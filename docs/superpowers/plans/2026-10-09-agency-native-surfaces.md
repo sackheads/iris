@@ -7,12 +7,12 @@
 **Architecture:**
 - One derived value, `SurfaceAttention`, is computed from four inputs: `pendingApprovals`, the session statuses, a new observed `AppState.runningJobs` (keyed by job id, fed by `JobRunner` through one actor hop), and a cached `AppState.ledgerAttention` snapshot. The snapshot is refreshed after each write that can change it and is never polled. The status item draws `SurfaceAttention`, and the Run Log refreshes when the snapshot changes.
 - Notifications run in a pure `NotificationPolicy` that builds every string from fixed words plus a quoted, flattened job or tool name. A `NotificationSink` protocol sits on `AppState` and is nil by default. `UserNotificationSink`, the only file that imports `UserNotifications`, is installed by `IrisApp.init`, and only inside a real `.app` bundle. The policy is asked in two places: after `deliverEvent`'s append, and in a `didSet` on `pendingApprovals`.
-- The URL trigger is an owner-only opt-in. `/jobs url <job> on` mints a 128-bit token, prints it once, and stores only its SHA-256 digest through a dedicated `setURLTrigger` write. `upsert` never writes either column, and it clears both when a job's prompt, profile or policy changes.
+- The URL trigger is an owner-only opt-in. `/jobs url <job> on` mints a 128-bit token and stores only its SHA-256 digest, through a dedicated `setURLTrigger` write. It shows the link once, in a transient sheet with Copy. The conversation keeps a redacted line, so the link never reaches `appendMessage`, the store or a log (plan note 17). `upsert` never writes either column, and it clears both when a job's prompt, profile or policy changes.
 - A link is parsed by a pure `RunJobURL`, looked up by digest, rate-limited (3 per job per rolling hour, refusal-only, no ledger row), deferred while a foreign `--run-job` holds the store, and fired through `runJobByHand`, the body that `/jobs run` used to own, with a new `FireOrigin.url`.
 
 **Tech Stack:** Swift 6, SwiftUI (`MenuBarExtra`, `Window`, `Table`), AppKit (`NSApplicationDelegate`, `NSWindow`), UserNotifications, CryptoKit and Security (`SHA256`, `SecRandomCopyBytes`), GRDB (`ConversationStore`, `JobLedger`), Swift Testing. No new dependencies.
 
-**Spec:** `docs/specs/2026-10-09-agency-native-surfaces.md` (merged in #462, binding). Read it in full before any task. "Decision N" below means spec §0.N. The review on #462 (iris-86, two rounds) is folded into the spec. Its second-round notes (policy in the compared set, and the three reasons the `on` reply's token stays out of model reach) are tests in Tasks 17 and 18. The design brief is `.superpowers/sdd/agency-6-design-brief.md`. Where this plan departs from the spec, see **Plan notes**. Each departure is a proposed ruling for the owner.
+**Spec:** `docs/specs/2026-10-09-agency-native-surfaces.md` (merged in #462, binding). Read it in full before any task. "Decision N" below means spec §0.N. The review on #462 (iris-86, two rounds) is folded into the spec. Its second-round notes (policy in the compared set, and the token staying out of model reach) are tests in Tasks 17 and 18. The review of this plan on #468 (`work`, plus a coordinator security ruling) is folded in as plan note 17 and the fixes it names. The design brief is `.superpowers/sdd/agency-6-design-brief.md`. Where this plan departs from the spec, see **Plan notes**. Each departure is a proposed ruling for the owner.
 
 **Scope:** spec §4, all five PRs: A (Tasks 1-6), B (Tasks 7-11), C (Tasks 12-16), D1 (Tasks 17-23) and D2 (Tasks 24-28). Every line number below was read on `main` at `8268d37`. Re-read the cited lines before editing, because an earlier PR in this plan moves them.
 
@@ -32,6 +32,7 @@
   - It accepts no query, no fragment, no other host or path, and no job id or slug.
   - The token is 128 bits from `SecRandomCopyBytes`, base64url-encoded (22 characters, no padding).
   - Only its SHA-256 digest is stored, in `jobs.urlTokenHash`. Each `on` rotates the token, and `off` deletes the digest.
+  - The link is shown once, in a transient sheet (`URLTriggerLinkSheet`). It never goes through `appendMessage` or `ConversationStore`, and never into a log (plan note 17, coordinator ruling).
   - The limit is 3 URL fires per job per rolling hour, counted from that job's `triggerKind = 'url'` rows. An over-limit fire is refused before admission, writes no ledger row, never counts toward the breaker and never pauses the job.
 - **Decision 14's deferral:** re-check a live foreign lock holder every 5 s, and give up after 10 minutes with "try again after the other Iris process finishes". The timers run on dispatch queues, never `Task.sleep` (the invariant 4 rule).
 - **Migration** `v19_job_url_trigger`: a nullable `urlTrigger` boolean (NULL means false) and a nullable `urlTokenHash TEXT` with a unique index. `main` has no `v19_*`, and no open PR claims one (checked with `gh pr list --state open` on 2026-10-09). Check again before Task 17.
@@ -77,7 +78,7 @@
 ## Plan notes: where the spec and the code disagree (proposed rulings)
 
 1. **The SQLite migration cannot add a UNIQUE column.** Spec §1 asks for "a nullable, unique `urlTokenHash TEXT`". SQLite refuses `ALTER TABLE … ADD COLUMN … UNIQUE` ("Cannot add a UNIQUE column").
-   - *Ruling:* add the plain column, then `CREATE UNIQUE INDEX jobs_urlTokenHash ON jobs(urlTokenHash)`. A unique index still allows any number of NULLs (Task 17).
+   - *Ruling:* add the plain column, then a unique index (`db.create(index: "jobs_urlTokenHash", on: "jobs", columns: ["urlTokenHash"], unique: true)`, the repo's style). A unique index still allows any number of NULLs (Task 17).
 2. **`upsert` compares only the gate today.** Decision 11 says it "compares the stored prompt, profile and policy … as it already does for the gate (`JobLedger.swift:105-112`)". The code reads only the stored `trigger`.
    - *Ruling:* in the same write transaction, `upsert` reads `trigger, prompt, profile, policy, urlTrigger` and clears the flag and digest when the job is URL-enabled and any of the three differs. The policy is compared as a decoded `JobPolicy`, which covers the grant and every budget field (Task 17).
 3. **The hotkey cannot find the window by title.** It matches `$0.title == "Iris"` (`iris.swift:5221`), but `ChatView` sets `.navigationTitle(conv.title)` (`ChatView.swift:398`). The window is called "Iris" only while Iris or nothing is selected. Otherwise the hotkey falls back to "the first SwiftUI window", which can be Diagnostics or, after PR B, the Run Log.
@@ -93,11 +94,16 @@
 9. **A URL fire costs one line, not two.** `/jobs run` prints "Starting …" and then the answer. A URL fire prints `Firing <job> from a URL …` and updates that same line in place with the answer (`updateMessageContent`), so that every fire posts one line, as decision 12 says. `/jobs run`'s lines are unchanged.
 10. **One pending deferral per job.** A second link for the same job while one waits joins the wait. It adds no second line and no second fire (Task 22).
 11. **A URL fire that the `queue` overlap policy holds is recorded as `queued`** (`FireOrigin.queued(from:)`'s `triggerKind`), so the URL limit does not count it. The `queue` policy holds one fire at most, so the gap is bounded at one extra fire. It is accepted and not fixed.
-12. **The token's exclusion test covers a fourth path.** `summarizeForRotation` sends `.user`, `.agent` and `.event` messages to a model (`iris.swift:1497`). A `.command` reply is outside it today. Task 18 pins it beside the three that #462's re-review named (model history, FTS, `read_conversation`).
+12. **The token's exclusion test covers a fourth path.** `summarizeForRotation` sends `.user`, `.agent` and `.event` messages to a model (`iris.swift:1497`). Task 18 pins it beside the three that #462's re-review named (model history, FTS, `read_conversation`). Since note 17, no message holds the token at all, so all four now hold by design rather than by which role a message has.
 13. **D1 ships `/jobs url` before anything can open the link.** The scheme is registered in D2. D1's reply and docs therefore say that the link opens once D2 lands (`JobsCommand.urlSchemePendingNote`), and D2's Task 26 deletes that note. That deletion is the falsifying half of invariant 9, made explicit.
 14. **B is ordered after A.** Spec §4 lets B land on its own. This plan has B call A's `showMainWindow(selecting:)`, `revealCard(runId:jobId:)` and `acknowledgeRun(_:)` rather than write second copies, so B is cut from `main` after A merges. D1 keeps its independence.
 15. **The Run Log also refreshes when the running count changes.** Decision 15 refreshes the log on appear and on a `LedgerAttention` change. A completed run changes neither, so a row would show "running" until the next event. The plan adds `.onChange(of: state.runningJobs.count)`.
 16. **`LedgerAttention` reads paused jobs through a new `JobLedger.pausedJobs()`**, not `jobs()`. `jobs()` is the one read that publishes `unreadableJobCount` (`JobLedger.swift:190-200`), and a background refresh must not move a figure that `/jobs` reports.
+17. **Ruled (coordinator, on #468): the link is never persisted.** The spec has `/jobs url … on` print the link as command output. `appendMessage` persists every message (`AppState.swift:2174-2180`), so the full `iris://run-job/<token>` would sit in plain text in `conversations.sqlite`, and an approved host `run_command` (`grep -a run-job …` or `sqlite3`) could read it and `open` it. That is the threat the hashed token exists to remove.
+    - *Ruling:* the conversation keeps a redacted line ("URL trigger on for <job>: the link was shown once and is not saved"). The full link is shown once, in a transient sheet with Copy, held only in the observed, non-persisted `AppState.revealedURLTrigger`, and cleared when the sheet closes or the trigger is turned off. The link never passes through `appendMessage` or `ConversationStore`, and never into a log.
+    - Task 18's `tokenNeverStored` reads every file of an on-disk store after `on` and finds no token, and Step 6 mutation-checks it.
+    - The spec's "a leaked database does not leak a live URL" (decision 10) was false as the spec stood, and is corrected in this plan's PR by a separate docs commit that records this ruling.
+    - Copy puts the link on the pasteboard, where a host `run_command` could read it with `pbpaste` until the next copy. That is the owner's explicit act, and the sheet says the link is not kept anywhere else.
 
 ---
 
@@ -855,7 +861,7 @@ In `IrisApp.init`, replace `:5203` with:
   - Delete `DevHomeSeeder.copiedJobPausedReason` from `ownerPauseReasons`: `makeSortsTheRows` fails.
 
 - [ ] **Step 6: Run the neighbours and the warnings check.**
-  - Run `timeout 300 scripts/test-filter.sh 'EventDeliveryTests|JobsCommandTests|WatcherManagerSyncTests|WatchCoordinatorTests|WatcherJobsTests|EventCardTests'`. Expected: every test passes, so the watch resync still works through the edited hook. Quote the count.
+  - Run `timeout 300 scripts/test-filter.sh 'EventDeliveryTests|JobsCommandTests|WatcherManagerSyncTests|WatchCoordinatorTests|WatcherJobsTests|EventCardTests|JobFireIntegrationTests'`. Expected: every test passes. `JobFireIntegrationTests` is the one that drives `IrisEngine.start()`, where `onJobsChanged` is installed, so it is what shows the watch resync still works through the edited hook. Quote the count.
   - Run `scripts/check-warnings.sh`. Expected: no warnings.
 
 - [ ] **Step 7: Commit.** `git add Sources/IrisKit/LedgerAttention.swift Sources/IrisKit/JobLedger.swift Sources/IrisKit/AppState.swift Sources/IrisKit/EventDelivery.swift Sources/IrisKit/iris.swift Tests/irisTests/LedgerAttentionTests.swift`, then `git commit -m "feat(jobs): cache the ledger's attention snapshot, refreshed on write (D6 decision 16)"`.
@@ -1023,7 +1029,7 @@ struct SurfaceAttentionTests {
         }
         #expect(reasons.first == .approvals(count: 1, conversationId: parent))
 
-        app.resolveApproval(id: app.pendingApprovals[0].id, .deny)
+        app.resolveApproval(id: try #require(app.pendingApprovals.first).id, .deny)
         #expect(try await value(of: ask) == false)
         #expect(app.surfaceAttention == .idle)
     }
@@ -1234,7 +1240,7 @@ extension AppState {
     /// has no ask of its own, since that ask is already counted.
     var surfaceAttention: SurfaceAttention {
         let asks = pendingApprovals.map {
-            SurfaceAttention.Ask(id: $0.id, root: $0.conversationId.map(delegationRoot(of:)),
+            SurfaceAttention.Ask(id: $0.id, root: $0.conversationId.map { delegationRoot(of: $0) },
                                  requestedAt: $0.requestedAt)
         }
         let askRoots = Set(asks.compactMap(\.root))
@@ -1606,19 +1612,20 @@ resumed. A plain failure, including one still on its retry ladder, and a job you
 
 Run on `work`'s laptop, on PR A's branch, before the PR merges. Post each numbered result on the PR.
 
+**Before you start.** Building Iris Dev.app needs `xcodegen` (`brew install xcodegen`) and the Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`). Neither is on `work` yet, and installing them needs the owner's OK. Steps marked **(spend)** run a real model turn, a job's or a chat's, on the owner's provider account. That is expected on `work`. Only Iris Dev.app is used: no release Iris.app and no Raycast are installed there.
+
 1. Run `pgrep -fl "Iris Dev|\.build/debug/iris"`. Expected: no output. Quit anything it lists first, because two processes on one `~/.iris-dev` both run jobs.
 2. Run `python3 ~/.claude/skills/gui-test-lease/lease.py acquire --purpose "iris: D6 PR A status item" --minutes 45 --on-behalf-of <requesting peer>`. Expected: exit 0. On exit 1, message the holder it names, or rerun with `--wait 600`.
 3. Run `scripts/build-app.sh Debug`, then `scripts/sign.sh "<the .app path it printed>"`, then `open "<that path>"`. Expected: the menu bar shows a hammer with no text beside it.
 4. Click the hammer. Expected: no reason rows. "Show Chat", "Settings..." and "Quit" are listed.
 5. Close the chat window with Cmd-W, then click the hammer and choose "Show Chat". Expected: the chat window reopens.
 6. Open Diagnostics (the chat window's diagnostics button), then select a conversation other than Iris in the chat window. Press Cmd-Shift-Option-Space twice. Expected: the first press hides the chat window and the second brings back the same chat window, not Diagnostics.
-7. In a normal conversation, ask: "Schedule a job named d6-slow every 10 minutes: write a 600-word story about a lighthouse, then reply done." Then type `/jobs run d6-slow`. Expected: within a few seconds the label reads hammer + `1`, and the menu shows "1 job running". When the card arrives, the label goes back to the hammer alone.
-8. Ask: "Schedule a read-only job named d6-blocked every 10 minutes that uses write_file to write hi to /tmp/d6-blocked.txt." Then type `/jobs run d6-blocked`. Expected: after the card, the label reads hammer + `!1`, and the menu shows "d6-blocked blocked: write_file".
+7. **(spend)** In a normal conversation, ask: "Schedule a job named d6-slow every 10 minutes: write a 600-word story about a lighthouse, then reply done." Then type `/jobs run d6-slow`. Expected: within a few seconds the label reads hammer + `1`, and the menu shows "1 job running". When the card arrives, the label goes back to the hammer alone.
+8. **(spend)** Ask: "Schedule a read-only job named d6-blocked every 10 minutes that uses write_file to write hi to /tmp/d6-blocked.txt." Then type `/jobs run d6-blocked`. Expected: after the card, the label reads hammer + `!1`, and the menu shows "d6-blocked blocked: write_file".
 9. Click that row. Expected: the chat window comes forward on Iris, scrolled to d6-blocked's card.
 10. Click the card's Dismiss. Expected: within a second, the label goes back to the hammer alone.
-11. A plain failure. If the Sandbox settings tab shows a container runtime: ask "Schedule a mutating job named d6-fail every 10 minutes that replies ok", turn "Enable sandboxing" off, type `/jobs run d6-fail`, then turn sandboxing back on and type `/jobs delete d6-fail`. Expected: d6-fail's card says it failed (sandbox unavailable) and is retrying, the label is unchanged, and the menu gains "1 failed run". Without a runtime, record "skipped: no container runtime".
-12. If the installed release Iris.app is already running, compare the two items. Expected: a sparkle for release and a hammer for dev. Do not launch the release app for this step. If it is not running, record "release not running".
-13. Type `/jobs delete d6-slow` and `/jobs delete d6-blocked`, quit Iris Dev, and run `python3 ~/.claude/skills/gui-test-lease/lease.py release`. Expected: the lease is released.
+11. **(spend)** A plain failure. If the Sandbox settings tab shows a container runtime: ask "Schedule a mutating job named d6-fail every 10 minutes that replies ok", turn "Enable sandboxing" off, type `/jobs run d6-fail`, then turn sandboxing back on and type `/jobs delete d6-fail`. Expected: d6-fail's card says it failed (sandbox unavailable) and is retrying, the label is unchanged, and the menu gains "1 failed run". Without a runtime, record "skipped: no container runtime".
+12. Type `/jobs delete d6-slow` and `/jobs delete d6-blocked`, quit Iris Dev, and run `python3 ~/.claude/skills/gui-test-lease/lease.py release`. Expected: the lease is released.
 
 ---
 
@@ -2042,7 +2049,10 @@ final class RunLogModel {
             }.value
             // A reload started since makes this page stale: its filters or its cursor are gone.
             guard let self, let page, generation == self.generation else { return }
-            let made = page.runs.map { RunLogRow.make($0, transcriptExists: self.transcriptExists) }
+            // Wrapped rather than passed: `transcriptExists` is `@MainActor`, the parameter is a
+            // plain closure, and this task runs on the main actor.
+            let exists = self.transcriptExists
+            let made = page.runs.map { run in RunLogRow.make(run, transcriptExists: { exists($0) }) }
             self.rows = cursor == nil ? made : self.rows + made
             self.next = page.next
             self.hasMore = page.next != nil
@@ -2205,7 +2215,7 @@ struct RunLogView: View {
             switch row.transcript {
             case .live(let id): Button("Transcript") { state.openTranscript(id) }
             case .pruned: Text("transcript pruned").foregroundStyle(.secondary)
-            case .none: EmptyView()
+            case RunLogRow.Transcript.none: EmptyView()
             }
         }
     }
@@ -2216,9 +2226,7 @@ struct RunLogView: View {
         return "\(Int(seconds / 60)) min \(Int(seconds) % 60) s"
     }
 
-    private static func statusText(_ status: JobRun.Status) -> String {
-        status == .blockedOnApproval ? "blocked on approval" : status.rawValue
-    }
+    private static func statusText(_ status: JobRun.Status) -> String { status.text }
 }
 ```
 
@@ -2270,10 +2278,12 @@ opens it in the main window; one that retention has pruned says so.
 
 ### Task 11: GUI pass for PR B (`work`, under the lease)
 
+**Before you start.** Building Iris Dev.app needs `xcodegen` (`brew install xcodegen`) and the Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`). Neither is on `work` yet, and installing them needs the owner's OK. Steps marked **(spend)** run a real model turn, a job's or a chat's, on the owner's provider account. That is expected on `work`. Only Iris Dev.app is used: no release Iris.app and no Raycast are installed there.
+
 1. Run `pgrep -fl "Iris Dev|\.build/debug/iris"`. Expected: no output.
 2. Run `python3 ~/.claude/skills/gui-test-lease/lease.py acquire --purpose "iris: D6 PR B run log" --minutes 30 --on-behalf-of <requesting peer>`. Expected: exit 0.
 3. Build, sign and open Iris Dev.app as in Task 6 step 3.
-4. Ask: "Schedule a job named d6-log every 10 minutes that replies pong." Type `/jobs run d6-log`, then repeat Task 6 step 8 to create and run `d6-blocked`.
+4. **(spend)** Ask: "Schedule a job named d6-log every 10 minutes that replies pong." Type `/jobs run d6-log`, then repeat Task 6 step 8 to create and run `d6-blocked`.
 5. Click the hammer, then "Open Run Log…". Expected: a window titled "Run Log" with columns Started, Duration, Job, Trigger, Status, Tokens and Outcome. The d6-log and d6-blocked rows are at the top, with trigger `manual`. No row shows an Approve button.
 6. Click d6-log's "Transcript". Expected: the chat window comes forward with the read-only transcript sheet showing d6-log's run.
 7. Click d6-blocked's "Show card". Expected: the chat window comes forward on Iris, scrolled to the card.
@@ -2756,23 +2766,23 @@ struct NotificationWiringTests {
         let conversation = app.createNewConversation()
 
         let approved = await raise(app, in: conversation)
-        let first = app.pendingApprovals[0].id
+        let first = try #require(app.pendingApprovals.first).id
         #expect(sink.posted.map(\.identifier) == [first.uuidString])
         app.resolveApproval(id: first, .approve)
         #expect(try await value(of: approved) == true)
 
         let denied = await raise(app, in: conversation)
-        let second = app.pendingApprovals[0].id
+        let second = try #require(app.pendingApprovals.first).id
         app.resolveApproval(id: second, .deny)
         _ = try await value(of: denied)
 
         let stopped = await raise(app, in: conversation)
-        let third = app.pendingApprovals[0].id
+        let third = try #require(app.pendingApprovals.first).id
         app.denyPendingApprovals(for: conversation)
         _ = try await value(of: stopped)
 
         let cancelled = await raise(app, in: conversation)
-        let fourth = app.pendingApprovals[0].id
+        let fourth = try #require(app.pendingApprovals.first).id
         cancelled.cancel()
         #expect(try await value(of: cancelled) == false)
 
@@ -2784,7 +2794,8 @@ struct NotificationWiringTests {
     func denyResponseDenies() async throws {
         let (_, app, _, _) = try makeApp()
         let ask = await raise(app, in: app.createNewConversation())
-        _ = respond(app, NotificationPolicy.Action.deny, [NotificationPolicy.Key.askId: app.pendingApprovals[0].id.uuidString])
+        let askId = try #require(app.pendingApprovals.first).id
+        _ = respond(app, NotificationPolicy.Action.deny, [NotificationPolicy.Key.askId: askId.uuidString])
         #expect(try await value(of: ask) == false)
         #expect(app.pendingApprovals.isEmpty)
     }
@@ -2798,7 +2809,7 @@ struct NotificationWiringTests {
             try await value(of: dismissed)
         }
         #expect(app.pendingApprovals.count == 1, "someone else's ask is untouched")
-        app.resolveApproval(id: app.pendingApprovals[0].id, .deny)
+        app.resolveApproval(id: try #require(app.pendingApprovals.first).id, .deny)
         _ = try await value(of: ask)
     }
 
@@ -2806,12 +2817,12 @@ struct NotificationWiringTests {
     func unknownActionNeverApproves() async throws {
         let (_, app, _, _) = try makeApp()
         let ask = await raise(app, in: app.createNewConversation())
-        let id = app.pendingApprovals[0].id.uuidString
+        let id = try #require(app.pendingApprovals.first).id.uuidString
         for action in ["approve", "iris.approve", "com.apple.UNNotificationDismissActionIdentifier", ""] {
             _ = respond(app, action, [NotificationPolicy.Key.askId: id])
         }
         #expect(app.pendingApprovals.count == 1, "the ask is still waiting for a person")
-        app.resolveApproval(id: app.pendingApprovals[0].id, .deny)
+        app.resolveApproval(id: try #require(app.pendingApprovals.first).id, .deny)
         #expect(try await value(of: ask) == false)
     }
 
@@ -2827,10 +2838,11 @@ struct NotificationWiringTests {
         let parent = app.createNewConversation(select: false), child = app.createNewConversation(isSubagent: true)
         app.linkDelegate(child, of: parent)
         let ask = await raise(app, in: child)
-        _ = respond(app, NotificationPolicy.Action.open, [NotificationPolicy.Key.askId: app.pendingApprovals[0].id.uuidString])
+        let askId = try #require(app.pendingApprovals.first).id
+        _ = respond(app, NotificationPolicy.Action.open, [NotificationPolicy.Key.askId: askId.uuidString])
         #expect(app.selectedConversationId == parent)
         #expect(raises.count == 2)
-        app.resolveApproval(id: app.pendingApprovals[0].id, .deny)
+        app.resolveApproval(id: try #require(app.pendingApprovals.first).id, .deny)
         _ = try await value(of: ask)
     }
 
@@ -2859,7 +2871,7 @@ struct NotificationWiringTests {
         for planted in ["SAFE", "PLANTED-DETAILS"] {
             #expect(!posted.title.contains(planted) && !posted.body.contains(planted))
         }
-        app.resolveApproval(id: app.pendingApprovals[0].id, .deny)
+        app.resolveApproval(id: try #require(app.pendingApprovals.first).id, .deny)
         _ = try await value(of: ask)
     }
 }
@@ -2912,7 +2924,7 @@ extension AppState {
         let context = notificationContext()
         for request in added {
             let event = NotificationEvent.ask(id: request.id, toolName: request.toolName, details: request.details,
-                                              root: request.conversationId.map(delegationRoot(of:)))
+                                              root: request.conversationId.map { delegationRoot(of: $0) })
             if let planned = NotificationPolicy.decide(event, context: context) { sink.post(planned) }
         }
     }
@@ -2933,7 +2945,7 @@ extension AppState {
             } else if let askId {
                 let owner = pendingApprovals.first { $0.id == askId }?.conversationId
                     ?? info[NotificationPolicy.Key.conversationId].flatMap(UUID.init(uuidString:))
-                showMainWindow(selecting: owner.map(delegationRoot(of:)))
+                showMainWindow(selecting: owner.map { delegationRoot(of: $0) })
             } else {
                 showMainWindow(selecting: nil)
             }
@@ -3025,6 +3037,8 @@ struct NotificationInstallTests {
         var delivered: [String] = []
         var held: CheckedContinuation<Void, Never>?
         var holdRequest = false
+        /// The prompt was closed unanswered: the request returns false and nothing is decided.
+        var dismissPrompt = false
     }
 
     private func gate(_ calls: Calls) -> NotificationPermission {
@@ -3033,7 +3047,7 @@ struct NotificationInstallTests {
             request: {
                 calls.requests += 1
                 if calls.holdRequest { await withCheckedContinuation { calls.held = $0 } }
-                calls.status = calls.grant ? .authorized : .denied
+                calls.status = calls.grant ? .authorized : (calls.dismissPrompt ? .notDetermined : .denied)
                 return calls.grant
             },
             deliver: { calls.delivered.append($0.identifier) })
@@ -3066,6 +3080,17 @@ struct NotificationInstallTests {
         await permission.submit(note("d"))
         #expect(calls.delivered == ["d"])
         #expect(calls.requests == 1)
+    }
+
+    @Test("a prompt closed unanswered stays undecided, and is still never asked again")
+    func dismissedPromptNeverAsksAgain() async {
+        let calls = Calls(), permission = gate(calls)
+        calls.grant = false
+        calls.dismissPrompt = true
+        for id in ["a", "b", "c"] { await permission.submit(note(id)) }
+        #expect(calls.status == .notDetermined, "nothing was decided")
+        #expect(calls.requests == 1, "and the owner is not asked again in this process")
+        #expect(calls.delivered.isEmpty)
     }
 
     @Test("a post that arrives while the prompt is up is held, and withdrawn if its ask goes")
@@ -3211,10 +3236,11 @@ final class UserNotificationSink: NSObject, NotificationSink, UNUserNotification
         self.center = UNUserNotificationCenter.current()
         self.state = state
         super.init()
-        let center = self.center
+        // `UNUserNotificationCenter` is not `Sendable`, so the center is never captured into these
+        // closures or passed across isolation: each nonisolated helper asks `.current()` itself.
         permission = NotificationPermission(
-            current: { await Self.status(of: center) },
-            request: { (try? await center.requestAuthorization(options: [.alert, .sound])) ?? false },
+            current: { await Self.currentStatus() },
+            request: { await Self.requestPermission() },
             deliver: { [weak self] in self?.deliver($0) })
         center.setNotificationCategories(Self.categories())
         center.delegate = self
@@ -3263,13 +3289,18 @@ final class UserNotificationSink: NSObject, NotificationSink, UNUserNotification
         })
     }
 
-    private nonisolated static func status(of center: UNUserNotificationCenter) async -> NotificationPermission.Status {
-        switch await center.notificationSettings().authorizationStatus {
-        case .authorized, .provisional, .ephemeral: return .authorized
+    private nonisolated static func currentStatus() async -> NotificationPermission.Status {
+        // `.ephemeral` is iOS-only (`UNNotificationSettings.h`: unavailable on macOS).
+        switch await UNUserNotificationCenter.current().notificationSettings().authorizationStatus {
+        case .authorized, .provisional: return .authorized
         case .notDetermined: return .notDetermined
         case .denied: return .denied
         @unknown default: return .denied
         }
+    }
+
+    private nonisolated static func requestPermission() async -> Bool {
+        (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])) ?? false
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
@@ -3293,7 +3324,7 @@ final class UserNotificationSink: NSObject, NotificationSink, UNUserNotification
 }
 ```
 
-If `check-warnings.sh` reports a Sendable diagnostic on `center` crossing into the closures, it is reporting a real isolation question. Answer it at the source by reading through a `nonisolated` helper that takes the center, as `status(of:)` does. Never use `@preconcurrency` to silence it.
+The stored `center` is used only on the main actor (posting, withdrawing, categories, the delegate). If `check-warnings.sh` still reports a Sendable diagnostic, fix the isolation at the source the same way, with a `nonisolated` helper that calls `.current()` itself. Never use `@preconcurrency` to silence it.
 
 Create `Sources/IrisKit/SurfaceInstall.swift`:
 
@@ -3364,10 +3395,10 @@ In `IrisApp.init`'s `MainActor.assumeIsolated` block, after `installGuardHealthS
             SurfaceInstall.installNotifications(on: AppState.shared)
 ```
 
-- [ ] **Step 4: Run them and watch them pass.** Run the same filter. Expected: 7 tests passed. Quote the count.
+- [ ] **Step 4: Run them and watch them pass.** Run the same filter. Expected: 8 tests passed. Quote the count.
 
 - [ ] **Step 5: Mutation checks.** Make each change, run the filter, see the named test fail, then restore.
-  - Delete `guard !asked else { return }`: `deniedNeverAsksAgain` fails, because a second request is made.
+  - Delete `guard !asked else { return }`: `dismissedPromptNeverAsksAgain` fails with three requests. (`deniedNeverAsksAgain` alone would not catch it: its stub records `.denied`, so later posts never reach `.notDetermined`.)
   - Add `import UserNotifications` to `SurfaceInstall.swift`: `oneImporter` fails.
   - Delete `guard isAppBundle(bundleURL) else { return }`: `installOutsideABundle` crashes the suite (the API raises outside a bundle). Kill the run, restore the guard, and record the crash as the expected failure.
 
@@ -3403,23 +3434,28 @@ and `scripts/run-dev.sh` never post; dev testing uses Iris Dev.app.
 
 ### Task 16: GUI pass for PR C (`work`, under the lease)
 
+**Before you start.** Building Iris Dev.app needs `xcodegen` (`brew install xcodegen`) and the Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`). Neither is on `work` yet, and installing them needs the owner's OK. Steps marked **(spend)** run a real model turn, a job's or a chat's, on the owner's provider account. That is expected on `work`. Only Iris Dev.app is used: no release Iris.app and no Raycast are installed there.
+
+**The permission prompt comes once per bundle id.** `tccutil` cannot reset it: notification permission is held by the notification service, not by TCC. If this laptop has already answered for `com.bnaylor.iris.dev`, steps 4 and 5 cannot show the first-run prompt. Record "prompt already answered", set "Allow notifications" off in System Settings › Notifications › Iris Dev to check the denied path in step 5, and go on from step 6. To see the prompt again, build once with a throwaway bundle id: `scripts/gen-xcodeproj.sh && xcodebuild -project Iris.xcodeproj -scheme Iris -configuration Debug -derivedDataPath "$TMPDIR/iris-notify1" PRODUCT_BUNDLE_IDENTIFIER=com.bnaylor.iris.dev.notify1 build`, then sign and open the `.app` under that derived-data path. It is still a dev build on `~/.iris-dev`, but it has its own defaults domain, so the setup wizard runs. Delete the derived-data folder afterwards.
+
 1. Run `pgrep -fl "Iris Dev|\.build/debug/iris"`. Expected: no output.
 2. Run `python3 ~/.claude/skills/gui-test-lease/lease.py acquire --purpose "iris: D6 PR C notifications" --minutes 60 --on-behalf-of <requesting peer>`. Expected: exit 0.
 3. Build, sign and open Iris Dev.app as in Task 6 step 3. In Settings › General, confirm "Notifications" reads "Needs attention".
-4. Create `d6-blocked` as in Task 6 step 8 if it does not exist. In Iris, type `/jobs run d6-blocked`, press Return, then click the Finder in the Dock within a second so that Iris Dev is inactive when the card arrives. Expected: the system prompt "“Iris Dev” Would Like to Send You Notifications" appears. Click "Don't Allow". Expected: no banner, and Iris Dev keeps running.
-5. Repeat step 4. Expected: no prompt and no banner (the denied path, with no re-prompt).
+4. **(spend)** Create `d6-blocked` as in Task 6 step 8 if it does not exist. In Iris, type `/jobs run d6-blocked`, press Return, then click the Finder in the Dock within a second so that Iris Dev is inactive when the card arrives. Expected: the system prompt "“Iris Dev” Would Like to Send You Notifications" appears. Click "Don't Allow". Expected: no banner, and Iris Dev keeps running.
+5. **(spend)** Repeat step 4. Expected: no prompt and no banner (the denied path, with no re-prompt).
 6. In System Settings › Notifications › Iris Dev, turn "Allow notifications" on and set the style to "Alerts", so the actions stay visible.
-7. Repeat step 4. Expected: an alert titled exactly `Iris: a job needs you`, with the body `Job “d6-blocked” is blocked on “write_file”.`. Its actions are Open and Dismiss. There is no Approve.
+7. **(spend)** Repeat step 4. Expected: an alert titled exactly `Iris: a job needs you`, with the body `Job “d6-blocked” is blocked on “write_file”.`. Its actions are Open and Dismiss. There is no Approve.
 8. Click Open. Expected: Iris Dev comes forward on Iris, scrolled to d6-blocked's card.
-9. Repeat step 4 and click Dismiss. Expected: the card's run is acknowledged, so `/jobs` no longer lists it under unacknowledged failures, and the menu bar label goes back to the hammer alone.
-10. In a conversation other than Iris, type "Run the shell command `date` with run_command." and press Return, then press Cmd-H at once. Expected: an alert titled `Iris: approval waiting`, with the body `“run_command” is waiting for your approval.` and the actions Open and Deny.
-11. Click Deny. Then bring Iris Dev forward. Expected: no approval overlay is left, and the turn continued with the call denied.
-12. Repeat step 10, then bring Iris Dev forward from the Dock and approve in the overlay. Expected: the alert disappears from Notification Center.
-13. Bring Iris Dev forward with Iris selected, and type `/jobs run d6-blocked`. Expected: no banner. Select another conversation, keep the app in front, and run it again from the Iris conversation's composer before switching away. Expected: a banner.
-14. In Settings › General › Notifications, choose Off, then repeat step 4. Expected: no banner. Set it back to "Needs attention".
-15. Lock screen (optional; skip it if locking would end the remote session). In System Settings › Notifications, set "Show previews" to "When Unlocked". Lock with Ctrl-Cmd-Q and trigger step 4 from a pre-scheduled one-minute job. Expected: the lock screen shows only `Iris: a job needs you`.
-16. Quit Iris Dev and run `scripts/run-dev.sh`. Expected: it launches with no crash and no notification prompt, and the menu bar item works. Quit it.
-17. Type `/jobs delete d6-blocked`, quit, and release the lease.
+9. **(spend)** Repeat step 4 and click Dismiss. Expected: the card's run is acknowledged, so `/jobs` no longer lists it under unacknowledged failures, and the menu bar label goes back to the hammer alone.
+10. **(spend)** An ask that always asks: job creation in Iris is `humanOnly`, so neither the allowlist nor Vibecop can answer it (`iris.swift:3532`), unlike a command such as `date`, which Vibecop may approve on its own. In Iris (the pinned conversation), type "Schedule a job named d6-ask every 10 minutes that replies pong." and press Return, then press Cmd-H at once. Expected: an alert titled `Iris: approval waiting`, with the body `“schedule_job” is waiting for your approval.` and the actions Open and Deny.
+11. Click Deny. Then bring Iris Dev forward. Expected: no approval overlay is left, the turn continued with the call denied, and `/jobs` lists no d6-ask.
+12. **(spend)** Repeat step 10, then bring Iris Dev forward from the Dock and approve in the overlay. Expected: the alert disappears from Notification Center, and d6-ask is created.
+13. **(spend)** Bring Iris Dev forward with Iris selected, and type `/jobs run d6-blocked`. Expected: no banner. Select another conversation, keep the app in front, and run it again from the Iris conversation's composer before switching away. Expected: a banner.
+14. **(spend)** In Settings › General › Notifications, choose Off, then repeat step 4. Expected: no banner. Set it back to "Needs attention".
+15. Quit Iris Dev and run `scripts/run-dev.sh`. Expected: it launches with no crash and no notification prompt, and the menu bar item works. Quit it.
+16. Type `/jobs delete d6-blocked` and `/jobs delete d6-ask`, quit, and release the lease.
+
+There is no lock-screen step. It would change the global "Show previews" setting and lock the owner's machine, and the rule it would check (the title is a fixed constant) is pinned by `NotificationPolicyTests.titleIsAlwaysFixed`.
 
 ---
 
@@ -3588,7 +3624,7 @@ struct URLTriggerLedgerTests {
                 t.add(column: "urlTrigger", .boolean)
                 t.add(column: "urlTokenHash", .text)
             }
-            try db.execute(sql: "CREATE UNIQUE INDEX jobs_urlTokenHash ON jobs(urlTokenHash)")
+            try db.create(index: "jobs_urlTokenHash", on: "jobs", columns: ["urlTokenHash"], unique: true)
         }
 ```
 
@@ -3695,6 +3731,9 @@ In `JobLedger.job(from:)`, add the argument after `action: action`:
             let storedPrompt = String.fromDatabaseValue(stored["prompt"] as DatabaseValue)
             let storedProfile = String.fromDatabaseValue(stored["profile"] as DatabaseValue)
                 .flatMap(JobProfile.init(rawValue:))
+            // `JobPolicy`'s decoder drops negative figures and unreadable grants
+            // (JobPolicy.swift:88-98), so a stored policy holding one compares unequal on every
+            // write and clears the opt-in: the safe direction.
             let changed = storedPrompt != job.prompt || storedProfile != job.profile
                 || Self.policy(from: stored["policy"] as DatabaseValue?) != job.policy
             guard changed else { return false }
@@ -3773,7 +3812,9 @@ In the runs extension, after `runsStarted`:
 - Create: `Sources/IrisKit/RunJobURL.swift` (the URL builder and the scheme; Tasks 20 and 21 extend it)
 - Modify: `Sources/IrisKit/BuildIdentity.swift` (`urlScheme`)
 - Modify: `Sources/IrisKit/JobsCommand.swift:12-29` (the `url` case and `usageText`), `:44-66` (`parse`), plus new texts
-- Modify: `Sources/IrisKit/AppState.swift:3779` (`handleJobsCommand`'s `.url` branch)
+- Modify: `Sources/IrisKit/AppState.swift:375` (`revealedURLTrigger`, beside `transcriptSheetConversationId`) and `:3779` (`handleJobsCommand`'s `.url` branch)
+- Create: `Sources/IrisKit/URLTriggerLinkSheet.swift` (the transient sheet that shows the link once)
+- Modify: `Sources/IrisKit/ChatView.swift` (the body's root: `.sheet(item:)` for the link)
 - Modify: `Sources/IrisKit/iris.swift:4944-4946` (`list_jobs` description) and `:5029-5059` (`jobsListJSON`'s row)
 - Modify: `Tests/irisTests/JobsCommandTests.swift:650` (the usage-forms list gains `/jobs url`)
 - Test: `Tests/irisTests/URLTriggerCommandTests.swift` (new)
@@ -3784,7 +3825,9 @@ In the runs extension, after `runsStarted`:
   - `enum URLTriggerToken` with `byteCount = 16`, `encodedLength = 22`, `generate(fill:) -> String?`, `secureFill(_:) -> Bool`, `base64url(_:) -> String`, `digest(_:) -> String` (lowercase hex) and `isWellFormed(_:) -> Bool`.
   - `BuildIdentity.urlScheme` (`"iris"` or `"iris-dev"`).
   - `enum RunJobURL` with `host = "run-job"` and `url(token:identity:) -> String`.
-  - `JobsCommand.url(name: String, setting: Bool?)`, `JobsCommand.parseURL(_:)`, `JobsCommand.urlStatusText(_:)`, `JobsCommand.urlOnText(_:url:)`, `JobsCommand.urlOffText(_:)` and `JobsCommand.urlSchemePendingNote`.
+  - `JobsCommand.url(name: String, setting: Bool?)`, `JobsCommand.parseURL(_:)`, `JobsCommand.urlStatusText(_:)`, `JobsCommand.urlOnText(_:)` (the redacted, persisted line), `JobsCommand.urlSheetText(_:)`, `JobsCommand.urlOffText(_:)` and `JobsCommand.urlSchemePendingNote`.
+  - `struct RevealedURLTrigger: Identifiable, Equatable, Sendable` with `id`, `jobName` and `url`, and `AppState.revealedURLTrigger: RevealedURLTrigger?` (observed, transient, never `Codable`, never persisted).
+  - `URLTriggerLinkSheet(link:onDone:)`.
   - `list_jobs` rows gain `"urlTrigger": Bool`.
 
 - [ ] **Step 1: Write the failing tests.** Create `Tests/irisTests/URLTriggerCommandTests.swift`:
@@ -3794,9 +3837,11 @@ import Testing
 import Foundation
 @testable import IrisKit
 
-/// D6 decisions 9 and 10: `/jobs url <job> on` mints a 128-bit token, prints its link once and
-/// keeps only the digest. The token never reaches a model: not through a tool, a card, a system
-/// line, the model's history, search, `read_conversation` or the rotation summary.
+/// D6 decisions 9 and 10, and plan note 17 (coordinator ruling): `/jobs url <job> on` mints a
+/// 128-bit token and keeps only its digest. The link is shown once, in a transient sheet; the
+/// conversation keeps a redacted line. So the token is never in the store, on disk or in any
+/// message, and never reaches a model: not through a tool, a card, a line, the model's
+/// history, search, `read_conversation` or the rotation summary.
 @MainActor
 @Suite("/jobs url (D6)", .timeLimit(.minutes(1)))
 struct URLTriggerCommandTests {
@@ -3862,27 +3907,31 @@ struct URLTriggerCommandTests {
             .filter { $0.role == .command }.map(\.content).joined(separator: "\n")
     }
 
-    /// The token in the most recent `on` reply.
-    private func token(in text: String) throws -> String {
+    /// The token the most recent `on` revealed, read from the transient sheet's state: the only
+    /// place it exists.
+    private func token(_ app: AppState) throws -> String {
+        let link = try #require(app.revealedURLTrigger, "on must reveal the link")
         let marker = "\(BuildIdentity.current.urlScheme)://\(RunJobURL.host)/"
-        let range = try #require(text.range(of: marker, options: .backwards))
-        return String(text[range.upperBound...].prefix(URLTriggerToken.encodedLength))
+        #expect(link.url.hasPrefix(marker))
+        return String(link.url.dropFirst(marker.count))
     }
 
     private func sweep() -> Job { Job(name: "pr-sweep", prompt: "sweep", trigger: .schedule(.interval(seconds: 60))) }
 
-    @Test("on prints a link whose token hashes to the stored digest; on again rotates; off clears")
+    @Test("on reveals a link whose token hashes to the stored digest; on again rotates; off clears")
     func onRotateOff() throws {
         let job = sweep()
         let (store, app, id) = try makeApp(with: [job])
 
         app.sendMessage("/jobs url pr-sweep on")
-        let first = try token(in: output(app, id))
+        let first = try token(app)
         #expect(URLTriggerToken.isWellFormed(first))
+        #expect(output(app, id).contains(JobsCommand.urlOnText(job)), "the conversation keeps the redacted line")
+        #expect(!output(app, id).contains(first))
         #expect(try store.ledger.job(urlTokenHash: URLTriggerToken.digest(first))?.id == job.id)
 
         app.sendMessage("/jobs url pr-sweep on")
-        let second = try token(in: output(app, id))
+        let second = try token(app)
         #expect(second != first)
         #expect(try store.ledger.job(urlTokenHash: URLTriggerToken.digest(first)) == nil, "the old link is dead")
         #expect(try store.ledger.job(urlTokenHash: URLTriggerToken.digest(second))?.id == job.id)
@@ -3890,6 +3939,33 @@ struct URLTriggerCommandTests {
         app.sendMessage("/jobs url pr-sweep off")
         #expect(try store.ledger.job(id: job.id)?.urlTrigger == false)
         #expect(try store.ledger.job(urlTokenHash: URLTriggerToken.digest(second)) == nil)
+        #expect(app.revealedURLTrigger == nil, "off withdraws a link still on screen")
+    }
+
+    @Test("after on, the token is nowhere in the store's files, and the redacted line is")
+    func tokenNeverStored() throws {
+        let dir = try tempDirectory(prefix: "iris-urlstore")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try ConversationStore.onDisk(at: dir.appendingPathComponent("conversations.sqlite"))
+        let app = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        app.conversations.removeAll()
+        app.selectedConversationId = app.createNewConversation()
+        let job = sweep()
+        try store.ledger.upsert(job)
+
+        app.sendMessage("/jobs url pr-sweep on")
+        let minted = try token(app)
+        app.flushSave()
+
+        // Every file the store wrote: the database, its WAL and its shared-memory index.
+        let files = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+        #expect(!files.isEmpty)
+        for file in files {
+            let bytes = try Data(contentsOf: file)
+            #expect(bytes.range(of: Data(minted.utf8)) == nil, "\(file.lastPathComponent) holds the token")
+        }
+        let saved = try store.loadAll().conversations.flatMap(\.messages).map(\.content)
+        #expect(saved.contains { $0.contains(JobsCommand.urlOnText(job)) })
     }
 
     @Test("asking shows on or off and never a token, and an unknown name is refused")
@@ -3898,7 +3974,7 @@ struct URLTriggerCommandTests {
         app.sendMessage("/jobs url pr-sweep")
         #expect(output(app, id).contains("is off"))
         app.sendMessage("/jobs url pr-sweep on")
-        let minted = try token(in: output(app, id))
+        let minted = try token(app)
         app.sendMessage("/jobs url pr-sweep")
         let lines = output(app, id).components(separatedBy: "\n")
         #expect(lines.last?.contains("is on") == true)
@@ -3912,7 +3988,7 @@ struct URLTriggerCommandTests {
         let job = sweep()
         let (store, app, id) = try makeApp(with: [job])
         app.sendMessage("/jobs url pr-sweep on")
-        let minted = try token(in: output(app, id))
+        let minted = try token(app)
 
         // list_jobs and get_job_run: the flag, never the token.
         let jobs = try store.ledger.jobs()
@@ -3923,26 +3999,27 @@ struct URLTriggerCommandTests {
         #expect(!IrisEngine.jobRunJSON(run, outcome: nil, failureReason: nil, gateSignal: nil,
                                        lastAgentMessage: nil).contains(minted))
 
-        // /jobs, cards and system lines.
+        // /jobs, cards and every message of every role: the conversation keeps only the
+        // redacted line.
         app.sendMessage("/jobs")
         if let listingTask = app.jobsListingTask { try await value(of: listingTask) }
-        let commands = app.conversations.first { $0.id == id }?.messages.filter { $0.role == .command } ?? []
-        #expect(commands.last?.content.contains("pr-sweep") == true, "the last command output is the listing")
-        #expect(commands.last?.content.contains(minted) == false, "the listing never repeats the token")
         for conversation in app.conversations {
-            for message in conversation.messages where message.role != .command {
+            for message in conversation.messages {
                 #expect(!message.content.contains(minted), "a \(message.role) message carried the token")
             }
         }
 
-        // The model's history, search, read_conversation: holds today by construction (a
-        // .command message is outside all three), pinned so a refactor cannot move it.
+        // The model's history, search, read_conversation.
         let conversation = try #require(app.conversations.first { $0.id == id })
         let history = conversation.history.flatMap(\.parts).compactMap(\.text).joined()
         #expect(!history.contains(minted))
         app.flushSave()
-        #expect(try store.searchConversations(query: minted).isEmpty)
-        #expect(try store.searchConversations(query: "run-job").isEmpty)
+        // `sanitizeFTSQuery` keeps only letters, digits and spaces, so the token is searched by
+        // its longest alphanumeric run, which the index tokenizes the same way.
+        let run = String(minted.split(whereSeparator: { $0 == "-" || $0 == "_" })
+            .max(by: { $0.count < $1.count }) ?? Substring(minted))
+        #expect(try store.searchConversations(query: run).isEmpty)
+        #expect(try store.searchConversations(query: "run job").isEmpty)
         #expect(!ConversationReader.page(conversation.messages, from: 0, count: 50).text.contains(minted))
 
         // The rotation summary: the one path that sends UI messages to a model (plan note 12).
@@ -3973,8 +4050,9 @@ import Security
 
 /// The capability a URL trigger carries (D6 decision 10): 128 random bits, base64url-encoded.
 /// Not the job id, which sits in the ledger and in transcripts, where an approved host
-/// `run_command` could `open` it. Only the SHA-256 digest is stored: the token cannot be printed
-/// twice, and a leaked database holds no live URL.
+/// `run_command` could `open` it. Only the SHA-256 digest is stored, and the link itself is shown
+/// once in a transient sheet and never written to a message (plan note 17): the token cannot be
+/// shown twice, and a leaked database holds no live URL.
 enum URLTriggerToken {
     static let byteCount = 16
     static let encodedLength = 22
@@ -4077,20 +4155,23 @@ Then add the parser and the texts:
 
     static func urlStatusText(_ job: Job) -> String {
         job.urlTrigger
-            ? "The URL trigger for **\(job.name)** is on. Its link was shown once, when it was turned on; `/jobs url \(job.name) on` makes a new one and retires the old."
+            ? "The URL trigger for **\(job.name)** is on. Its link was shown once, when it was turned on, and is not saved anywhere; `/jobs url \(job.name) on` makes a new one and retires the old."
             : "The URL trigger for **\(job.name)** is off. `/jobs url \(job.name) on` turns it on and shows its link."
     }
 
-    static func urlOnText(_ job: Job, url: String) -> String {
-        """
-        The URL trigger for **\(job.name)** is on. Its link, shown only this once:
+    /// The line the conversation keeps (plan note 17): it never holds the link, because every
+    /// message is persisted in plain text in `conversations.sqlite`, where an approved host
+    /// `run_command` could read it.
+    static func urlOnText(_ job: Job) -> String {
+        "URL trigger on for **\(job.name)**: the link was shown once and is not saved. `/jobs url \(job.name) on` makes a new one."
+    }
 
-        `\(url)`
-
-        Opening it fires \(job.name) now, as `/jobs run` would, at most \(RunJobURL.maxFiresPerHour) times an hour. \
-        Turning it on again replaces the link; `/jobs url \(job.name) off` retires it. Changing the job's prompt, \
-        profile or policy turns it off. \(urlSchemePendingNote)
-        """
+    /// What the transient sheet says around the link.
+    static func urlSheetText(_ jobName: String) -> String {
+        "Opening this link fires \(jobName) now, as `/jobs run` would, at most \(RunJobURL.maxFiresPerHour) times an hour. "
+            + "Iris keeps only a hash of it: copy it now, because it cannot be shown again. Turning the trigger on again "
+            + "replaces it, `/jobs url \(jobName) off` retires it, and changing the job's prompt, profile or policy turns "
+            + "it off. \(urlSchemePendingNote)"
     }
 
     static func urlOffText(_ job: Job) -> String {
@@ -4119,6 +4200,7 @@ In `AppState.handleJobsCommand`, add a branch after `.reschedule`:
                     emitCommandOutput(JobsCommand.urlStatusText(job), format: .markdown, to: convId)
                 case false?:
                     try ledger.setURLTrigger(jobId: job.id, tokenHash: nil)
+                    if revealedURLTrigger?.jobName == job.name { revealedURLTrigger = nil }
                     emitCommandOutput(JobsCommand.urlOffText(job), format: .markdown, to: convId)
                 case true?:
                     guard let token = URLTriggerToken.generate() else {
@@ -4126,16 +4208,76 @@ In `AppState.handleJobsCommand`, add a branch after `.reschedule`:
                                           format: .markdown, to: convId)
                         return
                     }
-                    // Only the digest is stored. The token exists in this reply and nowhere else:
-                    // a `.command` message, outside the model's history, search and
-                    // `read_conversation` (URLTriggerCommandTests pins all three).
+                    // Plan note 17: only the digest is stored, and the link never passes through
+                    // `appendMessage`, `ConversationStore` or a log. It lives in the transient sheet
+                    // until the owner closes it; the conversation keeps a redacted line.
                     try ledger.setURLTrigger(jobId: job.id, tokenHash: URLTriggerToken.digest(token))
-                    emitCommandOutput(JobsCommand.urlOnText(job, url: RunJobURL.url(token: token, identity: .current)),
-                                      format: .markdown, to: convId)
+                    revealedURLTrigger = RevealedURLTrigger(jobName: job.name,
+                                                            url: RunJobURL.url(token: token, identity: .current))
+                    emitCommandOutput(JobsCommand.urlOnText(job), format: .markdown, to: convId)
                 }
             } catch {
                 emitCommandOutput("Could not change the URL trigger: \(error).", format: .markdown, to: convId)
             }
+```
+
+In `AppState.swift`, after `transcriptSheetConversationId` (`:375`):
+
+```swift
+    /// The URL trigger link `/jobs url … on` just minted, shown once in `URLTriggerLinkSheet`
+    /// (plan note 17). Transient: never on a `Codable` type, never persisted, never logged, and
+    /// cleared when the sheet closes or the trigger is turned off.
+    var revealedURLTrigger: RevealedURLTrigger?
+```
+
+Create `Sources/IrisKit/URLTriggerLinkSheet.swift`:
+
+```swift
+import AppKit
+import SwiftUI
+
+/// A link `/jobs url … on` minted, for the one sheet that shows it (plan note 17).
+struct RevealedURLTrigger: Identifiable, Equatable, Sendable {
+    let id = UUID()
+    let jobName: String
+    let url: String
+}
+
+/// Shows a URL trigger's link once, with Copy. The link is never written to the conversation:
+/// every message is persisted in plain text, where an approved host `run_command` could read it.
+/// Copying puts it on the pasteboard, which is the owner's choice and lasts until the next copy.
+struct URLTriggerLinkSheet: View {
+    let link: RevealedURLTrigger
+    let onDone: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(verbatim: "Link for \(link.jobName)").font(.headline)
+            Text(verbatim: link.url)
+                .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled)
+            Text(JobsCommand.urlSheetText(link.jobName)).font(.callout).foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Copy") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(link.url, forType: .string)
+                }
+                Button("Done", action: onDone).keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 520)
+    }
+}
+```
+
+In `ChatView.swift`, beside the body's root `.onAppear` (`:489`):
+
+```swift
+        .sheet(item: $state.revealedURLTrigger) { link in
+            URLTriggerLinkSheet(link: link) { state.revealedURLTrigger = nil }
+        }
 ```
 
 In `iris.swift`'s `jobsListJSON` row, after `"action": job.action.stored,`:
@@ -4150,16 +4292,18 @@ In the `list_jobs` description, after "`action` — … the daily digest — ", 
 
 In `JobsCommandTests.swift:650`, add `"/jobs url"` to the list of forms.
 
-- [ ] **Step 5: Run them and watch them pass.** Run the same filter. Expected: 8 tests passed. Then run `timeout 300 scripts/test-filter.sh 'JobsCommandTests|JobToolsTests'`. Expected: every test passes. Quote both counts.
+- [ ] **Step 5: Run them and watch them pass.** Run the same filter. Expected: 9 tests passed. Then run `timeout 300 scripts/test-filter.sh 'JobsCommandTests|JobToolsTests'`. Expected: every test passes. Quote both counts.
 
-- [ ] **Step 6: Mutation checks (the token never reaches the model).** Make each change, run the filter, see the named test fail, then restore.
-  - Change the `on` reply's `format: .markdown` to `.system`: `tokenNeverReachesTheModel` fails on the system-line check.
-  - In `handleJobsCommand`'s `true?` branch, add `appendContentToHistory(for: convId, content: AppState.eventLineContent(token))`: `tokenNeverReachesTheModel` fails on the history check.
-  - Add `.command` to `ConversationStore.indexedRoles` (`ConversationStore.swift:594`): the FTS assertion in `tokenNeverReachesTheModel` fails.
+- [ ] **Step 6: Mutation checks (the token is never stored and never reaches the model).** Make each change, run the filter, see the named test fail, then restore.
+  - Put the link back in the persisted line: `emitCommandOutput(JobsCommand.urlOnText(job) + " " + RunJobURL.url(token: token, identity: .current), …)`. `tokenNeverStored` fails on the database files, and `tokenNeverReachesTheModel` fails on the message check.
+  - With that change still in, also add `.command` to `ConversationStore.indexedRoles` (`ConversationStore.swift:594`): the FTS assertion on the token's alphanumeric run fails too. Restore both.
+  - In the `true?` branch, add `appendContentToHistory(for: convId, content: AppState.eventLineContent(token))`: `tokenNeverReachesTheModel` fails on the history check, and `tokenNeverStored` fails, since history is persisted.
+  - Delete `revealedURLTrigger = RevealedURLTrigger(…)`: every test that calls `token(app)` fails at its `#require`.
+- Then run `grep -n "print(" Sources/IrisKit/AppState.swift | grep -i "token\|url"`. Expected: no line logs the token or the link.
 
 - [ ] **Step 7: Run the warnings check.** Run `scripts/check-warnings.sh`. Expected: no warnings.
 
-- [ ] **Step 8: Commit.** `git add Sources/IrisKit/URLTriggerToken.swift Sources/IrisKit/RunJobURL.swift Sources/IrisKit/BuildIdentity.swift Sources/IrisKit/JobsCommand.swift Sources/IrisKit/AppState.swift Sources/IrisKit/iris.swift Tests/irisTests/URLTriggerCommandTests.swift Tests/irisTests/JobsCommandTests.swift`, then `git commit -m "feat(jobs): /jobs url mints a hashed per-job token; list_jobs shows the flag (D6 decisions 9, 10)"`.
+- [ ] **Step 8: Commit.** `git add Sources/IrisKit/URLTriggerToken.swift Sources/IrisKit/RunJobURL.swift Sources/IrisKit/BuildIdentity.swift Sources/IrisKit/JobsCommand.swift Sources/IrisKit/AppState.swift Sources/IrisKit/URLTriggerLinkSheet.swift Sources/IrisKit/ChatView.swift Sources/IrisKit/iris.swift Tests/irisTests/URLTriggerCommandTests.swift Tests/irisTests/JobsCommandTests.swift`, then `git commit -m "feat(jobs): /jobs url mints a hashed per-job token shown once, never stored; list_jobs shows the flag (D6 decisions 9, 10)"`.
 
 ### Task 19: Say so when a change turns the trigger off
 
@@ -5390,7 +5534,7 @@ Then add to the extension:
   - Record the findings in the commit body.
 
 - [ ] **Step 2: Add what is new.**
-  - Add a `/jobs` table row: ``| `/jobs url <name> [on\|off]` | `on` makes a link that fires the job, `iris://run-job/<token>` (`iris-dev://` for a dev build), shown once; `on` again replaces it; `off` retires it; the bare form says whether it is on. Changing the job's prompt, profile or policy turns it off. Until the app registers the scheme (D6 PR D2), nothing opens the link |``.
+  - Add a `/jobs` table row: ``| `/jobs url <name> [on\|off]` | `on` makes a link that fires the job, `iris://run-job/<token>` (`iris-dev://` for a dev build), shown once in a sheet with Copy and never saved; `on` again replaces it; `off` retires it; the bare form says whether it is on. Changing the job's prompt, profile or policy turns it off. Until the app registers the scheme (D6 PR D2), nothing opens the link |``.
   - In "The job tools", add `urlTrigger` to `list_jobs`' field list: "(whether a link may fire it; the token itself is never shown)".
   - Add a section before "## Retention":
 
@@ -5399,8 +5543,9 @@ Then add to the extension:
 
 A job can be fired from Shortcuts, Raycast or anything else that opens a URL, once you have turned
 its link on with `/jobs url <name> on`. Only you can do that: no tool sets it, and `/jobs` is typed
-in the composer. The reply shows the link once. Iris keeps only a hash of it, so it cannot show it
-again; `on` again makes a new one and kills the old.
+in the composer. A sheet shows the link once, with Copy. The conversation keeps only a line saying a
+link was made, never the link, and the database keeps only a hash of it, so neither the app nor
+anything that can read its files can show it again; `on` again makes a new one and kills the old.
 
 Opening the link fires the job exactly as `/jobs run` would: the gate is skipped, and overlap, the
 breaker and the budgets apply. The run's row says `url`. Every fire and every refusal says so in
@@ -5431,7 +5576,7 @@ Branch: `feat/agency6-url-scheme`, cut from `main` after PR D1 merges. Spec deci
 
 The question, from spec §3: does SwiftUI's `WindowGroup` open a second window on an external URL, and does `.handlesExternalEvents(matching: [])` or `application(_:open:)` alone prevent it?
 
-This runs on a scratch branch that is never pushed.
+This runs on a scratch branch that is never pushed. It needs `xcodegen` and the Metal Toolchain installed, which needs the owner's OK on `work`. It fires no job and costs no provider spend.
 
 1. Run `git worktree add .worktrees/agency6-spike -b spike/agency6-url-window origin/main`, then run the `.sourcekit-lsp` step from AGENTS.md "Worktrees".
 2. Apply the throwaway patch. Tasks 25 and 26 add the same lines for real.
@@ -5492,8 +5637,13 @@ struct URLSchemeConfigTests {
         let release = try #require(yml.range(of: "Release:"))
         let debugBlock = yml[debug.upperBound..<release.lowerBound]
         let releaseBlock = yml[release.upperBound...].prefix(400)
-        #expect(debugBlock.contains("IRIS_URL_SCHEME: \(BuildIdentity.dev.urlScheme)"))
-        #expect(releaseBlock.contains("IRIS_URL_SCHEME: \(BuildIdentity.release.urlScheme)"))
+        // Whole lines, never substrings: "IRIS_URL_SCHEME: iris" is a prefix of "… iris-dev".
+        func setting(_ block: Substring) -> [String] {
+            block.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { $0.hasPrefix("IRIS_URL_SCHEME:") }
+        }
+        #expect(setting(debugBlock) == ["IRIS_URL_SCHEME: \(BuildIdentity.dev.urlScheme)"])
+        #expect(setting(releaseBlock) == ["IRIS_URL_SCHEME: \(BuildIdentity.release.urlScheme)"])
     }
 
     @Test("Info.plist registers the scheme from the build setting")
@@ -5537,7 +5687,7 @@ In `App/Info.plist`, after the `CFBundleVersion` line:
 
 - [ ] **Step 4: Run them and watch them pass.** Run the same filter. Expected: 2 tests passed. Quote the count.
 
-- [ ] **Step 5: Mutation check.** Set Debug's `IRIS_URL_SCHEME` to `iris`: `projectSetsBothSchemes` fails. Restore it.
+- [ ] **Step 5: Mutation checks.** Set Debug's `IRIS_URL_SCHEME` to `iris`: `projectSetsBothSchemes` fails. Set Release's to `iris-dev`: it fails too, which a substring match would have missed. Restore both.
 
 - [ ] **Step 6: Run the warnings check.** Run `scripts/check-warnings.sh`. Expected: no warnings. If `work` has the Metal Toolchain, also have it run `scripts/build-app.sh Debug` and `plutil -p "<app>/Contents/Info.plist" | grep -A3 CFBundleURLSchemes`. Expected: `"iris-dev"`.
 
@@ -5548,7 +5698,7 @@ In `App/Info.plist`, after the `CFBundleVersion` line:
 **Files:**
 - Modify: `Sources/IrisKit/iris.swift:5157-5178` (`AppDelegate.application(_:open:)`), `:5193` (the lock read before `GUILock.acquire()`), `:5203` (the note after `AppState.shared` exists), and `:5239` (`.handlesExternalEvents(matching: [])`, Variant B only)
 - Create: `Sources/IrisKit/LaunchLock.swift`
-- Modify: `Sources/IrisKit/JobsCommand.swift` (delete `urlSchemePendingNote` and its use in `urlOnText`)
+- Modify: `Sources/IrisKit/JobsCommand.swift` (delete `urlSchemePendingNote` and its use in `urlSheetText`)
 - Test: `Tests/irisTests/LaunchLockTests.swift` (new)
 
 **Interfaces:**
@@ -5608,10 +5758,9 @@ struct LaunchLockTests {
         #expect(iris?.messages.last?.content == RunJobURL.foreignHolderNotice(pid: 4242))
     }
 
-    @Test("the on reply no longer says the link cannot be opened")
+    @Test("the link sheet no longer says the link cannot be opened")
     func pendingNoteIsGone() {
-        let job = Job(name: "pr-sweep", prompt: "sweep", trigger: .schedule(.interval(seconds: 60)))
-        #expect(!JobsCommand.urlOnText(job, url: "iris-dev://run-job/x").contains("registers the scheme"))
+        #expect(!JobsCommand.urlSheetText("pr-sweep").contains("registers the scheme"))
     }
 }
 ```
@@ -5686,7 +5835,7 @@ In `AppDelegate`, add:
         .handlesExternalEvents(matching: [])
 ```
 
-In `JobsCommand.swift`, delete `urlSchemePendingNote` and the ` \(urlSchemePendingNote)` at the end of `urlOnText`. Plan note 13: the scheme is registered now, so the note is false.
+In `JobsCommand.swift`, delete `urlSchemePendingNote` and the ` \(urlSchemePendingNote)` at the end of `urlSheetText`. Plan note 13: the scheme is registered now, so the note is false.
 
 - [ ] **Step 4: Run them and watch them pass.** Run the same filter. Expected: 4 tests passed. Then run `timeout 300 scripts/test-filter.sh 'URLTriggerCommandTests|RunJobURLTests|RunJobURLDeferralTests|RunJobCLITests'`. Expected: every test passes. Quote both counts.
 
@@ -5707,7 +5856,13 @@ In `JobsCommand.swift`, delete `urlSchemePendingNote` and the ` \(urlSchemePendi
   - Task 23's two sentences, "Until the app registers the scheme (D6 PR D2), nothing opens the link", are now false. Delete both.
   - `RunJobCLI.swift:355-358` says an app launched during a run "still races". That stays true, because the app still overwrites the lock. Decision 14 only adds a warning and the deferral. Leave it, and record that in the commit body.
 
-- [ ] **Step 2: Add what is new.** In the README feature list: `- **Run a job from a link**: \`/jobs url <name> on\` makes an \`iris://run-job/…\` link (\`iris-dev://\` for a dev build) for Shortcuts, Raycast or a browser bookmark. It fires that one job, at most three times an hour, and carries no input. See [docs/jobs.md](docs/jobs.md).`
+- [ ] **Step 1b: Remove D1's "not openable yet" note, everywhere.** This is the falsifying half of invariant 9 for D1 (plan note 13), so it is a line of its own:
+  - [ ] `JobsCommand.urlSchemePendingNote` and its use are deleted (Task 26), and `LaunchLockTests.pendingNoteIsGone` passes;
+  - [ ] the `/jobs url` row in `docs/jobs.md` no longer says "Until the app registers the scheme (D6 PR D2), nothing opens the link";
+  - [ ] the last paragraph of "Firing a job from a link" no longer says it;
+  - [ ] `grep -rn -i "registers the scheme\|nothing opens the link\|not openable" docs README.md Sources` returns nothing.
+
+- [ ] **Step 2: Add what is new.** In the README feature list: `- **Run a job from a link**: \`/jobs url <name> on\` makes an \`iris://run-job/…\` link (\`iris-dev://\` for a dev build) for Shortcuts, Raycast or a browser bookmark. It fires that one job, at most three times an hour, and carries no input. The link is shown once and never saved. See [docs/jobs.md](docs/jobs.md).`
 
 - [ ] **Step 3: Full suite.** Run `timeout 900 swift test` (all three markers), then `scripts/check-warnings.sh`.
 
@@ -5715,21 +5870,23 @@ In `JobsCommand.swift`, delete `urlSchemePendingNote` and the ` \(urlSchemePendi
 
 ### Task 28: GUI pass for PR D2 (`work`, under the lease)
 
+**Before you start.** Building Iris Dev.app needs `xcodegen` (`brew install xcodegen`) and the Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`). Neither is on `work` yet, and installing them needs the owner's OK. Steps marked **(spend)** run a real model turn, a job's or a chat's, on the owner's provider account. That is expected on `work`. Only Iris Dev.app is used: no release Iris.app and no Raycast are installed there.
+
+Links are opened with `open 'iris-dev://…'` from a terminal and with Shortcuts, and nothing else.
+
 1. Run `pgrep -fl "Iris Dev|\.build/debug/iris"`. Expected: no output.
 2. Run `python3 ~/.claude/skills/gui-test-lease/lease.py acquire --purpose "iris: D6 PR D2 run-job links" --minutes 60 --on-behalf-of <requesting peer>`. Expected: exit 0.
 3. Build, sign and open Iris Dev.app as in Task 6 step 3.
-4. Ask: "Schedule a job named d6-url every 10 minutes that replies pong." Also schedule `d6-url2` (the same, for steps 11-12) and `d6-slow` (as in Task 6 step 7). Type `/jobs url d6-url on`. Expected: the reply shows `iris-dev://run-job/<22 characters>` once, and says nothing about the link not opening yet. Copy the link.
-5. App running: note the window count (`osascript -e 'tell application "System Events" to count windows of process "Iris Dev"'`), then run `open '<link>'`. Expected: Iris shows `Firing d6-url from a URL …`, which turns into `Fired d6-url from a URL; the result arrives as a card.`, and the card arrives. The window count is unchanged.
-6. Quit the app (Cmd-Q), then run `open '<link>'`. Expected: the app launches with one chat window, and the same line and card appear.
-7. The deferral. Quit the app. In a terminal at the repo, run `swift build && scripts/sign.sh .build/debug/iris && .build/debug/iris --run-job d6-slow &`. Within 5 s, run `open '<link>'`. Expected: Iris shows `Another Iris process (pid N) held the store at launch. …` and `Waiting for the other Iris process (pid N) to finish before firing d6-url.`. Within 5 s of the CLI printing its row, that line turns into `The other Iris process (pid N) finished; firing d6-url …`, and a fire line follows.
-8. The limit. Run `open '<link>'` until four have been opened since step 5. Count steps 5-7 as three. Expected: the fourth shows `Refused a URL fire of d6-url: URL fires are limited to 3 an hour per job.`. Open it twice more. Expected: that same line now reads `Refused 3 URL fires of d6-url in the last hour. …`, and `/jobs` shows d6-url is not paused.
+4. **(spend)** Ask: "Schedule a job named d6-url every 10 minutes that replies pong." Also schedule `d6-url2` (the same, for step 11) and `d6-slow` (as in Task 6 step 7). Type `/jobs url d6-url on`. Expected: a sheet titled "Link for d6-url" shows `iris-dev://run-job/<22 characters>` with Copy and Done. Its text says nothing about the link not opening yet. The conversation gains only `URL trigger on for **d6-url**: the link was shown once and is not saved. …`, with no link in it. Click Copy, then Done. Then run `sqlite3 ~/.iris-dev/conversations.sqlite "SELECT count(*) FROM messages WHERE content LIKE '%run-job/%'"`. Expected: `0`.
+5. **(spend)** App running: note the window count (`osascript -e 'tell application "System Events" to count windows of process "Iris Dev"'`), then run `open '<link>'`. Expected: Iris shows `Firing d6-url from a URL …`, which turns into `Fired d6-url from a URL; the result arrives as a card.`, and the card arrives. The window count is unchanged.
+6. **(spend)** Quit the app (Cmd-Q), then run `open '<link>'`. Expected: the app launches with one chat window, and the same line and card appear.
+7. **(spend)** The deferral. Quit the app. In a terminal at the repo, run `swift build && scripts/sign.sh .build/debug/iris && .build/debug/iris --run-job d6-slow &`. Within 5 s, run `open '<link>'`. Expected: Iris shows `Another Iris process (pid N) held the store at launch. …` and `Waiting for the other Iris process (pid N) to finish before firing d6-url.`. Within 5 s of the CLI printing its row, that line turns into `The other Iris process (pid N) finished; firing d6-url …`, and a fire line follows.
+8. **(spend)** The limit. Run `open '<link>'` until four have been opened since step 5. Count steps 5-7 as three. Expected: the fourth shows `Refused a URL fire of d6-url: URL fires are limited to 3 an hour per job.`. Open it twice more. Expected: that same line now reads `Refused 3 URL fires of d6-url in the last hour. …`, and `/jobs` shows d6-url is not paused.
 9. Type `/jobs url d6-url on` again, then open the old link. Expected: `Refused a URL fire: the link matches no job's URL trigger; …`. The new token appears nowhere in that line.
 10. Run `open 'iris-dev://run-job/<new token>?prompt=hi'` and `open 'iris-dev://run-job/<d6-url's job id from /jobs>'`. Expected: both are refused, and the unmatched line's count goes up rather than adding lines.
-11. Shortcuts. Type `/jobs url d6-url2 on` and copy its link. Create a shortcut with one "Open URLs" action holding that link, and run it. Expected: d6-url2 fires, as in step 5.
-12. Raycast, if installed: create a Quicklink with d6-url2's link and open it. Expected: d6-url2 fires. Otherwise record "Raycast not installed".
-13. With the release Iris.app running (if it is already installed and running; do not launch it for this), run `open 'iris://run-job/<d6-url2 token>'`. Expected: the release app refuses it as matching no job, because its store has no such job, and Iris Dev is untouched. If the release app is not running, record "skipped".
-14. Quit Iris Dev, then run `scripts/run-dev.sh`. Expected: it launches with no crash, and the status item works. Do not open a link while it runs, because LaunchServices would launch Iris Dev.app beside it on one store. Quit it.
-15. Type `/jobs delete d6-url`, `/jobs delete d6-url2` and `/jobs delete d6-slow`, quit, and release the lease.
+11. **(spend)** Shortcuts. Type `/jobs url d6-url2 on`, and copy its link from the sheet. Create a shortcut with one "Open URLs" action holding that link, and run it. Expected: d6-url2 fires, as in step 5.
+12. Quit Iris Dev, then run `scripts/run-dev.sh`. Expected: it launches with no crash, and the status item works. Do not open a link while it runs, because LaunchServices would launch Iris Dev.app beside it on one store. Quit it.
+13. Type `/jobs delete d6-url`, `/jobs delete d6-url2` and `/jobs delete d6-slow`, quit, and release the lease.
 
 ---
 
@@ -5748,7 +5905,7 @@ In `JobsCommand.swift`, delete `urlSchemePendingNote` and the ` \(urlSchemePendi
 | §0.7 the sink, the two call sites, the `didSet` diff, permission on first post, `.active`, responses, the setting | 13, 14 |
 | §0.8 bundle-only install, never `--run-job` or tests, delegate in `IrisApp.init` | 13 (`noSinkByDefault`), 14 (`SurfaceInstall`) |
 | §0.9 `Job.urlTrigger`, `/jobs url` read from the right, the status form, `list_jobs` read-only | 17, 18 |
-| §0.10 the 128-bit token, digest only, rotate on `on`, delete on `off`, never shown again | 17, 18 |
+| §0.10 the 128-bit token, digest only, rotate on `on`, delete on `off`, never shown again | 17, 18 (shown once in a sheet, never persisted: plan note 17) |
 | §0.11 one writer, the clear in `upsert` on prompt, profile or policy, saying so, `/jobs reschedule` keeps | 17, 19 |
 | §0.12 the URL form, the per-build scheme, `runJobByHand`, `FireOrigin.url`, a line per fire and refusal | 18, 20, 21, 25, 26 |
 | §0.13 3 per hour, refuse-only, no row, no breaker, coalesced | 21 |
@@ -5784,7 +5941,7 @@ No requirement is left without a task. Two spec items are implemented differentl
 - 5 is in Task 7 (`pagingNeverDropsOrRepeatsTiedRows`).
 
 The security rules the coordinator named each have a mutation check:
-- The token never reaching the model: Task 18, Step 6.
+- The token never stored and never reaching the model: Task 18, Step 6 (`tokenNeverStored`, `tokenNeverReachesTheModel`).
 - The opt-in clearing on a prompt, profile, policy or grant change: Task 17, Step 7.
 - The URL limit not counting toward the breaker: Task 21, Step 6.
 - Fixed notification titles, and notifications never approving: Task 12, Step 5, and Task 13, Step 5.
