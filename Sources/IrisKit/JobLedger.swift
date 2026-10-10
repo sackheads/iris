@@ -232,6 +232,13 @@ final class JobLedger: JobUsageReading, Sendable {
         }
     }
 
+    /// Whether `setURLTrigger` failed because another job already holds the digest: the only
+    /// unique constraint that write can hit is `jobs_urlTokenHash`, so a fresh token cures it.
+    static func isURLTokenHashCollision(_ error: any Error) -> Bool {
+        guard let error = error as? DatabaseError else { return false }
+        return error.extendedResultCode == .SQLITE_CONSTRAINT_UNIQUE
+    }
+
     // MARK: Reads
 
     /// Every job, enabled and disabled, oldest first. `rowid` breaks ties: two jobs created in the

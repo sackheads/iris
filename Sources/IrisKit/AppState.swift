@@ -3952,6 +3952,15 @@ class AppState {
         }
     }
 
+    /// The URL trigger link `/jobs url … on` just minted, shown once in `URLTriggerLinkSheet`
+    /// (plan note 17). Transient: never on a `Codable` type, never persisted, never logged, and
+    /// cleared when the sheet closes or the trigger is turned off.
+    var revealedURLTrigger: RevealedURLTrigger?
+
+    /// Test seam: where `/jobs url … on` gets its token, so a test can force a digest collision
+    /// or a failed random source.
+    @ObservationIgnored var urlTriggerTokenSource: () -> String? = { URLTriggerToken.generate() }
+
     /// `/jobs` (#187 §9). Works in every conversation, pinned or not, and never starts a turn:
     /// everything it says comes from the ledger through `JobsCommand`'s pure rendering. The
     /// ledger calls are synchronous, so the answer is in the transcript before this returns —
@@ -4119,6 +4128,9 @@ class AppState {
                 emitCommandOutput("Could not reschedule that job: \(error).", format: .markdown, to: convId)
             }
 
+        case .url(let name, let setting):
+            handleURLTriggerCommand(name: name, setting: setting, ledger: ledger, convId: convId)
+
         case .delete(let name):
             do {
                 guard let job = try ledger.job(named: name) else {
@@ -4151,6 +4163,58 @@ class AppState {
                                   format: .markdown, to: convId)
             } catch {
                 emitCommandOutput("Could not delete that job: \(error).", format: .markdown, to: convId)
+            }
+        }
+    }
+
+    /// `/jobs url <name> [on|off]` (D6 decisions 9 and 10). Plan note 17: only the token's digest
+    /// is stored, and the link never passes through `appendMessage`, `ConversationStore` or a log.
+    /// It lives in `revealedURLTrigger` until the sheet closes; the conversation keeps a redacted
+    /// line. A failure prints fixed words, never the error, which can be a raw SQLite message.
+    private func handleURLTriggerCommand(name: String, setting: Bool?, ledger: JobLedger, convId: UUID) {
+        let job: Job
+        do {
+            guard let found = try ledger.job(named: name) else {
+                emitCommandOutput("No job named '\(name)'.", format: .markdown, to: convId)
+                return
+            }
+            job = found
+        } catch {
+            emitCommandOutput("Could not read the jobs table. Nothing changed.", format: .markdown, to: convId)
+            return
+        }
+        switch setting {
+        case nil:
+            emitCommandOutput(JobsCommand.urlStatusText(job), format: .markdown, to: convId)
+        case false?:
+            do {
+                try ledger.setURLTrigger(jobId: job.id, tokenHash: nil)
+            } catch {
+                emitCommandOutput(JobsCommand.urlChangeFailedText(job), format: .markdown, to: convId)
+                return
+            }
+            if revealedURLTrigger?.jobName == job.name { revealedURLTrigger = nil }
+            emitCommandOutput(JobsCommand.urlOffText(job), format: .markdown, to: convId)
+        case true?:
+            // Two attempts: a digest another job holds fails the unique index, and a fresh token
+            // cures that. A second collision means the random source is not random; stop there.
+            for attempt in 1...2 {
+                guard let token = urlTriggerTokenSource() else {
+                    emitCommandOutput("Could not make a link for **\(job.name)**: the system's random source failed. Nothing changed.",
+                                      format: .markdown, to: convId)
+                    return
+                }
+                do {
+                    try ledger.setURLTrigger(jobId: job.id, tokenHash: URLTriggerToken.digest(token))
+                } catch {
+                    if attempt == 1 && JobLedger.isURLTokenHashCollision(error) { continue }
+                    emitCommandOutput(JobsCommand.urlChangeFailedText(job), format: .markdown, to: convId)
+                    return
+                }
+                revealedURLTrigger = RevealedURLTrigger(jobName: job.name,
+                                                        url: RunJobURL.url(token: token, identity: .current))
+                emitCommandOutput(JobsCommand.urlOnText(job), format: .markdown, to: convId)
+                return
             }
         }
     }

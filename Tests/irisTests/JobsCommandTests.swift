@@ -80,7 +80,7 @@ struct JobsCommandTests {
     func usageTextSpellsEveryForm() {
         #expect(JobsCommand.usageText == "Usage: /jobs · /jobs ack <run id> · /jobs pause <name> · "
                 + "/jobs resume <name> · /jobs run <name> · /jobs delete <name> · "
-                + "/jobs reschedule <name> <cron> [timezone]")
+                + "/jobs reschedule <name> <cron> [timezone] · /jobs url <name> [on|off]")
     }
 
     // MARK: reschedule
@@ -647,7 +647,7 @@ struct JobsCommandTests {
 
     @Test("the usage line names every form the command takes")
     func usageTextNamesEveryForm() {
-        for form in ["/jobs ack", "/jobs pause", "/jobs resume", "/jobs run", "/jobs delete", "/jobs reschedule"] {
+        for form in ["/jobs ack", "/jobs pause", "/jobs resume", "/jobs run", "/jobs delete", "/jobs reschedule", "/jobs url"] {
             #expect(JobsCommand.usageText.contains(form), "usage text is missing \(form)")
         }
     }

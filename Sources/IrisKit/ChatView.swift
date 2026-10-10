@@ -499,6 +499,9 @@ struct ChatView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("RerunSetupWizard"))) { _ in
             showSetupWizard = true
         }
+        .sheet(item: $state.revealedURLTrigger) { link in
+            URLTriggerLinkSheet(link: link) { state.revealedURLTrigger = nil }
+        }
     }
     
     /// Shared row body for both the Conversations and Archived sections, so archiving a
