@@ -83,6 +83,19 @@ struct RunJobByHandTests {
         #expect(try store.ledger.runs(jobId: job.id, limit: 1).first?.triggerKind == "url")
     }
 
+    @Test("a URL fire's last line says what admission decided: queued is not refused, a pause says so")
+    func urlAdmissionLines() {
+        #expect(RunJobURL.admissionLine("j", .run) == RunJobURL.firedLine("j"))
+        #expect(RunJobURL.admissionLine("j", .queued)
+                == "Queued a URL fire of j: a run is already in progress, so it will start after that one.")
+        #expect(RunJobURL.admissionLine("j", .pauseBreaker(count: 6))
+                == "Refused a URL fire of j: it was not started, and the job is now paused (breaker: 6 runs in the last hour).")
+        #expect(RunJobURL.admissionLine("j", .pauseBudget(scope: "job", used: 120, limit: 100))
+                == RunJobURL.pausedLine("j", JobRunner.budgetReason(scope: "job", used: 120, limit: 100)))
+        #expect(RunJobURL.admissionLine("j", .skipInFlight)
+                == "Refused a URL fire of j: it was not started, because a run is already in progress.")
+    }
+
     @Test("a paused job is refused before anything fires, in one line")
     func pausedURLVoice() throws {
         let (store, app, iris) = try makeApp()

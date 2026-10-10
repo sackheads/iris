@@ -10,7 +10,7 @@ extension AppState {
     /// `conversationId` (Iris), updated in place once admission answers (plan note 9).
     @discardableResult
     func runJobByHand(job: Job, origin: FireOrigin, announceTo conversationId: UUID) -> Task<JobRunner.Admission?, Never>? {
-        let byURL = origin == .url
+        let byURL = origin.root == .url
         // Admission drops a paused or disabled job without a word, and both are states the user
         // has to undo before a hand-started fire can do anything. Saying so before anything is
         // started is the difference between a command that did nothing and one that looks like
@@ -53,11 +53,12 @@ extension AppState {
             if admission == nil {
                 text = byURL ? RunJobURL.notStartedLine(job.name, "it is no longer in the jobs table")
                              : "'\(job.name)' is no longer in the jobs table."
+            } else if byURL, let admission {
+                text = RunJobURL.admissionLine(job.name, admission)
             } else if let refusal = admission.flatMap(JobRunner.refusalText) {
-                text = byURL ? RunJobURL.notStartedLine(job.name, refusal)
-                             : "**\(job.name)** was not started: \(refusal)."
+                text = "**\(job.name)** was not started: \(refusal)."
             } else {
-                text = byURL ? RunJobURL.firedLine(job.name) : "Fired **\(job.name)**; the result arrives as a card."
+                text = "Fired **\(job.name)**; the result arrives as a card."
             }
             self.finishHandFire(text, byURL: byURL, lineId: lineId, to: conversationId)
             return admission

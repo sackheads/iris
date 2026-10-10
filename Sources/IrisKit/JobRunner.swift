@@ -197,8 +197,9 @@ actor JobRunner {
         case gateError(detail: String, paused: Bool)
     }
 
-    /// Why a fire was not started, as a person reads it — `nil` for `.run`. `/jobs run` prints it:
-    /// a hand-started fire that admission refused must say so, or the command looks like it worked.
+    /// Why a fire was not started, as a person reads it — `nil` for `.run`. `/jobs run` and a URL
+    /// fire (`RunJobURL.admissionLine`) print it: a hand-started fire that admission refused must
+    /// say so, or the command looks like it worked.
     static func refusalText(_ admission: Admission) -> String? {
         switch admission {
         case .run: return nil
@@ -548,12 +549,13 @@ actor JobRunner {
     /// Whether this fire is one the gate gets a say in (R29). A **cadence** fire that is not a
     /// retry — including one the `queue` policy held.
     ///
-    /// The two that skip it have already had the question answered for them. A retry re-runs work
+    /// The three that skip it have already had the question answered for them. A retry re-runs work
     /// the gate authorised a minute ago, and asking again would get "nothing has changed since the
     /// run that failed" — the work would be dropped, the row would read `completed`, and the ladder
     /// would sit at attempt 1 for ever, which is the retry silently disabled for exactly the jobs
     /// that were gated to avoid wasted turns. And `/jobs run` is a person saying "run it now",
     /// which a gate does not get a vote on; `--dry-run` is where someone asks what the gate thinks.
+    /// A URL fire (`.url`, D6 decision 12) is the same person, through a link they made.
     ///
     /// A held `queue` re-fire is not one of them: it is a cadence fire whose gate was never asked,
     /// held before the question could be put — or held *because* the gate had just said nothing
