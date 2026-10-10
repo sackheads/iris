@@ -48,30 +48,7 @@ struct SandboxTimeoutTests {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-kill-grace-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        // The deadline is armed once `process.run()` returns (#421), but the shell still has to be
-        // scheduled and reach its first statement after that, and under load that took up to
-        // 0.5 s here; nothing outside the runner can wait for it, since the shell's readiness
-        // cannot gate the clock. It gates the attempt instead: an attempt whose
-        // SIGTERM beat the `trap` killed an ordinary shell, which is right but tests nothing here,
-        // and is run again (#386).
-        for attempt in 1...3 {
-            let ready = dir.appendingPathComponent("ready-\(attempt)").path
-            let wall = try await Self.runTrappedShell(signalling: ready)
-            let wasReady = FileManager.default.fileExists(atPath: ready)
-            // Printed on every attempt, so the next rerun leaves data: the cause is not known (#386).
-            print("#386 attempt \(attempt): wall \(String(format: "%.3f", wall)) s, ready file \(wasReady ? "present" : "missing")")
-            guard wasReady else { continue }
-            // SIGTERM was ignored, so it took the grace period plus SIGKILL — but not the full sleep.
-            #expect(wall >= 1 + CLIProcessRunner.killGraceSeconds, "attempt \(attempt)")
-            #expect(wall < 9)
-            return
-        }
-        Issue.record("in 3 attempts the deadline's SIGTERM always reached the shell before its trap did")
-    }
-
-    /// One run of a shell that ignores SIGTERM and then touches `ready`, under a 1 s deadline.
-    /// Returns the wall time, once the runner has answered `.timedOut` and the shell is gone.
-    private static func runTrappedShell(signalling ready: String) async throws -> Double {
+        let ready = dir.appendingPathComponent("ready").path
         let marker = "iris-kill-\(UUID().uuidString)"
         // `/bin/sh`, and nothing outside the base system: the shell traps SIGTERM so the ladder's
         // second rung is the only way out of it. The sleep is inside a loop on purpose — the rung
@@ -89,8 +66,8 @@ struct SandboxTimeoutTests {
         // defer ever reaches it; leaving it to the `sleep` match alone let four of them survive a
         // mutation run for 8 hours, ppid 1.
         defer {
-            killAll(matching: "sleep \(nap)")
-            killAll(matching: marker)
+            Self.killAll(matching: "sleep \(nap)")
+            Self.killAll(matching: marker)
         }
         let started = Date()
         var thrown: Error?
@@ -104,10 +81,22 @@ struct SandboxTimeoutTests {
         let error = try #require(thrown as? ContainerRuntimeError)
         guard case .timedOut = error else {
             Issue.record("expected .timedOut, got \(error)")
-            throw error
+            return
         }
-        #expect(!processExists(matching: marker), "the shell is gone, whichever rung ended it")
-        return wall
+        #expect(!Self.processExists(matching: marker), "the shell is gone, whichever rung ended it")
+        // The deadline is armed once `process.run()` returns (#421). The shell reached its trap
+        // within 0.16 s of the call in 63 full-suite runs, 40 of them under load, against that
+        // 1 s (#386). A shell that had not got there was killed by the SIGTERM, which is right but
+        // tests an ordinary shell, so it fails here by name rather than on the wall bound below.
+        let trapped = try? FileManager.default.attributesOfItem(atPath: ready)[.modificationDate] as? Date
+        guard let trapped else {
+            Issue.record("the deadline's SIGTERM reached the shell before its trap did (wall \(String(format: "%.3f", wall)) s); a scheduling stall over 1 s, see #386")
+            return
+        }
+        // SIGTERM was ignored, so it took the grace period plus SIGKILL — but not the full sleep.
+        #expect(wall >= 1 + CLIProcessRunner.killGraceSeconds,
+                "trap in place \(String(format: "%.3f", trapped.timeIntervalSince(started))) s after the call")
+        #expect(wall < 9)
     }
 
     /// #421: the deadline is the command's own. Armed before `process.run()`, a deadline that
