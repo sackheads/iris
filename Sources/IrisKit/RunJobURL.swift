@@ -38,4 +38,75 @@ enum RunJobURL {
     static func url(token: String, identity: BuildIdentity) -> String {
         "\(identity.urlScheme)://\(host)/\(token)"
     }
+
+    /// The rolling window both the URL limit and refusal coalescing count over.
+    static let window: TimeInterval = 3_600
+
+    /// Why a link was refused before any job was looked up. A fixed sentence each: the link is
+    /// unauthenticated input, so no part of it is echoed into Iris.
+    enum Refusal: Error, Equatable, Sendable {
+        case otherScheme, wrongHost, hasQuery, hasFragment, wrongPath, malformedToken
+
+        var sentence: String {
+            switch self {
+            case .otherScheme: return "the link is for the other Iris build"
+            case .wrongHost: return "the link is not a run-job link"
+            case .hasQuery, .hasFragment: return "run-job links take no input, and this one carried some"
+            case .wrongPath: return "the link has something other than one token after run-job/"
+            case .malformedToken: return "the link's token is not one Iris made; a job's id or name does not work, and `/jobs url <name> on` makes a link"
+            }
+        }
+    }
+
+    /// The token, or why the link is refused (decision 12): this build's scheme, the `run-job`
+    /// host (in any case, as hosts are, but never percent-encoded), no user, password, port,
+    /// query or fragment, and exactly one path component that is a well-formed token. The path
+    /// is read still encoded, and a well-formed token has no `%`, so nothing is decoded first.
+    static func parse(_ url: URL, identity: BuildIdentity) -> Result<String, Refusal> {
+        guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              parts.scheme?.lowercased() == identity.urlScheme else { return .failure(.otherScheme) }
+        guard parts.percentEncodedUser == nil, parts.percentEncodedPassword == nil, parts.port == nil,
+              parts.percentEncodedHost?.lowercased() == host else { return .failure(.wrongHost) }
+        guard parts.percentEncodedQuery == nil else { return .failure(.hasQuery) }
+        guard parts.percentEncodedFragment == nil else { return .failure(.hasFragment) }
+        let path = parts.percentEncodedPath
+        guard path.hasPrefix("/") else { return .failure(.wrongPath) }
+        let token = String(path.dropFirst())
+        guard !token.isEmpty, !token.contains("/") else { return .failure(.wrongPath) }
+        guard URLTriggerToken.isWellFormed(token) else { return .failure(.malformedToken) }
+        return .success(token)
+    }
+
+    static let unknownTokenReason = "the link matches no job's URL trigger; it may have been turned off or replaced"
+    static let ledgerUnreadableReason = "the jobs table could not be read"
+    static let overLimitReason = "URL fires are limited to \(maxFiresPerHour) an hour per job"
+    static let disabledReason = "it is disabled"
+    static func triggerOffReason(_ name: String) -> String { "\(name) has URL triggers off" }
+    static func pausedReason(_ job: Job) -> String {
+        "it is paused (\(job.pausedReason ?? "")); `/jobs resume \(job.name)` first"
+    }
+
+    /// One refusal line, or the running count of a coalesced one (decision 13, plan note 8).
+    static func refusalLine(subject: String?, reason: String, count: Int) -> String {
+        let of = subject.map { " of \($0)" } ?? ""
+        if count <= 1 { return "Refused a URL fire\(of): \(reason)." }
+        return "Refused \(count) URL fires\(of) in the last hour. The latest: \(reason)."
+    }
+}
+
+/// The line a coalesced URL refusal keeps updating, by job id or `unmatched`.
+struct URLRefusalLine: Sendable {
+    let messageId: UUID
+    let since: Date
+    var count: Int
+    let conversationId: UUID
+}
+
+/// The URL fires of one job dispatched since its last moment with none in flight. Their rows
+/// may or may not be written yet, so the limit counts these instead of any row they started at
+/// or after `since`: each fire is counted once, whether its row has landed or not.
+struct URLFireBatch: Equatable, Sendable {
+    let since: Date
+    var dispatched: [Date] = []
+    var pending = 0
 }

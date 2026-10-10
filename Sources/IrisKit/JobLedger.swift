@@ -700,9 +700,17 @@ extension JobLedger {
     /// How many of this job's rows a URL fire wrote at or after `since`: decision 13's limit,
     /// asked with `since = now - 1h`. Every such row counts, a skip row included. The limit is
     /// on links that got as far as admission, and an over-limit link writes no row at all.
-    func urlFires(jobId: UUID, since: Date) throws -> Int {
+    /// With `before`, only rows that started earlier than it: the URL handler counts its own
+    /// in-flight fires itself from that moment on.
+    func urlFires(jobId: UUID, since: Date, before: Date? = nil) throws -> Int {
         try writer.read { db in
-            try Int.fetchOne(db, sql: """
+            if let before {
+                return try Int.fetchOne(db, sql: """
+                    SELECT COUNT(*) FROM job_runs
+                    WHERE jobId = ? AND triggerKind = ? AND startedAt >= ? AND startedAt < ?
+                    """, arguments: [jobId.uuidString, Self.urlTriggerKind, since, before]) ?? 0
+            }
+            return try Int.fetchOne(db, sql: """
                 SELECT COUNT(*) FROM job_runs WHERE jobId = ? AND triggerKind = ? AND startedAt >= ?
                 """, arguments: [jobId.uuidString, Self.urlTriggerKind, since]) ?? 0
         }

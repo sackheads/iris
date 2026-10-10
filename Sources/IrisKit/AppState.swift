@@ -3970,6 +3970,17 @@ class AppState {
     /// instead of polling a wall clock that a busy main actor makes meaningless.
     @ObservationIgnored private(set) var jobsListingTask: Task<Void, Never>? = nil
 
+    /// D6 decisions 12-13: one refusal line per job (or per `unmatched`) per hour, updated with a
+    /// running count. Written only by `refuseURLFire`.
+    @ObservationIgnored var urlRefusalLines: [String: URLRefusalLine] = [:]
+    /// Each job's URL fires in flight, counted by the limit until they settle. Written only by
+    /// `fireByURL`.
+    @ObservationIgnored var urlFireBatches: [UUID: URLFireBatch] = [:]
+    /// The clock the URL limit, the coalescing window and the deferral read. A seam for tests.
+    @ObservationIgnored var urlClock: @Sendable () -> Date = { Date() }
+    /// Test seam: the most recent URL fire, so a test can await it.
+    @ObservationIgnored var urlFireTask: Task<JobRunner.Admission?, Never>?
+
     private func handleJobsCommand(_ trimmed: String, convId: UUID) {
         let ledger = store.ledger
         switch JobsCommand.parse(trimmed) {
