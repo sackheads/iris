@@ -27,6 +27,10 @@ enum BuildIdentity: Equatable, Sendable {
     /// shared name stays with release instead of firing both apps.
     var hotkeyName: String { self == .release ? "toggleIris" : "toggleIrisDev" }
 
+    /// The status item's base symbol (D6 decision 4): two running builds can be told apart in
+    /// the menu bar, as their hotkeys already can.
+    var statusSymbol: String { self == .release ? "sparkles" : "hammer" }
+
     var defaultHotkey: KeyboardShortcuts.Shortcut {
         self == .release
             ? .init(.space, modifiers: [.command, .shift])

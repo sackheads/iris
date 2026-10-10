@@ -262,8 +262,11 @@ actor JobRunner {
 
     /// The pause reason a breaker trip writes — on the job, on its row, and on its card.
     static func breakerReason(count: Int) -> String {
-        "breaker: \(count) runs in the last hour"
+        "\(breakerReasonPrefix)\(count) runs in the last hour"
     }
+
+    /// What every breaker reason starts with, for the readers that classify a pause (D6).
+    static let breakerReasonPrefix = "breaker: "
 
     /// The pause reason an exhausted daily budget writes. It names the figure that tripped it
     /// (§9): "reached its budget" without the number leaves a person with nothing to decide on.
