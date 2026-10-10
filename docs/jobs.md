@@ -1086,6 +1086,7 @@ pause reason the table prints, on the `interrupted` row and on the card.
 | `/jobs run <name>` | Fires the job now, through the same admission a scheduled fire meets. Says it is starting straight away, then reports what admission decided once the fire is over — an overlap, the breaker or an exhausted budget is named rather than reported as a run. The result itself arrives as a card. A paused or disabled job is refused up front |
 | `/jobs reschedule <name> <cron> [timezone]` | Gives a scheduled or polled job a new five-field cron (the same subset `schedule_job` takes), recomputes its next fire and says when that is. Quote a name or cron with spaces in it — `/jobs reschedule "Daily digest" "0 9 * * *"` — or leave them bare and the last five words are the cron. Without a timezone a cron job keeps its own zone and an interval job (which becomes a cron job) takes the Mac's. Works on built-ins such as the daily digest; a polled job keeps its gate; a pending retry is dropped with the old schedule; a job you or the retry ladder paused stays paused, but a job paused because its old cron could never match is resumed by a cron that can, and a new cron that can never match pauses the job with that reason. The zone is any IANA name or abbreviation the Mac knows (`Europe/Paris`, `CET`, `GMT+2`). An invalid cron, a cron of six fields, or an unknown zone (a misspelled `Europe/Pairs` included) is refused with a sentence and changes nothing, and a directory watch, which has no schedule, is refused |
 | `/jobs delete <name>` | Deletes a job and its ledger rows. Refused while a run is in flight. The transcripts are left for retention to clear, so a card you are still reading keeps working |
+| `/jobs url <name> [on\|off]` | `on` makes a link that fires the job, `iris://run-job/<token>` (`iris-dev://` for a dev build), shown once in a sheet with Copy and never saved; `on` again replaces it; `off` retires it; the bare form says whether it is on. Changing the job's prompt, profile or policy turns it off. Until the app registers the scheme (D6 PR D2), nothing opens the link |
 
 ## Running one job from a terminal (`iris --run-job`)
 
@@ -1165,7 +1166,8 @@ is threading the run's own state to those call sites.
 Two read-only tools let the model answer questions about jobs: `list_jobs` (every job, its trigger,
 its next fire, why it is paused, how its last run ended, its policy, profile, gate kind and grant
 (`grants`, as stored; `null` when it has none or is read-only), its `action` (`prompt`, or
-`builtin:<name>` for a built-in such as the daily digest, which runs no model), what
+`builtin:<name>` for a built-in such as the daily digest, which runs no model), `urlTrigger`
+(whether a link may fire it; the token itself is never shown), what
 it has sent today against its budgets and the breaker, and — for a watch — its quiet window, its
 ignore globs, its last burst's figures and what it has absorbed since launch, `null` for anything
 else) and `get_job_run` (one run, by id or by the eight characters a card shows, including the
@@ -1178,6 +1180,28 @@ Both are declared **only in a pinned conversation**, and refused at dispatch any
 a call arrives regardless. The reason is cost, not secrecy: two extra tool declarations are a tax on
 every turn of every conversation, and the conversation where you ask about your jobs is the pinned
 one.
+
+## Firing a job from a link (`/jobs url`)
+
+A job can be fired from Shortcuts, Raycast or anything else that opens a URL, once you have turned
+its link on with `/jobs url <name> on`. Only you can do that: no tool sets it, and `/jobs` is typed
+in the composer. A sheet shows the link once, with Copy. The conversation keeps only a line saying a
+link was made, never the link, and the database keeps only a hash of it, so neither the app nor
+anything that can read its files can show it again; `on` again makes a new one and kills the old.
+
+Opening the link fires the job exactly as `/jobs run` would: the gate is skipped, and overlap, the
+breaker and the budgets apply. The run's row says `url`. Every fire and every refusal says so in
+Iris. Repeated refusals of one job, or of links that match no job, update one line with a count
+rather than adding a line each. A link carries no input, so nothing in it reaches a model.
+
+At most three links fire a job in any hour. A fourth is refused before admission: it writes no
+row, never counts toward the breaker and never pauses the job, so a page that keeps opening the
+link cannot stop your job. If `schedule_job` or `register_directory_watcher` changes what the job
+does (its prompt, profile, grant or budgets), the link is turned off, and Iris says so.
+
+If the app is launched by a link while `iris --run-job` holds the store, the fire waits, and says
+it is waiting, until that process finishes. It re-checks every five seconds and gives up after ten
+minutes. Until the app registers the scheme (D6 PR D2), nothing opens the link.
 
 ## Retention
 
