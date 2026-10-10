@@ -231,11 +231,12 @@ enum JobsCommand: Equatable {
         "URL trigger on for **\(job.name)**: the link was shown once and is not saved. `/jobs url \(job.name) on` makes a new one."
     }
 
-    /// What the transient sheet says around the link.
+    /// What the transient sheet says around the link. Plain words, no markdown: the sheet shows
+    /// it with `Text(String)`, which is verbatim, and a job name is not markdown either.
     static func urlSheetText(_ jobName: String) -> String {
-        "Opening this link fires \(jobName) now, as `/jobs run` would, at most \(RunJobURL.maxFiresPerHour) times an hour. "
+        "Opening this link fires \(jobName) now, as /jobs run would, at most \(RunJobURL.maxFiresPerHour) times an hour. "
             + "Iris keeps only a hash of it: copy it now, because it cannot be shown again. Turning the trigger on again "
-            + "replaces it, `/jobs url \(jobName) off` retires it, and changing the job's prompt, profile or policy turns "
+            + "replaces it, /jobs url \(jobName) off retires it, and changing the job's prompt, profile or policy turns "
             + "it off. \(urlSchemePendingNote)"
     }
 

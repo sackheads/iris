@@ -4,6 +4,8 @@ import SwiftUI
 /// A link `/jobs url … on` minted, for the one sheet that shows it (plan note 17).
 struct RevealedURLTrigger: Identifiable, Equatable, Sendable {
     let id = UUID()
+    /// What `off` and `delete` match on: a rename does not orphan the sheet.
+    let jobId: UUID
     let jobName: String
     let url: String
 }
@@ -15,6 +17,20 @@ struct URLTriggerLinkSheet: View {
     let link: RevealedURLTrigger
     let onDone: () -> Void
 
+    /// The nspasteboard.org markers: clipboard-history managers skip a concealed or transient
+    /// item instead of keeping the link on disk.
+    static let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
+    static let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
+
+    /// For this Mac only, so Universal Clipboard does not carry the link to the owner's other
+    /// devices, and marked so clipboard history does not keep it.
+    static func copy(_ url: String, to pasteboard: NSPasteboard) {
+        _ = pasteboard.prepareForNewContents(with: .currentHostOnly)
+        pasteboard.setString(url, forType: .string)
+        pasteboard.setData(Data(), forType: concealedType)
+        pasteboard.setData(Data(), forType: transientType)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(verbatim: "Link for \(link.jobName)").font(.headline)
@@ -24,10 +40,7 @@ struct URLTriggerLinkSheet: View {
             Text(JobsCommand.urlSheetText(link.jobName)).font(.callout).foregroundStyle(.secondary)
             HStack {
                 Spacer()
-                Button("Copy") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(link.url, forType: .string)
-                }
+                Button("Copy") { Self.copy(link.url, to: .general) }
                 Button("Done", action: onDone).keyboardShortcut(.defaultAction)
             }
         }

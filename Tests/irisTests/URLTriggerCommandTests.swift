@@ -1,3 +1,4 @@
+import AppKit
 import Testing
 import Foundation
 import GRDB
@@ -142,6 +143,51 @@ struct URLTriggerCommandTests {
         }
         let saved = try store.loadAll().conversations.flatMap(\.messages).map(\.content)
         #expect(saved.contains { $0.contains(JobsCommand.urlOnText(job)) })
+    }
+
+    @Test("off and delete both withdraw a link still on screen, matched by the job's id")
+    func withdrawals() throws {
+        let job = sweep()
+        let other = Job(name: "other", prompt: "other", trigger: .schedule(.interval(seconds: 60)))
+        let (store, app, _) = try makeApp(with: [job, other])
+
+        app.sendMessage("/jobs url other on")
+        #expect(app.revealedURLTrigger?.jobId == other.id)
+        app.sendMessage("/jobs url pr-sweep off")
+        #expect(app.revealedURLTrigger?.jobId == other.id, "another job's off leaves the sheet alone")
+
+        // A rename keeps the trigger on (upsert never writes it), so only the id still matches.
+        var renamed = try #require(try store.ledger.job(id: other.id))
+        renamed.name = "renamed"
+        try store.ledger.upsert(renamed)
+        app.sendMessage("/jobs url renamed off")
+        #expect(app.revealedURLTrigger == nil, "off withdraws its own job's link, renamed or not")
+
+        app.sendMessage("/jobs url pr-sweep on")
+        #expect(app.revealedURLTrigger?.jobId == job.id)
+        app.sendMessage("/jobs delete renamed")
+        #expect(app.revealedURLTrigger?.jobId == job.id, "deleting another job leaves the sheet alone")
+        app.sendMessage("/jobs delete pr-sweep")
+        #expect(try store.ledger.job(id: job.id) == nil)
+        #expect(app.revealedURLTrigger == nil, "delete withdraws the deleted job's link")
+    }
+
+    @Test("Copy marks the link concealed and transient, so clipboard history skips it")
+    func copyIsConcealed() throws {
+        let board = NSPasteboard(name: NSPasteboard.Name("iris-test-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        let link = "iris-dev://run-job/" + String(repeating: "a", count: URLTriggerToken.encodedLength)
+        URLTriggerLinkSheet.copy(link, to: board)
+        let types = board.types ?? []
+        #expect(board.string(forType: .string) == link)
+        #expect(types.contains(URLTriggerLinkSheet.concealedType))
+        #expect(types.contains(URLTriggerLinkSheet.transientType))
+    }
+
+    @Test("the sheet text is plain words: Text(String) shows markdown literally")
+    func sheetTextIsPlain() {
+        #expect(!JobsCommand.urlSheetText("pr-sweep").contains("`"))
+        #expect(!JobsCommand.urlSheetText("pr-sweep").contains("**"))
     }
 
     @Test("a digest another job holds is retried once with a fresh token")

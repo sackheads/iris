@@ -4154,6 +4154,7 @@ class AppState {
                 let runCount = try ledger.runCount(jobId: job.id)
                 try ledger.delete(jobId: job.id)
                 refreshLedgerAttention()
+                withdrawRevealedURLTrigger(jobId: job.id)
                 // The delete fires the ledger's `onJobsChanged` hook, which drops the job's
                 // subscriber and stops its stream if nothing else is watching that directory. What
                 // the hook cannot reach is the runner's own memory of a fire it held for this job.
@@ -4193,7 +4194,7 @@ class AppState {
                 emitCommandOutput(JobsCommand.urlChangeFailedText(job), format: .markdown, to: convId)
                 return
             }
-            if revealedURLTrigger?.jobName == job.name { revealedURLTrigger = nil }
+            withdrawRevealedURLTrigger(jobId: job.id)
             emitCommandOutput(JobsCommand.urlOffText(job), format: .markdown, to: convId)
         case true?:
             // Two attempts: a digest another job holds fails the unique index, and a fresh token
@@ -4211,12 +4212,17 @@ class AppState {
                     emitCommandOutput(JobsCommand.urlChangeFailedText(job), format: .markdown, to: convId)
                     return
                 }
-                revealedURLTrigger = RevealedURLTrigger(jobName: job.name,
+                revealedURLTrigger = RevealedURLTrigger(jobId: job.id, jobName: job.name,
                                                         url: RunJobURL.url(token: token, identity: .current))
                 emitCommandOutput(JobsCommand.urlOnText(job), format: .markdown, to: convId)
                 return
             }
         }
+    }
+
+    /// Closes the link sheet when it shows `jobId`'s link, which `off` or `delete` just killed.
+    private func withdrawRevealedURLTrigger(jobId: UUID) {
+        if revealedURLTrigger?.jobId == jobId { revealedURLTrigger = nil }
     }
 
     private func handleJourneyCommand(convId: UUID) {
