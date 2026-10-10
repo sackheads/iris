@@ -74,6 +74,16 @@ enum RunJobURL {
         let token = String(path.dropFirst())
         guard !token.isEmpty, !token.contains("/") else { return .failure(.wrongPath) }
         guard URLTriggerToken.isWellFormed(token) else { return .failure(.malformedToken) }
+        // And the link must be exactly the one Iris makes for that token, with only the scheme's
+        // and the host's case free: anything URLComponents normalised away (`run-job:` with an
+        // empty port, say) is refused rather than read past.
+        let canonical = Self.url(token: token, identity: identity)
+        let incoming = url.absoluteString
+        let authority = canonical.utf8.count - token.utf8.count
+        guard incoming.utf8.count == canonical.utf8.count,
+              String(decoding: incoming.utf8.prefix(authority), as: UTF8.self).lowercased()
+                == String(decoding: canonical.utf8.prefix(authority), as: UTF8.self),
+              incoming.hasSuffix("/" + token) else { return .failure(.wrongHost) }
         return .success(token)
     }
 
@@ -102,11 +112,18 @@ struct URLRefusalLine: Sendable {
     let conversationId: UUID
 }
 
-/// The URL fires of one job dispatched since its last moment with none in flight. Their rows
-/// may or may not be written yet, so the limit counts these instead of any row they started at
-/// or after `since`: each fire is counted once, whether its row has landed or not.
+/// The URL fires of one job dispatched since its last moment with none outstanding. Their rows
+/// may or may not be written yet, so while the batch is open the limit counts its dispatches,
+/// every one and with no window filter, instead of any row started at or after `since`: each
+/// fire is counted once, whether its row has landed or not, and never less.
+///
+/// A fire is outstanding while its task runs, and after that while the `queue` policy holds it
+/// (`held`, by dispatch time): its run, recorded as `url`, has not started yet.
 struct URLFireBatch: Equatable, Sendable {
     let since: Date
     var dispatched: [Date] = []
     var pending = 0
+    var held: [Date] = []
+
+    var isOutstanding: Bool { pending > 0 || !held.isEmpty }
 }

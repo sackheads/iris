@@ -111,6 +111,10 @@ actor JobRunner {
     /// catch-up burst ends, and the held fire is where that count goes: it is the same fire, taken
     /// later, so it arrives on the row and card that fire eventually writes.
     private var queuedNotes: [UUID: String] = [:]
+    /// The jobs whose held fire stands in for at least one URL fire (D6 decision 13). Kept beside
+    /// the held origin rather than merged into it, so no merge rule can lose it: whatever origin
+    /// the hold keeps, the re-fire records `url` and the URL limit counts it.
+    private var queuedURLFires: Set<UUID> = []
     /// What a watch has seen since the fire that was held, and what it counted seeing it —
     /// `WatchCoordinator.takeHeldPaths` in the app, injected here because the coordinator owns the
     /// runner's fire handler and a reference the other way would be a cycle (and, in a test, a
@@ -463,7 +467,7 @@ actor JobRunner {
                 // gate is asked again for it: one held fire at a time, so this terminates.
                 guard let held = takeQueuedFire(job: current) else { return decided }
                 let merged = await mergedHeldOrigin(held.origin, jobId: current.id)
-                origin = .queued(from: merged.origin)
+                origin = FireOrigin.held(merged.origin, byURL: held.byURL)
                 watch = merged.watch
                 note = held.note
                 continue
@@ -484,7 +488,7 @@ actor JobRunner {
             // the retry ladder decides on, and re-entering as a bare "queued" erased it (R7). Its
             // own catch-up count comes back with it, for the same reason: this pass *is* that fire.
             let merged = await mergedHeldOrigin(held.origin, jobId: current.id)
-            origin = .queued(from: merged.origin)
+            origin = FireOrigin.held(merged.origin, byURL: held.byURL)
             // The burst this fire stands in for, counted by the coordinator and reported by no
             // row until this one: a `.queued` admission writes nothing (R-D4-9).
             watch = merged.watch
@@ -766,6 +770,7 @@ actor JobRunner {
     func forget(jobId: UUID) {
         queuedOrigins.removeValue(forKey: jobId)
         queuedNotes.removeValue(forKey: jobId)
+        queuedURLFires.remove(jobId)
     }
 
     /// D6 decision 16: re-reads `AppState.ledgerAttention` after a write that moved it, in one
@@ -829,6 +834,7 @@ actor JobRunner {
         // carries no note and must not wipe the one already waiting, or the occurrences a sleep
         // dropped are recorded nowhere at all.
         if let note { queuedNotes[job.id] = note }
+        if origin.carriesURL { queuedURLFires.insert(job.id) }
         do {
             guard job.queuedFire == nil else { return }
             try ledger.setQueuedFire(jobId: job.id, at: at)
@@ -837,6 +843,7 @@ actor JobRunner {
             // behind either: it would be handed to the *next* held fire as if it were its own.
             queuedOrigins.removeValue(forKey: job.id)
             queuedNotes.removeValue(forKey: job.id)
+            queuedURLFires.remove(job.id)
             print("[JobRunner] could not queue a fire for \(job.name): \(error)")
         }
     }
@@ -844,7 +851,7 @@ actor JobRunner {
     /// The trigger held back while this job ran, cleared as it is taken — so a trigger arriving
     /// during the *next* run is what refills the slot rather than this one firing forever. `nil`
     /// when nothing was held.
-    private func takeQueuedFire(job: Job) -> (origin: FireOrigin, note: String?)? {
+    private func takeQueuedFire(job: Job) -> (origin: FireOrigin, note: String?, byURL: Bool)? {
         let stored: Job?
         do { stored = try ledger.job(id: job.id) } catch {
             print("[JobRunner] could not take the queued fire for \(job.name): \(error)")
@@ -855,6 +862,7 @@ actor JobRunner {
             // outlive the row it belonged to.
             queuedOrigins.removeValue(forKey: job.id)
             queuedNotes.removeValue(forKey: job.id)
+            queuedURLFires.remove(job.id)
             return nil
         }
         // The freshly read row's policy, not the snapshot's: a job switched to `skip` mid-run must
@@ -869,6 +877,7 @@ actor JobRunner {
         guard stored.queuedFire != nil else {
             queuedOrigins.removeValue(forKey: job.id)
             queuedNotes.removeValue(forKey: job.id)
+            queuedURLFires.remove(job.id)
             return nil
         }
         do {
@@ -878,7 +887,8 @@ actor JobRunner {
             return nil
         }
         return (queuedOrigins.removeValue(forKey: job.id) ?? .schedule,
-                queuedNotes.removeValue(forKey: job.id))
+                queuedNotes.removeValue(forKey: job.id),
+                queuedURLFires.remove(job.id) != nil)
     }
 
     /// One line with the catch-up count folded in, for the paths that have no card to put it on.
@@ -892,6 +902,7 @@ actor JobRunner {
     private func discardQueuedFire(job: Job) {
         queuedOrigins.removeValue(forKey: job.id)
         queuedNotes.removeValue(forKey: job.id)
+        queuedURLFires.remove(job.id)
         guard job.queuedFire != nil else { return }
         do {
             try ledger.setQueuedFire(jobId: job.id, at: nil)
@@ -2012,6 +2023,10 @@ indirect enum FireOrigin: Equatable, Sendable {
     /// A fire the `queue` policy held while the previous run finished, standing in for the fire
     /// that was actually held.
     case queued(from: FireOrigin)
+    /// A held re-fire that stands in for at least one URL fire, whatever origin the hold kept
+    /// (a watch's paths, a cadence, a hand start). Recorded as `url`, so the URL limit counts the
+    /// run (D6 decision 13); everything else reads `from`, exactly as `.queued` does.
+    case queuedWithURL(from: FireOrigin)
 
     /// The ordinary scheduled fire.
     static let schedule = FireOrigin.cadence(kind: "schedule")
@@ -2022,15 +2037,32 @@ indirect enum FireOrigin: Equatable, Sendable {
         case .cadence(let kind): return kind
         case .watcher: return Trigger.fsEventKind
         case .manual: return "manual"
-        case .url: return JobLedger.urlTriggerKind
-        case .queued: return "queued"
+        case .url, .queuedWithURL: return JobLedger.urlTriggerKind
+        // A URL fire held and re-fired is still a URL fire: the limit counts it.
+        case .queued: return carriesURL ? JobLedger.urlTriggerKind : "queued"
         }
     }
 
     /// The fire this one stands in for: itself, unless it is a held re-fire.
     var root: FireOrigin {
-        if case .queued(let from) = self { return from.root }
-        return self
+        switch self {
+        case .queued(let from), .queuedWithURL(let from): return from.root
+        default: return self
+        }
+    }
+
+    /// Whether a URL fire is among the fires this one stands in for, at any depth of holding.
+    var carriesURL: Bool {
+        switch self {
+        case .url, .queuedWithURL: return true
+        case .queued(let from): return from.carriesURL
+        default: return false
+        }
+    }
+
+    /// The re-fire of a held origin: `.queuedWithURL` when a URL fire was among those held.
+    static func held(_ origin: FireOrigin, byURL: Bool) -> FireOrigin {
+        byURL || origin.carriesURL ? .queuedWithURL(from: origin) : .queued(from: origin)
     }
 
     /// The paths the filesystem handed this fire — the held re-fire of a watch fire carries them

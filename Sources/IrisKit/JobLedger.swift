@@ -694,12 +694,13 @@ extension JobLedger {
     }
 
     /// The `triggerKind` a URL fire's row records. Spelled once: `urlFires` counts it, and
-    /// `FireOrigin.url` writes it.
+    /// `FireOrigin.url` and every held re-fire carrying one write it.
     static let urlTriggerKind = "url"
 
     /// How many of this job's rows a URL fire wrote at or after `since`: decision 13's limit,
-    /// asked with `since = now - 1h`. Every such row counts, a skip row included. The limit is
-    /// on links that got as far as admission, and an over-limit link writes no row at all.
+    /// asked with `since = now - 1h`. Every such row counts, a skip row and a held URL fire's
+    /// re-fire (`FireOrigin.queuedWithURL`) included. The limit is on links that got as far as
+    /// admission, and an over-limit link writes no row at all.
     /// With `before`, only rows that started earlier than it: the URL handler counts its own
     /// in-flight fires itself from that moment on.
     func urlFires(jobId: UUID, since: Date, before: Date? = nil) throws -> Int {

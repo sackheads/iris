@@ -3973,8 +3973,8 @@ class AppState {
     /// D6 decisions 12-13: one refusal line per job (or per `unmatched`) per hour, updated with a
     /// running count. Written only by `refuseURLFire`.
     @ObservationIgnored var urlRefusalLines: [String: URLRefusalLine] = [:]
-    /// Each job's URL fires in flight, counted by the limit until they settle. Written only by
-    /// `fireByURL`.
+    /// Each job's outstanding URL fires (in flight, or held by the `queue` policy), counted by
+    /// the limit until their runs have started. Written only by `RunJobURLHandling.swift`.
     @ObservationIgnored var urlFireBatches: [UUID: URLFireBatch] = [:]
     /// The clock the URL limit, the coalescing window and the deferral read. A seam for tests.
     @ObservationIgnored var urlClock: @Sendable () -> Date = { Date() }

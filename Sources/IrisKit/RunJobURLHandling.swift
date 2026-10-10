@@ -53,18 +53,21 @@ extension AppState {
         if job.pausedReason != nil { return RunJobURL.pausedReason(job) }
         if !job.enabled { return RunJobURL.disabledReason }
         let windowStart = urlClock().addingTimeInterval(-RunJobURL.window)
+        guard (try? resolveHeldURLFires(job: job, windowStart: windowStart)) != nil else {
+            return RunJobURL.ledgerUnreadableReason
+        }
         let batch = urlFireBatches[job.id]
-        // Rows from before the batch, plus the batch's own fires: a fire in flight counts once,
-        // whether or not its row has landed yet.
+        // Rows from before the batch, plus every one of the batch's own fires: a fire in flight
+        // or held counts once, whether or not its row has landed yet.
         guard let rows = try? store.ledger.urlFires(jobId: job.id, since: windowStart, before: batch?.since) else {
             return RunJobURL.ledgerUnreadableReason
         }
-        let inBatch = batch?.dispatched.filter { $0 >= windowStart }.count ?? 0
+        let inBatch = batch?.dispatched.count ?? 0
         return rows + inBatch >= RunJobURL.maxFiresPerHour ? RunJobURL.overLimitReason : nil
     }
 
-    /// Fires `job` from a link and counts the fire against the limit until it settles. The one
-    /// place a URL fire is dispatched, so nothing fires uncounted.
+    /// Fires `job` from a link and counts the fire against the limit until its run has started
+    /// or it is gone. The one place a URL fire is dispatched, so nothing fires uncounted.
     func fireByURL(_ job: Job, to iris: UUID) -> Task<JobRunner.Admission?, Never>? {
         guard let fire = runJobByHand(job: job, origin: .url, announceTo: iris) else { return nil }
         let now = urlClock()
@@ -74,18 +77,34 @@ extension AppState {
         urlFireBatches[job.id] = batch
         let task = Task { [weak self] in
             let admission = await fire.value
-            self?.urlFireSettled(jobId: job.id)
+            self?.urlFireSettled(jobId: job.id, dispatchedAt: now, held: admission == .queued)
             return admission
         }
         urlFireTask = task
         return task
     }
 
-    private func urlFireSettled(jobId: UUID) {
+    private func urlFireSettled(jobId: UUID, dispatchedAt: Date, held: Bool) {
         guard var batch = urlFireBatches[jobId] else { return }
         batch.pending -= 1
-        // With none in flight every fire's row is written, so the rows alone are the count again.
-        urlFireBatches[jobId] = batch.pending > 0 ? batch : nil
+        // A held fire's run starts later, as `url`; until then the batch keeps counting it.
+        if held { batch.held.append(dispatchedAt) }
+        urlFireBatches[jobId] = batch.isOutstanding ? batch : nil
+    }
+
+    /// Drops the held fires whose run has started, and closes the batch when nothing in it is
+    /// outstanding: with none, every fire's row is written and the rows alone are the count. A
+    /// held fire has run once the job holds nothing and a `url` row started after it was sent;
+    /// one the runner dropped instead (a policy switch, a delete) is let go once it has left the
+    /// window. Until then it errs strict.
+    private func resolveHeldURLFires(job: Job, windowStart: Date) throws {
+        guard var batch = urlFireBatches[job.id], !batch.held.isEmpty, job.queuedFire == nil else { return }
+        var still: [Date] = []
+        for sent in batch.held where sent >= windowStart {
+            if try store.ledger.urlFires(jobId: job.id, since: sent) == 0 { still.append(sent) }
+        }
+        batch.held = still
+        urlFireBatches[job.id] = batch.isOutstanding ? batch : nil
     }
 
     /// Says a refusal in Iris, coalesced (plan note 8): the first in an hour is a line, and each
