@@ -145,6 +145,60 @@ struct LedgerAttentionTests {
         #expect(app.ledgerAttention.attentionPaused.isEmpty)
     }
 
+    /// Holds the approved call open until released, and says when it has started.
+    private actor HeldCall {
+        private var held: CheckedContinuation<Void, Never>?
+        private(set) var isRunning = false
+
+        func run() async -> String {
+            await withCheckedContinuation { held = $0; isRunning = true }
+            return "wrote 4 bytes"
+        }
+
+        func release() { held?.resume(); held = nil }
+    }
+
+    @Test("Approve and run clears the blocked run from the snapshot when it claims it, not when the call ends")
+    func approvalRefreshesOnClaim() async throws {
+        let (store, app, _) = try makeApp()
+        let engine = IrisEngine(state: app, tier: .medium, client: FakeLLMClient(responses: []),
+                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
+        let j = Job(name: "writer", prompt: "do it", trigger: .schedule(.interval(seconds: 60)),
+                    profile: .mutating)
+        try store.ledger.upsert(j)
+        let blocked = try row(j, .blockedOnApproval, tool: "write_file", ledger: store.ledger)
+        try store.ledger.setBlockedCall(runId: blocked.id, BlockedCall(
+            toolName: "write_file", args: ["path": .string("/nonexistent/a.txt"), "content": .string("once")],
+            cwd: "/nonexistent"))
+        let suite = "iris-attention-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            IrisDefaults.removeSuiteFile(named: suite, in: IrisDefaults.preferencesDirectory)
+        }
+        let call = HeldCall()
+        defer { Task { await call.release() } }
+        let runner = JobRunner(state: app, engine: engine, ledger: store.ledger,
+                               endSandboxSession: { _ in }, config: ConfigManager(store: defaults),
+                               sandboxAvailable: { true },
+                               approvedCallExecutor: { _, _ in await call.run() })
+        try await value(of: app.refreshLedgerAttention())
+        #expect(app.ledgerAttention.blocked.map(\.runId) == [blocked.id])
+
+        let approval = Task { await runner.runApproved(runId: blocked.id) }
+        var spins = 0
+        while !(await call.isRunning), spins < 10_000 { await Task.yield(); spins += 1 }
+        try #require(await call.isRunning, "the approved call never started")
+        try await landed(app)
+        #expect(app.ledgerAttention.blocked.isEmpty, "the claim acknowledged the run before the call began")
+
+        await call.release()
+        guard case .dispatched = try await value(of: approval) else {
+            Issue.record("the approval was refused")
+            return
+        }
+    }
+
     /// Holds the first read until released; every later read answers at once.
     private actor HeldRead {
         private var calls = 0
@@ -168,6 +222,9 @@ struct LedgerAttentionTests {
         let older = LedgerAttention(failedCount: 7), newer = LedgerAttention(failedCount: 1)
         app.ledgerAttentionReader = { _ in await gate.read(older: older, newer: newer) }
 
+        // Released on every way out, so a failed expectation ends the test instead of leaving the
+        // first read parked until the time limit.
+        defer { Task { await gate.release() } }
         let first = app.refreshLedgerAttention()
         var spins = 0
         while !(await gate.firstIsHeld), spins < 10_000 { await Task.yield(); spins += 1 }

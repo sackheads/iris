@@ -81,6 +81,9 @@ actor JobRunner {
     /// same reason `usageSource` exists. A gate whose previous signal cannot be read is a gate
     /// error like any other, and there is no other way to make only that read fail.
     private let lastGateSignal: @Sendable (UUID) throws -> String?
+    /// Runs an approved call in place of `IrisEngine.executeApprovedCall`, when set. A test seam
+    /// only, so a test can hold the call open and look at what is true while it runs.
+    private let approvedCallExecutor: (@Sendable (BlockedCall, UUID) async -> String)?
     /// Ends the run's container when the run closes (§2), and closes the conversation's sandbox
     /// for good: a turn the deadline abandoned may still call `run_command`, and must not get a
     /// new container for it (#292). Injected so a test can watch which conversations were ended
@@ -140,6 +143,7 @@ actor JobRunner {
          sandboxAvailable: (@Sendable () -> Bool)? = nil,
          gateEvaluator: (@Sendable (Gate, String?) async -> GateResult)? = nil,
          lastGateSignal: (@Sendable (UUID) throws -> String?)? = nil,
+         approvedCallExecutor: (@Sendable (BlockedCall, UUID) async -> String)? = nil,
          watchdogSlice: TimeInterval = JobRunner.defaultWatchdogSlice,
          deadlineClock: @escaping @Sendable () -> Date = Date.init) {
         self.state = state
@@ -156,6 +160,7 @@ actor JobRunner {
         self.gateEvaluator = gateEvaluator ?? Self.liveGateEvaluator(
             sandboxAvailable: resolvedSandboxAvailable, image: { config.sandboxImage })
         self.lastGateSignal = lastGateSignal ?? { [ledger] in try ledger.lastGateSignal(jobId: $0) }
+        self.approvedCallExecutor = approvedCallExecutor
         self.endSandboxSession = endSandboxSession ?? { await (sandboxSessions ?? .shared).closeSession($0) }
         self.ensureIsolatedNetwork = ensureIsolatedNetwork ?? {   // Task 4a: the real network check
             do { try await CLIContainerRuntime().ensureIsolatedNetwork(named: NetworkMode.isolatedNetworkName); return nil }
@@ -692,6 +697,9 @@ actor JobRunner {
         } catch {
             print("[JobRunner] could not close the run for \(job.name): \(error)")
         }
+        // A failed built-in with `card: false` reaches no `deliverEvent`, which is the refresh
+        // every other run gets (D6 decision 16).
+        await refreshAttention()
         // An unknown name pauses on the first failure: retrying cannot register it, so the
         // ladder would only post three more identical cards before pausing anyway.
         let retry: RetryDecision = builtin == nil
@@ -753,6 +761,13 @@ actor JobRunner {
     func forget(jobId: UUID) {
         queuedOrigins.removeValue(forKey: jobId)
         queuedNotes.removeValue(forKey: jobId)
+    }
+
+    /// D6 decision 16: re-reads `AppState.ledgerAttention` after a write that moved it, in one
+    /// hop (the actor-helper rule).
+    private func refreshAttention() async {
+        guard let state else { return }
+        await MainActor.run { _ = state.refreshLedgerAttention() }
     }
 
     /// D6 decision 5: one activity of `job` began (`+1`) or ended (`-1`), told to
@@ -1374,6 +1389,9 @@ actor JobRunner {
         } catch {
             return await refuse(Self.ledgerRefusal(error), for: job)
         }
+        // The claim stamped `acknowledgedAt`, so the run is no longer blocked: say so now, not
+        // after a call that can take an hour, and not never on a refusal below (D6 decision 16).
+        await refreshAttention()
 
         let startedAt = now()
         // Pinned to the container whenever the call could run a command: `openConversation`'s
@@ -1402,7 +1420,11 @@ actor JobRunner {
         // rather than by a grant anyone has to remember to take back (#187 R21). The checks the
         // gate would have made are made instead by this function above and by the executor's own
         // R10/R13/R20 backstops.
-        let result = await engine.executeApprovedCall(call, conversationId: conversationId)
+        let result = if let approvedCallExecutor {
+            await approvedCallExecutor(call, conversationId)
+        } else {
+            await engine.executeApprovedCall(call, conversationId: conversationId)
+        }
         let finishedAt = now()
         await MainActor.run {
             // The transcript "View run" opens: what was run, and what came back.
