@@ -411,7 +411,15 @@ class AppState {
         let ledger = store.ledger
         let read = ledgerAttentionReader
         let task = Task { [weak self] in
-            let snapshot = await Task.detached { try? await read(ledger) }.value
+            let snapshot = await Task.detached { () -> LedgerAttention? in
+                do {
+                    return try await read(ledger)
+                } catch {
+                    // The old snapshot stays: a stale count beats a blank one.
+                    print("[AppState] could not refresh the ledger attention snapshot: \(error)")
+                    return nil
+                }
+            }.value
             // Only the newest read lands: two refreshes can finish out of order, and the older
             // one would put back a count the newer one had already cleared.
             guard let self, let snapshot, generation == self.ledgerAttentionGeneration else { return }
@@ -3113,10 +3121,11 @@ class AppState {
         }
     }
 
-    /// Marks a failed or blocked run seen. The card's Dismiss, the run log's Acknowledge and a
-    /// notification's Dismiss all land here. The status item's snapshot is refreshed once the row
-    /// is written (D6 decision 16). The card itself stays in the transcript: it is a record of
-    /// what happened, not a notification to be cleared.
+    /// Marks a failed or blocked run seen, which takes it out of `/jobs`'s failure list and off
+    /// retention's exemption. The card's Dismiss, the run log's Acknowledge and a notification's
+    /// Dismiss all land here. The status item's snapshot is refreshed once the row is written
+    /// (D6 decision 16). The card itself stays in the transcript: it is a record of what
+    /// happened, not a notification to be cleared.
     ///
     /// Off the main actor, like every other write to the store.
     @discardableResult

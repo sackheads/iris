@@ -63,10 +63,21 @@ struct LedgerAttentionTests {
         let (store, _, _) = try makeApp()
         try store.ledger.upsert(job("running"))
         try store.ledger.upsert(job("stopped", pausedReason: JobRunner.gateFailingReason))
+        // Two unreadable rows, one paused: `jobs()` counts both, and `pausedJobs()` would see only
+        // the paused one, so a `pausedJobs()` that published its own count would move 2 to 1.
+        try store.writer.write { db in
+            for (name, paused) in [("bad-running", nil), ("bad-paused", "why")] as [(String, String?)] {
+                try db.execute(sql: """
+                    INSERT INTO jobs (id, name, prompt, triggerKind, trigger, createdAt, pausedReason)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, arguments: [UUID().uuidString, name, "p", "schedule",
+                                     "{\"kind\":\"telepathy\"}", Date(), paused])
+            }
+        }
         _ = try store.ledger.jobs()
-        let before = store.ledger.unreadableJobCount
+        #expect(store.ledger.unreadableJobCount == 2)
         #expect(try store.ledger.pausedJobs().map(\.name) == ["stopped"])
-        #expect(store.ledger.unreadableJobCount == before)
+        #expect(store.ledger.unreadableJobCount == 2)
     }
 
     @Test("a delivered card refreshes the snapshot")
