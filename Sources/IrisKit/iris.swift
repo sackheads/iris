@@ -128,8 +128,8 @@ private final class RetryAttemptCounter: @unchecked Sendable {
 
 actor IrisEngine {
     /// The reflection turn fired after a goal completes. Shared with `AppState`, which completes a
-    /// goal whose last criteria the user judged — that path returns from this handler long before
-    /// the push below, so it has to fire the same turn itself (D2 spec §7).
+    /// goal whose last criteria the user judged — that path returns from `goal_complete`'s handler
+    /// long before its push, so it has to fire the same turn itself (D2 spec §7).
     static let goalCompletionSkillCheck = "System Event [Goal Completion Skill Check]: Evaluate the goal just completed. Did you execute a complex multi-step procedure, overcome non-obvious errors, or discover a reusable recipe? If so, call `create_skill` or `update_skill` now to save or patch it in your permanent skill library."
 
     let client: any LLMClientProtocol
@@ -1208,6 +1208,10 @@ actor IrisEngine {
     nonisolated func haltGoalLoop(for conversationId: UUID, cancelling: Bool = true) {
         goalLoop.halt(conversationId, cancelling: cancelling)
     }
+
+    /// Conversations whose `goal_complete` succeeded in the turn now running: the turn's end
+    /// schedules `goalCompletionSkillCheck` as a follow-up turn of its own (#474).
+    private var skillCheckDue: Set<UUID> = []
 
     /// Per-conversation loop detectors (reset on a fresh UI turn).
     private var loopDetectors: [UUID: LoopDetector] = [:]
@@ -2753,13 +2757,25 @@ actor IrisEngine {
                 }
             }
         }
+
+        // `goal_complete`'s reflection, now that its result is in history (#474). Not after a
+        // Stop: the turn that was stopped would have run it, and the user asked for nothing more.
+        if skillCheckDue.remove(conversationId) != nil, !Task.isCancelled {
+            scheduleReprompt(for: conversationId, afterNanoseconds: UInt64(repromptDelay * 1_000_000_000),
+                             followUp: .goalCompletionSkillCheck)
+        }
     }
+
+    /// What a scheduled follow-up turn sends: the goal loop's oracle reprompt, or the reflection
+    /// after a completed goal (#474), which has no goal left to re-verify.
+    enum FollowUp: Sendable { case goalReprompt, goalCompletionSkillCheck }
 
     /// The goal loop's next turn: a task of its own, started after `delay`, so each
     /// `processInput` is one turn and the loop is live until this task has run (#399).
     /// False, with nothing scheduled, for a halted loop (a subagent stopped from outside).
     @discardableResult
-    private func scheduleReprompt(for conversationId: UUID, afterNanoseconds delay: UInt64) -> Bool {
+    private func scheduleReprompt(for conversationId: UUID, afterNanoseconds delay: UInt64,
+                                  followUp: FollowUp = .goalReprompt) -> Bool {
         let localState = state
         let goalLoop = self.goalLoop
         let token = UUID()
@@ -2768,6 +2784,14 @@ actor IrisEngine {
             defer { goalLoop.finishReprompt(token: token, for: conversationId) }
             try? await Task.sleep(nanoseconds: delay)
             guard !Task.isCancelled, let self else { return }
+            if followUp == .goalCompletionSkillCheck {
+                let exists = await MainActor.run {
+                    localState?.conversations.contains { $0.id == conversationId } ?? false
+                }
+                guard exists, !Task.isCancelled else { return }
+                await self.processInput(IrisEngine.goalCompletionSkillCheck, source: "System", conversationId: conversationId)
+                return
+            }
             // Re-verify the conversation still exists and the goal is still active before
             // reprompting — it may have been deleted or stopped during the sleep.
             let stillActive = await MainActor.run { () -> Bool in
@@ -4258,8 +4282,11 @@ actor IrisEngine {
                 localState?.onSubagentComplete[conversationId] = nil
             }
             await pushToUI(role: .agent, text: summary, conversationId: conversationId)
+            // Queued, not run here (#474): a turn started from this handler appends its user entry
+            // between this call and its result, and Anthropic rejects that history. The turn
+            // schedules it once this result is in history.
             if principal == .main {
-                await processInput(IrisEngine.goalCompletionSkillCheck, source: "System", conversationId: conversationId)
+                skillCheckDue.insert(conversationId)
             }
             result = "Goal marked as complete. Summary: \(summary)"
         } else if functionCall.name == "reach_checkpoint", principal == .main {

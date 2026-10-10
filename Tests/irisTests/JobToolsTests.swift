@@ -2001,12 +2001,9 @@ struct JobToolsTests {
 
         let goalCompleteCall = FunctionCall(name: "goal_complete", args: ["summary": .string("done")], id: "c1")
         let scheduleCall = FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c2")
-        // Response order, since the skill-check turn runs to completion INSIDE goal_complete's own
-        // handler, before the outer turn's own next round ever happens (FakeLLMClient is a plain
-        // FIFO queue shared across nested `processInput` calls on one engine): (1) the outer turn's
-        // goal_complete call, (2) the nested skill-check turn's schedule_job call, (3) the nested
-        // turn's own closing text, (4) the outer turn's closing text (reacting to goal_complete's
-        // tool result).
+        // Response order (FakeLLMClient is a plain FIFO queue shared by every turn on one engine):
+        // (1) the turn's goal_complete call, which ends that turn; then the skill-check turn it
+        // schedules (#474) takes (2) its schedule_job call and (3) its closing text. (4) is spare.
         let client = FakeLLMClient(responses: [
             GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: goalCompleteCall)]))], usageMetadata: nil),
             GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: scheduleCall)]))], usageMetadata: nil),
@@ -2014,7 +2011,8 @@ struct JobToolsTests {
             GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "done")]))], usageMetadata: nil),
         ])
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
-                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
+                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0,
+                                repromptDelay: 0)
 
         async let turn: Void = engine.processInput("continue", source: "UI", conversationId: id)
         var queued = false
@@ -2030,6 +2028,10 @@ struct JobToolsTests {
         }
         if !queued { app.denyPendingApprovals(for: id) }
         await turn
+        // The skill check is a turn of its own after goal_complete's (#474): let it finish.
+        for _ in 0..<400 where engine.goalLoopIsLive(for: id) {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
         #expect(queued, "the skill-check continuation after goal_complete must see the conversation's own taint")
         #expect(try app.store.ledger.jobs().count == 1)
     }
@@ -2071,14 +2073,15 @@ struct JobToolsTests {
         responses.append(contentsOf: [
             // The forced summary turn's own goal_complete call.
             GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: FunctionCall(name: "goal_complete", args: ["summary": .string("stopped")], id: "c3"))]))], usageMetadata: nil),
-            // The nested skill-check turn's schedule_job call — the one this test is actually about.
+            // The skill-check turn's schedule_job call — the one this test is actually about.
             GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: scheduleCall)]))], usageMetadata: nil),
             GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil),
             GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "done")]))], usageMetadata: nil),
         ])
         let client = FakeLLMClient(responses: responses)
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
-                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
+                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0,
+                                repromptDelay: 0)
 
         async let turn: Void = engine.processInput("continue", source: "UI", conversationId: id)
         var queued = false
@@ -2094,6 +2097,10 @@ struct JobToolsTests {
         }
         if !queued { app.denyPendingApprovals(for: id) }
         await turn
+        // The skill check is a turn of its own after goal_complete's (#474): let it finish.
+        for _ in 0..<400 where engine.goalLoopIsLive(for: id) {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
         // M2 (coordinator re-review): `queued` alone could pass for the wrong reason — nothing
         // here proves the five `reflect` calls actually tripped loop detection and ran the REAL
         // `softStopWithSummary`, rather than, say, the test's own setup happening to taint the
