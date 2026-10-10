@@ -5,9 +5,9 @@ Iris runs in the background of macOS as a persistent native application, allowin
 By default, the shortcut to toggle the main Iris Chat window is **`Cmd + Shift + Space`**.
 
 ## How It Works
-*   **Active Overlays:** When you press the hotkey, Iris evaluates if the chat window is currently visible and active.
-*   **Show:** If Iris is hidden or behind other applications, the hotkey brings the window to the front and focuses the text input field, making it ready for immediate use.
-*   **Hide:** If Iris is already the foreground application, the hotkey seamlessly orders the window out (hides it), returning focus to whatever you were previously working on.
+*   **Active Overlays:** When you press the hotkey, Iris checks whether the chat window is the one in front: Iris is the active app and the chat window has focus.
+*   **Show:** If the chat window is hidden, minimized, behind other applications, or behind another Iris window (Diagnostics, say), the hotkey brings it to the front. If you closed it, the hotkey opens it again.
+*   **Hide:** If the chat window is already in front, the hotkey orders it out (hides it), returning focus to whatever you were previously working on.
 
 ## Customization
 You can easily customize the hotkey at any time:

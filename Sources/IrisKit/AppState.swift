@@ -429,6 +429,64 @@ class AppState {
         return task
     }
 
+    /// How the main window is brought forward. `IrisApp` sets it to `MainWindow.raise()`; a test
+    /// counts it. Nothing else may raise the window (D6 decision 4).
+    @ObservationIgnored var raiseMainWindow: @MainActor () -> Void = {}
+
+    /// The one way any surface raises the main window: the status item's rows and "Show Chat", a
+    /// notification's Open, the run log's transcript, and the hotkey. Selects `conversationId`
+    /// first when the sidebar can show it; a background run's transcript or a subagent's scratch
+    /// thread is never selected (`reveal(hit:)`'s rule).
+    func showMainWindow(selecting conversationId: UUID?) {
+        if let conversationId, conversations.contains(where: { $0.id == conversationId && $0.isUserFacing }) {
+            selectedConversationId = conversationId
+        }
+        raiseMainWindow()
+    }
+
+    /// Where a job's card is delivered: the job's destination while it exists unarchived,
+    /// otherwise Iris, which also covers a job deleted since (nil). `JobRunner` delivers by it and
+    /// `revealCard` looks by it, so the two can never disagree (R4).
+    ///
+    /// Falling back rather than dropping: `deliverEvent` is a no-op for an unknown id, a card in
+    /// an archived conversation is one nobody sees, and a run nobody hears about is the failure
+    /// mode #187 exists to fix.
+    func cardDestination(for job: Job?) -> UUID {
+        if let wanted = job?.destinationConversationId,
+           conversations.contains(where: { $0.id == wanted && !$0.isArchived }) {
+            return wanted
+        }
+        return activityConversationId()
+    }
+
+    /// Opens the conversation a job's card was delivered to and scrolls to the card.
+    func revealCard(runId: UUID, jobId: UUID) {
+        let target = cardDestination(for: (try? store.ledger.job(id: jobId)) ?? nil)
+        if let message = conversations.first(where: { $0.id == target })?.messages.last(where: {
+            $0.role == .event && EventCard.decode($0.content)?.runId == runId
+        }) {
+            pendingScrollTarget = message.id
+        }
+        showMainWindow(selecting: target)
+    }
+
+    /// What clicking a status item row does. A conversation row is an ask's delegation root or a
+    /// goal wait; a root archived while its ask is live is moved out of the archive, since an
+    /// archived conversation means an idle one (#182 §6.2) and this one is waiting on the owner.
+    func openStatusRow(_ target: StatusMenuRow.Target) {
+        switch target {
+        case .conversation(let id):
+            unarchiveConversation(id)
+            showMainWindow(selecting: id)
+        case .card(let runId, let jobId):
+            revealCard(runId: runId, jobId: jobId)
+        case .iris:
+            showMainWindow(selecting: activityConversationId())
+        case .nowhere:
+            break
+        }
+    }
+
     var subagentWriteLedger: [UUID: [String]] = [:]
     var pendingApprovals: [ToolApprovalRequest] = []
     /// Fail-closed denials recorded for background (unattended) conversations (#187) — never

@@ -1747,25 +1747,14 @@ actor JobRunner {
         await state.deliverEvent(card, to: await destination(for: job))
     }
 
-    /// Where a job's news goes: its own destination conversation, or Activity. Shared by the card
-    /// and by a refused "Approve and run", because the sentence explaining a click has to land
-    /// where the card the person clicked is — anywhere else is silence with extra steps.
-    ///
-    /// A destination that has since been deleted or archived falls back to Activity rather than
-    /// dropping or burying the news: `deliverEvent` is a no-op for an unknown id, a card in an
-    /// archived conversation is one nobody sees, and a run nobody hears about is the failure mode
-    /// this whole deliverable exists to fix. `nil` — no job left at all — is Activity for the same
-    /// reason. Nothing sets a destination today (every job is created with nil), so this guards
-    /// the field rather than a live path.
+    /// Where a job's news goes: `AppState.cardDestination(for:)`, the rule the status item's
+    /// `revealCard` looks by too. Shared by the card and by a refused "Approve and run", because
+    /// the sentence explaining a click has to land where the card the person clicked is — anywhere
+    /// else is silence with extra steps. Nothing sets a destination today (every job is created
+    /// with nil), so the rule guards the field rather than a live path.
     private func destination(for job: Job?) async -> UUID {
         guard let state else { return UUID() }
-        return await MainActor.run { () -> UUID in
-            if let wanted = job?.destinationConversationId,
-               state.conversations.contains(where: { $0.id == wanted && !$0.isArchived }) {
-                return wanted
-            }
-            return state.activityConversationId()
-        }
+        return await MainActor.run { state.cardDestination(for: job) }
     }
 
     /// The job's prompt, plus the paths that woke it when a watch did — and what became of them.

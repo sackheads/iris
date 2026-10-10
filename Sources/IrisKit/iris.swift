@@ -5225,6 +5225,7 @@ struct IrisApp: App {
             // D6 decision 16: the snapshot at launch. Here and not in `AppState.init`, which a
             // test suite runs hundreds of times.
             AppState.shared.refreshLedgerAttention()
+            AppState.shared.raiseMainWindow = { MainWindow.raise() }
         }
         Task {
             await SandboxSessionManager.shared.reapOrphans()
@@ -5242,26 +5243,14 @@ struct IrisApp: App {
             NSApplication.shared.applicationIconImage = image
         }
         
+        // D6 decision 4: the raise goes through `showMainWindow`, like every other surface's.
         KeyboardShortcuts.onKeyUp(for: .toggleIris) {
-            if let window = NSApp.windows.first(where: { $0.title == "Iris" }) {
-                if window.isVisible && NSApp.isActive {
-                    window.orderOut(nil)
-                } else {
-                    NSApp.activate(ignoringOtherApps: true)
-                    window.makeKeyAndOrderFront(nil)
-                }
-            } else {
-                // If it's closed but a SwiftUI window still exists (sometimes hidden)
-                if let window = NSApp.windows.first(where: { $0.className.contains("SwiftUI") }) {
-                    NSApp.activate(ignoringOtherApps: true)
-                    window.makeKeyAndOrderFront(nil)
-                }
-            }
+            MainWindow.tracking.toggleFromHotkey(state: AppState.shared)
         }
     }
     
     var body: some Scene {
-        WindowGroup("Iris") {
+        WindowGroup("Iris", id: MainWindow.sceneId) {
             ChatView()
                 .tint(.irisIndigo)
         }
@@ -5281,26 +5270,12 @@ struct IrisApp: App {
             DiagnosticsView()
         }
         
-        // This is a minimal MenuBarExtra, we can expand it later.
-        MenuBarExtra("Iris", systemImage: "sparkles") {
-            Button("Show Chat") {
-                // If the window is closed, this doesn't automatically reopen it in SwiftUI 
-                // without URL routing or openWindow. But it serves as a placeholder.
-                // In macOS 13+, we'd use openWindow(id:)
-            }
-            Divider()
-            if let updater = UpdaterController.shared {
-                CheckForUpdatesButton(updater: updater)
-            }
-            Button("Settings...") {
-                NSApp.activate(ignoringOtherApps: true)
-                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-            }
-            Button("Quit") {
-                NSApplication.shared.terminate(nil)
-            }
+        MenuBarExtra {
+            StatusMenu(state: AppState.shared)
+        } label: {
+            StatusItemLabel(state: AppState.shared)
         }
-        
+
         Settings {
             SettingsView()
         }
