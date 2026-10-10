@@ -63,6 +63,9 @@ Out, deliberately:
   orchestration item.
 - **Live-path attachments.** Repo paths stay as plain text in a message (§7.4).
 - **Model-proposed roles.** Only the user assigns roles (§4.3).
+- **`model` and `sandboxed` on the card.** The model tier belongs to the engine, not the
+  conversation, so there is nothing reliable to stamp; neither field is needed to route.
+- **A UI control for roles.** `/role` first; a sidebar control can follow.
 - **A cost backstop on peer traffic.** Spend is monitored elsewhere; the rate limit in §6 bounds
   runaway fan-out.
 
@@ -78,9 +81,8 @@ whether it can be trusted.
 | `id` | harness | the conversation UUID, unchanged |
 | `kind` | harness, derived | `iris` (the pinned conversation), `role` (a role is assigned), `worker` (otherwise). Job-run conversations stay undiscoverable, as today |
 | `project` | harness, derived | workspace path; repo name and branch when it is a git repo. Branch is read at list time, not stored |
-| `model`, `sandboxed` | harness | provider and tier; whether `run_command` goes through the session container |
 | `status`, `lastActive` | harness | unchanged (#418): busy, waiting, idle |
-| `role` | **user only** | via `/role <name>` or a UI control. No tool sets it |
+| `role` | **user only** | via `/role <name>`. No tool sets it; a UI control can come later |
 | `name` | model, `set_session_card` | unique among active sessions (§4.2) |
 | `description` | model, `set_session_card` | unchanged: what the session is doing now |
 | `lane` | model, `set_session_card` | optional free text, meant for workers ("swift UI", "store migrations") |
@@ -105,14 +107,19 @@ A role is a standing responsibility the user assigned. It is unique among active
 - **Assigning a role another session holds moves it.** The previous holder gets a harness event
   line ("role `planner` moved to session …") and loses its skills. This is a harness event, not a
   peer message, so it costs no cascade depth or rate (§6).
-- **Uniqueness is enforced by the store**, not just by code: a partial unique index on the role
-  column (§8), so two concurrent assignments cannot both win.
-- **Archiving a role-holder clears its role**, after a confirmation that names the role.
+- **Uniqueness is enforced on the MainActor**, the only writer, not by a store index. Each
+  conversation is written in its own transaction, so a move (clear the old holder, set the new
+  one) would fail half-applied under a unique index. Load-time normalization restores the
+  invariant if a database ever holds two holders: the most recently updated keeps the role.
+- **Archiving a role-holder is refused until the role is released** (`/role clear`). This follows
+  the existing archive-refusal pattern, which the sidebar already uses to disable its menu item
+  with a reason, rather than adding a confirmation dialog.
 - **A role-holder is exempt from auto-archive.** #231 has not landed; when it does, it must skip
   sessions holding a role, or the TTL quietly removes the overseer from discovery.
 - **A session holding a role knows it**: one standing context line, `You hold role: <name>`.
 
-Role names are free text from the user, flattened and capped like card fields.
+Role names are lowercase `a-z`, `0-9` and `-`, 1–32 characters, starting alphanumeric; `iris`
+and `clear` are reserved. That keeps `role:<name>` unambiguous to type and needs no flattening.
 
 ### 4.4 Skills
 
@@ -129,7 +136,7 @@ their description and cost tokens in every listing.
 ### 4.5 Mapping to A2A 0.3
 
 `name`, `description`, and `skills` are `AgentCard` fields. Everything else — `id`, `kind`,
-`project`, `model`, `sandboxed`, `status`, `lastActive`, `role`, `lane` — is declared under
+`project`, `status`, `lastActive`, `role`, `lane` — is declared under
 `capabilities.extensions` as `{uri: "https://github.com/sackheads/iris/ext/session/v1", params: …}`.
 Inside the app these are typed Swift properties, never a dictionary; the extension is only how
 they would serialize.
@@ -290,8 +297,7 @@ Every field below needs `decodeIfPresent` and a store column, or it vanishes on 
 
 - **`SessionCard` JSON** (the existing `sessionCard` column, migration `v8_session_card`) gains
   optional `lane` and `skills`.
-- **`role`**: a new column on conversations with a partial unique index on non-null values.
-  Archiving clears it.
+- **`role`**: a new nullable column on conversations, without a unique index (§4.3).
 - **`peer_messages`**: `msgId`, `fromSession`, `toSession`, `contextId`, `inReplyTo`, `depth`,
   `firstLine`, `sentAt`, `expectsReply`, `closedAt`, `closeReason`. One table serves correlation,
   `in_reply_to` validation, depth, and the ledger.
@@ -304,8 +310,8 @@ Token buckets are in memory; a restart refilling them is acceptable.
 Swift Testing, each suite on its own `IrisPaths(root:)` and store; nothing touches
 `ConfigManager.shared` (Invariant 7).
 
-- Roles: assignment, move with the old holder's event line and skills cleared, archive clears, the
-  unique index under two concurrent assignments, the pinned Iris refused.
+- Roles: assignment, move with the old holder's event line and skills cleared, archive refused
+  until released, load-time normalization of duplicate holders, the pinned Iris refused.
 - Names: collision refused with the taken names listed, case-insensitive; freed on archive.
 - Skills: refused without a role; bounds enforced.
 - Addressing: `role:`, `name:`, `iris`, and bare id resolve at delivery time; a role moved between
@@ -331,6 +337,8 @@ Swift Testing, each suite on its own `IrisPaths(root:)` and store; nothing touch
 Search for what this falsifies and fix it, at least:
 
 - `"You will not be notified when it completes"` in the `send_to_session` result (`iris.swift`).
+- `set_session_card` with `lane` or `skills` omitted keeps the current values; an empty value
+  clears it. (Recorded here so the tool description and tests agree.)
 - The `send_to_session`, `list_sessions`, and `set_session_card` descriptions in `iris.swift`
   (`session_id` becomes `to`; names become unique; skills and lane).
 - The system prompt's peer guidance and #185's framing text.
@@ -341,6 +349,7 @@ Search for what this falsifies and fix it, at least:
 Three PRs, each based on `main` and mergeable alone:
 
 1. **Cards, roles, names, addressing** — §4, the `role` column, `/role`, `describe_session`.
+   Plan: `docs/superpowers/plans/2026-10-10-sessions-a2a-pr1-cards-roles.md`.
 2. **Messages, correlation, ledger, limits** — §5, §6, `peer_messages`, `close_request`.
 3. **Artifacts** — §7, the exchange directory, `artifact_refs`, the sandbox decision.
 
