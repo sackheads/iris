@@ -18,17 +18,25 @@ extension NSWindow: TrackableWindow {
     var isUncovered: Bool { occlusionState.contains(.visible) }
 }
 
-/// Tracks the chat window by reference (plan note 3). An instance so a test builds its own over
-/// fake windows and its own notification center; the app has exactly one, `MainWindow.tracking`.
+/// Tracks the chat windows by reference (plan note 3). Every chat window registers (weakly),
+/// most recently key first, so closing one of several leaves the raise a window to bring back
+/// rather than opening another. An instance so a test builds its own over fake windows and its
+/// own notification center; the app has exactly one, `MainWindow.tracking`.
 @MainActor
 final class MainWindowTracking {
     static let willCloseNotification = NSWindow.willCloseNotification
+    static let didBecomeKeyNotification = NSWindow.didBecomeKeyNotification
 
-    private(set) weak var current: TrackableWindow?
+    private struct Entry {
+        weak var window: TrackableWindow?
+        let observers: [NSObjectProtocol]
+    }
+
+    /// Most recently key (or registered) first.
+    private var entries: [Entry] = []
     private let center: NotificationCenter
     private let appIsActive: @MainActor () -> Bool
     private let activate: @MainActor () -> Void
-    private var closeObserver: NSObjectProtocol?
 
     init(center: NotificationCenter = .default,
          appIsActive: @escaping @MainActor () -> Bool,
@@ -38,15 +46,53 @@ final class MainWindowTracking {
         self.activate = activate
     }
 
+    /// The chat window a raise brings back: the most recently key one still open.
+    var current: TrackableWindow? { entries.lazy.compactMap(\.window).first }
+
     func track(_ window: TrackableWindow?) {
-        guard let window, window !== current else { return }
-        current = window
-        if let closeObserver { center.removeObserver(closeObserver) }
-        // `queue: nil` delivers on the posting thread, and a window closes on the main thread,
-        // so the forget happens before the close returns rather than on a later turn.
-        closeObserver = center.addObserver(forName: Self.willCloseNotification, object: window,
-                                           queue: nil) { [weak self] _ in
-            MainActor.assumeIsolated { self?.current = nil }
+        guard let window else { return }
+        if entries.contains(where: { $0.window === window }) {
+            moveToFront(ObjectIdentifier(window))
+            return
+        }
+        // `queue: nil` delivers on the posting thread, and a window closes and becomes key on
+        // the main thread, so the registry is current before the notification returns.
+        let id = ObjectIdentifier(window)
+        let closed = center.addObserver(forName: Self.willCloseNotification, object: window,
+                                        queue: nil) { [weak self] _ in
+            MainActor.assumeIsolated { self?.forget(id) }
+        }
+        let keyed = center.addObserver(forName: Self.didBecomeKeyNotification, object: window,
+                                       queue: nil) { [weak self] _ in
+            MainActor.assumeIsolated { self?.moveToFront(id) }
+        }
+        prune()
+        entries.insert(Entry(window: window, observers: [closed, keyed]), at: 0)
+    }
+
+    /// By identifier, so the observers capture no window. A live entry's identifier is unique;
+    /// a dead entry's window is nil and never matches.
+    private func index(of id: ObjectIdentifier) -> Int? {
+        entries.firstIndex { $0.window.map(ObjectIdentifier.init) == id }
+    }
+
+    private func moveToFront(_ id: ObjectIdentifier) {
+        guard let idx = index(of: id), idx > 0 else { return }
+        entries.insert(entries.remove(at: idx), at: 0)
+    }
+
+    private func forget(_ id: ObjectIdentifier) {
+        guard let idx = index(of: id) else { return }
+        entries.remove(at: idx).observers.forEach(center.removeObserver)
+        prune()
+    }
+
+    /// Drops entries whose window went away without a close notification.
+    private func prune() {
+        entries.removeAll { entry in
+            guard entry.window == nil else { return false }
+            entry.observers.forEach(center.removeObserver)
+            return true
         }
     }
 
@@ -58,7 +104,8 @@ final class MainWindowTracking {
 
     var isFrontmost: Bool { appIsActive() && (current?.isKeyWindow ?? false) }
 
-    /// Brings the tracked window forward, or opens the scene through `open` when it was closed.
+    /// Brings the most recently key chat window forward, or opens the scene through `open` only
+    /// when no chat window is left: never a second window while one still exists.
     func raise(open: (@MainActor () -> Void)?) {
         activate()
         if let window = current {

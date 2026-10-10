@@ -187,7 +187,7 @@ struct MainWindowTrackerTests {
         #expect(tracker.current == nil)
     }
 
-    @Test("a re-tracked window replaces the old one, and only the new one's close counts")
+    @Test("a newer window goes in front, and only the closed window is forgotten")
     func retrack() {
         let (tracker, _, center) = makeTracker()
         let first = FakeWindow(), second = FakeWindow()
@@ -210,6 +210,54 @@ struct MainWindowTrackerTests {
         #expect(app.activations == 1)
         #expect(window.calls == ["deminiaturize", "front"])
         #expect(opened == 0)
+    }
+
+    @Test("closing the tracked one of two windows raises the other, minimized or not, and opens nothing")
+    func fallsBackToOpenWindow() {
+        let (tracker, _, center) = makeTracker()
+        let other = FakeWindow(), tracked = FakeWindow()
+        other.isMiniaturized = true
+        tracker.track(other)
+        tracker.track(tracked)
+        #expect(tracker.current === tracked)
+
+        center.post(name: MainWindowTracking.willCloseNotification, object: tracked)
+        var opened = 0
+        tracker.raise(open: { opened += 1 })
+
+        #expect(opened == 0)
+        #expect(other.calls == ["deminiaturize", "front"])
+        #expect(tracked.calls.isEmpty)
+    }
+
+    @Test("the fallback is the most recently key chat window still open")
+    func fallbackIsMostRecentlyKey() {
+        let (tracker, _, center) = makeTracker()
+        let a = FakeWindow(), b = FakeWindow(), c = FakeWindow()
+        tracker.track(a)
+        tracker.track(b)
+        tracker.track(c)
+        center.post(name: MainWindowTracking.didBecomeKeyNotification, object: a)
+        #expect(tracker.current === a)
+
+        center.post(name: MainWindowTracking.willCloseNotification, object: a)
+        #expect(tracker.current === c)
+        center.post(name: MainWindowTracking.willCloseNotification, object: c)
+        #expect(tracker.current === b)
+    }
+
+    @Test("once every chat window has closed, raise opens one")
+    func opensWhenAllClosed() {
+        let (tracker, _, center) = makeTracker()
+        let a = FakeWindow(), b = FakeWindow()
+        tracker.track(a)
+        tracker.track(b)
+        center.post(name: MainWindowTracking.willCloseNotification, object: a)
+        center.post(name: MainWindowTracking.willCloseNotification, object: b)
+        var opened = 0
+        tracker.raise(open: { opened += 1 })
+        #expect(opened == 1)
+        #expect(a.calls.isEmpty && b.calls.isEmpty)
     }
 
     @Test("raise with no window opens the scene")
