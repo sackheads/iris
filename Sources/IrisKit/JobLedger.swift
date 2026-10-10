@@ -220,6 +220,13 @@ final class JobLedger: JobUsageReading, Sendable {
             arguments: [now]).jobs
     }
 
+    /// The jobs with a `pausedReason`, oldest first: the status item's pause counts (D6 decision
+    /// 16). Does not publish `unreadableJobCount`, which only `jobs()` does, for `/jobs`.
+    func pausedJobs() throws -> [Job] {
+        try decodeAll(sql: "SELECT * FROM jobs WHERE pausedReason IS NOT NULL ORDER BY createdAt, rowid",
+                      arguments: []).jobs
+    }
+
     private func decodeAll(sql: String, arguments: StatementArguments) throws -> (jobs: [Job], skipped: Int) {
         let rows = try writer.read { db in try Row.fetchAll(db, sql: sql, arguments: arguments) }
         var jobs: [Job] = []

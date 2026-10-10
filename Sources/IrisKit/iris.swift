@@ -3334,6 +3334,10 @@ actor IrisEngine {
             Task {
                 guard let self, let ledger else { return }
                 await self.scheduleWatchSync(ledger: ledger).value
+                // D6 decision 16: the status item's pause count moves with the jobs table too.
+                // One call added to this hook, never a second hook: the ledger holds one, and a
+                // second install would silently replace the watch resync above.
+                await self.refreshStateLedgerAttention()
             }
         }
         await scheduleWatchSync(ledger: ledger).value
@@ -3343,6 +3347,12 @@ actor IrisEngine {
             guard let self, let ledger else { return }
             await self.scheduleWatchSync(ledger: ledger).value
         })
+    }
+
+    /// The status item's ledger snapshot, refreshed on the main actor (the actor-helper rule).
+    private func refreshStateLedgerAttention() async {
+        let state = self.state
+        await MainActor.run { _ = state?.refreshLedgerAttention() }
     }
 
     /// Asks for one `syncWatches` that starts after this call. Single-flight in order: a sync that
@@ -5210,7 +5220,12 @@ struct IrisApp: App {
         // main thread, and this is a synchronous call in it. It is not a general escape hatch —
         // the same construct trapped in #187's D3 PR B when it was reached from a non-isolated
         // closure. If this moves anywhere else, it needs a real hop instead.
-        MainActor.assumeIsolated { AppState.shared.installGuardHealthSink() }
+        MainActor.assumeIsolated {
+            AppState.shared.installGuardHealthSink()
+            // D6 decision 16: the snapshot at launch. Here and not in `AppState.init`, which a
+            // test suite runs hundreds of times.
+            AppState.shared.refreshLedgerAttention()
+        }
         Task {
             await SandboxSessionManager.shared.reapOrphans()
             while true {

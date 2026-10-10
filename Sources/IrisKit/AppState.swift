@@ -388,6 +388,39 @@ class AppState {
         runningJobs[id] = activities > 0 ? RunningJob(name: name, activities: activities) : nil
         runningJobsDidChange?(runningJobs)
     }
+
+    /// D6 decision 16: what the ledger says is waiting on the owner, cached for the status item
+    /// and the run log. Assigned only by `refreshLedgerAttention`. Never polled.
+    private(set) var ledgerAttention = LedgerAttention.empty
+    /// How the snapshot is read. A seam so a test can hold one read back and show that a slower,
+    /// older read never overwrites a newer one.
+    @ObservationIgnored var ledgerAttentionReader: @Sendable (JobLedger) async throws -> LedgerAttention = {
+        try LedgerAttention.read($0)
+    }
+    /// Test seam: the most recent refresh, so a test awaits it rather than polling.
+    @ObservationIgnored private(set) var ledgerAttentionRefresh: Task<Void, Never>?
+    @ObservationIgnored private var ledgerAttentionGeneration = 0
+
+    /// Reads the snapshot off the main actor and assigns it on it. Called at launch, after
+    /// `deliverEvent`, after each acknowledge path, after `/jobs pause|resume|delete`, and from
+    /// the watch layer's `onJobsChanged` closure.
+    @discardableResult
+    func refreshLedgerAttention() -> Task<Void, Never> {
+        ledgerAttentionGeneration += 1
+        let generation = ledgerAttentionGeneration
+        let ledger = store.ledger
+        let read = ledgerAttentionReader
+        let task = Task { [weak self] in
+            let snapshot = await Task.detached { try? await read(ledger) }.value
+            // Only the newest read lands: two refreshes can finish out of order, and the older
+            // one would put back a count the newer one had already cleared.
+            guard let self, let snapshot, generation == self.ledgerAttentionGeneration else { return }
+            self.ledgerAttention = snapshot
+        }
+        ledgerAttentionRefresh = task
+        return task
+    }
+
     var subagentWriteLedger: [UUID: [String]] = [:]
     var pendingApprovals: [ToolApprovalRequest] = []
     /// Fail-closed denials recorded for background (unattended) conversations (#187) — never
@@ -3080,23 +3113,33 @@ class AppState {
         }
     }
 
-    /// The card's "Dismiss": marks the run seen, which takes it out of `/jobs`'s failure list and
-    /// off retention's exemption. The card itself stays in the transcript — it is a record of what
-    /// happened, not a notification to be cleared.
+    /// Marks a failed or blocked run seen. The card's Dismiss, the run log's Acknowledge and a
+    /// notification's Dismiss all land here. The status item's snapshot is refreshed once the row
+    /// is written (D6 decision 16). The card itself stays in the transcript: it is a record of
+    /// what happened, not a notification to be cleared.
     ///
-    /// Off the main actor, like every other write to the store: the row is tiny and the button
-    /// would almost certainly not stutter on it, but a synchronous SQLite write in a view action
-    /// is the shape that eventually does.
-    func dismissEventCard(runId: UUID) {
+    /// Off the main actor, like every other write to the store.
+    @discardableResult
+    func acknowledgeRun(_ runId: UUID) -> Task<Void, Never> {
         let ledger = store.ledger
-        Task.detached {
-            do {
-                try ledger.acknowledge(runId: runId, at: Date())
-            } catch {
-                print("[AppState] could not acknowledge run \(runId): \(error)")
-            }
+        return Task { [weak self] in
+            let written = await Task.detached { () -> Bool in
+                do {
+                    try ledger.acknowledge(runId: runId, at: Date())
+                    return true
+                } catch {
+                    print("[AppState] could not acknowledge run \(runId): \(error)")
+                    return false
+                }
+            }.value
+            guard written, let self else { return }
+            await self.refreshLedgerAttention().value
         }
     }
+
+    /// The card's "Dismiss".
+    @discardableResult
+    func dismissEventCard(runId: UUID) -> Task<Void, Never> { acknowledgeRun(runId) }
 
     /// Appends an approval request and awaits the user's decision. The queue/continuation seam,
     /// separated from `requestApproval`'s permission/Vibecop fast paths so it is unit-testable.
@@ -3832,6 +3875,7 @@ class AppState {
                     emitCommandOutput("Ambiguous run id prefix.", format: .markdown, to: convId)
                 case .found(let id):
                     try ledger.acknowledge(runId: id, at: Date())
+                    refreshLedgerAttention()
                     let short = id.uuidString.lowercased().prefix(8)
                     emitCommandOutput("Acknowledged run \(short).", format: .markdown, to: convId)
                 }
@@ -3846,6 +3890,7 @@ class AppState {
                     return
                 }
                 try ledger.setPaused(jobId: job.id, reason: JobsCommand.pausedByUserReason)
+                refreshLedgerAttention()
                 emitCommandOutput("Paused **\(job.name)**. `/jobs resume \(job.name)` puts it back.",
                                   format: .markdown, to: convId)
             } catch {
@@ -3863,6 +3908,7 @@ class AppState {
                 let next = JobScheduler.nextFire(for: job.trigger, after: Date())
                 try ledger.setPaused(jobId: job.id, reason: nil)
                 try ledger.setRetry(jobId: job.id, attempt: 0, nextFireAt: next)
+                refreshLedgerAttention()
                 var resumed = job
                 resumed.pausedReason = nil
                 resumed.retryAttempt = 0
@@ -3984,6 +4030,7 @@ class AppState {
                 // card they are still reading.
                 let runCount = try ledger.runCount(jobId: job.id)
                 try ledger.delete(jobId: job.id)
+                refreshLedgerAttention()
                 // The delete fires the ledger's `onJobsChanged` hook, which drops the job's
                 // subscriber and stops its stream if nothing else is watching that directory. What
                 // the hook cannot reach is the runner's own memory of a fire it held for this job.
