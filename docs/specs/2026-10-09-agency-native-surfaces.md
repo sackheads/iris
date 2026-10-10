@@ -1,6 +1,6 @@
 # Agency deliverable 6: Native surfaces
 
-Status: **proposed** (2026-10-09), revised after `work`'s review (#462). Deliverable 6 of #187, the last one. It adds four surfaces over state the harness already owns: a status item, notifications, an `iris://run-job/<token>` URL, and a run log window. The design brief is `.superpowers/sdd/agency-6-design-brief.md`. The owner ruled on its five questions on 2026-10-09, and those rulings are binding here (decisions 1, 3, 6, 8 and 9). The coordinator's rulings on the review are binding too: the per-job secret token (decision 10), the URL rate limit (decision 13), and fixed notification titles (decision 6). Every surface is additive. Nothing here changes how a job is admitted, gated, run or recorded, beyond one new trigger kind.
+Status: **proposed** (2026-10-09), revised after `work`'s review (#462). Deliverable 6 of #187, the last one. It adds four surfaces over state the harness already owns: a status item, notifications, an `iris://run-job/<token>` URL, and a run log window. The design brief is `.superpowers/sdd/agency-6-design-brief.md`. The owner ruled on its five questions on 2026-10-09, and those rulings are binding here (decisions 1, 3, 6, 8 and 9). The coordinator's rulings on the review are binding too: the per-job secret token (decision 10), the URL rate limit (decision 13), and fixed notification titles (decision 6). So is the coordinator's ruling on the plan's review (#468): the URL trigger's link is shown once in a transient sheet and never persisted (decision 10). Every surface is additive. Nothing here changes how a job is admitted, gated, run or recorded, beyond one new trigger kind.
 
 The epic names an `NSStatusItem`. This spec uses SwiftUI's `MenuBarExtra` instead (decision 4), which draws the same item.
 
@@ -121,10 +121,10 @@ Each decision gives its default and the reason for it. A reviewer should weigh t
    - `schedule_job` and `register_directory_watcher` have no such argument. `list_jobs` reports the flag read-only.
    - *Cost if wrong:* the owner types one command per job.
 10. **The capability is a per-job secret token, not the job id** (coordinator ruling, hardening ruling 2).
-   - `/jobs url <job> on` generates 128 random bits with `SecRandomCopyBytes`, base64url-encoded, and prints `iris://run-job/<token>` once, in its reply.
-   - Only the token's SHA-256 digest is stored, in a `urlTokenHash` column. The handler hashes the token it receives and looks the job up by that digest. So the token can never be printed again, and a leaked database does not leak a live URL.
+   - `/jobs url <job> on` generates 128 random bits with `SecRandomCopyBytes`, base64url-encoded, and shows `iris://run-job/<token>` once, in a transient sheet with Copy. The conversation keeps a redacted line; the link is never written to a message, the store or a log (coordinator ruling on #468, below).
+   - Only the token's SHA-256 digest is stored, in a `urlTokenHash` column. The handler hashes the token it receives and looks the job up by that digest. So the token can never be printed again. *Corrected (coordinator ruling on #468):* as first written, the `on` reply put the full link in a `.command` message, which `appendMessage` persists in plain text in `conversations.sqlite`, so a leaked database (or an approved host `run_command` reading it) did leak a live URL. The link is therefore shown only in the transient sheet and never persisted, and only with that does a leaked database hold no live URL.
    - Every `on` rotates the token, which kills the old URL. `off` deletes the digest.
-   - The token never appears in `list_jobs`, `/jobs`, a card, `get_job_run`, a system line or any tool result. The one exception is the `on` reply itself, which is ordinary command output in the conversation it was typed in. A test pins these exclusions.
+   - The token never appears in `list_jobs`, `/jobs`, a card, `get_job_run`, a system line or any tool result. Nor does it appear in any message: the `on` reply is a redacted line, and the link exists only in the transient sheet. Tests pin these exclusions, including one that reads every file of an on-disk store after `on`.
    - *Why:* a job id sits in the ledger and in transcripts, and an approved host `run_command` can `open` a URL. A URL built from the id would therefore be reachable by the model.
    - *Cost if wrong:* the owner re-runs `on` to get a URL again.
 11. **Only `/jobs url` writes the flag and token, and any change to what a job does clears both.**
@@ -254,7 +254,7 @@ Dated specs are history and are not edited.
   - a pre-D6 job row loads `urlTrigger == false` and no digest;
   - `on` returns a URL whose token hashes to the stored digest; a second `on` rotates it; `off` clears it;
   - the token appears in no `list_jobs`, `/jobs`, card, `get_job_run` or system-line output;
-  - the `on` reply's token never reaches the model: it is absent from the conversation's model history, from an FTS search for "run-job", and from a `read_conversation` page. This holds today by construction: the reply is a `.command` message (`AppState.swift:2140-2142`), outside the history and outside `indexedRoles` (`ConversationStore.swift:594`). The test locks it in;
+  - the token never reaches the model or the disk: it is absent from every message, the conversation's model history, an FTS search for its alphanumeric run, a `read_conversation` page, the rotation summary's request, and every file of an on-disk store (corrected by the coordinator ruling on #468);
   - `upsert` of a stale copy does not change the flag; a prompt, profile or policy change (a grant, a budget field) by `schedule_job`'s re-schedule or a `register_directory_watcher` update clears it and says so; `/jobs reschedule` keeps it;
   - `/jobs url` parsing, including a name that ends in "on".
 - `runLog`: paging and filters, the inclusions, Acknowledge stamps `acknowledgedAt`, and the pruned-transcript state.
