@@ -3243,9 +3243,14 @@ class AppState {
     /// `conversationId` and marks the settled ones too, so none of them wakes it afterwards.
     /// Returns how many it stopped, for the notice.
     @discardableResult
+    /// An evaluator grading a background subagent is stopped too (#464) but not counted: the
+    /// notice speaks of subagents, and the one it grades is already settled.
     func stopBackgroundSubagents(under conversationId: UUID) -> Int {
         backgroundSubagents(under: conversationId, stoppableOnly: false)
-            .filter { stopSubagent($0, kind: .parent) }.count
+            .filter { id in
+                let evaluator = evaluatorDelegates.contains(id)
+                return stopSubagent(id, kind: .parent) && !evaluator
+            }.count
     }
 
     /// " Also stopped N background subagent(s).", or "" for none.

@@ -156,7 +156,8 @@ struct EvaluatorStopTests {
         #expect(await eventually { client.graderCalls == 1 })
 
         // The subagent is settled while it is graded; the grade is what is still running.
-        #expect(state.stopBackgroundSubagents(under: parent) == 1)
+        // Stopped, but not counted in "Also stopped N background subagents": it is a grader.
+        #expect(state.stopBackgroundSubagents(under: parent) == 0)
 
         #expect(await eventually { client.graderCancellations == 1 })
         let result = try await value(of: outcome)
@@ -201,5 +202,39 @@ struct EvaluatorStopTests {
         #expect(conv.lastGoalEvaluation?.gateOutcome == nil, "not let through as a grader failure")
         #expect(conv.activeGoal != nil, "the goal was not marked complete")
         #expect(client.graderCancellations == 1)
+    }
+    @Test("a checkpoint whose grade is stopped is neither advanced nor paused for review, and says so")
+    func stoppedCheckpointGradeDecidesNothing() async throws {
+        let reach = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [
+            Part(functionCall: FunctionCall(name: "reach_checkpoint", args: ["milestone_summary": .string("one done")]))]))],
+                                   usageMetadata: nil)
+        let client = ParkedGraderClient(main: [reach, Self.text("ok")])
+        let state = try state()
+        let id = state.createNewConversation(isBackground: true, select: false)
+        let a = Criterion(text: "build", kind: .qualitative, check: nil)
+        let b = Criterion(text: "docs", kind: .qualitative, check: nil)
+        var contract = GoalContract(objective: "Ship", criteria: [a, b])
+        contract.milestones = [Milestone(title: "One", criterionIds: [a.id]),
+                               Milestone(title: "Two", criterionIds: [b.id])]
+        state.setGoalContract(for: id, contract)
+        let engine = IrisEngine(state: state, tier: .medium, principal: .main, client: client)
+        let turn = Task { await engine.processInput("work", source: "User", conversationId: id) }
+        #expect(await eventually { client.graderCalls == 1 })
+
+        _ = state.takeBackgroundDenials(for: id)   // the run closes while the checkpoint is graded
+        _ = try await value(of: turn)
+        engine.haltGoalLoop(for: id)
+
+        let conv = try #require(state.conversations.first { $0.id == id })
+        #expect(conv.lastGoalEvaluation?.status == .stopped)
+        #expect(conv.goalContract?.checkpointStatus == .running, "not paused for a review of an ungraded milestone")
+        #expect(conv.goalContract?.currentMilestone == 0, "not advanced")
+        #expect(!conv.messages.contains { $0.content.contains("Paused for your review") })
+        let results = conv.history.flatMap(\.parts).compactMap { part -> String? in
+            guard case .string(let s)? = part.functionResponse?.response["result"] else { return nil }
+            return s
+        }.joined(separator: "\n")
+        #expect(results.contains("was stopped before a verdict, so the checkpoint was not decided"), "told the model: \(results)")
+        #expect(!results.contains("reached and graded"))
     }
 }
