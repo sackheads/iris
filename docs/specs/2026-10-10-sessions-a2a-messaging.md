@@ -130,6 +130,8 @@ their description and cost tokens in every listing.
 - Shape: 0.3 `AgentSkill` — `id`, `name`, `description`, `tags`, `examples`.
 - Bounds: at most 5 skills, at most 3 examples each; each string flattened and capped.
 - `set_session_card` with `skills` on a session without a role is refused.
+- A `set_session_card` call that omits `lane` or `skills` keeps the current values; an empty
+  value clears it, so a role-holder can update its description without restating its skills.
 - Assigning a role seeds no skills; the role-holder writes them on its first turn after
   assignment, prompted by the role context line.
 
@@ -337,8 +339,6 @@ Swift Testing, each suite on its own `IrisPaths(root:)` and store; nothing touch
 Search for what this falsifies and fix it, at least:
 
 - `"You will not be notified when it completes"` in the `send_to_session` result (`iris.swift`).
-- `set_session_card` with `lane` or `skills` omitted keeps the current values; an empty value
-  clears it. (Recorded here so the tool description and tests agree.)
 - The `send_to_session`, `list_sessions`, and `set_session_card` descriptions in `iris.swift`
   (`session_id` becomes `to`; names become unique; skills and lane).
 - The system prompt's peer guidance and #185's framing text.
