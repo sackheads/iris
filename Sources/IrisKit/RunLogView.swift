@@ -24,6 +24,12 @@ struct RunLogView: View {
     let state: AppState
     @State private var model: RunLogModel
 
+    /// Acknowledge, Show card and Transcript side by side at the small control size.
+    static let actionsWidth: CGFloat = 280
+    /// The window's first-open size: every column at its ideal width, actions included.
+    static let defaultWidth: CGFloat = 1120
+    static let defaultHeight: CGFloat = 480
+
     private static let statuses: [JobRun.Status] = [.running, .completed, .failed, .blockedOnApproval, .interrupted]
 
     init(state: AppState) {
@@ -41,15 +47,25 @@ struct RunLogView: View {
                 TableColumn("Started") { row in
                     Text(row.started, format: .dateTime.month().day().hour().minute().second())
                 }
+                .width(min: 110, ideal: 130)
                 TableColumn("Duration") { row in Text(verbatim: Self.durationText(row.duration)) }
+                    .width(min: 60, ideal: 80)
                 TableColumn("Job") { row in Text(verbatim: row.jobName) }
+                    .width(min: 80, ideal: 120)
                 TableColumn("Trigger") { row in Text(verbatim: row.triggerKind) }
+                    .width(min: 50, ideal: 70)
                 TableColumn("Status") { row in Text(verbatim: row.status.text) }
+                    .width(min: 70, ideal: 120)
                 TableColumn("Tokens") { row in Text(verbatim: "\(row.weightedTokens)") }
+                    .width(min: 50, ideal: 60)
                 TableColumn("Outcome") { row in
                     Text(verbatim: row.outcome ?? "").lineLimit(1).help(row.outcome ?? "")
                 }
+                .width(min: 120, ideal: 220)
+                // Wide enough for all three actions on one line (the GUI pass on #481 saw them
+                // wrap and the last one clipped).
                 TableColumn("") { row in actions(row) }
+                    .width(min: Self.actionsWidth, ideal: Self.actionsWidth)
             }
             if model.hasMore {
                 Button("Load more") { model.loadMore() }.padding(8)
@@ -91,21 +107,29 @@ struct RunLogView: View {
     @ViewBuilder
     private func actions(_ row: RunLogRow) -> some View {
         HStack(spacing: 6) {
-            if row.canAcknowledge {
-                // Reloads itself once the write lands, rather than trusting the snapshot to move.
-                Button("Acknowledge") {
-                    let ack = state.acknowledgeRun(row.id)
-                    Task { await ack.value; model.reload(keepingDepth: true) }
-                }
+            actionButtons(row)
+        }
+        .controlSize(.small)
+        .lineLimit(1)
+        .fixedSize()
+    }
+
+    @ViewBuilder
+    private func actionButtons(_ row: RunLogRow) -> some View {
+        if row.canAcknowledge {
+            // Reloads itself once the write lands, rather than trusting the snapshot to move.
+            Button("Acknowledge") {
+                let ack = state.acknowledgeRun(row.id)
+                Task { await ack.value; model.reload(keepingDepth: true) }
             }
-            if row.opensCard {
-                Button("Show card") { Task { await state.revealCard(runId: row.id, jobId: row.jobId) } }
-            }
-            switch row.transcript {
-            case .live(let id): Button("Transcript") { state.openTranscript(id) }
-            case .pruned: Text("transcript pruned").foregroundStyle(.secondary)
-            case RunLogRow.Transcript.none: EmptyView()
-            }
+        }
+        if row.opensCard {
+            Button("Show card") { Task { await state.revealCard(runId: row.id, jobId: row.jobId) } }
+        }
+        switch row.transcript {
+        case .live(let id): Button("Transcript") { state.openTranscript(id) }
+        case .pruned: Text("transcript pruned").foregroundStyle(.secondary)
+        case RunLogRow.Transcript.none: EmptyView()
         }
     }
 

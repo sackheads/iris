@@ -5359,6 +5359,7 @@ struct IrisApp: App {
         Window("Run Log", id: RunLogWindow.sceneId) {
             RunLogView(state: AppState.shared)
         }
+        .defaultSize(width: RunLogView.defaultWidth, height: RunLogView.defaultHeight)
         
         MenuBarExtra {
             StatusMenu(state: AppState.shared)
