@@ -15,13 +15,12 @@ final class RunJobURLEvents: NSObject {
         self.deliver = deliver
     }
 
-    /// A real `.app` only (decision 8): the bare binary registers no scheme, so nothing routes a
-    /// link to it, and it installs nothing it cannot use.
-    static func shouldInstall(bundleURL: URL) -> Bool { bundleURL.pathExtension == "app" }
-
     /// The app's handler, delivering to `AppState.shared`. Here rather than in `AppDelegate` so the
-    /// closure that carries the raw link sits in a file the no-logging test reads.
-    static func installForApp() -> RunJobURLEvents {
+    /// closure that carries the raw link sits in a file the no-logging test reads. A real `.app`
+    /// only (decision 8), by the predicate notifications use: the bare binary registers no scheme,
+    /// so nothing routes a link to it, and it installs nothing it cannot use.
+    static func installForApp(bundleURL: URL = Bundle.main.bundleURL) -> RunJobURLEvents? {
+        guard SurfaceInstall.isAppBundle(bundleURL) else { return nil }
         let events = RunJobURLEvents { url in AppState.shared.receiveRunJobURL(url) }
         events.install()
         return events

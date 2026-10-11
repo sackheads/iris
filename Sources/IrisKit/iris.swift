@@ -5443,7 +5443,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Here, not in did-finish: a link that launches Iris arrives between the two (Task 24).
         // Never `application(_:open:)` or `.handlesExternalEvents`: SwiftUI opened a window per
         // link with either (owner ruling C2).
-        guard RunJobURLEvents.shouldInstall(bundleURL: Bundle.main.bundleURL) else { return }
         runJobURLEvents = RunJobURLEvents.installForApp()
     }
 

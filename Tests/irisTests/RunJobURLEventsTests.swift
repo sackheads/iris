@@ -35,10 +35,12 @@ struct RunJobURLEventsTests {
         #expect(got == [URL(string: "iris-dev://run-job/abc"), nil])
     }
 
-    @Test("only a real .app installs it (decision 8)")
+    /// Only the refusing half: installing for an `.app` would set the process-wide Apple Event
+    /// handler under every other suite. `SurfaceInstall.isAppBundle`'s own tests cover the rest.
+    @Test("outside a real .app nothing is installed (decision 8, the notifications predicate)")
     func appBundleOnly() {
-        #expect(RunJobURLEvents.shouldInstall(bundleURL: URL(fileURLWithPath: "/Applications/Iris Dev.app")))
-        #expect(!RunJobURLEvents.shouldInstall(bundleURL: URL(fileURLWithPath: "/Users/x/src/iris/.build/debug")))
+        #expect(RunJobURLEvents.installForApp(bundleURL: URL(fileURLWithPath: "/Users/x/src/iris/.build/debug")) == nil)
+        #expect(RunJobURLEvents.installForApp(bundleURL: Bundle.main.bundleURL) == nil, "a test runner is not an app")
     }
 
     @Test("no URL file logs anything: a log line would keep a live token")
