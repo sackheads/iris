@@ -48,8 +48,15 @@ struct PeerLedgerTests {
         try peers.insert(record("aaaa0001", from: a, to: b))
         try peers.insert(record("aaaa0002", from: c, to: b))
         try peers.insert(record("aaaa0003", from: b, to: a))
-        let closed = try peers.closeOpenRequests(to: b, reason: "target archived", at: Date())
+        let closeTime = Date(timeIntervalSince1970: 5000)
+        let closed = try peers.closeOpenRequests(to: b, reason: "target archived", at: closeTime)
         #expect(Set(closed.map(\.msgId)) == ["aaaa0001", "aaaa0002"])
+        // Verify returned records reflect the close
+        for record in closed {
+            #expect(record.closedAt == closeTime)
+            #expect(record.closeReason == "target archived")
+            #expect(!record.isOpen)
+        }
         try peers.deleteMessages(involving: b)
         #expect(try peers.message("aaaa0001") == nil)
         #expect(try peers.message("aaaa0003") == nil)
@@ -65,5 +72,27 @@ struct PeerLedgerTests {
         try peers.pruneClosed(before: Date(timeIntervalSince1970: 3000))
         #expect(try peers.message("aaaa0001") == nil)
         #expect(try peers.message("aaaa0002") != nil, "open rows are never pruned")
+    }
+
+    @Test("damaged columns are skipped, not fatal")
+    func damagedColumns() throws {
+        let store = try ConversationStore.inMemory()
+        let peers = store.peers
+        let a = UUID(), b = UUID()
+        try peers.insert(record("aaaa0001", from: a, to: b))
+        try peers.insert(record("aaaa0002", from: a, to: b))
+
+        // Corrupt the depth column of one record
+        try store.writer.write { db in
+            try db.execute(sql: "UPDATE peer_messages SET depth = 'not a number' WHERE msgId = ?",
+                          arguments: ["aaaa0001"])
+        }
+
+        // message(id) for the corrupted record returns nil
+        #expect(try peers.message("aaaa0001") == nil)
+        // message(id) for the good record still works
+        #expect(try peers.message("aaaa0002")?.firstLine == "do the thing")
+        // openRequests skips the corrupted record but returns the good one
+        #expect(try peers.openRequests(from: a).map(\.msgId) == ["aaaa0002"])
     }
 }

@@ -74,13 +74,18 @@ final class PeerLedger: Sendable {
 
     func closeOpenRequests(to session: UUID, reason: String, at: Date) throws -> [PeerMessageRecord] {
         try writer.write { db in
-            let open = try Row.fetchAll(db, sql: """
+            var open = try Row.fetchAll(db, sql: """
                 SELECT * FROM peer_messages WHERE toSession = ? AND expectsReply = 1 AND closedAt IS NULL
                 """, arguments: [session.uuidString]).compactMap(Self.decode)
             try db.execute(sql: """
                 UPDATE peer_messages SET closedAt = ?, closeReason = ?
                 WHERE toSession = ? AND expectsReply = 1 AND closedAt IS NULL
                 """, arguments: [at, reason, session.uuidString])
+            // Reflect the close in the returned records
+            for i in 0..<open.count {
+                open[i].closedAt = at
+                open[i].closeReason = reason
+            }
             return open
         }
     }
@@ -108,18 +113,35 @@ final class PeerLedger: Sendable {
         }
     }
 
-    /// A row this build cannot read is skipped rather than failing the query.
+    /// A row this build cannot read is skipped rather than failing the query. Reads every column
+    /// as DatabaseValue first, then converts safely (never traps on type mismatches).
     private static func decode(_ row: Row) -> PeerMessageRecord? {
-        guard let msgId: String = row["msgId"],
-              let from = (row["fromSession"] as String?).flatMap(UUID.init(uuidString:)),
-              let to = (row["toSession"] as String?).flatMap(UUID.init(uuidString:)),
-              let contextId: String = row["contextId"],
-              let firstLine: String = row["firstLine"],
-              let sentAt = Date.fromDatabaseValue(row["sentAt"]) else { return nil }
+        guard let msgIdValue = row["msgId"] as DatabaseValue?, !msgIdValue.isNull,
+              let msgId = String.fromDatabaseValue(msgIdValue) else { return nil }
+        guard let fromValue = row["fromSession"] as DatabaseValue?, !fromValue.isNull,
+              let fromStr = String.fromDatabaseValue(fromValue),
+              let from = UUID(uuidString: fromStr) else { return nil }
+        guard let toValue = row["toSession"] as DatabaseValue?, !toValue.isNull,
+              let toStr = String.fromDatabaseValue(toValue),
+              let to = UUID(uuidString: toStr) else { return nil }
+        guard let contextIdValue = row["contextId"] as DatabaseValue?, !contextIdValue.isNull,
+              let contextId = String.fromDatabaseValue(contextIdValue) else { return nil }
+        guard let firstLineValue = row["firstLine"] as DatabaseValue?, !firstLineValue.isNull,
+              let firstLine = String.fromDatabaseValue(firstLineValue) else { return nil }
+        guard let sentAtValue = row["sentAt"] as DatabaseValue?, !sentAtValue.isNull,
+              let sentAt = Date.fromDatabaseValue(sentAtValue) else { return nil }
+        guard let expectsReplyValue = row["expectsReply"] as DatabaseValue?, !expectsReplyValue.isNull,
+              let expectsReply = Bool.fromDatabaseValue(expectsReplyValue) else { return nil }
+        guard let depthValue = row["depth"] as DatabaseValue?, !depthValue.isNull,
+              let depth = Int.fromDatabaseValue(depthValue) else { return nil }
+
+        let inReplyTo = (row["inReplyTo"] as DatabaseValue?).flatMap { v in !v.isNull ? String.fromDatabaseValue(v) : nil }
+        let closedAt = (row["closedAt"] as DatabaseValue?).flatMap { v in !v.isNull ? Date.fromDatabaseValue(v) : nil }
+        let closeReason = (row["closeReason"] as DatabaseValue?).flatMap { v in !v.isNull ? String.fromDatabaseValue(v) : nil }
+
         return PeerMessageRecord(msgId: msgId, fromSession: from, toSession: to, contextId: contextId,
-                                 inReplyTo: row["inReplyTo"], depth: row["depth"] ?? 0, firstLine: firstLine,
-                                 sentAt: sentAt, expectsReply: row["expectsReply"] ?? false,
-                                 closedAt: Date.fromDatabaseValue(row["closedAt"]),
-                                 closeReason: row["closeReason"])
+                                 inReplyTo: inReplyTo, depth: depth, firstLine: firstLine,
+                                 sentAt: sentAt, expectsReply: expectsReply,
+                                 closedAt: closedAt, closeReason: closeReason)
     }
 }
