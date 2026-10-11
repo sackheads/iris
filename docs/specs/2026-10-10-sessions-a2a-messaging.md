@@ -179,7 +179,11 @@ travels in the iris extension's `metadata`.
   resolved to: `Sent msg 7f3a to worker-a (session …).` The sender records the resolved session, so
   a later move of the role cannot misattribute the reply.
 - `in_reply_to` must name a message that was delivered **to this sender**. Anything else is
-  refused. This stops a session closing a request that is not its to answer.
+  refused. This stops a session closing a request that is not its to answer. A reply goes to the
+  session that sent the original: with `in_reply_to`, `to` may be omitted, and if given must
+  resolve to that session.
+- Message ids are 8 lowercase hex characters, unique in the store: short enough to copy, long
+  enough not to collide in a factory's lifetime.
 - `expects_reply` defaults to `false`, so status notes and FYIs do not fill the ledger. Role
   instructions for delegating sessions tell them to set it when they hand off work.
 
@@ -225,13 +229,16 @@ bitten us").
 `maxSessionCascade` 8, reset when a human types) counts every hop of a fan-out against one number.
 It is replaced by two limits that each catch one failure:
 
-- **Hop depth per thread** catches ping-pong loops. Each message carries the depth of its thread
-  since a human last typed into any session on that thread; delivery is refused once it exceeds
-  the limit. The existing `maxSessionCascade` setting becomes this limit, keeping its default of 8.
-  Depth resets when the user types into any session that has sent or received on the thread.
-- **A per-sender token bucket** catches runaway fan-out: N sends, refilling at a fixed rate.
-  Starting values (capacity 20, one every 15 s) are tuned in the plan against a realistic overseer
-  fan-out.
+- **Hop depth along the causal chain** catches ping-pong loops. A session's depth is the depth of
+  the peer message that last reached it (0 once the user types into it), and a message it sends
+  carries its depth plus one; delivery is refused once that exceeds the limit. Depth follows
+  causation, not `contextId`: counted per thread, a loop could escape the limit by starting a new
+  thread on every hop. The existing `maxSessionCascade` setting becomes this limit, keeping its
+  default of 8. Typing into a session resets that session's depth only, as #185's cascade reset
+  did; depth is in memory and a restart clears it.
+- **A per-sender token bucket** catches runaway fan-out: capacity 20, refilling one send every
+  15 s. That lets an overseer hand work to a dozen workers at once and keep a steady four sends a
+  minute after, while bounding a runaway sender to the same.
 
 Both refuse visibly — the sender's tool result says which limit and when it frees — never by a
 silent drop. Silent drops were the worst part of the Claude Code protocol this is modelled on.
@@ -302,7 +309,10 @@ Every field below needs `decodeIfPresent` and a store column, or it vanishes on 
 - **`role`**: a new nullable column on conversations, without a unique index (§4.3).
 - **`peer_messages`**: `msgId`, `fromSession`, `toSession`, `contextId`, `inReplyTo`, `depth`,
   `firstLine`, `sentAt`, `expectsReply`, `closedAt`, `closeReason`. One table serves correlation,
-  `in_reply_to` validation, depth, and the ledger.
+  `in_reply_to` validation, and the ledger (`depth` is recorded for diagnosis; the limit reads the
+  in-memory per-session depth, §6). No foreign keys to `conversations`: a new conversation's row
+  is written asynchronously and may not exist yet when it sends. Deleting a conversation deletes
+  its rows explicitly, and closed rows older than 30 days are pruned at launch.
 - **`artifact_refs`**: `sha256`, `conversationId`, `msgId`. Drives retention.
 
 Token buckets are in memory; a restart refilling them is acceptable.
@@ -351,6 +361,7 @@ Three PRs, each based on `main` and mergeable alone:
 1. **Cards, roles, names, addressing** — §4, the `role` column, `/role`, `describe_session`.
    Plan: `docs/superpowers/plans/2026-10-10-sessions-a2a-pr1-cards-roles.md`.
 2. **Messages, correlation, ledger, limits** — §5, §6, `peer_messages`, `close_request`.
+   Plan: `docs/superpowers/plans/2026-10-10-sessions-a2a-pr2-correlation.md`.
 3. **Artifacts** — §7, the exchange directory, `artifact_refs`, the sandbox decision.
 
 ## 12. Provenance and the edge
