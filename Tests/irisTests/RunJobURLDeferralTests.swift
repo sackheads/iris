@@ -160,7 +160,8 @@ struct RunJobURLDeferralTests {
         f.app.handleRunJobURL(f.link, identity: .dev)
         f.app.urlFireBatches[f.job.id] = URLFireBatch(since: f.clock.now, dispatched: [f.clock.now], pending: 1)
         f.app.urlRefusalLines[f.job.id.uuidString] = URLRefusalLine(messageId: UUID(), since: f.clock.now,
-                                                                    count: 2, conversationId: f.iris)
+                                                                    count: 2, written: 2, conversationId: f.iris,
+                                                                    subject: f.job.name, reason: RunJobURL.overLimitReason)
         f.app.selectedConversationId = f.iris
         f.app.sendMessage("/jobs delete url-digest")
 
@@ -213,6 +214,7 @@ struct RunJobURLDeferralTests {
         for _ in 0..<4 {
             #expect(f.app.handleRunJobURL(f.link, identity: .dev) == .refused, "the wait is the third fire")
         }
+        f.app.flushURLRefusalLines()
         #expect(lines(f) == [RunJobURL.waitingLine("url-digest", pid: 4242),
                              RunJobURL.refusalLine(subject: "url-digest", reason: RunJobURL.overLimitReason, count: 4)])
         #expect(f.timer.pending.count == 1)

@@ -49,10 +49,6 @@ extension AppState {
         for url in held { handleRunJobURL(url) }
     }
 
-    /// Every coalesced refusal line brought up to its count. Lines are written as each refusal
-    /// arrives until the throttle (Part E) lands, so for now there is nothing to catch up.
-    func flushURLRefusalLines() {}
-
     /// Launch found Iris not set up, so nothing will start the engine until the wizard finishes.
     func refuseRunJobURLsUntilSetUp() {
         guard case .starting(let held) = urlIntake else { return }

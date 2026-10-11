@@ -5466,7 +5466,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // Flush BEFORE _exit: it runs no atexit handlers, so it would kill the pending debounced
         // save and skip the cfprefsd flush, losing every unwritten change (#62).
-        MainActor.assumeIsolated { AppState.shared.flushSave() }
+        MainActor.assumeIsolated {
+            AppState.shared.flushURLRefusalLines()
+            AppState.shared.flushSave()
+        }
         // And give the store back to the command line (#187 §8). `_exit` below runs no atexit
         // handler, so this is the only orderly release; a crash instead leaves a lock naming a
         // dead pid, which `GUILock` reads as stale.

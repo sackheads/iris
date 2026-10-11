@@ -61,6 +61,8 @@ enum RunJobURL {
 
     /// The rolling window both the URL limit and refusal coalescing count over.
     static let window: TimeInterval = 3_600
+    /// How often a coalesced refusal line catches up with its count (the D2 throttle).
+    static let refusalFlushInterval: TimeInterval = 1
 
     /// Why a link was refused before any job was looked up. A fixed sentence each: the link is
     /// unauthenticated input, so no part of it is echoed into Iris.
@@ -133,12 +135,16 @@ struct HeldURLFire: Equatable, Sendable {
     let generation: Int
 }
 
-/// The line a coalesced URL refusal keeps updating, by job id or `unmatched`.
+/// The line a coalesced URL refusal keeps updating, by job id or `unmatched`. The count is
+/// trusted between flushes; `written` is what the line last showed.
 struct URLRefusalLine: Sendable {
-    let messageId: UUID
+    var messageId: UUID
     let since: Date
     var count: Int
-    let conversationId: UUID
+    var written: Int
+    var conversationId: UUID
+    let subject: String?
+    var reason: String
 }
 
 /// The URL fires of one job dispatched since its last moment with none outstanding. Their rows

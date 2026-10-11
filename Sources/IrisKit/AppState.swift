@@ -4225,8 +4225,12 @@ class AppState {
     @ObservationIgnored private(set) var jobsListingTask: Task<Void, Never>? = nil
 
     /// D6 decisions 12-13: one refusal line per job (or per `unmatched`) per hour, updated with a
-    /// running count. Written only by `refuseURLFire`.
+    /// running count at most once a second. Written only by `RunJobURLHandling.swift`.
     @ObservationIgnored var urlRefusalLines: [String: URLRefusalLine] = [:]
+    /// Schedules a coalesced refusal line's catch-up, on a dispatch queue. A seam for tests.
+    @ObservationIgnored var urlRefusalFlushTimer = URLDeferralTimer.dispatch
+    /// The lines with a catch-up already scheduled. Written only by `RunJobURLHandling.swift`.
+    @ObservationIgnored var urlRefusalFlushPending: Set<String> = []
     /// Each job's outstanding URL fires (in flight, or held by the `queue` policy), counted by
     /// the limit until their runs have started. Written only by `RunJobURLHandling.swift`.
     @ObservationIgnored var urlFireBatches: [UUID: URLFireBatch] = [:]
