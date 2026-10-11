@@ -693,6 +693,8 @@ extension JobLedger {
     /// out unless `includeGateUnchanged`, matched by prefix as `recentRuns` matches them.
     func runLog(limit: Int, before: RunLogCursor? = nil, jobId: UUID? = nil,
                 status: JobRun.Status? = nil, includeGateUnchanged: Bool = false) throws -> RunLogPage {
+        // `prefix` traps on a negative count, and a page of nothing would never move on.
+        let limit = max(limit, 1)
         var conditions: [String] = []
         var arguments = StatementArguments()
         if let before {

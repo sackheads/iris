@@ -504,6 +504,18 @@ class AppState {
         showMainWindow(selecting: iris)
     }
 
+    /// The run log's transcript button (D6 decision 15): the app's one transcript sheet, on the
+    /// main window, raised first so the sheet has a window to appear on.
+    func openTranscript(_ conversationId: UUID) {
+        showMainWindow(selecting: nil)
+        transcriptSheetConversationId = conversationId
+    }
+
+    /// Whether a run's transcript conversation is still here, or retention has pruned it.
+    func transcriptExists(_ conversationId: UUID) -> Bool {
+        conversations.contains { $0.id == conversationId }
+    }
+
     /// What `revealCard` says when a blocked run's card is in no conversation any more.
     static func goneCardLine(jobName: String, runId: UUID) -> String {
         let name = IrisEngine.flattenCardField(jobName, cap: IrisEngine.cardNameCap)

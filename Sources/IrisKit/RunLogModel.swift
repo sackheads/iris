@@ -1,0 +1,113 @@
+import Foundation
+import Observation
+
+/// One row of the Run Log window (D6 decision 15).
+struct RunLogRow: Identifiable, Equatable, Sendable {
+    enum Transcript: Equatable, Sendable {
+        /// The run recorded no transcript: a built-in, a gate check, a stillborn row.
+        case none
+        case live(UUID)
+        /// Recorded, and since removed by retention.
+        case pruned
+    }
+
+    let id: UUID
+    let jobId: UUID
+    let started: Date
+    /// nil while the run is still going.
+    let duration: TimeInterval?
+    let jobName: String
+    let triggerKind: String
+    let status: JobRun.Status
+    let weightedTokens: Int
+    /// Shown as plain text in the window, and never sent to a model or a notification: it is the
+    /// run's own words, which no human read before they arrived.
+    let outcome: String?
+    /// An unacknowledged failure or blocked run: the one-click clear owner ruling 3 needs.
+    let canAcknowledge: Bool
+    /// A blocked run links to its card, where the call and its verdict are. No Approve here.
+    let opensCard: Bool
+    let transcript: Transcript
+
+    static func make(_ run: JobRun, transcriptExists: (UUID) -> Bool) -> RunLogRow {
+        let waits = run.status == .failed || run.status == .blockedOnApproval
+        let transcript: Transcript
+        if let id = run.transcriptConversationId {
+            transcript = transcriptExists(id) ? .live(id) : .pruned
+        } else {
+            transcript = .none
+        }
+        return RunLogRow(
+            id: run.id, jobId: run.jobId, started: run.startedAt,
+            duration: run.finishedAt.map { $0.timeIntervalSince(run.startedAt) },
+            jobName: run.jobName, triggerKind: run.triggerKind, status: run.status,
+            weightedTokens: CostWeights.weighted(run.components, provider: run.provider, model: run.model),
+            outcome: run.outcome, canAcknowledge: waits && run.acknowledgedAt == nil,
+            opensCard: run.status == .blockedOnApproval, transcript: transcript)
+    }
+}
+
+/// The Run Log window's rows, paged from the ledger off the main actor.
+@MainActor
+@Observable
+final class RunLogModel {
+    private(set) var rows: [RunLogRow] = []
+    private(set) var hasMore = false
+    var jobFilter: UUID?
+    var statusFilter: JobRun.Status?
+    var showGateChecks = false
+
+    @ObservationIgnored private var next: JobLedger.RunLogCursor?
+    @ObservationIgnored private let ledger: JobLedger
+    @ObservationIgnored private let pageSize: Int
+    @ObservationIgnored private let transcriptExists: @MainActor (UUID) -> Bool
+    @ObservationIgnored private var generation = 0
+    /// The reload whose page has not landed yet, if any.
+    @ObservationIgnored private var pendingReload: Task<Void, Never>?
+
+    init(ledger: JobLedger, pageSize: Int = 100, transcriptExists: @escaping @MainActor (UUID) -> Bool) {
+        self.ledger = ledger
+        self.pageSize = pageSize
+        self.transcriptExists = transcriptExists
+    }
+
+    @discardableResult
+    func reload() -> Task<Void, Never> {
+        let task = load(after: nil)
+        pendingReload = task
+        return task
+    }
+
+    @discardableResult
+    func loadMore() -> Task<Void, Never> {
+        // A reload in flight owns the rows and the cursor: a page read from the old cursor would
+        // supersede it and append to rows it is about to replace.
+        if let pendingReload { return pendingReload }
+        guard let next else { return Task {} }
+        return load(after: next)
+    }
+
+    private func load(after cursor: JobLedger.RunLogCursor?) -> Task<Void, Never> {
+        generation += 1
+        let generation = self.generation
+        let ledger = self.ledger, limit = pageSize
+        let (jobId, status, gate) = (jobFilter, statusFilter, showGateChecks)
+        return Task { [weak self] in
+            let page = await Task.detached {
+                try? ledger.runLog(limit: limit, before: cursor, jobId: jobId, status: status,
+                                   includeGateUnchanged: gate)
+            }.value
+            // A reload started since makes this page stale: its filters or its cursor are gone.
+            guard let self, generation == self.generation else { return }
+            if cursor == nil { self.pendingReload = nil }
+            guard let page else { return }
+            // Wrapped rather than passed: `transcriptExists` is `@MainActor`, the parameter is a
+            // plain closure, and this task runs on the main actor.
+            let exists = self.transcriptExists
+            let made = page.runs.map { run in RunLogRow.make(run, transcriptExists: { exists($0) }) }
+            self.rows = cursor == nil ? made : self.rows + made
+            self.next = page.next
+            self.hasMore = page.next != nil
+        }
+    }
+}

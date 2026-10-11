@@ -98,4 +98,20 @@ struct RunLogQueryTests {
         #expect(try ledger.runLog(limit: 10, jobId: a.id).runs.count == 2)
         #expect(try ledger.runLog(limit: 10, jobId: a.id, status: .failed).runs.map(\.id) == [failed.id])
     }
+
+    @Test("a limit below 1 reads one row rather than trapping")
+    func clampsLimit() throws {
+        let ledger = try makeLedger()
+        let j = job()
+        try ledger.upsert(j)
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        try row(j, at: base, ledger: ledger)
+        let newest = try row(j, at: base.addingTimeInterval(1), ledger: ledger)
+
+        for limit in [-5, 0] {
+            let page = try ledger.runLog(limit: limit)
+            #expect(page.runs.map(\.id) == [newest.id])
+            #expect(page.next != nil)
+        }
+    }
 }
