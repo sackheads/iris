@@ -321,6 +321,25 @@ final class JobLedger: JobUsageReading, Sendable {
                       arguments: []).jobs
     }
 
+    struct JobName: Identifiable, Equatable, Sendable {
+        let id: UUID
+        let name: String
+    }
+
+    /// Every job's id and name, oldest first: the run log's job picker (R9). Reads two columns, so
+    /// a job whose row no longer decodes is still listed and its runs can still be filtered. Does
+    /// not publish `unreadableJobCount`, which only `jobs()` does, for `/jobs`.
+    func jobNames() throws -> [JobName] {
+        let rows = try writer.read { db in
+            try Row.fetchAll(db, sql: "SELECT id, name FROM jobs ORDER BY createdAt, rowid")
+        }
+        return rows.compactMap { row in
+            guard let idText: String = row["id"], let id = UUID(uuidString: idText),
+                  let name: String = row["name"] else { return nil }
+            return JobName(id: id, name: name)
+        }
+    }
+
     private func decodeAll(sql: String, arguments: StatementArguments) throws -> (jobs: [Job], skipped: Int) {
         let rows = try writer.read { db in try Row.fetchAll(db, sql: sql, arguments: arguments) }
         var jobs: [Job] = []

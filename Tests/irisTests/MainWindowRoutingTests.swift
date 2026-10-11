@@ -178,6 +178,21 @@ struct MainWindowRoutingTests {
         #expect(app.selectedConversationId == other)
         #expect(raises.count == 2)
     }
+
+    @Test("the failed-runs row and Open Run Log open the run log, and never raise or reselect the chat")
+    func runLogRow() async throws {
+        let (_, app, raises) = try makeApp()
+        let mine = app.createNewConversation()
+        var opened = 0
+        app.openRunLogWindow = { opened += 1 }
+
+        await app.openStatusRow(.runLog)
+        #expect(opened == 1)
+        app.showRunLog()
+        #expect(opened == 2)
+        #expect(raises.count == 0)
+        #expect(app.selectedConversationId == mine)
+    }
 }
 
 /// The chat window, tracked by reference (plan note 3), over fake windows: the tracker is an
@@ -302,6 +317,40 @@ struct MainWindowTrackerTests {
         tracker.raise(open: { opened += 1 })
         #expect(opened == 1)
         #expect(app.activations == 1)
+    }
+
+    @Test("the run log window is not a chat window: its becoming key, being key or closing moves nothing")
+    func runLogIsNotAChatWindow() throws {
+        let (tracker, app, center) = makeTracker()
+        let chat = FakeWindow(), runLog = FakeWindow()
+        tracker.track(chat)
+        app.active = true
+
+        // The run log's window is never handed to `track` (only ChatView carries the tracker);
+        // what it posts must not register it or reorder the chat windows.
+        runLog.isKeyWindow = true
+        center.post(name: MainWindowTracking.didBecomeKeyNotification, object: runLog)
+        #expect(tracker.current === chat)
+        #expect(!tracker.isFrontmost, "the run log in front is not the chat in front")
+
+        // The hotkey with the run log key raises the chat window rather than hiding anything.
+        let state = AppState(store: try ConversationStore.inMemory(),
+                             tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        var raises = 0
+        state.raiseMainWindow = { raises += 1 }
+        tracker.toggleFromHotkey(state: state)
+        #expect(raises == 1)
+        #expect(runLog.calls.isEmpty && chat.calls.isEmpty)
+
+        var opened = 0
+        tracker.raise(open: { opened += 1 })
+        #expect(chat.calls == ["front"])
+        #expect(runLog.calls.isEmpty)
+
+        center.post(name: MainWindowTracking.willCloseNotification, object: runLog)
+        #expect(tracker.current === chat)
+        tracker.raise(open: { opened += 1 })
+        #expect(opened == 0, "closing the run log leaves the chat window to raise, not a new one")
     }
 
     @Test("visible means on screen, not minimized and not covered")

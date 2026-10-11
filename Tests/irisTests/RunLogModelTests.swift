@@ -75,6 +75,65 @@ struct RunLogModelTests {
         #expect(model.rows.map(\.outcome) == ["r0"])
     }
 
+    @Test("every filter change reloads from the top by itself, before any loadMore can run")
+    func filtersReload() async throws {
+        let (store, job) = try seeded(3)
+        let other = Job(name: "digest", prompt: "do it", trigger: .schedule(.interval(seconds: 60)))
+        try store.ledger.upsert(other)
+        let gate = JobRun(jobId: other.id, jobName: other.name, triggerKind: "schedule",
+                          startedAt: Date(timeIntervalSince1970: 1_700_000_100))
+        try store.ledger.begin(run: gate)
+        try store.ledger.finish(runId: gate.id, status: .completed, outcome: JobRunner.gateUnchangedOutcome,
+                                failureReason: nil, blockedTool: nil, tokens: TokenUsage(),
+                                finishedAt: gate.startedAt)
+        let model = RunLogModel(ledger: store.ledger, pageSize: 10, transcriptExists: { _ in false })
+        try await value(of: model.reload())
+        #expect(model.rows.map(\.outcome) == ["r2", "r1", "r0"])
+
+        // No reload() here: the assignment alone must start one, so a loadMore that follows
+        // waits for it rather than paging the old filter from the old cursor.
+        model.showGateChecks = true
+        let gateReload = try #require(model.pendingReload, "a filter change starts a reload")
+        try await value(of: gateReload)
+        #expect(model.rows.first?.outcome == JobRunner.gateUnchangedOutcome)
+
+        model.statusFilter = .failed
+        try await value(of: try #require(model.pendingReload))
+        #expect(model.rows.map(\.outcome) == ["r0"])
+
+        model.statusFilter = nil
+        model.jobFilter = job.id
+        try await value(of: model.loadMore())
+        #expect(model.rows.map(\.outcome) == ["r2", "r1", "r0"])
+
+        // Setting the value it already has is not a change.
+        try await value(of: model.reload())
+        model.jobFilter = job.id
+        #expect(model.pendingReload == nil)
+    }
+
+    @Test("the job picker lists every job by name, unreadable ones too, without moving /jobs' count")
+    func jobChoices() async throws {
+        let (store, job) = try seeded(1)
+        let badId = UUID()
+        try await store.writer.write { db in
+            try db.execute(sql: """
+                INSERT INTO jobs (id, name, prompt, triggerKind, trigger, createdAt)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """, arguments: [badId.uuidString, "bad", "p", "schedule", "{\"kind\":\"telepathy\"}", Date()])
+        }
+        #expect(store.ledger.unreadableJobCount == 0)
+        #expect(try store.ledger.jobNames() == [JobLedger.JobName(id: job.id, name: "pr-sweep"),
+                                                JobLedger.JobName(id: badId, name: "bad")])
+        // R9: `jobs()` would publish 1 here, and `/jobs` reports that figure.
+        #expect(store.ledger.unreadableJobCount == 0)
+
+        let model = RunLogModel(ledger: store.ledger, pageSize: 10, transcriptExists: { _ in false })
+        try await value(of: model.reload())
+        #expect(model.jobChoices.map(\.name) == ["pr-sweep", "bad"])
+        #expect(store.ledger.unreadableJobCount == 0)
+    }
+
     @Test("a loadMore asked for while a reload is in flight waits for it rather than superseding it")
     func loadMoreDuringReload() async throws {
         let (store, _) = try seeded(5)

@@ -446,6 +446,15 @@ class AppState {
     /// How the main window is brought forward. `IrisApp` sets it to `MainWindow.raise()`; a test
     /// counts it. Nothing else may raise the window (D6 decision 4).
     @ObservationIgnored var raiseMainWindow: @MainActor () -> Void = {}
+    /// How the Run Log window is opened. `IrisApp` sets it to `RunLogWindow.open()`; a test
+    /// counts it.
+    @ObservationIgnored var openRunLogWindow: @MainActor () -> Void = {}
+
+    /// The status menu's "Open Run Log…" and its failed-runs row (D6 decision 15). Leaves the
+    /// chat window and its selection alone: the log is a window of its own.
+    func showRunLog() {
+        openRunLogWindow()
+    }
 
     /// The one way any surface raises the main window: the status item's rows and "Show Chat", a
     /// notification's Open, the run log's transcript, and the hotkey. Selects `conversationId`
@@ -535,6 +544,8 @@ class AppState {
             await revealCard(runId: runId, jobId: jobId)
         case .iris:
             showMainWindow(selecting: activityConversationId())
+        case .runLog:
+            showRunLog()
         case .nowhere:
             break
         }

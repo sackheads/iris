@@ -53,9 +53,19 @@ struct RunLogRow: Identifiable, Equatable, Sendable {
 final class RunLogModel {
     private(set) var rows: [RunLogRow] = []
     private(set) var hasMore = false
-    var jobFilter: UUID?
-    var statusFilter: JobRun.Status?
-    var showGateChecks = false
+    /// The job picker's choices, read with every reload (R9: never `jobs()`).
+    private(set) var jobChoices: [JobLedger.JobName] = []
+    // Each filter reloads itself, so a `loadMore` after a change waits for the new filter's first
+    // page instead of paging the old filter from the old cursor (Task 8's ruling).
+    var jobFilter: UUID? {
+        didSet { if jobFilter != oldValue { reload() } }
+    }
+    var statusFilter: JobRun.Status? {
+        didSet { if statusFilter != oldValue { reload() } }
+    }
+    var showGateChecks = false {
+        didSet { if showGateChecks != oldValue { reload() } }
+    }
 
     @ObservationIgnored private var next: JobLedger.RunLogCursor?
     @ObservationIgnored private let ledger: JobLedger
@@ -63,7 +73,7 @@ final class RunLogModel {
     @ObservationIgnored private let transcriptExists: @MainActor (UUID) -> Bool
     @ObservationIgnored private var generation = 0
     /// The reload whose page has not landed yet, if any.
-    @ObservationIgnored private var pendingReload: Task<Void, Never>?
+    @ObservationIgnored private(set) var pendingReload: Task<Void, Never>?
 
     init(ledger: JobLedger, pageSize: Int = 100, transcriptExists: @escaping @MainActor (UUID) -> Bool) {
         self.ledger = ledger
@@ -93,13 +103,15 @@ final class RunLogModel {
         let ledger = self.ledger, limit = pageSize
         let (jobId, status, gate) = (jobFilter, statusFilter, showGateChecks)
         return Task { [weak self] in
-            let page = await Task.detached {
-                try? ledger.runLog(limit: limit, before: cursor, jobId: jobId, status: status,
-                                   includeGateUnchanged: gate)
+            let (page, names) = await Task.detached {
+                (try? ledger.runLog(limit: limit, before: cursor, jobId: jobId, status: status,
+                                    includeGateUnchanged: gate),
+                 cursor == nil ? try? ledger.jobNames() : nil)
             }.value
             // A reload started since makes this page stale: its filters or its cursor are gone.
             guard let self, generation == self.generation else { return }
             if cursor == nil { self.pendingReload = nil }
+            if let names { self.jobChoices = names }
             guard let page else { return }
             // Wrapped rather than passed: `transcriptExists` is `@MainActor`, the parameter is a
             // plain closure, and this task runs on the main actor.
