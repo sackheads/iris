@@ -143,27 +143,33 @@ enum NotificationPolicy {
         }
     }
 
-    /// A name as a banner may show it, wrapped in `“…”`.
+    /// A name as a banner may show it, wrapped in `“…”`, or the fixed word `unnamed`.
     ///
-    /// - Flattened by `IrisEngine.flattenCardField` (line breaks, `|`, `"`) and capped at
-    ///   `cardNameCap` Characters.
-    /// - Every character a reader could not see is removed: controls, bidi overrides and
-    ///   isolates, zero-width characters, line and paragraph separators (#334's
-    ///   `containsHiddenCharacters`). `flattenCardField` removes none of these.
-    /// - NFKC-normalised before anything else, so a compatibility form cannot fold into a `|`
-    ///   or a quote after the flattening has run.
-    /// - Then `String.quotesNeutralised`, shared with `Briefing.name`: every quote-like scalar
-    ///   becomes a straight `'`, and a combining mark survives only on a letter or digit, so none
-    ///   attaches to the opening quote or turns a space into a `"`.
-    /// - Capped at `Briefing.nameMaxBytes` UTF-8 bytes, as the briefing caps its names: a
-    ///   Character cap alone does not bound one letter carrying thousands of combining marks.
+    /// An allowlist, not a neutraliser: after `flattenCardField`, only ASCII letters and digits,
+    /// space and `- _ . : / + #` are kept, and everything else is removed. Runs of spaces collapse,
+    /// the ends are trimmed, and the result is capped at `bannerNameMaxBytes`. Every denylist of
+    /// look-alike quotes had another gap (primes, modifier letters, combining marks on blanks);
+    /// nothing outside this set can draw a quote. Nothing real is lost: job names are slugs
+    /// (`Job.slug`, `[a-z0-9-]`) and provider tool names are `[A-Za-z0-9_-]`. Only an MCP name
+    /// with other characters changes, and that is exactly the surface an attacker controls.
     static func quoted(_ field: String) -> String {
-        let flat = IrisEngine.flattenCardField(field.precomposedStringWithCompatibilityMapping,
-                                               cap: IrisEngine.cardNameCap)
-        let visible = String(String.UnicodeScalarView(
-            flat.unicodeScalars.filter { !String($0).containsHiddenCharacters }))
-        let neutral = visible.quotesNeutralised
-        let name = IrisEngine.capFieldBytes(neutral, maxBytes: Briefing.nameMaxBytes)
-        return "\u{201C}\(name)\u{201D}"
+        let flat = IrisEngine.flattenCardField(field, cap: IrisEngine.cardNameCap)
+        var kept = String.UnicodeScalarView()
+        for scalar in flat.unicodeScalars where isBannerSafe(scalar) { kept.append(scalar) }
+        let collapsed = String(kept).split(separator: " ").joined(separator: " ")
+        let name = String(ConversationReader.utf8Prefix(collapsed, maxBytes: bannerNameMaxBytes))
+            .trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? unnamed : "\u{201C}\(name)\u{201D}"
+    }
+
+    static let bannerNameMaxBytes = 64
+    /// What a banner says for a name with nothing safe left in it. Fixed words, so unquoted.
+    static let unnamed = "unnamed"
+
+    private static func isBannerSafe(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar {
+        case "a"..."z", "A"..."Z", "0"..."9", " ", "-", "_", ".", ":", "/", "+", "#": return true
+        default: return false
+        }
     }
 }

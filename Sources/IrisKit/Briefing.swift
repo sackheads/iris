@@ -127,10 +127,13 @@ enum Briefing {
         // sanitiser's NFKC pass, so neither a combining mark fused onto a `·` nor a compatibility
         // form that folds into one gets through.
         // Quotes become a straight `'` rather than vanishing ("Bob's", not "Bobs"), by the rule
-        // `NotificationPolicy.quoted` shares: no scalar left can read as the closing `”`. First,
+        // `String.quotesNeutralised` applies: no scalar left can read as the closing `”`. First,
         // so nothing its NFKC pass folds into a `·` gets past the delimiter filter.
         flat = flat.quotesNeutralised
         flat = String(String.UnicodeScalarView(flat.unicodeScalars.filter { !fieldDelimiters.contains($0) }))
+        // Two `'` in a row draw as a `"` (`ˈˈ`, or a raw `''`), so a run of them becomes one. After
+        // every step that can make two meet: the neutraliser, and the delimiter filter.
+        flat = flat.replacingOccurrences(of: "'{2,}", with: "'", options: .regularExpression)
         flat = flat.trimmingCharacters(in: .whitespaces)
         // Bytes, not `Character`s: one letter plus 50,000 combining marks is one Character of
         // ~100 KB, and this lands in the harness-authority turn context (#187 review).
@@ -144,7 +147,7 @@ enum Briefing {
     /// `·` (U+00B7) and the dots that read as one: Greek ano teleia (folds to U+00B7), hyphenation
     /// point, bullet and dot operators, word-separator middle dot, katakana middle dot (and its
     /// halfwidth form), bullet. The quotes the name is wrapped in, and every shape that reads as
-    /// one, are neutralised by `String.quotesNeutralised`, which `NotificationPolicy` shares.
+    /// one, are neutralised by `String.quotesNeutralised`.
     private static let fieldDelimiters: Set<Unicode.Scalar> = [
         "\u{00B7}", "\u{0387}", "\u{2027}", "\u{2219}", "\u{22C5}", "\u{2E31}", "\u{30FB}", "\u{FF65}", "\u{2022}",
     ]

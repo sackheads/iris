@@ -62,15 +62,17 @@ extension Unicode.Scalar {
 }
 
 extension String {
-    /// The name with nothing left that could read as a quotation mark, for both quoters
-    /// (`Briefing.name`, `NotificationPolicy.quoted`):
+    /// The name with nothing left that could read as a quotation mark, for `Briefing.name`, whose
+    /// agent-facing names must keep real Unicode. (Banners do not use this: `NotificationPolicy`
+    /// keeps an ASCII allowlist.)
     /// 1. NFKC first, so a compatibility form (fullwidth, Greek oxia) is judged as what it folds to.
     /// 2. Every `isQuoteLike` scalar becomes a straight `'`.
     /// 3. Every default-ignorable scalar (it draws blank) is dropped, except a variation
     ///    selector, before marks are judged, so a mark sees the base it really draws on.
-    /// 4. A combining mark (Mn, Me) is kept only on a letter or digit base: on a space, a `'` or
-    ///    another symbol, U+030E or U+030B draws a `"` (`" \u{030E}"`). Marks stacked on one base
-    ///    are judged by that base, so Thai and Indic clusters survive.
+    /// 4. A combining mark (Mn, Me) is kept only on a letter (not a modifier letter, Lm) or digit
+    ///    base: on a space, a `'`, an Lm such as `ˍ` or another symbol, U+030E or U+030B draws a
+    ///    `"` (`" \u{030E}"`, `"ˍ\u{030E}"`). Marks stacked on one base are judged by that base,
+    ///    so Thai and Indic clusters (whose bases are Lo) survive.
     var quotesNeutralised: String {
         var out = String.UnicodeScalarView()
         var baseIsAlphanumeric = false
@@ -80,8 +82,9 @@ extension String {
                 out.append(scalar)
                 continue
             }
-            // Blank code points that are not controls or format characters, such as the Hangul
-            // fillers (Lo): kept, they would be the "letter" a following U+030E sits on.
+            // Dropped: a default-ignorable scalar draws nothing, and some (the Hangul fillers)
+            // are letters (Lo), so keeping one would give a following U+030E a blank "letter" to
+            // sit on, and it would draw alone as a `"`.
             if scalar.properties.isDefaultIgnorableCodePoint { continue }
             switch scalar.properties.generalCategory {
             case .nonspacingMark, .enclosingMark:
@@ -103,7 +106,7 @@ extension String {
     }
 
     private static let alphanumeric: Set<Unicode.GeneralCategory> = [
-        .uppercaseLetter, .lowercaseLetter, .titlecaseLetter, .modifierLetter, .otherLetter,
+        .uppercaseLetter, .lowercaseLetter, .titlecaseLetter, .otherLetter,
         .decimalNumber,
     ]
 }

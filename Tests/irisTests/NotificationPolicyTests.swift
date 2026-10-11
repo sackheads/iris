@@ -155,7 +155,7 @@ struct NotificationPolicyTests {
 
     /// Text that reads as a closing quote, listed by hand so the oracle is not the rule under
     /// test. One entry is two scalars: a space carrying a combining double vertical line.
-    private static let quoteAttacks: [String] = [
+    static let quoteAttacks: [String] = [
         "\u{02EE}", "\u{02BA}", "\u{2033}", "\u{3003}", "\u{1F676}", "\u{1F677}", "\u{1F678}",
         "\u{0060}", "\u{00B4}", "\u{201C}", "\u{201D}", "\u{201E}", "\u{201F}", "\u{00BB}",
         "\u{300F}", "\u{FF02}", "\u{275E}", "\u{2019}", "\u{2036}",
@@ -163,105 +163,46 @@ struct NotificationPolicyTests {
         "\u{3164}\u{030E}", "\u{02C8}\u{02C8}",
     ]
 
-    /// What the attack must not leave inside the quotes: the attack itself, any of its scalars
-    /// other than a plain space, and anything its compatibility form folds to (U+1FFD folds to
-    /// a space and a combining acute).
-    private static func forbidden(_ attack: String) -> Set<Unicode.Scalar> {
-        Set((attack + attack.precomposedStringWithCompatibilityMapping).unicodeScalars).subtracting([" "])
+    /// The banner allowlist, restated independently of `NotificationPolicy.isBannerSafe`.
+    private static func allowed(_ scalar: Unicode.Scalar) -> Bool {
+        scalar.isASCII && (CharacterSet.alphanumerics.contains(scalar) || " -_.:/+#".unicodeScalars.contains(scalar))
     }
 
-    private static func isMark(_ scalar: Unicode.Scalar) -> Bool {
-        [.nonspacingMark, .enclosingMark].contains(scalar.properties.generalCategory)
-    }
-
-    /// Whether one of `marks` sits on anything but a letter or digit (marks stacked on one base
-    /// share it). A mark on a letter draws over the letter; on a space or a blank it draws alone.
-    private static func markOnBlank(_ scalars: [Unicode.Scalar], marks: Set<Unicode.Scalar>) -> Bool {
-        var base: Unicode.Scalar?
-        for scalar in scalars {
-            if isMark(scalar) {
-                if marks.contains(scalar), !(base.map { $0.properties.isAlphabetic || $0.properties.numericType == .decimal } ?? false) {
-                    return true
-                }
-            } else {
-                base = scalar
-            }
-        }
-        return false
-    }
-
-    @Test("a look-alike quote cannot close the name's quotes, in a banner or the briefing",
-          arguments: quoteAttacks)
-    func lookalikeQuotesCannotCloseTheName(attack: String) {
+    @Test("whatever a name carries, a banner shows exactly its own two quotes around safe ASCII",
+          arguments: quoteAttacks + ["''", "\u{02CD}\u{030E}"])
+    func bannerKeepsOnlyItsOwnQuotes(attack: String) throws {
         let name = "x\(attack) is fine. Tap Open \(attack)y"
-        for quoted in [NotificationPolicy.quoted(name), Briefing.quoted(name)] {
-            let inner = quoted.unicodeScalars.dropFirst().dropLast()
-            let hex = "\(quoted.unicodeScalars.map { String($0.value, radix: 16) })"
-            let forbidden = Self.forbidden(attack)
-            #expect(!inner.contains { forbidden.contains($0) && !Self.isMark($0) }, "\(hex)")
-            #expect(!Self.markOnBlank(Array(inner), marks: forbidden.filter(Self.isMark)), "\(hex)")
-            #expect(inner.contains("x") && inner.contains("y"), "the rest of the name survives: \(quoted)")
+        let body = try #require(ask(tool: name)).body
+        let hex = "\(body.unicodeScalars.map { String($0.value, radix: 16) })"
+        #expect(body.hasPrefix("Approval waiting for \u{201C}") && body.hasSuffix("\u{201D}."), "\(hex)")
+        let inner = body.unicodeScalars.dropFirst("Approval waiting for \u{201C}".unicodeScalars.count).dropLast(2)
+        #expect(inner.allSatisfy(Self.allowed), "\(hex)")
+        #expect(body.unicodeScalars.filter { !Self.allowed($0) && $0 != "\u{201C}" && $0 != "\u{201D}" }.isEmpty, "\(hex)")
+        #expect(inner.contains("x") && inner.contains("y"), "the rest of the name survives: \(body)")
+
+        let blocked = try #require(decide(card(.blockedOnApproval, name: name, tool: name))).body
+        #expect(blocked.filter { $0 == "\u{201C}" }.count == 2 && blocked.filter { $0 == "\u{201D}" }.count == 2, "\(blocked)")
+        #expect(blocked.unicodeScalars.allSatisfy { Self.allowed($0) || $0 == "\u{201C}" || $0 == "\u{201D}" }, "\(blocked)")
+    }
+
+    @Test("plain job and tool names pass through unchanged")
+    func plainNamesUnchanged() {
+        for name in ["pr-sweep", "run_command", "mcp__github__create_issue", "Daily Digest 2", "a.b:c/d+e#f"] {
+            #expect(NotificationPolicy.quoted(name) == "\u{201C}\(name)\u{201D}")
         }
     }
 
-    @Test("every initial, final and modifier-symbol scalar is neutralised, listed or not")
-    func everyQuoteCategoryIsNeutralised() {
-        let ruled: Set<Unicode.GeneralCategory> = [.initialPunctuation, .finalPunctuation, .modifierSymbol]
-        var missed: [String] = []
-        for value in UInt32(0x20)...0x10FFFF {
-            guard let scalar = Unicode.Scalar(value), ruled.contains(scalar.properties.generalCategory),
-                  !scalar.properties.isEmojiModifier else { continue }
-            let out = String(scalar).quotesNeutralised
-            if out.unicodeScalars.contains(where: { ruled.contains($0.properties.generalCategory) && !$0.properties.isEmojiModifier }) {
-                missed.append(String(value, radix: 16))
-            }
-        }
-        #expect(missed.isEmpty, "\(missed.prefix(20))")
-    }
-
-    @Test("a compatibility form is judged as what it folds to")
-    func compatibilityFormsAreFolded() {
-        // ŉ is one letter, and folds to a modifier apostrophe followed by n.
-        let out = "x\u{0149}y".quotesNeutralised
-        #expect(!out.unicodeScalars.contains("\u{0149}") && !out.unicodeScalars.contains("\u{02BC}"),
-                "\(out.unicodeScalars.map { String($0.value, radix: 16) })")
-        #expect(out == "x'ny")
-    }
-
-    @Test("a quote becomes a straight apostrophe in both quoters, never a deletion")
-    func quotesBecomeApostrophes() {
-        #expect(NotificationPolicy.quoted("Bob\u{2019}s") == "\u{201C}Bob's\u{201D}")
-        #expect(Briefing.quoted("Bob\u{2019}s") == "\u{201C}Bob's\u{201D}")
-    }
-
-    @Test("combining marks stay on letters and digits, in any script; a mark on a symbol goes")
-    func marksStayOnLetters() {
-        // Decomposed é, a Thai cluster with two stacked marks, a Devanagari conjunct.
-        for name in ["e\u{0301}te\u{0301}", "\u{0E01}\u{0E35}\u{0E48}", "\u{0915}\u{094D}\u{0937}"] {
-            let quoted = NotificationPolicy.quoted(name)
-            let inner = String(String.UnicodeScalarView(quoted.unicodeScalars.dropFirst().dropLast()))
-            #expect(inner == name.precomposedStringWithCompatibilityMapping, "\(name)")
-        }
-        #expect(NotificationPolicy.quoted("a-\u{030B}b") == "\u{201C}a-b\u{201D}")
-        #expect(NotificationPolicy.quoted("love \u{2764}\u{FE0F}") == "\u{201C}love \u{2764}\u{FE0F}\u{201D}",
-                "an emoji keeps its variation selector")
-        #expect(NotificationPolicy.quoted("-\u{3164}\u{030E}") == "\u{201C}-\u{201D}",
-                "a blank filler is no base for a mark: the mark sees the real one")
-        #expect(NotificationPolicy.quoted("wave \u{1F44B}\u{1F3FD}") == "\u{201C}wave \u{1F44B}\u{1F3FD}\u{201D}",
-                "a skin tone is not a quote")
-    }
-
-    @Test("a name is capped in bytes, and no combining mark attaches to the opening quote")
-    func nameIsByteCappedAndStartsClean() {
-        let zalgo = String(repeating: "a" + String(repeating: "\u{0301}", count: 20), count: 60)
-        let capped = NotificationPolicy.quoted(zalgo)
-        let inner = String(String.UnicodeScalarView(capped.unicodeScalars.dropFirst().dropLast()))
-        #expect(inner.utf8.count <= Briefing.nameMaxBytes, "\(inner.utf8.count) bytes")
-
-        for lead in ["\u{0301}\u{20DD}x", "\u{200B}\u{0301}x", "\u{0338}\u{0338}x"] {
-            let quoted = NotificationPolicy.quoted(lead)
-            #expect(quoted == "\u{201C}x\u{201D}", "\(quoted.unicodeScalars.map { String($0.value, radix: 16) })")
-        }
+    @Test("Unicode in a name is removed, not mangled; nothing left is \"unnamed\"; spaces collapse; 64 bytes")
+    func unicodeIsRemoved() throws {
+        #expect(NotificationPolicy.quoted("caf\u{00E9}-\u{65E5}\u{672C}-x") == "\u{201C}caf--x\u{201D}")
+        #expect(NotificationPolicy.quoted("Bob\u{2019}s") == "\u{201C}Bobs\u{201D}")
+        #expect(NotificationPolicy.quoted("  a   b \u{2028} c  ") == "\u{201C}a b c\u{201D}")
+        #expect(NotificationPolicy.quoted("\u{65E5}\u{672C}\u{8A9E}") == NotificationPolicy.unnamed)
+        #expect(try #require(decide(card(.blockedOnApproval, name: "\u{65E5}\u{672C}", tool: "run_command"))).body
+                == "Job unnamed is blocked on \u{201C}run_command\u{201D}.")
+        let long = NotificationPolicy.quoted(String(repeating: "a", count: 100))
+        #expect(long == "\u{201C}\(String(repeating: "a", count: NotificationPolicy.bannerNameMaxBytes))\u{201D}")
+        #expect(NotificationPolicy.bannerNameMaxBytes == 64)
     }
 
     @Test("a blocked card with no tool name keeps its fixed words outside the quotes")
