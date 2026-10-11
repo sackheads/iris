@@ -1,5 +1,12 @@
 import Foundation
 
+/// Whether one URL fire's answer has been counted: by the runner's report or, failing that, when
+/// its task ends. Never both.
+@MainActor
+final class URLFireTicket {
+    var decided = false
+}
+
 extension AppState {
     enum RunJobURLOutcome: Equatable, Sendable {
         case fired(UUID)
@@ -65,9 +72,7 @@ extension AppState {
         if job.pausedReason != nil { return RunJobURL.pausedReason(job) }
         if !job.enabled { return RunJobURL.disabledReason }
         let windowStart = urlClock().addingTimeInterval(-RunJobURL.window)
-        guard (try? resolveHeldURLFires(job: job, windowStart: windowStart)) != nil else {
-            return RunJobURL.ledgerUnreadableReason
-        }
+        pruneHeldURLFires(job: job, windowStart: windowStart)
         let batch = urlFireBatches[job.id]
         // Rows from before the batch, plus every one of the batch's own fires: a fire in flight
         // or held counts once, whether or not its row has landed yet.
@@ -82,42 +87,56 @@ extension AppState {
     /// Fires `job` from a link and counts the fire against the limit until its run has started
     /// or it is gone. The one place a URL fire is dispatched, so nothing fires uncounted.
     func fireByURL(_ job: Job, to iris: UUID) -> Task<JobRunner.Admission?, Never>? {
-        guard let fire = runJobByHand(job: job, origin: .url, announceTo: iris) else { return nil }
         let now = urlClock()
+        let ticket = URLFireTicket()
+        let jobId = job.id
+        // Settled on the runner's answer for this fire, not when `fire` returns: a run whose
+        // held slot keeps being refilled keeps `fire`'s loop going for hours.
+        let onDecided: @Sendable (FireDecision) async -> Void = { [weak self] decision in
+            await MainActor.run { self?.urlFireDecided(ticket, jobId: jobId, sent: now, decision) }
+        }
+        guard let fire = runJobByHand(job: job, origin: .url, announceTo: iris, onDecided: onDecided) else { return nil }
         var batch = urlFireBatches[job.id] ?? URLFireBatch(since: now)
         batch.dispatched.append(now)
         batch.pending += 1
         urlFireBatches[job.id] = batch
         let task = Task { [weak self] in
             let admission = await fire.value
-            self?.urlFireSettled(jobId: job.id, dispatchedAt: now, held: admission == .queued)
+            // A fire the runner never saw (no runner yet) is answered here instead.
+            self?.urlFireDecided(ticket, jobId: jobId, sent: now,
+                                 FireDecision(admission: admission, holdGeneration: nil))
             return admission
         }
         urlFireTask = task
         return task
     }
 
-    private func urlFireSettled(jobId: UUID, dispatchedAt: Date, held: Bool) {
+    /// One URL fire's answer, once. A run's row is begun by now and every refusal's row written,
+    /// so the fire stops being outstanding, unless it was held: then it waits for the held run.
+    func urlFireDecided(_ ticket: URLFireTicket, jobId: UUID, sent: Date, _ decision: FireDecision) {
+        guard !ticket.decided else { return }
+        ticket.decided = true
         guard var batch = urlFireBatches[jobId] else { return }
         batch.pending -= 1
-        // A held fire's run starts later, as `url`; until then the batch keeps counting it.
-        if held { batch.held.append(dispatchedAt) }
+        if decision.admission == .queued {
+            batch.held.append(HeldURLFire(sent: sent, generation: decision.holdGeneration ?? Int.max))
+        }
         urlFireBatches[jobId] = batch.isOutstanding ? batch : nil
     }
 
-    /// Drops the held fires whose run has started, and closes the batch when nothing in it is
-    /// outstanding: with none, every fire's row is written and the rows alone are the count. A
-    /// held fire has run once a `url` row started after it was sent; one the runner dropped
-    /// instead (a policy switch, a delete) is let go once it has left the window. Not keyed on
-    /// the job's `queuedFire`: on a busy `queue` or watch job something is nearly always held,
-    /// and a batch that waited for an empty slot would stay open, refusing every link, for hours.
-    private func resolveHeldURLFires(job: Job, windowStart: Date) throws {
+    /// The held run of `generation` has begun its row (or was answered otherwise): every URL fire
+    /// held into that hold, or an earlier one, is now that run's row.
+    func heldURLFireDecided(jobId: UUID, generation: Int) {
+        guard var batch = urlFireBatches[jobId] else { return }
+        batch.held.removeAll { $0.generation <= generation }
+        urlFireBatches[jobId] = batch.isOutstanding ? batch : nil
+    }
+
+    /// Lets go of held fires that have left the window: one the runner dropped instead of running
+    /// (a policy switch, a delete, a failed hold) would otherwise hold the batch open for good.
+    private func pruneHeldURLFires(job: Job, windowStart: Date) {
         guard var batch = urlFireBatches[job.id], !batch.held.isEmpty else { return }
-        var still: [Date] = []
-        for sent in batch.held where sent >= windowStart {
-            if try store.ledger.urlFires(jobId: job.id, since: sent) == 0 { still.append(sent) }
-        }
-        batch.held = still
+        batch.held.removeAll { $0.sent < windowStart }
         urlFireBatches[job.id] = batch.isOutstanding ? batch : nil
     }
 

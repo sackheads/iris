@@ -4099,8 +4099,11 @@ class AppState {
                     } else if updated.pausedReason == JobScheduler.unmatchableReason {
                         updated.pausedReason = nil
                     }
-                    try ledger.upsert(updated)
+                    // A cron that never matches replaces even the owner's pause, and lifting that
+                    // pause turns the link off (`JobLedger.upsert`): said like every other clear.
+                    let outcome = try ledger.upsert(updated)
                     emitCommandOutput(JobsCommand.rescheduledText(updated), format: .markdown, to: convId)
+                    if outcome.urlTriggerCleared { announceURLTriggerCleared(jobId: job.id, jobName: job.name) }
                 }
             } catch {
                 emitCommandOutput("Could not reschedule that job: \(error).", format: .markdown, to: convId)

@@ -121,6 +121,12 @@ enum RunJobURL {
     }
 }
 
+/// A URL fire the `queue` policy is holding: when it was sent, and which hold it joined.
+struct HeldURLFire: Equatable, Sendable {
+    let sent: Date
+    let generation: Int
+}
+
 /// The line a coalesced URL refusal keeps updating, by job id or `unmatched`.
 struct URLRefusalLine: Sendable {
     let messageId: UUID
@@ -134,13 +140,13 @@ struct URLRefusalLine: Sendable {
 /// every one and with no window filter, instead of any row started at or after `since`: each
 /// fire is counted once, whether its row has landed or not, and never less.
 ///
-/// A fire is outstanding while its task runs, and after that while the `queue` policy holds it
-/// (`held`, by dispatch time): its run, recorded as `url`, has not started yet.
+/// A fire is outstanding until the runner reports its own answer (`pending`), and after that,
+/// when the answer was `.queued`, until the held run it joined has begun (`held`).
 struct URLFireBatch: Equatable, Sendable {
     let since: Date
     var dispatched: [Date] = []
     var pending = 0
-    var held: [Date] = []
+    var held: [HeldURLFire] = []
 
     var isOutstanding: Bool { pending > 0 || !held.isEmpty }
 }

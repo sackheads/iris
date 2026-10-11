@@ -239,6 +239,24 @@ struct URLTriggerClearTests {
         #expect(await announced.ids == [job.id])
     }
 
+    @Test("/jobs reschedule to a cron that never matches, on an owner-paused job, turns it off and says so")
+    func jobsRescheduleUnmatchableAnnounces() throws {
+        let store = try ConversationStore.inMemory()
+        let app = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        app.conversations.removeAll()
+        app.selectedConversationId = app.createNewConversation()
+        let job = Job(name: "pr-sweep", prompt: "sweep", trigger: .schedule(.interval(seconds: 60)),
+                      pausedReason: JobsCommand.pausedByUserReason)
+        try store.ledger.upsert(job)
+        try store.ledger.setURLTrigger(jobId: job.id, tokenHash: Self.digest)
+
+        app.sendMessage("/jobs reschedule pr-sweep 0 0 30 2 *")
+
+        #expect(try store.ledger.job(id: job.id)?.pausedReason == JobScheduler.unmatchableReason)
+        #expect(try store.ledger.job(id: job.id)?.urlTrigger == false)
+        #expect(irisLines(app).contains(AppState.urlTriggerClearedLine("pr-sweep")), "not cleared silently")
+    }
+
     @Test("/jobs reschedule keeps it")
     func jobsRescheduleKeeps() throws {
         let store = try ConversationStore.inMemory()

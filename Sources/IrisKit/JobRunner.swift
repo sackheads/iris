@@ -115,6 +115,11 @@ actor JobRunner {
     /// the held origin rather than merged into it, so no merge rule can lose it: whatever origin
     /// the hold keeps, the re-fire records `url` and the URL limit counts it.
     private var queuedURLFires: Set<UUID> = []
+    /// Which hold a job's held slot is, by job: taking a held fire moves the job to the next one.
+    /// A URL fire answered `.queued` is told the generation it joined, and the held run reports
+    /// the generation it was taken from, so the URL handler releases exactly the links that run
+    /// stood in for and none held after it was taken.
+    private var holdGenerations: [UUID: Int] = [:]
     /// What a watch has seen since the fire that was held, and what it counted seeing it —
     /// `WatchCoordinator.takeHeldPaths` in the app, injected here because the coordinator owns the
     /// runner's fire handler and a reference the other way would be a cycle (and, in a test, a
@@ -350,16 +355,41 @@ actor JobRunner {
     /// only `WatchCoordinator` can count. It is stamped on the row this fire begins, with
     /// `delivered` and `pathsWithheld` filled in from the prompt build — and, like `note`, it
     /// belongs to the caller's fire alone: a held fire taken afterwards is a different burst.
+    ///
+    /// `onDecided` hears the caller's own answer as soon as it is final, with any row it writes
+    /// already written (a run's row begun), rather than when this returns: a run that keeps a
+    /// `queue` job's held slot refilled keeps this loop going for as long as that lasts, and the
+    /// URL limit must not count a link as outstanding for all of it (D6 decision 13).
     @discardableResult
-    func fire(job: Job, origin: FireOrigin, note: String? = nil,
-              watch: WatchSummary? = nil) async -> Admission? {
+    func fire(job: Job, origin: FireOrigin, note: String? = nil, watch: WatchSummary? = nil,
+              onDecided: (@Sendable (FireDecision) async -> Void)? = nil) async -> Admission? {
+        let state = self.state
+        let report = PassReport(jobId: job.id, onDecided: onDecided, onHeldURLDecided: { jobId, generation in
+            await MainActor.run { state?.heldURLFireDecided(jobId: jobId, generation: generation) }
+        })
+        let decided = await fireLoop(job: job, origin: origin, note: note, watch: watch, report: report)
+        // Whatever pass the loop ended on, its answer is final now.
+        await reportPass(report, decided)
+        return decided
+    }
+
+    /// Hands a pass's final answer to whoever is waiting for it, once.
+    private func reportPass(_ report: PassReport, _ admission: Admission?) async {
+        if let call = report.take(admission) { await call() }
+    }
+
+    private func fireLoop(job: Job, origin: FireOrigin, note: String?, watch: WatchSummary?,
+                          report: PassReport) async -> Admission? {
         var origin = origin
         var note = note
         var watch = watch
         var decided: Admission?
+        // The hold generation the current pass was taken from; nil for the caller's own pass.
+        var takenGeneration: Int?
         // A loop, not recursion: the `queue` policy can hand this straight back a trigger, and a
         // busy job would otherwise grow one stack frame per held fire.
         while true {
+            report.begin(origin: origin, isCaller: decided == nil, generation: takenGeneration)
             let current: Job
             do {
                 guard let stored = try ledger.job(id: job.id) else { return decided }
@@ -430,6 +460,8 @@ actor JobRunner {
                 return decided
             case .queued:
                 hold(fire: at, for: current, origin: origin, note: note)
+                // Held again: the URL fires it stood in for are in the new hold, still waiting.
+                report.reheld(generation: holdGenerations[current.id, default: 0])
                 return decided
             case .pauseBreaker(let count):
                 await pause(job: current, origin: origin,
@@ -458,6 +490,7 @@ actor JobRunner {
                 inFlight.remove(current.id)
                 await reportRunning(current, -1)
                 if isCallersFire { decided = refusal }
+                await reportPass(report, refusal)
                 // Recorded by the branch above, on the row it wrote; a held fire taken next is a
                 // different fire and must not claim the count again. The burst summary goes with
                 // it, for the same reason.
@@ -466,6 +499,7 @@ actor JobRunner {
                 // A fire held while the gate was being evaluated is still owed an answer, and the
                 // gate is asked again for it: one held fire at a time, so this terminates.
                 guard let held = takeQueuedFire(job: current) else { return decided }
+                takenGeneration = held.generation
                 let merged = await mergedHeldOrigin(held.origin, jobId: current.id)
                 origin = FireOrigin.held(merged.origin, byURL: held.byURL)
                 watch = merged.watch
@@ -473,7 +507,9 @@ actor JobRunner {
                 continue
             }
             await run(job: current, origin: origin, limits: limits, gate: gate, note: note,
-                      watch: watch)
+                      watch: watch, afterBegin: { await self.reportPass(report, .run) })
+            // A run whose row could not be begun ends here too: its answer is final either way.
+            await reportPass(report, .run)
             note = nil
             // The summary describes the burst the *caller* handed over, and it is now on that
             // run's row. A held fire taken next is a different burst, whose arithmetic only the
@@ -484,6 +520,7 @@ actor JobRunner {
             await reportRunning(current, -1)
 
             guard let held = takeQueuedFire(job: current) else { return decided }
+            takenGeneration = held.generation
             // The held fire's own origin, wrapped rather than replaced: what woke the job is what
             // the retry ladder decides on, and re-entering as a bare "queued" erased it (R7). Its
             // own catch-up count comes back with it, for the same reason: this pass *is* that fire.
@@ -667,7 +704,8 @@ actor JobRunner {
     /// turn, and a card only if it asks for one. Modelled on `recordGateRow` — begin, finish, then
     /// the retry ladder — so a built-in sits on the same ladder as every other job. Tokens are
     /// zero by construction, which is why admission did not ask about the budgets.
-    private func runBuiltin(_ name: String, job: Job, origin: FireOrigin, note: String?) async {
+    private func runBuiltin(_ name: String, job: Job, origin: FireOrigin, note: String?,
+                            afterBegin: (() async -> Void)? = nil) async {
         let startedAt = now()
         let run = JobRun(jobId: job.id, jobName: job.name, triggerKind: origin.triggerKind,
                          startedAt: startedAt)
@@ -677,6 +715,7 @@ actor JobRunner {
             print("[JobRunner] not running \(job.name): could not record the run: \(error)")
             return
         }
+        await afterBegin?()
         do { try ledger.setLastRun(jobId: job.id, at: startedAt) }
         catch { print("[JobRunner] could not stamp the last run of \(job.name): \(error)") }
 
@@ -851,7 +890,7 @@ actor JobRunner {
     /// The trigger held back while this job ran, cleared as it is taken — so a trigger arriving
     /// during the *next* run is what refills the slot rather than this one firing forever. `nil`
     /// when nothing was held.
-    private func takeQueuedFire(job: Job) -> (origin: FireOrigin, note: String?, byURL: Bool)? {
+    private func takeQueuedFire(job: Job) -> (origin: FireOrigin, note: String?, byURL: Bool, generation: Int)? {
         let stored: Job?
         do { stored = try ledger.job(id: job.id) } catch {
             print("[JobRunner] could not take the queued fire for \(job.name): \(error)")
@@ -886,9 +925,11 @@ actor JobRunner {
             print("[JobRunner] could not clear the queued fire for \(job.name): \(error)")
             return nil
         }
+        let generation = holdGenerations[job.id, default: 0]
+        holdGenerations[job.id] = generation + 1
         return (queuedOrigins.removeValue(forKey: job.id) ?? .schedule,
                 queuedNotes.removeValue(forKey: job.id),
-                queuedURLFires.remove(job.id) != nil)
+                queuedURLFires.remove(job.id) != nil, generation)
     }
 
     /// One line with the catch-up count folded in, for the paths that have no card to put it on.
@@ -963,10 +1004,11 @@ actor JobRunner {
     ///
     /// Private: `fire` is the only way in, so nothing can start a run that skipped admission.
     private func run(job: Job, origin: FireOrigin, limits: JobLimits, gate: GateContext? = nil,
-                     note: String? = nil, watch: WatchSummary? = nil) async {
+                     note: String? = nil, watch: WatchSummary? = nil,
+                     afterBegin: (() async -> Void)? = nil) async {
         // Before anything that opens a conversation: a built-in has no turn and no transcript.
         if case .builtin(let name) = job.action {
-            await runBuiltin(name, job: job, origin: origin, note: note)
+            await runBuiltin(name, job: job, origin: origin, note: note, afterBegin: afterBegin)
             return
         }
         // L1: a grant on a read-only row is inert — never stamped, never checked.
@@ -1014,6 +1056,7 @@ actor JobRunner {
             await closeSession(conversationId, status: "not recorded")
             return
         }
+        await afterBegin?()
         do {
             // Here, not in the scheduler: this is the moment a turn actually starts, and the
             // scheduler hands triggers over before admission has decided anything (§4).
@@ -2004,6 +2047,62 @@ actor DeadlineFlag {
         // this whole mechanism exists to remove.
         precondition(waiter == nil, "DeadlineFlag has one waiter: the run that owns the ending")
         return await withCheckedContinuation { self.waiter = $0 }
+    }
+}
+
+/// The caller's own answer from `JobRunner.fire`, reported as soon as it is final (D6 decision 13).
+/// `holdGeneration` is set when the answer is `.queued`: the hold the fire joined, which the held
+/// run reports again when it begins, so the URL handler knows which links it stood in for.
+struct FireDecision: Equatable, Sendable {
+    let admission: JobRunner.Admission?
+    let holdGeneration: Int?
+}
+
+/// One fire's passes, as `JobRunner.fire` walks them: reports each pass's answer once, the
+/// caller's to `onDecided` and a held pass carrying a URL fire to `onHeldURLDecided`. Used only
+/// on the runner's actor; `take` hands back what to await, so nothing non-Sendable crosses.
+final class PassReport {
+    private let jobId: UUID
+    private let onDecided: (@Sendable (FireDecision) async -> Void)?
+    private let onHeldURLDecided: @Sendable (UUID, Int) async -> Void
+    private var isCaller = true
+    private var carriesURL = false
+    private var generation: Int?
+    private var queuedGeneration: Int?
+    private var done = false
+
+    init(jobId: UUID, onDecided: (@Sendable (FireDecision) async -> Void)?,
+         onHeldURLDecided: @escaping @Sendable (UUID, Int) async -> Void) {
+        self.jobId = jobId
+        self.onDecided = onDecided
+        self.onHeldURLDecided = onHeldURLDecided
+    }
+
+    func begin(origin: FireOrigin, isCaller: Bool, generation: Int?) {
+        self.isCaller = isCaller
+        carriesURL = origin.carriesURL
+        self.generation = generation
+        queuedGeneration = nil
+        done = false
+    }
+
+    /// The pass was held again. The caller hears which hold it joined; a held pass reports
+    /// nothing, because the URL fires it stood in for are waiting in that new hold.
+    func reheld(generation: Int) {
+        if isCaller { queuedGeneration = generation } else { done = true }
+    }
+
+    func take(_ admission: JobRunner.Admission?) -> (@Sendable () async -> Void)? {
+        guard !done else { return nil }
+        done = true
+        if isCaller {
+            guard let onDecided else { return nil }
+            let decision = FireDecision(admission: admission, holdGeneration: queuedGeneration)
+            return { await onDecided(decision) }
+        }
+        guard carriesURL, let generation else { return nil }
+        let hook = onHeldURLDecided, jobId = self.jobId
+        return { await hook(jobId, generation) }
     }
 }
 

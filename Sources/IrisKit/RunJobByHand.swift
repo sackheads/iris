@@ -9,7 +9,8 @@ extension AppState {
     /// `/jobs run` speaks in command output, as before. A URL fire speaks in one system line in
     /// `conversationId` (Iris), updated in place once admission answers (plan note 9).
     @discardableResult
-    func runJobByHand(job: Job, origin: FireOrigin, announceTo conversationId: UUID) -> Task<JobRunner.Admission?, Never>? {
+    func runJobByHand(job: Job, origin: FireOrigin, announceTo conversationId: UUID,
+                      onDecided: (@Sendable (FireDecision) async -> Void)? = nil) -> Task<JobRunner.Admission?, Never>? {
         let byURL = origin.root == .url
         // Admission drops a paused or disabled job without a word, and both are states the user
         // has to undo before a hand-started fire can do anything. Saying so before anything is
@@ -47,7 +48,7 @@ extension AppState {
                                      byURL: byURL, lineId: lineId, to: conversationId)
                 return nil
             }
-            let admission = await runner.fire(job: job, origin: origin)
+            let admission = await runner.fire(job: job, origin: origin, onDecided: onDecided)
             guard let self else { return admission }
             let text: String
             if admission == nil {

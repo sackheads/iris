@@ -498,6 +498,76 @@ struct RunJobURLTests {
         _ = try await settle(tasks)
     }
 
+    @Test("a link that starts an idle queue job's long loop is settled on its own answer, not when the loop ends")
+    func longLoopSettlesOnDecision() async throws {
+        let (store, app, job, client, minted) = try queueApp()
+        let runner = try #require(await app.engine.jobRunner())
+        var tasks: [Task<JobRunner.Admission?, Never>] = []
+
+        // L1 starts the job: its `fire` is now the job's loop.
+        #expect(open(app, minted, into: &tasks) == .fired(job.id))
+        try await client.waitForArrivals(1)
+        #expect(app.urlFireBatches[job.id] == nil, "settled once its row was begun, with its run still going")
+        // Every run, a manual fire is held, so the loop keeps going.
+        var others: [JobRunner.Admission?] = []
+        others.append(await runner.fire(job: job, origin: .manual))
+        await client.turnstile.release()
+        try await client.waitForArrivals(2)
+        others.append(await runner.fire(job: job, origin: .manual))
+        #expect(others == [.queued, .queued])
+        #expect(app.urlFireBatches[job.id] == nil, "L1's run began: nothing of it is outstanding")
+
+        // An hour later, with L1's loop still running: three fresh links are admitted.
+        app.urlClock = { Date().addingTimeInterval(RunJobURL.window + 1) }
+        for _ in 0..<3 { #expect(open(app, minted, into: &tasks) == .fired(job.id)) }
+        #expect(open(app, minted, into: &tasks) == .refused)
+
+        await client.turnstile.release()
+        try await client.waitForArrivals(3)
+        await client.turnstile.release()
+        _ = try await settle(tasks)
+        _ = try store.ledger.runs(jobId: job.id, limit: 10)
+    }
+
+    @Test("a held run that is itself held again leaves its links waiting in the new hold")
+    func reheldPassKeepsItsLinks() async throws {
+        let job = Job(name: "url-rehold", prompt: "Reply with just the word tick.",
+                      trigger: .fsEvent(FSWatch(path: "/tmp/rehold")), policy: JobPolicy(overlap: .queue))
+        let (store, app, _) = try makeApp([job])
+        app.autoApproveTools = true
+        let client = TurnstileClient()
+        app.installEngine(IrisEngine(state: app, tier: .medium, client: client, protectionEnabled: false, sessionPeerCount: 0))
+        let minted = try optIn(job, store)
+        let runner = try #require(await app.engine.jobRunner())
+        // Parks the held pass between being taken and being admitted, so another fire can start.
+        let gate = JobSchedulerTests.Gate()
+        await runner.setHeldPathsSource { _ in await gate.arriveAndWait(); return ([], nil) }
+
+        let owner = Task { await runner.fire(job: job, origin: .watcher(paths: ["/tmp/rehold/a"])) }
+        try await client.waitForArrivals(1)
+        #expect(await runner.fire(job: job, origin: .watcher(paths: ["/tmp/rehold/b"])) == .queued)
+        var tasks: [Task<JobRunner.Admission?, Never>] = []
+        #expect(open(app, minted, into: &tasks) == .fired(job.id))
+        #expect(try await settle(tasks) == [.queued])
+        #expect(app.urlFireBatches[job.id]?.held.map(\.generation) == [0])
+
+        await client.turnstile.release()           // the owner's run ends; hold 0 is taken
+        try await gate.waitForEntry()
+        let intruder = Task { await runner.fire(job: job, origin: .manual) }
+        try await client.waitForArrivals(2)         // it runs, so the held pass will be held again
+        await gate.open()
+        _ = try await value(of: owner)              // the held pass was answered `.queued`
+        #expect(app.urlFireBatches[job.id]?.held.map(\.generation) == [0],
+                "the link waits in hold 1 now: its run has not begun")
+
+        await client.turnstile.release()
+        try await client.waitForArrivals(3)         // hold 1: the watch and the link, as url
+        await client.turnstile.release()
+        _ = try await value(of: intruder)
+        #expect(app.urlFireBatches[job.id] == nil)
+        #expect(try store.ledger.runs(jobId: job.id, limit: 10).contains { $0.triggerKind == "url" })
+    }
+
     @Test("a URL fire merged into a held watch fire keeps both: the watch's paths and the url row")
     func mergedHoldKeepsTheURL() async throws {
         for urlFirst in [false, true] {
@@ -538,7 +608,7 @@ struct RunJobURLTests {
         }
     }
 
-    @Test("a held fire is released once a url row began after it was sent, whatever the job still holds")
+    @Test("a held fire is released when the held run of its hold begins, and not by a later hold's")
     func heldFireResolution() throws {
         let job = digest()
         let (store, app, _) = try makeApp([job])
@@ -548,20 +618,24 @@ struct RunJobURLTests {
         let d1 = now.addingTimeInterval(-600), d2 = d1.addingTimeInterval(1), d3 = d1.addingTimeInterval(2)
         func current() throws -> Job { try #require(try store.ledger.job(id: job.id)) }
 
-        // No url row since it was sent: counted.
-        app.urlFireBatches[job.id] = URLFireBatch(since: d1, dispatched: [d1, d2, d3], pending: 0, held: [d1])
-        #expect(app.urlFireRefusal(for: try current()) == RunJobURL.overLimitReason)
-        #expect(app.urlFireBatches[job.id]?.held == [d1])
-
-        // Its run began (url rows since d1), while the job holds another fire: released, and the
-        // batch closes; the rows alone count.
-        try store.ledger.setQueuedFire(jobId: job.id, at: now)
+        // d1 waits in hold 4, d2 in hold 5 (joined after hold 4 was taken).
+        app.urlFireBatches[job.id] = URLFireBatch(since: d1, dispatched: [d1, d2, d3], pending: 0,
+                                                  held: [HeldURLFire(sent: d1, generation: 4),
+                                                         HeldURLFire(sent: d2, generation: 5)])
+        // Url rows landing (another fire's) release nothing: only the held run's own report does.
         try urlRows(2, for: job, store)
+        #expect(app.urlFireRefusal(for: try current()) == RunJobURL.overLimitReason)
+
+        app.heldURLFireDecided(jobId: job.id, generation: 4)
+        #expect(app.urlFireBatches[job.id]?.held == [HeldURLFire(sent: d2, generation: 5)])
+        #expect(app.urlFireRefusal(for: try current()) == RunJobURL.overLimitReason, "d2 is still waiting")
+
+        app.heldURLFireDecided(jobId: job.id, generation: 5)
+        #expect(app.urlFireBatches[job.id] == nil, "nothing outstanding: the rows alone count")
         #expect(app.urlFireRefusal(for: try current()) == nil)
-        #expect(app.urlFireBatches[job.id] == nil)
     }
 
-    @Test("a held fire the job no longer holds, with no url row since, is counted until it leaves the hour")
+    @Test("a held fire whose run never reports is counted until it leaves the hour")
     func heldFireWithoutARow() throws {
         let job = digest()
         let (store, app, _) = try makeApp([job])
@@ -569,8 +643,9 @@ struct RunJobURLTests {
         let now = Date()
         app.urlClock = { now }
         let d1 = now.addingTimeInterval(-600)
-        app.urlFireBatches[job.id] = URLFireBatch(since: d1, dispatched: [d1, d1, d1], pending: 0, held: [d1])
-        // Taken but its row not begun yet, or dropped: either way it errs strict.
+        app.urlFireBatches[job.id] = URLFireBatch(since: d1, dispatched: [d1, d1, d1], pending: 0,
+                                                  held: [HeldURLFire(sent: d1, generation: 0)])
+        // Its held run has not reported (not begun yet, or dropped): either way it errs strict.
         #expect(app.urlFireRefusal(for: try #require(try store.ledger.job(id: job.id))) == RunJobURL.overLimitReason)
 
         // Once out of the window it is let go, so a dropped hold cannot block links for ever, even
