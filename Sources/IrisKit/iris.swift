@@ -5435,6 +5435,19 @@ extension IrisEngine {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Kept for the life of the app: `NSAppleEventManager` is not documented to retain a handler.
+    private var runJobURLEvents: RunJobURLEvents?
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Here, not in did-finish: a link that launches Iris arrives between the two (Task 24).
+        // Never `application(_:open:)` or `.handlesExternalEvents`: SwiftUI opened a window per
+        // link with either (owner ruling C2).
+        guard RunJobURLEvents.shouldInstall(bundleURL: Bundle.main.bundleURL) else { return }
+        let events = RunJobURLEvents { url in AppState.shared.receiveRunJobURL(url) }
+        events.install()
+        runJobURLEvents = events
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.activate(ignoringOtherApps: true)
         // Sparkle wants its scheduled checks started after launch, not at construction.
