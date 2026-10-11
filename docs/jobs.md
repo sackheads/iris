@@ -854,8 +854,9 @@ for them — so a `permissions.json` rule cannot put a granted run's `write_file
 outside its mounts, and the `~/.iris` read carve-out does not apply to a granted run's `read_file`
 outside its mounts either (see "Grants").
 
-A background run cannot message other sessions either. `list_sessions`, `send_to_session` and
-`set_session_card` are not offered to it, and all three are refused if called anyway: delivering a
+A background run cannot message other sessions either. `list_sessions`, `describe_session`,
+`send_to_session` and `set_session_card` are not offered to it, and all four are refused if called
+anyway: delivering a
 message starts a real turn in an attended conversation — which would run the work under *that*
 conversation's approval path — and the roster is how a sender picks its target. A run reports
 through its card; it does not ask a peer to act for it, and it does not advertise itself to peers
