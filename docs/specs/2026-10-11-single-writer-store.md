@@ -47,7 +47,9 @@ Checked against `main` at `e418b29`. Paths are under `Sources/IrisKit/`.
    - The app shows an alert and quits. It never opens the store unlocked.
 5. **The payload.**
    - It is one JSON line, `{"pid", "kind": "app"|"run-job"|"seed-dev-home", "job"?}`.
-   - The holder writes it first, with `pwrite` at offset 0, and then `ftruncate`s to its length.
+   - It is written inside `claim()`, in this order: `flock`, the inode check (decision 3), `pwrite` at offset 0, then `ftruncate` to the payload's length. Nothing runs between the `flock` and the `pwrite`. If the write fails, `claim()` closes the fd and returns `.failed`.
+   - *Why:* otherwise a GUI whose write failed would hold the lock over a crashed CLI's stale `run-job` payload. If that pid had been reused, a waiting GUI would read a live `run-job` holder and wait forever.
+   - `job` is the CLI argument as typed. Resolving a name to a job needs the store.
    - It is vacated (truncated to empty) on a clean exit, by the CLI and the app.
    - The payload only describes the holder; the lock decides who holds it.
    - A reader that finds it empty, unparsable or naming a dead pid (a new holder that hasn't written yet) re-reads for up to 1 s.
@@ -62,6 +64,8 @@ Checked against `main` at `e418b29`. Paths are under `Sources/IrisKit/`.
    - It shows an alert, "Iris is already running on this home", activates the holder (`NSRunningApplication`), and exits 0.
    - When the launch carried a link (the bare-binary case), the alert says the link was not run.
    - A GUI that is itself waiting re-reads `kind` on every poll. If a second waiting GUI won the race, the loser quits the same way.
+   - A GUI that gets `.legacy` (a pre-#463 app, which never flocks) refuses and quits the same way.
+   - A `seed-dev-home` holder is waited on, like a CLI. A copy takes seconds.
 9. **A GUI that finds a CLI holder waits** (ruling 2).
    - It polls `LOCK_NB` once a second on a main-queue `DispatchSourceTimer`, never `Task.sleep`, running decision 3's check each time.
    - There is no timeout and no Stop. When it wins the lock it completes the launch (decision 11).
@@ -92,6 +96,7 @@ Checked against `main` at `e418b29`. Paths are under `Sources/IrisKit/`.
       - **`--run-job`:** builds its own `AppState(store:)` (`RunJobCLI.swift:437`). After #489, nothing it reaches names `.shared`.
       - **`--perf`, `--bench`, `--seed-dev-home`:** none names `AppState`. The tools they run reach `.shared` only through #489's paths, now gone.
       - **Tests:** `AttachmentIntegrationTests` moves to `AppState(store: .inMemory())`. A test that reaches `.shared` by any other path now crashes the suite. That is the alarm.
+    - The trap has no test disarm. That is safe only because the trap and #489 land together in PR 1; a trap without #489 would crash every test and every `--run-job` that writes a skill.
     - *Cost if wrong:* a path nobody exercised crashes. That loses nothing while the app waits; once it's open, a crash loses up to the 2 s debounce, as today.
 15. **#489, in PR 1.**
     - `ToolExecutor.execute`, the skill CRUD and `SkillCurator.curateSkills` take an `onSkillsChanged: @Sendable () async -> Void`. `IrisEngine` supplies its own `invalidateSystemPrompt()`, and `AppState.swift:4070` supplies its engine's.
@@ -152,7 +157,8 @@ Checked against `main` at `e418b29`. Paths are under `Sources/IrisKit/`.
   - an injected `flock` returning `ENOTSUP` gives `.failed`;
   - the payload round-trips, a half-written one reads as nil, and `vacate()` leaves the file empty;
   - a bare pid naming a live stub is `.legacy`.
-- **`LaunchDecision`:** the table of holder kinds, including an unknown kind after 1 s, which refuses.
+- **`LaunchDecision`:** the table of holder kinds. `app`, `.legacy`, and an unknown kind after 1 s refuse. `run-job` and `seed-dev-home` wait.
+- **`claim()`:** with an injected failing `pwrite`, the result is `.failed` and the fd is closed, so a second claim succeeds.
 - **`LaunchGate`:**
   - an injected `openStore` is never called while waiting;
   - links are held in order up to capacity, then counted, and delivered after launch;
