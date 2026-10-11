@@ -49,6 +49,9 @@ enum RunJobURL {
     static func waitAbandonedLine(_ name: String, reason: String) -> String {
         "Did not fire \(name) from the link that was waiting: \(reason)."
     }
+    static func foreignHolderNotice(pid: Int32) -> String {
+        "Another Iris process (pid \(pid)) held the store at launch. A link opened before it finishes waits for it."
+    }
     static let deletedWhileWaitingReason = "it was deleted while it waited"
     static let replacedWhileWaitingReason = "its URL trigger was turned off or replaced while it waited"
 
@@ -183,6 +186,8 @@ struct PendingURLFire: Sendable {
     let jobName: String
     let tokenHash: String
     let holder: Int32
+    /// The holder's start time when the wait began, so a reused pid ends the wait (Task 26).
+    let holderStart: ProcessStart?
     let since: Date
     let lineId: UUID
     let conversationId: UUID

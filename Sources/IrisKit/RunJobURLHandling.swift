@@ -53,12 +53,13 @@ extension AppState {
         // would make its re-check a second fire (plan note 10).
         if pendingURLFires[job.id] != nil { return .deferred(job.id) }
         if let holder = foreignStoreHolder {
-            if isProcessAlive(holder) {
+            if isForeignHolderAlive(holder) {
                 deferURLFire(job, tokenHash: digest, holder: holder, to: iris)
                 return .deferred(job.id)
             }
             // Gone since launch: never asked about again, so a reused pid cannot hold fires back.
             foreignStoreHolder = nil
+            foreignStoreHolderStart = nil
         }
         guard fireByURL(job, to: iris) != nil else { return .refused }
         return .fired(job.id)
@@ -147,7 +148,8 @@ extension AppState {
         let lineId = UUID()
         appendMessage(role: .system, content: RunJobURL.waitingLine(job.name, pid: holder), id: lineId, to: iris)
         pendingURLFires[job.id] = PendingURLFire(jobId: job.id, jobName: job.name, tokenHash: tokenHash,
-                                                 holder: holder, since: urlClock(), lineId: lineId,
+                                                 holder: holder, holderStart: foreignStoreHolderStart,
+                                                 since: urlClock(), lineId: lineId,
                                                  conversationId: iris)
         scheduleURLRecheck(job.id)
     }
@@ -162,7 +164,7 @@ extension AppState {
     /// counts the fire, so it is counted once.
     func recheckDeferredURLFire(_ jobId: UUID) {
         guard let pending = pendingURLFires[jobId] else { return }
-        switch URLDeferral.decide(holderAlive: isProcessAlive(pending.holder),
+        switch URLDeferral.decide(holderAlive: isHolderAlive(pending.holder, started: pending.holderStart),
                                   waited: urlClock().timeIntervalSince(pending.since)) {
         case .wait:
             scheduleURLRecheck(jobId)
@@ -178,6 +180,7 @@ extension AppState {
         case .fire:
             pendingURLFires[jobId] = nil
             foreignStoreHolder = nil
+            foreignStoreHolderStart = nil
             let job: Job
             switch deferredFireCheck(pending) {
             case .failure(let refusal): return abandonDeferredFire(pending, refusal)

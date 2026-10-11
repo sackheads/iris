@@ -4240,6 +4240,11 @@ class AppState {
     /// lives. nil once it has gone, so a reused pid cannot hold fires back later.
     @ObservationIgnored var foreignStoreHolder: Int32?
     @ObservationIgnored var isProcessAlive: @Sendable (Int32) -> Bool = { GUILock.isAlive($0) }
+    /// When `foreignStoreHolder` started, recorded at launch: a pid whose process started at any
+    /// other time is a reused pid, not the holder (Task 26, the pid-reuse carry-forward).
+    @ObservationIgnored var foreignStoreHolderStart: ProcessStart?
+    /// A process's start time. A seam for tests.
+    @ObservationIgnored var processStart: @Sendable (Int32) -> ProcessStart? = { ProcessStart.of($0) }
     /// Schedules the deferral's re-check, on a dispatch queue. A seam for tests.
     @ObservationIgnored var urlDeferralTimer = URLDeferralTimer.dispatch
     /// The URL fires waiting for `foreignStoreHolder`, one per job (plan note 10). Each counts as
