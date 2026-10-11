@@ -766,18 +766,25 @@ actor IrisEngine {
     /// review, M2). A second flattener would drift from this one; there is deliberately only this.
     ///
     /// Removed: every line break (Unicode ones included — `.newlines` covers U+0085/2028/2029, not
-    /// just LF/CR), the `|` the listing delimits on, and the `"` that could close the framing's
-    /// quoting early. Capped as well: `set_session_card` bounds every field it writes — name and
+    /// just LF/CR), the `|` the listing delimits on, the `"` that could close the framing's
+    /// quoting early, and — #480 review item 2 — `\u{FF02}` (fullwidth quote), which reads as a
+    /// quote to a person but would otherwise survive untouched, plus every Unicode category-Cf
+    /// scalar (zero-width spaces, bidi controls) that a card author could otherwise hide inside a
+    /// field. Capped as well: `set_session_card` bounds every field it writes — name and
     /// description (#246), then lane and skills (#469) — and `set_workspace` refuses an over-long
     /// path (#273), but a card or workspace stored before any of those fixes is still whatever its
     /// author sent, so the cap here is the one that holds for every field on every path — an
     /// unbounded one is a context-flooding channel on its own.
     nonisolated static func flattenCardField(_ value: String, cap: Int) -> String {
-        let flattened = value
+        let noFormatScalars = String(String.UnicodeScalarView(value.unicodeScalars.filter {
+            $0.properties.generalCategory != .format
+        }))
+        let flattened = noFormatScalars
             .replacingOccurrences(of: "\r\n", with: " ")            // one space, not two
             .components(separatedBy: .newlines).joined(separator: " ")
             .replacingOccurrences(of: "|", with: "/")                // the listing's row delimiter
             .replacingOccurrences(of: "\"", with: "'")
+            .replacingOccurrences(of: "\u{FF02}", with: "'")          // fullwidth quote reads as one
         return capCardField(flattened, cap: cap)
     }
 
@@ -3943,77 +3950,55 @@ actor IrisEngine {
             // leave them green while proving nothing about the render path.
             let boundedName = Self.capCardField(name, cap: Self.cardNameCap)
             let boundedDescription = Self.capCardField(description, cap: Self.cardDescriptionCap)
-            let (existing, role, taken) = await MainActor.run { () -> (SessionCard?, String?, [String]) in
-                guard let s = localState else { return (nil, nil, []) }
-                let me = s.conversations.first { $0.id == conversationId }
-                let clash = SessionRoles.sessions(named: boundedName, in: s.conversations, excluding: conversationId)
-                // The clashing session's own name comes first — it is the actual answer to "who's
-                // using it" — then up to 19 other active names, so the refusal is useful even when
-                // several sessions happen to share the name.
-                let clashNames = clash.compactMap { id in s.conversations.first { $0.id == id }?.sessionCard?.name }
-                let names: [String]
-                if clash.isEmpty {
-                    names = []
-                } else {
-                    let others = s.conversations
-                        .filter { $0.id != conversationId && !$0.isArchived && $0.isUserFacing && !clash.contains($0.id) }
-                        .compactMap { $0.sessionCard?.name }
-                    names = Array((clashNames + others).prefix(20))
-                }
-                return (me?.sessionCard, me?.role, names)
+            // #480 review item 2: "iris" is the pinned conversation's address, not a card a
+            // worker can claim — checked here, not inside the atomic hop below, since it depends
+            // only on the name itself, never on other sessions' state.
+            guard SessionRoles.canonicalKey(boundedName) != "iris" else {
+                result = "\"iris\" is reserved for the pinned conversation. Pick a different name."
+                return result
             }
-            guard taken.isEmpty else {
+            let rawLane = functionCall.args["lane"]?.stringValue
+            let rawSkills: [JSONValue]?
+            if case .array(let items)? = functionCall.args["skills"] {
+                rawSkills = items
+            } else {
+                rawSkills = nil
+            }
+            // #480 review item 1: the clash check, the existing-card/role read, the skills-need-
+            // role gate, and the write all happen inside this one call — see
+            // `AppState.setSessionCard(for:boundedName:boundedDescription:rawLane:rawSkills:)`.
+            let outcome = await MainActor.run { () -> AppState.SetSessionCardOutcome in
+                localState?.setSessionCard(for: conversationId, boundedName: boundedName,
+                                           boundedDescription: boundedDescription,
+                                           rawLane: rawLane, rawSkills: rawSkills) ?? .gone
+            }
+            switch outcome {
+            case .gone:
+                result = "That conversation no longer exists."
+            case .nameTaken(let taken):
                 result = "Name taken — another active session uses it. Names in use: "
                     + taken.map { "\"\(Self.flattenCardField($0, cap: Self.cardNameCap))\"" }.joined(separator: ", ")
                     + ". Pick a different name."
-                return result
-            }
-            var lane = existing?.lane
-            var laneTruncated = false
-            if let raw = functionCall.args["lane"]?.stringValue {
-                let trimmed = raw.trimmingCharacters(in: .whitespaces)
-                let capped = Self.capCardField(trimmed, cap: Self.cardLaneCap)
-                laneTruncated = !trimmed.isEmpty && capped != trimmed
-                lane = trimmed.isEmpty ? nil : capped
-            }
-            var skills = existing?.skills ?? []
-            var skillsTruncated = false
-            if case .array(let items)? = functionCall.args["skills"] {
-                guard role != nil || items.isEmpty else {
-                    result = "Skills are for sessions holding a role, which the user assigns. Not stored; set name, description and lane only."
-                    return result
+            case .skillsNeedRole:
+                result = "Skills are for sessions holding a role, which the user assigns. Not stored; set name, description and lane only."
+            case .stored(let card, let laneTruncated, let skillsTruncated):
+                // Echo what was stored, as the listing will render it (#418), and say so when it
+                // was cut: `list_sessions` shows a session its peers, never its own row, so this
+                // reply is where a session learns what peers actually read.
+                let truncated = boundedName != name || boundedDescription != description || laneTruncated || skillsTruncated
+                var shown = "Peers see: name: \"\(Self.flattenCardField(card.name, cap: Self.cardNameCap))\" | doing: \"\(Self.flattenCardField(card.description, cap: Self.cardDescriptionCap))\""
+                if let lane = card.lane { shown += " | lane: \"\(Self.flattenCardField(lane, cap: Self.cardLaneCap))\"" }
+                // Skill ids are the model's own text, same as name/description/lane — flattened
+                // here too, or a hostile id (newline, `|`, `"`) would forge a row or close the
+                // framing's quoting in this echo, same class of bug `flattenCardField`'s doc
+                // comment describes.
+                if !card.skills.isEmpty {
+                    shown += " | skills: " + card.skills.map { Self.flattenCardField($0.id, cap: Self.skillIdCap) }.joined(separator: ", ")
                 }
-                // Drop malformed items first, then cap the count — so up to `skillsMax` VALID
-                // skills survive even when an earlier item in the model's array was malformed,
-                // rather than a bad item at position 2 silently costing a good one at position 6.
-                let validSkills = items.compactMap(Self.boundedSkill)
-                let parsed = validSkills.prefix(Self.skillsMax)
-                skills = parsed.map(\.0)
-                // Truncated either because a kept skill's own field was cut, or because more than
-                // `skillsMax` valid skills were supplied and the excess was dropped — both are
-                // "what peers see is not what you sent," so both fire the same banner.
-                skillsTruncated = parsed.contains { $0.1 } || validSkills.count > Self.skillsMax
+                result = (truncated
+                    ? "Card updated — over-long fields were truncated to what the peer listing shows. "
+                    : "Card updated. ") + shown
             }
-            await MainActor.run {
-                localState?.setSessionCard(for: conversationId,
-                                           SessionCard(name: boundedName, description: boundedDescription,
-                                                       lane: lane, skills: skills))
-            }
-            // Echo what was stored, as the listing will render it (#418), and say so when it was
-            // cut: `list_sessions` shows a session its peers, never its own row, so this reply is
-            // where a session learns what peers actually read.
-            let truncated = boundedName != name || boundedDescription != description || laneTruncated || skillsTruncated
-            var shown = "Peers see: name: \"\(Self.flattenCardField(boundedName, cap: Self.cardNameCap))\" | doing: \"\(Self.flattenCardField(boundedDescription, cap: Self.cardDescriptionCap))\""
-            if let lane { shown += " | lane: \"\(Self.flattenCardField(lane, cap: Self.cardLaneCap))\"" }
-            // Skill ids are the model's own text, same as name/description/lane — flattened here
-            // too, or a hostile id (newline, `|`, `"`) would forge a row or close the framing's
-            // quoting in this echo, same class of bug `flattenCardField`'s doc comment describes.
-            if !skills.isEmpty {
-                shown += " | skills: " + skills.map { Self.flattenCardField($0.id, cap: Self.skillIdCap) }.joined(separator: ", ")
-            }
-            result = (truncated
-                ? "Card updated — over-long fields were truncated to what the peer listing shows. "
-                : "Card updated. ") + shown
         } else if functionCall.name == "list_jobs" || functionCall.name == "get_job_run" {
             // Declaration gating stops a well-behaved model from being offered these; dispatch
             // reads the function name alone, so the invariant ("in no other conversation") is

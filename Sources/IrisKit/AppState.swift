@@ -1781,6 +1781,74 @@ class AppState {
         markChanged(conversationId, .metadata)
     }
 
+    /// #480 review item 1. All sessions share one `IrisEngine` actor, so a `set_session_card`
+    /// handler that checked the name clash in one `MainActor.run` and wrote the card in a second
+    /// could have another session's turn interleave at the `await` between them: two sessions
+    /// could both pass the clash check for the same name, or a `/role` could move in between the
+    /// read of this session's role and the write, so the skills gated on that read land on a
+    /// session that no longer holds the role. The fix is this method existing at all — the clash
+    /// check, the read of the existing card and role, the role gate on `skills`, and the write
+    /// are a single synchronous call with no suspension point inside, so the handler reaches it
+    /// through one `await` and nothing else can run on the actor in between.
+    enum SetSessionCardOutcome {
+        /// The conversation no longer exists (e.g. deleted mid-turn). Nothing was written.
+        case gone
+        /// `name` collides with an active session's card. The clashing session's own name comes
+        /// first, then up to 19 other active names, so the refusal is useful even when several
+        /// sessions share the name.
+        case nameTaken([String])
+        /// `skills` was non-empty but this session holds no role. Nothing was written.
+        case skillsNeedRole
+        /// Written. `laneTruncated`/`skillsTruncated` report whether `lane` or any `skills` field
+        /// was cut to its cap — the caller already knows whether `name`/`description` were.
+        case stored(SessionCard, laneTruncated: Bool, skillsTruncated: Bool)
+    }
+
+    /// `boundedName`/`boundedDescription` arrive already capped (#246) — that bound does not
+    /// depend on any other session's state, so the caller applies it before this call. `rawLane`
+    /// and `rawSkills` are the tool call's raw, uncapped arguments; this method does the capping
+    /// that DOES depend on current state (the role gate on `skills`) atomically with the rest.
+    @discardableResult
+    func setSessionCard(for conversationId: UUID, boundedName: String, boundedDescription: String,
+                         rawLane: String?, rawSkills: [JSONValue]?) -> SetSessionCardOutcome {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return .gone }
+        let clash = SessionRoles.sessions(named: boundedName, in: conversations, excluding: conversationId)
+        if !clash.isEmpty {
+            let clashNames = clash.compactMap { id in conversations.first { $0.id == id }?.sessionCard?.name }
+            let others = conversations
+                .filter { $0.id != conversationId && !$0.isArchived && $0.isUserFacing && !clash.contains($0.id) }
+                .compactMap { $0.sessionCard?.name }
+            return .nameTaken(Array((clashNames + others).prefix(20)))
+        }
+        let existing = conversations[idx].sessionCard
+        let role = conversations[idx].role
+
+        var lane = existing?.lane
+        var laneTruncated = false
+        if let raw = rawLane {
+            let trimmed = raw.trimmingCharacters(in: .whitespaces)
+            let capped = IrisEngine.capCardField(trimmed, cap: IrisEngine.cardLaneCap)
+            laneTruncated = !trimmed.isEmpty && capped != trimmed
+            lane = trimmed.isEmpty ? nil : capped
+        }
+        var skills = existing?.skills ?? []
+        var skillsTruncated = false
+        if let items = rawSkills {
+            guard role != nil || items.isEmpty else { return .skillsNeedRole }
+            // Drop malformed items first, then cap the count — so up to `skillsMax` VALID skills
+            // survive even when an earlier item in the model's array was malformed, rather than a
+            // bad item at position 2 silently costing a good one at position 6.
+            let validSkills = items.compactMap(IrisEngine.boundedSkill)
+            let parsed = validSkills.prefix(IrisEngine.skillsMax)
+            skills = parsed.map(\.0)
+            skillsTruncated = parsed.contains { $0.1 } || validSkills.count > IrisEngine.skillsMax
+        }
+        let card = SessionCard(name: boundedName, description: boundedDescription, lane: lane, skills: skills)
+        conversations[idx].sessionCard = card
+        markChanged(conversationId, .metadata)
+        return .stored(card, laneTruncated: laneTruncated, skillsTruncated: skillsTruncated)
+    }
+
     enum RoleAssignment: Equatable {
         case assigned(role: String, movedFrom: UUID?)
         case refused(String)

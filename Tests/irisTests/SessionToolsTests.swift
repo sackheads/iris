@@ -571,6 +571,15 @@ struct SessionToolsTests {
                 "a field under the cap must be stored exactly as written")
     }
 
+    /// #480 review item 2: a zero-width space (category Cf) is invisible but survived
+    /// `flattenCardField` unchanged before this fix, and U+FF02 (fullwidth quote) reads as a
+    /// quote to a person but did not get the same treatment as the ASCII `"`.
+    @Test("flattenCardField strips Cf scalars and maps the fullwidth quote like an ASCII one")
+    func flattenCardFieldStripsCfAndFullwidthQuote() {
+        #expect(IrisEngine.flattenCardField("swift\u{200B}worker", cap: IrisEngine.cardNameCap) == "swiftworker")
+        #expect(IrisEngine.flattenCardField("foo\u{FF02}bar", cap: IrisEngine.cardNameCap) == "foo'bar")
+    }
+
     /// Capping at write must not quietly become the only bound: the two tests above that prove the
     /// LISTING is hardened write their hostile values straight to `setSessionCard`, so they keep
     /// exercising the render path. Fixing length at the mutator instead of the handler would leave

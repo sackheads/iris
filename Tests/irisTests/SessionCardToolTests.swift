@@ -39,6 +39,38 @@ struct SessionCardToolTests {
         #expect(app.conversations.first { $0.id == a }?.sessionCard == nil)
     }
 
+    /// #480 review item 1: the clash check and the write are now one atomic call
+    /// (`AppState.setSessionCard(for:boundedName:boundedDescription:rawLane:rawSkills:)`), so a
+    /// refused call — a name clash, or skills without a role — provably writes nothing. A race
+    /// test with two engines was deliberately not added: it would be nondeterministic, and the
+    /// single `MainActor` hop makes the interleaving the old two-hop version was vulnerable to
+    /// impossible by construction rather than merely unlikely.
+    @Test("a name clash or a missing role refuses atomically: no partial write of any field")
+    func refusedCallWritesNothingAtAll() async {
+        let app = AppState(); app.conversations.removeAll()
+        let a = UUID(), b = UUID()
+        app.createNewConversation(id: a); app.createNewConversation(id: b)
+        app.setSessionCard(for: b, SessionCard(name: "taken", description: "x"))
+
+        _ = await run(["name": .string("taken"), "description": .string("y"), "lane": .string("z")], on: app, as: a)
+        #expect(app.conversations.first { $0.id == a }?.sessionCard == nil,
+                "no name, description or lane was written on the clash path")
+
+        _ = await run(["name": .string("free"), "description": .string("d"), "lane": .string("l"),
+                       "skills": .array([skill("s")])], on: app, as: a)
+        #expect(app.conversations.first { $0.id == a }?.sessionCard == nil,
+                "a skills-without-role refusal must not partially write name/description/lane either")
+    }
+
+    @Test("\"iris\" is reserved as a card name, case- and look-alike-insensitively")
+    func reservedIrisName() async {
+        let app = AppState(); app.conversations.removeAll()
+        let a = UUID(); app.createNewConversation(id: a); app.createNewConversation(id: UUID())
+        let out = await run(["name": .string("Iris"), "description": .string("d")], on: app, as: a)
+        #expect(out.contains("reserved"))
+        #expect(app.conversations.first { $0.id == a }?.sessionCard == nil)
+    }
+
     @Test("an archived session's name is free")
     func archivedNameFree() async {
         let app = AppState(); app.conversations.removeAll()

@@ -22,6 +22,32 @@ struct SessionRolesTests {
         #expect(SessionRoles.normalizedName("clear") == nil)
     }
 
+    /// #480 review item 2: one canonicalizer for the uniqueness check AND `name:` resolution —
+    /// both go through `sessions(named:)`, so proving the clash here also proves `name:` would
+    /// resolve the look-alike to the same session.
+    @Test("a look-alike quote and a hidden zero-width space both clash with the plain name")
+    func canonicalNameClash() {
+        let a = UUID(), b = UUID()
+        let app = app([a, b])
+        app.setSessionCard(for: a, SessionCard(name: "O\"Brien", description: "x"))
+        // `O"Brien` (ASCII double quote) vs `O'Brien` (apostrophe): `flattenCardField` maps `"`
+        // to `'` for both, so the canonical keys match.
+        #expect(SessionRoles.sessions(named: "O'Brien", in: app.conversations, excluding: b) == [a])
+
+        app.setSessionCard(for: b, SessionCard(name: "swift\u{200B}worker", description: "x"))
+        // U+200B ZERO WIDTH SPACE is category Cf; stripped, "swift\u{200B}worker" canonicalizes
+        // to the same key as "swiftworker".
+        #expect(SessionRoles.sessions(named: "swiftworker", in: app.conversations, excluding: a) == [b])
+    }
+
+    @Test("name: resolves a card with a look-alike quote to a single session")
+    func nameResolvesCanonical() {
+        let a = UUID(), b = UUID()
+        let app = app([a, b])
+        app.setSessionCard(for: a, SessionCard(name: "O\"Brien", description: "x"))
+        #expect(SessionDirectory.resolve("name:o'brien", in: app.conversations, excluding: b) == .success(a))
+    }
+
     @Test("assigning a held role moves it, clears the old holder's skills, and tells it")
     func moveRole() {
         let a = UUID(), b = UUID()

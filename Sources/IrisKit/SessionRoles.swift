@@ -28,12 +28,31 @@ enum SessionRoles {
         !c.isArchived && !c.isPinned && c.isUserFacing
     }
 
-    /// #469 §4.2: names are identifiers among active sessions, compared case-insensitively.
+    /// #480 review item 2: NFKC, strips Unicode format (Cf — zero-width, bidi controls) and
+    /// default-ignorable code points, then applies `flattenCardField`'s own substitutions
+    /// (`"`→`'`, `|`→`/`, every newline, and — since that function now also maps it —
+    /// `\u{FF02}`→`'`) so two names that render identically, or that differ only by an invisible
+    /// character a card author slipped in, compare equal. Collapses whitespace runs, lowercases,
+    /// and trims (the collapse's empty components double as the trim). One canonicalizer for
+    /// both the uniqueness check below and `name:` resolution (`SessionDirectory.resolve`, which
+    /// calls through `sessions(named:)`) — a second one would drift from this one the way
+    /// `flattenCardField`'s own doc comment warns against for card fields generally.
+    static func canonicalKey(_ value: String) -> String {
+        let normalized = value.precomposedStringWithCompatibilityMapping
+        let noIgnorables = String(String.UnicodeScalarView(normalized.unicodeScalars.filter {
+            !$0.properties.isDefaultIgnorableCodePoint
+        }))
+        let flattened = IrisEngine.flattenCardField(noIgnorables, cap: Int.max)
+        let collapsed = flattened.components(separatedBy: .whitespaces).filter { !$0.isEmpty }.joined(separator: " ")
+        return collapsed.lowercased()
+    }
+
+    /// #469 §4.2: names are identifiers among active sessions, compared by `canonicalKey`.
     static func sessions(named name: String, in conversations: [Conversation], excluding: UUID?) -> [UUID] {
-        let key = name.trimmingCharacters(in: .whitespaces).lowercased()
+        let key = canonicalKey(name)
         return conversations.filter {
-            $0.id != excluding && !$0.isArchived && $0.isUserFacing
-                && $0.sessionCard?.name.trimmingCharacters(in: .whitespaces).lowercased() == key
+            guard $0.id != excluding, !$0.isArchived, $0.isUserFacing, let cardName = $0.sessionCard?.name else { return false }
+            return canonicalKey(cardName) == key
         }.map(\.id)
     }
 
