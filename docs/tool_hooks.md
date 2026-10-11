@@ -17,7 +17,7 @@ The tool hook lifecycle provides granular control over the agent's interactions:
 - **`AfterAgent`**: Fired immediately after the agent finalizes its response and pushes text to the UI.
 - **`BeforeTool`**: Fired before a specific tool (e.g., `run_command`, `write_file`) is executed locally. Host `run_command` invocations run with the user's login-shell PATH captured once at app launch, so shims installed by `.zprofile`/`.zshrc` (pyenv, nvm, Homebrew) resolve without spawning a login shell per command.
 - **`AfterTool`**: Fired immediately after a specific tool finishes execution and returns its result.
-- **`Notification`**: Fired when a system notification is triggered (e.g., from a background schedule or Vibecop alert).
+- **`Notification`**: Fired when a model call fails, with the title `LLM Error` and the error's headline as the body. It does not fire for the macOS banners Iris posts (Settings → General → Notifications), nor for job cards or Vibecop verdicts.
 
 ### Streaming and the model/agent hooks
 

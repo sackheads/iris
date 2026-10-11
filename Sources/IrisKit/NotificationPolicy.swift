@@ -138,7 +138,7 @@ enum NotificationPolicy {
             if let root { info[Key.conversationId] = root.uuidString }
             return PlannedNotification(
                 identifier: id.uuidString, kind: .approvalWaiting, title: approvalTitle,
-                body: "\(quoted(toolName)) is waiting for your approval.",
+                body: "Approval waiting for \(quoted(toolName)).",
                 categoryId: Category.ask, userInfo: info)
         }
     }
@@ -150,21 +150,20 @@ enum NotificationPolicy {
     /// - Every character a reader could not see is removed: controls, bidi overrides and
     ///   isolates, zero-width characters, line and paragraph separators (#334's
     ///   `containsHiddenCharacters`). `flattenCardField` removes none of these.
-    /// - Every quote-like scalar (`isQuoteLike`, the set `Briefing.name` strips) becomes a
-    ///   straight `'`, so the name cannot appear to close its own quotes.
-    /// - Leading combining marks are dropped, so none attaches to the opening quote.
+    /// - NFKC-normalised before anything else, so a compatibility form cannot fold into a `|`
+    ///   or a quote after the flattening has run.
+    /// - Then `String.quotesNeutralised`, shared with `Briefing.name`: every quote-like scalar
+    ///   becomes a straight `'`, and a combining mark survives only on a letter or digit, so none
+    ///   attaches to the opening quote or turns a space into a `"`.
     /// - Capped at `Briefing.nameMaxBytes` UTF-8 bytes, as the briefing caps its names: a
     ///   Character cap alone does not bound one letter carrying thousands of combining marks.
     static func quoted(_ field: String) -> String {
-        let flat = IrisEngine.flattenCardField(field, cap: IrisEngine.cardNameCap)
-        var scalars = String.UnicodeScalarView()
-        for scalar in flat.unicodeScalars where !String(scalar).containsHiddenCharacters {
-            if scalars.isEmpty, [.nonspacingMark, .enclosingMark].contains(scalar.properties.generalCategory) {
-                continue
-            }
-            scalars.append(scalar.isQuoteLike ? "'" : scalar)
-        }
-        let name = IrisEngine.capFieldBytes(String(scalars), maxBytes: Briefing.nameMaxBytes)
+        let flat = IrisEngine.flattenCardField(field.precomposedStringWithCompatibilityMapping,
+                                               cap: IrisEngine.cardNameCap)
+        let visible = String(String.UnicodeScalarView(
+            flat.unicodeScalars.filter { !String($0).containsHiddenCharacters }))
+        let neutral = visible.quotesNeutralised
+        let name = IrisEngine.capFieldBytes(neutral, maxBytes: Briefing.nameMaxBytes)
         return "\u{201C}\(name)\u{201D}"
     }
 }

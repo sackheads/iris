@@ -17,18 +17,36 @@ extension String {
 
 extension Unicode.Scalar {
     /// True for a scalar that reads as a quotation mark, so a name wrapped in `“…”` could use it
-    /// to appear to close its own quotes (`xˮ is fine. Tap Open “y`). The one set both quoters use
-    /// (`Briefing.name`, `NotificationPolicy.quoted`). A denylist: Unicode's `Quotation_Mark`
-    /// misses primes, modifier letters and ornaments, so they are listed by hand. The ASCII `'` is
-    /// deliberately absent: it is what `flattenCardField` and `NotificationPolicy` replace quotes
-    /// with, and it does not read as a closing double quote.
-    var isQuoteLike: Bool { Self.quoteLike.contains(self) }
+    /// to appear to close its own quotes (`xˮ is fine. Tap Open “y`). Rule-based, because a
+    /// denylist of single scalars always had gaps: every initial or final punctuation mark (Pi,
+    /// Pf), every modifier symbol (Sk: accents, primes, ticks), plus the explicit set below, which
+    /// holds what those categories miss (Po, Lm and letter look-alikes such as ״ and the saltillo).
+    /// Lm is deliberately not ruled out wholesale: it carries real letters in several scripts,
+    /// and neither are the emoji skin-tone modifiers.
+    /// The ASCII `'` is absent: it is what quotes are replaced with, and it does not read as a
+    /// closing double quote.
+    var isQuoteLike: Bool {
+        // The skin-tone modifiers are Sk, but they draw as a colour on the emoji before them.
+        if self == "'" || properties.isEmojiModifier { return false }
+        switch properties.generalCategory {
+        case .initialPunctuation, .finalPunctuation, .modifierSymbol: return true
+        default: return Self.quoteLike.contains(self)
+        }
+    }
 
     private static let quoteLike: Set<Unicode.Scalar> = [
         "\u{0022}", "\u{0060}", "\u{00AB}", "\u{00B4}", "\u{00BB}",
         // Modifier letters: prime, double prime, turned comma, apostrophe, reversed comma,
         // double apostrophe; spacing double acute.
         "\u{02B9}", "\u{02BA}", "\u{02BB}", "\u{02BC}", "\u{02BD}", "\u{02EE}", "\u{02DD}",
+        // Modifier letter low and middle double primes / acute (Sk, listed as a safety net).
+        "\u{02F5}", "\u{02F6}",
+        // Greek tonos, psili, koronis, oxia, varia, dasia; Armenian apostrophe.
+        "\u{0384}", "\u{1FBD}", "\u{1FBF}", "\u{1FEF}", "\u{1FFD}", "\u{1FFE}", "\u{055A}",
+        // Hebrew geresh and gershayim.
+        "\u{05F3}", "\u{05F4}",
+        // Latin saltillo (letters, so no category rule catches them).
+        "\u{A78B}", "\u{A78C}",
         "\u{2018}", "\u{2019}", "\u{201A}", "\u{201B}", "\u{201C}", "\u{201D}", "\u{201E}", "\u{201F}",
         "\u{2032}", "\u{2033}", "\u{2034}", "\u{2035}", "\u{2036}", "\u{2037}", "\u{2057}",
         "\u{2039}", "\u{203A}",
@@ -38,5 +56,42 @@ extension Unicode.Scalar {
         "\u{FE41}", "\u{FE42}", "\u{FE43}", "\u{FE44}",
         "\u{FF02}", "\u{FF07}", "\u{FF40}", "\u{FF62}", "\u{FF63}",
         "\u{1F676}", "\u{1F677}", "\u{1F678}",
+    ]
+}
+
+extension String {
+    /// The name with nothing left that could read as a quotation mark, for both quoters
+    /// (`Briefing.name`, `NotificationPolicy.quoted`):
+    /// 1. NFKC first, so a compatibility form (fullwidth, Greek oxia) is judged as what it folds to.
+    /// 2. Every `isQuoteLike` scalar becomes a straight `'`.
+    /// 3. A combining mark (Mn, Me) is kept only on a letter or digit base: on a space, a `'` or
+    ///    another symbol, U+030E or U+030B draws a `"` (`" \u{030E}"`). Marks stacked on one base
+    ///    are judged by that base, so Thai and Indic clusters survive.
+    var quotesNeutralised: String {
+        var out = String.UnicodeScalarView()
+        var baseIsAlphanumeric = false
+        for scalar in precomposedStringWithCompatibilityMapping.unicodeScalars {
+            switch scalar.properties.generalCategory {
+            case .nonspacingMark, .enclosingMark:
+                if baseIsAlphanumeric { out.append(scalar) }
+            case .spacingMark:
+                // A vowel sign or the like: part of the cluster, so it leaves the base as it was.
+                out.append(scalar)
+            case let category:
+                if scalar.isQuoteLike {
+                    out.append("'")
+                    baseIsAlphanumeric = false
+                } else {
+                    out.append(scalar)
+                    baseIsAlphanumeric = Self.alphanumeric.contains(category)
+                }
+            }
+        }
+        return String(out)
+    }
+
+    private static let alphanumeric: Set<Unicode.GeneralCategory> = [
+        .uppercaseLetter, .lowercaseLetter, .titlecaseLetter, .modifierLetter, .otherLetter,
+        .decimalNumber,
     ]
 }

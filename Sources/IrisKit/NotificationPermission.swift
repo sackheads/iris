@@ -28,13 +28,19 @@ final class NotificationPermission {
     }
 
     /// Returns once `notification` is delivered or dropped, unless it is held behind the prompt:
-    /// then the post that is asking delivers or drops it. Either way `settled` is called for it
+    /// then whoever ends the wait delivers or drops it. Either way `settled` is called for it
     /// exactly once, when nothing more will happen to it (or when it is withdrawn while held).
+    ///
+    /// The status is read even while the prompt is up. A prompt whose answer never comes back
+    /// must not hold every banner for the life of the process: once the status says the owner has
+    /// decided (in the prompt or in System Settings), the next post ends the wait under that
+    /// answer, and a late return from the prompt finds nothing left to do.
     func submit(_ notification: PlannedNotification) async {
-        if asking { held.append(notification); return }
         let status = await current()
-        // Re-checked after the await: another post may have started the prompt meanwhile.
-        if asking { held.append(notification); return }
+        if asking {
+            guard status != .notDetermined else { held.append(notification); return }
+            await endWait(granted: status == .authorized)
+        }
         switch status {
         case .authorized:
             await deliver(notification)
@@ -47,13 +53,19 @@ final class NotificationPermission {
             asking = true
             held.append(notification)
             let granted = await request()
-            asking = false
-            let waiting = held
-            held = []
-            for planned in waiting {
-                if granted { await deliver(planned) }
-                settled(planned)
-            }
+            // If a decided status already ended the wait, `held` is empty and this does nothing:
+            // no post is held once `asking` is false, and `asked` means no second prompt.
+            await endWait(granted: granted)
+        }
+    }
+
+    private func endWait(granted: Bool) async {
+        asking = false
+        let waiting = held
+        held = []
+        for planned in waiting {
+            if granted { await deliver(planned) }
+            settled(planned)
         }
     }
 

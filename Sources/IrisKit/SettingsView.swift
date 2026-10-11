@@ -204,7 +204,7 @@ struct SettingsView: View {
                         Text("Off").tag(NotificationMode.off)
                         Text("Needs attention").tag(NotificationMode.needsAttention)
                     }
-                    .help("Needs attention: a banner when a job is blocked or stopped by a limit, or an approval is waiting while the window is hidden. A banner never approves anything; Open shows the details. Only the app bundle posts them, not `swift run`.")
+                    .help("Needs attention: a banner when a background job is blocked on a call, when a failed run's job is paused by a limit (not by you), or when an approval is waiting and the chat window is not in front. A banner never approves anything: Open shows the details, Deny refuses an approval, Dismiss clears a blocked run. Only the installed app posts them, not swift run.")
                     Toggle("Show model activity LEDs", isOn: $config.showModelLEDs)
                         .help("Show the row of model status lights above the message box. A guard model that is installed but failing still reports itself in the conversation with this off.")
                     Picker("Default emoji skin tone", selection: $config.defaultEmojiSkinTone) {

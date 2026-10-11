@@ -3278,6 +3278,7 @@ class AppState {
     /// Off the main actor, like every other write to the store.
     @discardableResult
     func acknowledgeRun(_ runId: UUID) -> Task<Void, Never> {
+        withdrawCardBanner(runId: runId)
         let ledger = store.ledger
         return Task { [weak self] in
             let written = await Task.detached { () -> Bool in
@@ -4062,6 +4063,7 @@ class AppState {
                     emitCommandOutput("Ambiguous run id prefix.", format: .markdown, to: convId)
                 case .found(let id):
                     try ledger.acknowledge(runId: id, at: Date())
+                    withdrawCardBanner(runId: id)
                     refreshLedgerAttention()
                     let short = id.uuidString.lowercased().prefix(8)
                     emitCommandOutput("Acknowledged run \(short).", format: .markdown, to: convId)

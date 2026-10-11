@@ -809,28 +809,29 @@ news, not a request — waking the model on every run would turn a five-minute s
 five-minute agent loop. Raw run output never enters the destination's messages.
 
 The menu bar item carries the same news without opening the window. A blocked run that nobody has
-acknowledged turns the icon to `!` with a count until the run is cleared: dismissed on its card,
-acknowledged with `/jobs ack` or the Run Log window's **Acknowledge**, approved with **Approve
-and run**, or gone with its job when you `/jobs delete` it. So does a job paused by its breaker, a
-budget, its retry ladder, a failing gate, a vanished folder, a built-in this build does not know,
-or a schedule that never matches, until you `/jobs resume` (or delete) it. A plain failure,
-including one still on its retry ladder, and a job you paused with `/jobs pause` are counts in the
-menu only; the failed-runs row opens the Run Log, where each one is acknowledged. While a job is
-running, the icon shows how many.
+acknowledged turns the icon to `!` with a count until the run is cleared: dismissed on its card
+or its banner, acknowledged with `/jobs ack` or the Run Log window's **Acknowledge**, approved
+with **Approve and run**, or gone with its job when you `/jobs delete` it. So does a job paused by
+its breaker, a budget, its retry ladder, a failing gate, a vanished folder, a built-in this build
+does not know, or a schedule that never matches, until you `/jobs resume` (or delete) it. A plain
+failure, including one still on its retry ladder, and a job you paused with `/jobs pause` are
+counts in the menu only; the failed-runs row opens the Run Log, where each one is acknowledged.
+While a job is running, the icon shows how many.
 
 A blocked run's row in the menu opens its card wherever the card is, an archived Iris after a
 `/new` included. If the conversation holding it has been deleted, the row opens Iris with one line
 naming the `/jobs ack` that clears the run instead.
 
-**Notifications.** A blocked card, and a failed or interrupted card whose job a limit or another
-admission check has just paused — not one you paused yourself — also post a banner, unless Iris is
+**Notifications.** A blocked card, and a failed or interrupted card whose job is paused when the
+card arrives — by a limit or another admission check, not by you — also post a banner, unless Iris is
 active with its chat window visible and showing that card's conversation. A live approval posts one
 too, unless Iris is active with its window visible, because the approval overlay is global. The
 title is always `Iris: a job needs you` or `Iris: approval waiting`, because macOS shows titles on
 the lock screen. The body names only the job and the tool, never what a run said. The actions are
 Open; Deny, for an approval; and Dismiss, for a blocked card, which acknowledges it and needs the
 Mac unlocked first — Deny does not, since stopping work is always safe. Nothing on a banner
-approves: Open shows the call in full, and approving stays a click in the app. Permission is asked
+approves: Open shows the call in full, and approving stays a click in the app. A blocked card's
+banner comes down once its run is acknowledged, from any surface. Permission is asked
 the first time a banner would be posted; denied, including by MDM, stays denied, with no re-prompt.
 Turn banners off with Settings → General → Notifications ("Needs attention" by default). `swift run`
 and `scripts/run-dev.sh` never post; dev testing uses Iris Dev.app.
@@ -1240,7 +1241,7 @@ Run history is pruned at launch and once a day after that:
 - for each job, background transcripts beyond its **20 most recent runs** are deleted;
 - both are overridden by the same exemption: a `failed` or `blocked on approval` run that nobody
   has acknowledged keeps its row *and* its transcript, however old. Acknowledging it gives it up:
-  `/jobs ack`, the card's **Dismiss**, or the Run Log's **Acknowledge**.
+  `/jobs ack`, the card's **Dismiss**, a banner's **Dismiss**, or the Run Log's **Acknowledge**.
 
 A pruned transcript leaves the ledger's `transcriptConversationId` dangling on purpose — the card
 then says "transcript pruned" rather than offering a dead button. Only a background conversation is

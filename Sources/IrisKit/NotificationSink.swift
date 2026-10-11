@@ -18,14 +18,27 @@ struct NotificationResponse: Equatable, Sendable {
 
 extension AppState {
     /// The first of the two places the policy is asked: after `deliverEvent`'s append. Reads the
-    /// card's job once, because no card field says "this paused the job".
+    /// card's job once, because no card field says "this paused the job", and only when
+    /// notifications are on and the card is one a pause could make notify.
     func notifyForCard(_ card: EventCard, destination: UUID) {
         guard let sink = notificationSink, !card.isReflection else { return }
-        let paused = (try? store.ledger.job(id: card.jobId))?.pausedReason
+        let context = notificationContext()
+        guard context.enabled else { return }
+        // Only a failed or interrupted card can notify for its job's pause (plan note 5), so no
+        // other card costs a main-actor ledger read.
+        let paused = card.status == .failed || card.status == .interrupted
+            ? (try? store.ledger.job(id: card.jobId))?.pausedReason : nil
         if let planned = NotificationPolicy.decide(.card(card, destination: destination, jobPausedReason: paused),
-                                                   context: notificationContext()) {
+                                                   context: context) {
             sink.post(planned)
         }
+    }
+
+    /// A card's banner comes down once its run is acknowledged (the card's or the banner's
+    /// Dismiss, `/jobs ack`, or an Approve-and-run claim): it no longer needs the owner. A banner still held behind the
+    /// permission prompt is dropped by the same withdraw.
+    func withdrawCardBanner(runId: UUID) {
+        notificationSink?.withdraw(identifiers: [runId.uuidString])
     }
 
     /// The second: every change to `pendingApprovals`, diffed by id. Only an ask that was not in
@@ -62,13 +75,14 @@ extension AppState {
             if let runId, let jobId {
                 return Task { [weak self] in await self?.revealCard(runId: runId, jobId: jobId) }
             }
-            if let askId {
-                let owner = pendingApprovals.first { $0.id == askId }?.conversationId
-                    ?? info[NotificationPolicy.Key.conversationId].flatMap(UUID.init(uuidString:))
-                showMainWindow(selecting: owner.map { delegationRoot(of: $0) })
-            } else {
-                showMainWindow(selecting: nil)
+            if let askId, let live = pendingApprovals.first(where: { $0.id == askId })?.conversationId {
+                // The status item's own path: a root archived while its ask waits is unarchived.
+                let root = delegationRoot(of: live)
+                return Task { [weak self] in await self?.openStatusRow(.conversation(root)) }
             }
+            // An ask already answered unarchives nothing: its root is no longer waiting.
+            let gone = askId == nil ? nil : info[NotificationPolicy.Key.conversationId].flatMap(UUID.init(uuidString:))
+            showMainWindow(selecting: gone.map { delegationRoot(of: $0) })
             return nil
         case NotificationPolicy.Action.deny:
             if let askId { resolveApproval(id: askId, .deny) }

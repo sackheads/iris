@@ -26,6 +26,8 @@ final class UserNotificationSink: NotificationSink {
     private var permission: NotificationPermission?
     /// Posts not yet settled with the center, counted per id. A withdraw empties an id's entry,
     /// which tells a post still on its way not to add, or to remove what its add just put up.
+    /// This assumes an id is never re-posted after it is withdrawn: ids are run and ask UUIDs,
+    /// each posted once. A re-post racing an older post's add could otherwise be removed by it.
     private var unsettled: [String: Int] = [:]
     var unsettledCountForTesting: Int { unsettled.count }
 
@@ -156,7 +158,7 @@ private final class SystemNotificationCenter: NSObject, NotificationCenterClient
     }
 
     private nonisolated static func requestPermission() async -> Bool {
-        (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])) ?? false
+        (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert])) ?? false
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,

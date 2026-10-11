@@ -131,6 +131,54 @@ struct NotificationInstallTests {
         #expect(calls.delivered == ["a", "b"])
     }
 
+    @Test("a prompt that never returns: a decided status ends the wait at the next post", arguments: [true, false])
+    func stuckPromptEndsOnDecidedStatus(allowed: Bool) async throws {
+        let calls = Calls(), permission = gate(calls)
+        calls.holdRequest = true
+        let first = Task { @MainActor in await permission.submit(note("a")) }
+        var spins = 0
+        while calls.held == nil, spins < 10_000 { await Task.yield(); spins += 1 }
+        try #require(calls.held != nil)
+        await permission.submit(note("b"))
+        #expect(calls.delivered.isEmpty, "still undecided: held")
+
+        calls.status = allowed ? .authorized : .denied   // answered, but the request never returned
+        await permission.submit(note("c"))
+        #expect(calls.delivered == (allowed ? ["a", "b", "c"] : []))
+
+        // The prompt's late return finds nothing left to deliver, and asks nothing again.
+        calls.grant = allowed
+        calls.held?.resume()
+        try await value(of: first)
+        await permission.submit(note("d"))
+        #expect(calls.delivered == (allowed ? ["a", "b", "c", "d"] : []))
+        #expect(calls.requests == 1)
+    }
+
+    @Test("through the sink, a stuck prompt ends on a decided status, without the cards acknowledged meanwhile")
+    func sinkStuckPromptDropsAcknowledged() async throws {
+        let (_, app) = try makeApp()
+        let center = FakeCenter()
+        center.status = .notDetermined
+        center.holdRequest = true
+        let sink = UserNotificationSink(state: app, center: center)
+        let first = sink.submit(note("a"))
+        var spins = 0
+        while center.heldRequest == nil, spins < 10_000 { await Task.yield(); spins += 1 }
+        try #require(center.heldRequest != nil)
+        try await value(of: sink.submit(note("run-1")))
+        sink.withdraw(identifiers: ["run-1"])   // what acknowledging the run does
+
+        center.status = .authorized
+        try await value(of: sink.submit(note("b")))
+        #expect(center.added == ["a", "b"])
+        #expect(sink.unsettledCountForTesting == 0)
+
+        center.heldRequest?.resume()
+        try await value(of: first)
+        #expect(center.added == ["a", "b"], "the late return adds nothing twice")
+    }
+
     @Test("only a real .app bundle gets a sink")
     func bundleGuard() {
         #expect(SurfaceInstall.isAppBundle(URL(fileURLWithPath: "/Applications/Iris Dev.app")))

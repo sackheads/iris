@@ -227,12 +227,60 @@ struct NotificationWiringTests {
         app.linkDelegate(child, of: parent)
         let ask = await raise(app, in: child)
         let askId = try #require(app.pendingApprovals.first).id
-        _ = respond(app, NotificationPolicy.Action.open, [NotificationPolicy.Key.askId: askId.uuidString])
+        try await value(of: try #require(respond(app, NotificationPolicy.Action.open,
+                                                 [NotificationPolicy.Key.askId: askId.uuidString])))
         #expect(app.selectedConversationId == parent)
         #expect(raises.count == 2)
         #expect(app.pendingApprovals.count == 1, "Open never answers the ask")
         app.resolveApproval(id: try #require(app.pendingApprovals.first).id, .deny)
         _ = try await value(of: ask)
+    }
+
+    @Test("Open on an ask whose root was archived brings the root back and selects it")
+    func openUnarchivesTheRoot() async throws {
+        let (_, app, _, raises) = try makeApp()
+        let parent = app.createNewConversation(select: false), child = app.createNewConversation(isSubagent: true)
+        app.linkDelegate(child, of: parent)
+        let ask = await raise(app, in: child)
+        let askId = try #require(app.pendingApprovals.first).id
+        let index = try #require(app.conversations.firstIndex { $0.id == parent })
+        app.conversations[index].isArchived = true
+
+        try await value(of: try #require(respond(app, NotificationPolicy.Action.open,
+                                                 [NotificationPolicy.Key.askId: askId.uuidString])))
+        #expect(app.conversations.first { $0.id == parent }?.isArchived == false)
+        #expect(app.selectedConversationId == parent)
+        #expect(raises.count == 1)
+        app.resolveApproval(id: askId, .deny)
+        _ = try await value(of: ask)
+    }
+
+    @Test("acknowledging a run, from any surface, withdraws its banner")
+    func acknowledgeWithdrawsTheBanner() async throws {
+        let (store, app, sink, _) = try makeApp()
+        let (_, run) = try blockedRun(store)
+        try await value(of: app.acknowledgeRun(run.id))
+        #expect(sink.withdrawn == [run.id.uuidString])
+        try await value(of: app.dismissEventCard(runId: run.id))
+        #expect(sink.withdrawn == [run.id.uuidString, run.id.uuidString])
+    }
+
+    @Test("deleting a conversation with several delegates withdraws every ask in the cascade")
+    func deleteCascadeWithdrawsEveryAsk() async throws {
+        let (_, app, sink, _) = try makeApp()
+        let parent = app.createNewConversation(select: false)
+        let first = app.createNewConversation(isSubagent: true), second = app.createNewConversation(isSubagent: true)
+        app.linkDelegate(first, of: parent)
+        app.linkDelegate(second, of: parent)
+        let asks = [await raise(app, in: parent), await raise(app, in: first), await raise(app, in: second)]
+        let ids = app.pendingApprovals.map(\.id.uuidString)
+        #expect(ids.count == 3)
+
+        app.deleteConversation(parent)
+        for ask in asks { #expect(try await value(of: ask) == false) }
+        #expect(app.pendingApprovals.isEmpty)
+        #expect(Set(sink.withdrawn) == Set(ids))
+        #expect(sink.withdrawn.count == 3, "each withdrawn once")
     }
 
     @Test("Open on a delivered card scrolls to it")
