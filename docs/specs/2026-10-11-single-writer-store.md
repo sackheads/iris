@@ -17,48 +17,16 @@ This spec replaces #390/#391's `GUILock` and D6 decision 14's `LaunchLock` mitig
 
 Checked against `main` at `e418b29`. Paths are under `Sources/IrisKit/`.
 
-- **Writes overwrite from a snapshot.**
-  - `markChanged` debounces 0.5 s with a 2 s max wait (`AppState.swift:3833`, `:3840`), so a CLI writes throughout a run (`RunJobCLI.swift:491`).
-  - A message append does `INSERT OR REPLACE` from `from` to the end of the writer's array, then `DELETE … ordinal >= count` (`ConversationStore.swift:844-877`). History works the same way (`:879-887`).
-  - A `.metadata` write rewrites the whole row (`:812-822`).
-  - Nothing re-reads before it writes.
-- **What a CLI run writes.**
-  - Its hidden transcript (`JobRunner.swift:1682-1704`), its card (`EventDelivery.swift:49-54`), and ledger rows.
-  - Its `AppState.init` runs the launch repairs (`AppState.swift:1195-1196`, `:4047`).
-  - `activityConversationId` can create or re-pin Iris (`:1554-1572`).
-- **The CLI already opens the store after its claim.**
-  - `RunJobCLI.run` takes the store as an `@autoclosure` (`RunJobCLI.swift:338`). It is first evaluated at `:389`, after the claim at `:366`.
-  - So `IrisMain.swift:31`'s `try ConversationStore.onDisk(…)` doesn't migrate (`ConversationStore.swift:200`) or repair (`:247-256`) a store the CLI refuses. No test pins this.
-- **#489.** `ToolExecutor.afterSkillFileWrite` (`ToolExecutor.swift:690`), `createSkill`/`updateSkill`/`deleteSkill` (`:1145`, `:1202`, `:1219`) and `SkillCurator` (`SkillCurator.swift:73`) call `AppState.shared.invalidateEnginePrompt()`.
-  - Inside `--run-job` that builds a second `AppState` over the store.
-  - It also invalidates an engine that isn't the run's (`AppState.swift:1311-1315`).
-- **Who reaches `AppState.shared` today.**
-  - The GUI shell: `IrisApp.init`, inside `MainActor.assumeIsolated` (`iris.swift:5510-5519`); the scenes (`:5544-5578`); the hotkey closure (`:5538-5540`); did-finish (`:5455-5460`); terminate (`:5468-5469`); the URL handler (`RunJobURLEvents.swift:24`).
-  - Views: `ChatView.swift:6`, `SettingsView.swift:148`, `PluginsSettingsView.swift:412`, `:446`.
-  - #489's five skill paths.
-  - In tests, only `AttachmentIntegrationTests.swift:46`, `:83`.
-  - `PerfCLI`, `BenchCLI` and `DevHomeSeeder` never name `AppState`.
-- **Locks today.**
-  - The CLI claims `conversations.sqlite.lock` (`IrisPaths.swift:148`) by `link(2)`, with a dead-pid takeover, and refuses a live holder (`RunJobCLI.swift:126-166`, `:366-384`).
-  - The app never checks. `GUILock.acquire` renames over the path (`:234-240`, `iris.swift:5500`), and `release` deletes it on quit (`:244-248`, `iris.swift:5474`).
-  - `PerfCLI` (`:117`) and the seeder (`DevHomeSeeder.swift:50`) use the same protocol.
-- **D2.**
-  - `LaunchLock` remembers a foreign holder and posts a notice (`LaunchLock.swift:53-92`).
-  - A URL fire is deferred for up to 600 s (`RunJobURLHandling.swift:60-71`, `RunJobURL.swift:166-177`).
-  - A cold start from a link opens no window (`RunJobURLEvents.swift:1-7`).
-  - `RunJobURLIntake` holds links until the job bookkeeping is done (`RunJobURLIntake.swift:7-49`).
-- **Launch sweeps.**
-  - `closeRunningRuns` marks every `running` row `interrupted`, "app was not running" (`JobLedger.swift:586-596`, `iris.swift:3439-3456`).
-  - `reapOrphans` deletes every `iris-` container this process doesn't know about (`SandboxSessionManager.swift:8`, `:251-270`).
-  - Overlap tracking is per process (`JobRunner.swift:103-105`).
-- **Signals.**
-  - No signal handler exists in `Sources/`.
-  - `ProcessGroupRunner` resets every disposition in the child (`ProcessGroupRunner.swift:190-201`), and gives each `run_command` its own process group. So a terminal's Ctrl-C reaches only the CLI, and those groups outlive it.
-  - The watchdog ends a hung turn by claiming `ending` and cancelling the turn (`JobRunner.swift:1199-1212`).
-- **Homes.**
-  - The lock is per home.
-  - `swift run`/`run-dev.sh` and `Iris Dev.app` share `~/.iris-dev`.
-  - The bare binary registers no URL scheme, so an `iris-dev://` link opened beside it launches `Iris Dev.app` on the same home (AGENTS.md).
+- **Writes overwrite from a snapshot.** `markChanged` debounces 0.5 s with a 2 s max wait (`AppState.swift:3833`, `:3840`), so a CLI writes throughout a run (`RunJobCLI.swift:491`). A message append does `INSERT OR REPLACE` from `from` to the end of the writer's array, then `DELETE … ordinal >= count` (`ConversationStore.swift:844-877`). History works the same way (`:879-887`). A `.metadata` write rewrites the whole row (`:812-822`). Nothing re-reads before it writes.
+- **What a CLI run writes.** Its hidden transcript (`JobRunner.swift:1682-1704`), its card (`EventDelivery.swift:49-54`), and ledger rows. Its `AppState.init` runs the launch repairs (`AppState.swift:1195-1196`, `:4047`). `activityConversationId` can create or re-pin Iris (`:1554-1572`).
+- **The CLI already opens the store after its claim.** `RunJobCLI.run` takes the store as an `@autoclosure` (`RunJobCLI.swift:338`). It is first evaluated at `:389`, after the claim at `:366`. So `IrisMain.swift:31`'s `try ConversationStore.onDisk(…)` doesn't migrate (`ConversationStore.swift:200`) or repair (`:247-256`) a store the CLI refuses. No test pins this.
+- **#489.** `ToolExecutor.afterSkillFileWrite` (`ToolExecutor.swift:690`), `createSkill`/`updateSkill`/`deleteSkill` (`:1145`, `:1202`, `:1219`) and `SkillCurator` (`SkillCurator.swift:73`) call `AppState.shared.invalidateEnginePrompt()`. Inside `--run-job` that builds a second `AppState` over the store. It also invalidates an engine that isn't the run's (`AppState.swift:1311-1315`).
+- **Who reaches `AppState.shared` today.** The GUI shell: `IrisApp.init`, inside `MainActor.assumeIsolated` (`iris.swift:5510-5519`); the scenes (`:5544-5578`); the hotkey closure (`:5538-5540`); did-finish (`:5455-5460`); terminate (`:5468-5469`); the URL handler (`RunJobURLEvents.swift:24`). Views: `ChatView.swift:6`, `SettingsView.swift:148`, `PluginsSettingsView.swift:412`, `:446`. #489's five skill paths. In tests, only `AttachmentIntegrationTests.swift:46`, `:83`. `PerfCLI`, `BenchCLI` and `DevHomeSeeder` never name `AppState`.
+- **Locks today.** The CLI claims `conversations.sqlite.lock` (`IrisPaths.swift:148`) by `link(2)`, with a dead-pid takeover, and refuses a live holder (`RunJobCLI.swift:126-166`, `:366-384`). The app never checks. `GUILock.acquire` renames over the path (`:234-240`, `iris.swift:5500`), and `release` deletes it on quit (`:244-248`, `iris.swift:5474`). `PerfCLI` (`:117`) and the seeder (`DevHomeSeeder.swift:50`) use the same protocol.
+- **D2.** `LaunchLock` remembers a foreign holder and posts a notice (`LaunchLock.swift:53-92`). A URL fire is deferred for up to 600 s (`RunJobURLHandling.swift:60-71`, `RunJobURL.swift:166-177`). A cold start from a link opens no window (`RunJobURLEvents.swift:1-7`). `RunJobURLIntake` holds links until the job bookkeeping is done (`RunJobURLIntake.swift:7-49`).
+- **Launch sweeps.** `closeRunningRuns` marks every `running` row `interrupted`, "app was not running" (`JobLedger.swift:586-596`, `iris.swift:3439-3456`). `reapOrphans` deletes every `iris-` container this process doesn't know about (`SandboxSessionManager.swift:8`, `:251-270`). Overlap tracking is per process (`JobRunner.swift:103-105`).
+- **Signals.** No signal handler exists in `Sources/`. `ProcessGroupRunner` resets every disposition in the child (`ProcessGroupRunner.swift:190-201`), and gives each `run_command` its own process group. So a terminal's Ctrl-C reaches only the CLI, and those groups outlive it. The watchdog ends a hung turn by claiming `ending` and cancelling the turn (`JobRunner.swift:1199-1212`).
+- **Homes.** The lock is per home. `swift run`/`run-dev.sh` and `Iris Dev.app` share `~/.iris-dev`. The bare binary registers no URL scheme, so an `iris-dev://` link opened beside it launches `Iris Dev.app` on the same home (AGENTS.md).
 
 ## 0. Decided
 
