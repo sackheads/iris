@@ -657,8 +657,9 @@ actor IrisEngine {
     /// conversation's id — a model-supplied "from" is never trusted and never reaches the label.
     ///
     /// Unguarded: this is the delivery primitive, not the policy. Callers MUST check archived
-    /// (§5.1), self-send (§5.4), and the cascade budget (§7) before calling — `deliverPeerMessage`
-    /// itself will happily deliver into an archived target or let a session message itself.
+    /// (§5.1), self-send (§5.4), and the hop depth and rate limit (§6) before calling —
+    /// `deliverPeerMessage` itself will happily deliver into an archived target or let a session
+    /// message itself.
     ///
     /// The busy decision and the turn it authorises are atomic (#240). They were not: this took
     /// two reads of `hasTurnInFlight`, and two concurrent sends to one idle target both passed
@@ -673,7 +674,7 @@ actor IrisEngine {
     /// it took (most of `PeerDeliveryTests`), can ignore it.
     @discardableResult
     func deliverPeerMessage(_ message: String, from senderId: UUID, senderName: String?,
-                             senderRole: String? = nil, to targetId: UUID) async -> Bool {
+                             senderRole: String? = nil, to targetId: UUID, depth: Int = 1) async -> Bool {
         let localState = state
         let attributed = Self.framePeerMessage(message, senderName: senderName, senderId: senderId, senderRole: senderRole)
         // Sanitise before deciding where it goes, because both destinations need it sanitised and
@@ -686,6 +687,10 @@ actor IrisEngine {
         // typed — `takePendingSteers`' consumer renders queued text as `"User (mid-task): …"`, the
         // system's highest trust label. The `isPeer` flag on the queued entry is what stops that.
         let safe = await sanitizeArrival(attributed, source: Self.peerSource)
+        // #469 §6: raises the target's depth regardless of which path below actually delivers —
+        // the busy branch queues instead of running a turn, but the message still reached the
+        // target causally, so its depth must rise either way.
+        await MainActor.run { localState?.notePeerArrival(depth: depth, at: targetId) }
         // §5.2: a second turn on one history produces empty or rejected provider responses, so a
         // busy target takes the same #172 inbox a user message would. Peer messaging must not make
         // that hazard agent-triggerable.
@@ -3919,25 +3924,19 @@ actor IrisEngine {
                 result = "A message is required."
                 return result
             }
-            // #469 §5.2: resolved here, at delivery time — not when the model last listed peers —
-            // so `role:<name>` reaches whoever holds it now, not whoever held it when the model
-            // called `list_sessions`. Covers the self-send, archived, background-run and
-            // unknown-id refusals the old inline guards used to spell out individually.
-            let resolved = await MainActor.run { () -> Result<UUID, SessionAddressError> in
-                guard let s = localState else { return .failure(.notFound) }
-                return SessionDirectory.resolve(to, in: s.conversations, excluding: conversationId)
+            // #469 §5.2/§6: resolved and decided here, at delivery time — not when the model last
+            // listed peers — so `role:<name>` reaches whoever holds it now, not whoever held it
+            // when the model called `list_sessions`. One hop: `decidePeerSend` covers the
+            // self-send, archived, background-run and unknown-id refusals the old inline guards
+            // used to spell out individually, plus the hop-depth and rate limits (Task 3 adds
+            // `replyTarget`; nil here).
+            let decision = await MainActor.run { () -> AppState.PeerSendDecision in
+                localState?.decidePeerSend(to: to, from: conversationId, replyTarget: nil) ?? .refused("No session matches that.")
             }
-            let targetId: UUID
-            switch resolved {
-            case .failure(let e): result = e.message; return result
-            case .success(let id): targetId = id
-            }
-            let allowed = await MainActor.run {
-                localState?.beginPeerCascade(into: targetId, from: conversationId) ?? false
-            }
-            guard allowed else {
-                result = "Message budget for this chain of session messages is exhausted; not sent."
-                return result
+            let targetId: UUID, depth: Int
+            switch decision {
+            case .refused(let why): result = why; return result
+            case .allowed(let t, let d): targetId = t; depth = d
             }
             let (senderName, senderRole, targetLabel) = await MainActor.run { () -> (String?, String?, String) in
                 let me = localState?.conversations.first(where: { $0.id == conversationId })
@@ -3946,7 +3945,7 @@ actor IrisEngine {
                 return (me?.sessionCard?.name, me?.role, "\(label) (\(targetId.uuidString.prefix(8)))")
             }
             let queued = await deliverPeerMessage(message, from: conversationId, senderName: senderName,
-                                                  senderRole: senderRole, to: targetId)
+                                                  senderRole: senderRole, to: targetId, depth: depth)
             result = queued
                 ? "Accepted — sent to \(targetLabel); it is busy and will see this at its next turn."
                 : "Accepted — sent to \(targetLabel), delivered in the background. You will not be notified when it completes."

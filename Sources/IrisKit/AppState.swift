@@ -793,17 +793,11 @@ class AppState {
     /// the second's.
     private var engineTurnCounts: [UUID: Int] = [:]
 
-    /// #185 §7 — which cascade a conversation's current turn belongs to. Absent means "not in a
-    /// cascade", i.e. a full budget.
-    ///
-    /// Two dictionaries, not one, because the allowance is a property of the CASCADE and the
-    /// membership is a property of the conversation. Holding `(id, remaining)` per conversation
-    /// looked equivalent and was not: every delivery copied the count into both sender and target,
-    /// after which the two drifted independently and each branch effectively got its own budget —
-    /// 2^N - 1 peer-woken turns from one user action at binary fan-out, which is exactly the F^N
-    /// §7 exists to forbid (whole-branch review, C1).
-    private var cascadeOf: [UUID: UUID] = [:]      // conversation -> the cascade it belongs to
-    private var cascadeBudget: [UUID: Int] = [:]   // cascade -> what is left of its allowance
+    /// #469 §6 — each session's hop depth: the depth of the last peer message that reached it, 0
+    /// once the user types into it. A send carries the sender's depth + 1. Follows causation, not
+    /// `contextId`, so a loop cannot escape by starting a new thread on every hop. In memory.
+    private var peerDepths: [UUID: Int] = [:]
+    var peerRateLimiter = PeerRateLimiter()
 
     /// Called from `IrisEngine.processInput`'s own begin/end pair, which brackets every turn the
     /// engine runs — UI-initiated ones included, so a UI turn is counted by both sources.
@@ -2100,48 +2094,55 @@ class AppState {
         }
     }
 
-    func cascadeRemaining(for conversationId: UUID) -> Int {
-        guard let cascadeId = cascadeOf[conversationId],
-              let remaining = cascadeBudget[cascadeId] else { return ConfigManager.shared.maxSessionCascade }
-        return remaining
+    func peerDepth(for id: UUID) -> Int { peerDepths[id] ?? 0 }
+
+    func notePeerArrival(depth: Int, at id: UUID) {
+        peerDepths[id] = max(peerDepths[id] ?? 0, depth)
     }
 
-    /// Records a peer delivery. Returns false when the sender's cascade is spent, in which case
-    /// nothing is delivered and the sender is told why (§5.3).
-    ///
-    /// The allowance travels with the CASCADE, not the branch: a sender fanning out to three peers
-    /// spends three of ONE budget, and so does a chain that walks away from it. One decrement of
-    /// one counter per delivery, read back through `cascadeOf` by every member — a per-branch
-    /// limit, or a per-conversation copy of a shared number, would still permit F^N turns.
-    @discardableResult
-    func beginPeerCascade(into targetId: UUID, from senderId: UUID) -> Bool {
-        // A sender not yet in a cascade starts one; its first delivery is what mints the id.
-        let cascadeId = cascadeOf[senderId] ?? UUID()
-        let remaining = cascadeBudget[cascadeId] ?? ConfigManager.shared.maxSessionCascade
-        guard remaining > 0 else { return false }
-        cascadeBudget[cascadeId] = remaining - 1
-        // Both ends are now in this cascade, reading the single counter above.
-        cascadeOf[senderId] = cascadeId
-        cascadeOf[targetId] = cascadeId
-        return true
+    func resetPeerDepth(for id: UUID) { peerDepths[id] = nil }
+
+    enum PeerSendDecision: Equatable {
+        case allowed(target: UUID, depth: Int)
+        case refused(String)
     }
 
-    /// A person typing begins a fresh cascade — the budget exists to bound unattended machine
-    /// chatter, not to ration a conversation the user is steering (§7).
-    ///
-    /// Drops this conversation's MEMBERSHIP only. It must not touch the shared counter: sibling
-    /// branches of the same cascade are still unattended machine chatter and keep their remaining
-    /// allowance (§7, "sibling branches keep their own remaining allowance").
-    func clearCascade(for conversationId: UUID) {
-        guard let cascadeId = cascadeOf.removeValue(forKey: conversationId) else { return }
-        // The counter outlives its last member otherwise: nothing else removes budget entries, so
-        // a long session would accumulate one per cascade it ever ran.
-        if !cascadeOf.values.contains(cascadeId) { cascadeBudget[cascadeId] = nil }
+    /// One synchronous decision for a send: resolve the target, check depth, take a token. One
+    /// MainActor step, because every main session shares one engine actor and an `await` between
+    /// a check and its act would let another session's turn run in between (#480 review).
+    func decidePeerSend(to: String, from sender: UUID, replyTarget: UUID?) -> PeerSendDecision {
+        let target: UUID
+        if let replyTarget {
+            guard let c = conversations.first(where: { $0.id == replyTarget }), !c.isArchived, c.isUserFacing
+            else { return .refused("The session that sent that message is no longer active.") }
+            if !to.isEmpty {
+                switch SessionDirectory.resolve(to, in: conversations, excluding: sender) {
+                case .success(let id) where id == replyTarget: break
+                case .success: return .refused("A reply goes to the session that sent the original message; omit `to` or name that session.")
+                case .failure(let e): return .refused(e.message)
+                }
+            }
+            target = replyTarget
+        } else {
+            switch SessionDirectory.resolve(to, in: conversations, excluding: sender) {
+            case .success(let id): target = id
+            case .failure(let e): return .refused(e.message)
+            }
+        }
+        let depth = peerDepth(for: sender) + 1
+        let limit = ConfigManager.shared.maxSessionCascade
+        guard depth <= limit else {
+            return .refused("Not sent: this chain of session messages is \(limit) hops deep, the limit. It resets when the user types into this session.")
+        }
+        if let wait = peerRateLimiter.take(for: sender) {
+            return .refused("Not sent: rate limit — this session has sent \(PeerRateLimiter.capacity) messages in quick succession. The next is allowed in about \(Int(wait.rounded(.up)))s.")
+        }
+        return .allowed(target: target, depth: depth)
     }
 
     func deleteConversation(_ id: UUID) {
         cancelTasks(for: id)
-        clearCascade(for: id)   // a deleted conversation is in no cascade; also prunes a spent budget
+        resetPeerDepth(for: id)   // a deleted conversation carries no hop depth
 
         // Its delegates go with it (#291): a background subagent is reached by no cancellation of
         // this conversation's tasks, and would go on working, asking and holding its container.
@@ -2453,17 +2454,18 @@ class AppState {
     /// reflection/rename triggers. The user bubble is already in the chat.
     ///
     /// `isPeer` (round 3, #185 §7): true only when `drainPendingUserMessages` is starting a
-    /// drained PEER entry, not a person typing. The comment on `clearCascade` below is "a person
-    /// typing starts a fresh cascade" — a drained peer entry is not that, and clearing here
-    /// unconditionally was a cascade-cap bypass by timing: queue a peer message behind a busy
-    /// target, let the target's turn end, and the drain used to hand the target's cascade a full
-    /// fresh budget regardless of how much the cascade had already spent.
+    /// drained PEER entry, not a person typing. The comment on `resetPeerDepth` below is "a person
+    /// typing resets depth" — a drained peer entry is not that, and resetting here unconditionally
+    /// was a hop-depth bypass by timing: queue a peer message behind a busy target, let the
+    /// target's turn end, and the drain used to hand the target a depth of zero regardless of how
+    /// deep the chain already was.
     private func startTurn(text: String, attachments: [FileAttachment], in convId: UUID, isPeer: Bool = false) {
-        // #185 §7: a person typing starts a fresh cascade. Deliberately here and not in
+        // #469 §6: a person typing resets this session's hop depth. Deliberately here and not in
         // `runThinkingTask`, which also carries the `/goal` draft kickoff and every goal resume —
-        // machine-initiated continuations that would hand a cascade a new budget on each resume.
+        // machine-initiated continuations that would hand a running chain a fresh depth on each
+        // resume.
         if !isPeer {
-            clearCascade(for: convId)
+            resetPeerDepth(for: convId)
         }
 
         if let idx = conversations.firstIndex(where: { $0.id == convId }) {

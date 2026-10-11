@@ -83,8 +83,9 @@ class ConfigManager: @unchecked Sendable {
         didSet { store.set(notificationMode.rawValue, forKey: "NOTIFICATION_MODE") }
     }
 
-    /// #185 §7 — how many peer-woken turns one user action may cascade into, across the whole
-    /// cascade rather than per branch. The right number is empirical; 8 is a starting point.
+    /// #469 §6 — the maximum hop depth of a chain of session messages: a send carries the
+    /// sender's depth + 1 and is refused once that exceeds this limit. The right number is
+    /// empirical; 8 is a starting point.
     var maxSessionCascade: Int {
         didSet { store.set(maxSessionCascade, forKey: "MAX_SESSION_CASCADE") }
     }

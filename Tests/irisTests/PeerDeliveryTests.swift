@@ -232,8 +232,8 @@ struct PeerDeliveryTests {
         ])
     }
 
-    @Test("a drained peer entry does not reset the target's cascade budget")
-    func drainedPeerDoesNotResetCascade() async {
+    @Test("a drained peer entry does not reset the target's hop depth")
+    func drainedPeerDoesNotResetDepth() async {
         let gate = PeerDeliveryGate()
         let client = singleRoundClient(gate)
         let (app, engine, sender, target) = busyTarget(client)
@@ -242,21 +242,16 @@ struct PeerDeliveryTests {
         #expect(await eventually { client.calls == 1 })
         #expect(app.hasTurnInFlight(for: target))
 
-        // Simulates what a real send_to_session would do (beginPeerCascade, wired by a later
-        // task): the target is already mid-cascade with a reduced budget when the peer message
-        // arrives, set here directly since this task does not call beginPeerCascade itself.
-        let otherSender = UUID()
-        app.createNewConversation(id: otherSender)
-        _ = app.beginPeerCascade(into: target, from: otherSender)
-        let before = app.cascadeRemaining(for: target)
-        #expect(before < ConfigManager.shared.maxSessionCascade)
+        // The target already carries hop depth from an earlier arrival when this message queues
+        // behind its busy turn.
+        app.notePeerArrival(depth: 3, at: target)
 
         await engine.deliverPeerMessage("from a peer, queued behind a busy turn", from: sender, senderName: "peer", to: target)
         await gate.release()
         #expect(await eventually { client.calls == 2 && !app.isThinking })
 
-        #expect(app.cascadeRemaining(for: target) == before,
-                "a drained PEER entry is not a person typing; startTurn's clearCascade must not fire for it (#185 §7)")
+        #expect(app.peerDepth(for: target) == 3,
+                "a drained PEER entry is not a person typing; startTurn's resetPeerDepth must not fire for it (#469 §6)")
     }
 
     @Test("a drained peer entry is not presented to the model as user-authored")

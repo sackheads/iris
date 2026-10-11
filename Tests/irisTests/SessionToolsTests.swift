@@ -133,10 +133,10 @@ struct SessionToolsTests {
     }
 
     /// #185 §9: "a subagent attempting a send is refused as 'not a session' ... can neither
-    /// originate nor extend a cascade." Declaration gating (above) only stops a well-behaved
-    /// model from being offered the tool — dispatch reads `functionCall.name` alone, so a forged
-    /// call must be refused where it would otherwise act (#185 review round 2, M2). Scripts the
-    /// call directly rather than relying on the model to emit an undeclared tool.
+    /// originate nor extend a chain of session messages." Declaration gating (above) only stops a
+    /// well-behaved model from being offered the tool — dispatch reads `functionCall.name` alone,
+    /// so a forged call must be refused where it would otherwise act (#185 review round 2, M2).
+    /// Scripts the call directly rather than relying on the model to emit an undeclared tool.
     @Test("a subagent's forged send_to_session call is refused by the handler, not just undeclared")
     func subagentSendIsRefusedByHandler() async {
         let app = AppState(); app.conversations.removeAll()
@@ -155,8 +155,8 @@ struct SessionToolsTests {
         let engine = IrisEngine(state: app, tier: .medium, principal: .subagent, client: client, sessionPeerCount: 1)
         await engine.processInput("go", source: "UI", conversationId: subagentId)
 
-        #expect(app.cascadeRemaining(for: target) == ConfigManager.shared.maxSessionCascade,
-                "a refused send must never debit a cascade budget it is not allowed to extend")
+        #expect(app.peerDepth(for: target) == 0,
+                "a refused send must never raise a hop depth it is not allowed to extend")
         let targetHistory = app.conversations.first { $0.id == target }?.history ?? []
         #expect(targetHistory.isEmpty,
                 "declaration gating is not the only enforcement — a forged call must not deliver")
@@ -331,7 +331,7 @@ struct SessionToolsTests {
         #expect(listing.count < 1_000, "one peer must not be able to become the bulk of a turn")
     }
 
-    // MARK: - send_to_session refusals and acceptances (#185 §5.3, §5.4, §7 — spec §11)
+    // MARK: - send_to_session refusals and acceptances (#469 §5.3, §5.4, §6 — spec §11)
 
     @Test("a self-send is refused")
     func selfSendRefused() async {
@@ -342,29 +342,26 @@ struct SessionToolsTests {
 
         let result = await runToolCall(sendCall(to: me), on: app, as: me)
         #expect(result.contains("That is this session — refused."))
-        #expect(app.cascadeRemaining(for: me) == ConfigManager.shared.maxSessionCascade,
-                "a refused self-send must not debit the budget either")
+        #expect(app.peerDepth(for: me) == 0, "a refused self-send must not raise depth either")
     }
 
-    @Test("a send with the cascade budget spent is refused, with the reason")
-    func budgetExhaustedRefusal() async {
+    @Test("a send past the hop limit is refused, with the reason")
+    func depthLimitRefusal() async {
         let app = AppState(); app.conversations.removeAll()
         let me = UUID(), target = UUID()
         app.createNewConversation(id: me)
         app.createNewConversation(id: target)
 
-        // Spend the cascade the sender belongs to, using the configured default rather than
-        // reaching into `ConfigManager.shared` to shrink it (invariant 7).
-        let scratch = UUID(); app.createNewConversation(id: scratch)
-        for _ in 0..<ConfigManager.shared.maxSessionCascade {
-            _ = app.beginPeerCascade(into: scratch, from: me)
-        }
-        #expect(app.cascadeRemaining(for: me) == 0)
+        // Put the sender already at the limit, as a long causal chain would have, rather than
+        // reaching into `ConfigManager.shared` to shrink the limit (invariant 7).
+        let limit = ConfigManager.shared.maxSessionCascade
+        app.notePeerArrival(depth: limit, at: me)
 
         let result = await runToolCall(sendCall(to: target), on: app, as: me)
-        #expect(result.contains("Message budget for this chain of session messages is exhausted; not sent."))
+        #expect(result.contains("Not sent: this chain of session messages is \(limit) hops deep, the limit."))
         let targetHistory = app.conversations.first { $0.id == target }?.history ?? []
         #expect(targetHistory.isEmpty, "a refused send delivers nothing")
+        #expect(app.peerDepth(for: target) == 0, "a refused send must not raise the target's depth")
     }
 
     @Test("an accepted send to an idle target says it was delivered in the background")
@@ -377,8 +374,8 @@ struct SessionToolsTests {
         let result = await runToolCall(sendCall(to: target), on: app, as: me)
         #expect(result.contains("Accepted — sent to"))
         #expect(result.contains("delivered in the background. You will not be notified when it completes."))
-        #expect(app.cascadeRemaining(for: me) == ConfigManager.shared.maxSessionCascade - 1,
-                "an accepted send debits exactly one from the shared cascade budget")
+        #expect(app.peerDepth(for: target) == 1,
+                "an accepted send carries the sender's depth (0) plus one to the target")
     }
 
     @Test("an accepted send to a busy target says it will be seen at the next turn")
