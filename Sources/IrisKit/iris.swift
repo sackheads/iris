@@ -930,7 +930,7 @@ actor IrisEngine {
     nonisolated static func sessionIdentitySection(id: UUID, title: String, card: SessionCard?) -> TurnContext.Section {
         var body = "You are session \(id.uuidString), titled \(Briefing.quoted(title))."
         if let card {
-            body += " Peers see your card as \(Briefing.quoted(card.name)), doing \(Briefing.quoted(card.description, maxBytes: cardDescriptionMaxBytes))."
+            body += " Your card reads \(Briefing.quoted(card.name)), doing \(Briefing.quoted(card.description, maxBytes: cardDescriptionMaxBytes))."
         } else {
             body += " You have no session card yet, so peers see no name for you."
         }

@@ -259,6 +259,9 @@ struct NotificationWiringTests {
     func acknowledgeWithdrawsTheBanner() async throws {
         let (store, app, sink, _) = try makeApp()
         let (_, run) = try blockedRun(store)
+        // A write that fails (here: no such run) acknowledged nothing, so no banner comes down.
+        try await value(of: app.acknowledgeRun(UUID()))
+        #expect(sink.withdrawn.isEmpty)
         try await value(of: app.acknowledgeRun(run.id))
         #expect(sink.withdrawn == [run.id.uuidString])
         try await value(of: app.dismissEventCard(runId: run.id))

@@ -39,6 +39,8 @@ extension Unicode.Scalar {
         // Modifier letters: prime, double prime, turned comma, apostrophe, reversed comma,
         // double apostrophe; spacing double acute.
         "\u{02B9}", "\u{02BA}", "\u{02BB}", "\u{02BC}", "\u{02BD}", "\u{02EE}", "\u{02DD}",
+        // Modifier letters vertical line, acute and grave accent: two in a row draw a `"`.
+        "\u{02C8}", "\u{02CA}", "\u{02CB}",
         // Modifier letter low and middle double primes / acute (Sk, listed as a safety net).
         "\u{02F5}", "\u{02F6}",
         // Greek tonos, psili, koronis, oxia, varia, dasia; Armenian apostrophe.
@@ -64,13 +66,23 @@ extension String {
     /// (`Briefing.name`, `NotificationPolicy.quoted`):
     /// 1. NFKC first, so a compatibility form (fullwidth, Greek oxia) is judged as what it folds to.
     /// 2. Every `isQuoteLike` scalar becomes a straight `'`.
-    /// 3. A combining mark (Mn, Me) is kept only on a letter or digit base: on a space, a `'` or
+    /// 3. Every default-ignorable scalar (it draws blank) is dropped, except a variation
+    ///    selector, before marks are judged, so a mark sees the base it really draws on.
+    /// 4. A combining mark (Mn, Me) is kept only on a letter or digit base: on a space, a `'` or
     ///    another symbol, U+030E or U+030B draws a `"` (`" \u{030E}"`). Marks stacked on one base
     ///    are judged by that base, so Thai and Indic clusters survive.
     var quotesNeutralised: String {
         var out = String.UnicodeScalarView()
         var baseIsAlphanumeric = false
         for scalar in precomposedStringWithCompatibilityMapping.unicodeScalars {
+            // A variation selector picks how its base draws (text or emoji), so it stays.
+            if scalar.properties.isVariationSelector {
+                out.append(scalar)
+                continue
+            }
+            // Blank code points that are not controls or format characters, such as the Hangul
+            // fillers (Lo): kept, they would be the "letter" a following U+030E sits on.
+            if scalar.properties.isDefaultIgnorableCodePoint { continue }
             switch scalar.properties.generalCategory {
             case .nonspacingMark, .enclosingMark:
                 if baseIsAlphanumeric { out.append(scalar) }

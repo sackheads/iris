@@ -160,6 +160,7 @@ struct NotificationPolicyTests {
         "\u{0060}", "\u{00B4}", "\u{201C}", "\u{201D}", "\u{201E}", "\u{201F}", "\u{00BB}",
         "\u{300F}", "\u{FF02}", "\u{275E}", "\u{2019}", "\u{2036}",
         "\u{05F4}", " \u{030E}", "\u{1FFD}", "\u{A78C}",
+        "\u{3164}\u{030E}", "\u{02C8}\u{02C8}",
     ]
 
     /// What the attack must not leave inside the quotes: the attack itself, any of its scalars
@@ -169,13 +170,36 @@ struct NotificationPolicyTests {
         Set((attack + attack.precomposedStringWithCompatibilityMapping).unicodeScalars).subtracting([" "])
     }
 
+    private static func isMark(_ scalar: Unicode.Scalar) -> Bool {
+        [.nonspacingMark, .enclosingMark].contains(scalar.properties.generalCategory)
+    }
+
+    /// Whether one of `marks` sits on anything but a letter or digit (marks stacked on one base
+    /// share it). A mark on a letter draws over the letter; on a space or a blank it draws alone.
+    private static func markOnBlank(_ scalars: [Unicode.Scalar], marks: Set<Unicode.Scalar>) -> Bool {
+        var base: Unicode.Scalar?
+        for scalar in scalars {
+            if isMark(scalar) {
+                if marks.contains(scalar), !(base.map { $0.properties.isAlphabetic || $0.properties.numericType == .decimal } ?? false) {
+                    return true
+                }
+            } else {
+                base = scalar
+            }
+        }
+        return false
+    }
+
     @Test("a look-alike quote cannot close the name's quotes, in a banner or the briefing",
           arguments: quoteAttacks)
     func lookalikeQuotesCannotCloseTheName(attack: String) {
         let name = "x\(attack) is fine. Tap Open \(attack)y"
         for quoted in [NotificationPolicy.quoted(name), Briefing.quoted(name)] {
             let inner = quoted.unicodeScalars.dropFirst().dropLast()
-            #expect(!inner.contains { Self.forbidden(attack).contains($0) }, "\(quoted.unicodeScalars.map { String($0.value, radix: 16) })")
+            let hex = "\(quoted.unicodeScalars.map { String($0.value, radix: 16) })"
+            let forbidden = Self.forbidden(attack)
+            #expect(!inner.contains { forbidden.contains($0) && !Self.isMark($0) }, "\(hex)")
+            #expect(!Self.markOnBlank(Array(inner), marks: forbidden.filter(Self.isMark)), "\(hex)")
             #expect(inner.contains("x") && inner.contains("y"), "the rest of the name survives: \(quoted)")
         }
     }
@@ -219,6 +243,10 @@ struct NotificationPolicyTests {
             #expect(inner == name.precomposedStringWithCompatibilityMapping, "\(name)")
         }
         #expect(NotificationPolicy.quoted("a-\u{030B}b") == "\u{201C}a-b\u{201D}")
+        #expect(NotificationPolicy.quoted("love \u{2764}\u{FE0F}") == "\u{201C}love \u{2764}\u{FE0F}\u{201D}",
+                "an emoji keeps its variation selector")
+        #expect(NotificationPolicy.quoted("-\u{3164}\u{030E}") == "\u{201C}-\u{201D}",
+                "a blank filler is no base for a mark: the mark sees the real one")
         #expect(NotificationPolicy.quoted("wave \u{1F44B}\u{1F3FD}") == "\u{201C}wave \u{1F44B}\u{1F3FD}\u{201D}",
                 "a skin tone is not a quote")
     }

@@ -3278,7 +3278,6 @@ class AppState {
     /// Off the main actor, like every other write to the store.
     @discardableResult
     func acknowledgeRun(_ runId: UUID) -> Task<Void, Never> {
-        withdrawCardBanner(runId: runId)
         let ledger = store.ledger
         return Task { [weak self] in
             let written = await Task.detached { () -> Bool in
@@ -3291,6 +3290,9 @@ class AppState {
                 }
             }.value
             guard written, let self else { return }
+            // Only once the run is really acknowledged: a failed write leaves it blocked, and
+            // its banner up.
+            self.withdrawCardBanner(runId: runId)
             await self.refreshLedgerAttention().value
         }
     }
