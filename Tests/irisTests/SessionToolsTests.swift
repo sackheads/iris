@@ -482,12 +482,13 @@ struct SessionToolsTests {
     @Test("the second brain pays nothing: a lone, uncarded, roleless session gets no session tools or lines")
     func noTax() async {
         let tools = await toolNames(sessionPeerCount: 0)
-        for name in ["list_sessions", "send_to_session", "set_session_card", "describe_session"] {
+        for name in ["list_sessions", "send_to_session", "set_session_card", "describe_session", "close_request"] {
             #expect(!tools.contains(name))
         }
         let text = await systemPromptText(sessionPeerCount: 0)
         #expect(!text.contains("This Session"))
         #expect(!text.contains("hold role"))
+        #expect(!text.contains("Awaiting replies"))
     }
 
     @Test("set_session_card works with no peer, and echoes what peers will see")
