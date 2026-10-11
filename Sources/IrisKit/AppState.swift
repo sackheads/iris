@@ -565,7 +565,17 @@ class AppState {
     }
 
     var subagentWriteLedger: [UUID: [String]] = [:]
-    var pendingApprovals: [ToolApprovalRequest] = []
+    var pendingApprovals: [ToolApprovalRequest] = [] {
+        // D6 decision 7: every mutation passes through here, so a new ask meets the notification
+        // policy and a gone one's banner is withdrawn without any site having to remember to.
+        didSet { approvalsChanged(from: oldValue) }
+    }
+    /// Where notifications go: nil unless `IrisApp.init` installed one in a real `.app` bundle
+    /// (D6 decision 8). Never set by `init`, which every test runs.
+    @ObservationIgnored var notificationSink: (any NotificationSink)?
+    /// The app's state when the policy decides. `.off` until `IrisApp.init` replaces it, so a
+    /// sink installed with no context still posts nothing.
+    @ObservationIgnored var notificationContext: @MainActor () -> NotificationContext = { .off }
     /// Fail-closed denials recorded for background (unattended) conversations (#187) — never
     /// enqueued in `pendingApprovals`, since nobody is watching to resolve them. The ledger drains
     /// this per run via `takeBackgroundDenials(for:)` to mark it `blockedOnApproval`. The whole

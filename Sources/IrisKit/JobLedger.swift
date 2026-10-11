@@ -498,9 +498,11 @@ extension JobLedger {
     /// Marks a failed or blocked run as seen, taking it out of `unacknowledgedFailures()` and out
     /// of retention's exemption. Throws `JobLedgerError.unknownRun` for an id that is not in the
     /// table.
+    /// A run already acknowledged keeps its first time: the card's Dismiss and a banner's are
+    /// often both pressed, and the second is a no-op.
     func acknowledge(runId: UUID, at: Date) throws {
         try writer.write { db in
-            try db.execute(sql: "UPDATE job_runs SET acknowledgedAt = ? WHERE id = ?",
+            try db.execute(sql: "UPDATE job_runs SET acknowledgedAt = COALESCE(acknowledgedAt, ?) WHERE id = ?",
                            arguments: [at, runId.uuidString])
             guard db.changesCount > 0 else { throw JobLedgerError.unknownRun(runId) }
         }

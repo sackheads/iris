@@ -46,6 +46,7 @@ extension AppState {
         // Re-checked after the await: the destination could have been deleted while the guard ran.
         guard conversations.contains(where: { $0.id == destinationId }) else { return }
         appendMessage(role: .event, content: card.encodedContent(), to: destinationId)
+        notifyForCard(card, destination: destinationId)
         if hasTurnInFlight(for: destinationId) {
             enqueueEventLine(safeLine, for: destinationId)
         } else {
