@@ -36,6 +36,9 @@ extension AppState {
     /// model where this sentence came from. The card keeps the raw `encodedContent()`, because
     /// the wrapper is addressed to the model and would only be noise in a rendered card.
     func deliverEvent(_ card: EventCard, to destinationId: UUID) async {
+        // D6 decision 16: every pause, block and failure reaches the owner through here, so the
+        // status item re-reads the ledger once the card is in, on every path out.
+        defer { refreshLedgerAttention() }
         guard conversations.contains(where: { $0.id == destinationId }) else { return }
         let safeLine = await InjectionGuard.sanitize(card.historyLine,
                                                      contextTag: "event_card",

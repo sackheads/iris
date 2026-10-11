@@ -373,6 +373,161 @@ class AppState {
     /// second `.sheet` on `MessageView` would be torn down whenever the message row it is attached
     /// to scrolls out of the lazy stack.
     var transcriptSheetConversationId: UUID?
+
+    /// Job id → what of that job is in flight (D6 decision 5). Observed, so the status item
+    /// redraws. Written only by `adjustRunningJob`, which `JobRunner` reaches through one hop.
+    private(set) var runningJobs: [UUID: RunningJob] = [:]
+    /// Test seam: every value `runningJobs` takes, in order, so a test can see an entry that came
+    /// and went inside one `await`.
+    @ObservationIgnored var runningJobsDidChange: (([UUID: RunningJob]) -> Void)?
+
+    /// Counts one activity of job `id` in (`delta` 1) or out (-1). An entry at zero is removed,
+    /// and a stray decrement never leaves a negative count behind.
+    func adjustRunningJob(id: UUID, name: String, by delta: Int) {
+        let activities = (runningJobs[id]?.activities ?? 0) + delta
+        runningJobs[id] = activities > 0 ? RunningJob(name: name, activities: activities) : nil
+        runningJobsDidChange?(runningJobs)
+    }
+
+    /// D6 decision 16: what the ledger says is waiting on the owner, cached for the status item
+    /// and the run log. Assigned only by `refreshLedgerAttention`. Never polled.
+    private(set) var ledgerAttention = LedgerAttention.empty
+    /// How the snapshot is read. A seam so a test can hold one read back and count the reads a
+    /// burst of refreshes costs.
+    @ObservationIgnored var ledgerAttentionReader: @Sendable (JobLedger) async throws -> LedgerAttention = {
+        try LedgerAttention.read($0)
+    }
+    /// Test seam: the most recent refresh, so a test awaits it rather than polling.
+    @ObservationIgnored private(set) var ledgerAttentionRefresh: Task<Void, Never>?
+    /// The newest read, started or not: the next one waits for it, so reads never overlap and
+    /// land in the order they started.
+    @ObservationIgnored private var ledgerAttentionTail: Task<Void, Never>?
+    /// The read that has not started yet, if any. At most one exists: every request made while
+    /// it waits is answered by it, since it reads after all of them.
+    @ObservationIgnored private var ledgerAttentionWaiting: Task<Void, Never>?
+
+    /// Reads the snapshot off the main actor and assigns it on it. Called at launch, after
+    /// `deliverEvent`, after each acknowledge path, after `/jobs pause|resume|delete`, and from
+    /// the watch layer's `onJobsChanged` closure.
+    ///
+    /// Single-flight, as `SyncCoalescer` is for the watch sync: at most one read runs at a time,
+    /// and a burst of requests during it costs one more read, not one each. The read a request
+    /// gets starts after the request, so awaiting it sees every write made before the call; and
+    /// since reads run one after another, the newest always lands last.
+    @discardableResult
+    func refreshLedgerAttention() -> Task<Void, Never> {
+        if let waiting = ledgerAttentionWaiting { return waiting }
+        let previous = ledgerAttentionTail
+        let ledger = store.ledger
+        let read = ledgerAttentionReader
+        let task = Task { [weak self] in
+            await previous?.value
+            guard let self else { return }
+            // From here on a request needs a read of its own: this one may already be past the
+            // write that request is about.
+            self.ledgerAttentionWaiting = nil
+            let snapshot = await Task.detached { () -> LedgerAttention? in
+                do {
+                    return try await read(ledger)
+                } catch {
+                    // The old snapshot stays: a stale count beats a blank one.
+                    print("[AppState] could not refresh the ledger attention snapshot: \(error)")
+                    return nil
+                }
+            }.value
+            if let snapshot { self.ledgerAttention = snapshot }
+        }
+        ledgerAttentionWaiting = task
+        ledgerAttentionTail = task
+        ledgerAttentionRefresh = task
+        return task
+    }
+
+    /// How the main window is brought forward. `IrisApp` sets it to `MainWindow.raise()`; a test
+    /// counts it. Nothing else may raise the window (D6 decision 4).
+    @ObservationIgnored var raiseMainWindow: @MainActor () -> Void = {}
+
+    /// The one way any surface raises the main window: the status item's rows and "Show Chat", a
+    /// notification's Open, the run log's transcript, and the hotkey. Selects `conversationId`
+    /// first when the sidebar can show it; a background run's transcript or a subagent's scratch
+    /// thread is never selected (`reveal(hit:)`'s rule).
+    func showMainWindow(selecting conversationId: UUID?) {
+        if let conversationId, conversations.contains(where: { $0.id == conversationId && $0.isUserFacing }) {
+            selectedConversationId = conversationId
+        }
+        raiseMainWindow()
+    }
+
+    /// Where a job's card is delivered: the job's destination while it exists unarchived,
+    /// otherwise Iris, which also covers a job deleted since (nil). `JobRunner` delivers by it and
+    /// `revealCard` looks by it, so the two can never disagree (R4).
+    ///
+    /// Falling back rather than dropping: `deliverEvent` is a no-op for an unknown id, a card in
+    /// an archived conversation is one nobody sees, and a run nobody hears about is the failure
+    /// mode #187 exists to fix.
+    func cardDestination(for job: Job?) -> UUID {
+        if let wanted = job?.destinationConversationId,
+           conversations.contains(where: { $0.id == wanted && !$0.isArchived }) {
+            return wanted
+        }
+        return activityConversationId()
+    }
+
+    /// Opens the conversation holding a job's card and scrolls to it.
+    ///
+    /// Where a card would go today (`cardDestination`) is only the first place to look: once Iris
+    /// rotates (`/new`), every older card sits in an archived Iris, and a destination can be
+    /// deleted under its cards. So the search goes on through every conversation the sidebar can
+    /// show, newest first, archived included (`reveal(hit:)` selects archived ones too). A card
+    /// found nowhere gets one line in Iris naming the `/jobs ack` that clears it, rather than an
+    /// empty Iris and an icon that stays lit.
+    ///
+    /// The job read is off the main actor: one row, but on the click's path.
+    func revealCard(runId: UUID, jobId: UUID) async {
+        let ledger = store.ledger
+        let job = await Task.detached { (try? ledger.job(id: jobId)) ?? nil }.value
+        let first = cardDestination(for: job)
+        let candidates = conversations.filter { $0.id == first }
+            + conversations.filter { $0.id != first && $0.isUserFacing }.sorted { $0.updatedAt > $1.updatedAt }
+        for conversation in candidates {
+            if let message = conversation.messages.last(where: {
+                $0.role == .event && EventCard.decode($0.content)?.runId == runId
+            }) {
+                pendingScrollTarget = message.id
+                showMainWindow(selecting: conversation.id)
+                return
+            }
+        }
+        let iris = activityConversationId()
+        let name = job?.name ?? ledgerAttention.blocked.first { $0.runId == runId }?.jobName ?? "a job"
+        emitCommandOutput(Self.goneCardLine(jobName: name, runId: runId), format: .markdown, to: iris)
+        showMainWindow(selecting: iris)
+    }
+
+    /// What `revealCard` says when a blocked run's card is in no conversation any more.
+    static func goneCardLine(jobName: String, runId: UUID) -> String {
+        let name = IrisEngine.flattenCardField(jobName, cap: IrisEngine.cardNameCap)
+        let shortId = runId.uuidString.lowercased().prefix(8)
+        return "The card for \(name)'s blocked run is gone; `/jobs ack \(shortId)` clears it."
+    }
+
+    /// What clicking a status item row does. A conversation row is an ask's delegation root or a
+    /// goal wait; a root archived while its ask is live is moved out of the archive, since an
+    /// archived conversation means an idle one (#182 §6.2) and this one is waiting on the owner.
+    func openStatusRow(_ target: StatusMenuRow.Target) async {
+        switch target {
+        case .conversation(let id):
+            unarchiveConversation(id)
+            showMainWindow(selecting: id)
+        case .card(let runId, let jobId):
+            await revealCard(runId: runId, jobId: jobId)
+        case .iris:
+            showMainWindow(selecting: activityConversationId())
+        case .nowhere:
+            break
+        }
+    }
+
     var subagentWriteLedger: [UUID: [String]] = [:]
     var pendingApprovals: [ToolApprovalRequest] = []
     /// Fail-closed denials recorded for background (unattended) conversations (#187) — never
@@ -3065,23 +3220,34 @@ class AppState {
         }
     }
 
-    /// The card's "Dismiss": marks the run seen, which takes it out of `/jobs`'s failure list and
-    /// off retention's exemption. The card itself stays in the transcript — it is a record of what
+    /// Marks a failed or blocked run seen, which takes it out of `/jobs`'s failure list and off
+    /// retention's exemption. The card's Dismiss, the run log's Acknowledge and a notification's
+    /// Dismiss all land here. The status item's snapshot is refreshed once the row is written
+    /// (D6 decision 16). The card itself stays in the transcript: it is a record of what
     /// happened, not a notification to be cleared.
     ///
-    /// Off the main actor, like every other write to the store: the row is tiny and the button
-    /// would almost certainly not stutter on it, but a synchronous SQLite write in a view action
-    /// is the shape that eventually does.
-    func dismissEventCard(runId: UUID) {
+    /// Off the main actor, like every other write to the store.
+    @discardableResult
+    func acknowledgeRun(_ runId: UUID) -> Task<Void, Never> {
         let ledger = store.ledger
-        Task.detached {
-            do {
-                try ledger.acknowledge(runId: runId, at: Date())
-            } catch {
-                print("[AppState] could not acknowledge run \(runId): \(error)")
-            }
+        return Task { [weak self] in
+            let written = await Task.detached { () -> Bool in
+                do {
+                    try ledger.acknowledge(runId: runId, at: Date())
+                    return true
+                } catch {
+                    print("[AppState] could not acknowledge run \(runId): \(error)")
+                    return false
+                }
+            }.value
+            guard written, let self else { return }
+            await self.refreshLedgerAttention().value
         }
     }
+
+    /// The card's "Dismiss".
+    @discardableResult
+    func dismissEventCard(runId: UUID) -> Task<Void, Never> { acknowledgeRun(runId) }
 
     /// Appends an approval request and awaits the user's decision. The queue/continuation seam,
     /// separated from `requestApproval`'s permission/Vibecop fast paths so it is unit-testable.
@@ -3817,6 +3983,7 @@ class AppState {
                     emitCommandOutput("Ambiguous run id prefix.", format: .markdown, to: convId)
                 case .found(let id):
                     try ledger.acknowledge(runId: id, at: Date())
+                    refreshLedgerAttention()
                     let short = id.uuidString.lowercased().prefix(8)
                     emitCommandOutput("Acknowledged run \(short).", format: .markdown, to: convId)
                 }
@@ -3831,6 +3998,7 @@ class AppState {
                     return
                 }
                 try ledger.setPaused(jobId: job.id, reason: JobsCommand.pausedByUserReason)
+                refreshLedgerAttention()
                 emitCommandOutput("Paused **\(job.name)**. `/jobs resume \(job.name)` puts it back.",
                                   format: .markdown, to: convId)
             } catch {
@@ -3848,6 +4016,7 @@ class AppState {
                 let next = JobScheduler.nextFire(for: job.trigger, after: Date())
                 try ledger.setPaused(jobId: job.id, reason: nil)
                 try ledger.setRetry(jobId: job.id, attempt: 0, nextFireAt: next)
+                refreshLedgerAttention()
                 var resumed = job
                 resumed.pausedReason = nil
                 resumed.retryAttempt = 0
@@ -3969,6 +4138,7 @@ class AppState {
                 // card they are still reading.
                 let runCount = try ledger.runCount(jobId: job.id)
                 try ledger.delete(jobId: job.id)
+                refreshLedgerAttention()
                 // The delete fires the ledger's `onJobsChanged` hook, which drops the job's
                 // subscriber and stops its stream if nothing else is watching that directory. What
                 // the hook cannot reach is the runner's own memory of a fire it held for this job.

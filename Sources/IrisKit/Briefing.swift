@@ -20,8 +20,9 @@ enum Briefing {
     private static let budgetReasonPrefix = "daily weighted-token budget reached"
 
     /// Either spelling of a daily-budget pause: the current one, or the one rows and paused jobs
-    /// written before 5c still carry (`JobRunner.legacyBudgetReasonPrefix`).
-    private static func isBudgetReason(_ reason: String) -> Bool {
+    /// written before 5c still carry (`JobRunner.legacyBudgetReasonPrefix`). Internal so the
+    /// status item's pause label classifies a budget pause by the same test (D6).
+    static func isBudgetReason(_ reason: String) -> Bool {
         reason.hasPrefix(budgetReasonPrefix) || reason.hasPrefix(JobRunner.legacyBudgetReasonPrefix)
     }
 

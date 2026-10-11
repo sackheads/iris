@@ -1023,9 +1023,25 @@ actor IrisEngine {
             }
         }
 
-        // Resume an in-flight goal that was interrupted by an app restart/crash.
-        // The goal state (activeGoal, goalContract, history) persists; we re-kick
-        // the reprompt loop so the agent picks up where it left off.
+        await resumeInterruptedGoal()
+    }
+
+    /// Whether this engine has already looked for a goal a restart interrupted. Not persisted:
+    /// an interruption is something only a process's first `start()` can find.
+    private var checkedForInterruptedGoal = false
+
+    /// Resumes an in-flight goal that was interrupted by an app restart or crash: the goal state
+    /// (activeGoal, goalContract, history) persists, and this re-kicks the reprompt loop so the
+    /// agent picks up where it left off.
+    ///
+    /// Once per engine. `ChatView`'s `.onAppear` calls `start()` every time the window opens, and
+    /// by the second call any goal still running is live, not interrupted: resuming it again
+    /// posted a second "interrupted by restart" line and could run a `processInput` beside the
+    /// live turn. The flag is set before the first `await`, so two overlapping starts cannot
+    /// both pass it.
+    func resumeInterruptedGoal() async {
+        guard !checkedForInterruptedGoal else { return }
+        checkedForInterruptedGoal = true
         let localState = state
         let localConversationId = await MainActor.run { localState?.selectedConversationId }
         if let convId = localConversationId {
@@ -3328,14 +3344,7 @@ actor IrisEngine {
             await runner?.pauseUnavailable(job: job, reason: reason)
         }
 
-        ledger.onJobsChanged { [weak self, weak ledger] in
-            // A task, because the hook runs on whatever thread finished the write and must not
-            // wait on an actor — least of all one whose fire handler writes to this same ledger.
-            Task {
-                guard let self, let ledger else { return }
-                await self.scheduleWatchSync(ledger: ledger).value
-            }
-        }
+        installJobsChangedHook(ledger: ledger)
         await scheduleWatchSync(ledger: ledger).value
         // The minute hand of §7's vanished-root check: FSEvents never reports a root that was
         // deleted, so nothing but a periodic re-stat would ever notice.
@@ -3343,6 +3352,30 @@ actor IrisEngine {
             guard let self, let ledger else { return }
             await self.scheduleWatchSync(ledger: ledger).value
         })
+    }
+
+    /// The ledger's one `onJobsChanged` hook: the watch resync, then the status item's snapshot.
+    /// Split out of `startWatching` so a test can pin it without the process-wide
+    /// `WatcherManager`; nothing else may call it, since a second install replaces the first.
+    func installJobsChangedHook(ledger: JobLedger) {
+        ledger.onJobsChanged { [weak self, weak ledger] in
+            // A task, because the hook runs on whatever thread finished the write and must not
+            // wait on an actor — least of all one whose fire handler writes to this same ledger.
+            Task {
+                guard let self, let ledger else { return }
+                await self.scheduleWatchSync(ledger: ledger).value
+                // D6 decision 16: the status item's pause count moves with the jobs table too.
+                // One call added to this hook, never a second hook: the ledger holds one, and a
+                // second install would silently replace the watch resync above.
+                await self.refreshStateLedgerAttention()
+            }
+        }
+    }
+
+    /// The status item's ledger snapshot, refreshed on the main actor (the actor-helper rule).
+    private func refreshStateLedgerAttention() async {
+        let state = self.state
+        await MainActor.run { _ = state?.refreshLedgerAttention() }
     }
 
     /// Asks for one `syncWatches` that starts after this call. Single-flight in order: a sync that
@@ -5210,7 +5243,13 @@ struct IrisApp: App {
         // main thread, and this is a synchronous call in it. It is not a general escape hatch —
         // the same construct trapped in #187's D3 PR B when it was reached from a non-isolated
         // closure. If this moves anywhere else, it needs a real hop instead.
-        MainActor.assumeIsolated { AppState.shared.installGuardHealthSink() }
+        MainActor.assumeIsolated {
+            AppState.shared.installGuardHealthSink()
+            // D6 decision 16: the snapshot at launch. Here and not in `AppState.init`, which a
+            // test suite runs hundreds of times.
+            AppState.shared.refreshLedgerAttention()
+            AppState.shared.raiseMainWindow = { MainWindow.raise() }
+        }
         Task {
             await SandboxSessionManager.shared.reapOrphans()
             while true {
@@ -5227,26 +5266,14 @@ struct IrisApp: App {
             NSApplication.shared.applicationIconImage = image
         }
         
+        // D6 decision 4: the raise goes through `showMainWindow`, like every other surface's.
         KeyboardShortcuts.onKeyUp(for: .toggleIris) {
-            if let window = NSApp.windows.first(where: { $0.title == "Iris" }) {
-                if window.isVisible && NSApp.isActive {
-                    window.orderOut(nil)
-                } else {
-                    NSApp.activate(ignoringOtherApps: true)
-                    window.makeKeyAndOrderFront(nil)
-                }
-            } else {
-                // If it's closed but a SwiftUI window still exists (sometimes hidden)
-                if let window = NSApp.windows.first(where: { $0.className.contains("SwiftUI") }) {
-                    NSApp.activate(ignoringOtherApps: true)
-                    window.makeKeyAndOrderFront(nil)
-                }
-            }
+            MainWindow.tracking.toggleFromHotkey(state: AppState.shared)
         }
     }
     
     var body: some Scene {
-        WindowGroup("Iris") {
+        WindowGroup("Iris", id: MainWindow.sceneId) {
             ChatView()
                 .tint(.irisIndigo)
         }
@@ -5266,26 +5293,12 @@ struct IrisApp: App {
             DiagnosticsView()
         }
         
-        // This is a minimal MenuBarExtra, we can expand it later.
-        MenuBarExtra("Iris", systemImage: "sparkles") {
-            Button("Show Chat") {
-                // If the window is closed, this doesn't automatically reopen it in SwiftUI 
-                // without URL routing or openWindow. But it serves as a placeholder.
-                // In macOS 13+, we'd use openWindow(id:)
-            }
-            Divider()
-            if let updater = UpdaterController.shared {
-                CheckForUpdatesButton(updater: updater)
-            }
-            Button("Settings...") {
-                NSApp.activate(ignoringOtherApps: true)
-                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-            }
-            Button("Quit") {
-                NSApplication.shared.terminate(nil)
-            }
+        MenuBarExtra {
+            StatusMenu(state: AppState.shared)
+        } label: {
+            StatusItemLabel(state: AppState.shared)
         }
-        
+
         Settings {
             SettingsView()
         }
