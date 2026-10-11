@@ -106,10 +106,17 @@ final class PeerLedger: Sendable {
         }
     }
 
-    func pruneClosed(before cutoff: Date) throws {
+    /// A closed request has nothing left to tell either side; a message that never expected a
+    /// reply has nothing to wait for either, but `expectsReply = 0` never gets a `closedAt` — so
+    /// without the second clause those rows never aged out at all. An open request (`expectsReply
+    /// = 1`, `closedAt IS NULL`) matches neither clause and is kept forever (§5.3: requests never
+    /// expire by themselves).
+    func prune(before cutoff: Date) throws {
         try writer.write { db in
-            try db.execute(sql: "DELETE FROM peer_messages WHERE closedAt IS NOT NULL AND closedAt < ?",
-                           arguments: [cutoff])
+            try db.execute(sql: """
+                DELETE FROM peer_messages
+                WHERE (closedAt IS NOT NULL AND closedAt < ?) OR (expectsReply = 0 AND sentAt < ?)
+                """, arguments: [cutoff, cutoff])
         }
     }
 

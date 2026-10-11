@@ -312,7 +312,8 @@ Every field below needs `decodeIfPresent` and a store column, or it vanishes on 
   `in_reply_to` validation, and the ledger (`depth` is recorded for diagnosis; the limit reads the
   in-memory per-session depth, §6). No foreign keys to `conversations`: a new conversation's row
   is written asynchronously and may not exist yet when it sends. Deleting a conversation deletes
-  its rows explicitly, and closed rows older than 30 days are pruned at launch.
+  its rows explicitly; messages that expected no reply, and closed requests, older than 30 days
+  are pruned at launch — open requests are kept.
 - **`artifact_refs`**: `sha256`, `conversationId`, `msgId`. Drives retention.
 
 Token buckets are in memory; a restart refilling them is acceptable.

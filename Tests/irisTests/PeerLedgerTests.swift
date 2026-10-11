@@ -62,16 +62,26 @@ struct PeerLedgerTests {
         #expect(try peers.message("aaaa0003") == nil)
     }
 
-    @Test("pruning removes only closed rows older than the cutoff")
+    @Test("pruning removes closed rows older than the cutoff; open rows are kept")
     func prune() throws {
         let peers = try ConversationStore.inMemory().peers
         let a = UUID(), b = UUID()
         try peers.insert(record("aaaa0001", from: a, to: b))
         try peers.insert(record("aaaa0002", from: a, to: b))
         try peers.close("aaaa0001", reason: "x", at: Date(timeIntervalSince1970: 2000))
-        try peers.pruneClosed(before: Date(timeIntervalSince1970: 3000))
+        try peers.prune(before: Date(timeIntervalSince1970: 3000))
         #expect(try peers.message("aaaa0001") == nil)
         #expect(try peers.message("aaaa0002") != nil, "open rows are never pruned")
+    }
+
+    @Test("pruning removes an old row that never expected a reply, even though it was never closed")
+    func pruneNeverExpectedReply() throws {
+        let peers = try ConversationStore.inMemory().peers
+        let a = UUID(), b = UUID()
+        try peers.insert(record("aaaa0001", from: a, to: b, expects: false, sentAt: Date(timeIntervalSince1970: 1000)))
+        try peers.prune(before: Date(timeIntervalSince1970: 3000))
+        #expect(try peers.message("aaaa0001") == nil,
+                "expectsReply=false never gets closedAt, so a closedAt-only clause would have kept this forever")
     }
 
     @Test("damaged columns are skipped, not fatal")

@@ -48,7 +48,11 @@ struct SessionRolesTests {
         #expect(SessionDirectory.resolve("name:o'brien", in: app.conversations, excluding: b) == .success(a))
     }
 
-    @Test("assigning a held role moves it, clears the old holder's skills, and tells it")
+    /// Routed like `closeRequestsToGone`/`deliverEvent`: the queue `takePendingEventLines` reads
+    /// only drains at the destination's next model round, so an idle previous holder — the usual
+    /// case — would never see a line left only there. It must land in the transcript and
+    /// straight into history instead.
+    @Test("assigning a held role moves it, clears the old holder's skills, and tells it via history, not only the queue")
     func moveRole() {
         let a = UUID(), b = UUID()
         let app = app([a, b])
@@ -61,9 +65,27 @@ struct SessionRolesTests {
         #expect(old.role == nil)
         #expect(old.sessionCard?.skills.isEmpty == true)
         #expect(app.conversations.first { $0.id == b }?.role == "planner")
-        let lines = app.takePendingEventLines(for: a)
-        #expect(lines.contains { $0.contains("planner") && $0.contains("no longer") })
-        #expect(lines.contains { $0.contains("(\"new-planner\")") }, "the new holder's card name is quoted, like renderPeerList")
+        #expect(app.takePendingEventLines(for: a).isEmpty, "an idle old holder must not need its next turn to see this")
+        let messages = old.messages
+        #expect(messages.contains { $0.role == .system && $0.content.contains("planner") && $0.content.contains("no longer") })
+        let history = old.history.flatMap(\.parts).compactMap(\.text).joined(separator: "\n")
+        #expect(history.contains("planner") && history.contains("no longer"),
+                "an idle old holder gets the line straight into history")
+        #expect(history.contains("(\"new-planner\")"), "the new holder's card name is quoted, like renderPeerList")
+    }
+
+    @Test("assigning a held role queues the notice for a BUSY old holder's own turn instead")
+    func moveRoleQueuesForBusyHolder() {
+        let a = UUID(), b = UUID()
+        let app = app([a, b])
+        #expect(app.assignRole("planner", to: a) == .assigned(role: "planner", movedFrom: nil))
+        app.beginEngineTurn(for: a)
+        #expect(app.assignRole("planner", to: b) == .assigned(role: "planner", movedFrom: a))
+        let old = app.conversations.first { $0.id == a }!
+        #expect(old.messages.contains { $0.role == .system && $0.content.contains("planner") },
+                "the transcript line is unconditional, busy or not")
+        #expect(old.history.isEmpty, "must not cut into the running turn's history")
+        #expect(app.takePendingEventLines(for: a).contains { $0.contains("planner") && $0.contains("no longer") })
     }
 
     @Test("a session's own skills do not survive it being moved to a different role")

@@ -4088,6 +4088,10 @@ actor IrisEngine {
                                            firstLine: Self.firstLine(of: message), sentAt: Date(),
                                            expectsReply: expectsReply, closedAt: nil, closeReason: nil)
             do { try peers.insert(record) } catch { result = "Not sent: the message could not be recorded."; return result }
+            // #469 review item 4: the user could have archived or deleted the target in the gap
+            // between `decidePeerSend`'s decision above and this insert — re-checked here so an
+            // `expects_reply` request is never left open against a target that cannot answer it.
+            await MainActor.run { localState?.closeIfTargetGone(msgId, target: targetId) }
             if let parent { _ = try? peers.close(parent.msgId, reason: "replied with \(msgId)", at: Date()) }
             let envelope = PeerEnvelope(msgId: msgId, contextId: contextId, depth: depth, expectsReply: expectsReply,
                                         replyTo: parent.map { PeerReplyRef(msgId: $0.msgId, firstLine: $0.firstLine) })

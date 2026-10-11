@@ -1891,7 +1891,16 @@ class AppState {
         if let previous, let p = conversations.firstIndex(where: { $0.id == previous }) {
             setRole(nil, at: p)
             let newName = conversations[idx].sessionCard?.name ?? conversations[idx].title
-            enqueueEventLine("[Event] Role `\(role)` moved to session \(id.uuidString) (\"\(IrisEngine.flattenCardField(newName, cap: IrisEngine.cardNameCap))\"); you no longer hold it, and your skills were cleared.", for: previous)
+            // Routed the way `closeRequestsToGone`/`deliverEvent` route an event line (see their
+            // doc comments): appended to the previous holder's transcript now, then joined to
+            // history immediately if it is idle, or queued for its own running turn otherwise.
+            let safeLine = "[Event] Role `\(role)` moved to session \(id.uuidString) (\"\(IrisEngine.flattenCardField(newName, cap: IrisEngine.cardNameCap))\"); you no longer hold it, and your skills were cleared."
+            appendMessage(role: .system, content: safeLine, to: previous)
+            if hasTurnInFlight(for: previous) {
+                enqueueEventLine(safeLine, for: previous)
+            } else {
+                appendContentToHistory(for: previous, content: Self.eventLineContent(safeLine))
+            }
         }
         setRole(role, at: idx)
         return .assigned(role: role, movedFrom: previous)
@@ -4067,10 +4076,11 @@ class AppState {
             if result.skipped.count > logCap {
                 print("… and \(result.skipped.count - logCap) more unreadable row(s).")
             }
-            // #469 §5.3: a closed request has nothing left to tell either side — pruned here,
-            // once per launch, rather than growing the ledger forever. Best-effort; a failure here
-            // must not stop the app from finishing its load.
-            try? store.peers.pruneClosed(before: Date().addingTimeInterval(-30 * 86_400))
+            // #469 §5.3: a closed request has nothing left to tell either side, and a message
+            // that never expected a reply has nothing to wait for — both pruned here, once per
+            // launch, rather than growing the ledger forever. An open request is kept regardless
+            // of age. Best-effort; a failure here must not stop the app from finishing its load.
+            try? store.peers.prune(before: Date().addingTimeInterval(-30 * 86_400))
         } catch {
             print("Failed to load conversations: \(error)")
             loadFailureHeadline = "\(error)"
@@ -4079,14 +4089,45 @@ class AppState {
 
     /// #469 §5.3: a request whose target goes away closes visibly — its sender is told, rather
     /// than left waiting on a session that will never answer.
+    ///
+    /// Routed the way `deliverEvent`/`deliverStoppedSubagentResult` route an event line: appended
+    /// to the sender's transcript now, then either joined to history immediately (idle sender) or
+    /// queued for the sender's own running turn to pick up (`enqueueEventLine` only drains at the
+    /// destination's next model round — an idle sender would otherwise never see it, and it would
+    /// be lost on quit).
     func closeRequestsToGone(_ id: UUID, verb: String) {
         let now = Date()
         let name = conversations.first { $0.id == id }.map { $0.sessionCard?.name ?? $0.title } ?? id.uuidString
         guard let closed = try? store.peers.closeOpenRequests(to: id, reason: "target \(verb)", at: now) else { return }
         for r in closed {
-            enqueueEventLine("[Event] Session \"\(IrisEngine.flattenCardField(name, cap: IrisEngine.cardNameCap))\" \(verb); msg \(r.msgId) closed unanswered.", for: r.fromSession)
+            let safeLine = "[Event] Session \"\(IrisEngine.flattenCardField(name, cap: IrisEngine.cardNameCap))\" \(verb); msg \(r.msgId) closed unanswered."
+            appendMessage(role: .system, content: safeLine, to: r.fromSession)
+            if hasTurnInFlight(for: r.fromSession) {
+                enqueueEventLine(safeLine, for: r.fromSession)
+            } else {
+                appendContentToHistory(for: r.fromSession, content: Self.eventLineContent(safeLine))
+            }
         }
         try? store.peers.closeOpenRequests(from: id, reason: "sender \(verb)", at: now)
+    }
+
+    /// #469 review item 4: `send_to_session` resolves and decides the send in `decidePeerSend`,
+    /// then crosses an `await` (sanitisation) before the record lands in `peers.insert`. The user
+    /// can archive or delete the target in that gap. `closeRequestsToGone` does not catch it — at
+    /// the moment the user archives or deletes, this message's row does not exist yet, so there is
+    /// nothing for it to close. Called right after the insert, so a request that expects a reply
+    /// never sits open against a target that can no longer answer it. A no-op for a message that
+    /// never expected a reply, or whose target is still active.
+    func closeIfTargetGone(_ msgId: String, target: UUID) {
+        guard let record = try? store.peers.message(msgId), record.isOpen else { return }
+        guard let c = conversations.first(where: { $0.id == target }) else {
+            _ = try? store.peers.close(msgId, reason: "target deleted", at: Date())
+            return
+        }
+        guard !c.isArchived else {
+            _ = try? store.peers.close(msgId, reason: "target archived", at: Date())
+            return
+        }
     }
 
     // MARK: - Slash Command Handlers
