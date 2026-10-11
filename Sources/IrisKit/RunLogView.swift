@@ -26,8 +26,8 @@ struct RunLogView: View {
 
     /// Acknowledge, Show card and Transcript side by side at the small control size.
     static let actionsWidth: CGFloat = 280
-    /// The window's first-open size: every column at its ideal width, actions included.
-    static let defaultWidth: CGFloat = 1120
+    /// The window's first-open size: every column at its ideal width (1240 measured on #481).
+    static let defaultWidth: CGFloat = 1240
     static let defaultHeight: CGFloat = 480
 
     private static let statuses: [JobRun.Status] = [.running, .completed, .failed, .blockedOnApproval, .interrupted]
@@ -47,25 +47,27 @@ struct RunLogView: View {
                 TableColumn("Started") { row in
                     Text(row.started, format: .dateTime.month().day().hour().minute().second())
                 }
-                .width(min: 110, ideal: 130)
+                .width(min: 90, ideal: 130)
                 TableColumn("Duration") { row in Text(verbatim: Self.durationText(row.duration)) }
-                    .width(min: 60, ideal: 80)
+                    .width(min: 45, ideal: 80)
                 TableColumn("Job") { row in Text(verbatim: row.jobName) }
-                    .width(min: 80, ideal: 120)
+                    .width(min: 60, ideal: 120)
                 TableColumn("Trigger") { row in Text(verbatim: row.triggerKind) }
-                    .width(min: 50, ideal: 70)
+                    .width(min: 45, ideal: 70)
                 TableColumn("Status") { row in Text(verbatim: row.status.text) }
-                    .width(min: 70, ideal: 120)
+                    .width(min: 60, ideal: 120)
                 TableColumn("Tokens") { row in Text(verbatim: "\(row.weightedTokens)") }
-                    .width(min: 50, ideal: 60)
-                TableColumn("Outcome") { row in
-                    Text(verbatim: row.outcome ?? "").lineLimit(1).help(row.outcome ?? "")
-                }
-                .width(min: 120, ideal: 220)
-                // Wide enough for all three actions on one line (the GUI pass on #481 saw them
-                // wrap and the last one clipped).
+                    .width(min: 40, ideal: 60)
+                // Ahead of Outcome and wide enough for all three actions on one line, so they stay
+                // visible at the minimum width (the GUI passes on #481 saw them wrap, then clip).
                 TableColumn("") { row in actions(row) }
                     .width(min: Self.actionsWidth, ideal: Self.actionsWidth)
+                // Last and flexible: it takes the squeeze, truncating with the full text on hover.
+                TableColumn("Outcome") { row in
+                    Text(verbatim: row.outcome ?? "").lineLimit(1).truncationMode(.tail)
+                        .help(row.outcome ?? "")
+                }
+                .width(min: 100, ideal: 220)
             }
             if model.hasMore {
                 Button("Load more") { model.loadMore() }.padding(8)
