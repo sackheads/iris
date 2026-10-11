@@ -56,7 +56,7 @@ Each decision gives its default and the reason for it. A reviewer should weigh t
    - The actions are **Open**, **Deny** (live asks) and **Dismiss** (blocked cards). The categories are registered without any approve action, so no code path can add one by accident.
    - *Why:* a banner truncates, a locked screen hides previews, and `humanOnly` exists so nothing but a click with the details in view can authorise. The card rule is the same: "an approval given without sight of the payload is worse than no button" (`EventCard.swift:45-47`).
    - *Cost if wrong:* one extra click to open the app.
-2. **One derived attention value.** `SurfaceAttention`, a pure function of `(pendingApprovals, session statuses, runningJobs, LedgerAttention)`. It returns `.actionRequired([Reason])`, `.running(count)` or `.idle`, in that order of precedence. It is computed, never stored. The status item and the run log's header read it. Notifications use the same inputs, through the policy in decision 6.
+2. **One derived attention value.** `SurfaceAttention`, a pure function of `(pendingApprovals, session statuses, runningJobs, LedgerAttention)`. It returns `.actionRequired([Reason])`, `.running(count)` or `.idle`, in that order of precedence. It is computed, never stored. The status item reads it; the run log refreshes on its ledger half (`LedgerAttention`, decision 15). Notifications use the same inputs, through the policy in decision 6.
    - *Why:* four surfaces, one answer, and one producer to move if #331's split ever comes back.
    - *Cost if wrong:* none to speak of; it is a function.
 3. **What "action required" means** (owner ruling 3). Something is waiting on the owner and a click resolves it:

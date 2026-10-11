@@ -40,6 +40,20 @@ struct RunLogModelTests {
         #expect(RunLogRow.make(run(.running, finishedAfter: nil), transcriptExists: { _ in false }).duration == nil)
         #expect(RunLogRow.make(run(.completed, transcript: UUID()), transcriptExists: { _ in false }).transcript == .pruned)
         #expect(RunLogRow.make(run(.completed), transcriptExists: { _ in true }).transcript == .none)
+
+        // A failed run that wrote only a reason shows the reason, as `/jobs` does; an outcome
+        // that is only whitespace counts as none.
+        var reasonOnly = run(.failed)
+        reasonOnly.failureReason = "model call failed: 500"
+        #expect(RunLogRow.make(reasonOnly, transcriptExists: { _ in false }).outcome == "model call failed: 500")
+        var blank = run(.failed)
+        blank.outcome = "  \n"
+        blank.failureReason = "timed out"
+        #expect(RunLogRow.make(blank, transcriptExists: { _ in false }).outcome == "timed out")
+        var both = run(.failed)
+        both.outcome = "said something"
+        both.failureReason = "then failed"
+        #expect(RunLogRow.make(both, transcriptExists: { _ in false }).outcome == "said something")
     }
 
     private func seeded(_ count: Int) throws -> (ConversationStore, Job) {
@@ -110,6 +124,52 @@ struct RunLogModelTests {
         try await value(of: model.reload())
         model.jobFilter = job.id
         #expect(model.pendingReload == nil)
+    }
+
+    @Test("a refresh keeps the pages Load more brought in; a filter change reads one page")
+    func refreshKeepsDepth() async throws {
+        let (store, _) = try seeded(5)
+        let model = RunLogModel(ledger: store.ledger, pageSize: 2, transcriptExists: { _ in false })
+        try await value(of: model.reload())
+        try await value(of: model.loadMore())
+        #expect(model.rows.count == 4)
+
+        try await value(of: model.reload(keepingDepth: true))
+        #expect(model.rows.map(\.outcome) == ["r4", "r3", "r2", "r1"])
+        #expect(model.hasMore)
+        try await value(of: model.loadMore())
+        #expect(model.rows.map(\.outcome) == ["r4", "r3", "r2", "r1", "r0"], "the cursor follows the deeper read")
+
+        try await value(of: model.reload())
+        #expect(model.rows.count == 2)
+    }
+
+    @Test("a reload that cannot read leaves no Load more behind")
+    func failedReload() async throws {
+        let (store, _) = try seeded(5)
+        let model = RunLogModel(ledger: store.ledger, pageSize: 2, transcriptExists: { _ in false })
+        try await value(of: model.reload())
+        #expect(model.hasMore)
+        try await store.writer.write { db in try db.execute(sql: "DROP TABLE job_runs") }
+
+        try await value(of: model.reload())
+        #expect(!model.hasMore)
+        try await value(of: model.loadMore())
+        #expect(model.rows.count == 2, "loadMore has no cursor to page from")
+    }
+
+    @Test("a picked job that has since been deleted is cleared from the filter")
+    func deletedJobFilter() async throws {
+        let (store, job) = try seeded(2)
+        let model = RunLogModel(ledger: store.ledger, pageSize: 10, transcriptExists: { _ in false })
+        model.jobFilter = job.id
+        try await value(of: try #require(model.pendingReload))
+        #expect(model.jobFilter == job.id)
+
+        try store.ledger.delete(jobId: job.id)
+        try await value(of: model.reload())
+        #expect(model.jobFilter == nil)
+        #expect(!model.jobChoices.contains { $0.id == job.id })
     }
 
     @Test("the job picker lists every job by name, unreadable ones too, without moving /jobs' count")
@@ -184,5 +244,23 @@ struct RunLogModelTests {
 
         #expect(app.transcriptSheetConversationId == transcript)
         #expect(raises.count == 1)
+    }
+
+    @Test("with nothing selected, Transcript selects Iris so the sheet has a pane to appear on")
+    func transcriptWithNoSelection() throws {
+        let app = AppState(store: try ConversationStore.inMemory(),
+                           tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        app.raiseMainWindow = {}
+        let mine = app.createNewConversation()
+        let transcript = app.createNewConversation(isBackground: true, select: false)
+
+        app.selectedConversationId = nil
+        app.openTranscript(transcript)
+        #expect(app.selectedConversationId == app.activityConversationId())
+        #expect(app.transcriptSheetConversationId == transcript)
+
+        app.selectedConversationId = mine
+        app.openTranscript(transcript)
+        #expect(app.selectedConversationId == mine, "a selection the user made is left alone")
     }
 }

@@ -107,6 +107,16 @@ extension JobRun {
     }
 }
 
+extension JobRun {
+    /// What a person is told about how the run ended: the outcome, or the failure reason when
+    /// there is no outcome to show. Shared by `/jobs`' failure lines and the Run Log.
+    var detailText: String? {
+        [outcome, failureReason]
+            .compactMap { $0 }
+            .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+}
+
 extension JobRun.Status {
     /// How a person is told about this status: `blocked on approval` rather than the camel-cased
     /// raw value. Shared by the event card and `/jobs`, so a run reads the same wherever it is

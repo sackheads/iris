@@ -2290,8 +2290,12 @@ opens it in the main window; one that retention has pruned says so.
 7. Click d6-blocked's "Show card". Expected: the chat window comes forward on Iris, scrolled to the card.
 8. Click d6-blocked's "Acknowledge". Expected: the button disappears from the row, and the menu bar label goes back to the hammer alone.
 9. Toggle "Show gate checks" on and off, and set the Job picker to d6-log. Expected: the rows narrow to d6-log's, and nothing errors.
-10. Run `scripts/run-dev.sh` only after quitting Iris Dev. Expected: the bare binary launches with no crash. Its menu bar item works, "Open Run Log…" included. Quit it.
-11. Type `/jobs delete d6-log` and `/jobs delete d6-blocked` (in either build), quit, and release the lease.
+10. Click "Open Run Log…" in the menu twice. Expected: one Run Log window, brought forward, never a second.
+11. **(spend)** With the Run Log open, type `/jobs run d6-log`. Expected: a `running` row for d6-log appears while the run is going, without clicking Refresh.
+12. Click "Load more" until more than one page shows (or note there is only one page), then let a run finish. Expected: the rows already loaded stay; the list does not fall back to one page.
+13. Close the chat window. Click "Open Run Log…", then a row's "Transcript". Expected: the Run Log opens, and the chat window reopens with the transcript sheet.
+14. Run `scripts/run-dev.sh` only after quitting Iris Dev. Expected: the bare binary launches with no crash. Its menu bar item works, "Open Run Log…" included. Quit it.
+15. Type `/jobs delete d6-log` and `/jobs delete d6-blocked` (in either build), quit, and release the lease.
 
 ---
 

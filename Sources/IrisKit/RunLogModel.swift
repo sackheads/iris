@@ -20,6 +20,7 @@ struct RunLogRow: Identifiable, Equatable, Sendable {
     let triggerKind: String
     let status: JobRun.Status
     let weightedTokens: Int
+    /// The outcome, or the failure reason when there is none (`JobRun.detailText`).
     /// Shown as plain text in the window, and never sent to a model or a notification: it is the
     /// run's own words, which no human read before they arrived.
     let outcome: String?
@@ -42,7 +43,7 @@ struct RunLogRow: Identifiable, Equatable, Sendable {
             duration: run.finishedAt.map { $0.timeIntervalSince(run.startedAt) },
             jobName: run.jobName, triggerKind: run.triggerKind, status: run.status,
             weightedTokens: CostWeights.weighted(run.components, provider: run.provider, model: run.model),
-            outcome: run.outcome, canAcknowledge: waits && run.acknowledgedAt == nil,
+            outcome: run.detailText, canAcknowledge: waits && run.acknowledgedAt == nil,
             opensCard: run.status == .blockedOnApproval, transcript: transcript)
     }
 }
@@ -81,9 +82,11 @@ final class RunLogModel {
         self.transcriptExists = transcriptExists
     }
 
+    /// Reads from the top. A filter change reads one page; a refresh (`keepingDepth`) reads as
+    /// many rows as are showing, so the pages "Load more" brought in survive it.
     @discardableResult
-    func reload() -> Task<Void, Never> {
-        let task = load(after: nil)
+    func reload(keepingDepth: Bool = false) -> Task<Void, Never> {
+        let task = load(after: nil, limit: keepingDepth ? max(pageSize, rows.count) : pageSize)
         pendingReload = task
         return task
     }
@@ -94,25 +97,44 @@ final class RunLogModel {
         // supersede it and append to rows it is about to replace.
         if let pendingReload { return pendingReload }
         guard let next else { return Task {} }
-        return load(after: next)
+        return load(after: next, limit: pageSize)
     }
 
-    private func load(after cursor: JobLedger.RunLogCursor?) -> Task<Void, Never> {
+    private func load(after cursor: JobLedger.RunLogCursor?, limit: Int) -> Task<Void, Never> {
         generation += 1
         let generation = self.generation
-        let ledger = self.ledger, limit = pageSize
+        let ledger = self.ledger
         let (jobId, status, gate) = (jobFilter, statusFilter, showGateChecks)
         return Task { [weak self] in
-            let (page, names) = await Task.detached {
-                (try? ledger.runLog(limit: limit, before: cursor, jobId: jobId, status: status,
-                                    includeGateUnchanged: gate),
+            let (result, names) = await Task.detached {
+                (Result { try ledger.runLog(limit: limit, before: cursor, jobId: jobId, status: status,
+                                            includeGateUnchanged: gate) },
                  cursor == nil ? try? ledger.jobNames() : nil)
             }.value
             // A reload started since makes this page stale: its filters or its cursor are gone.
             guard let self, generation == self.generation else { return }
             if cursor == nil { self.pendingReload = nil }
-            if let names { self.jobChoices = names }
-            guard let page else { return }
+            if let names {
+                self.jobChoices = names
+                // A job deleted since it was picked: the picker has no row for it any more.
+                if let picked = self.jobFilter, !names.contains(where: { $0.id == picked }) {
+                    // Its didSet starts the unfiltered reload; this page belongs to the old filter.
+                    self.jobFilter = nil
+                    return
+                }
+            }
+            let page: JobLedger.RunLogPage
+            switch result {
+            case .success(let read): page = read
+            case .failure(let error):
+                print("[RunLog] could not read the run log: \(error)")
+                // A failed reload leaves no cursor that belongs to what is showing.
+                if cursor == nil {
+                    self.next = nil
+                    self.hasMore = false
+                }
+                return
+            }
             // Wrapped rather than passed: `transcriptExists` is `@MainActor`, the parameter is a
             // plain closure, and this task runs on the main actor.
             let exists = self.transcriptExists

@@ -813,8 +813,9 @@ acknowledged turns the icon to `!` with a count until the run is cleared: dismis
 acknowledged with `/jobs ack` or the Run Log window's **Acknowledge**, approved with **Approve
 and run**, or gone with its job when you `/jobs delete` it. So does a job paused by its breaker, a
 budget, its retry ladder, a failing gate, a vanished folder, a built-in this build does not know,
-or a schedule that never matches, until you `/jobs resume` (or delete) it. A plain failure, including one still on its retry
-ladder, and a job you paused with `/jobs pause` are counts in the menu only. While a job is
+or a schedule that never matches, until you `/jobs resume` (or delete) it. A plain failure,
+including one still on its retry ladder, and a job you paused with `/jobs pause` are counts in the
+menu only; the failed-runs row opens the Run Log, where each one is acknowledged. While a job is
 running, the icon shows how many.
 
 A blocked run's row in the menu opens its card wherever the card is, an archived Iris after a
@@ -1225,8 +1226,8 @@ Run history is pruned at launch and once a day after that:
 - ledger rows older than **90 days** are deleted;
 - for each job, background transcripts beyond its **20 most recent runs** are deleted;
 - both are overridden by the same exemption: a `failed` or `blocked on approval` run that nobody
-  has acknowledged keeps its row *and* its transcript, however old. `/jobs ack` is what gives it
-  up.
+  has acknowledged keeps its row *and* its transcript, however old. Acknowledging it gives it up:
+  `/jobs ack`, the card's **Dismiss**, or the Run Log's **Acknowledge**.
 
 A pruned transcript leaves the ledger's `transcriptConversationId` dangling on purpose — the card
 then says "transcript pruned" rather than offering a dead button. Only a background conversation is

@@ -59,9 +59,12 @@ struct RunLogView: View {
         // The filters reload themselves (`RunLogModel`'s didSets); these are decision 15's
         // refreshes plus plan note 15's: a completed run moves neither the snapshot nor anything
         // else, so the running count is watched too.
-        .onAppear { model.reload() }
-        .onChange(of: state.ledgerAttention) { _, _ in model.reload() }
-        .onChange(of: state.runningJobs.count) { _, _ in model.reload() }
+        // A refresh keeps the depth "Load more" reached; a filter change starts at one page.
+        .onAppear { model.reload(keepingDepth: true) }
+        .onChange(of: state.ledgerAttention) { _, _ in model.reload(keepingDepth: true) }
+        .onChange(of: state.runningJobs.count) { _, _ in model.reload(keepingDepth: true) }
+        // A run's +1 above lands before its row is written; this moves once the row exists.
+        .onChange(of: state.runLogRevision) { _, _ in model.reload(keepingDepth: true) }
     }
 
     private var controls: some View {
@@ -80,7 +83,7 @@ struct RunLogView: View {
             .frame(maxWidth: 220)
             Toggle("Show gate checks", isOn: $model.showGateChecks)
             Spacer()
-            Button("Refresh") { model.reload() }
+            Button("Refresh") { model.reload(keepingDepth: true) }
         }
         .padding(8)
     }
@@ -92,7 +95,7 @@ struct RunLogView: View {
                 // Reloads itself once the write lands, rather than trusting the snapshot to move.
                 Button("Acknowledge") {
                     let ack = state.acknowledgeRun(row.id)
-                    Task { await ack.value; model.reload() }
+                    Task { await ack.value; model.reload(keepingDepth: true) }
                 }
             }
             if row.opensCard {

@@ -389,6 +389,18 @@ class AppState {
         runningJobsDidChange?(runningJobs)
     }
 
+    /// Moves each time `JobRunner` writes a new ledger row, so the Run Log shows a run when it
+    /// starts. A run's `+1` in `runningJobs` lands before its row does. Transient, plain and
+    /// observed: never a second `onJobsChanged` hook.
+    private(set) var runLogRevision = 0
+    /// Test seam: called after each bump.
+    @ObservationIgnored var runLogRevisionDidChange: ((Int) -> Void)?
+
+    func bumpRunLogRevision() {
+        runLogRevision &+= 1
+        runLogRevisionDidChange?(runLogRevision)
+    }
+
     /// D6 decision 16: what the ledger says is waiting on the owner, cached for the status item
     /// and the run log. Assigned only by `refreshLedgerAttention`. Never polled.
     private(set) var ledgerAttention = LedgerAttention.empty
@@ -516,7 +528,8 @@ class AppState {
     /// The run log's transcript button (D6 decision 15): the app's one transcript sheet, on the
     /// main window, raised first so the sheet has a window to appear on.
     func openTranscript(_ conversationId: UUID) {
-        showMainWindow(selecting: nil)
+        // The sheet lives in the detail pane, which shows nothing with no conversation selected.
+        showMainWindow(selecting: selectedConversationId == nil ? activityConversationId() : nil)
         transcriptSheetConversationId = conversationId
     }
 

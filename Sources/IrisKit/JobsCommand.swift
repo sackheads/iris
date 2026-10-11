@@ -539,10 +539,7 @@ enum JobsCommand: Equatable {
     static func failureLine(_ run: JobRun) -> String {
         let shortId = run.id.uuidString.lowercased().prefix(8)
         var line = "⚠️ \(run.jobName) · \(run.status.text) · \(shortId)"
-        let detail = [run.outcome, run.failureReason]
-            .compactMap { $0 }
-            .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        if let detail { line += " · \(flatten(detail))" }
+        if let detail = run.detailText { line += " · \(flatten(detail))" }
         return line
     }
 
