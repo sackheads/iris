@@ -473,6 +473,15 @@ struct SessionToolsTests {
         #expect(text.contains("skills"))
     }
 
+    @Test("a lone role-holder gets the role line but not the skills hint, which has no reader yet")
+    func roleLineAlone() async {
+        let text = await systemPromptText(sessionPeerCount: 0) { app, id in
+            _ = app.assignRole("pr-minder", to: id)
+        }
+        #expect(text.contains("You hold role `pr-minder`"))
+        #expect(!text.contains("Advertise"))
+    }
+
     @Test("the second brain pays nothing: a lone, uncarded, roleless session gets no session tools or lines")
     func noTax() async {
         let tools = await toolNames(sessionPeerCount: 0)

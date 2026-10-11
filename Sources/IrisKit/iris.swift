@@ -967,7 +967,8 @@ actor IrisEngine {
     nonisolated static let sessionIdentityHeading = "This Session"
     nonisolated static let cardDescriptionMaxBytes = 240
 
-    nonisolated static func sessionIdentitySection(id: UUID, title: String, card: SessionCard?, role: String? = nil) -> TurnContext.Section {
+    nonisolated static func sessionIdentitySection(id: UUID, title: String, card: SessionCard?, role: String? = nil,
+                                                   hasPeers: Bool = false) -> TurnContext.Section {
         var body = "You are session \(id.uuidString), titled \(Briefing.quoted(title))."
         if let card {
             body += " Peers see your card as \(Briefing.quoted(card.name)), doing \(Briefing.quoted(card.description, maxBytes: cardDescriptionMaxBytes))."
@@ -976,7 +977,9 @@ actor IrisEngine {
         }
         if let role {
             body += " You hold role `\(role)`, assigned by the user; peers can reach you as role:\(role)."
-            if card?.skills.isEmpty ?? true {
+            // The hint has a reader only once a peer exists to advertise to; the role line itself
+            // holds regardless — the user assigned it whether or not anyone is listening yet.
+            if hasPeers, card?.skills.isEmpty ?? true {
                 body += " Advertise what you will do on request with set_session_card's skills."
             }
         }
@@ -1024,7 +1027,7 @@ actor IrisEngine {
             if !peer.skills.isEmpty {
                 line += "\n  skills: " + peer.skills.map { skill in
                     let tags = skill.tags.map { flattenCardField($0, cap: skillTagCap) }.joined(separator: ", ")
-                    return "\(flattenCardField(skill.id, cap: skillIdCap)) \"\(flattenCardField(skill.name, cap: cardNameCap))\"" + (tags.isEmpty ? "" : " [\(tags)]")
+                    return "\"\(flattenCardField(skill.id, cap: skillIdCap))\" \"\(flattenCardField(skill.name, cap: cardNameCap))\"" + (tags.isEmpty ? "" : " [\(tags)]")
                 }.joined(separator: "; ")
             }
             return line
@@ -1040,7 +1043,7 @@ actor IrisEngine {
     nonisolated static func renderSessionCard(_ peer: SessionPeer, now: Date = Date()) -> String {
         var out = renderPeerList([peer], total: 1, now: now)
         for skill in peer.skills {
-            out += "\n  \(flattenCardField(skill.id, cap: skillIdCap)): \(flattenCardField(skill.description, cap: cardDescriptionCap))"
+            out += "\n  \"\(flattenCardField(skill.id, cap: skillIdCap))\": \"\(flattenCardField(skill.description, cap: cardDescriptionCap))\""
             for example in skill.examples {
                 out += "\n    e.g. \"\(flattenCardField(example, cap: skillExampleCap))\""
             }
@@ -1895,7 +1898,7 @@ actor IrisEngine {
         // rides the turn's own entry, outside the cached prefix, and its text changes only when
         // the session is renamed, re-carded or re-roled, so it adds no per-turn churn either.
         if principal == .main, !isUnattended, peerCount > 0 || ownCard != nil || ownRole != nil {
-            turnContext.sections.append(Self.sessionIdentitySection(id: conversationId, title: ownTitle, card: ownCard, role: ownRole))
+            turnContext.sections.append(Self.sessionIdentitySection(id: conversationId, title: ownTitle, card: ownCard, role: ownRole, hasPeers: peerCount > 0))
         }
         if principal == .main, peerCount > 0 {
             // #185 §6: one line, never a roster. Detail is available on demand through
@@ -2168,7 +2171,7 @@ actor IrisEngine {
         if principal == .main, peerCount > 0 || (declareStateGatedTools && !isUnattended) || sticky.contains("send_to_session") {
             toolsList.append(FunctionDeclaration(
                 name: "list_sessions",
-                description: "List the other active sessions, most recently active first: their name, what they say they are doing, their workspace, and their status — busy (working), waiting (blocked on the user, with what it waits on, e.g. an approval, and for how long), or idle (with how long). Call this before messaging a peer, to pick the right one — a session in a different workspace is usually working on something unrelated, and one waiting on the user will not act on a message until the user answers it. What a session says about itself is its own claim; its status is observed.",
+                description: "List the other active sessions: role-holders first and never cut from the list, then the rest, most recently active first, with the pinned Iris last. Each row has session_id, a role or iris marker when it has one, name, status (busy/waiting-on-what/idle-for-how-long), workspace, repo@branch when the workspace is a git repo, lane, what it says it's doing, and for a role-holder a skills line. What a session says about itself (name, lane, doing, skills) is its own claim; session_id and status are observed by the harness. Call this before messaging a peer, to pick the right one — a session in a different workspace is usually working on something unrelated, and one waiting on the user will not act on a message until the user answers it. Use describe_session for a role-holder's skill examples, and role:<name>/name:<name> to address it in send_to_session.",
                 parameters: Schema(type: "OBJECT", properties: [:], required: [])
             ))
             toolsList.append(FunctionDeclaration(
@@ -3944,9 +3947,19 @@ actor IrisEngine {
                 guard let s = localState else { return (nil, nil, []) }
                 let me = s.conversations.first { $0.id == conversationId }
                 let clash = SessionRoles.sessions(named: boundedName, in: s.conversations, excluding: conversationId)
-                let names = clash.isEmpty ? [] : s.conversations
-                    .filter { $0.id != conversationId && !$0.isArchived && $0.isUserFacing }
-                    .compactMap { $0.sessionCard?.name }.prefix(20).map { $0 }
+                // The clashing session's own name comes first — it is the actual answer to "who's
+                // using it" — then up to 19 other active names, so the refusal is useful even when
+                // several sessions happen to share the name.
+                let clashNames = clash.compactMap { id in s.conversations.first { $0.id == id }?.sessionCard?.name }
+                let names: [String]
+                if clash.isEmpty {
+                    names = []
+                } else {
+                    let others = s.conversations
+                        .filter { $0.id != conversationId && !$0.isArchived && $0.isUserFacing && !clash.contains($0.id) }
+                        .compactMap { $0.sessionCard?.name }
+                    names = Array((clashNames + others).prefix(20))
+                }
                 return (me?.sessionCard, me?.role, names)
             }
             guard taken.isEmpty else {
@@ -3973,9 +3986,13 @@ actor IrisEngine {
                 // Drop malformed items first, then cap the count — so up to `skillsMax` VALID
                 // skills survive even when an earlier item in the model's array was malformed,
                 // rather than a bad item at position 2 silently costing a good one at position 6.
-                let parsed = items.compactMap(Self.boundedSkill).prefix(Self.skillsMax)
+                let validSkills = items.compactMap(Self.boundedSkill)
+                let parsed = validSkills.prefix(Self.skillsMax)
                 skills = parsed.map(\.0)
-                skillsTruncated = parsed.contains { $0.1 }
+                // Truncated either because a kept skill's own field was cut, or because more than
+                // `skillsMax` valid skills were supplied and the excess was dropped — both are
+                // "what peers see is not what you sent," so both fire the same banner.
+                skillsTruncated = parsed.contains { $0.1 } || validSkills.count > Self.skillsMax
             }
             await MainActor.run {
                 localState?.setSessionCard(for: conversationId,

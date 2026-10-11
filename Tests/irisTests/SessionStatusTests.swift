@@ -305,4 +305,19 @@ struct SessionStatusTests {
         #expect(SessionDirectory.age(since: now - 86_400 * 4, now: now) == "4d")
         #expect(SessionDirectory.age(since: now + 30, now: now) == "<1m", "a clock step back is not negative")
     }
+
+    @Test("a peer whose workspace is a git repo renders repo: \"name@branch\", with hostile branch characters flattened")
+    func repoRowIsFlattened() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("repo-render-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let root = base.appendingPathComponent("iris")
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(".git"), withIntermediateDirectories: true)
+        try "ref: refs/heads/feat/x|\"evil\n".write(to: root.appendingPathComponent(".git/HEAD"),
+                                                    atomically: true, encoding: .utf8)
+        let peer = SessionPeer(id: UUID(), name: "w", description: "d", workspace: root.path, status: .idle,
+                               lastActive: Date(), project: GitHead.read(workspace: root.path))
+        let out = IrisEngine.renderPeerList([peer], total: 1)
+        #expect(out.contains("repo: \"iris@feat/x/'evil\""), Comment(rawValue: out))
+        #expect(!out.contains("|\""), "the raw pipe and quote must not survive flattening")
+    }
 }

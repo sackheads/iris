@@ -65,9 +65,10 @@ struct SessionCardToolTests {
         let a = UUID(); app.createNewConversation(id: a); app.createNewConversation(id: UUID())
         _ = app.assignRole("pr-minder", to: a)
         let six = (1...6).map { skill("s\($0)") }
-        _ = await run(["name": .string("n"), "description": .string("d"), "lane": .string("github"),
-                       "skills": .array(six)], on: app, as: a)
+        let out = await run(["name": .string("n"), "description": .string("d"), "lane": .string("github"),
+                             "skills": .array(six)], on: app, as: a)
         #expect(app.conversations.first { $0.id == a }?.sessionCard?.skills.count == IrisEngine.skillsMax)
+        #expect(out.contains("truncated"), "more than skillsMax valid skills were supplied and some were dropped")
         _ = await run(["name": .string("n"), "description": .string("new")], on: app, as: a)
         let card = app.conversations.first { $0.id == a }?.sessionCard
         #expect(card?.description == "new")
