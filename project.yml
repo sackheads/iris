@@ -36,8 +36,10 @@ targets:
         Debug:
           PRODUCT_BUNDLE_IDENTIFIER: com.bnaylor.iris.dev
           PRODUCT_NAME: "Iris Dev"
+          IRIS_URL_SCHEME: iris-dev
         Release:
           PRODUCT_BUNDLE_IDENTIFIER: com.bnaylor.iris
+          IRIS_URL_SCHEME: iris
 schemes:
   Iris:
     build:
