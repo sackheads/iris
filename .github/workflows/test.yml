@@ -1,0 +1,61 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # SwiftPM package only (IrisKit + the `iris` executable + irisTests). The Xcode app target is
+    # not built here: it needs the Metal toolchain for MLX's shaders and Developer ID signing,
+    # neither of which the runner has. GUI checks (the app, hotkeys, real windows) are not covered.
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Toolchain
+        id: toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          echo "key=$( { xcodebuild -version; swift --version 2>&1; } | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache .build
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-${{ runner.os }}-${{ steps.toolchain.outputs.key }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            spm-${{ runner.os }}-${{ steps.toolchain.outputs.key }}-
+
+      - name: Build package and tests
+        run: swift build --build-tests
+
+      - name: No warnings in Sources/ or Tests/
+        # Touches our own Swift files so every warning prints again; the rebuild is our modules
+        # only, since the dependencies' sources are untouched.
+        run: scripts/check-warnings.sh
+
+      - name: Tests
+        # Serial on purpose. The runner has 3 cores, so Swift's cooperative pool is 3 threads,
+        # and many suites run subprocesses, deadlines and kill ladders whose timing assumes the
+        # pool is not saturated by every other suite at once (AGENTS.md, invariant 4).
+        # `swift test` exits non-zero when either Swift Testing or XCTest fails; the check after
+        # it also requires both summary lines, so a run that silently selected nothing fails.
+        timeout-minutes: 30
+        env:
+          NSUnbufferedIO: "YES"
+        run: |
+          swift test --no-parallel 2>&1 | tee test.log
+          grep -E "^✔ Test run with [0-9]+ tests? in [0-9]+ suites? passed" test.log
+          grep -E "Executed [1-9][0-9]* tests?, with 0 failures" test.log | tail -1
