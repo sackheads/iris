@@ -389,6 +389,18 @@ class AppState {
         runningJobsDidChange?(runningJobs)
     }
 
+    /// Moves each time `JobRunner` writes a new ledger row, so the Run Log shows a run when it
+    /// starts. A run's `+1` in `runningJobs` lands before its row does. Transient, plain and
+    /// observed: never a second `onJobsChanged` hook.
+    private(set) var runLogRevision = 0
+    /// Test seam: called after each bump.
+    @ObservationIgnored var runLogRevisionDidChange: ((Int) -> Void)?
+
+    func bumpRunLogRevision() {
+        runLogRevision &+= 1
+        runLogRevisionDidChange?(runLogRevision)
+    }
+
     /// D6 decision 16: what the ledger says is waiting on the owner, cached for the status item
     /// and the run log. Assigned only by `refreshLedgerAttention`. Never polled.
     private(set) var ledgerAttention = LedgerAttention.empty
@@ -446,6 +458,15 @@ class AppState {
     /// How the main window is brought forward. `IrisApp` sets it to `MainWindow.raise()`; a test
     /// counts it. Nothing else may raise the window (D6 decision 4).
     @ObservationIgnored var raiseMainWindow: @MainActor () -> Void = {}
+    /// How the Run Log window is opened. `IrisApp` sets it to `RunLogWindow.open()`; a test
+    /// counts it.
+    @ObservationIgnored var openRunLogWindow: @MainActor () -> Void = {}
+
+    /// The status menu's "Open Run Log…" and its failed-runs row (D6 decision 15). Leaves the
+    /// chat window and its selection alone: the log is a window of its own.
+    func showRunLog() {
+        openRunLogWindow()
+    }
 
     /// The one way any surface raises the main window: the status item's rows and "Show Chat", a
     /// notification's Open, the run log's transcript, and the hotkey. Selects `conversationId`
@@ -504,6 +525,19 @@ class AppState {
         showMainWindow(selecting: iris)
     }
 
+    /// The run log's transcript button (D6 decision 15): the app's one transcript sheet, on the
+    /// main window, raised first so the sheet has a window to appear on.
+    func openTranscript(_ conversationId: UUID) {
+        // The sheet lives in the detail pane, which shows nothing with no conversation selected.
+        showMainWindow(selecting: selectedConversationId == nil ? activityConversationId() : nil)
+        transcriptSheetConversationId = conversationId
+    }
+
+    /// Whether a run's transcript conversation is still here, or retention has pruned it.
+    func transcriptExists(_ conversationId: UUID) -> Bool {
+        conversations.contains { $0.id == conversationId }
+    }
+
     /// What `revealCard` says when a blocked run's card is in no conversation any more.
     static func goneCardLine(jobName: String, runId: UUID) -> String {
         let name = IrisEngine.flattenCardField(jobName, cap: IrisEngine.cardNameCap)
@@ -523,6 +557,8 @@ class AppState {
             await revealCard(runId: runId, jobId: jobId)
         case .iris:
             showMainWindow(selecting: activityConversationId())
+        case .runLog:
+            showRunLog()
         case .nowhere:
             break
         }

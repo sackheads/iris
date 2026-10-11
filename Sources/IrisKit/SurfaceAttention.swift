@@ -81,6 +81,8 @@ struct StatusMenuRow: Identifiable, Equatable, Sendable {
         case conversation(UUID)
         case card(runId: UUID, jobId: UUID)
         case iris
+        /// The Run Log window, where a failed run is acknowledged (D6 decision 15).
+        case runLog
         case nowhere
     }
 
@@ -129,7 +131,7 @@ extension SurfaceAttention {
         }
         if ledger.failedCount > 0 {
             rows.append(StatusMenuRow(id: "failed", text: "\(ledger.failedCount) failed run\(plural(ledger.failedCount))",
-                                      target: .iris))
+                                      target: .runLog))
         }
         if ledger.ownerPausedCount > 0 {
             rows.append(StatusMenuRow(id: "owner-paused",

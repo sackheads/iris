@@ -127,6 +127,7 @@ struct SurfaceAttentionTests {
         #expect(rows[1].target == .card(runId: b.runId, jobId: b.jobId))
         #expect(rows[2].target == .card(runId: digest.runId, jobId: digestJob))
         #expect(rows[4].target == .nowhere)
+        #expect(rows[5].target == .runLog, "failed runs are cleared from the log, so that is where the row goes")
         #expect(Set(rows.map(\.id)).count == rows.count, "row ids are unique")
 
         let mixed = LedgerAttention(blocked: [blocked(), blocked(tool: "write_file")])

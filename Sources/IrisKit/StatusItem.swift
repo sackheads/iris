@@ -247,6 +247,10 @@ struct StatusMenu: View {
             adoptOpenAction()
             state.showMainWindow(selecting: nil)
         }
+        Button("Open Run Log…") {
+            adoptOpenAction()
+            state.showRunLog()
+        }
         Divider()
         if let updater = UpdaterController.shared {
             CheckForUpdatesButton(updater: updater)

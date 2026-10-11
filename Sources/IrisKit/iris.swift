@@ -5311,6 +5311,7 @@ struct IrisApp: App {
             // test suite runs hundreds of times.
             AppState.shared.refreshLedgerAttention()
             AppState.shared.raiseMainWindow = { MainWindow.raise() }
+            AppState.shared.openRunLogWindow = { RunLogWindow.open() }
         }
         Task {
             await SandboxSessionManager.shared.reapOrphans()
@@ -5354,6 +5355,11 @@ struct IrisApp: App {
         Window("Diagnostics", id: "diagnostics") {
             DiagnosticsView()
         }
+
+        Window("Run Log", id: RunLogWindow.sceneId) {
+            RunLogView(state: AppState.shared)
+        }
+        .defaultSize(width: RunLogView.defaultWidth, height: RunLogView.defaultHeight)
         
         MenuBarExtra {
             StatusMenu(state: AppState.shared)

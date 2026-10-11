@@ -421,6 +421,7 @@ actor JobRunner {
                 do {
                     try Self.recordStillborn(job: current, ledger: ledger, reason: reason,
                                              triggerKind: origin.triggerKind, now: at, note: note)
+                    await reportRowWritten()
                 } catch {
                     print("[JobRunner] could not record the skipped fire for \(current.name): \(error)")
                 }
@@ -454,6 +455,7 @@ actor JobRunner {
                 do {
                     try Self.recordSkip(job: current, ledger: ledger,
                                         triggerKind: origin.triggerKind, now: at, note: note)
+                    await reportRowWritten()
                 } catch {
                     print("[JobRunner] could not record the skipped run for \(current.name): \(error)")
                 }
@@ -684,6 +686,8 @@ actor JobRunner {
             try ledger.finish(runId: run.id, status: status, outcome: outcome,
                               failureReason: reason, blockedTool: nil, tokens: TokenUsage(),
                               finishedAt: at)
+            // After `finish`: a reload between the two would read the row half-written.
+            await reportRowWritten()
         } catch {
             print("[JobRunner] could not record the gate's answer for \(job.name): \(error)")
         }
@@ -716,6 +720,7 @@ actor JobRunner {
             return
         }
         await afterBegin?()
+        await reportRowWritten()
         do { try ledger.setLastRun(jobId: job.id, at: startedAt) }
         catch { print("[JobRunner] could not stamp the last run of \(job.name): \(error)") }
 
@@ -817,6 +822,12 @@ actor JobRunner {
     private func refreshAttention() async {
         guard let state else { return }
         await MainActor.run { _ = state.refreshLedgerAttention() }
+    }
+
+    /// D6 decision 15: a ledger row was just begun, told to the Run Log in one hop.
+    private func reportRowWritten() async {
+        guard let state else { return }
+        await MainActor.run { state.bumpRunLogRevision() }
     }
 
     /// D6 decision 5: one activity of `job` began (`+1`) or ended (`-1`), told to
@@ -972,6 +983,7 @@ actor JobRunner {
         do {
             let run = try Self.recordStillborn(job: job, ledger: ledger, reason: reason,
                                                triggerKind: origin.triggerKind, now: at)
+            await reportRowWritten()
             // `network` as the three run sites say it (L1): the card line reads the same
             // whichever site wrote it.
             await deliver(EventCard(runId: run.id, jobId: job.id, jobName: job.name,
@@ -1059,6 +1071,7 @@ actor JobRunner {
             return
         }
         await afterBegin?()
+        await reportRowWritten()
         do {
             // Here, not in the scheduler: this is the moment a turn actually starts, and the
             // scheduler hands triggers over before admission has decided anything (§4).
@@ -1475,6 +1488,7 @@ actor JobRunner {
             await closeSession(conversationId, status: "not recorded")
             return await refuse(Self.ledgerRefusal(error), for: job)
         }
+        await reportRowWritten()
 
         // Straight into the executor: `executeApprovedCall` runs the tool through the hook layer
         // and never enters `AppState.requestApproval`, so the approval is given by construction

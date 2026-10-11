@@ -321,6 +321,25 @@ final class JobLedger: JobUsageReading, Sendable {
                       arguments: []).jobs
     }
 
+    struct JobName: Identifiable, Equatable, Sendable {
+        let id: UUID
+        let name: String
+    }
+
+    /// Every job's id and name, oldest first: the run log's job picker (R9). Reads two columns, so
+    /// a job whose row no longer decodes is still listed and its runs can still be filtered. Does
+    /// not publish `unreadableJobCount`, which only `jobs()` does, for `/jobs`.
+    func jobNames() throws -> [JobName] {
+        let rows = try writer.read { db in
+            try Row.fetchAll(db, sql: "SELECT id, name FROM jobs ORDER BY createdAt, rowid")
+        }
+        return rows.compactMap { row in
+            guard let idText: String = row["id"], let id = UUID(uuidString: idText),
+                  let name: String = row["name"] else { return nil }
+            return JobName(id: id, name: name)
+        }
+    }
+
     private func decodeAll(sql: String, arguments: StatementArguments) throws -> (jobs: [Job], skipped: Int) {
         let rows = try writer.read { db in try Row.fetchAll(db, sql: sql, arguments: arguments) }
         var jobs: [Job] = []
@@ -672,6 +691,66 @@ extension JobLedger {
                 """,
             arguments: [JobRun.Status.running.rawValue, JobRun.Status.interrupted.rawValue,
                        JobRunner.gateUnchangedOutcome + "%", limit])
+    }
+
+    /// Where the next run-log page starts: the last row of the page before it (D6 decision 15).
+    /// Both halves, because a catch-up burst writes several rows in one stored millisecond, and a
+    /// cursor on `startedAt` alone would drop or repeat them at a page boundary.
+    struct RunLogCursor: Equatable, Sendable {
+        let startedAt: Date
+        let rowid: Int64
+    }
+
+    struct RunLogPage: Equatable, Sendable {
+        let runs: [JobRun]
+        /// nil when this page reached the oldest matching row.
+        let next: RunLogCursor?
+    }
+
+    /// The run log, newest first, with every kind of row: running rows, built-ins, and the
+    /// stillborn skip and pause rows that `recentRuns` hides. Gate-unchanged completions are left
+    /// out unless `includeGateUnchanged`, matched by prefix as `recentRuns` matches them.
+    func runLog(limit: Int, before: RunLogCursor? = nil, jobId: UUID? = nil,
+                status: JobRun.Status? = nil, includeGateUnchanged: Bool = false) throws -> RunLogPage {
+        // `prefix` traps on a negative count, and a page of nothing would never move on.
+        let limit = max(limit, 1)
+        var conditions: [String] = []
+        var arguments = StatementArguments()
+        if let before {
+            conditions.append("(startedAt < ? OR (startedAt = ? AND rowid < ?))")
+            arguments += [before.startedAt, before.startedAt, before.rowid]
+        }
+        if let jobId {
+            conditions.append("jobId = ?")
+            arguments += [jobId.uuidString]
+        }
+        if let status {
+            conditions.append("status = ?")
+            arguments += [status.rawValue]
+        }
+        if !includeGateUnchanged {
+            conditions.append("NOT (status = ? AND outcome IS NOT NULL AND outcome LIKE ?)")
+            arguments += [JobRun.Status.completed.rawValue, JobRunner.gateUnchangedOutcome + "%"]
+        }
+        let filter = conditions.isEmpty ? "" : "WHERE " + conditions.joined(separator: " AND ")
+        arguments += [limit + 1]
+        let rows = try writer.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT rowid AS logRowid, * FROM job_runs \(filter)
+                ORDER BY startedAt DESC, rowid DESC LIMIT ?
+                """, arguments: arguments)
+        }
+        let kept = rows.prefix(limit)
+        let runs = Self.decodeRuns(Array(kept))
+        // The cursor comes from the raw row, not the decoded run: an unreadable last row must
+        // still move the page on rather than end the log early.
+        var next: RunLogCursor?
+        if rows.count > limit, let last = kept.last,
+           let startedAt = Date.fromDatabaseValue(last["startedAt"] as DatabaseValue),
+           let rowid = Int64.fromDatabaseValue(last["logRowid"] as DatabaseValue) {
+            next = RunLogCursor(startedAt: startedAt, rowid: rowid)
+        }
+        return RunLogPage(runs: runs, next: next)
     }
 
     /// The daily digest's window (5b §0.7): runs that started in `[since, until)`, oldest first,

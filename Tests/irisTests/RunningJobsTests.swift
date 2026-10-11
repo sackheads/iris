@@ -86,6 +86,32 @@ struct RunningJobsTests {
         #expect(try store.ledger.runs(jobId: job.id, limit: 1).first?.status == .completed)
     }
 
+    @Test("the run log's revision moves once a run's row exists, not before (D6 decision 15)")
+    func runLogRevisionAfterBegin() async throws {
+        let (store, state, engine) = try harness()
+        let job = Job(name: "digest-like", prompt: "", trigger: .schedule(.interval(seconds: 60)),
+                      action: .builtin(DailyDigest.name))
+        try store.ledger.upsert(job)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                               endSandboxSession: { _ in }, config: config)
+        final class Seen { var running: [Bool] = [] }
+        let seen = Seen()
+        let ledger = store.ledger
+        // At each bump, is this job's row already there and still running?
+        state.runLogRevisionDidChange = { _ in
+            seen.running.append((try? ledger.runs(jobId: job.id, limit: 1).first?.status) == .running)
+        }
+        let before = state.runLogRevision
+
+        await runner.fire(job: job, origin: .schedule)
+
+        #expect(state.runLogRevision > before)
+        #expect(seen.running.first == true, "the first bump comes after begin, while the row says running")
+        #expect(try store.ledger.runs(jobId: job.id, limit: 1).first?.status == .completed)
+    }
+
     @Test("a failed run is cleared")
     func failedRun() async throws {
         let (store, state, engine) = try harness([])   // no responses queued: the model call fails
