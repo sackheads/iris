@@ -104,29 +104,53 @@ final class MainWindowTracking {
 
     var isFrontmost: Bool { appIsActive() && (current?.isKeyWindow ?? false) }
 
-    /// How to open a chat window when none is left, for a raise that brings no opener of its own:
-    /// the hotkey, and a notification's Open. Adopted from the status item's label at launch,
-    /// replaced by `ChatView`'s own once one appears.
-    private(set) var opener: (@MainActor () -> Void)?
+    /// Where an opener came from, so a better-proven one is never displaced by a worse one.
+    enum OpenerSource: Sendable, CustomStringConvertible {
+        /// The status item's label, drawn at launch with or without a window. Unproven by any GUI
+        /// pass, so it only fills an empty slot.
+        case label
+        /// The status menu, at the click that uses it (Show Chat after a cold start: Task 24).
+        case menu
+        /// A chat window's own environment.
+        case chat
 
-    /// Keeps the first opener offered and ignores later ones: an environment that exists before
-    /// any chat window (the status item's label, its menu) never displaces what is known.
-    func adoptOpener(_ open: @escaping @MainActor () -> Void) {
-        if opener == nil { opener = open }
+        var description: String {
+            switch self { case .label: "label"; case .menu: "menu"; case .chat: "chat" }
+        }
     }
 
-    func replaceOpener(_ open: @escaping @MainActor () -> Void) { opener = open }
+    /// Opens a scene by id, for a surface with no SwiftUI environment of its own: the hotkey and a
+    /// notification's Open (the chat scene), the Run Log. Ranked by `openerSource`.
+    private(set) var openScene: (@MainActor (String) -> Void)?
+    private(set) var openerSource: OpenerSource?
 
-    /// Brings the most recently key chat window forward, or opens the scene through `open` (else
-    /// the known `opener`) only when no chat window is left: never a second window while one
+    /// The one ranking policy: a chat window's opener replaces any, the menu's replaces any but a
+    /// chat window's, and the label's only fills an empty slot.
+    func offerOpener(_ open: @escaping @MainActor (String) -> Void, from source: OpenerSource) {
+        switch source {
+        case .label: guard openerSource == nil else { return }
+        case .menu: guard openerSource != .chat else { return }
+        case .chat: break
+        }
+        openScene = open
+        openerSource = source
+    }
+
+    /// Opens `scene` through the known opener; nothing when none is known yet.
+    func open(scene: String) { openScene?(scene) }
+
+    /// Brings the most recently key chat window forward, or opens the chat scene through `open`
+    /// (else the known opener) only when no chat window is left: never a second window while one
     /// still exists.
     func raise(open: (@MainActor () -> Void)? = nil) {
         activate()
         if let window = current {
             if window.isMiniaturized { window.deminiaturize(nil) }
             window.makeKeyAndOrderFront(nil)
+        } else if let open {
+            open()
         } else {
-            (open ?? opener)?()
+            self.open(scene: MainWindow.sceneId)
         }
     }
 
@@ -153,30 +177,20 @@ enum MainWindow {
     static let tracking = MainWindowTracking(appIsActive: { NSApp.isActive },
                                              activate: { NSApp.activate(ignoringOtherApps: true) })
     static var current: NSWindow? { tracking.current as? NSWindow }
-    /// `ChatView`'s `openWindow`, or the status item's until a `ChatView` appears, for a surface
-    /// with no SwiftUI environment of its own (the hotkey, a notification's Open) once no chat
-    /// window is left.
-    static var openAction: OpenWindowAction? {
-        didSet {
-            guard let action = openAction else { return }
-            tracking.replaceOpener { action(id: sceneId) }
-        }
+    /// Hands an environment's `openWindow` to the tracker, which keeps the best-ranked one
+    /// (`MainWindowTracking.offerOpener`).
+    static func adoptOpenAction(_ action: OpenWindowAction, from source: MainWindowTracking.OpenerSource) {
+        tracking.offerOpener({ action(id: $0) }, from: source)
     }
 
-    /// From an environment that exists before any chat window does (the status item's label at
-    /// launch, its menu). Never replaces one already known.
-    static func adoptOpenAction(_ action: OpenWindowAction) {
-        if openAction == nil { openAction = action }
-    }
+    /// Opens a scene (the Run Log) through the best-ranked `openWindow` known.
+    static func open(scene: String) { tracking.open(scene: scene) }
 
     static func track(_ window: NSWindow?) { tracking.track(window) }
     static var isVisible: Bool { tracking.isVisible }
     static var isFrontmost: Bool { tracking.isFrontmost }
 
-    static func raise(fallback: OpenWindowAction? = nil) {
-        guard let fallback else { return tracking.raise() }
-        tracking.raise(open: { fallback(id: sceneId) })
-    }
+    static func raise() { tracking.raise() }
 
     static func hide() { tracking.hide() }
 }
@@ -207,8 +221,9 @@ struct StatusItemLabel: View {
         // The label is drawn at launch even when no window opens (a link's cold start), so this
         // is the environment certain to exist before the hotkey is pressed (Task 24 follow-up).
         // In `body`, not `onAppear`: whether a `MenuBarExtra` label runs `onAppear` is unverified,
-        // and the adoption sets an unobserved static, so it triggers no view update.
-        let _ = MainWindow.adoptOpenAction(openWindow)
+        // and the adoption sets unobserved state, so it triggers no view update. Ranked lowest: it
+        // only fills an empty slot.
+        let _ = MainWindow.adoptOpenAction(openWindow, from: .label)
         let glyph = StatusGlyph.make(state.surfaceAttention, identity: .current)
         if let image = StatusItemImage.make(glyph) {
             Image(nsImage: image)
@@ -292,8 +307,8 @@ struct StatusMenu: View {
     }
 
     /// The menu has an environment of its own, so a closed window can reopen from here even
-    /// before `ChatView` ever appeared to hand over its action.
+    /// before `ChatView` ever appeared to hand over its action. It replaces the label's.
     private func adoptOpenAction() {
-        MainWindow.adoptOpenAction(openWindow)
+        MainWindow.adoptOpenAction(openWindow, from: .menu)
     }
 }

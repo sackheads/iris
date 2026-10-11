@@ -488,7 +488,7 @@ struct ChatView: View {
         }
         .background(MainWindowTracker())
         .onAppear {
-            MainWindow.openAction = openWindow
+            MainWindow.adoptOpenAction(openWindow, from: .chat)
             if !AppState.isSetUp() {
                 showSetupWizard = true
             } else {
