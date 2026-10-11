@@ -37,18 +37,23 @@ enum SessionRoles {
         }.map(\.id)
     }
 
-    /// Restores the invariant after load: only a session that may hold a role has one, and each
-    /// role has at most one holder — the most recently updated keeps it.
+    /// Restores the invariant after load: only a session that may hold a role has one, each role
+    /// has at most one holder — the most recently updated keeps it — and a role that does not
+    /// survive `normalizedName` unchanged (a value written before validation existed, or edited
+    /// directly in the store) is cleared too. §4.4: skills never survive a role loss, so every
+    /// branch that nils `role` here clears `sessionCard?.skills` with it.
     static func normalize(_ conversations: inout [Conversation]) {
         var keeper: [String: Int] = [:]
         for i in conversations.indices {
             guard let role = conversations[i].role else { continue }
-            guard mayHoldRole(conversations[i]) else { conversations[i].role = nil; continue }
+            guard mayHoldRole(conversations[i]), SessionRoles.normalizedName(role) == role else {
+                conversations[i].role = nil; conversations[i].sessionCard?.skills = []; continue
+            }
             if let j = keeper[role] {
                 if conversations[i].updatedAt > conversations[j].updatedAt {
-                    conversations[j].role = nil; keeper[role] = i
+                    conversations[j].role = nil; conversations[j].sessionCard?.skills = []; keeper[role] = i
                 } else {
-                    conversations[i].role = nil
+                    conversations[i].role = nil; conversations[i].sessionCard?.skills = []
                 }
             } else {
                 keeper[role] = i

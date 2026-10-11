@@ -71,14 +71,18 @@ enum SessionDirectory {
 
     /// One conversation's row. Shared by `peers(in:...)` and `describe_session`'s direct lookup,
     /// which must be able to build a peer that the 20-entry cap below would otherwise hide.
-    static func peer(for c: Conversation, now: Date, status: SessionStatus) -> SessionPeer {
+    /// `project` defaults to true (read `GitHead` now) for that single-row caller; the bulk
+    /// `peers(in:...)` below passes false and fills it in itself, only for rows that survive the
+    /// cut — a listing otherwise reads every active session's `.git` on every call, most of which
+    /// the cut then throws away.
+    static func peer(for c: Conversation, now: Date, status: SessionStatus, project: Bool = true) -> SessionPeer {
         let kind: SessionKind = c.isPinned ? .iris : (c.role != nil ? .role : .worker)
         return SessionPeer(id: c.id, name: c.sessionCard?.name, description: c.sessionCard?.description,
                            workspace: c.workspacePath, status: status,
                            lastActive: status == .busy ? now : c.updatedAt,
                            kind: kind, role: c.role, lane: c.sessionCard?.lane,
                            skills: c.role != nil ? (c.sessionCard?.skills ?? []) : [],
-                           project: c.workspacePath.flatMap { GitHead.read(workspace: $0) })
+                           project: project ? c.workspacePath.flatMap { GitHead.read(workspace: $0) } : nil)
     }
 
     /// Most recently active first (#418). When the set is over the cap, live sessions (busy or
@@ -88,21 +92,30 @@ enum SessionDirectory {
                       status: (Conversation) -> SessionStatus) -> (peers: [SessionPeer], total: Int) {
         let active = activePeers(in: conversations, excluding: selfId)
         // Keyed on the conversation, not `card.updatedAt`, which would rank a session that
-        // re-describes itself above one actually doing work.
-        let all = active.map { c -> SessionPeer in peer(for: c, now: now, status: status(c)) }
+        // re-describes itself above one actually doing work. `project` is filled in below, only
+        // for the rows that survive the cut — `GitHead.read` is a filesystem read per peer, and a
+        // listing of twenty idle tabs plus the one row that keeps its cap should not pay for the
+        // nineteen it is about to drop.
+        let all = active.map { c -> (Conversation, SessionPeer) in (c, peer(for: c, now: now, status: status(c), project: false)) }
         let byActivity: (SessionPeer, SessionPeer) -> Bool = {
             $0.lastActive != $1.lastActive ? $0.lastActive > $1.lastActive : $0.id.uuidString < $1.id.uuidString
         }
+        let byActivityPair: ((Conversation, SessionPeer), (Conversation, SessionPeer)) -> Bool = { byActivity($0.1, $1.1) }
         // #469 §4.6: role-holders first and outside the cap — a large worker pool never
         // truncates a role out of view. The rest keep #418's live-ahead-of-idle cut.
-        let roles = all.filter { $0.kind == .role }.sorted(by: byActivity)
-        let rest = all.filter { $0.kind != .role }
-        let kept = (rest.filter { $0.status.isLive }.sorted(by: byActivity)
-                    + rest.filter { !$0.status.isLive }.sorted(by: byActivity)).prefix(listCap)
+        let roles = all.filter { $0.1.kind == .role }.sorted(by: byActivityPair)
+        let rest = all.filter { $0.1.kind != .role }
+        let kept = (rest.filter { $0.1.status.isLive }.sorted(by: byActivityPair)
+                    + rest.filter { !$0.1.status.isLive }.sorted(by: byActivityPair)).prefix(listCap)
         let ordered = kept.sorted { a, b in
-            a.kind != b.kind ? (a.kind == .worker) : byActivity(a, b)   // workers before iris
+            a.1.kind != b.1.kind ? (a.1.kind == .worker) : byActivityPair(a, b)   // workers before iris
         }
-        return (roles + ordered, active.count)
+        let final = (roles + ordered).map { c, p -> SessionPeer in
+            var p = p
+            p.project = c.workspacePath.flatMap { GitHead.read(workspace: $0) }
+            return p
+        }
+        return (final, active.count)
     }
 
     /// "<1m", "12m", "3h", "4d": how long ago `date` was, coarse on purpose — a peer deciding

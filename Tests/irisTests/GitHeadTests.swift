@@ -75,4 +75,23 @@ struct GitHeadTests {
         }
         #expect(GitHead.read(workspace: base.path) == nil)
     }
+
+    @Test("a dotfiles repo at home does not claim a workspace below it")
+    func homeBoundary() throws {
+        let home = try tempDir()
+        defer { try? FileManager.default.removeItem(at: home) }
+        try write("ref: refs/heads/main\n", home.appendingPathComponent(".git/HEAD"))
+        let sub = home.appendingPathComponent("src/project")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        #expect(GitHead.read(workspace: sub.path, homeDirectory: home) == nil)
+    }
+
+    @Test("a workspace that IS home still reads its own repo")
+    func homeItself() throws {
+        let home = try tempDir()
+        defer { try? FileManager.default.removeItem(at: home) }
+        try write("ref: refs/heads/main\n", home.appendingPathComponent(".git/HEAD"))
+        #expect(GitHead.read(workspace: home.path, homeDirectory: home)
+                == GitProject(repo: home.lastPathComponent, branch: "main"))
+    }
 }

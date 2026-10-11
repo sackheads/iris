@@ -11,9 +11,17 @@ struct GitProject: Equatable, Sendable {
 enum GitHead {
     static let maxDepth = 32
 
-    static func read(workspace: String, fileManager: FileManager = .default) -> GitProject? {
+    static func read(workspace: String, fileManager: FileManager = .default,
+                      homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> GitProject? {
         var dir = URL(fileURLWithPath: workspace).standardizedFileURL
+        let start = dir
+        let home = homeDirectory.standardizedFileURL
         for _ in 0..<maxDepth {
+            // A dotfiles repo at $HOME would otherwise claim every workspace below it: the walk
+            // reaches home on its way up from anywhere, and home almost always has its own `.git`
+            // for dotfiles rather than the user's actual project. Stop before inspecting home's
+            // `.git` unless the workspace IS home.
+            if dir.path == home.path, dir.path != start.path { return nil }
             let dotGit = dir.appendingPathComponent(".git")
             var isDir: ObjCBool = false
             if fileManager.fileExists(atPath: dotGit.path, isDirectory: &isDir) {

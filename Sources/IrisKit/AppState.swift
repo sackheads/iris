@@ -1786,6 +1786,17 @@ class AppState {
         case refused(String)
     }
 
+    /// #469 §4.4: skills never survive a role change, in either direction. Every mutator that
+    /// touches `role` goes through this so the clearing is not something each caller has to
+    /// remember — the previous holder of a moved role, the target when its OWN role changes from
+    /// one value to another, and `clearRole`'s release all go through it.
+    private func setRole(_ role: String?, at idx: Int) {
+        guard conversations[idx].role != role else { return }
+        conversations[idx].role = role
+        conversations[idx].sessionCard?.skills = []
+        markChanged(conversations[idx].id, .metadata)
+    }
+
     /// #469 §4.3. The user's `/role`; no tool reaches this.
     func assignRole(_ raw: String, to id: UUID) -> RoleAssignment {
         guard let role = SessionRoles.normalizedName(raw) else {
@@ -1795,19 +1806,16 @@ class AppState {
             return .refused("That conversation no longer exists.")
         }
         guard SessionRoles.mayHoldRole(conversations[idx]) else {
-            return .refused(conversations[idx].isPinned ? "Iris holds no factory role." : "Only an active session can hold a role.")
+            return .refused(conversations[idx].isPinned ? "Iris can't hold a role." : "Only an active session can hold a role.")
         }
         if conversations[idx].role == role { return .assigned(role: role, movedFrom: nil) }
         let previous = SessionRoles.holder(of: role, in: conversations)
         if let previous, let p = conversations.firstIndex(where: { $0.id == previous }) {
-            conversations[p].role = nil
-            conversations[p].sessionCard?.skills = []
-            markChanged(previous, .metadata)
+            setRole(nil, at: p)
             let newName = conversations[idx].sessionCard?.name ?? conversations[idx].title
-            enqueueEventLine("[Event] Role `\(role)` moved to session \(id.uuidString) (\(IrisEngine.flattenCardField(newName, cap: IrisEngine.cardNameCap))); you no longer hold it, and your skills were cleared.", for: previous)
+            enqueueEventLine("[Event] Role `\(role)` moved to session \(id.uuidString) (\"\(IrisEngine.flattenCardField(newName, cap: IrisEngine.cardNameCap))\"); you no longer hold it, and your skills were cleared.", for: previous)
         }
-        conversations[idx].role = role
-        markChanged(id, .metadata)
+        setRole(role, at: idx)
         return .assigned(role: role, movedFrom: previous)
     }
 
@@ -1816,9 +1824,7 @@ class AppState {
     func clearRole(for id: UUID) -> String? {
         guard let idx = conversations.firstIndex(where: { $0.id == id }),
               let role = conversations[idx].role else { return nil }
-        conversations[idx].role = nil
-        conversations[idx].sessionCard?.skills = []
-        markChanged(id, .metadata)
+        setRole(nil, at: idx)
         return role
     }
 
