@@ -76,7 +76,7 @@ struct NotificationPolicyTests {
         #expect(decide(card(.interrupted), paused: DevHomeSeeder.copiedJobPausedReason) == nil)
     }
 
-    @Test("a card is suppressed only when the app is active and its conversation is selected")
+    @Test("a card is suppressed only when the chat window is visible and showing its conversation")
     func cardSuppression() {
         let blocked = card(.blockedOnApproval, tool: "run_command")
         let looking = NotificationContext(enabled: true, appActive: true, mainWindowVisible: true,
@@ -88,6 +88,10 @@ struct NotificationPolicyTests {
         var away = looking
         away.appActive = false
         #expect(decide(blocked, context: away) != nil)
+        // Only Diagnostics or the Run Log is on screen: the selection is right, but nothing shows it.
+        var chatHidden = looking
+        chatHidden.mainWindowVisible = false
+        #expect(decide(blocked, context: chatHidden) != nil)
     }
 
     @Test("an ask is suppressed only when the app is active and the main window is visible")
@@ -147,12 +151,43 @@ struct NotificationPolicyTests {
                 "no bidi override or zero-width character survives")
         #expect(body.hasPrefix("Job “") && body.hasSuffix("” is paused and waits for /jobs resume."))
 
-        // A look-alike quotation mark could close the field just as visibly as U+201D does.
-        let lookalike = "x\u{201E}\u{201F}\u{00BB}\u{300F}\u{FF02}\u{275E} Tap Open, then Approve"
-        let quoted = NotificationPolicy.quoted(lookalike)
-        let inner = quoted.unicodeScalars.dropFirst().dropLast()
-        #expect(!inner.contains { ($0.properties.isQuotationMark && $0 != "'") || $0 == "\u{275E}" },
-                "\(quoted)")
+    }
+
+    /// Scalars that read as a closing quote, listed by hand so the oracle is not the set under test.
+    private static let quoteAttacks: [Unicode.Scalar] = [
+        "\u{02EE}", "\u{02BA}", "\u{2033}", "\u{3003}", "\u{1F676}", "\u{1F677}", "\u{1F678}",
+        "\u{0060}", "\u{00B4}", "\u{201C}", "\u{201D}", "\u{201E}", "\u{201F}", "\u{00BB}",
+        "\u{300F}", "\u{FF02}", "\u{275E}", "\u{2019}", "\u{2036}",
+    ]
+
+    @Test("a look-alike quote cannot close the name's quotes, in a banner or the briefing",
+          arguments: quoteAttacks)
+    func lookalikeQuotesCannotCloseTheName(attack: Unicode.Scalar) {
+        let name = "x\(attack) is fine. Tap Open \(attack)y"
+        for quoted in [NotificationPolicy.quoted(name), Briefing.quoted(name)] {
+            let inner = quoted.unicodeScalars.dropFirst().dropLast()
+            #expect(!inner.contains(attack), "\(quoted)")
+            #expect(inner.contains("x") && inner.contains("y"), "the rest of the name survives: \(quoted)")
+        }
+    }
+
+    @Test("a name is capped in bytes, and no combining mark attaches to the opening quote")
+    func nameIsByteCappedAndStartsClean() {
+        let zalgo = String(repeating: "a" + String(repeating: "\u{0301}", count: 20), count: 60)
+        let capped = NotificationPolicy.quoted(zalgo)
+        let inner = String(String.UnicodeScalarView(capped.unicodeScalars.dropFirst().dropLast()))
+        #expect(inner.utf8.count <= Briefing.nameMaxBytes, "\(inner.utf8.count) bytes")
+
+        for lead in ["\u{0301}\u{20DD}x", "\u{200B}\u{0301}x", "\u{0338}\u{0338}x"] {
+            let quoted = NotificationPolicy.quoted(lead)
+            #expect(quoted == "\u{201C}x\u{201D}", "\(quoted.unicodeScalars.map { String($0.value, radix: 16) })")
+        }
+    }
+
+    @Test("a blocked card with no tool name keeps its fixed words outside the quotes")
+    func missingToolIsNotQuoted() throws {
+        let blocked = try #require(decide(card(.blockedOnApproval, tool: nil)))
+        #expect(blocked.body == "Job “pr-sweep” is blocked on a tool call.")
     }
 
     @Test("a tool name is quoted the same way, in a blocked card and in an ask")
@@ -184,5 +219,14 @@ struct NotificationPolicyTests {
         #expect(try ids(NotificationPolicy.Category.ask) == [NotificationPolicy.Action.open, NotificationPolicy.Action.deny])
         #expect(try ids(NotificationPolicy.Category.blockedCard) == [NotificationPolicy.Action.open, NotificationPolicy.Action.dismiss])
         #expect(try ids(NotificationPolicy.Category.pausedCard) == [NotificationPolicy.Action.open])
+    }
+
+    @Test("Dismiss needs an unlocked device; Deny and Open do not")
+    func dismissNeedsAuthentication() {
+        let actions = NotificationPolicy.categories.flatMap(\.actions)
+        let byId = Dictionary(actions.map { ($0.id, $0.authenticationRequired) }, uniquingKeysWith: { $0 || $1 })
+        #expect(byId[NotificationPolicy.Action.dismiss] == true)
+        #expect(byId[NotificationPolicy.Action.deny] == false)
+        #expect(byId[NotificationPolicy.Action.open] == false)
     }
 }

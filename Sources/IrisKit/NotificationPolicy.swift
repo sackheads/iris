@@ -19,6 +19,8 @@ struct NotificationContext: Equatable, Sendable {
     /// Settings' "Notifications: Off / Needs attention".
     var enabled: Bool
     var appActive: Bool
+    /// The chat window (`MainWindow.isVisible`) is on screen and uncovered. Diagnostics or the
+    /// Run Log being open does not count: neither shows a card or the approval overlay.
     var mainWindowVisible: Bool
     var selectedConversationId: UUID?
 
@@ -71,6 +73,10 @@ enum NotificationPolicy {
         let destructive: Bool
         /// Brings the app forward. Only Open does; Deny and Dismiss act from the banner.
         let foreground: Bool
+        /// The device must be unlocked first. Dismiss acknowledges a blocked run and clears the
+        /// owner's alert, so a passer-by at a locked screen must not be able to. Deny stops work,
+        /// the safe direction, and Open foregrounds the app, which needs an unlock anyway.
+        var authenticationRequired = false
     }
 
     struct CategorySpec: Equatable, Sendable {
@@ -87,7 +93,8 @@ enum NotificationPolicy {
     static let categories: [CategorySpec] = [
         CategorySpec(id: Category.blockedCard, actions: [
             openAction,
-            ActionSpec(id: Action.dismiss, title: "Dismiss", destructive: false, foreground: false),
+            ActionSpec(id: Action.dismiss, title: "Dismiss", destructive: false, foreground: false,
+                       authenticationRequired: true),
         ]),
         CategorySpec(id: Category.pausedCard, actions: [openAction]),
         CategorySpec(id: Category.ask, actions: [
@@ -101,14 +108,17 @@ enum NotificationPolicy {
         switch event {
         case .card(let card, let destination, let pausedReason):
             guard !card.isReflection else { return nil }
-            // Already on screen: the card is in the conversation the owner is looking at.
-            if context.appActive, context.selectedConversationId == destination { return nil }
+            // Already on screen: the chat window is visible and showing the card's conversation.
+            if context.appActive, context.mainWindowVisible,
+               context.selectedConversationId == destination { return nil }
             let info = [Key.runId: card.runId.uuidString, Key.jobId: card.jobId.uuidString,
                         Key.conversationId: destination.uuidString]
             if card.status == .blockedOnApproval {
+                // Fixed words never sit inside a name's quotes.
+                let tool = card.blockedTool.map(quoted) ?? "a tool call"
                 return PlannedNotification(
                     identifier: card.runId.uuidString, kind: .jobNeedsYou, title: jobTitle,
-                    body: "Job \(quoted(card.jobName)) is blocked on \(quoted(card.blockedTool ?? "a tool")).",
+                    body: "Job \(quoted(card.jobName)) is blocked on \(tool).",
                     categoryId: Category.blockedCard, userInfo: info)
             }
             // Plan note 5: only a card that ended badly on a job a limit has stopped. A completed
@@ -133,23 +143,28 @@ enum NotificationPolicy {
         }
     }
 
-    /// A name as a banner may show it: flattened and capped as the briefing does, with every
-    /// character a reader could not see removed (controls, bidi overrides, zero-width spaces,
-    /// line and paragraph separators, the set #334's `containsHiddenCharacters` names). Every
-    /// quotation mark, and the dingbat ones Unicode does not class as such, becomes a straight
-    /// `'`, so the name cannot close its own quotation marks, even with a look-alike.
-    /// `flattenCardField` strips line breaks, `|` and `"` only, so the rest is done here.
+    /// A name as a banner may show it, wrapped in `“…”`.
+    ///
+    /// - Flattened by `IrisEngine.flattenCardField` (line breaks, `|`, `"`) and capped at
+    ///   `cardNameCap` Characters.
+    /// - Every character a reader could not see is removed: controls, bidi overrides and
+    ///   isolates, zero-width characters, line and paragraph separators (#334's
+    ///   `containsHiddenCharacters`). `flattenCardField` removes none of these.
+    /// - Every quote-like scalar (`isQuoteLike`, the set `Briefing.name` strips) becomes a
+    ///   straight `'`, so the name cannot appear to close its own quotes.
+    /// - Leading combining marks are dropped, so none attaches to the opening quote.
+    /// - Capped at `Briefing.nameMaxBytes` UTF-8 bytes, as the briefing caps its names: a
+    ///   Character cap alone does not bound one letter carrying thousands of combining marks.
     static func quoted(_ field: String) -> String {
         let flat = IrisEngine.flattenCardField(field, cap: IrisEngine.cardNameCap)
         var scalars = String.UnicodeScalarView()
         for scalar in flat.unicodeScalars where !String(scalar).containsHiddenCharacters {
-            let looksLikeAQuote = scalar.properties.isQuotationMark || quoteDingbats.contains(scalar)
-            scalars.append(looksLikeAQuote ? "'" : scalar)
+            if scalars.isEmpty, [.nonspacingMark, .enclosingMark].contains(scalar.properties.generalCategory) {
+                continue
+            }
+            scalars.append(scalar.isQuoteLike ? "'" : scalar)
         }
-        return "\u{201C}\(String(scalars))\u{201D}"
+        let name = IrisEngine.capFieldBytes(String(scalars), maxBytes: Briefing.nameMaxBytes)
+        return "\u{201C}\(name)\u{201D}"
     }
-
-    /// U+275B-275E: heavy turned/comma quotation mark ornaments, which are `So`, not
-    /// `Quotation_Mark`.
-    private static let quoteDingbats: Set<Unicode.Scalar> = ["\u{275B}", "\u{275C}", "\u{275D}", "\u{275E}"]
 }
