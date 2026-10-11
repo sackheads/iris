@@ -23,7 +23,7 @@ struct EphemeralSubprocessPersistenceTests {
     @Test("sanitizeLoaded purges orphaned sub-process conversations from old data")
     func loadPurgesOrphans() {
         let decoded = [conv("main", isSubagent: false), conv("Evaluator", isSubagent: true)]
-        let loaded = AppState.sanitizeLoaded(decoded)
+        let loaded = AppState.sanitizeLoaded(decoded).conversations
         #expect(loaded.map { $0.isSubagent } == [false])   // only the durable one survives
     }
 
@@ -36,7 +36,7 @@ struct EphemeralSubprocessPersistenceTests {
                                         verdict: .cannotVerify, evidence: "", method: .judge)],
             startedAt: Date(timeIntervalSince1970: 100), completedAt: nil)
         main.lastGoalCompletionReport = .array([.object(["criterion": .string("c"), "status": .string("met")])])
-        let loaded = AppState.sanitizeLoaded([main])
+        let loaded = AppState.sanitizeLoaded([main]).conversations
         #expect(loaded.first?.lastGoalEvaluation == nil)          // chip surfacing dropped
         #expect(loaded.first?.lastGoalCompletionReport == nil)
     }
@@ -46,7 +46,7 @@ struct EphemeralSubprocessPersistenceTests {
         var main = conv("main", isSubagent: false)
         main.activeGoal = "ship it"
         main.lastGoalCompletionReport = .array([.object(["criterion": .string("c"), "status": .string("met")])])
-        let loaded = AppState.sanitizeLoaded([main])
+        let loaded = AppState.sanitizeLoaded([main]).conversations
         #expect(loaded.count == 1)                                 // conversation survives
         #expect(loaded.first?.activeGoal == "ship it")             // durable goal state intact
         #expect(loaded.first?.lastGoalCompletionReport == nil)     // only the chip surfacing cleared

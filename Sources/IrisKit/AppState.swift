@@ -97,13 +97,60 @@ struct TokenUsage: Codable, Equatable, Sendable {
     }
 }
 
-/// A2A-shaped identity a session advertises to its peers (#185 §4). Distinct from `title`, which
-/// is the user's name for the chat: the card is what the agent is doing *now* and changes as the
-/// work changes, where a title the user set deliberately should not.
+/// A2A 0.3 `AgentSkill` (#469 §4.4): something a role-holder will do on request.
+struct AgentSkill: Codable, Equatable, Sendable {
+    var id: String
+    var name: String
+    var description: String
+    var tags: [String] = []
+    var examples: [String] = []
+
+    init(id: String, name: String, description: String, tags: [String] = [], examples: [String] = []) {
+        self.id = id; self.name = name; self.description = description
+        self.tags = tags; self.examples = examples
+    }
+
+    enum CodingKeys: String, CodingKey { case id, name, description, tags, examples }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        description = try c.decodeIfPresent(String.self, forKey: .description) ?? ""
+        tags = try c.decodeIfPresent([String].self, forKey: .tags) ?? []
+        examples = try c.decodeIfPresent([String].self, forKey: .examples) ?? []
+    }
+}
+
+/// A2A-shaped identity a session advertises to its peers (#185 §4, #469 §4). Distinct from
+/// `title`, which is the user's name for the chat: the card is what the agent is doing *now*.
+/// `name`, `description` and `skills` are A2A 0.3 `AgentCard` fields; `lane` is iris's own.
 struct SessionCard: Codable, Equatable, Sendable {
     var name: String
     var description: String
     var updatedAt: Date = Date()
+    /// #469 §4.1: a worker's topical lane, free text.
+    var lane: String? = nil
+    /// #469 §4.4: role-holders only; the `set_session_card` handler refuses them elsewhere.
+    var skills: [AgentSkill] = []
+
+    init(name: String, description: String, updatedAt: Date = Date(), lane: String? = nil,
+         skills: [AgentSkill] = []) {
+        self.name = name; self.description = description; self.updatedAt = updatedAt
+        self.lane = lane; self.skills = skills
+    }
+
+    enum CodingKeys: String, CodingKey { case name, description, updatedAt, lane, skills }
+
+    // Invariant 1: every card stored before #469 lacks lane and skills.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        description = try c.decode(String.self, forKey: .description)
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        lane = try c.decodeIfPresent(String.self, forKey: .lane)
+        skills = try c.decodeIfPresent([AgentSkill].self, forKey: .skills) ?? []
+    }
 }
 
 struct Conversation: Identifiable, Codable, Hashable, Sendable {
@@ -152,6 +199,10 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// #185 -- what this session advertises to peers. Nil until the session describes itself.
     var sessionCard: SessionCard?
 
+    /// #469 §4.3 — the standing role the USER assigned (`/role`). Never set by a tool. Unique
+    /// among active sessions; `SessionRoles.normalize` restores that on load.
+    var role: String?
+
     /// Sticky taint (#187 §0.5, structural ruling, renamed from `hasPeerContent` under review #340):
     /// true once this conversation has had a turn started on it by content that was NOT the owner
     /// present and typing — a peer's `send_to_session` delivery (idle, or queued behind a busy turn
@@ -198,7 +249,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, prefixMismatchBehavior
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, prefixMismatchBehavior, role
     }
 
     init(from decoder: Decoder) throws {
@@ -233,6 +284,8 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         // Same invariant-1 shape as every other optional above: a legacy conversation has no
         // sessionCard key at all, and a missing key must decode as "uncarded", not throw.
         sessionCard = try container.decodeIfPresent(SessionCard.self, forKey: .sessionCard)
+        // Invariant 1: absent on every conversation persisted before #469, and absent is no role.
+        role = try container.decodeIfPresent(String.self, forKey: .role)
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
         // Invariant 1: a conversation persisted before this ruling has no such key, and absent
         // means "no turn here ever started without the owner present", the correct default.
@@ -1728,6 +1781,121 @@ class AppState {
         markChanged(conversationId, .metadata)
     }
 
+    /// #480 review item 1. All sessions share one `IrisEngine` actor, so a `set_session_card`
+    /// handler that checked the name clash in one `MainActor.run` and wrote the card in a second
+    /// could have another session's turn interleave at the `await` between them: two sessions
+    /// could both pass the clash check for the same name, or a `/role` could move in between the
+    /// read of this session's role and the write, so the skills gated on that read land on a
+    /// session that no longer holds the role. The fix is this method existing at all — the clash
+    /// check, the read of the existing card and role, the role gate on `skills`, and the write
+    /// are a single synchronous call with no suspension point inside, so the handler reaches it
+    /// through one `await` and nothing else can run on the actor in between.
+    enum SetSessionCardOutcome {
+        /// The conversation no longer exists (e.g. deleted mid-turn). Nothing was written.
+        case gone
+        /// `name` collides with an active session's card. The clashing session's own name comes
+        /// first, then up to 19 other active names, so the refusal is useful even when several
+        /// sessions share the name.
+        case nameTaken([String])
+        /// `skills` was non-empty but this session holds no role. Nothing was written.
+        case skillsNeedRole
+        /// Written. `laneTruncated`/`skillsTruncated` report whether `lane` or any `skills` field
+        /// was cut to its cap — the caller already knows whether `name`/`description` were.
+        case stored(SessionCard, laneTruncated: Bool, skillsTruncated: Bool)
+    }
+
+    /// `boundedName`/`boundedDescription` arrive already capped (#246) — that bound does not
+    /// depend on any other session's state, so the caller applies it before this call. `rawLane`
+    /// and `rawSkills` are the tool call's raw, uncapped arguments; this method does the capping
+    /// that DOES depend on current state (the role gate on `skills`) atomically with the rest.
+    @discardableResult
+    func setSessionCard(for conversationId: UUID, boundedName: String, boundedDescription: String,
+                         rawLane: String?, rawSkills: [JSONValue]?) -> SetSessionCardOutcome {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return .gone }
+        let clash = SessionRoles.sessions(named: boundedName, in: conversations, excluding: conversationId)
+        if !clash.isEmpty {
+            let clashNames = clash.compactMap { id in conversations.first { $0.id == id }?.sessionCard?.name }
+            let others = conversations
+                .filter { $0.id != conversationId && !$0.isArchived && $0.isUserFacing && !clash.contains($0.id) }
+                .compactMap { $0.sessionCard?.name }
+            return .nameTaken(Array((clashNames + others).prefix(20)))
+        }
+        let existing = conversations[idx].sessionCard
+        let role = conversations[idx].role
+
+        var lane = existing?.lane
+        var laneTruncated = false
+        if let raw = rawLane {
+            let trimmed = raw.trimmingCharacters(in: .whitespaces)
+            let capped = IrisEngine.capCardField(trimmed, cap: IrisEngine.cardLaneCap)
+            laneTruncated = !trimmed.isEmpty && capped != trimmed
+            lane = trimmed.isEmpty ? nil : capped
+        }
+        var skills = existing?.skills ?? []
+        var skillsTruncated = false
+        if let items = rawSkills {
+            guard role != nil || items.isEmpty else { return .skillsNeedRole }
+            // Drop malformed items first, then cap the count — so up to `skillsMax` VALID skills
+            // survive even when an earlier item in the model's array was malformed, rather than a
+            // bad item at position 2 silently costing a good one at position 6.
+            let validSkills = items.compactMap(IrisEngine.boundedSkill)
+            let parsed = validSkills.prefix(IrisEngine.skillsMax)
+            skills = parsed.map(\.0)
+            skillsTruncated = parsed.contains { $0.1 } || validSkills.count > IrisEngine.skillsMax
+        }
+        let card = SessionCard(name: boundedName, description: boundedDescription, lane: lane, skills: skills)
+        conversations[idx].sessionCard = card
+        markChanged(conversationId, .metadata)
+        return .stored(card, laneTruncated: laneTruncated, skillsTruncated: skillsTruncated)
+    }
+
+    enum RoleAssignment: Equatable {
+        case assigned(role: String, movedFrom: UUID?)
+        case refused(String)
+    }
+
+    /// #469 §4.4: skills never survive a role change, in either direction. Every mutator that
+    /// touches `role` goes through this so the clearing is not something each caller has to
+    /// remember — the previous holder of a moved role, the target when its OWN role changes from
+    /// one value to another, and `clearRole`'s release all go through it.
+    private func setRole(_ role: String?, at idx: Int) {
+        guard conversations[idx].role != role else { return }
+        conversations[idx].role = role
+        conversations[idx].sessionCard?.skills = []
+        markChanged(conversations[idx].id, .metadata)
+    }
+
+    /// #469 §4.3. The user's `/role`; no tool reaches this.
+    func assignRole(_ raw: String, to id: UUID) -> RoleAssignment {
+        guard let role = SessionRoles.normalizedName(raw) else {
+            return .refused("Role names are 1–\(SessionRoles.maxLength) characters of a-z, 0-9 and -, not `iris` or `clear`.")
+        }
+        guard let idx = conversations.firstIndex(where: { $0.id == id }) else {
+            return .refused("That conversation no longer exists.")
+        }
+        guard SessionRoles.mayHoldRole(conversations[idx]) else {
+            return .refused(conversations[idx].isPinned ? "Iris can't hold a role." : "Only an active session can hold a role.")
+        }
+        if conversations[idx].role == role { return .assigned(role: role, movedFrom: nil) }
+        let previous = SessionRoles.holder(of: role, in: conversations)
+        if let previous, let p = conversations.firstIndex(where: { $0.id == previous }) {
+            setRole(nil, at: p)
+            let newName = conversations[idx].sessionCard?.name ?? conversations[idx].title
+            enqueueEventLine("[Event] Role `\(role)` moved to session \(id.uuidString) (\"\(IrisEngine.flattenCardField(newName, cap: IrisEngine.cardNameCap))\"); you no longer hold it, and your skills were cleared.", for: previous)
+        }
+        setRole(role, at: idx)
+        return .assigned(role: role, movedFrom: previous)
+    }
+
+    /// Releases this session's role, returning it; nil when it held none.
+    @discardableResult
+    func clearRole(for id: UUID) -> String? {
+        guard let idx = conversations.firstIndex(where: { $0.id == id }),
+              let role = conversations[idx].role else { return nil }
+        setRole(nil, at: idx)
+        return role
+    }
+
     /// Bind a contracted goal's workspace at lock (#68), creating it when it does not exist.
     ///
     /// Returns the bound path, or nil when nothing could be bound — creation failing is not fatal:
@@ -2009,6 +2177,9 @@ class AppState {
         case noSuchConversation
         case turnInFlight
         case goalActive
+        /// #469 §4.3 — a role-holder cannot be archived out from under its role; release it with
+        /// `/role clear` first (or let another assignment move it, which clears it the same way).
+        case holdsRole(String)
         /// 5b: the pinned conversation may never be archived directly (spec §0.2, §0.4); `/new`
         /// rotates it instead (`rotatePinned`), unpinning it before it archives it. Checked last —
         /// a pinned conversation mid-turn must still report `.turnInFlight`, which
@@ -2020,6 +2191,7 @@ class AppState {
             case .noSuchConversation: return "that conversation no longer exists"
             case .turnInFlight: return "a turn is still running"
             case .goalActive: return "a goal is active — /stop it first"
+            case .holdsRole(let role): return "it holds role `\(role)` — release it with /role clear first"
             case .pinned: return "Iris can't be archived directly; /new archives it and starts a fresh Iris from a summary."
             }
         }
@@ -2033,6 +2205,7 @@ class AppState {
         }
         if hasTurnInFlight(for: conversationId) { return .turnInFlight }
         if conv.activeGoal != nil { return .goalActive }
+        if let role = conv.role { return .holdsRole(role) }
         if conv.isPinned { return .pinned }
         return nil
     }
@@ -2222,6 +2395,28 @@ class AppState {
         } else if trimmed == "/unarchive" {
             if !unarchiveConversation(convId) {
                 appendMessage(role: .system, content: "Not archived.", to: convId)
+            }
+            return
+        } else if trimmed == "/role" || trimmed.hasPrefix("/role ") {
+            // #469 §4.3: roles are the user's to assign; no tool sets one.
+            let arg = trimmed.dropFirst("/role".count).trimmingCharacters(in: .whitespaces)
+            if arg.isEmpty {
+                let role = conversations.first { $0.id == convId }?.role
+                appendMessage(role: .system, content: role.map { "This session holds role `\($0)`." }
+                              ?? "No role. Assign one with /role <name>; /role clear releases it.", to: convId)
+            } else if arg.lowercased() == "clear" {
+                let released = clearRole(for: convId)
+                appendMessage(role: .system, content: released.map { "Released role `\($0)`." } ?? "No role to release.", to: convId)
+            } else {
+                switch assignRole(arg, to: convId) {
+                case .assigned(let role, let movedFrom):
+                    let from = movedFrom.map { id in
+                        " (moved from \(conversations.first { $0.id == id }?.title ?? id.uuidString))"
+                    } ?? ""
+                    appendMessage(role: .system, content: "Role `\(role)` assigned\(from).", to: convId)
+                case .refused(let reason):
+                    appendMessage(role: .system, content: reason, to: convId)
+                }
             }
             return
         }
@@ -3593,8 +3788,15 @@ class AppState {
     /// answerable. The unconditional clear that used to live here was the workaround for a
     /// window-blanking render bug whose root cause was fixed in aa141d5 (invariant 8); if
     /// blanking returns at launch, this is the change to suspect (spec §3.1).
-    nonisolated static func sanitizeLoaded(_ decoded: [Conversation]) -> [Conversation] {
+    ///
+    /// `roleNormalizationChanged` is `SessionRoles.normalize`'s own return (#480 review item 5):
+    /// this function only touches the in-memory array, so the load path (`loadConversations`)
+    /// needs the ids back to `markChanged` them — without that, a duplicate-role repair's loser
+    /// keeps its stale role in the STORE and can win it back at the next launch, even though this
+    /// in-memory copy is already correct.
+    nonisolated static func sanitizeLoaded(_ decoded: [Conversation]) -> (conversations: [Conversation], roleNormalizationChanged: Set<UUID>) {
         var loaded = durableConversations(decoded)
+        let roleNormalizationChanged = SessionRoles.normalize(&loaded)
         for i in loaded.indices {
             // #191: while the run is stopped on the user, the surfacing fields are the pause's
             // inputs — `lastGoalEvaluation` is the only thing Accept/Reject act on and the only
@@ -3612,7 +3814,7 @@ class AppState {
             }
             loaded[i].messages = loaded[i].messages.map(LLMErrorMessage.migrateLegacy)
         }
-        return loaded
+        return (loaded, roleNormalizationChanged)
     }
 
     /// Quiet period before a debounced save fires.
@@ -3824,9 +4026,13 @@ class AppState {
             let result = try store.loadAll()
             loadedSkippedRows = result.skipped
             loadedRepairFailed = result.repairFailed
-            let loaded = Self.sanitizeLoaded(result.conversations)
+            let (loaded, roleNormalizationChanged) = Self.sanitizeLoaded(result.conversations)
             self.conversations = loaded
             self.selectedConversationId = Self.selectLaunchConversation(loaded)?.id
+            // #480 review item 5: persist the repair, not just this in-memory copy — otherwise
+            // the loser of a duplicate-role (or invalid-role) cleanup keeps its stale role in the
+            // store and can win it back at the next launch.
+            for id in roleNormalizationChanged { markChanged(id, .metadata) }
             // A whole-table corruption can be thousands of rows; one line each would bury
             // everything else in the log.
             let logCap = 10

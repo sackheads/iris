@@ -51,7 +51,7 @@ struct CheckpointJudgementUITests {
 
     @Test("sanitizeLoaded keeps the surfacing fields while the checkpoint is paused for review")
     func sanitizeKeepsFieldsWhenPausedForReview() {
-        let out = AppState.sanitizeLoaded([Self.pausedConversation()])
+        let out = AppState.sanitizeLoaded([Self.pausedConversation()]).conversations
         #expect(out.first?.lastGoalEvaluation != nil)
         #expect(out.first?.lastGoalCompletionReport != nil)
     }
@@ -61,7 +61,7 @@ struct CheckpointJudgementUITests {
         var c = Self.pausedConversation()
         c.goalContract?.checkpointStatus = .running
         c.goalContract?.awaitingHumanJudgement = true
-        let out = AppState.sanitizeLoaded([c])
+        let out = AppState.sanitizeLoaded([c]).conversations
         #expect(out.first?.lastGoalEvaluation != nil)
     }
 
@@ -70,7 +70,7 @@ struct CheckpointJudgementUITests {
         var c = Self.pausedConversation()
         c.goalContract?.checkpointStatus = .running
         c.goalContract?.awaitingHumanJudgement = false
-        let out = AppState.sanitizeLoaded([c])
+        let out = AppState.sanitizeLoaded([c]).conversations
         #expect(out.first?.lastGoalEvaluation == nil && out.first?.lastGoalCompletionReport == nil)
     }
 
@@ -78,7 +78,7 @@ struct CheckpointJudgementUITests {
     func sanitizeClearsFieldsWithoutContract() {
         var c = Self.pausedConversation()
         c.goalContract = nil
-        let out = AppState.sanitizeLoaded([c])
+        let out = AppState.sanitizeLoaded([c]).conversations
         #expect(out.first?.lastGoalEvaluation == nil)
     }
 

@@ -35,6 +35,7 @@ Iris supports in-app slash commands (`/-commands`) typed into the chat composer 
 | `/jobs reschedule` | `/jobs reschedule <name> <cron> [timezone]` | Give a scheduled or polled job (built-ins such as the daily digest included) a new five-field cron and report its next fire. Quote names or crons with spaces: `/jobs reschedule "Daily digest" "0 9 * * *"`. An invalid cron changes nothing; a directory watch is refused. |
 | `/jobs delete` | `/jobs delete <name>` | Delete a job and its ledger rows. Refused while one of its runs is in flight. |
 | `/jobs url` | `/jobs url <name> [on\|off]` | `on` mints a link (`iris://run-job/<token>`) that fires the job, shown once in a sheet and never saved; `on` again replaces it, `off` retires it, and the bare form says whether it is on. Changing the job's prompt, profile or policy, or a model lifting your pause, turns it off. Until the app registers the scheme, nothing opens the link. |
+| `/role` | `/role [<name>\|clear]` | Show this session's role, assign one (lowercase letters, digits and `-`, 1-32 characters; `iris` and `clear` are reserved), or release it. Assigning an already-held role moves it here instead; the previous holder is told and loses its skills. Refused on the pinned Iris. |
 | `/stop` | `/stop` | Cancel active goal mode or background subagent tasks. |
 | `/update` | `/update` | Check for a new version of Iris with Sparkle (installed release app only; dev builds reply that updates are disabled). |
 

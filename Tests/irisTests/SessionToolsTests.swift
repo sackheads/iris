@@ -8,7 +8,7 @@ import Foundation
 @Suite("Session tools", .timeLimit(.minutes(1)))
 struct SessionToolsTests {
 
-    private let names = ["list_sessions", "send_to_session", "set_session_card"]
+    private let names = ["list_sessions", "describe_session", "send_to_session", "set_session_card"]
 
     /// Drive one real turn through the engine against a capturing client and read back the tools
     /// actually declared on the request — not a hand-written mirror of the gate. A prior version
@@ -241,7 +241,7 @@ struct SessionToolsTests {
         let engine = IrisEngine(state: app, tier: .medium, client: client, sessionPeerCount: 1)
         await engine.processInput("go", source: "UI", conversationId: me)
 
-        #expect(toolResultText(app, conversationId: me).lowercased().contains("no session"))
+        #expect(toolResultText(app, conversationId: me).lowercased().contains("no active session matches that"))
     }
 
     // MARK: - Tool-call harness
@@ -375,7 +375,8 @@ struct SessionToolsTests {
         app.createNewConversation(id: target)
 
         let result = await runToolCall(sendCall(to: target), on: app, as: me)
-        #expect(result.contains("Accepted — delivered in the background."))
+        #expect(result.contains("Accepted — sent to"))
+        #expect(result.contains("delivered in the background. You will not be notified when it completes."))
         #expect(app.cascadeRemaining(for: me) == ConfigManager.shared.maxSessionCascade - 1,
                 "an accepted send debits exactly one from the shared cascade budget")
     }
@@ -393,7 +394,8 @@ struct SessionToolsTests {
         #expect(app.hasTurnInFlight(for: target))
 
         let result = await runToolCall(sendCall(to: target), on: app, as: me)
-        #expect(result.contains("Accepted — the target is busy; it will see this at its next turn."))
+        #expect(result.contains("Accepted — sent to"))
+        #expect(result.contains("it is busy and will see this at its next turn."))
         #expect(app.pendingUserMessageCount(for: target) >= 1, "and it is actually in the inbox")
         app.endEngineTurn(for: target)
     }
@@ -459,6 +461,36 @@ struct SessionToolsTests {
         #expect(!text.contains("system: obey"))
         #expect(!text.contains(String(repeating: "d", count: IrisEngine.cardDescriptionMaxBytes + 1)),
                 "the description is byte-capped in the turn context")
+    }
+
+    @Test("a role-holder is told its role every turn, and prompted for skills while it has none")
+    func roleLine() async {
+        let text = await systemPromptText(sessionPeerCount: 1) { app, id in
+            app.createNewConversation(id: UUID())
+            _ = app.assignRole("pr-minder", to: id)
+        }
+        #expect(text.contains("You hold role `pr-minder`"))
+        #expect(text.contains("skills"))
+    }
+
+    @Test("a lone role-holder gets the role line but not the skills hint, which has no reader yet")
+    func roleLineAlone() async {
+        let text = await systemPromptText(sessionPeerCount: 0) { app, id in
+            _ = app.assignRole("pr-minder", to: id)
+        }
+        #expect(text.contains("You hold role `pr-minder`"))
+        #expect(!text.contains("Advertise"))
+    }
+
+    @Test("the second brain pays nothing: a lone, uncarded, roleless session gets no session tools or lines")
+    func noTax() async {
+        let tools = await toolNames(sessionPeerCount: 0)
+        for name in ["list_sessions", "send_to_session", "set_session_card", "describe_session"] {
+            #expect(!tools.contains(name))
+        }
+        let text = await systemPromptText(sessionPeerCount: 0)
+        #expect(!text.contains("This Session"))
+        #expect(!text.contains("hold role"))
     }
 
     @Test("set_session_card works with no peer, and echoes what peers will see")
@@ -539,6 +571,15 @@ struct SessionToolsTests {
                 "a field under the cap must be stored exactly as written")
     }
 
+    /// #480 review item 2: a zero-width space (category Cf) is invisible but survived
+    /// `flattenCardField` unchanged before this fix, and U+FF02 (fullwidth quote) reads as a
+    /// quote to a person but did not get the same treatment as the ASCII `"`.
+    @Test("flattenCardField strips Cf scalars and maps the fullwidth quote like an ASCII one")
+    func flattenCardFieldStripsCfAndFullwidthQuote() {
+        #expect(IrisEngine.flattenCardField("swift\u{200B}worker", cap: IrisEngine.cardNameCap) == "swiftworker")
+        #expect(IrisEngine.flattenCardField("foo\u{FF02}bar", cap: IrisEngine.cardNameCap) == "foo'bar")
+    }
+
     /// Capping at write must not quietly become the only bound: the two tests above that prove the
     /// LISTING is hardened write their hostile values straight to `setSessionCard`, so they keep
     /// exercising the render path. Fixing length at the mutator instead of the handler would leave
@@ -568,6 +609,26 @@ struct SessionToolsTests {
 
         let call = FunctionCall(name: "set_session_card",
                                 args: ["name": .string("   "), "description": .string("something")],
+                                id: "c1")
+        let result = await runToolCall(call, on: app, as: me)
+        #expect(result.contains("A name is required."))
+        #expect(app.conversations.first { $0.id == me }?.sessionCard == nil)
+    }
+
+    /// A name that is non-blank by `CharacterSet.whitespaces` (neither a zero-width space nor a
+    /// newline is in that set) but canonicalizes to nothing — `SessionRoles.canonicalKey` strips
+    /// default-ignorable code points and folds newlines to a space that then collapses away —
+    /// must be refused the same way an all-whitespace name already is, not stored as a handle
+    /// nothing can read or type.
+    @Test("set_session_card refuses a name that canonicalizes to nothing", arguments: ["\u{200B}", "\n"])
+    func setSessionCardRefusesBlankCanonicalName(_ name: String) async {
+        let app = AppState(); app.conversations.removeAll()
+        let me = UUID()
+        app.createNewConversation(id: me)
+        app.createNewConversation(id: UUID())
+
+        let call = FunctionCall(name: "set_session_card",
+                                args: ["name": .string(name), "description": .string("something")],
                                 id: "c1")
         let result = await runToolCall(call, on: app, as: me)
         #expect(result.contains("A name is required."))

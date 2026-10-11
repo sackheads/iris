@@ -13,7 +13,7 @@ import Foundation
 @Suite("A background run cannot message sessions", .timeLimit(.minutes(1)))
 struct BackgroundSessionToolsTests {
 
-    private let names = ["list_sessions", "send_to_session", "set_session_card"]
+    private let names = ["list_sessions", "describe_session", "send_to_session", "set_session_card"]
 
     /// One real turn against a capturing client, reading the tools actually sent. `peerCount` is
     /// forced to 1 so the gate under test is the background one and nothing else.
@@ -29,13 +29,13 @@ struct BackgroundSessionToolsTests {
         return client.requests.first?.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? []
     }
 
-    @Test("a foreground conversation with a peer still gets all three")
+    @Test("a foreground conversation with a peer still gets all of them")
     func declaredInTheForeground() async {
         let declared = await declaredToolNames(isBackground: false)
         for n in names { #expect(declared.contains(n), "\(n) is unchanged for an attended session") }
     }
 
-    @Test("a background run is offered none of the three")
+    @Test("a background run is offered none of them")
     func notDeclaredInTheBackground() async {
         let declared = await declaredToolNames(isBackground: true)
         for n in names { #expect(!declared.contains(n), "\(n) must not be offered to an unattended run") }

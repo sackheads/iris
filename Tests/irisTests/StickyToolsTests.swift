@@ -29,7 +29,7 @@ import Foundation
     }
 
     @Test func eligibleSetIsTheStateGatedTools() {
-        #expect(StickyTools.eligible == ["manage_fact", "list_sessions", "send_to_session", "set_session_card",
+        #expect(StickyTools.eligible == ["manage_fact", "list_sessions", "describe_session", "send_to_session", "set_session_card",
                                          "amend_goal_contract", "reach_checkpoint", "delegate_milestone",
                                          "waive_criterion", "goal_complete"])
         // Never the workflow triggers (decision 1), the pinned-only job tools (plan note 5) or

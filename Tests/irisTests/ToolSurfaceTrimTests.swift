@@ -91,7 +91,7 @@ struct ToolSurfaceTrimTests {
     /// context still carries no Active Sessions line, since there are no peers to count.
     @Test("the tool-list experiment declares the peer tools with no peers, without an Active Sessions block")
     func experimentDeclaresPeerTools() async throws {
-        let peerTools = ["list_sessions", "send_to_session", "set_session_card"]
+        let peerTools = ["list_sessions", "describe_session", "send_to_session", "set_session_card"]
         let gated = await toolNames(prompt: "hello", factStore: try FactStoreManager(inMemory: true))
         for name in peerTools { #expect(!gated.contains(name), Comment(rawValue: name)) }
 
