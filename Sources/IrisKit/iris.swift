@@ -767,10 +767,11 @@ actor IrisEngine {
     ///
     /// Removed: every line break (Unicode ones included — `.newlines` covers U+0085/2028/2029, not
     /// just LF/CR), the `|` the listing delimits on, and the `"` that could close the framing's
-    /// quoting early. Capped as well: `set_session_card` bounds the two fields it writes (#246)
-    /// and `set_workspace` refuses an over-long path (#273), but a card or workspace stored before
-    /// either fix is still whatever its author sent, so the cap here is the one that holds for
-    /// every field on every path — an unbounded one is a context-flooding channel on its own.
+    /// quoting early. Capped as well: `set_session_card` bounds every field it writes — name and
+    /// description (#246), then lane and skills (#469) — and `set_workspace` refuses an over-long
+    /// path (#273), but a card or workspace stored before any of those fixes is still whatever its
+    /// author sent, so the cap here is the one that holds for every field on every path — an
+    /// unbounded one is a context-flooding channel on its own.
     nonisolated static func flattenCardField(_ value: String, cap: Int) -> String {
         let flattened = value
             .replacingOccurrences(of: "\r\n", with: " ")            // one space, not two
@@ -966,12 +967,18 @@ actor IrisEngine {
     nonisolated static let sessionIdentityHeading = "This Session"
     nonisolated static let cardDescriptionMaxBytes = 240
 
-    nonisolated static func sessionIdentitySection(id: UUID, title: String, card: SessionCard?) -> TurnContext.Section {
+    nonisolated static func sessionIdentitySection(id: UUID, title: String, card: SessionCard?, role: String? = nil) -> TurnContext.Section {
         var body = "You are session \(id.uuidString), titled \(Briefing.quoted(title))."
         if let card {
             body += " Peers see your card as \(Briefing.quoted(card.name)), doing \(Briefing.quoted(card.description, maxBytes: cardDescriptionMaxBytes))."
         } else {
             body += " You have no session card yet, so peers see no name for you."
+        }
+        if let role {
+            body += " You hold role `\(role)`, assigned by the user; peers can reach you as role:\(role)."
+            if card?.skills.isEmpty ?? true {
+                body += " Advertise what you will do on request with set_session_card's skills."
+            }
         }
         return .init(heading: sessionIdentityHeading, body: body)
     }
@@ -1837,12 +1844,12 @@ actor IrisEngine {
         // `isPinned` reads false for it at no extra cost). The ledger reference rides the same hop
         // (fix round 1, review) rather than a second `MainActor.run` just for it — a stored
         // property read, free either way.
-        let (isUnattended, hasActiveGoal, jobProfile, isPinned, ledger, storedSticky, ownTitle, ownCard) = await MainActor.run { () -> (Bool, Bool, JobProfile?, Bool, JobLedger?, Set<String>, String, SessionCard?) in
+        let (isUnattended, hasActiveGoal, jobProfile, isPinned, ledger, storedSticky, ownTitle, ownCard, ownRole) = await MainActor.run { () -> (Bool, Bool, JobProfile?, Bool, JobLedger?, Set<String>, String, SessionCard?, String?) in
             let conversation = localState?.conversations.first(where: { $0.id == conversationId })
             return (conversation?.isBackground == true, conversation?.activeGoal != nil,
                     conversation?.jobProfile, conversation?.isPinned == true, localState?.store.ledger,
                     localState?.stickyTools.names(for: conversationId) ?? [],
-                    conversation?.title ?? "", conversation?.sessionCard)
+                    conversation?.title ?? "", conversation?.sessionCard, conversation?.role)
         }
         // 5c §0.1 (plan note 6): attended main conversations only. A job run is one turn in a fresh
         // conversation, so a set could never help it and would leave an entry behind per fire.
@@ -1882,12 +1889,13 @@ actor IrisEngine {
         // may not act on is prompt weight, and the hop is work for a value it discards.
         let peerCount = (principal == .main && !isUnattended) ? await sessionPeerCount(excluding: conversationId) : 0
         // #418: who this session is, so it need not call a tool to find out. Only where identity
-        // has a reader — a peer exists, or the session has already named itself — so a lone
-        // conversation pays nothing (invariant 6's reasoning, applied to standing context). It
+        // has a reader — a peer exists, the session has already named itself, or the user has
+        // assigned it a role — so a lone, uncarded, roleless conversation pays nothing (invariant
+        // 6's reasoning, applied to standing context; #469's role line keeps the same gate). It
         // rides the turn's own entry, outside the cached prefix, and its text changes only when
-        // the session is renamed or re-carded, so it adds no per-turn churn either.
-        if principal == .main, !isUnattended, peerCount > 0 || ownCard != nil {
-            turnContext.sections.append(Self.sessionIdentitySection(id: conversationId, title: ownTitle, card: ownCard))
+        // the session is renamed, re-carded or re-roled, so it adds no per-turn churn either.
+        if principal == .main, !isUnattended, peerCount > 0 || ownCard != nil || ownRole != nil {
+            turnContext.sections.append(Self.sessionIdentitySection(id: conversationId, title: ownTitle, card: ownCard, role: ownRole))
         }
         if principal == .main, peerCount > 0 {
             // #185 §6: one line, never a roster. Detail is available on demand through

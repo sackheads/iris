@@ -463,6 +463,27 @@ struct SessionToolsTests {
                 "the description is byte-capped in the turn context")
     }
 
+    @Test("a role-holder is told its role every turn, and prompted for skills while it has none")
+    func roleLine() async {
+        let text = await systemPromptText(sessionPeerCount: 1) { app, id in
+            app.createNewConversation(id: UUID())
+            _ = app.assignRole("pr-minder", to: id)
+        }
+        #expect(text.contains("You hold role `pr-minder`"))
+        #expect(text.contains("skills"))
+    }
+
+    @Test("the second brain pays nothing: a lone, uncarded, roleless session gets no session tools or lines")
+    func noTax() async {
+        let tools = await toolNames(sessionPeerCount: 0)
+        for name in ["list_sessions", "send_to_session", "set_session_card", "describe_session"] {
+            #expect(!tools.contains(name))
+        }
+        let text = await systemPromptText(sessionPeerCount: 0)
+        #expect(!text.contains("This Session"))
+        #expect(!text.contains("hold role"))
+    }
+
     @Test("set_session_card works with no peer, and echoes what peers will see")
     func setSessionCardWithNoPeers() async {
         let app = AppState(); app.conversations.removeAll()
