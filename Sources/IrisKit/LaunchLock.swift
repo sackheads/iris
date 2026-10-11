@@ -52,12 +52,32 @@ enum LaunchLock {
 
     /// Reads the lock file and nothing else: `IrisApp.init` calls this before `GUILock.acquire()`,
     /// and nothing before the acquire may touch the store.
+    ///
+    /// One open, as `GUILock`'s own read is one read (#390): the pid and the mtime come from the
+    /// same descriptor, so a lock replaced between two path lookups can never pair one file's pid
+    /// with another's time. No file, or one that names no pid, is no holder.
     static func read(at url: URL, ownPid: Int32 = ProcessInfo.processInfo.processIdentifier,
                      processStart: (Int32) -> ProcessStart? = { ProcessStart.of($0) }) -> StoreHolder? {
-        let state = GUILock.state(at: url)
-        guard case .held(let pid) = state else { return nil }
-        let written = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+        guard let (pid, written) = pidAndMtime(at: url) else { return nil }
+        let state: GUILock.State = GUILock.isAlive(pid) ? .held(pid: pid) : .free
         return foreignHolder(state, lockWritten: written, holderStart: processStart(pid), ownPid: ownPid)
+    }
+
+    /// The pid the file names and the file's mtime, both through one descriptor.
+    private static func pidAndMtime(at url: URL) -> (Int32, Date)? {
+        let fd = open(url.path, O_RDONLY | O_CLOEXEC)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0 else { return nil }
+        // A pid and a newline; anything longer is not a lock this app or the CLI wrote.
+        var buffer = [UInt8](repeating: 0, count: 32)
+        let count = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+        guard count > 0, count < buffer.count,
+              let text = String(bytes: buffer[..<count], encoding: .utf8),
+              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0 else { return nil }
+        let mtime = info.st_mtimespec
+        return (pid, Date(timeIntervalSince1970: TimeInterval(mtime.tv_sec) + TimeInterval(mtime.tv_nsec) / 1_000_000_000))
     }
 }
 
