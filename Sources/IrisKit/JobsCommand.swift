@@ -215,9 +215,6 @@ enum JobsCommand: Equatable {
         return .url(name: name, setting: setting)
     }
 
-    /// Plan note 13: said until the scheme is registered, and deleted by the PR that registers it.
-    static let urlSchemePendingNote = "Nothing opens the link yet: the app registers the scheme in a later update."
-
     static func urlStatusText(_ job: Job) -> String {
         job.urlTrigger
             ? "The URL trigger for **\(job.name)** is on. Its link was shown once, when it was turned on, and is not saved anywhere; `/jobs url \(job.name) on` makes a new one and retires the old."
@@ -228,8 +225,7 @@ enum JobsCommand: Equatable {
     /// message is persisted in plain text in `conversations.sqlite`, where an approved host
     /// `run_command` could read it.
     static func urlOnText(_ job: Job) -> String {
-        "URL trigger on for **\(job.name)**: the link was shown once and is not saved. `/jobs url \(job.name) on` makes a new one. "
-            + urlSchemePendingNote
+        "URL trigger on for **\(job.name)**: the link was shown once and is not saved. `/jobs url \(job.name) on` makes a new one."
     }
 
     /// What the transient sheet says around the link. Plain words, no markdown: the sheet shows
@@ -238,7 +234,7 @@ enum JobsCommand: Equatable {
         "Opening this link fires \(jobName) now, as /jobs run would, at most \(RunJobURL.maxFiresPerHour) times an hour. "
             + "Iris keeps only a hash of it: copy it now, because it cannot be shown again. Turning the trigger on again "
             + "replaces it, /jobs url \(jobName) off retires it, and changing the job's prompt, profile or policy, or a "
-            + "model lifting your pause, turns it off. \(urlSchemePendingNote)"
+            + "model lifting your pause, turns it off."
     }
 
     static func urlOffText(_ job: Job) -> String {
