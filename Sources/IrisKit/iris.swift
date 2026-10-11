@@ -1054,6 +1054,23 @@ actor IrisEngine {
         return .init(heading: sessionIdentityHeading, body: body)
     }
 
+    /// #469 §5.3: requests this session sent with `expects_reply` and no answer or close yet.
+    /// Harness-owned (msg id, age); the target's name is session-authored, so it goes through
+    /// `flattenCardField` like every other card field. nil when there is nothing open — a session
+    /// with no outstanding request pays nothing for this section.
+    nonisolated static let awaitingRepliesHeading = "Awaiting Replies"
+
+    nonisolated static func awaitingRepliesSection(_ open: [PeerMessageRecord], names: [UUID: String],
+                                                   now: Date) -> TurnContext.Section? {
+        guard !open.isEmpty else { return nil }
+        let shown = open.prefix(5).map { r -> String in
+            let name = names[r.toSession].map { "\"\(flattenCardField($0, cap: cardNameCap))\"" } ?? "a session"
+            return "\(name) (\(r.msgId), \(SessionDirectory.age(since: r.sentAt, now: now)))"
+        }
+        let more = open.count > 5 ? ", +\(open.count - 5) more" : ""
+        return .init(heading: awaitingRepliesHeading, body: "Awaiting replies: " + shown.joined(separator: ", ") + more)
+    }
+
     /// `list_sessions`'s response body (#185 §6.1): one line per peer, `session_id` spelled out
     /// verbatim since `send_to_session` needs it copied exactly, not inferred from prose.
     nonisolated static func renderPeerList(_ peers: [SessionPeer], total: Int, now: Date = Date()) -> String {
@@ -1915,11 +1932,11 @@ actor IrisEngine {
         // `isPinned` reads false for it at no extra cost). The ledger reference rides the same hop
         // (fix round 1, review) rather than a second `MainActor.run` just for it — a stored
         // property read, free either way.
-        let (isUnattended, hasActiveGoal, jobProfile, isPinned, ledger, storedSticky, ownTitle, ownCard, ownRole) = await MainActor.run { () -> (Bool, Bool, JobProfile?, Bool, JobLedger?, Set<String>, String, SessionCard?, String?) in
+        let (isUnattended, hasActiveGoal, jobProfile, isPinned, ledger, peers, storedSticky, ownTitle, ownCard, ownRole) = await MainActor.run { () -> (Bool, Bool, JobProfile?, Bool, JobLedger?, PeerLedger?, Set<String>, String, SessionCard?, String?) in
             let conversation = localState?.conversations.first(where: { $0.id == conversationId })
             return (conversation?.isBackground == true, conversation?.activeGoal != nil,
                     conversation?.jobProfile, conversation?.isPinned == true, localState?.store.ledger,
-                    localState?.stickyTools.names(for: conversationId) ?? [],
+                    localState?.store.peers, localState?.stickyTools.names(for: conversationId) ?? [],
                     conversation?.title ?? "", conversation?.sessionCard, conversation?.role)
         }
         // 5c §0.1 (plan note 6): attended main conversations only. A job run is one turn in a fresh
@@ -1973,6 +1990,32 @@ actor IrisEngine {
             // `list_sessions`; a per-peer list would grow with session count and churn every turn.
             turnContext.sections.append(.init(heading: "Active Sessions",
                                               body: "\(peerCount) other session\(peerCount == 1 ? " is" : "s are") active."))
+        }
+
+        // #469 §5.3: requests this session sent and is still owed an answer for. Read off the
+        // MainActor — `PeerLedger` is `Sendable` — best-effort: a read that throws omits the
+        // section and the `close_request` declaration below, never fails the turn. `hasOpenRequests`
+        // is computed once and reused for that declaration gate, same reasoning as `peerCount`
+        // above. Attended main turns only, so a subagent, evaluator or background run pays nothing.
+        let openRequests: [PeerMessageRecord] = (principal == .main && !isUnattended)
+            ? ((try? peers?.openRequests(from: conversationId)) ?? []) : []
+        let hasOpenRequests = !openRequests.isEmpty
+        if hasOpenRequests {
+            // A second hop, paid only when there is something open: each target's current card
+            // name or title, so the line reads like `list_sessions` rather than a bare id.
+            let targetNames = await MainActor.run { () -> [UUID: String] in
+                guard let s = localState else { return [:] }
+                var names: [UUID: String] = [:]
+                for r in openRequests {
+                    if let c = s.conversations.first(where: { $0.id == r.toSession }) {
+                        names[r.toSession] = c.sessionCard?.name ?? c.title
+                    }
+                }
+                return names
+            }
+            if let section = Self.awaitingRepliesSection(openRequests, names: targetNames, now: Date()) {
+                turnContext.sections.append(section)
+            }
         }
 
         // 5b §0.3: the pinned conversation only, built fresh from the ledger every turn.
@@ -2277,6 +2320,20 @@ actor IrisEngine {
                         "examples": Schema(type: "ARRAY", description: "Example requests, at most \(Self.skillExamplesMax).", items: Schema(type: "STRING"))
                     ], required: ["id", "name", "description"]))
                 ], required: ["name", "description"])
+            ))
+        }
+
+        // #469 §5.3: declared whenever this session has something open, or sticky once it has
+        // been. `hasOpenRequests` is the same read the Awaiting Replies section above used — never
+        // a second ledger hop for this gate.
+        if principal == .main, hasOpenRequests || sticky.contains("close_request") {
+            toolsList.append(FunctionDeclaration(
+                name: "close_request",
+                description: "Stop waiting for a reply to a request you sent with expects_reply — you rerouted it, or no longer need it. It leaves your Awaiting replies.",
+                parameters: Schema(type: "OBJECT", properties: [
+                    "msg": Schema(type: "STRING", description: "The msg id from Awaiting replies."),
+                    "reason": Schema(type: "STRING", description: "A few words, e.g. \"rerouted to swift-worker\".")
+                ], required: ["msg"])
             ))
         }
 
@@ -3309,7 +3366,8 @@ actor IrisEngine {
 
     /// 5c §1: never declared to an unattended turn, whatever a sticky set says.
     nonisolated static let unattendedNeverDeclared: Set<String> =
-        jobCreationTools.union(["set_workspace", "list_sessions", "describe_session", "send_to_session", "set_session_card"])
+        jobCreationTools.union(["set_workspace", "list_sessions", "describe_session", "send_to_session",
+                                "set_session_card", "close_request"])
     /// OpenAI's `prompt_cache_key` (5c §0.9). It is a routing hint, so it names the prefix a
     /// request shares with others, not the conversation. An attended chat (Iris included) keeps
     /// its own history warm, so it uses its id. A job run, a subagent or an evaluator starts a
@@ -3337,7 +3395,8 @@ actor IrisEngine {
     /// 5c §1: never declared to a subagent or evaluator, whatever a sticky set says.
     nonisolated static let mainOnlyDeclared: Set<String> =
         jobCreationTools.union(["amend_goal_contract", "reach_checkpoint", "delegate_milestone",
-                                "waive_criterion", "list_sessions", "describe_session", "send_to_session", "set_session_card"])
+                                "waive_criterion", "list_sessions", "describe_session", "send_to_session",
+                                "set_session_card", "close_request"])
 
     nonisolated static func hardStrip(_ tools: [FunctionDeclaration], isUnattended: Bool,
                                       principal: Principal) -> [FunctionDeclaration] {
@@ -4123,6 +4182,32 @@ actor IrisEngine {
                     ? "Card updated — over-long fields were truncated to what the peer listing shows. "
                     : "Card updated. ") + shown
             }
+        } else if functionCall.name == "close_request", let msg = functionCall.args["msg"]?.stringValue {
+            // Defense in depth, same reasoning as the other session tools above: declaration
+            // gating only stops a well-behaved model, so a forged call is refused again here.
+            guard principal == .main else {
+                result = "Refused — a subagent is not a session."
+                return result
+            }
+            guard !isUnattended else {
+                result = Self.unattendedSessionMessageRefusal
+                return result
+            }
+            guard let peers = await MainActor.run(body: { localState?.store.peers }) else {
+                result = "Session messaging is unavailable."; return result
+            }
+            guard let record = try? peers.message(msg), record.fromSession == conversationId else {
+                result = "No open request \(msg) from this session."
+                return result
+            }
+            guard record.isOpen else {
+                result = "Request \(msg) is already closed."
+                return result
+            }
+            let reason = functionCall.args["reason"]?.stringValue ?? ""
+            let closeReason = "closed by sender: " + Self.flattenCardField(reason, cap: 80)
+            _ = try? peers.close(msg, reason: closeReason, at: Date())
+            result = "Closed request \(msg)."
         } else if functionCall.name == "list_jobs" || functionCall.name == "get_job_run" {
             // Declaration gating stops a well-behaved model from being offered these; dispatch
             // reads the function name alone, so the invariant ("in no other conversation") is
@@ -4992,7 +5077,7 @@ actor IrisEngine {
         "set_workspace", "rename_conversation", "schedule_job", "save_fact", "manage_fact",
         "reflect", "goal_complete", "search_memory", "update_user_profile", "update_soul",
         "update_memory", "propose_goal_contract", "list_sessions", "describe_session", "send_to_session",
-        "set_session_card", "amend_goal_contract", "reach_checkpoint", "waive_criterion",
+        "set_session_card", "close_request", "amend_goal_contract", "reach_checkpoint", "waive_criterion",
         "invoke_subagent", "delegate_milestone",
     ]
 

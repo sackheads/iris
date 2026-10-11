@@ -328,6 +328,22 @@ struct ToolSurfaceTrimTests {
             observed.formUnion(client.requests.first?.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? [])
         }
 
+        // close_request needs an open request this session sent (#469 §5.3) — unrelated to peer
+        // count, so built by hand like the peer-tools state above.
+        do {
+            let app = AppState()
+            let id = UUID()
+            app.createNewConversation(id: id)
+            try app.store.peers.insert(PeerMessageRecord(msgId: "aaaa0001", fromSession: id, toSession: UUID(),
+                                                         contextId: "c", inReplyTo: nil, depth: 1, firstLine: "x",
+                                                         sentAt: Date(), expectsReply: true, closedAt: nil, closeReason: nil))
+            let client = CapturingLLMClient(reply: "ok")
+            let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, retryDelays: [],
+                                    factStore: try FactStoreManager(inMemory: true), sessionPeerCount: 0)
+            await engine.processInput("hello", source: "UI", conversationId: id)
+            observed.formUnion(client.requests.first?.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? [])
+        }
+
         // Subtract the two OTHER sources of declared tool names — this test is only about the
         // hand-maintained inline set, not the whole declared surface.
         let executorNames = Set(await ToolExecutor.shared.getTools(workspaceToolsEnabled: true).map(\.name))

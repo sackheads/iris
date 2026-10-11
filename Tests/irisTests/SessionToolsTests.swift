@@ -659,4 +659,77 @@ struct SessionToolsTests {
         #expect(result.contains("Refused — a subagent is not a session."))
         #expect(!result.contains("session_id:"), "a subagent must not learn the peer set either")
     }
+
+    // MARK: - close_request (#469 §5.3)
+
+    private func openRequest(_ msgId: String, from: UUID, to: UUID) -> PeerMessageRecord {
+        PeerMessageRecord(msgId: msgId, fromSession: from, toSession: to, contextId: "c", inReplyTo: nil,
+                          depth: 1, firstLine: "x", sentAt: Date(), expectsReply: true,
+                          closedAt: nil, closeReason: nil)
+    }
+
+    @Test("close_request is absent when the session has no open requests")
+    func closeRequestAbsentWithNoneOpen() async {
+        let declared = await toolNames(sessionPeerCount: 1) { app, _ in
+            app.createNewConversation(id: UUID())
+        }
+        #expect(!declared.contains("close_request"))
+    }
+
+    @Test("close_request is declared once this session has an open request")
+    func closeRequestPresentWithOneOpen() async throws {
+        let declared = await toolNames(sessionPeerCount: 0) { app, id in
+            try? app.store.peers.insert(openRequest("aaaa0001", from: id, to: UUID()))
+        }
+        #expect(declared.contains("close_request"))
+    }
+
+    @Test("a forged close_request with none open is refused")
+    func closeRequestRefusedWithNoneOpen() async {
+        let app = AppState(); app.conversations.removeAll()
+        let me = UUID(); app.createNewConversation(id: me)
+        let call = FunctionCall(name: "close_request", args: ["msg": .string("aaaa0001")], id: "c1")
+        let result = await runToolCall(call, on: app, as: me)
+        #expect(result.contains("No open request aaaa0001 from this session."))
+    }
+
+    @Test("a close_request on a msg the session did not send is refused")
+    func closeRequestRefusedForSomeoneElsesMessage() async throws {
+        let app = AppState(); app.conversations.removeAll()
+        let me = UUID(), other = UUID(), target = UUID()
+        app.createNewConversation(id: me)
+        try app.store.peers.insert(openRequest("aaaa0002", from: other, to: target))
+        let call = FunctionCall(name: "close_request", args: ["msg": .string("aaaa0002")], id: "c1")
+        let result = await runToolCall(call, on: app, as: me)
+        #expect(result.contains("No open request aaaa0002 from this session."))
+        #expect(try app.store.peers.message("aaaa0002")?.isOpen == true, "someone else's request must not close")
+    }
+
+    @Test("a successful close_request closes it with the given reason, flattened")
+    func closeRequestCloses() async throws {
+        let app = AppState(); app.conversations.removeAll()
+        let me = UUID(), target = UUID()
+        app.createNewConversation(id: me)
+        try app.store.peers.insert(openRequest("aaaa0003", from: me, to: target))
+        let call = FunctionCall(name: "close_request",
+                                args: ["msg": .string("aaaa0003"), "reason": .string("rerouted\nto \"swift-worker\"")],
+                                id: "c1")
+        let result = await runToolCall(call, on: app, as: me)
+        #expect(result == "Closed request aaaa0003.")
+        let record = try app.store.peers.message("aaaa0003")
+        #expect(record?.isOpen == false)
+        #expect(record?.closeReason == "closed by sender: rerouted to 'swift-worker'")
+    }
+
+    @Test("closing an already-closed request is refused")
+    func closeRequestRefusedWhenAlreadyClosed() async throws {
+        let app = AppState(); app.conversations.removeAll()
+        let me = UUID(), target = UUID()
+        app.createNewConversation(id: me)
+        try app.store.peers.insert(openRequest("aaaa0004", from: me, to: target))
+        try app.store.peers.close("aaaa0004", reason: "already done", at: Date())
+        let call = FunctionCall(name: "close_request", args: ["msg": .string("aaaa0004")], id: "c1")
+        let result = await runToolCall(call, on: app, as: me)
+        #expect(result == "Request aaaa0004 is already closed.")
+    }
 }

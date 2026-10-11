@@ -2143,6 +2143,10 @@ class AppState {
     func deleteConversation(_ id: UUID) {
         cancelTasks(for: id)
         resetPeerDepth(for: id)   // a deleted conversation carries no hop depth
+        // #469 §5.3: must run before `conversations.removeAll` below — it reads this
+        // conversation's name for the event line it sends to each sender it closes out.
+        closeRequestsToGone(id, verb: "deleted")
+        try? store.peers.deleteMessages(involving: id)
 
         // Its delegates go with it (#291): a background subagent is reached by no cancellation of
         // this conversation's tasks, and would go on working, asking and holding its container.
@@ -2234,6 +2238,7 @@ class AppState {
               !conversations[idx].isArchived else { return nil }
         conversations[idx].isArchived = true
         markChanged(conversationId, .metadata)
+        closeRequestsToGone(conversationId, verb: "archived")   // #469 §5.3
 
         // Archiving your only active conversation would leave nowhere to type. §6.1's refusal is
         // what makes this safe: the replacement can never inherit a running goal, because a
@@ -4062,10 +4067,26 @@ class AppState {
             if result.skipped.count > logCap {
                 print("… and \(result.skipped.count - logCap) more unreadable row(s).")
             }
+            // #469 §5.3: a closed request has nothing left to tell either side — pruned here,
+            // once per launch, rather than growing the ledger forever. Best-effort; a failure here
+            // must not stop the app from finishing its load.
+            try? store.peers.pruneClosed(before: Date().addingTimeInterval(-30 * 86_400))
         } catch {
             print("Failed to load conversations: \(error)")
             loadFailureHeadline = "\(error)"
         }
+    }
+
+    /// #469 §5.3: a request whose target goes away closes visibly — its sender is told, rather
+    /// than left waiting on a session that will never answer.
+    func closeRequestsToGone(_ id: UUID, verb: String) {
+        let now = Date()
+        let name = conversations.first { $0.id == id }.map { $0.sessionCard?.name ?? $0.title } ?? id.uuidString
+        guard let closed = try? store.peers.closeOpenRequests(to: id, reason: "target \(verb)", at: now) else { return }
+        for r in closed {
+            enqueueEventLine("[Event] Session \"\(IrisEngine.flattenCardField(name, cap: IrisEngine.cardNameCap))\" \(verb); msg \(r.msgId) closed unanswered.", for: r.fromSession)
+        }
+        try? store.peers.closeOpenRequests(from: id, reason: "sender \(verb)", at: now)
     }
 
     // MARK: - Slash Command Handlers
