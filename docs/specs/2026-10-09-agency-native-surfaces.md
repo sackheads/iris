@@ -8,7 +8,7 @@ The epic names an `NSStatusItem`. This spec uses SwiftUI's `MenuBarExtra` instea
 
 Checked against `main` at `cec9947`, 2026-10-09. The code is in `Sources/IrisKit/`, not `Sources/iris/` as AGENTS.md's layout says. Paths below are relative to it.
 
-- **No notification or URL code exists.** Nothing in the tree uses `UserNotifications`. `App/Info.plist` declares no `CFBundleURLTypes`, and nothing implements `onOpenURL` or `application(_:open:)`. `App/Iris.entitlements` is an empty dict. Local notifications need no entitlement.
+- **No notification or URL code exists.** Nothing in the tree uses `UserNotifications`. `App/Info.plist` declares no `CFBundleURLTypes`, and nothing implements `onOpenURL`, `application(_:open:)` or a `kAEGetURL` Apple-event handler. `App/Iris.entitlements` is an empty dict. Local notifications need no entitlement. (Task 24's window spike, run after this spec was written, found that both `application(_:open:)` and `.handlesExternalEvents(matching: [])` open an extra chat window on a cold launch; the owner ruled for a `kAEGetURL` handler instead — see decision 12 and §4's D2 row.)
 - **One choke point for cards.** Every card, job or reflection, goes through `AppState.deliverEvent(_:to:)` (`EventDelivery.swift:38`).
 - **Cards have no priority.** `EventCard` (`EventCard.swift:17-78`) has `status`, `blockedCall`, the Vibecop verdict and `offersApproval` (`:310`), but no priority or severity field. A pause card is `.interrupted`, with the pause reason as its `outcome` (`JobRunner.swift:879-897`). A retry ladder that runs out pauses the job in `apply` (`JobRunner.swift:1514`), and its card is a plain `.failed` card. No card field says "this paused the job".
 - **Live asks exist only inside the main window.** `pendingApprovals` (`AppState.swift:377`) holds `ToolApprovalRequest`s (`:281-305`, with `humanOnly` and `requestedAt`). They are drawn only by the overlay on `ChatView` (`ChatView.swift:466`). The array is changed in exactly four places: append (`AppState.swift:3072`), the cancellation removal (`:3084`), `denyPendingApprovals` (`:3091`) and `resolveApproval` (`:3278`).
@@ -198,7 +198,7 @@ Each decision gives its default and the reason for it. A reviewer should weigh t
   - the dynamic `MenuBarExtra` label and menu;
   - the `Run Log` scene;
   - the bundle-guarded notifier install;
-  - `application(_:open:)`;
+  - the bundle-guarded `kAEGetURL` handler, installed in `AppDelegate.applicationWillFinishLaunching` (owner ruling after the window spike: no `application(_:open:)`, no `.handlesExternalEvents`);
   - the pre-acquire `GUILock.state` read.
 - **`RunLogView`** (new) over `runLog(...)`.
 - **Ledger:**
@@ -271,7 +271,7 @@ Dated specs are history and are not edited.
 - a blocked card's banner with the app inactive: Open lands on the card, and Dismiss acknowledges it;
 - a live ask with the window hidden: the banner appears, Deny unparks the turn with a denial, and resolving the ask in the app withdraws the banner;
 - the icon through idle → running (a one-minute job) → action required (a blocked job) → idle after Dismiss. A failed job leaves the icon alone and raises the menu count. With both builds running, the release and dev icons can be told apart;
-- **The window spike (D2's first step, which gates the rest of D2):** does SwiftUI's `WindowGroup` open a second window on an external URL, and does `.handlesExternalEvents(matching: [])` or `application(_:open:)` alone prevent it?
+- **The window spike (D2's first step, which gates the rest of D2):** does SwiftUI's `WindowGroup` open a second window on an external URL, and does `.handlesExternalEvents(matching: [])` or `application(_:open:)` alone prevent it? Answered on #187: both variants opened a window; the owner ruled for an AppKit `kAEGetURL` handler.
 - `open 'iris-dev://run-job/<token>'` with the app running, with it quit, and with it quit while a `--run-job` holds the store (the deferral). Then the same from Shortcuts' "Open URL" and from Raycast;
 - the Run Log: a row opens the transcript sheet, and Acknowledge clears the menu's count;
 - the bare `scripts/run-dev.sh`: it launches with no crash and the status item works.
@@ -286,7 +286,7 @@ Every PR is based on `main` and none is stacked. A later PR rebases on `main` af
 | B | Decision 15: `runLog(...)`, the Run Log window, Acknowledge | none (reads the ledger directly; once A has merged, it refreshes on A's snapshot) |
 | C | Decisions 1, 6–8: the policy, the sink, categories, Settings, the bundle guard, responses | A merged |
 | D1 | Decisions 9–11 and 13, and decision 12's non-GUI half: migration v19, the flag, the token, `setURLTrigger`, the clear in `upsert`, `/jobs url`, `FireOrigin.url`, `runJobByHand`, `RunJobURL`, and `handleRunJobURL` behind a test entry point, including the deferral logic. Unit tests only, no GUI | none |
-| D2 | Decision 12's scheme and decision 14's launch path: `IRIS_URL_SCHEME` in `project.yml`, `CFBundleURLTypes`, `application(_:open:)`, and the pre-acquire lock read in `IrisApp.init`. **The window spike comes first and gates the rest of D2**, since its answer can change the design | D1 merged |
+| D2 | Decision 12's scheme and decision 14's launch path: `IRIS_URL_SCHEME` in `project.yml`, `CFBundleURLTypes`, a `kAEGetURL` handler installed in `applicationWillFinishLaunching` (owner ruling after the window spike: no `application(_:open:)`, no `handlesExternalEvents`), links held until the job bookkeeping is done, a windowless cold start, and the pre-acquire lock read in `IrisApp.init`. **The window spike comes first and gates the rest of D2**, since its answer can change the design | A and D1 merged |
 
 Each PR carries its own slice of §2's docs sweep.
 

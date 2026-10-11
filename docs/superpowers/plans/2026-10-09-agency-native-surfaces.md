@@ -26,7 +26,7 @@
 - **Decision 1: a notification never approves.** The only actions are Open, Deny (live asks) and Dismiss (blocked cards). No category is registered with an approve action, and `handleNotificationResponse` ignores any action id it does not know.
 - **Interruption level `.active`.** Never `.timeSensitive`, which needs an entitlement. `App/Iris.entitlements` stays an empty dict.
 - **Permission** is requested the first time a notification would be posted, never at launch. "Denied", including denied by MDM, is a normal state: no re-prompt and no retry.
-- **Only a real `.app` bundle gets notifications or the URL scheme** (decision 8): the check is `Bundle.main.bundleURL.pathExtension == "app"`, and it runs before any `UNUserNotificationCenter` call. `IrisApp.init` is the only installer. `--run-job` never installs a sink, and neither does `AppState()` in a test.
+- **Only a real `.app` bundle gets notifications or the URL scheme** (decision 8): the check is `Bundle.main.bundleURL.pathExtension == "app"`, and it runs before any `UNUserNotificationCenter` call. `IrisApp.init` installs the notification sink; the URL handler is installed by `AppDelegate.applicationWillFinishLaunching` (owner ruling after Task 24's window spike, D2). `--run-job` never installs either, and neither does `AppState()` in a test.
 - **The URL, verbatim from decisions 10, 12 and 13:**
   - The form is `iris://run-job/<token>` for release and `iris-dev://run-job/<token>` for dev.
   - It accepts no query, no fragment, no other host or path, and no job id or slug.

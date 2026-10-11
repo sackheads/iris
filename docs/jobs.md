@@ -1111,7 +1111,7 @@ pause reason the table prints, on the `interrupted` row and on the card.
 | `/jobs run <name>` | Fires the job now, through the same admission a scheduled fire meets. Says it is starting straight away, then reports what admission decided once the fire is over — an overlap, the breaker or an exhausted budget is named rather than reported as a run. The result itself arrives as a card. A paused or disabled job is refused up front |
 | `/jobs reschedule <name> <cron> [timezone]` | Gives a scheduled or polled job a new five-field cron (the same subset `schedule_job` takes), recomputes its next fire and says when that is. Quote a name or cron with spaces in it — `/jobs reschedule "Daily digest" "0 9 * * *"` — or leave them bare and the last five words are the cron. Without a timezone a cron job keeps its own zone and an interval job (which becomes a cron job) takes the Mac's. Works on built-ins such as the daily digest; a polled job keeps its gate; a pending retry is dropped with the old schedule; a job you or the retry ladder paused stays paused, but a job paused because its old cron could never match is resumed by a cron that can, and a new cron that can never match pauses the job with that reason. The zone is any IANA name or abbreviation the Mac knows (`Europe/Paris`, `CET`, `GMT+2`). An invalid cron, a cron of six fields, or an unknown zone (a misspelled `Europe/Pairs` included) is refused with a sentence and changes nothing, and a directory watch, which has no schedule, is refused |
 | `/jobs delete <name>` | Deletes a job and its ledger rows. Refused while a run is in flight. The transcripts are left for retention to clear, so a card you are still reading keeps working |
-| `/jobs url <name> [on\|off]` | `on` makes a link that fires the job, `iris://run-job/<token>` (`iris-dev://` for a dev build), shown once in a sheet with Copy and never saved; `on` again replaces it; `off` retires it; the bare form says whether it is on. Changing the job's prompt, profile or policy, or a model lifting your pause, turns it off. Until the app registers the scheme (a later update), nothing opens the link |
+| `/jobs url <name> [on\|off]` | `on` makes a link that fires the job, `iris://run-job/<token>` (`iris-dev://` for a dev build), shown once in a sheet with Copy and never saved; `on` again replaces it; `off` retires it; the bare form says whether it is on. Changing the job's prompt, profile or policy, or a model lifting your pause, turns it off. Opening the link fires the job; see "Firing a job from a link" below for what a cold launch does |
 
 ## Running one job from a terminal (`iris --run-job`)
 
@@ -1232,8 +1232,21 @@ can walk the retry ladder all the way to "failed 3 times; paused". A job whose o
 grant or budgets), or lifts a pause you put on it, the link is turned off, and Iris says so.
 
 If the app is launched by a link while `iris --run-job` holds the store, the fire waits, and says
-it is waiting, until that process finishes. It re-checks every five seconds and gives up after ten
-minutes. Until the app registers the scheme (a later update), nothing opens the link.
+it is waiting, until that process finishes. The holder is identified by when it started, not only
+its pid, so a pid the kernel has since reused for something else is never mistaken for it. It
+re-checks every five seconds and gives up after ten minutes.
+
+A link that launches Iris starts it without a window: the job runs once Iris has finished
+starting, the menu bar icon counts it while it runs, and its card lands in Iris. Click the Dock
+icon, choose Show Chat from the menu bar icon, or press the hotkey to open the chat. With Iris
+already open, a link opens no window. A release build answers only `iris://` and a dev build only
+`iris-dev://`, so the two never take each other's links. Iris never writes a link to a log.
+
+A link that arrives while Iris is still starting is held rather than fired early — up to 16 of
+them, a flood beyond that refused with one line — and is then checked exactly as a link arriving
+after launch would be. The same cold start resumes a goal a restart interrupted and loads plugins
+and MCP servers, all before any window opens. Reopening the chat window later does neither again:
+only the setup wizard's own finish reloads plugins and MCP servers.
 
 ## Retention
 
