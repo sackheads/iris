@@ -5312,6 +5312,8 @@ struct IrisApp: App {
             AppState.shared.refreshLedgerAttention()
             AppState.shared.raiseMainWindow = { MainWindow.raise() }
             AppState.shared.openRunLogWindow = { RunLogWindow.open() }
+            // D6 decision 8: only here, and only in a real `.app` bundle.
+            SurfaceInstall.installNotifications(on: AppState.shared)
         }
         Task {
             await SandboxSessionManager.shared.reapOrphans()

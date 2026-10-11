@@ -26,6 +26,11 @@ public enum AnthropicAuthMode: String, CaseIterable, Identifiable, Sendable {
     public var id: String { rawValue }
 }
 
+/// Settings' "Notifications" row (D6 decision 7).
+enum NotificationMode: String, CaseIterable, Sendable {
+    case off, needsAttention
+}
+
 @Observable
 class ConfigManager: @unchecked Sendable {
     @ObservationIgnored static let shared = ConfigManager()
@@ -71,6 +76,11 @@ class ConfigManager: @unchecked Sendable {
     /// stopping the human. False forces every checkpoint to pause, which is pre-D3 behaviour.
     var checkpointAutoAdvance: Bool {
         didSet { store.set(checkpointAutoAdvance, forKey: "CHECKPOINT_AUTO_ADVANCE") }
+    }
+
+    /// D6 decision 7: "Notifications: Off / Needs attention". Needs attention by default.
+    var notificationMode: NotificationMode {
+        didSet { store.set(notificationMode.rawValue, forKey: "NOTIFICATION_MODE") }
     }
 
     /// #185 §7 — how many peer-woken turns one user action may cascade into, across the whole
@@ -401,6 +411,8 @@ class ConfigManager: @unchecked Sendable {
         } else {
             self.checkpointAutoAdvance = true
         }
+        self.notificationMode = NotificationMode(rawValue: saved.string(forKey: "NOTIFICATION_MODE") ?? "")
+            ?? .needsAttention
 
         let savedCascade = saved.integer(forKey: "MAX_SESSION_CASCADE")
         self.maxSessionCascade = savedCascade == 0 ? 8 : savedCascade
