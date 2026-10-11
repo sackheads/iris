@@ -2757,7 +2757,9 @@ actor IrisEngine {
         let paused = await MainActor.run {
             localState?.conversations.first(where: { $0.id == conversationId })?.goalContract?.isPaused == true
         }
-        if let _ = activeGoalResult.0, !paused {
+        // Not for a stopped turn: a Stop that lands after the final reply never reaches the catch
+        // above, and `cancelTasks`' own cancel of the reprompt may already have run (#474).
+        if let _ = activeGoalResult.0, !paused, !Task.isCancelled {
             if let cap = goalIterationCaps[conversationId], activeGoalResult.1 >= cap {
                 await endAtIterationCap(conversationId: conversationId, cap: cap)
             } else if goalIterationCaps[conversationId] == nil,

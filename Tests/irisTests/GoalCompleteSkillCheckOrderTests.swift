@@ -212,4 +212,32 @@ struct GoalCompleteSkillCheckOrderTests {
         #expect(client.requests.count == 1)
         #expect(app.conversations.first { $0.id == id }?.messages.last?.content == "Interrupted.")
     }
+
+    @Test("a Stop after a goal turn's final reply schedules no reprompt")
+    func cancelAfterFinalReplySchedulesNoReprompt() async throws {
+        let (app, id) = goalApp()
+        // The AfterAgent hook runs after the final reply has been read, so a cancel landing while
+        // it runs is past every point where the turn would notice a Stop and take the catch.
+        let dir = try ThinkingFixtures.tempDirectory("474-stop")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let marker = dir.appendingPathComponent("after-agent-started")
+        let hooks = try ThinkingFixtures.hooks(in: dir, ["AfterAgent": "touch '\(marker.path)'; sleep 5"])
+        let client = RecordingClient([reply(Part(text: "Working on it."))])
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
+                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0,
+                                hooks: hooks, repromptDelay: 30)
+        let turn = Task { await engine.processInput("go", source: "UI", conversationId: id) }
+        let deadline = Date().addingTimeInterval(10)
+        while !FileManager.default.fileExists(atPath: marker.path), Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try #require(FileManager.default.fileExists(atPath: marker.path), "the AfterAgent hook never ran")
+        turn.cancel()
+        try await value(of: turn)
+        #expect(client.requests.count == 1)
+        #expect(app.conversations.first { $0.id == id }?.activeGoal != nil,
+                "the goal is still set, so only the cancel can skip the re-arm")
+        #expect(!engine.goalLoopIsLive(for: id), "a stopped turn re-armed the goal loop")
+        await engine.cancelReprompt(for: id)
+    }
 }
