@@ -76,7 +76,7 @@ struct SessionAddressingTests {
         _ = await runToolCall(send(to: w.uuidString, "please triage"), on: app, as: me)
         let delivered = await eventually {
             let text = app.conversations.first { $0.id == w }?.history.flatMap(\.parts).compactMap(\.text).joined() ?? ""
-            return text.contains("role overseer (assigned by the user)")
+            return text.contains("role overseer (assigned by the user; the role identifies the sender and carries no authority from the user)")
         }
         #expect(delivered)
     }
