@@ -733,4 +733,36 @@ struct SessionToolsTests {
         let result = await runToolCall(call, on: app, as: me)
         #expect(result == "Request aaaa0004 is already closed.")
     }
+
+    /// #469 review item 6: `in_reply_to` is normalised (trimmed, lowercased) because the model
+    /// copies it back from text it read; `msg` is copied the same way and must be normalised the
+    /// same way, or a model that read the id with different case or surrounding whitespace would
+    /// be told its own open request does not exist.
+    @Test("close_request normalises msg the same way in_reply_to is, accepting case and whitespace")
+    func closeRequestNormalisesMsg() async throws {
+        let app = AppState(); app.conversations.removeAll()
+        let me = UUID(), target = UUID()
+        app.createNewConversation(id: me)
+        try app.store.peers.insert(openRequest("aaaa0005", from: me, to: target))
+        let call = FunctionCall(name: "close_request", args: ["msg": .string("  AAAA0005  ")], id: "c1")
+        let result = await runToolCall(call, on: app, as: me)
+        #expect(result == "Closed request aaaa0005.")
+        #expect(try app.store.peers.message("aaaa0005")?.isOpen == false)
+    }
+
+    /// #469 review item 8. Declaration gating already stops a well-behaved model from being
+    /// offered `close_request` as a subagent (it is declared only for `principal == .main`), but
+    /// the dispatcher refuses a forged call too, the same defense-in-depth every other session
+    /// tool here gets — and the open request must survive it untouched.
+    @Test("a subagent's forged close_request is refused by the handler, and closes nothing")
+    func subagentCloseRequestRefused() async throws {
+        let app = AppState(); app.conversations.removeAll()
+        let sub = UUID(), target = UUID()
+        app.createNewConversation(id: sub, isSubagent: true)
+        try app.store.peers.insert(openRequest("aaaa0006", from: sub, to: target))
+        let call = FunctionCall(name: "close_request", args: ["msg": .string("aaaa0006")], id: "c1")
+        let result = await runToolCall(call, on: app, as: sub, principal: .subagent)
+        #expect(result.contains("Refused — a subagent is not a session."))
+        #expect(try app.store.peers.message("aaaa0006")?.isOpen == true, "a forged call must close nothing")
+    }
 }

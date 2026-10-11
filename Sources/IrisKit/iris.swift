@@ -697,7 +697,7 @@ actor IrisEngine {
     @discardableResult
     func deliverPeerMessage(_ message: String, from senderId: UUID, senderName: String?,
                              senderRole: String? = nil, to targetId: UUID,
-                             envelope: PeerEnvelope = PeerEnvelope(msgId: "", contextId: "", depth: 1, expectsReply: false, replyTo: nil)) async -> Bool {
+                             envelope: PeerEnvelope) async -> Bool {
         let localState = state
         let attributed = Self.framePeerMessage(message, senderName: senderName, senderId: senderId, senderRole: senderRole, envelope: envelope)
         // Sanitise before deciding where it goes, because both destinations need it sanitised and
@@ -4038,7 +4038,15 @@ actor IrisEngine {
             // treated as absent — since the model copies it back from text it read.
             let inReplyTo = (functionCall.args["in_reply_to"]?.stringValue)
                 .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.flatMap { $0.isEmpty ? nil : $0 }
-            let expectsReply: Bool = { if case .bool(true)? = functionCall.args["expects_reply"] { return true }; return false }()
+            // #469 review item 7: a hand-written tool call may spell this as the string "true"
+            // rather than the JSON boolean; accepted case-insensitively, same as the literal.
+            let expectsReply: Bool = {
+                switch functionCall.args["expects_reply"] {
+                case .bool(let b)?: return b
+                case .string(let s)?: return s.caseInsensitiveCompare("true") == .orderedSame
+                default: return false
+                }
+            }()
             guard let peers = await MainActor.run(body: { localState?.store.peers }) else {
                 result = "Session messaging is unavailable."; return result
             }
@@ -4186,7 +4194,11 @@ actor IrisEngine {
                     ? "Card updated — over-long fields were truncated to what the peer listing shows. "
                     : "Card updated. ") + shown
             }
-        } else if functionCall.name == "close_request", let msg = functionCall.args["msg"]?.stringValue {
+        } else if functionCall.name == "close_request", let rawMsg = functionCall.args["msg"]?.stringValue {
+            // #469 review item 6: normalised the same way `in_reply_to` is above — the model
+            // copies this id back from text it read, so case and surrounding whitespace must not
+            // make its own open request unrecognisable.
+            let msg = rawMsg.trimmingCharacters(in: .whitespaces).lowercased()
             // Defense in depth, same reasoning as the other session tools above: declaration
             // gating only stops a well-behaved model, so a forged call is refused again here.
             guard principal == .main else {

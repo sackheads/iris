@@ -40,6 +40,30 @@ struct PeerCorrelationTests {
         #expect(try app.store.peers.openRequests(from: a).map(\.msgId) == [id])
     }
 
+    /// #469 review item 7: a model that writes a JSON tool call by hand may spell this as the
+    /// string `"true"` rather than the boolean literal; refusing it silently (treating it as
+    /// false) would leave the sender thinking it is tracked as a request when it is not.
+    @Test("expects_reply accepts the string \"true\", any case, as well as the boolean",
+          arguments: [JSONValue.string("true"), .string("True"), .string("TRUE"), .bool(true)])
+    func expectsReplyAcceptsStringTrue(_ value: JSONValue) async throws {
+        let app = AppState(); app.conversations.removeAll()
+        let a = UUID(), b = UUID()
+        for id in [a, b] { app.createNewConversation(id: id) }
+        let out = await call(["to": .string(b.uuidString), "message": .string("x"), "expects_reply": value], on: app, as: a)
+        let id = try #require(msgId(in: out))
+        #expect(try app.store.peers.message(id)?.expectsReply == true)
+    }
+
+    @Test("expects_reply treats any other string as false")
+    func expectsReplyOtherStringIsFalse() async throws {
+        let app = AppState(); app.conversations.removeAll()
+        let a = UUID(), b = UUID()
+        for id in [a, b] { app.createNewConversation(id: id) }
+        let out = await call(["to": .string(b.uuidString), "message": .string("x"), "expects_reply": .string("nah")], on: app, as: a)
+        let id = try #require(msgId(in: out))
+        #expect(try app.store.peers.message(id)?.expectsReply == false)
+    }
+
     @Test("a reply inherits the thread, closes the request, and is framed as a reply to the original")
     func replyCloses() async throws {
         let app = AppState(); app.conversations.removeAll()
