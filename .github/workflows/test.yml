@@ -38,12 +38,10 @@ jobs:
           restore-keys: |
             spm-${{ runner.os }}-${{ steps.toolchain.outputs.key }}-
 
-      - name: Build package and tests
-        run: swift build --build-tests
-
-      - name: No warnings in Sources/ or Tests/
-        # Touches our own Swift files so every warning prints again; the rebuild is our modules
-        # only, since the dependencies' sources are untouched.
+      - name: Build package and tests, no warnings in Sources/ or Tests/
+        # check-warnings.sh runs `swift build --build-tests` itself, after touching our own Swift
+        # files so every warning prints; a separate build step first would compile our modules
+        # twice. Dependencies come from the cache and are not rebuilt.
         run: scripts/check-warnings.sh
 
       - name: Tests

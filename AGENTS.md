@@ -24,9 +24,9 @@ what it recompiles, so it rebuilds our modules (about a minute) but not the depe
 warning is fixed at its source: `_ =` for a result discarded on purpose, the right isolation for
 the code that warns. Do not suppress it (#286).
 
-**CI.** `.github/workflows/test.yml` runs `swift build --build-tests`, `scripts/check-warnings.sh`
-and `swift test --no-parallel` on every PR and push to main, on GitHub's `macos-26` runner. The
-runner has 3 cores, so Swift's cooperative pool is 3 threads; in parallel about 25 suites miss
+**CI.** `.github/workflows/test.yml` runs `scripts/check-warnings.sh` (which builds the package
+and tests) and `swift test --no-parallel` on every PR and push to main, on GitHub's `macos-26`
+runner. The runner has 3 cores, so Swift's cooperative pool is 3 threads; in parallel about 25 suites miss
 their deadlines there (subprocess timeouts, kill ladders, subagent stops, tests that park a pool
 thread on a semaphore), while serial is green. It does not build the Xcode app target (needs the
 Metal toolchain and signing) or run any GUI check, and the opt-in tests (`IRIS_REAL_VM`,
