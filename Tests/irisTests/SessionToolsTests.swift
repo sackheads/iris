@@ -8,7 +8,7 @@ import Foundation
 @Suite("Session tools", .timeLimit(.minutes(1)))
 struct SessionToolsTests {
 
-    private let names = ["list_sessions", "send_to_session", "set_session_card"]
+    private let names = ["list_sessions", "describe_session", "send_to_session", "set_session_card"]
 
     /// Drive one real turn through the engine against a capturing client and read back the tools
     /// actually declared on the request — not a hand-written mirror of the gate. A prior version

@@ -101,6 +101,7 @@ import Foundation
     @Test func peerToolsRefuseWithNoPeers() async {
         let app = AppState(); let me = UUID(); app.createNewConversation(id: me)
         for call in [FunctionCall(name: "list_sessions", args: [:], id: "c1"),
+                     FunctionCall(name: "describe_session", args: ["to": .string(UUID().uuidString)], id: "c1"),
                      FunctionCall(name: "send_to_session", args: ["session_id": .string(UUID().uuidString),
                                                                   "message": .string("hi")], id: "c1")] {
             #expect(await runToolCall(call, on: app, as: me, peerCount: 0) == IrisEngine.noPeersRefusal,
