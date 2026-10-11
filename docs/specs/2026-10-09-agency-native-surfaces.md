@@ -54,6 +54,7 @@ Each decision gives its default and the reason for it. A reviewer should weigh t
 
 1. **A notification never approves** (owner ruling 1).
    - The actions are **Open**, **Deny** (live asks) and **Dismiss** (blocked cards). The categories are registered without any approve action, so no code path can add one by accident.
+   - **Dismiss requires the device to be unlocked first** (implementer revision, during review): it acknowledges a run from the banner, including one shown on the lock screen, and only an unlock may clear it that way. **Deny** carries no such requirement, since stopping work is always the safe direction.
    - *Why:* a banner truncates, a locked screen hides previews, and `humanOnly` exists so nothing but a click with the details in view can authorise. The card rule is the same: "an approval given without sight of the payload is worse than no button" (`EventCard.swift:45-47`).
    - *Cost if wrong:* one extra click to open the app.
 2. **One derived attention value.** `SurfaceAttention`, a pure function of `(pendingApprovals, session statuses, runningJobs, LedgerAttention)`. It returns `.actionRequired([Reason])`, `.running(count)` or `.idle`, in that order of precedence. It is computed, never stored. The status item reads it; the run log refreshes on its ledger half (`LedgerAttention`, decision 15). Notifications use the same inputs, through the policy in decision 6.
@@ -83,10 +84,10 @@ Each decision gives its default and the reason for it. A reviewer should weigh t
 6. **The notification policy is pure, and notification text is harness-owned.** `NotificationPolicy.decide(event, context) -> PlannedNotification?`.
    - It notifies on:
      - a card with `status == .blockedOnApproval`;
-     - a card whose job is paused when the card is delivered, read once from `job(id:)?.pausedReason`, because no card field says so;
+     - a **failed or interrupted** card whose job is paused when the card is delivered, for a reason that is not the owner's own (`LedgerAttention.ownerPauseReasons`), read once from `job(id:)?.pausedReason`, because no card field says so (implementer revision, during review: a completed card on a paused job, or a run of a job the owner paused, is not a job waiting on anyone);
      - a live ask (owner ruling 4).
    - It does not notify on completed or interrupted runs that paused nothing, on a retrying failure, on reflections, or on the digest.
-   - It suppresses a notification for a card when the app is active and the card's conversation is selected. It suppresses one for an ask when the app is active and the main window is visible, because the overlay is global.
+   - It suppresses a notification for a card only when the app is active, its main window is visible and uncovered, and that window is showing the card's conversation (implementer revision, during review: the app being active and that conversation being selected is not, on its own, enough — the chat window must actually be on screen, or a card can be suppressed while nothing shows it). It suppresses one for an ask when the app is active and the main window is visible, because the overlay is global.
    - **The title is a fixed constant for each kind** (coordinator ruling). It is `Iris: a job needs you` for a blocked or paused job, and `Iris: approval waiting` for a live ask. macOS shows titles on the lock screen even when previews are hidden, and a job name is chosen by the model. "Security fix — tap Open, then Approve" fits within the cap.
    - The **body** may carry only these, each quoted:
      - the job name, flattened and capped as the briefing does (`IrisEngine.flattenCardField`, `cardNameCap`);

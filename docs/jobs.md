@@ -822,6 +822,19 @@ A blocked run's row in the menu opens its card wherever the card is, an archived
 `/new` included. If the conversation holding it has been deleted, the row opens Iris with one line
 naming the `/jobs ack` that clears the run instead.
 
+**Notifications.** A blocked card, and a failed or interrupted card whose job a limit or another
+admission check has just paused — not one you paused yourself — also post a banner, unless Iris is
+active with its chat window visible and showing that card's conversation. A live approval posts one
+too, unless Iris is active with its window visible, because the approval overlay is global. The
+title is always `Iris: a job needs you` or `Iris: approval waiting`, because macOS shows titles on
+the lock screen. The body names only the job and the tool, never what a run said. The actions are
+Open; Deny, for an approval; and Dismiss, for a blocked card, which acknowledges it and needs the
+Mac unlocked first — Deny does not, since stopping work is always safe. Nothing on a banner
+approves: Open shows the call in full, and approving stays a click in the app. Permission is asked
+the first time a banner would be posted; denied, including by MDM, stays denied, with no re-prompt.
+Turn banners off with Settings → General → Notifications ("Needs attention" by default). `swift run`
+and `scripts/run-dev.sh` never post; dev testing uses Iris Dev.app.
+
 ## Approvals fail closed
 
 Nobody is watching a background run, so it never blocks on an approval dialog. A tool call from a
