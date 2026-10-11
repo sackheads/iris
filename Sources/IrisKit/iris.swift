@@ -1130,8 +1130,8 @@ actor IrisEngine {
     /// Once per engine. `start()` runs again when the setup wizard finishes (a rerun from
     /// Settings, say), and by the second call any goal still running is live, not interrupted:
     /// resuming it again posted a second "interrupted by restart" line and could run a
-    /// `processInput` beside the live turn. The flag is set before the first `await`, so two overlapping starts cannot
-    /// both pass it.
+    /// `processInput` beside the live turn. The flag is set before the first `await`, so two
+    /// overlapping starts cannot both pass it.
     func resumeInterruptedGoal() async {
         guard !checkedForInterruptedGoal else { return }
         checkedForInterruptedGoal = true
@@ -3194,8 +3194,9 @@ actor IrisEngine {
     ///
     /// Reuses the scheduler this engine already has rather than building a second: `start()` runs
     /// from `AppState.start()`, once at launch or first window appear and again from the setup
-    /// wizard's finish, and a `schedule_job` before it may already have built one for writes. A fresh one each time would leave the
-    /// previous polling loop running with nothing holding a reference to stop it.
+    /// wizard's finish, and a `schedule_job` before it may already have built one for writes. A
+    /// fresh one each time would leave the previous polling loop running with nothing holding a
+    /// reference to stop it.
     /// `JobScheduler.start()` cancels its own previous loop, so re-adopting stays one loop.
     @discardableResult
     func adoptJobScheduler(ledger: JobLedger,

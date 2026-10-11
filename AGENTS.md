@@ -67,7 +67,9 @@ holds the user's real settings, so leave it alone. One exception: KeyboardShortc
 `.standard`, so a dev hotkey recorded from `swift run` lands in `iris` under its own
 `toggleIrisDev` name. `Iris Dev.app` and `scripts/run-dev.sh` are still separate processes — do
 not run both at once against one `~/.iris-dev`: both would open the store's GUI lock and run the
-same jobs.
+same jobs. An `iris-dev://` link opened while `swift run` or `run-dev.sh` is running
+does exactly that: the bare binary registers no scheme, so Launch Services launches Iris Dev.app
+beside it on the same `~/.iris-dev`.
 
 **Dev builds use `~/.iris-dev`, not `~/.iris`.** `swift build`/`swift run`, `scripts/run-dev.sh`,
 Xcode Debug and `swift test` are all dev builds (`BuildIdentity.current == .dev`): they read and

@@ -1246,7 +1246,7 @@ A link that arrives while Iris is still starting is held rather than fired early
 them, a flood beyond that refused with one line — and is then checked exactly as a link arriving
 after launch would be. The same cold start resumes a goal a restart interrupted and loads plugins
 and MCP servers, all before any window opens. Reopening the chat window later does neither again:
-only the setup wizard's own finish reloads plugins and MCP servers.
+plugins and MCP servers are reloaded by `/mcp reload`, or when the setup wizard finishes.
 
 ## Retention
 
