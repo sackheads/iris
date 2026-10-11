@@ -65,7 +65,7 @@ enum RunJobURL {
     /// Why a link was refused before any job was looked up. A fixed sentence each: the link is
     /// unauthenticated input, so no part of it is echoed into Iris.
     enum Refusal: Error, Equatable, Sendable {
-        case otherScheme, wrongHost, hasQuery, hasFragment, wrongPath, malformedToken
+        case otherScheme, wrongHost, hasQuery, hasFragment, wrongPath, malformedToken, unreadable
 
         var sentence: String {
             switch self {
@@ -73,6 +73,7 @@ enum RunJobURL {
             case .wrongHost: return "the link is not a run-job link"
             case .hasQuery, .hasFragment: return "run-job links take no input, and this one carried some"
             case .wrongPath: return "the link has something other than one token after run-job/"
+            case .unreadable: return "the link could not be read as a URL"
             case .malformedToken: return "the link's token is not one Iris made; a job's id or name does not work, and `/jobs url <name> on` makes a link"
             }
         }
@@ -107,6 +108,8 @@ enum RunJobURL {
         return .success(token)
     }
 
+    static let notSetUpReason = "Iris is not set up yet; finish setup in the chat window, then open the link again"
+    static let startupFloodReason = "too many links arrived while Iris was starting"
     static let unknownTokenReason = "the link matches no job's URL trigger; it may have been turned off or replaced"
     static let ledgerUnreadableReason = "the jobs table could not be read"
     static let overLimitReason = "URL fires are limited to \(maxFiresPerHour) an hour per job"

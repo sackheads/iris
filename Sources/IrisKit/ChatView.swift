@@ -489,11 +489,10 @@ struct ChatView: View {
         .background(MainWindowTracker())
         .onAppear {
             MainWindow.openAction = openWindow
-            let hasCompletedSetup = IrisDefaults.store.bool(forKey: "HAS_COMPLETED_SETUP")
-            if !hasCompletedSetup || !ConfigManager.shared.isConfigured {
+            if !AppState.isSetUp() {
                 showSetupWizard = true
             } else {
-                state.start()
+                state.startOnce()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("RerunSetupWizard"))) { _ in
