@@ -46,7 +46,7 @@ struct RunJobURLEventsTests {
         let sources = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/IrisKit")
-        let banned = try Regex(#"\b(print|debugPrint|NSLog|os_log|dump)\(|\bLogger\("#)
+        let banned = try Regex(#"\b(print|debugPrint|NSLog|os_log|dump|fputs)\(|\bLogger\(|FileHandle\.standardError"#)
         for file in ["RunJobURLEvents.swift", "RunJobURLIntake.swift", "RunJobURLHandling.swift",
                      "RunJobURL.swift", "LaunchLock.swift", "URLTriggerToken.swift", "URLTriggerLinkSheet.swift"] {
             let text = try String(contentsOf: sources.appendingPathComponent(file), encoding: .utf8)

@@ -5443,9 +5443,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Never `application(_:open:)` or `.handlesExternalEvents`: SwiftUI opened a window per
         // link with either (owner ruling C2).
         guard RunJobURLEvents.shouldInstall(bundleURL: Bundle.main.bundleURL) else { return }
-        let events = RunJobURLEvents { url in AppState.shared.receiveRunJobURL(url) }
-        events.install()
-        runJobURLEvents = events
+        runJobURLEvents = RunJobURLEvents.installForApp()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {

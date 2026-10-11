@@ -19,6 +19,14 @@ final class RunJobURLEvents: NSObject {
     /// link to it, and it installs nothing it cannot use.
     static func shouldInstall(bundleURL: URL) -> Bool { bundleURL.pathExtension == "app" }
 
+    /// The app's handler, delivering to `AppState.shared`. Here rather than in `AppDelegate` so the
+    /// closure that carries the raw link sits in a file the no-logging test reads.
+    static func installForApp() -> RunJobURLEvents {
+        let events = RunJobURLEvents { url in AppState.shared.receiveRunJobURL(url) }
+        events.install()
+        return events
+    }
+
     func install(on manager: NSAppleEventManager = .shared()) {
         manager.setEventHandler(self, andSelector: #selector(handleGetURL(_:withReply:)),
                                 forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL))

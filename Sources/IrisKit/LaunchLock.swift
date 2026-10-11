@@ -11,8 +11,11 @@ struct ProcessStart: Equatable, Sendable {
         Date(timeIntervalSince1970: TimeInterval(seconds) + TimeInterval(microseconds) / 1_000_000)
     }
 
-    /// nil when no process has that pid. A process of this user is always readable, so for the
-    /// holder (the same user's `--run-job`) nil means it has gone.
+    /// nil when no process has that pid, and also when the pid belongs to another user
+    /// (`proc_pidinfo` fails with EPERM). Both mean "not the holder": the holder is always this
+    /// user's own `--run-job`, so a pid now owned by someone else was reused. That is why the
+    /// callers fail open (the link fires rather than waits) on nil. Do not make nil fail closed:
+    /// a reused pid would then stall every link for the whole deferral.
     static func of(_ pid: Int32) -> ProcessStart? {
         guard pid > 0 else { return nil }
         var info = proc_bsdinfo()
