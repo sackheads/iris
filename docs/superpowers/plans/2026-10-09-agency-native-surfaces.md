@@ -26,7 +26,7 @@
 - **Decision 1: a notification never approves.** The only actions are Open, Deny (live asks) and Dismiss (blocked cards). No category is registered with an approve action, and `handleNotificationResponse` ignores any action id it does not know.
 - **Interruption level `.active`.** Never `.timeSensitive`, which needs an entitlement. `App/Iris.entitlements` stays an empty dict.
 - **Permission** is requested the first time a notification would be posted, never at launch. "Denied", including denied by MDM, is a normal state: no re-prompt and no retry.
-- **Only a real `.app` bundle gets notifications or the URL scheme** (decision 8): the check is `Bundle.main.bundleURL.pathExtension == "app"`, and it runs before any `UNUserNotificationCenter` call. `IrisApp.init` is the only installer. `--run-job` never installs a sink, and neither does `AppState()` in a test.
+- **Only a real `.app` bundle gets notifications or the URL scheme** (decision 8): the check is `Bundle.main.bundleURL.pathExtension == "app"`, and it runs before any `UNUserNotificationCenter` call. `IrisApp.init` installs the notification sink; the URL handler is installed by `AppDelegate.applicationWillFinishLaunching` (owner ruling after Task 24's window spike, D2). `--run-job` never installs either, and neither does `AppState()` in a test.
 - **The URL, verbatim from decisions 10, 12 and 13:**
   - The form is `iris://run-job/<token>` for release and `iris-dev://run-job/<token>` for dev.
   - It accepts no query, no fragment, no other host or path, and no job id or slug.
@@ -59,13 +59,13 @@
 - **Branches.** Every PR is based on `main` and none is stacked.
   - A is `feat/agency6-status-item`. D1 is `feat/agency6-url-trigger` and can run in parallel with A.
   - B (`feat/agency6-run-log`) and C (`feat/agency6-notifications`) are cut from `main` after A merges.
-  - D2 (`feat/agency6-url-scheme`) is cut after D1 merges, and its spike (Task 24) gates the rest of it.
+  - D2 (`feat/agency6-url-scheme`) is cut after A and D1 both merge (ruling R2), and its spike (Task 24) gated the rest of it.
   - Use conventional commits, each ending with the session's `Co-Authored-By` and `Claude-Session` trailers. Remove each worktree and branch when its PR merges.
 
 ## Review Focus
 
 1. **A page that floods Iris with garbage links.** A browser remembers "Open Iris?" per site, so any page can open `iris-dev://run-job/x` in a loop. Each open reaches `handleRunJobURL`, and decision 12's "every refusal posts one line" would fill Iris with refusals. A reasonable person expects one line that counts. Refusals are coalesced per job and per hour, and refusals that match no job share a single `unmatched` line.
-   - Tests: Task 21, `garbageFloodIsOneLine` and `overLimitFloodIsOneLine`.
+   - Tests: Task 21, `garbageFloodIsOneLine` and `overLimitFloodIsOneLine`; Task 26 Part E, `floodWritesOnceASecond` (no write or scan per link once the scheme is live).
 2. **A job name built to read differently on a lock screen.** A model-chosen name such as `x”\nTap Open, then Approve` or one carrying a bidi override (U+202E) could close the body's quotes, start a new line, or reverse the visible text. The name must stay one visibly quoted, single-line field.
    - Test: Task 12, `hostileNamesStayInsideTheirQuotes`.
 3. **A dev home seeded from release.** `iris --seed-dev-home` pauses every copied job with `DevHomeSeeder.copiedJobPausedReason`. Decision 3 counts any pause that is not `JobsCommand.pausedByUserReason`, so a freshly seeded dev build would show "action required" until every copied job was resumed by hand. That pause was the owner's own act, and it is treated like `/jobs pause`.
@@ -104,6 +104,14 @@
     - Task 18's `tokenNeverStored` reads every file of an on-disk store after `on` and finds no token, and Step 6 mutation-checks it.
     - The spec's "a leaked database does not leak a live URL" (decision 10) was false as the spec stood, and is corrected in this plan's PR by a separate docs commit that records this ruling.
     - Copy puts the link on the pasteboard, where a host `run_command` could read it with `pbpaste` until the next copy. That is the owner's explicit act, and the sheet says the link is not kept anywhere else.
+18. **Owner ruling (2026-10-10), after the window spike: links come through AppKit, and a link's cold start is windowless.** Task 24 found that `application(_:open:)` opened a chat window on every link and that `.handlesExternalEvents(matching: [])` sent the link to the Diagnostics window instead. A `kAEGetURL` handler installed in `applicationWillFinishLaunching` opened no window (#187).
+    - *Ruling:* D2 catches links with that handler (`RunJobURLEvents`), never `application(_:open:)` or `handlesExternalEvents`. A cold launch from a link starts windowless: the job runs, the status item shows it, and the result lands in Iris. The Dock and Show Chat already open the chat from there, and the hotkey is fixed by note 20 (Task 26).
+19. **A windowless launch has to start the engine itself, and links wait for the job bookkeeping.** `AppState.start()` had one caller, `ChatView.onAppear`, which never runs if no window opens. And `start()` begins by closing every `running` row as the last session's, so a link fired before that could have its own run closed under it.
+    - *Ruling:* `applicationDidFinishLaunching` calls `startOnce()` when Iris is set up, and `ChatView.onAppear` calls the same, which is then a no-op. The setup wizard's finish keeps the full `start()`, which is half of #472. A link that arrives first waits in `AppState.urlIntake` (at most 16), and the end of `configureJobBookkeeping` releases the held links in order through `handleRunJobURL`. If Iris is not set up, links are refused, coalesced, until setup starts the engine (Task 26 Part B).
+20. **The hotkey after a windowless start: an `OpenWindowAction` from the status item's label.** The spike found the hotkey opened nothing there, because no `ChatView` or menu had supplied an action.
+    - *Ruling:* `StatusItemLabel` adopts its `openWindow` in `body`, because the label is drawn at launch. `MainWindowTracking` keeps an opener that `raise()` falls back to. This is preferred over an AppKit fallback because it is the path Show Chat already proved, and it opens the chat scene by id, where the AppKit routes open whatever SwiftUI picks. Only the GUI can prove that the label's action works (Task 28 step 8). If it does not, D2 stops for a ruling on a self-sent `kAEReopenApplication` (Task 26 Part D).
+21. **The store holder is known by its start time, not by its pid alone** (carried from Task 22). A lock file holds a bare pid, and a reused pid used to stall links for the whole session.
+    - *Ruling:* at launch, a holder counts only if its process started before the lock file's mtime. After that, it is alive only while the process at that pid keeps the start time recorded at launch (`proc_pidinfo(PROC_PIDTBSDINFO)`) (Task 26 Part A). Separately, coalesced refusals now write at most once a second and never scan Iris per link (Task 26 Part E, coordinator ruling), and nothing in the URL path logs a link.
 
 ---
 
@@ -5575,48 +5583,45 @@ minutes. Until the app registers the scheme (D6 PR D2), nothing opens the link.
 
 ## PR D2: the scheme, the launch path, and the window spike
 
-Branch: `feat/agency6-url-scheme`, cut from `main` after PR D1 merges. Spec decision 12's scheme and decision 14's launch path. **Task 24 comes first and gates the rest.** Its answer picks between Task 26's two variants, or stops D2.
+Branch: `feat/agency6-url-scheme`, cut from `main` after PRs A and D1 merged (ruling R2: it uses `MainWindow` and the status item), at 25d4c6b. Spec decision 12's scheme and decision 14's launch path. Task 24, the spike, ran first and stopped D2; the owner then ruled for an AppKit `kAEGetURL` handler and a windowless cold start, and Tasks 25-28 were re-planned on that ruling (plan notes 18-21).
 
-### Task 24: The window spike (`work`, under the lease; gates D2)
+### Task 24: The window spike (`work`, under the lease) — done; the owner ruled
 
-The question, from spec §3: does SwiftUI's `WindowGroup` open a second window on an external URL, and does `.handlesExternalEvents(matching: [])` or `application(_:open:)` alone prevent it?
+**Status: done (2026-10-10), on #187.** It stopped D2 under its own step 10, because neither planned variant passed, and the owner ruled on a third.
 
-This runs on a scratch branch that is never pushed. It needs `xcodegen` and the Metal Toolchain installed, which needs the owner's OK on `work`. It fires no job and costs no provider spend.
+The question was whether SwiftUI's `WindowGroup` opens a second window on an external URL, and whether `.handlesExternalEvents(matching: [])` or `application(_:open:)` alone prevents it. `work` ran it on main 25d4c6b, on a scratch branch that was never pushed and has been removed, with no provider spend. Windows were counted through System Events (standard windows only).
 
-1. Run `git worktree add .worktrees/agency6-spike -b spike/agency6-url-window origin/main`, then run the `.sourcekit-lsp` step from AGENTS.md "Worktrees".
-2. Apply the throwaway patch. Tasks 25 and 26 add the same lines for real.
-   - In `project.yml`, under `configs: Debug:`, add `IRIS_URL_SCHEME: iris-dev`, and under `Release:`, add `IRIS_URL_SCHEME: iris`.
-   - In `App/Info.plist`, add the `CFBundleURLTypes` block from Task 25 Step 3.
-   - In `AppDelegate` (`Sources/IrisKit/iris.swift:5157`), add:
+| Case | A: `application(_:open:)` only | B: + `.handlesExternalEvents(matching: [])` on the `WindowGroup` | C2: a `kAEGetURL` handler installed in `applicationWillFinishLaunching` |
+|---|---|---|---|
+| Chat window open, link | delivered; windows 1 → **2** (a second chat window) | delivered; 1 → **2** (a **Diagnostics** window) | delivered; 1 → **1** |
+| Window closed, app running, link | delivered; 0 → **1** | delivered; 0 → **1** (Diagnostics) | delivered; 0 → **0** |
+| Cold launch from a link | delivered; **1** chat window | delivered; **1** Diagnostics window | delivered; **0** windows |
 
-```swift
-    func application(_ application: NSApplication, open urls: [URL]) {
-        NSLog("D6 spike open: %@", urls.map(\.absoluteString).joined(separator: " "))
-    }
-```
+`.handlesExternalEvents(matching: [])` on every scene behaved like C2. The follow-up on C2's windowless cold start:
+- **Order:** `applicationWillFinishLaunching`, then the link about 20 ms later, then `applicationDidFinishLaunching` about 20 ms after that. The keychain read at `App` init comes first.
+- **Dock click** after a windowless cold launch opens one chat window (SwiftUI's default reopen); no `applicationShouldHandleReopen` is needed.
+- **Show Chat** works after a cold launch, through `adoptOpenAction`.
+- **The hotkey opens nothing** after a windowless cold launch: `MainWindow.openAction` is nil, because no `ChatView` appeared and the menu was never opened. With a normal launch, the hotkey works.
+- **With a window open**, a link adds no window.
 
-3. Run `pgrep -fl "Iris Dev|\.build/debug/iris"`. Expected: no output. Then run `python3 ~/.claude/skills/gui-test-lease/lease.py acquire --purpose "iris: D6 window spike" --minutes 40 --on-behalf-of <requesting peer>`. Expected: exit 0.
-4. Variant A (delegate only). Run `scripts/build-app.sh Debug "$TMPDIR/iris-spike"`, then `scripts/sign.sh "<path>"`, then `open "<path>"`. In a second terminal, run `log stream --style compact --predicate 'process == "Iris Dev"' | grep "D6 spike"`.
-5. With the chat window open, run `osascript -e 'tell application "System Events" to count windows of process "Iris Dev"'` and note N. Then run `open 'iris-dev://run-job/AAAAAAAAAAAAAAAAAAAAAA'`, and count the windows again. Record: did the log line appear, and is the count still N?
-6. Close the chat window with Cmd-W, keeping the app running, and repeat step 5. Record the same two answers.
-7. Quit the app. Run `open 'iris-dev://run-job/AAAAAAAAAAAAAAAAAAAAAA'` to cold-launch it. Record: the log line, and how many chat windows appeared.
-8. Variant B. Add `.handlesExternalEvents(matching: [])` after `.commands { … }` on the `WindowGroup("Iris", id: MainWindow.sceneId)` scene, rebuild, re-sign, and repeat steps 5-7.
-9. Release the lease, remove the worktree (`git worktree remove --force .worktrees/agency6-spike` is allowed here, because the tree is scratch by design), and run `git branch -D spike/agency6-url-window`.
-10. Post the six answers on the D2 PR as a table, or on #187 if the PR is not open yet. Decide:
-    - **Variant A** gives no extra window at steps 5 and 6, exactly one window at step 7, and the log line every time: Task 26 uses the delegate only.
-    - **Variant A** opens a second window anywhere, and **Variant B** does not, with the log line still printing: Task 26 adds `.handlesExternalEvents(matching: [])`.
-    - **Neither** stops a second window, or Variant B stops the log line: stop D2. Report to the owner with the table, because the design must change (for example, an `NSAppleEventManager` `kAEGetURL` handler installed in `applicationWillFinishLaunching`). No later D2 task runs until the owner rules.
+**Owner ruling (binding, 2026-10-10):**
+- Catch links with an AppKit `kAEGetURL` handler installed in `applicationWillFinishLaunching` (variant C2).
+- Do not use `application(_:open:)`, and do not use `handlesExternalEvents`.
+- A cold launch from a link starts **windowless**: the job runs, the status item shows it, and the result lands in Iris.
+- D2 must make the hotkey open the chat window after a windowless cold launch (Task 26 Part D).
+
+Tasks 25-28 below were re-planned on that ruling (plan notes 18-21).
 
 ### Task 25: The per-build scheme in `project.yml` and `Info.plist`
 
 **Files:**
-- Modify: `project.yml:35-39` (`IRIS_URL_SCHEME` per configuration)
-- Modify: `App/Info.plist` (`CFBundleURLTypes`)
+- Modify: `project.yml` (`configs: Debug:` and `Release:`, currently lines 35-39)
+- Modify: `App/Info.plist` (add `CFBundleURLTypes`)
 - Test: `Tests/irisTests/URLSchemeConfigTests.swift` (new)
 
 **Interfaces:**
-- Consumes: `BuildIdentity.urlScheme` (Task 18).
-- Produces: the build setting `IRIS_URL_SCHEME`, which is `iris-dev` for Debug and `iris` for Release.
+- Consumes: `BuildIdentity.urlScheme` (Task 18): `iris` for `.release`, `iris-dev` for `.dev`.
+- Produces: the build setting `IRIS_URL_SCHEME` (`iris-dev` for Debug, `iris` for Release), substituted into `CFBundleURLTypes`. Nothing in Swift reads it; the handler checks the scheme through `BuildIdentity.urlScheme` (`RunJobURL.parse`).
 
 - [ ] **Step 1: Write the failing tests.** Create `Tests/irisTests/URLSchemeConfigTests.swift`:
 
@@ -5625,14 +5630,21 @@ import Testing
 import Foundation
 @testable import IrisKit
 
-/// D6 decision 12: each build registers its own scheme, the same one `BuildIdentity.urlScheme`
-/// says the handler answers. Read from the repo, located from `#filePath` and never the cwd.
+/// D6 decision 12: each build registers its own scheme, the one `BuildIdentity.urlScheme` says the
+/// handler answers, so a release and a dev install never claim each other's links. Read from the
+/// repo, located from `#filePath` and never the cwd.
 @Suite("URL scheme configuration (D6)")
 struct URLSchemeConfigTests {
     private func repoFile(_ path: String) throws -> String {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         return try String(contentsOf: root.appendingPathComponent(path), encoding: .utf8)
+    }
+
+    @Test("the two identities answer different schemes")
+    func identitiesDiffer() {
+        #expect(BuildIdentity.release.urlScheme == "iris")
+        #expect(BuildIdentity.dev.urlScheme == "iris-dev")
     }
 
     @Test("Debug sets iris-dev and Release sets iris, matching BuildIdentity")
@@ -5651,7 +5663,7 @@ struct URLSchemeConfigTests {
         #expect(setting(releaseBlock) == ["IRIS_URL_SCHEME: \(BuildIdentity.release.urlScheme)"])
     }
 
-    @Test("Info.plist registers the scheme from the build setting")
+    @Test("Info.plist registers exactly one scheme, from the build setting")
     func plistRegistersTheScheme() throws {
         let plist = try repoFile("App/Info.plist")
         let parsed = try PropertyListSerialization.propertyList(from: Data(plist.utf8), format: nil) as? [String: Any]
@@ -5663,9 +5675,9 @@ struct URLSchemeConfigTests {
 }
 ```
 
-- [ ] **Step 2: Run them and watch them fail.** Run `timeout 300 scripts/test-filter.sh URLSchemeConfigTests`. Expected: both tests fail. `projectSetsBothSchemes` fails on the missing setting, and `plistRegistersTheScheme` fails at the `#require`.
+- [ ] **Step 2: Run them and watch them fail.** `timeout 300 scripts/test-filter.sh URLSchemeConfigTests`. Expected: `identitiesDiffer` passes (Task 18 already pins it; this closes Task 18's deferred minor "release urlScheme untested"), `projectSetsBothSchemes` fails on the missing setting, and `plistRegistersTheScheme` fails at the `#require`.
 
-- [ ] **Step 3: Implement.** In `project.yml`, change the configurations to:
+- [ ] **Step 3: Implement.** In `project.yml`:
 
 ```yaml
       configs:
@@ -5690,112 +5702,280 @@ In `App/Info.plist`, after the `CFBundleVersion` line:
     </array>
 ```
 
-- [ ] **Step 4: Run them and watch them pass.** Run the same filter. Expected: 2 tests passed. Quote the count.
+- [ ] **Step 4: Run them and watch them pass.** Same filter. Expected: 3 tests passed. Quote the count.
 
 - [ ] **Step 5: Mutation checks.** Set Debug's `IRIS_URL_SCHEME` to `iris`: `projectSetsBothSchemes` fails. Set Release's to `iris-dev`: it fails too, which a substring match would have missed. Restore both.
 
-- [ ] **Step 6: Run the warnings check.** Run `scripts/check-warnings.sh`. Expected: no warnings. If `work` has the Metal Toolchain, also have it run `scripts/build-app.sh Debug` and `plutil -p "<app>/Contents/Info.plist" | grep -A3 CFBundleURLSchemes`. Expected: `"iris-dev"`.
+- [ ] **Step 6: Run the warnings check.** `scripts/check-warnings.sh`. Expected: exit 0. (The built app's `Info.plist` is checked on `work` in Task 28 step 3; this machine has no Metal Toolchain.)
 
-- [ ] **Step 7: Commit.** `git add project.yml App/Info.plist Tests/irisTests/URLSchemeConfigTests.swift`, then `git commit -m "feat(app): register iris:// for release and iris-dev:// for dev (D6 decision 12)"`.
+- [ ] **Step 7: Commit.** `git add project.yml App/Info.plist Tests/irisTests/URLSchemeConfigTests.swift`, then `git commit -m "feat(app): register iris:// for release and iris-dev:// for dev (D6 decision 12)"` with the session trailers.
 
-### Task 26: `application(_:open:)` and the pre-acquire lock read
+### Task 26: The `kAEGetURL` handler, the launch queue, the launch lock, the hotkey and the throttle
+
+Owner ruling (2026-10-10, after Task 24): links are caught by an AppKit `kAEGetURL` handler installed in `applicationWillFinishLaunching` (variant C2). Not `application(_:open:)`, not `.handlesExternalEvents`. A link that launches Iris starts it **windowless**: the job runs, the status item shows it, the result lands in Iris.
+
+Six parts, each red-green and committed on its own, in this order. Re-read every anchor before editing: line numbers below were read at 25d4c6b.
 
 **Files:**
-- Modify: `Sources/IrisKit/iris.swift:5157-5178` (`AppDelegate.application(_:open:)`), `:5193` (the lock read before `GUILock.acquire()`), `:5203` (the note after `AppState.shared` exists), and `:5239` (`.handlesExternalEvents(matching: [])`, Variant B only)
-- Create: `Sources/IrisKit/LaunchLock.swift`
-- Modify: `Sources/IrisKit/JobsCommand.swift` (delete `urlSchemePendingNote` and its use in `urlSheetText`)
-- Test: `Tests/irisTests/LaunchLockTests.swift` (new)
+- Create: `Sources/IrisKit/LaunchLock.swift` (Part A), `Sources/IrisKit/RunJobURLIntake.swift` (Part B), `Sources/IrisKit/RunJobURLEvents.swift` (Part C)
+- Modify: `Sources/IrisKit/iris.swift`: `AppDelegate` (`:5262`), `IrisApp.init` (`GUILock.acquire()` at `:5298`, the `assumeIsolated` block at `:5308`), `IrisEngine.configureJobBookkeeping` (`:3021`), and the `start()` comments at `:3085`, `:3330`, `:3365`
+- Modify: `Sources/IrisKit/AppState.swift`: `start()` (`:2033`), the URL fields beside `foreignStoreHolder` (`:3975-3992`)
+- Modify: `Sources/IrisKit/ChatView.swift`: `.onAppear` (`:490-498`)
+- Modify: `Sources/IrisKit/RunJobURLHandling.swift`: `handleRunJobURL`, `recheckDeferredURLFire`, `refuseURLFire`
+- Modify: `Sources/IrisKit/RunJobURL.swift`: `Refusal.unreadable`, `foreignHolderNotice`, `notSetUpReason`, `startupFloodReason`, `refusalFlushInterval`, `URLRefusalLine`
+- Modify: `Sources/IrisKit/StatusItem.swift`: `MainWindowTracking`, `MainWindow`, `StatusItemLabel`, `StatusMenu.adoptOpenAction`
+- Modify: `Sources/IrisKit/JobsCommand.swift` (delete `urlSchemePendingNote`, Part F)
+- Test: `Tests/irisTests/LaunchLockTests.swift`, `Tests/irisTests/RunJobURLIntakeTests.swift`, `Tests/irisTests/RunJobURLEventsTests.swift` (new); `Tests/irisTests/MainWindowRoutingTests.swift`, `Tests/irisTests/RunJobURLTests.swift`, `Tests/irisTests/RunJobURLDeferralTests.swift`, `Tests/irisTests/URLTriggerCommandTests.swift` (modified)
 
 **Interfaces:**
-- Consumes: `AppState.handleRunJobURL(_:identity:)`, `foreignStoreHolder` (Tasks 21 and 22) and `GUILock.state(at:)`.
-- Produces: `LaunchLock.foreignHolder(_ state: GUILock.State, ownPid: Int32) -> Int32?` and `AppState.noteForeignStoreHolder(_ pid: Int32?)`.
+- Consumes: `AppState.handleRunJobURL(_:identity:)` (Task 21, still the test entry point and the handler), `refuseURLFire`, `foreignStoreHolder`, `isProcessAlive`, `URLDeferralTimer` (Task 22), `GUILock.state(at:)` and `GUILock.acquire(at:pid:)`, `MainWindowTracking` and `MainWindow` (Task 4), `IrisEngine.configureJobBookkeeping(ledger:)`.
+- Produces:
+  - `ProcessStart.of(_ pid: Int32) -> ProcessStart?`, `StoreHolder`, `LaunchLock.foreignHolder(_:lockWritten:holderStart:ownPid:)`, `LaunchLock.read(at:ownPid:processStart:)`; `AppState.noteForeignStoreHolder(_ holder: StoreHolder?)`, `AppState.isForeignHolderAlive(_:)`, `AppState.foreignStoreHolderStart`, `AppState.processStart` (seam).
+  - `RunJobURLIntake`; `AppState.urlIntake`, `receiveRunJobURL(_ url: URL?)`, `jobsBecameReady()`, `refuseRunJobURLsUntilSetUp()`, `startOnce()`, `static isSetUp(defaults:config:)`, `launchEngine` (seam), `engineStarted`.
+  - `RunJobURLEvents` (`shouldInstall(bundleURL:)`, `url(from:)`, `install(on:)`, `handleGetURL(_:withReply:)`).
+  - `MainWindowTracking.opener`, `adoptOpener(_:)`, `replaceOpener(_:)`, `raise(open:)` defaulting to the opener; `MainWindow.adoptOpenAction(_:)`.
+  - `AppState.flushURLRefusalLine(_:)`, `flushURLRefusalLines()`, `urlRefusalFlushTimer` (seam), `urlRefusalFlushPending`.
 
-- [ ] **Step 1: Write the failing tests.** Create `Tests/irisTests/LaunchLockTests.swift`:
+**Verified APIs** (compiled under `-swift-version 6` on 2026-10-10, macOS 26 SDK): `NSAppleEventManager.shared().setEventHandler(_:andSelector:forEventClass:andEventID:)` with `AEEventClass(kInternetEventClass)` and `AEEventID(kAEGetURL)`; `NSAppleEventDescriptor.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue`; `NSAppleEventDescriptor(eventClass:eventID:targetDescriptor:returnID:transactionID:)` plus `setParam(_:forKeyword:)` (to build one in a test); `proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))` with `proc_bsdinfo.pbi_start_tvsec` / `pbi_start_tvusec` (`UInt64`), from `import Darwin`; `@Environment(\.openWindow)` read inside a `View` body with `let _ = …`.
+
+#### Part A: the launch lock, with the holder's identity (decision 14, the pid-reuse carry-forward)
+
+The lock file holds a bare pid. D1's deferral treats the pid as the holder for as long as `kill(pid, 0)` says it lives, so a crashed `--run-job` whose pid the kernel hands to an unrelated process stalls every link for ten minutes, for the whole session (progress.md, carried to Task 26). Two checks close it, both from what the kernel records:
+- **At launch:** a holder must have started before the lock file was written (its `mtime`). A process that started after that is a reused pid, and holds nothing.
+- **Afterwards:** a holder is alive only while the process at that pid still has the start time recorded at launch.
+
+- [ ] **A1: Write the failing tests.** Create `Tests/irisTests/LaunchLockTests.swift`:
 
 ```swift
 import Testing
 import Foundation
+import GRDB
 @testable import IrisKit
 
-/// D6 decision 14: the app reads the store lock before it overwrites it, remembers a live
-/// foreign holder so that a URL fire waits for it, and says so in Iris. Launch is never blocked.
+/// D6 decision 14: the app reads the store lock before it overwrites it and remembers a live
+/// foreign holder, by pid and start time, so a link waits for that process and never for a pid
+/// the kernel has handed to something else. Launch is never blocked.
 @MainActor
 @Suite("Launch lock (D6)", .timeLimit(.minutes(1)))
 struct LaunchLockTests {
-    @Test("only a live pid that is not this process is a foreign holder")
+    @MainActor private final class Scheduled { var bodies: [@MainActor @Sendable () -> Void] = [] }
+
+    private let written = Date(timeIntervalSince1970: 1_700_000_000)
+    private func start(_ offset: TimeInterval) -> ProcessStart {
+        let t = written.timeIntervalSince1970 + offset
+        return ProcessStart(seconds: UInt64(t), microseconds: UInt64((t - t.rounded(.down)) * 1_000_000))
+    }
+
+    @Test("only a live other process that started before the lock was written holds it")
     func foreignHolder() {
         let me: Int32 = 100
-        #expect(LaunchLock.foreignHolder(.free, ownPid: me) == nil)
-        #expect(LaunchLock.foreignHolder(.held(pid: me), ownPid: me) == nil)
-        #expect(LaunchLock.foreignHolder(.held(pid: 4242), ownPid: me) == 4242)
-        #expect(LaunchLock.foreignHolder(.unreadable(path: "/x"), ownPid: me) == nil)
+        let before = start(-30)
+        #expect(LaunchLock.foreignHolder(.held(pid: 4242), lockWritten: written, holderStart: before, ownPid: me)
+                == StoreHolder(pid: 4242, started: before))
+        #expect(LaunchLock.foreignHolder(.held(pid: 4242), lockWritten: written, holderStart: start(30), ownPid: me) == nil,
+                "started after the lock was written: a reused pid")
+        #expect(LaunchLock.foreignHolder(.held(pid: me), lockWritten: written, holderStart: before, ownPid: me) == nil)
+        #expect(LaunchLock.foreignHolder(.held(pid: 4242), lockWritten: written, holderStart: nil, ownPid: me) == nil,
+                "no start time: the process has gone")
+        #expect(LaunchLock.foreignHolder(.held(pid: 4242), lockWritten: nil, holderStart: before, ownPid: me) == nil,
+                "no file by the time it was stamped: released")
+        #expect(LaunchLock.foreignHolder(.free, lockWritten: written, holderStart: before, ownPid: me) == nil)
+        #expect(LaunchLock.foreignHolder(.unreadable(path: "/x"), lockWritten: written, holderStart: before, ownPid: me) == nil)
     }
 
-    @Test("a lock file a live other process wrote reads as that process")
+    @Test("the kernel's start time names one process, and none for a pid nothing has")
+    func processStart() throws {
+        let me = ProcessInfo.processInfo.processIdentifier
+        let first = try #require(ProcessStart.of(me))
+        #expect(ProcessStart.of(me) == first)
+        #expect(first.date <= Date())
+        #expect(ProcessStart.of(Int32.max) == nil)
+        #expect(ProcessStart.of(0) == nil)
+    }
+
+    @Test("a lock written by a live older process reads as that process; one naming this process does not")
     func readsARealLock() throws {
-        try withTempDirectorySync { dir in
-            let lock = dir.appendingPathComponent("gui.lock")
-            let parent = getppid()
-            GUILock.acquire(at: lock, pid: parent)
-            #expect(LaunchLock.foreignHolder(GUILock.state(at: lock),
-                                             ownPid: ProcessInfo.processInfo.processIdentifier) == parent)
-        }
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-launchlock-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let lock = dir.appendingPathComponent("gui.lock")
+        let parent = getppid()      // started before this test wrote anything
+        GUILock.acquire(at: lock, pid: parent)
+        let holder = try #require(LaunchLock.read(at: lock))
+        #expect(holder.pid == parent)
+        #expect(holder.started == ProcessStart.of(parent))
+
+        GUILock.acquire(at: lock, pid: ProcessInfo.processInfo.processIdentifier)
+        #expect(LaunchLock.read(at: lock) == nil)
     }
 
-    private func withTempDirectorySync(_ body: (URL) throws -> Void) throws {
-        let dir = try tempDirectory(prefix: "iris-launchlock")
-        defer { try? FileManager.default.removeItem(at: dir) }
-        try body(dir)
+    // MARK: AppState
+
+    private func makeApp() throws -> (ConversationStore, AppState, Job, URL) {
+        let store = try ConversationStore.inMemory()
+        let app = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        app.conversations.removeAll()
+        app.selectedConversationId = app.createNewConversation()
+        let job = Job(name: "url-digest", prompt: "", trigger: .schedule(.interval(seconds: 86_400)),
+                      action: .builtin(DailyDigest.name))
+        try store.ledger.upsert(job)
+        let minted = try #require(URLTriggerToken.generate())
+        try store.ledger.setURLTrigger(jobId: job.id, tokenHash: URLTriggerToken.digest(minted))
+        return (store, app, job, URL(string: RunJobURL.url(token: minted, identity: .dev))!)
+    }
+
+    private func irisLines(_ app: AppState) -> [String] {
+        let iris = app.activityConversationId()
+        return app.conversations.first { $0.id == iris }?.messages.filter { $0.role == .system }.map(\.content) ?? []
     }
 
     @Test("a foreign holder is remembered and announced in Iris; none is silent")
     func noted() throws {
-        let app = AppState(store: try ConversationStore.inMemory(),
-                           tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
-        app.conversations.removeAll()
+        let (_, app, _, _) = try makeApp()
         app.noteForeignStoreHolder(nil)
         #expect(app.foreignStoreHolder == nil)
-        #expect(app.conversations.flatMap(\.messages).isEmpty)
+        #expect(irisLines(app).isEmpty)
 
-        app.noteForeignStoreHolder(4242)
+        let holder = StoreHolder(pid: 4242, started: start(-30))
+        app.noteForeignStoreHolder(holder)
         #expect(app.foreignStoreHolder == 4242)
-        let iris = app.conversations.first { $0.id == app.activityConversationId() }
-        #expect(iris?.messages.last?.content == RunJobURL.foreignHolderNotice(pid: 4242))
+        #expect(app.foreignStoreHolderStart == holder.started)
+        #expect(irisLines(app) == [RunJobURL.foreignHolderNotice(pid: 4242)])
     }
 
-    @Test("the link sheet no longer says the link cannot be opened")
-    func pendingNoteIsGone() {
-        #expect(!JobsCommand.urlSheetText("pr-sweep").contains("registers the scheme"))
+    @Test("a holder's pid now owned by a later process is not waited for: the link fires")
+    func reusedPidFires() async throws {
+        let (store, app, job, link) = try makeApp()
+        let recorded = start(-30)
+        app.noteForeignStoreHolder(StoreHolder(pid: 4242, started: recorded))
+        app.isProcessAlive = { _ in true }
+        app.processStart = { _ in recorded }
+        #expect(app.isForeignHolderAlive(4242))
+
+        let later = start(60)                               // the same pid, a different process
+        app.processStart = { _ in later }
+        #expect(app.handleRunJobURL(link, identity: .dev) == .fired(job.id))
+        _ = try await value(of: try #require(app.urlFireTask))
+        #expect(app.foreignStoreHolder == nil)
+        #expect(try store.ledger.runs(jobId: job.id, limit: 1).first?.triggerKind == "url")
+    }
+
+    @Test("a wait ends at the next re-check once the holder's pid belongs to another process")
+    func reusedPidEndsAWait() async throws {
+        let (store, app, job, link) = try makeApp()
+        let recorded = start(-30), later = start(60)
+        let scheduled = Scheduled()
+        app.urlDeferralTimer = URLDeferralTimer { _, body in scheduled.bodies.append(body) }
+        app.noteForeignStoreHolder(StoreHolder(pid: 4242, started: recorded))
+        app.isProcessAlive = { _ in true }
+        app.processStart = { _ in recorded }
+        #expect(app.handleRunJobURL(link, identity: .dev) == .deferred(job.id))
+
+        app.processStart = { _ in later }
+        let recheck = try #require(scheduled.bodies.first)
+        recheck()
+        _ = try await value(of: try #require(app.urlFireTask))
+        #expect(try store.ledger.runs(jobId: job.id, limit: 1).first?.triggerKind == "url")
     }
 }
 ```
 
-- [ ] **Step 2: Run them and watch them fail.** Run `timeout 300 scripts/test-filter.sh LaunchLockTests`. Expected: the build fails with "cannot find 'LaunchLock' in scope".
+- [ ] **A2: Run them and watch them fail.** `timeout 300 scripts/test-filter.sh LaunchLockTests`. Expected: the build fails with "cannot find 'LaunchLock' in scope".
 
-- [ ] **Step 3: Implement.** Create `Sources/IrisKit/LaunchLock.swift`:
+- [ ] **A3: Implement.** Create `Sources/IrisKit/LaunchLock.swift`:
 
 ```swift
+import Darwin
 import Foundation
+
+/// When a process started, as the kernel records it. Two reads that agree name one process: a pid
+/// the kernel hands out again belongs to a process that started later.
+struct ProcessStart: Equatable, Sendable {
+    let seconds: UInt64
+    let microseconds: UInt64
+
+    var date: Date {
+        Date(timeIntervalSince1970: TimeInterval(seconds) + TimeInterval(microseconds) / 1_000_000)
+    }
+
+    /// nil when no process has that pid. A process of this user is always readable, so for the
+    /// holder (the same user's `--run-job`) nil means it has gone.
+    static func of(_ pid: Int32) -> ProcessStart? {
+        guard pid > 0 else { return nil }
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+        return ProcessStart(seconds: info.pbi_start_tvsec, microseconds: info.pbi_start_tvusec)
+    }
+}
+
+/// A live Iris process that held the store when this app launched (decision 14): its pid, and when
+/// it started, so a pid reused later is never mistaken for it.
+struct StoreHolder: Equatable, Sendable {
+    let pid: Int32
+    let started: ProcessStart
+}
 
 /// D6 decision 14: who held the store when this app launched. The app still overwrites the lock,
 /// because it owns the store and a lock left by a crashed build must never stop it launching. A
 /// live other holder (a `--run-job`) is remembered, so a URL fire waits for it, and the owner is
 /// told. The fix, making the app or the CLI yield, is #463.
 enum LaunchLock {
-    static func foreignHolder(_ state: GUILock.State, ownPid: Int32) -> Int32? {
-        if case .held(let pid) = state, pid != ownPid { return pid }
-        return nil
+    /// Allowance between the clock that stamps a process's start and the one that stamps a file.
+    static let clockSlack: TimeInterval = 1
+
+    /// The holder, if the lock names a live process other than this one that could have written
+    /// it: one that started before the file was written. One that started later has a pid the
+    /// kernel reused after the real holder died, and holds nothing.
+    static func foreignHolder(_ state: GUILock.State, lockWritten: Date?, holderStart: ProcessStart?,
+                              ownPid: Int32) -> StoreHolder? {
+        guard case .held(let pid) = state, pid != ownPid, let lockWritten, let holderStart,
+              holderStart.date <= lockWritten.addingTimeInterval(clockSlack) else { return nil }
+        return StoreHolder(pid: pid, started: holderStart)
+    }
+
+    /// Reads the lock file and nothing else: `IrisApp.init` calls this before `GUILock.acquire()`,
+    /// and nothing before the acquire may touch the store.
+    static func read(at url: URL, ownPid: Int32 = ProcessInfo.processInfo.processIdentifier,
+                     processStart: (Int32) -> ProcessStart? = { ProcessStart.of($0) }) -> StoreHolder? {
+        let state = GUILock.state(at: url)
+        guard case .held(let pid) = state else { return nil }
+        let written = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+        return foreignHolder(state, lockWritten: written, holderStart: processStart(pid), ownPid: ownPid)
     }
 }
 
 extension AppState {
-    func noteForeignStoreHolder(_ pid: Int32?) {
-        foreignStoreHolder = pid
-        guard let pid else { return }
-        appendLaunchNotice(RunJobURL.foreignHolderNotice(pid: pid), to: activityConversationId())
+    /// Decision 14 at launch: remembers a live foreign holder, so a link opened before it finishes
+    /// waits for it, and says so in Iris. nil is silent.
+    func noteForeignStoreHolder(_ holder: StoreHolder?) {
+        foreignStoreHolder = holder?.pid
+        foreignStoreHolderStart = holder?.started
+        guard let holder else { return }
+        appendLaunchNotice(RunJobURL.foreignHolderNotice(pid: holder.pid), to: activityConversationId())
+    }
+
+    /// Whether the holder is still the process it was at launch: alive, and, once its start time
+    /// was recorded, still that start time. Without a recorded start (a test that sets only the
+    /// pid) liveness alone decides, as in D1.
+    func isForeignHolderAlive(_ pid: Int32) -> Bool {
+        guard isProcessAlive(pid) else { return false }
+        guard let recorded = foreignStoreHolderStart else { return true }
+        return processStart(pid) == recorded
     }
 }
 ```
+
+In `AppState.swift`, beside `foreignStoreHolder`:
+
+```swift
+    /// When `foreignStoreHolder` started, recorded at launch: a pid whose process started at any
+    /// other time is a reused pid, not the holder (Task 26, the pid-reuse carry-forward).
+    @ObservationIgnored var foreignStoreHolderStart: ProcessStart?
+    /// A process's start time. A seam for tests.
+    @ObservationIgnored var processStart: @Sendable (Int32) -> ProcessStart? = { ProcessStart.of($0) }
+```
+
+In `RunJobURLHandling.swift`, replace `isProcessAlive(holder)` in `handleRunJobURL` and `isProcessAlive(pending.holder)` in `recheckDeferredURLFire` with `isForeignHolderAlive(…)`, and wherever `foreignStoreHolder = nil` is set (both places) also set `foreignStoreHolderStart = nil`.
 
 In `RunJobURL.swift`'s enum:
 
@@ -5805,93 +5985,894 @@ In `RunJobURL.swift`'s enum:
     }
 ```
 
-In `IrisApp.init`, replace `GUILock.acquire()` (`:5193`) with:
+In `IrisApp.init`, replace `GUILock.acquire()` with:
 
 ```swift
-        // D6 decision 14: who held the store before this app takes it. Read only the lock file,
+        // D6 decision 14: who held the store before this app takes it. Reads only the lock file,
         // never the store, so the rule above (nothing touches the store before the acquire) holds.
-        let priorLock = GUILock.state(at: IrisPaths.default.guiLockFile)
+        let priorHolder = LaunchLock.read(at: IrisPaths.default.guiLockFile)
         GUILock.acquire()
 ```
 
-In the `MainActor.assumeIsolated` block, after `installGuardHealthSink()`, add:
+and in the `MainActor.assumeIsolated` block, after `installGuardHealthSink()`:
 
 ```swift
-            AppState.shared.noteForeignStoreHolder(
-                LaunchLock.foreignHolder(priorLock, ownPid: ProcessInfo.processInfo.processIdentifier))
+            AppState.shared.noteForeignStoreHolder(priorHolder)
 ```
 
-In `AppDelegate`, add:
+- [ ] **A4: Run them and watch them pass.** Same filter: 6 tests passed. Then `timeout 300 scripts/test-filter.sh 'RunJobURLDeferralTests|RunJobURLTests|RunJobCLITests'`: all pass (the D1 deferral tests set only the pid, so `isForeignHolderAlive` falls back to liveness). Quote both counts.
+
+- [ ] **A5: Mutation checks.** (1) Drop the `holderStart.date <= lockWritten…` clause: `foreignHolder` fails. (2) Make `isForeignHolderAlive` return `isProcessAlive(pid)` alone: `reusedPidFires` and `reusedPidEndsAWait` fail. Restore both.
+
+- [ ] **A6: Commit.** `feat(app): read the store lock at launch and know its holder by start time (D6 decision 14)`.
+
+#### Part B: the launch queue, and starting the engine at launch
+
+The spike's cold-launch order is `applicationWillFinishLaunching`, then the link about 20 ms later, then `applicationDidFinishLaunching` about 20 ms after that. `AppState.shared` already exists then (`IrisApp.init` built it), but the engine has not started, and **nothing would ever start it in a windowless launch**: `AppState.start()` has one caller, `ChatView.onAppear`, which never runs when no window opens. That leaves the scheduler and watches down until the owner opens a window, and it is worse for a link: `start()` begins with `closeInterruptedRuns` (once per launch), which marks every `running` row as interrupted. A link fired before that, whose run is still going when the owner later opens a window, would have its own run closed as "app was not running".
+
+So:
+- The app starts the engine at `applicationDidFinishLaunching`, once (`startOnce()`). `ChatView.onAppear` calls `startOnce()` too, which is then a no-op. The setup wizard's finish keeps calling `start()`, which reloads plugins and MCP servers, as #472 says that path needs. A window reopen no longer re-runs `start()`: that is half of #472's fix, landed here because launch would otherwise start the engine twice at every normal launch (`adoptJobScheduler` is not safe against two concurrent first starts). Reference #472 in the commit; do not close it (the Ollama warning half stays open).
+- A link that arrives before the job bookkeeping is done waits in `urlIntake`. The end of `configureJobBookkeeping` (after `closeInterruptedRuns` and the scheduler) calls `jobsBecameReady()`, which handles every held link, oldest first, through `handleRunJobURL` exactly as if it had just arrived: a foreign holder still defers it, the limit still counts it.
+- If Iris is not set up, launch does not start the engine (as today); held and later links are refused, coalesced, until setup finishes and `start()` makes it ready.
+- The queue holds at most `RunJobURLIntake.capacity` (16) links; beyond that each is refused at once into one coalesced line.
+
+- [ ] **B1: Write the failing tests.** Create `Tests/irisTests/RunJobURLIntakeTests.swift`:
 
 ```swift
-    /// D6 decision 12: a run-job link, from a browser, Shortcuts, Raycast or `open`. Task 24's
-    /// spike showed that this receives it with no second chat window opening (see the D2 PR).
-    func application(_ application: NSApplication, open urls: [URL]) {
+import Testing
+import Foundation
+import GRDB
+@testable import IrisKit
+
+/// D2: a link can arrive before Iris has finished starting (a cold launch delivers it between will-
+/// and did-finish-launching). It waits until the job bookkeeping is done, then is handled exactly
+/// as if it had just arrived. Nothing fires before the runs the last process died in are closed.
+@MainActor
+@Suite("Run-job URL intake (D6)", .timeLimit(.minutes(1)))
+struct RunJobURLIntakeTests {
+    private func makeApp() throws -> (ConversationStore, AppState, Job, URL) {
+        let store = try ConversationStore.inMemory()
+        let app = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        app.conversations.removeAll()
+        app.selectedConversationId = app.createNewConversation()
+        let job = Job(name: "url-digest", prompt: "", trigger: .schedule(.interval(seconds: 86_400)),
+                      action: .builtin(DailyDigest.name))
+        try store.ledger.upsert(job)
+        let minted = try #require(URLTriggerToken.generate())
+        try store.ledger.setURLTrigger(jobId: job.id, tokenHash: URLTriggerToken.digest(minted))
+        return (store, app, job, URL(string: RunJobURL.url(token: minted, identity: .dev))!)
+    }
+
+    private func irisLines(_ app: AppState) -> [String] {
+        let iris = app.activityConversationId()
+        return app.conversations.first { $0.id == iris }?.messages.filter { $0.role == .system }.map(\.content) ?? []
+    }
+
+    private let junk = URL(string: "iris-dev://run-job/junk")!
+    @MainActor private final class Counter { var value = 0 }
+
+    @Test("a link before the bookkeeping waits, silently, and is handled in order once it is done")
+    func heldUntilReady() async throws {
+        let (store, app, job, link) = try makeApp()
+        #expect(app.urlIntake == .starting([]))
+        app.receiveRunJobURL(junk)
+        app.receiveRunJobURL(link)
+        #expect(app.urlIntake == .starting([junk, link]))
+        #expect(irisLines(app).isEmpty)
+        #expect(try store.ledger.runs(jobId: job.id, limit: 5).isEmpty)
+
+        app.jobsBecameReady()
+        #expect(app.urlIntake == .ready)
+        let lines = irisLines(app)
+        #expect(lines.first == RunJobURL.refusalLine(subject: nil, reason: RunJobURL.Refusal.malformedToken.sentence, count: 1))
+        #expect(lines.count == 2, "the refusal, then the fire's line")
+        _ = try await value(of: try #require(app.urlFireTask))
+        #expect(try store.ledger.runs(jobId: job.id, limit: 1).first?.triggerKind == "url")
+    }
+
+    @Test("once ready, a link is handled at once")
+    func readyHandlesAtOnce() async throws {
+        let (store, app, job, link) = try makeApp()
+        app.jobsBecameReady()
+        app.receiveRunJobURL(link)
+        _ = try await value(of: try #require(app.urlFireTask))
+        #expect(try store.ledger.runs(jobId: job.id, limit: 1).first?.triggerKind == "url")
+    }
+
+    @Test("a flood while starting holds only the first few and refuses the rest in one line")
+    func startupFloodIsCapped() throws {
+        let (_, app, _, _) = try makeApp()
+        for i in 0..<(RunJobURLIntake.capacity + 5) { app.receiveRunJobURL(URL(string: "iris-dev://run-job/junk\(i)")!) }
+        guard case .starting(let held) = app.urlIntake else { Issue.record("not starting"); return }
+        #expect(held.count == RunJobURLIntake.capacity)
+        app.flushURLRefusalLines()
+        #expect(irisLines(app) == [RunJobURL.refusalLine(subject: nil, reason: RunJobURL.startupFloodReason, count: 5)])
+    }
+
+    @Test("with Iris not set up, held and later links are refused in one line until setup makes it ready")
+    func notSetUpRefuses() async throws {
+        let (store, app, job, link) = try makeApp()
+        app.receiveRunJobURL(link)
+        app.refuseRunJobURLsUntilSetUp()
+        app.receiveRunJobURL(link)
+        #expect(app.urlIntake == .notSetUp)
+        app.flushURLRefusalLines()
+        #expect(irisLines(app) == [RunJobURL.refusalLine(subject: nil, reason: RunJobURL.notSetUpReason, count: 2)])
+        #expect(try store.ledger.runs(jobId: job.id, limit: 5).isEmpty)
+
+        app.jobsBecameReady()           // setup finished and `start()` ran
+        app.receiveRunJobURL(link)
+        _ = try await value(of: try #require(app.urlFireTask))
+        #expect(try store.ledger.runs(jobId: job.id, limit: 1).first?.triggerKind == "url")
+    }
+
+    @Test("an event that carried no readable link is refused with a line")
+    func unreadableIsRefused() throws {
+        let (_, app, _, _) = try makeApp()
+        app.jobsBecameReady()
+        app.receiveRunJobURL(nil)
+        #expect(irisLines(app) == [RunJobURL.refusalLine(subject: nil, reason: RunJobURL.Refusal.unreadable.sentence, count: 1)])
+    }
+
+    @Test("the launch bookkeeping, after it closes the last session's runs, releases the held links")
+    func bookkeepingMakesReady() async throws {
+        let (store, app, job, link) = try makeApp()
+        let orphan = JobRun(jobId: job.id, jobName: job.name, triggerKind: "schedule",
+                            startedAt: Date().addingTimeInterval(-3600))
+        try store.ledger.begin(run: orphan)
+        app.receiveRunJobURL(link)
+
+        await app.engine.configureJobBookkeeping(ledger: store.ledger)
+        #expect(app.urlIntake == .ready)
+        _ = try await value(of: try #require(app.urlFireTask))
+        if let scheduler = await app.engine.jobScheduler { await scheduler.stop() }
+
+        let runs = try store.ledger.runs(jobId: job.id, limit: 5)
+        #expect(runs.first { $0.id == orphan.id }?.status == .interrupted)
+        let fired = try #require(runs.first { $0.triggerKind == "url" })
+        #expect(fired.status != .interrupted, "the link's own run was not closed as the last session's")
+    }
+
+    @Test("the engine starts once, whether launch or a window asks first; the wizard's start still counts")
+    func startOnce() throws {
+        let (_, app, _, _) = try makeApp()
+        let starts = Counter()
+        app.launchEngine = { _ in starts.value += 1 }
+        app.startOnce()
+        app.startOnce()
+        #expect(starts.value == 1)
+
+        let (_, wizard, _, _) = try makeApp()
+        let wizardStarts = Counter()
+        wizard.launchEngine = { _ in wizardStarts.value += 1 }
+        wizard.start()                  // the setup wizard's finish
+        wizard.startOnce()              // the window's appear
+        #expect(wizardStarts.value == 1)
+    }
+
+    @Test("Iris is not set up until the setup wizard has finished")
+    func isSetUpNeedsTheFlag() {
+        let name = "iris-intake-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer {
+            defaults.removePersistentDomain(forName: name)
+            IrisDefaults.removeSuiteFile(named: name, in: IrisDefaults.preferencesDirectory)
+        }
+        #expect(!AppState.isSetUp(defaults: defaults, config: ConfigManager(store: defaults)))
+    }
+}
+```
+
+Check `value(of:)`'s signature in `BoundedWait.swift` and `JobRun`'s initializer against `JobRunnerTests.launchClosesRunningRows` before running; adjust the call shape, not the assertions.
+
+- [ ] **B2: Run them and watch them fail.** `timeout 300 scripts/test-filter.sh RunJobURLIntakeTests`. Expected: the build fails on `urlIntake`.
+
+- [ ] **B3: Implement.** Create `Sources/IrisKit/RunJobURLIntake.swift`:
+
+```swift
+import Foundation
+
+/// Where a run-job link waits while Iris starts (D2, owner ruling C2). A cold launch delivers the
+/// link between `applicationWillFinishLaunching` and `applicationDidFinishLaunching`, before the
+/// job bookkeeping `IrisEngine.start()` does first, which closes every `running` row as the last
+/// session's. A link fired before that could have its own run closed under it, so links wait until
+/// it is done, in order, and are then handled as if they had just arrived.
+enum RunJobURLIntake: Equatable, Sendable {
+    /// Waiting for the job bookkeeping, holding these links.
+    case starting([URL])
+    case ready
+    /// Launched before setup was finished, so the engine was not started: links are refused until
+    /// setup starts it.
+    case notSetUp
+
+    /// Links held while starting. A flood beyond this is refused at once, in one coalesced line.
+    static let capacity = 16
+}
+
+extension AppState {
+    /// The one way in for a link from outside (`RunJobURLEvents`). nil is an event that carried no
+    /// link a URL could be made of. `handleRunJobURL` stays the handler and the test entry point.
+    func receiveRunJobURL(_ url: URL?) {
+        guard let url else {
+            refuseURLFire(job: nil, reason: RunJobURL.Refusal.unreadable.sentence, to: activityConversationId())
+            return
+        }
+        switch urlIntake {
+        case .ready:
+            handleRunJobURL(url)
+        case .notSetUp:
+            refuseURLFire(job: nil, reason: RunJobURL.notSetUpReason, to: activityConversationId())
+        case .starting(var held):
+            guard held.count < RunJobURLIntake.capacity else {
+                refuseURLFire(job: nil, reason: RunJobURL.startupFloodReason, to: activityConversationId())
+                return
+            }
+            held.append(url)
+            urlIntake = .starting(held)
+        }
+    }
+
+    /// The job bookkeeping is done (`IrisEngine.configureJobBookkeeping`): every held link is
+    /// handled, oldest first. Also the way out of `.notSetUp`, when setup's `start()` gets here.
+    func jobsBecameReady() {
+        let held: [URL]
+        if case .starting(let waiting) = urlIntake { held = waiting } else { held = [] }
+        urlIntake = .ready
+        for url in held { handleRunJobURL(url) }
+    }
+
+    /// Launch found Iris not set up, so nothing will start the engine until the wizard finishes.
+    func refuseRunJobURLsUntilSetUp() {
+        guard case .starting(let held) = urlIntake else { return }
+        urlIntake = .notSetUp
+        for _ in held { refuseURLFire(job: nil, reason: RunJobURL.notSetUpReason, to: activityConversationId()) }
+    }
+
+    /// The rule `ChatView` uses to choose between the setup wizard and starting the engine.
+    static func isSetUp(defaults: UserDefaults = IrisDefaults.store, config: ConfigManager = .shared) -> Bool {
+        defaults.bool(forKey: "HAS_COMPLETED_SETUP") && config.isConfigured
+    }
+
+    /// Starts the engine unless something already has: launch (a link's cold start opens no
+    /// window, so `ChatView.onAppear` may never run) and every window appear. The setup wizard's
+    /// finish calls `start()` itself, which reloads plugins and MCP servers (#472).
+    func startOnce() {
+        guard !engineStarted else { return }
+        start()
+    }
+}
+```
+
+In `AppState.swift`, replace `start()` with:
+
+```swift
+    func start() {
+        engineStarted = true
+        launchEngine(engine)
+    }
+```
+
+and add beside the URL fields:
+
+```swift
+    /// D2: links held until the job bookkeeping is done. Written only by `RunJobURLIntake.swift`.
+    @ObservationIgnored var urlIntake: RunJobURLIntake = .starting([])
+    /// Whether `start()` has run in this process; `startOnce()` reads it.
+    @ObservationIgnored private(set) var engineStarted = false
+    /// What `start()` does with the engine. A seam for tests, which must not load plugins or MCP.
+    @ObservationIgnored var launchEngine: @MainActor (IrisEngine) -> Void = { engine in
+        Task { await engine.start() }
+    }
+```
+
+(`engine` is `IrisEngine!`; pass it as `launchEngine(engine)`, which unwraps it as `start()` always did.)
+
+In `IrisEngine.configureJobBookkeeping`, after `await applyRetention(ledger: ledger)`:
+
+```swift
+        // D2: the last session's runs are closed and the scheduler is up, so a link that arrived
+        // while Iris was starting may fire now without its run being taken for one of them.
+        let readyState = state
+        await MainActor.run { readyState?.jobsBecameReady() }
+```
+
+In `RunJobURL.swift`: add `case unreadable` to `Refusal` with the sentence `"the link could not be read as a URL"`, and:
+
+```swift
+    static let notSetUpReason = "Iris is not set up yet; finish setup in the chat window, then open the link again"
+    static let startupFloodReason = "too many links arrived while Iris was starting"
+```
+
+In `AppDelegate.applicationDidFinishLaunching`, replace the Sparkle line's `assumeIsolated` with:
+
+```swift
         MainActor.assumeIsolated {
-            for url in urls { AppState.shared.handleRunJobURL(url) }
+            UpdaterController.shared?.start()
+            // D2: a link's cold start opens no window, so `ChatView.onAppear` may never start the
+            // engine; start it here. The window's own call is then a no-op.
+            if AppState.isSetUp() {
+                AppState.shared.startOnce()
+            } else {
+                AppState.shared.refuseRunJobURLsUntilSetUp()
+            }
+        }
+```
+
+In `ChatView.onAppear`, replace the inline check and `state.start()` with:
+
+```swift
+            if !AppState.isSetUp() {
+                showSetupWizard = true
+            } else {
+                state.startOnce()
+            }
+```
+
+Leave the wizard's `.onDisappear { … state.start() }` as it is. Update the three `start()` comments in `iris.swift` (`adoptJobScheduler`'s, `closeInterruptedRuns`'s and `startWatching`'s) that say `start()` "runs from `onAppear` and can run more than once": it now runs once at launch or first appear, and again only from the setup wizard's finish. The guards they describe stay, because the wizard path can still re-run it.
+
+- [ ] **B4: Run them and watch them pass.** Same filter: 8 tests passed. Then `timeout 300 scripts/test-filter.sh 'JobRunnerTests|RunJobURLTests|RunJobURLDeferralTests'`: all pass. Quote both counts.
+
+- [ ] **B5: Mutation checks.** (1) Make `receiveRunJobURL`'s `.starting` case call `handleRunJobURL(url)` directly: `heldUntilReady` and `bookkeepingMakesReady` fail. (2) Remove the `jobsBecameReady` call from `configureJobBookkeeping`: `bookkeepingMakesReady` fails. (3) Remove `engineStarted = true` from `start()`: `startOnce` fails. Restore all three.
+
+- [ ] **B6: Commit.** `feat(app): hold run-job links until the job bookkeeping is done, and start the engine at launch (D6, refs #472)`.
+
+#### Part C: the `kAEGetURL` handler
+
+Never log the link (coordinator ruling): it carries a live token, and a log line would keep it where plan note 17 says it must never be. No `print`, `NSLog`, `os_log`, `Logger` or `debugPrint` in any of the URL files; a test reads them to make sure.
+
+- [ ] **C1: Write the failing tests.** Create `Tests/irisTests/RunJobURLEventsTests.swift`:
+
+```swift
+import Testing
+import AppKit
+@testable import IrisKit
+
+/// D2 (owner ruling C2): run-job links arrive as a `kAEGetURL` Apple Event, caught by a handler
+/// installed in `applicationWillFinishLaunching`, never by SwiftUI, which opened a window per link.
+@MainActor
+@Suite("Run-job URL events (D6)")
+struct RunJobURLEventsTests {
+    private func event(_ text: String?) -> NSAppleEventDescriptor {
+        let e = NSAppleEventDescriptor(eventClass: AEEventClass(kInternetEventClass), eventID: AEEventID(kAEGetURL),
+                                       targetDescriptor: nil, returnID: AEReturnID(kAutoGenerateReturnID),
+                                       transactionID: AETransactionID(kAnyTransactionID))
+        if let text { e.setParam(NSAppleEventDescriptor(string: text), forKeyword: AEKeyword(keyDirectObject)) }
+        return e
+    }
+
+    @Test("the link is the event's direct object")
+    func urlFromEvent() {
+        #expect(RunJobURLEvents.url(from: event("iris-dev://run-job/abc")) == URL(string: "iris-dev://run-job/abc"))
+    }
+
+    @Test("an event with no direct object, or one no URL can be made of, is nil")
+    func noURL() {
+        #expect(RunJobURLEvents.url(from: event(nil)) == nil)
+        #expect(RunJobURLEvents.url(from: event("")) == nil)
+    }
+
+    @Test("the handler hands the link over, and only that")
+    func handlerDelivers() {
+        var got: [URL?] = []
+        let handler = RunJobURLEvents { got.append($0) }
+        handler.handleGetURL(event("iris-dev://run-job/abc"), withReply: NSAppleEventDescriptor.null())
+        handler.handleGetURL(event(nil), withReply: NSAppleEventDescriptor.null())
+        #expect(got == [URL(string: "iris-dev://run-job/abc"), nil])
+    }
+
+    @Test("only a real .app installs it (decision 8)")
+    func appBundleOnly() {
+        #expect(RunJobURLEvents.shouldInstall(bundleURL: URL(fileURLWithPath: "/Applications/Iris Dev.app")))
+        #expect(!RunJobURLEvents.shouldInstall(bundleURL: URL(fileURLWithPath: "/Users/x/src/iris/.build/debug")))
+    }
+
+    @Test("no URL file logs anything: a log line would keep a live token")
+    func nothingLogs() throws {
+        let sources = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/IrisKit")
+        let banned = try Regex(#"\b(print|debugPrint|NSLog|os_log|dump)\(|\bLogger\("#)
+        for file in ["RunJobURLEvents.swift", "RunJobURLIntake.swift", "RunJobURLHandling.swift",
+                     "RunJobURL.swift", "LaunchLock.swift"] {
+            let text = try String(contentsOf: sources.appendingPathComponent(file), encoding: .utf8)
+            #expect(text.firstMatch(of: banned) == nil, "\(file) logs")
+        }
+    }
+}
+```
+
+- [ ] **C2: Run them and watch them fail.** `timeout 300 scripts/test-filter.sh RunJobURLEventsTests`. Expected: the build fails on `RunJobURLEvents`.
+
+- [ ] **C3: Implement.** Create `Sources/IrisKit/RunJobURLEvents.swift`:
+
+```swift
+import AppKit
+
+/// D2 (owner ruling, variant C2): run-job links arrive as a `kAEGetURL` Apple Event, caught here
+/// rather than by SwiftUI. Task 24's spike: with `application(_:open:)` the `WindowGroup` opened
+/// a chat window on every link, and `.handlesExternalEvents(matching: [])` sent the link to the
+/// Diagnostics window instead. A handler installed in `applicationWillFinishLaunching` opens no
+/// window at all, so a link that launches Iris starts it windowless.
+///
+/// Nothing here logs: the link carries a live token, and a log would keep it (plan note 17).
+final class RunJobURLEvents: NSObject {
+    private let deliver: @MainActor (URL?) -> Void
+
+    init(deliver: @escaping @MainActor (URL?) -> Void) {
+        self.deliver = deliver
+    }
+
+    /// A real `.app` only (decision 8): the bare binary registers no scheme, so nothing routes a
+    /// link to it, and it installs nothing it cannot use.
+    static func shouldInstall(bundleURL: URL) -> Bool { bundleURL.pathExtension == "app" }
+
+    func install(on manager: NSAppleEventManager = .shared()) {
+        manager.setEventHandler(self, andSelector: #selector(handleGetURL(_:withReply:)),
+                                forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL))
+    }
+
+    /// The link in the event's direct object, or nil when there is none a URL can be made of.
+    static func url(from event: NSAppleEventDescriptor) -> URL? {
+        guard let text = event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue else { return nil }
+        return URL(string: text)
+    }
+
+    /// AppKit dispatches Apple Events on the main thread, as it does the launch callbacks.
+    @objc func handleGetURL(_ event: NSAppleEventDescriptor, withReply reply: NSAppleEventDescriptor) {
+        let url = Self.url(from: event)
+        MainActor.assumeIsolated { deliver(url) }
+    }
+}
+```
+
+In `AppDelegate`:
+
+```swift
+    /// Kept for the life of the app: `NSAppleEventManager` is not documented to retain a handler.
+    private var runJobURLEvents: RunJobURLEvents?
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Here, not in did-finish: a link that launches Iris arrives between the two (Task 24).
+        guard RunJobURLEvents.shouldInstall(bundleURL: Bundle.main.bundleURL) else { return }
+        let events = RunJobURLEvents { url in AppState.shared.receiveRunJobURL(url) }
+        events.install()
+        runJobURLEvents = events
+    }
+```
+
+Do **not** add `application(_:open:)` to `AppDelegate`, and do not add `.handlesExternalEvents` to any scene. If PR C (`SurfaceInstall.isAppBundle`) has merged by the time this rebases, call that instead of `shouldInstall` and delete `shouldInstall` and its test, as R4 did for `ownerPauseReasons`.
+
+- [ ] **C4: Run them and watch them pass.** Same filter: 5 tests passed. Quote the count.
+
+- [ ] **C5: Mutation checks.** (1) Add `NSLog("%@", url?.absoluteString ?? "")` to `handleGetURL`: `nothingLogs` fails. (2) Make `shouldInstall` return true: `appBundleOnly` fails. Restore both.
+
+- [ ] **C6: Commit.** `feat(app): catch run-job links with a kAEGetURL handler, opening no window (D6, owner ruling C2)`.
+
+#### Part D: the hotkey after a windowless start
+
+The spike: after a link's cold start, Cmd-Shift-Option-Space opens nothing. `toggleFromHotkey` reaches `MainWindow.raise(fallback: nil)` with `openAction` nil, because no `ChatView` appeared and the status menu, whose `adoptOpenAction` would supply one, was never opened.
+
+**Chosen fix: capture an `OpenWindowAction` from the `MenuBarExtra` label.** The label is drawn at launch, with or without a window, so its body is evaluated before any hotkey press; the body reads `@Environment(\.openWindow)` and adopts it when nothing better is known. Why this over an AppKit fallback in `raise`:
+- It is the same mechanism Show Chat already uses after a cold start, and the spike confirmed that one (`adoptOpenAction` from the same `MenuBarExtra` scene's menu).
+- It opens the chat scene by id (`openWindow(id: "main")`). The AppKit routes have no scene id to give: a self-sent `kAEReopenApplication` or the File menu's "New Window" item opens whatever SwiftUI's default picks, and the spike's variant B showed SwiftUI picking Diagnostics when the chat scene declined an event.
+- The part that can break is testable: the tracker learns to keep an opener, and the hotkey path uses it with no window open.
+
+What only Task 28 can show is that the label's environment carries a working `openWindow` at launch. If step 5 fails, stop and report; the fallback (a self-sent `kAEReopenApplication`, the Dock-click path the spike showed opens one chat window) needs an owner decision, not an improvised patch.
+
+Adopting in `body` rather than `.onAppear`: whether a `MenuBarExtra` label runs `onAppear` is unverified, and Task 6 showed the label keeps only one element of what it is given, while its body is certainly evaluated, because the glyph is drawn from it. The adoption sets a non-observed static, so it triggers no view update.
+
+- [ ] **D1: Write the failing tests.** In `Tests/irisTests/MainWindowRoutingTests.swift`, in `MainWindowTrackerTests`:
+
+```swift
+    @Test("with no window, a raise opens through the adopted opener")
+    func adoptedOpenerOpens() {
+        let (tracker, _, _) = makeTracker()
+        var opened = 0
+        tracker.adoptOpener { opened += 1 }
+        tracker.raise()
+        #expect(opened == 1)
+    }
+
+    @Test("the first adoption stays; a replacement wins; an explicit open beats both")
+    func openerPrecedence() {
+        let (tracker, _, _) = makeTracker()
+        var calls: [String] = []
+        tracker.adoptOpener { calls.append("label") }
+        tracker.adoptOpener { calls.append("menu") }
+        tracker.raise()
+        tracker.replaceOpener { calls.append("chat") }
+        tracker.raise()
+        tracker.raise(open: { calls.append("explicit") })
+        #expect(calls == ["label", "chat", "explicit"])
+    }
+
+    @Test("with a window open, a raise never opens, whatever opener is known")
+    func windowBeatsOpener() {
+        let (tracker, _, _) = makeTracker()
+        var opened = 0
+        tracker.adoptOpener { opened += 1 }
+        let window = FakeWindow()
+        tracker.track(window)
+        tracker.raise()
+        #expect(opened == 0)
+        #expect(window.calls == ["front"])
+    }
+
+    @Test("the hotkey after a windowless start opens the chat window (Task 24 follow-up)")
+    func hotkeyAfterWindowlessStart() throws {
+        let (tracker, _, _) = makeTracker()
+        var opened = 0
+        tracker.adoptOpener { opened += 1 }          // the status item's label, at launch
+        let app = AppState(store: try ConversationStore.inMemory(),
+                           tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        app.raiseMainWindow = { tracker.raise() }
+        tracker.toggleFromHotkey(state: app)
+        #expect(opened == 1)
+    }
+```
+
+- [ ] **D2: Run them and watch them fail.** `timeout 300 scripts/test-filter.sh MainWindowTrackerTests`. Expected: the build fails on `adoptOpener`.
+
+- [ ] **D3: Implement.** In `MainWindowTracking`:
+
+```swift
+    /// How to open a chat window when none is left, for a raise that brings no opener of its own:
+    /// the hotkey, and a notification's Open. Adopted from the status item's label at launch,
+    /// replaced by `ChatView`'s own once one appears.
+    private(set) var opener: (@MainActor () -> Void)?
+
+    func adoptOpener(_ open: @escaping @MainActor () -> Void) {
+        if opener == nil { opener = open }
+    }
+
+    func replaceOpener(_ open: @escaping @MainActor () -> Void) { opener = open }
+```
+
+and change `raise(open:)` to default to it:
+
+```swift
+    func raise(open: (@MainActor () -> Void)? = nil) {
+        activate()
+        if let window = current {
+            if window.isMiniaturized { window.deminiaturize(nil) }
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            (open ?? opener)?()
         }
     }
 ```
 
-**Variant B only** (Task 24's decision): on the `WindowGroup("Iris", id: MainWindow.sceneId)` scene, after `.commands { … }`, add:
+In `MainWindow`:
 
 ```swift
-        // Task 24: without this the scene, not the delegate, took the link and opened a window.
-        .handlesExternalEvents(matching: [])
+    /// `ChatView`'s `openWindow`, or the status item's until a `ChatView` appears.
+    static var openAction: OpenWindowAction? {
+        didSet {
+            guard let action = openAction else { return }
+            tracking.replaceOpener { action(id: sceneId) }
+        }
+    }
+
+    /// From an environment that exists before any chat window does (the status item's label at
+    /// launch, its menu). Never replaces one already known.
+    static func adoptOpenAction(_ action: OpenWindowAction) {
+        if openAction == nil { openAction = action }
+    }
+
+    static func raise(fallback: OpenWindowAction? = nil) {
+        tracking.raise(open: fallback.map { action in { action(id: sceneId) } })
+    }
 ```
 
-In `JobsCommand.swift`, delete `urlSchemePendingNote` and the ` \(urlSchemePendingNote)` at the end of `urlSheetText`. Plan note 13: the scheme is registered now, so the note is false.
+In `StatusItemLabel`:
 
-- [ ] **Step 4: Run them and watch them pass.** Run the same filter. Expected: 4 tests passed. Then run `timeout 300 scripts/test-filter.sh 'URLTriggerCommandTests|RunJobURLTests|RunJobURLDeferralTests|RunJobCLITests'`. Expected: every test passes. Quote both counts.
+```swift
+    @Environment(\.openWindow) private var openWindow
 
-- [ ] **Step 5: Mutation check.** Make `foreignHolder` return the pid even when it equals `ownPid`: `foreignHolder` fails. Restore it.
+    var body: some View {
+        // The label is drawn at launch even when no window opens (a link's cold start), so this
+        // is the environment certain to exist before the hotkey is pressed (Task 24 follow-up).
+        let _ = MainWindow.adoptOpenAction(openWindow)
+        let glyph = StatusGlyph.make(state.surfaceAttention, identity: .current)
+        …
+```
 
-- [ ] **Step 6: Run the warnings check.** Run `scripts/check-warnings.sh`. Expected: no warnings.
+In `StatusMenu`, make `adoptOpenAction()` call `MainWindow.adoptOpenAction(openWindow)`. `ChatView.onAppear`'s `MainWindow.openAction = openWindow` is unchanged and still replaces whatever was adopted.
 
-- [ ] **Step 7: Commit.** `git add Sources/IrisKit/iris.swift Sources/IrisKit/LaunchLock.swift Sources/IrisKit/RunJobURL.swift Sources/IrisKit/JobsCommand.swift Tests/irisTests/LaunchLockTests.swift`, then `git commit -m "feat(app): receive run-job links, and wait behind a CLI that held the store (D6 decisions 12, 14)"`.
+- [ ] **D4: Run them and watch them pass.** Same filter; quote the count (the existing tracker tests plus 4). Then `timeout 300 scripts/test-filter.sh MainWindowRoutingTests`: all pass.
+
+- [ ] **D5: Mutation check.** Make `raise` call `open?()` instead of `(open ?? opener)?()`: `adoptedOpenerOpens` and `hotkeyAfterWindowlessStart` fail. Restore it.
+
+- [ ] **D6: Commit.** `fix(app): the hotkey opens the chat window after a windowless start (D6, Task 24 follow-up)`.
+
+#### Part E: the refusal-coalescing throttle
+
+D1 left each coalesced refusal costing two linear scans (the Iris conversation, then its messages), a persisted `updateMessageContent` (another scan, a `markChanged`, an observed mutation), and an `activityConversationId()` (a `meta` read and a scan) per link. Once the scheme is registered a page can open links in a loop. The coordinator's rulings: trust the coalesced entry rather than scanning, write the count at most once a second, and the throttle covers the per-link persisted write as well as the scan.
+
+So, per refusal after the first in a window: one dictionary update, and a flush scheduled if none is pending for that line. The flush, at most once a second per line, is the only place the line is looked for, written and persisted. A line the owner deleted, or one left in a replaced Iris, gets a fresh line with the running count at flush time. `activityConversationId()` is asked only when a line is first made, or at flush.
+
+What a flood still costs per link: parsing (pure) and, for a well-formed unknown token, a SHA-256 and one lookup on the unique `urlTokenHash` index. That lookup stays, so a token turned on a moment ago always works.
+
+- [ ] **E1: Write the failing tests.** In `Tests/irisTests/RunJobURLTests.swift`, add a manual timer and three tests:
+
+```swift
+    @MainActor
+    private final class ManualTimer {
+        var pending: [@MainActor @Sendable () -> Void] = []
+        func fireAll() { let due = pending; pending.removeAll(); due.forEach { $0() } }
+    }
+
+    @Test("a flood writes its line once and catches the count up at most once a second, with no write per link")
+    func floodWritesOnceASecond() throws {
+        let (_, app, iris) = try makeApp([])
+        let timer = ManualTimer()
+        app.urlRefusalFlushTimer = URLDeferralTimer { delay, body in
+            #expect(delay == RunJobURL.refusalFlushInterval)
+            timer.pending.append(body)
+        }
+        let reason = RunJobURL.Refusal.malformedToken.sentence
+        for i in 0..<200 { app.handleRunJobURL(URL(string: "iris-dev://run-job/junk\(i)")!, identity: .dev) }
+        #expect(systemLines(app, iris) == [RunJobURL.refusalLine(subject: nil, reason: reason, count: 1)],
+                "199 links later the line is untouched: nothing was written per link")
+        #expect(timer.pending.count == 1, "one flush for the whole flood")
+
+        timer.fireAll()
+        #expect(systemLines(app, iris) == [RunJobURL.refusalLine(subject: nil, reason: reason, count: 200)])
+
+        for i in 0..<5 { app.handleRunJobURL(URL(string: "iris-dev://run-job/more\(i)")!, identity: .dev) }
+        #expect(timer.pending.count == 1)
+        timer.fireAll()
+        #expect(systemLines(app, iris) == [RunJobURL.refusalLine(subject: nil, reason: reason, count: 205)])
+    }
+
+    @Test("a line the owner deleted mid-flood comes back at the next flush, with the count")
+    func deletedLineComesBack() throws {
+        let (_, app, iris) = try makeApp([])
+        app.urlRefusalFlushTimer = URLDeferralTimer { _, _ in }
+        app.handleRunJobURL(URL(string: "iris-dev://run-job/junk")!, identity: .dev)
+        let idx = try #require(app.conversations.firstIndex { $0.id == iris })
+        app.conversations[idx].messages.removeAll { $0.role == .system }
+        app.handleRunJobURL(URL(string: "iris-dev://run-job/junk2")!, identity: .dev)
+        app.flushURLRefusalLines()
+        #expect(systemLines(app, iris) == [RunJobURL.refusalLine(subject: nil, reason: RunJobURL.Refusal.malformedToken.sentence, count: 2)])
+    }
+
+    @Test("a refusal after the window first writes the old line's count, then starts a new line")
+    func windowRollFlushesFirst() throws {
+        let (_, app, iris) = try makeApp([])
+        app.urlRefusalFlushTimer = URLDeferralTimer { _, _ in }
+        let start = Date()
+        app.urlClock = { start }
+        for _ in 0..<3 { app.handleRunJobURL(URL(string: "iris-dev://run-job/junk")!, identity: .dev) }
+        app.urlClock = { start.addingTimeInterval(RunJobURL.window + 1) }
+        app.handleRunJobURL(URL(string: "iris-dev://run-job/junk")!, identity: .dev)
+        let reason = RunJobURL.Refusal.malformedToken.sentence
+        #expect(systemLines(app, iris) == [RunJobURL.refusalLine(subject: nil, reason: reason, count: 3),
+                                           RunJobURL.refusalLine(subject: nil, reason: reason, count: 1)])
+    }
+```
+
+Update the D1 tests that assert a running count, so they flush before asserting: in `RunJobURLTests`, `overLimitFloodIsOneLine`, `garbageFloodIsOneLine` and `stoppedFloodIsOneLinePerJob` call `app.flushURLRefusalLines()` before reading the lines. Then `grep -n "count: [2-9]\|Refused [0-9]" Tests/irisTests/RunJobURL*.swift Tests/irisTests/URLTrigger*.swift` and give every other hit the same treatment. Do not change what they expect.
+
+- [ ] **E2: Run them and watch them fail.** `timeout 300 scripts/test-filter.sh RunJobURLTests`. Expected: the build fails on `urlRefusalFlushTimer`.
+
+- [ ] **E3: Implement.** In `RunJobURL.swift`:
+
+```swift
+    /// How often a coalesced refusal line catches up with its count (the D2 throttle).
+    static let refusalFlushInterval: TimeInterval = 1
+```
+
+and replace `URLRefusalLine` with:
+
+```swift
+/// The line a coalesced URL refusal keeps updating, by job id or `unmatched`. The count is
+/// trusted between flushes; `written` is what the line last showed.
+struct URLRefusalLine: Sendable {
+    var messageId: UUID
+    let since: Date
+    var count: Int
+    var written: Int
+    var conversationId: UUID
+    let subject: String?
+    var reason: String
+}
+```
+
+In `AppState.swift`, beside `urlRefusalLines`:
+
+```swift
+    /// Schedules a coalesced refusal line's catch-up, on a dispatch queue. A seam for tests.
+    @ObservationIgnored var urlRefusalFlushTimer = URLDeferralTimer.dispatch
+    /// The lines with a catch-up already scheduled. Written only by `RunJobURLHandling.swift`.
+    @ObservationIgnored var urlRefusalFlushPending: Set<String> = []
+```
+
+In `RunJobURLHandling.swift`, replace `refuseURLFire` with:
+
+```swift
+    /// Says a refusal in Iris, coalesced (plan note 8): the first in an hour is a line, and later
+    /// ones raise its count. A later one costs a dictionary update and nothing else; the line
+    /// catches up at most once a second (the D2 throttle), so a page opening links in a loop never
+    /// scans Iris, rewrites a message or persists anything per link. `iris` is asked only when a
+    /// line is made.
+    func refuseURLFire(job: Job?, reason: String, to iris: @autoclosure () -> UUID) {
+        let key = job?.id.uuidString ?? "unmatched"
+        let now = urlClock()
+        if var entry = urlRefusalLines[key], now.timeIntervalSince(entry.since) < RunJobURL.window {
+            entry.count += 1
+            entry.reason = reason
+            urlRefusalLines[key] = entry
+            scheduleURLRefusalFlush(key)
+            return
+        }
+        // The window has rolled: the old line gets the count it had before a new one starts.
+        if urlRefusalLines[key] != nil { flushURLRefusalLine(key) }
+        let conversation = iris()
+        let id = UUID()
+        appendMessage(role: .system, content: RunJobURL.refusalLine(subject: job?.name, reason: reason, count: 1),
+                      id: id, to: conversation)
+        urlRefusalLines[key] = URLRefusalLine(messageId: id, since: now, count: 1, written: 1,
+                                              conversationId: conversation, subject: job?.name, reason: reason)
+    }
+
+    private func scheduleURLRefusalFlush(_ key: String) {
+        guard urlRefusalFlushPending.insert(key).inserted else { return }
+        urlRefusalFlushTimer.schedule(RunJobURL.refusalFlushInterval) { [weak self] in
+            self?.flushURLRefusalLine(key)
+        }
+    }
+
+    /// Brings one coalesced line up to its count. The one place the line is looked for: if the
+    /// owner deleted it, or Iris has been replaced since, the count goes on a new line in Iris.
+    func flushURLRefusalLine(_ key: String) {
+        urlRefusalFlushPending.remove(key)
+        guard var entry = urlRefusalLines[key], entry.count != entry.written else { return }
+        let text = RunJobURL.refusalLine(subject: entry.subject, reason: entry.reason, count: entry.count)
+        let iris = activityConversationId()
+        if entry.conversationId == iris,
+           conversations.first(where: { $0.id == iris })?.messages.contains(where: { $0.id == entry.messageId }) == true {
+            updateMessageContent(id: entry.messageId, content: text, in: iris, persist: true)
+        } else {
+            let id = UUID()
+            appendMessage(role: .system, content: text, id: id, to: iris)
+            entry.messageId = id
+            entry.conversationId = iris
+        }
+        entry.written = entry.count
+        urlRefusalLines[key] = entry
+    }
+
+    /// Every line still behind its count, now: at quit, and in tests.
+    func flushURLRefusalLines() {
+        for key in Array(urlRefusalLines.keys) { flushURLRefusalLine(key) }
+    }
+```
+
+In `handleRunJobURL`, ask for Iris lazily, so a refused link never reads `meta`:
+
+```swift
+        var resolvedIris: UUID?
+        func iris() -> UUID {
+            if let resolvedIris { return resolvedIris }
+            let id = activityConversationId()
+            resolvedIris = id
+            return id
+        }
+```
+
+and use `iris()` at every former use of `iris` in the function. `forgetURLState` needs no change: a flush finds no entry and returns.
+
+In `AppDelegate.applicationWillTerminate`, flush the lines before the save:
+
+```swift
+        MainActor.assumeIsolated {
+            AppState.shared.flushURLRefusalLines()
+            AppState.shared.flushSave()
+        }
+```
+
+- [ ] **E4: Run them and watch them pass.** `timeout 300 scripts/test-filter.sh 'RunJobURLTests|RunJobURLDeferralTests|RunJobURLIntakeTests|URLTriggerCommandTests'`. Quote the count.
+
+- [ ] **E5: Mutation checks.** (1) In the trusted branch, add `updateMessageContent(id: entry.messageId, content: RunJobURL.refusalLine(subject: job?.name, reason: reason, count: entry.count), in: entry.conversationId, persist: true)`: `floodWritesOnceASecond` fails at its first expectation. (2) Drop the `urlRefusalFlushPending` guard: it fails on `timer.pending.count == 1`. (3) Drop the "message still exists" check in the flush: `deletedLineComesBack` fails. Restore all three.
+
+- [ ] **E6: Commit.** `fix(jobs): coalesced URL refusals write at most once a second and never scan per link (D6)`.
+
+#### Part F: remove D1's "not openable yet" note
+
+Plan note 13: D1 said the link opens once D2 lands. It does now.
+
+- [ ] **F1: Write the failing test.** In `Tests/irisTests/URLTriggerCommandTests.swift`:
+
+```swift
+    @Test("neither the sheet nor the kept line says the link cannot be opened yet")
+    func pendingNoteIsGone() {
+        let job = Job(name: "pr-sweep", prompt: "p", trigger: .schedule(.interval(seconds: 60)))
+        for text in [JobsCommand.urlSheetText("pr-sweep"), JobsCommand.urlOnText(job)] {
+            #expect(!text.contains("registers the scheme"))
+            #expect(!text.contains("Nothing opens the link"))
+        }
+    }
+```
+
+- [ ] **F2: Watch it fail**, then delete `JobsCommand.urlSchemePendingNote`, the `+ urlSchemePendingNote` at the end of `urlOnText` (trim the trailing space it leaves: the text ends `makes a new one.`) and the ` \(urlSchemePendingNote)` at the end of `urlSheetText`. Watch it pass with `timeout 300 scripts/test-filter.sh URLTriggerCommandTests`; quote the count.
+
+- [ ] **F3: Grep, do not stop at the constant** (coordinator ruling). Run `grep -rn -i "registers the scheme\|nothing opens the link\|later update\|urlSchemePendingNote" Sources docs README.md`. `Sources` must return nothing. At 25d4c6b the doc hits are `docs/jobs.md:1089`, `docs/jobs.md:1211`, `docs/slash_commands.md:37` and `README.md:43`, plus this plan and the spec; Task 27 fixes the first four. Paste the output into the report.
+
+- [ ] **F4: Run the full suite and the warnings check** for the whole task: `timeout 900 swift test` (green = exit 0, the Swift Testing "Test run with N tests … passed" line, and XCTest "Executed N tests, with 0 failures") and `scripts/check-warnings.sh`.
+
+- [ ] **F5: Commit.** `fix(jobs): drop the "nothing opens the link yet" note (D6 plan note 13)`.
 
 ### Task 27: Invariant 9 sweep, and open PR D2
 
 **Files:**
-- Modify: `docs/jobs.md` (the `/jobs url` row and "Firing a job from a link", which Task 23 added)
-- Modify: `README.md` (the feature list)
-- Modify: `Sources/IrisKit/RunJobCLI.swift:355-358`, only if the search finds the comment falsified
+- Modify: `docs/jobs.md` (the `/jobs url` row, "Firing a job from a link")
+- Modify: `docs/slash_commands.md` (the `/jobs url` row)
+- Modify: `README.md` (the Jobs paragraph's `/jobs url` parenthetical)
+- Modify: `docs/specs/2026-10-09-agency-native-surfaces.md` (§4's D2 row, §3's spike bullet; ruling R2)
+- Modify: `Sources/IrisKit/RunJobCLI.swift:355-363`, only if the search finds the comment falsified
 
-- [ ] **Step 1: Search, do not compose.** Run `grep -rn -i "registers the scheme\|nothing opens the link\|D6 PR D2\|CFBundleURLTypes\|races it\|overwrites" docs README.md Sources/IrisKit App`, and read every hit.
-  - Task 23's two sentences, "Until the app registers the scheme (D6 PR D2), nothing opens the link", are now false. Delete both.
-  - `RunJobCLI.swift:355-358` says an app launched during a run "still races". That stays true, because the app still overwrites the lock. Decision 14 only adds a warning and the deferral. Leave it, and record that in the commit body.
+- [ ] **Step 1: Search, do not compose.** Run, and read every hit:
 
-- [ ] **Step 1b: Remove D1's "not openable yet" note, everywhere.** This is the falsifying half of invariant 9 for D1 (plan note 13), so it is a line of its own:
-  - [ ] `JobsCommand.urlSchemePendingNote` and its use are deleted (Task 26), and `LaunchLockTests.pendingNoteIsGone` passes;
-  - [ ] the `/jobs url` row in `docs/jobs.md` no longer says "Until the app registers the scheme (D6 PR D2), nothing opens the link";
-  - [ ] the last paragraph of "Firing a job from a link" no longer says it;
-  - [ ] `grep -rn -i "registers the scheme\|nothing opens the link\|not openable" docs README.md Sources` returns nothing.
+```sh
+grep -rn -i "registers the scheme\|nothing opens the link\|later update\|D6 PR D2\|CFBundleURLTypes\|application(_:open:)\|handlesExternalEvents\|still races\|onAppear" docs README.md Sources/IrisKit App | grep -v "docs/superpowers/plans/"
+grep -rn -i "urlTrigger\|run-job" Sources/IrisKit/ToolExecutor.swift Sources/IrisKit/iris.swift | grep -i "description"
+```
 
-- [ ] **Step 2: Add what is new.** In the README feature list: `- **Run a job from a link**: \`/jobs url <name> on\` makes an \`iris://run-job/…\` link (\`iris-dev://\` for a dev build) for Shortcuts, Raycast or a browser bookmark. It fires that one job, at most three times an hour, and carries no input. The link is shown once and never saved. See [docs/jobs.md](docs/jobs.md).`
+  - The four "not openable" sentences (Task 26 F3's list) are false now. Delete each.
+  - `RunJobCLI.swift:355-363` says an app launched during a run "still races". Still true: the app still overwrites the lock, and decision 14 only adds the notice and the deferral. Leave it, and say so in the commit body.
+  - Any comment or doc still saying `start()` runs on every window appear (`onAppear`) is false since Task 26 Part B. Fix what Part B did not.
+  - `list_jobs`' description lists `urlTrigger` as a field and says nothing about openability; expect no change. Record it.
 
-- [ ] **Step 3: Full suite.** Run `timeout 900 swift test` (all three markers), then `scripts/check-warnings.sh`.
+- [ ] **Step 1b: D1's "not openable yet" note is gone everywhere** (the falsifying half of invariant 9 for D1, plan note 13):
+  - [ ] `JobsCommand.urlSchemePendingNote` and its uses are deleted (Task 26 Part F), and `URLTriggerCommandTests.pendingNoteIsGone` passes;
+  - [ ] `docs/jobs.md`'s `/jobs url` row no longer ends "Until the app registers the scheme (a later update), nothing opens the link";
+  - [ ] "Firing a job from a link"'s last paragraph no longer says it;
+  - [ ] `docs/slash_commands.md`'s `/jobs url` row no longer says it;
+  - [ ] `README.md`'s Jobs paragraph no longer says "nothing opens the link until a later update registers the scheme";
+  - [ ] `grep -rn -i "registers the scheme\|nothing opens the link\|not openable" docs README.md Sources | grep -v "docs/superpowers/plans/\|docs/specs/"` returns nothing.
 
-- [ ] **Step 4: Commit, push and open PR D2.** Run `git commit -am "docs: run-job links open the app (D6)"` and `git push -u origin feat/agency6-url-scheme`. Then run `gh api repos/sackheads/iris/pulls -f base=main -f head=feat/agency6-url-scheme -f title="feat: agency D6 PR D2, the run-job scheme" -F body=@<file>`. The body has Task 24's spike table and the variant it chose, lists Tasks 25-27, says Task 28 is pending, and ends with the PR attribution lines.
+- [ ] **Step 2: Add what is new.**
+  - In "Firing a job from a link", replace the last sentence with: "A link that launches Iris starts it without a window: the job runs once Iris has finished starting, the menu bar icon counts it while it runs, and its card lands in Iris. Click the Dock icon, choose Show Chat from the menu bar icon, or press the hotkey to open the chat. With Iris already open, a link opens no window. A release build answers only `iris://` and a dev build only `iris-dev://`, so the two never take each other's links. Iris never writes a link to a log."
+  - In the README's Jobs paragraph, where the `/jobs url` parenthetical was: `(/jobs url <name> on|off, shown once and never saved; opening the link fires the job, and a link that launches Iris starts it with no window, the job's card landing in Iris)`.
+
+- [ ] **Step 3: The spec (ruling R2).** In §4's table, the D2 row becomes: Contents "Decision 12's scheme and decision 14's launch path: `IRIS_URL_SCHEME` in `project.yml`, `CFBundleURLTypes`, a `kAEGetURL` handler installed in `applicationWillFinishLaunching` (owner ruling after the window spike: no `application(_:open:)`, no `handlesExternalEvents`), links held until the job bookkeeping is done, a windowless cold start, and the pre-acquire lock read in `IrisApp.init`"; Depends on "A and D1 merged" (it uses `MainWindow` and the status item). In §3's GUI list, the spike bullet gains "Answered on #187: both variants opened a window; the owner ruled for an AppKit `kAEGetURL` handler." Decision 12 says nothing about how the URL is received, so it needs no edit; read it to make sure.
+
+- [ ] **Step 4: Full suite.** `timeout 900 swift test` (all three markers), then `scripts/check-warnings.sh`.
+
+- [ ] **Step 5: Commit, push and open PR D2.** `git commit -am "docs: run-job links open the app, windowless from a cold start (D6)"` (body: the `RunJobCLI` comment left as true, and why), `git push -u origin feat/agency6-url-scheme`, then `gh api repos/sackheads/iris/pulls -f base=main -f head=feat/agency6-url-scheme -f title="feat: agency D6 PR D2, the run-job scheme" -F body=@<file>`. The body has:
+  - Task 24's spike tables (link #187's two comments) and the owner ruling: C2, windowless cold start;
+  - Tasks 25-27, one line each, including the engine-at-launch change (refs #472, which stays open for the Ollama warning) and the hotkey fix with its reason;
+  - "Task 28 (GUI pass on `work`) pending; merge waits on it";
+  - the PR attribution lines.
 
 ### Task 28: GUI pass for PR D2 (`work`, under the lease)
 
-**Before you start.** Building Iris Dev.app needs `xcodegen` (`brew install xcodegen`) and the Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`). Neither is on `work` yet, and installing them needs the owner's OK. Steps marked **(spend)** run a real model turn, a job's or a chat's, on the owner's provider account. That is expected on `work`. Only Iris Dev.app is used: no release Iris.app and no Raycast are installed there.
+Run on `work`'s laptop, on PR D2's branch, before the PR merges. Post each numbered result on the PR. Steps marked **(spend)** run a real model turn on the owner's provider account, which is expected on `work`. Only Iris Dev.app is launched. Links are opened with `open` from a terminal and with Shortcuts.
 
-Links are opened with `open 'iris-dev://…'` from a terminal and with Shortcuts, and nothing else.
+**Before you start.**
+- `xcodegen` and the Metal Toolchain are on `work` since Task 24.
+- LaunchServices refuses to route a scheme to an app under a temp directory (`-10814`, Task 24), so build the dev app into a directory inside the worktree: `DD="$PWD/.dd-d2"` (scratch; step 15 deletes it).
+- Never open the release app or a locally built Release config. Step 11 builds Release only to read its `Info.plist`, into `$TMPDIR`, where LaunchServices will not route to it, and deletes it.
+- `HOTKEY` below is `osascript -e 'tell application "System Events" to key code 49 using {command down, shift down, option down}'` (Cmd-Shift-Option-Space, the dev hotkey). `WINDOWS` is `osascript -e 'tell application "System Events" to count windows of process "Iris Dev"'`.
 
-1. Run `pgrep -fl "Iris Dev|\.build/debug/iris"`. Expected: no output.
-2. Run `python3 ~/.claude/skills/gui-test-lease/lease.py acquire --purpose "iris: D6 PR D2 run-job links" --minutes 60 --on-behalf-of <requesting peer>`. Expected: exit 0.
-3. Build, sign and open Iris Dev.app as in Task 6 step 3.
-4. **(spend)** Ask: "Schedule a job named d6-url every 10 minutes that replies pong." Also schedule `d6-url2` (the same, for step 11) and `d6-slow` (as in Task 6 step 7). Type `/jobs url d6-url on`. Expected: a sheet titled "Link for d6-url" shows `iris-dev://run-job/<22 characters>` with Copy and Done. Its text says nothing about the link not opening yet. The conversation gains only `URL trigger on for **d6-url**: the link was shown once and is not saved. …`, with no link in it. Click Copy, then Done. Then run `sqlite3 ~/.iris-dev/conversations.sqlite "SELECT count(*) FROM messages WHERE content LIKE '%run-job/%'"`. Expected: `0`.
-5. **(spend)** App running: note the window count (`osascript -e 'tell application "System Events" to count windows of process "Iris Dev"'`), then run `open '<link>'`. Expected: Iris shows `Firing d6-url from a URL …`, which turns into `Fired d6-url from a URL; the result arrives as a card.`, and the card arrives. The window count is unchanged.
-6. **(spend)** Quit the app (Cmd-Q), then run `open '<link>'`. Expected: the app launches with one chat window, and the same line and card appear.
-7. **(spend)** The deferral. Quit the app. In a terminal at the repo, run `swift build && scripts/sign.sh .build/debug/iris && .build/debug/iris --run-job d6-slow &`. Within 5 s, run `open '<link>'`. Expected: Iris shows `Another Iris process (pid N) held the store at launch. …` and `Waiting for the other Iris process (pid N) to finish before firing d6-url.`. Within 5 s of the CLI printing its row, that line turns into `The other Iris process (pid N) finished; firing d6-url …`, and a fire line follows.
-8. **(spend)** The limit. Run `open '<link>'` until four have been opened since step 5. Count steps 5-7 as three. Expected: the fourth shows `Refused a URL fire of d6-url: URL fires are limited to 3 an hour per job.`. Open it twice more. Expected: that same line now reads `Refused 3 URL fires of d6-url in the last hour. …`, and `/jobs` shows d6-url is not paused.
-9. Type `/jobs url d6-url on` again, then open the old link. Expected: `Refused a URL fire: the link matches no job's URL trigger; …`. The new token appears nowhere in that line.
-10. Run `open 'iris-dev://run-job/<new token>?prompt=hi'` and `open 'iris-dev://run-job/<d6-url's job id from /jobs>'`. Expected: both are refused, and the unmatched line's count goes up rather than adding lines.
-11. **(spend)** Shortcuts. Type `/jobs url d6-url2 on`, and copy its link from the sheet. Create a shortcut with one "Open URLs" action holding that link, and run it. Expected: d6-url2 fires, as in step 5.
-12. Quit Iris Dev, then run `scripts/run-dev.sh`. Expected: it launches with no crash, and the status item works. Do not open a link while it runs, because LaunchServices would launch Iris Dev.app beside it on one store. Quit it.
-13. Type `/jobs delete d6-url`, `/jobs delete d6-url2` and `/jobs delete d6-slow`, quit, and release the lease.
+1. `pgrep -fl "Iris Dev|\.build/debug/iris"`. Expected: no output; quit anything listed.
+2. `python3 ~/.claude/skills/gui-test-lease/lease.py acquire --purpose "iris: D6 PR D2 run-job links" --minutes 75 --on-behalf-of <requesting peer>`. Expected: exit 0.
+3. `scripts/build-app.sh Debug "$DD"`, then `scripts/sign.sh "<app>"`, then `plutil -p "<app>/Contents/Info.plist" | grep -A3 CFBundleURLTypes`. Expected: one entry, `CFBundleURLSchemes => ["iris-dev"]`, `CFBundleURLName => "com.bnaylor.iris.dev"`. Then `open "<app>"`.
+4. **(spend)** Ask: "Schedule a job named d6-url every 10 minutes that replies pong." Ask the same for `d6-url2` (for step 13), and "Schedule a job named d6-slow every 10 minutes: write a 600-word story about a lighthouse, then reply done." Type `/jobs url d6-url on`. Expected: a sheet "Link for d6-url" shows `iris-dev://run-job/<22 characters>` with Copy and Done, and its text says nothing about the link not opening yet. The conversation gains only `URL trigger on for **d6-url**: the link was shown once and is not saved. …`, with no link and no "registers the scheme". Copy, then Done. Then `sqlite3 ~/.iris-dev/conversations.sqlite "SELECT (SELECT count(*) FROM messages WHERE payload LIKE '%run-job%'), (SELECT count(*) FROM messages_fts WHERE content LIKE '%run-job%')"`. Expected: `0|0`. (`messages` keeps each message as JSON in `payload`, where `JSONEncoder` writes `/` as `\/`, so the pattern stops before the slash; `messages_fts` holds the plain text.)
+5. **The link sheet across two windows.** Choose File > "New Iris Window" so two chat windows are open. In one, type `/jobs url d6-slow on`. Record: does the sheet appear in one window or both? Click Copy (step 7 needs this link), then Done in the window that shows it (or either, if both). Expected (D1's parked behaviour): every open chat window shows the sheet, and Done in one closes it in all; nothing is left stuck open, and `WINDOWS` is still 2. Close the second window with Cmd-W. Any other outcome is a finding: record it, do not stop.
+6. **(spend)** Link with the window open. Note `WINDOWS`, then `open '<d6-url link>'`. Expected: Iris shows `Firing d6-url from a URL …`, then `Fired d6-url from a URL; the result arrives as a card.`, and the card arrives. `WINDOWS` is unchanged.
+7. **(spend)** Cold launch from a link: windowless, and the job fires. Quit (Cmd-Q). `open '<d6-slow link>'` (its link from step 5). Expected, within 10 s: the app is running (`pgrep -fl "Iris Dev"`), `WINDOWS` is `0`, and the menu bar shows the hammer with `1` while d6-slow runs. When it finishes the hammer goes back to bare. Then `sqlite3 ~/.iris-dev/conversations.sqlite "SELECT triggerKind, status FROM job_runs WHERE jobName = 'd6-slow' ORDER BY startedAt DESC LIMIT 1"`. Expected: `url|completed` (not `interrupted`). Record whether the app took focus from the terminal (informational).
+8. **The hotkey after that cold start.** Without opening the menu or clicking the Dock, run `HOTKEY`. Expected: one chat window opens (`WINDOWS` is 1), and Iris shows d6-slow's `Firing … ` line turned into `Fired d6-slow from a URL; …` and its card. Run `HOTKEY` again: the window hides. If the first press opens nothing, this step **fails**: record it and stop the pass after step 15 (the fallback needs an owner decision; see Task 26 Part D).
+9. Cold launch again with a junk link, then the Dock. Quit. `open 'iris-dev://run-job/AAAAAAAAAAAAAAAAAAAAAA'`. Expected: `WINDOWS` is 0. Click the Dock icon. Expected: one chat window, and Iris has `Refused a URL fire: the link matches no job's URL trigger; …`.
+9a. **Show Chat after a windowless cold start, with no hotkey first.** Quit. `open 'iris-dev://run-job/AAAAAAAAAAAAAAAAAAAAAA'`. Expected: `WINDOWS` is 0. Without pressing `HOTKEY` or clicking the Dock, open the status item's menu and choose Show Chat. Expected: one chat window (`WINDOWS` is 1). Choose Show Chat again. Expected: `WINDOWS` is still 1. (The menu's opener replaces the label's at that click; the label's alone is what step 8 tests.)
+9b. **Open Run Log… after a windowless cold start.** Quit. `open 'iris-dev://run-job/AAAAAAAAAAAAAAAAAAAAAA'`. Expected: `WINDOWS` is 0. Without pressing `HOTKEY` or clicking the Dock, choose Open Run Log… from the status item's menu. Expected: the Run Log window opens and no chat window does (`WINDOWS` is 1, titled "Run Log"). Then run `HOTKEY`. Expected: one chat window opens beside it (`WINDOWS` is 2).
+10. **A garbage flood is one line, and nothing is logged.** With the window open, run `for i in $(seq 1 50); do open "iris-dev://run-job/junk$i"; done`, wait 3 s. Expected: no new line. Step 9's unmatched-link line now reads `Refused 51 URL fires in the last hour. The latest: the link's token is not one Iris made; …` (all refusals that match no job share one line per hour), the window stays responsive throughout, and `WINDOWS` is unchanged. Then `log show --last 10m --style compact --predicate 'process == "Iris Dev"' | grep -c "run-job"`. Expected: `0`.
+11. **Dev and release schemes do not collide.** `open 'iris://run-job/AAAAAAAAAAAAAAAAAAAAAA'`. Expected: Iris Dev shows nothing new, and `open` fails with no application for the URL, unless a release Iris.app is installed: check first with `mdfind "kMDItemCFBundleIdentifier == 'com.bnaylor.iris'"`, and if it lists anything, skip the `open` and record "skipped: release app installed". Then `scripts/build-app.sh Release "$TMPDIR/iris-d2-rel"` and `plutil -p "<that app>/Contents/Info.plist" | grep -A3 CFBundleURLTypes`. Expected: `CFBundleURLSchemes => ["iris"]`, `CFBundleURLName => "com.bnaylor.iris"`. **Do not open it.** Then `/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "<that app>"` and `rm -rf "$TMPDIR/iris-d2-rel"`.
+12. **(spend)** The deferral, and the lock read. Quit. `swift build && scripts/sign.sh .build/debug/iris && .build/debug/iris --run-job d6-slow &`. Within 5 s, `open '<d6-url link>'`. Expected: windowless start; open the chat with `HOTKEY`. Iris shows `Another Iris process (pid N) held the store at launch. …` and `Waiting for the other Iris process (pid N) to finish before firing d6-url from a URL.` Within 5 s of the CLI printing its row, that line becomes `The other Iris process (pid N) finished; firing d6-url from the link that was waiting.`, and a fire line follows.
+13. **(spend)** Shortcuts. `/jobs url d6-url2 on`, copy the link, create a shortcut with one "Open URLs" action holding it, and run it. Expected: d6-url2 fires as in step 6, and no window opens.
+14. **(spend)** The limit. Open d6-url's link until four have been opened since step 6 (steps 6 and 12 count as two). Expected: the fourth shows `Refused a URL fire of d6-url: URL fires are limited to 3 an hour per job.` Open it twice more and wait 2 s: that line reads `Refused 3 URL fires of d6-url in the last hour. …`, and `/jobs` shows d6-url is not paused.
+15. Quit Iris Dev. `scripts/run-dev.sh`. Expected: it launches with no crash and the status item works. Do not open a link while it runs (LaunchServices would launch Iris Dev.app beside it on one store). Quit it. In Iris Dev.app, `/jobs delete d6-url`, `/jobs delete d6-url2`, `/jobs delete d6-slow`, delete the shortcut, quit, `rm -rf "$DD"`, and `python3 ~/.claude/skills/gui-test-lease/lease.py release`.
 
 ---
 
@@ -5912,16 +6893,16 @@ Links are opened with `open 'iris-dev://…'` from a terminal and with Shortcuts
 | §0.9 `Job.urlTrigger`, `/jobs url` read from the right, the status form, `list_jobs` read-only | 17, 18 |
 | §0.10 the 128-bit token, digest only, rotate on `on`, delete on `off`, never shown again | 17, 18 (shown once in a sheet, never persisted: plan note 17) |
 | §0.11 one writer, the clear in `upsert` on prompt, profile or policy, saying so, `/jobs reschedule` keeps | 17, 19 |
-| §0.12 the URL form, the per-build scheme, `runJobByHand`, `FireOrigin.url`, a line per fire and refusal | 18, 20, 21, 25, 26 |
+| §0.12 the URL form, the per-build scheme, `runJobByHand`, `FireOrigin.url`, a line per fire and refusal; the `kAEGetURL` handler and the windowless cold start (plan note 18) | 18, 20, 21, 25, 26 |
 | §0.13 3 per hour, refuse-only, no row, no breaker, coalesced | 21 |
-| §0.14 the pre-acquire read, the launch notice, the 5 s / 10 min deferral | 22, 26 |
+| §0.14 the pre-acquire read (with the holder's start time, plan note 21), the launch notice, the 5 s / 10 min deferral | 22, 26 |
 | §0.15 the Run Log window, paging, inclusions, Acknowledge, no Approve, transcript or pruned | 7, 8, 9 |
 | §0.16 the cached snapshot and its refresh points, the one hook | 2 |
 | §1 components and the v19 migration | 17 (migration), every task's Files |
 | §2 agent-facing text and docs | 5, 10, 15, 23, 27; `list_jobs` in 18; plan note 7 for the two declarations |
 | §3 unit tests | each task's Step 1; the token exclusions in 18 |
 | §3 GUI checks | 6, 11, 16, 24, 28 |
-| §4 PR split, D1/D2, the spike gating D2 | the PR headings; Task 24 |
+| §4 PR split, D1/D2, the spike gating D2 | the PR headings; Task 24 (done; owner ruling, plan note 18); Task 27 fixes §4's D2 row (R2) |
 
 No requirement is left without a task. Two spec items are implemented differently from how the spec words them, and each is a plan note: the unique column (note 1), and the declarations in §2 (note 7).
 
@@ -5935,8 +6916,8 @@ No requirement is left without a task. Two spec items are implemented differentl
 - `StatusMenuRow.Target` is defined in Task 3 with `.nowhere` (not `.none`, to stay clear of `Optional.none`), and `.runLog` is added in Task 9.
 - `AppState.acknowledgeRun(_:)` is produced in Task 2 and used in Tasks 8, 9 and 13. `dismissEventCard(runId:)` returns its task.
 - `JobLedger.UpsertOutcome` is produced in Task 17 and consumed in Task 19.
-- `RunJobURL` gains members in Tasks 18 (`host`, `url`, `maxFiresPerHour`), 20 (fire lines), 21 (parse, refusals, reasons), 22 (wait lines) and 26 (`foreignHolderNotice`). `URLDeferral`, `URLDeferralTimer`, `PendingURLFire` and `URLRefusalLine` live at file scope beside it.
-- `foreignStoreHolder` and `isProcessAlive` are produced in Task 22 and set at launch in Task 26.
+- `RunJobURL` gains members in Tasks 18 (`host`, `url`, `maxFiresPerHour`), 20 (fire lines), 21 (parse, refusals, reasons), 22 (wait lines) and 26 (`foreignHolderNotice`, `notSetUpReason`, `startupFloodReason`, `refusalFlushInterval`, `Refusal.unreadable`). `URLDeferral`, `URLDeferralTimer`, `PendingURLFire` and `URLRefusalLine` live at file scope beside it.
+- `foreignStoreHolder` and `isProcessAlive` are produced in Task 22. Task 26 sets them at launch through `noteForeignStoreHolder(_: StoreHolder?)`, and adds `foreignStoreHolderStart`, `processStart` and `isForeignHolderAlive(_:)`. `RunJobURLIntake`, `RunJobURLEvents`, `ProcessStart`, `StoreHolder` and `LaunchLock` are all Task 26.
 
 **4. Review Focus.** Each of the five has its test in the owning task:
 - 1 is in Task 21 (`garbageFloodIsOneLine`, `overLimitFloodIsOneLine`).

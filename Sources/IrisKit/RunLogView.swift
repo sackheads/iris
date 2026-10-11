@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 /// Opens the Run Log scene from a surface with no SwiftUI environment of its own, through the
-/// `openWindow` action the chat window or the status menu handed `MainWindow` (D6 decision 15).
+/// best-ranked `openWindow` action handed to `MainWindow` (D6 decision 15).
 /// `Window` is single-instance, so opening it again brings the open one forward.
 @MainActor
 enum RunLogWindow {
@@ -10,7 +10,7 @@ enum RunLogWindow {
 
     static func open() {
         NSApp.activate(ignoringOtherApps: true)
-        MainWindow.openAction?(id: sceneId)
+        MainWindow.open(scene: sceneId)
     }
 }
 

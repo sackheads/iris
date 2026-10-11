@@ -394,4 +394,84 @@ struct MainWindowTrackerTests {
         tracker.toggleFromHotkey(state: state)
         #expect(raises == 2)
     }
+
+    @Test("with no window, a raise opens the chat scene through the known opener")
+    func adoptedOpenerOpens() {
+        let (tracker, _, _) = makeTracker()
+        var opened: [String] = []
+        tracker.offerOpener({ opened.append($0) }, from: .label)
+        tracker.raise()
+        #expect(opened == [MainWindow.sceneId])
+    }
+
+    /// The ranking every `MainWindow.adoptOpenAction(_:from:)` call goes through: `ChatView`'s
+    /// opener replaces anything, the status menu's replaces anything but `ChatView`'s, and the
+    /// label's, which no GUI pass has proven, only fills an empty slot.
+    @Test("the chat window's opener beats the menu's, which beats the label's; the label only fills nil",
+          arguments: [
+            ([MainWindowTracking.OpenerSource.label, .label], "label#0"),
+            ([.label, .menu], "menu#1"),
+            ([.menu, .label], "menu#0"),
+            ([.menu, .menu], "menu#1"),
+            ([.label, .chat], "chat#1"),
+            ([.chat, .label], "chat#0"),
+            ([.chat, .menu], "chat#0"),
+            ([.chat, .chat], "chat#1"),
+            ([.label, .menu, .chat, .menu, .label], "chat#2"),
+          ])
+    func openerRanking(offers: [MainWindowTracking.OpenerSource], winner: String) {
+        let (tracker, _, _) = makeTracker()
+        var opened: [String] = []
+        for (i, source) in offers.enumerated() {
+            tracker.offerOpener({ _ in opened.append("\(source)#\(i)") }, from: source)
+        }
+        tracker.raise()
+        #expect(opened == [winner])
+        #expect(tracker.openerSource == offers[Int(winner.split(separator: "#")[1])!])
+    }
+
+    @Test("the Run Log opens through the same ranked opener, by its own scene id")
+    func runLogUsesTheRankedOpener() {
+        let (tracker, _, _) = makeTracker()
+        var opened: [String] = []
+        tracker.open(scene: RunLogWindow.sceneId)
+        #expect(opened.isEmpty, "nothing known yet: nothing opens")
+        tracker.offerOpener({ opened.append("label:\($0)") }, from: .label)
+        tracker.offerOpener({ opened.append("menu:\($0)") }, from: .menu)
+        tracker.open(scene: RunLogWindow.sceneId)
+        #expect(opened == ["menu:\(RunLogWindow.sceneId)"])
+    }
+
+    @Test("an explicit open beats any known opener")
+    func explicitOpenWins() {
+        let (tracker, _, _) = makeTracker()
+        var calls: [String] = []
+        tracker.offerOpener({ _ in calls.append("chat") }, from: .chat)
+        tracker.raise(open: { calls.append("explicit") })
+        #expect(calls == ["explicit"])
+    }
+
+    @Test("with a window open, a raise never opens, whatever opener is known")
+    func windowBeatsOpener() {
+        let (tracker, _, _) = makeTracker()
+        var opened = 0
+        tracker.offerOpener({ _ in opened += 1 }, from: .chat)
+        let window = FakeWindow()
+        tracker.track(window)
+        tracker.raise()
+        #expect(opened == 0)
+        #expect(window.calls == ["front"])
+    }
+
+    @Test("the hotkey after a windowless start opens the chat window (Task 24 follow-up)")
+    func hotkeyAfterWindowlessStart() throws {
+        let (tracker, _, _) = makeTracker()
+        var opened: [String] = []
+        tracker.offerOpener({ opened.append($0) }, from: .label)   // the status item's label, at launch
+        let app = AppState(store: try ConversationStore.inMemory(),
+                           tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        app.raiseMainWindow = { tracker.raise() }
+        tracker.toggleFromHotkey(state: app)
+        #expect(opened == [MainWindow.sceneId])
+    }
 }

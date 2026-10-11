@@ -49,6 +49,9 @@ enum RunJobURL {
     static func waitAbandonedLine(_ name: String, reason: String) -> String {
         "Did not fire \(name) from the link that was waiting: \(reason)."
     }
+    static func foreignHolderNotice(pid: Int32) -> String {
+        "Another Iris process (pid \(pid)) held the store at launch. A link opened before it finishes waits for it."
+    }
     static let deletedWhileWaitingReason = "it was deleted while it waited"
     static let replacedWhileWaitingReason = "its URL trigger was turned off or replaced while it waited"
 
@@ -58,11 +61,13 @@ enum RunJobURL {
 
     /// The rolling window both the URL limit and refusal coalescing count over.
     static let window: TimeInterval = 3_600
+    /// How often a coalesced refusal line catches up with its count (the D2 throttle).
+    static let refusalFlushInterval: TimeInterval = 1
 
     /// Why a link was refused before any job was looked up. A fixed sentence each: the link is
     /// unauthenticated input, so no part of it is echoed into Iris.
     enum Refusal: Error, Equatable, Sendable {
-        case otherScheme, wrongHost, hasQuery, hasFragment, wrongPath, malformedToken
+        case otherScheme, wrongHost, hasQuery, hasFragment, wrongPath, malformedToken, unreadable
 
         var sentence: String {
             switch self {
@@ -70,6 +75,7 @@ enum RunJobURL {
             case .wrongHost: return "the link is not a run-job link"
             case .hasQuery, .hasFragment: return "run-job links take no input, and this one carried some"
             case .wrongPath: return "the link has something other than one token after run-job/"
+            case .unreadable: return "the link could not be read as a URL"
             case .malformedToken: return "the link's token is not one Iris made; a job's id or name does not work, and `/jobs url <name> on` makes a link"
             }
         }
@@ -104,6 +110,8 @@ enum RunJobURL {
         return .success(token)
     }
 
+    static let notSetUpReason = "Iris is not set up yet; finish setup in the chat window, then open the link again"
+    static let startupFloodReason = "too many links arrived while Iris was starting"
     static let unknownTokenReason = "the link matches no job's URL trigger; it may have been turned off or replaced"
     static let ledgerUnreadableReason = "the jobs table could not be read"
     static let overLimitReason = "URL fires are limited to \(maxFiresPerHour) an hour per job"
@@ -127,12 +135,16 @@ struct HeldURLFire: Equatable, Sendable {
     let generation: Int
 }
 
-/// The line a coalesced URL refusal keeps updating, by job id or `unmatched`.
+/// The line a coalesced URL refusal keeps updating, by job id or `unmatched`. The count is
+/// trusted between flushes; `written` is what the line last showed.
 struct URLRefusalLine: Sendable {
-    let messageId: UUID
+    var messageId: UUID
     let since: Date
     var count: Int
-    let conversationId: UUID
+    var written: Int
+    var conversationId: UUID
+    let subject: String?
+    var reason: String
 }
 
 /// The URL fires of one job dispatched since its last moment with none outstanding. Their rows
@@ -183,6 +195,8 @@ struct PendingURLFire: Sendable {
     let jobName: String
     let tokenHash: String
     let holder: Int32
+    /// The holder's start time when the wait began, so a reused pid ends the wait (Task 26).
+    let holderStart: ProcessStart?
     let since: Date
     let lineId: UUID
     let conversationId: UUID

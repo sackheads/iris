@@ -1127,11 +1127,11 @@ actor IrisEngine {
     /// (activeGoal, goalContract, history) persists, and this re-kicks the reprompt loop so the
     /// agent picks up where it left off.
     ///
-    /// Once per engine. `ChatView`'s `.onAppear` calls `start()` every time the window opens, and
-    /// by the second call any goal still running is live, not interrupted: resuming it again
-    /// posted a second "interrupted by restart" line and could run a `processInput` beside the
-    /// live turn. The flag is set before the first `await`, so two overlapping starts cannot
-    /// both pass it.
+    /// Once per engine. `start()` runs again when the setup wizard finishes (a rerun from
+    /// Settings, say), and by the second call any goal still running is live, not interrupted:
+    /// resuming it again posted a second "interrupted by restart" line and could run a
+    /// `processInput` beside the live turn. The flag is set before the first `await`, so two
+    /// overlapping starts cannot both pass it.
     func resumeInterruptedGoal() async {
         guard !checkedForInterruptedGoal else { return }
         checkedForInterruptedGoal = true
@@ -3141,6 +3141,10 @@ actor IrisEngine {
             }
         }
         await applyRetention(ledger: ledger)
+        // D2: the last session's runs are closed and the scheduler is up, so a link that arrived
+        // while Iris was starting may fire now without its run being taken for one of them.
+        let readyState = state
+        await MainActor.run { readyState?.jobsBecameReady() }
     }
 
     /// Ledger rows older than 90 days, and every job's transcripts beyond its 20 newest, go away —
@@ -3189,9 +3193,10 @@ actor IrisEngine {
     /// be driven on its own.
     ///
     /// Reuses the scheduler this engine already has rather than building a second: `start()` runs
-    /// from `AppState.start()`, which `onAppear` can call more than once, and a `schedule_job`
-    /// before it may already have built one for writes. A fresh one each time would leave the
-    /// previous polling loop running with nothing holding a reference to stop it.
+    /// from `AppState.start()`, once at launch or first window appear and again from the setup
+    /// wizard's finish, and a `schedule_job` before it may already have built one for writes. A
+    /// fresh one each time would leave the previous polling loop running with nothing holding a
+    /// reference to stop it.
     /// `JobScheduler.start()` cancels its own previous loop, so re-adopting stays one loop.
     @discardableResult
     func adoptJobScheduler(ledger: JobLedger,
@@ -3434,8 +3439,9 @@ actor IrisEngine {
     static let interruptedByQuitReason = "app was not running"
 
     /// Closes out those runs, once per launch, and says how many there were. Once per launch
-    /// matters: `AppState.start()` is called from `onAppear` and can run more than once, and a
-    /// second sweep would mark a run that is happening right now as interrupted.
+    /// matters: `AppState.start()` runs once at launch or first window appear, and again from the
+    /// setup wizard's finish, and a second sweep would mark a run that is happening right now
+    /// (a link's, say) as interrupted.
     @discardableResult
     func closeInterruptedRuns(ledger: JobLedger, at: Date = Date()) -> Int {
         guard !closedInterruptedRuns else { return 0 }
@@ -3469,7 +3475,7 @@ actor IrisEngine {
     /// The engine owns the coordinator, so the handlers installed on the process-wide manager hold
     /// it and the runner weakly: a singleton must not be what keeps an engine's objects alive.
     private func startWatching(ledger: JobLedger) async {
-        // `AppState.start()` runs from `onAppear` and can run more than once. A second watch layer
+        // `AppState.start()` runs again from the setup wizard's finish. A second watch layer
         // would be a second set of windows over the same jobs, and the second hook would replace
         // the first — so the first coordinator would go on firing from a loop nothing can stop.
         // The slot is claimed before the `await`: a guard on the coordinator alone would let two
@@ -5430,16 +5436,38 @@ extension IrisEngine {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Kept for the life of the app: `NSAppleEventManager` is not documented to retain a handler.
+    private var runJobURLEvents: RunJobURLEvents?
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Here, not in did-finish: a link that launches Iris arrives between the two (Task 24).
+        // Never `application(_:open:)` or `.handlesExternalEvents`: SwiftUI opened a window per
+        // link with either (owner ruling C2).
+        runJobURLEvents = RunJobURLEvents.installForApp()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.activate(ignoringOtherApps: true)
         // Sparkle wants its scheduled checks started after launch, not at construction.
-        MainActor.assumeIsolated { UpdaterController.shared?.start() }
+        MainActor.assumeIsolated {
+            UpdaterController.shared?.start()
+            // D2: a link's cold start opens no window, so `ChatView.onAppear` may never start the
+            // engine; start it here. The window's own call is then a no-op.
+            if AppState.isSetUp() {
+                AppState.shared.startOnce()
+            } else {
+                AppState.shared.refuseRunJobURLsUntilSetUp()
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         // Flush BEFORE _exit: it runs no atexit handlers, so it would kill the pending debounced
         // save and skip the cfprefsd flush, losing every unwritten change (#62).
-        MainActor.assumeIsolated { AppState.shared.flushSave() }
+        MainActor.assumeIsolated {
+            AppState.shared.flushURLRefusalLines()
+            AppState.shared.flushSave()
+        }
         // And give the store back to the command line (#187 §8). `_exit` below runs no atexit
         // handler, so this is the only orderly release; a crash instead leaves a lock naming a
         // dead pid, which `GUILock` reads as stale.
@@ -5465,6 +5493,10 @@ struct IrisApp: App {
         // the acquire first is what stops that becoming a window rather than a rule.
         // Best-effort, deliberately: a lock that cannot be written must not stop the app
         // launching. `AppDelegate.applicationWillTerminate` gives it back.
+        //
+        // D6 decision 14: who held the store before this app takes it. Reads only the lock file,
+        // never the store, so the rule above (nothing touches the store before the acquire) holds.
+        let priorHolder = LaunchLock.read(at: IrisPaths.default.guiLockFile)
         GUILock.acquire()
         IrisMigrator.migrate(.default)
         ShippedSkills.seedIfNeeded(.default)
@@ -5477,6 +5509,7 @@ struct IrisApp: App {
         // closure. If this moves anywhere else, it needs a real hop instead.
         MainActor.assumeIsolated {
             AppState.shared.installGuardHealthSink()
+            AppState.shared.noteForeignStoreHolder(priorHolder)
             // D6 decision 16: the snapshot at launch. Here and not in `AppState.init`, which a
             // test suite runs hundreds of times.
             AppState.shared.refreshLedgerAttention()

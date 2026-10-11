@@ -125,6 +125,7 @@ struct RunJobURLTests {
         for owner in [job, paused, disabled] {
             #expect(try store.ledger.runs(jobId: owner.id, limit: 5).isEmpty)
         }
+        app.flushURLRefusalLines()
         let lines = systemLines(app, iris)
         #expect(lines.count == 3, "one coalesced line for unmatched links, one per refused job: \(lines)")
         #expect(lines.contains { $0.hasPrefix("Refused \(unmatched.count) URL fires in the last hour.") })
@@ -180,6 +181,7 @@ struct RunJobURLTests {
         let minted = try optIn(job, store)
         try urlRows(3, for: job, store)
         for _ in 0..<5 { app.handleRunJobURL(link(minted), identity: .dev) }
+        app.flushURLRefusalLines()
         let lines = systemLines(app, iris)
         #expect(lines.count == 1)
         #expect(lines.first?.hasPrefix("Refused 5 URL fires of url-digest in the last hour.") == true)
@@ -189,6 +191,7 @@ struct RunJobURLTests {
     func garbageFloodIsOneLine() throws {
         let (_, app, iris) = try makeApp([])
         for i in 0..<20 { app.handleRunJobURL(URL(string: "iris-dev://run-job/junk\(i)")!, identity: .dev) }
+        app.flushURLRefusalLines()
         #expect(systemLines(app, iris) == [RunJobURL.refusalLine(subject: nil, reason: RunJobURL.Refusal.malformedToken.sentence, count: 20)])
     }
 
@@ -232,6 +235,7 @@ struct RunJobURLTests {
             #expect(app.handleRunJobURL(link(pausedToken), identity: .dev) == .refused)
             #expect(app.handleRunJobURL(link(disabledToken), identity: .dev) == .refused)
         }
+        app.flushURLRefusalLines()
         #expect(systemLines(app, iris) == [
             RunJobURL.refusalLine(subject: "stopped", reason: RunJobURL.pausedReason(paused), count: 4),
             RunJobURL.refusalLine(subject: "switched-off", reason: RunJobURL.disabledReason, count: 4),
@@ -686,5 +690,77 @@ struct RunJobURLTests {
         #expect(FireOrigin.held(.watcher(paths: ["/a"]), byURL: true).isWatcher)
         #expect(FireOrigin.held(.schedule, byURL: false).triggerKind == "queued")
         #expect(FireOrigin.queued(from: .queuedWithURL(from: .schedule)).triggerKind == "url")
+    }
+    @MainActor
+    private final class ManualTimer {
+        var pending: [@MainActor @Sendable () -> Void] = []
+        func fireAll() { let due = pending; pending.removeAll(); due.forEach { $0() } }
+    }
+
+    @Test("a flood writes its line once and catches the count up at most once a second, with no write per link")
+    func floodWritesOnceASecond() throws {
+        let (_, app, iris) = try makeApp([])
+        let timer = ManualTimer()
+        app.urlRefusalFlushTimer = URLDeferralTimer { delay, body in
+            #expect(delay == RunJobURL.refusalFlushInterval)
+            timer.pending.append(body)
+        }
+        let reason = RunJobURL.Refusal.malformedToken.sentence
+        for i in 0..<200 { app.handleRunJobURL(URL(string: "iris-dev://run-job/junk\(i)")!, identity: .dev) }
+        #expect(systemLines(app, iris) == [RunJobURL.refusalLine(subject: nil, reason: reason, count: 1)],
+                "199 links later the line is untouched: nothing was written per link")
+        #expect(timer.pending.count == 1, "one flush for the whole flood")
+
+        timer.fireAll()
+        #expect(systemLines(app, iris) == [RunJobURL.refusalLine(subject: nil, reason: reason, count: 200)])
+
+        for i in 0..<5 { app.handleRunJobURL(URL(string: "iris-dev://run-job/more\(i)")!, identity: .dev) }
+        #expect(timer.pending.count == 1)
+        timer.fireAll()
+        #expect(systemLines(app, iris) == [RunJobURL.refusalLine(subject: nil, reason: reason, count: 205)])
+    }
+
+    @Test("a line the owner deleted mid-flood comes back at the next flush, with the count")
+    func deletedLineComesBack() throws {
+        let (_, app, iris) = try makeApp([])
+        app.urlRefusalFlushTimer = URLDeferralTimer { _, _ in }
+        app.handleRunJobURL(URL(string: "iris-dev://run-job/junk")!, identity: .dev)
+        let idx = try #require(app.conversations.firstIndex { $0.id == iris })
+        app.conversations[idx].messages.removeAll { $0.role == .system }
+        app.handleRunJobURL(URL(string: "iris-dev://run-job/junk2")!, identity: .dev)
+        app.flushURLRefusalLines()
+        #expect(systemLines(app, iris) == [RunJobURL.refusalLine(subject: nil, reason: RunJobURL.Refusal.malformedToken.sentence, count: 2)])
+    }
+
+    @Test("a refusal after the window first writes the old line's count, then starts a new line")
+    func windowRollFlushesFirst() throws {
+        let (_, app, iris) = try makeApp([])
+        app.urlRefusalFlushTimer = URLDeferralTimer { _, _ in }
+        let start = Date()
+        app.urlClock = { start }
+        for _ in 0..<3 { app.handleRunJobURL(URL(string: "iris-dev://run-job/junk")!, identity: .dev) }
+        app.urlClock = { start.addingTimeInterval(RunJobURL.window + 1) }
+        app.handleRunJobURL(URL(string: "iris-dev://run-job/junk")!, identity: .dev)
+        let reason = RunJobURL.Refusal.malformedToken.sentence
+        #expect(systemLines(app, iris) == [RunJobURL.refusalLine(subject: nil, reason: reason, count: 3),
+                                           RunJobURL.refusalLine(subject: nil, reason: reason, count: 1)])
+    }
+
+    @Test("a flood of 100 links writes Iris twice at most: the line, then one catch-up")
+    func hundredLinksBoundedWrites() throws {
+        let (_, app, iris) = try makeApp([])
+        let timer = ManualTimer()
+        app.urlRefusalFlushTimer = URLDeferralTimer { _, body in timer.pending.append(body) }
+        func conversation() -> Conversation? { app.conversations.first { $0.id == iris } }
+        app.handleRunJobURL(URL(string: "iris-dev://run-job/junk")!, identity: .dev)
+        let afterFirst = try #require(conversation())
+        for i in 1..<100 { app.handleRunJobURL(URL(string: "iris-dev://run-job/junk\(i)")!, identity: .dev) }
+        let afterFlood = try #require(conversation())
+        #expect(afterFlood.updatedAt == afterFirst.updatedAt, "no write after the first line")
+        #expect(afterFlood.messages == afterFirst.messages)
+        timer.fireAll()
+        #expect(timer.pending.isEmpty)
+        #expect(conversation()?.messages.count == afterFirst.messages.count)
+        #expect(systemLines(app, iris) == [RunJobURL.refusalLine(subject: nil, reason: RunJobURL.Refusal.malformedToken.sentence, count: 100)])
     }
 }

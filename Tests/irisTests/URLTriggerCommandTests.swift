@@ -340,4 +340,13 @@ struct URLTriggerCommandTests {
             #expect(!String(decoding: try JSONEncoder().encode(request), as: UTF8.self).contains(minted))
         }
     }
+
+    @Test("neither the sheet nor the kept line says the link cannot be opened yet")
+    func pendingNoteIsGone() {
+        let job = Job(name: "pr-sweep", prompt: "p", trigger: .schedule(.interval(seconds: 60)))
+        for text in [JobsCommand.urlSheetText("pr-sweep"), JobsCommand.urlOnText(job)] {
+            #expect(!text.contains("registers the scheme"))
+            #expect(!text.contains("Nothing opens the link"))
+        }
+    }
 }

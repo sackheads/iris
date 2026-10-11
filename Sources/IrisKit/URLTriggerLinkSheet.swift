@@ -50,8 +50,12 @@ struct URLTriggerLinkSheet: View {
             Text(JobsCommand.urlSheetText(link.jobName)).font(.callout).foregroundStyle(.secondary)
             HStack {
                 Spacer()
+                // Copy is the default, not Done: Return must never end the reveal, because a stray
+                // one would lose a link that cannot be shown again (Task 28 step 4). Copying twice
+                // is harmless.
                 Button("Copy") { Self.copy(link.url, to: NSPasteboard.general) }
-                Button("Done", action: onDone).keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(.defaultAction)
+                Button("Done", action: onDone)
             }
         }
         .padding(20)

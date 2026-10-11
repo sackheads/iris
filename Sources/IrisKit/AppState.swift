@@ -2250,9 +2250,8 @@ class AppState {
     }
 
     func start() {
-        Task {
-            await engine.start()
-        }
+        engineStarted = true
+        launchEngine(engine)
     }
     
     func sendMessage(_ text: String, attachments: [FileAttachment] = []) {
@@ -4226,8 +4225,12 @@ class AppState {
     @ObservationIgnored private(set) var jobsListingTask: Task<Void, Never>? = nil
 
     /// D6 decisions 12-13: one refusal line per job (or per `unmatched`) per hour, updated with a
-    /// running count. Written only by `refuseURLFire`.
+    /// running count at most once a second. Written only by `RunJobURLHandling.swift`.
     @ObservationIgnored var urlRefusalLines: [String: URLRefusalLine] = [:]
+    /// Schedules a coalesced refusal line's catch-up, on a dispatch queue. A seam for tests.
+    @ObservationIgnored var urlRefusalFlushTimer = URLDeferralTimer.dispatch
+    /// The lines with a catch-up already scheduled. Written only by `RunJobURLHandling.swift`.
+    @ObservationIgnored var urlRefusalFlushPending: Set<String> = []
     /// Each job's outstanding URL fires (in flight, or held by the `queue` policy), counted by
     /// the limit until their runs have started. Written only by `RunJobURLHandling.swift`.
     @ObservationIgnored var urlFireBatches: [UUID: URLFireBatch] = [:]
@@ -4240,6 +4243,19 @@ class AppState {
     /// lives. nil once it has gone, so a reused pid cannot hold fires back later.
     @ObservationIgnored var foreignStoreHolder: Int32?
     @ObservationIgnored var isProcessAlive: @Sendable (Int32) -> Bool = { GUILock.isAlive($0) }
+    /// When `foreignStoreHolder` started, recorded at launch: a pid whose process started at any
+    /// other time is a reused pid, not the holder (Task 26, the pid-reuse carry-forward).
+    @ObservationIgnored var foreignStoreHolderStart: ProcessStart?
+    /// A process's start time. A seam for tests.
+    @ObservationIgnored var processStart: @Sendable (Int32) -> ProcessStart? = { ProcessStart.of($0) }
+    /// D2: links held until the job bookkeeping is done. Written only by `RunJobURLIntake.swift`.
+    @ObservationIgnored var urlIntake: RunJobURLIntake = .starting([])
+    /// Whether `start()` has run in this process; `startOnce()` reads it.
+    @ObservationIgnored private(set) var engineStarted = false
+    /// What `start()` does with the engine. A seam for tests, which must not load plugins or MCP.
+    @ObservationIgnored var launchEngine: @MainActor (IrisEngine) -> Void = { engine in
+        Task { await engine.start() }
+    }
     /// Schedules the deferral's re-check, on a dispatch queue. A seam for tests.
     @ObservationIgnored var urlDeferralTimer = URLDeferralTimer.dispatch
     /// The URL fires waiting for `foreignStoreHolder`, one per job (plan note 10). Each counts as

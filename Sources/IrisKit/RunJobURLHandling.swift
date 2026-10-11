@@ -23,11 +23,19 @@ extension AppState {
     /// cannot both pass the limit: the first is in `urlFireBatches` before the second is counted.
     @discardableResult
     func handleRunJobURL(_ url: URL, identity: BuildIdentity = .current) -> RunJobURLOutcome {
-        let iris = activityConversationId()
+        // Asked lazily: a refusal coalesced into an existing line never reads `meta` (the D2
+        // throttle).
+        var resolvedIris: UUID?
+        func iris() -> UUID {
+            if let resolvedIris { return resolvedIris }
+            let id = activityConversationId()
+            resolvedIris = id
+            return id
+        }
         let token: String
         switch RunJobURL.parse(url, identity: identity) {
         case .failure(let refusal):
-            refuseURLFire(job: nil, reason: refusal.sentence, to: iris)
+            refuseURLFire(job: nil, reason: refusal.sentence, to: iris())
             return .refused
         case .success(let parsed):
             token = parsed
@@ -38,29 +46,30 @@ extension AppState {
         do {
             job = try store.ledger.job(urlTokenHash: digest)
         } catch {
-            refuseURLFire(job: nil, reason: RunJobURL.ledgerUnreadableReason, to: iris)
+            refuseURLFire(job: nil, reason: RunJobURL.ledgerUnreadableReason, to: iris())
             return .refused
         }
         guard let job else {
-            refuseURLFire(job: nil, reason: RunJobURL.unknownTokenReason, to: iris)
+            refuseURLFire(job: nil, reason: RunJobURL.unknownTokenReason, to: iris())
             return .refused
         }
         if let reason = urlFireRefusal(for: job) {
-            refuseURLFire(job: job, reason: reason, to: iris)
+            refuseURLFire(job: job, reason: reason, to: iris())
             return .refused
         }
         // A wait already under way is joined even if the holder has just gone: firing here too
         // would make its re-check a second fire (plan note 10).
         if pendingURLFires[job.id] != nil { return .deferred(job.id) }
         if let holder = foreignStoreHolder {
-            if isProcessAlive(holder) {
-                deferURLFire(job, tokenHash: digest, holder: holder, to: iris)
+            if isForeignHolderAlive(holder) {
+                deferURLFire(job, tokenHash: digest, holder: holder, to: iris())
                 return .deferred(job.id)
             }
             // Gone since launch: never asked about again, so a reused pid cannot hold fires back.
             foreignStoreHolder = nil
+            foreignStoreHolderStart = nil
         }
-        guard fireByURL(job, to: iris) != nil else { return .refused }
+        guard fireByURL(job, to: iris()) != nil else { return .refused }
         return .fired(job.id)
     }
 
@@ -147,7 +156,8 @@ extension AppState {
         let lineId = UUID()
         appendMessage(role: .system, content: RunJobURL.waitingLine(job.name, pid: holder), id: lineId, to: iris)
         pendingURLFires[job.id] = PendingURLFire(jobId: job.id, jobName: job.name, tokenHash: tokenHash,
-                                                 holder: holder, since: urlClock(), lineId: lineId,
+                                                 holder: holder, holderStart: foreignStoreHolderStart,
+                                                 since: urlClock(), lineId: lineId,
                                                  conversationId: iris)
         scheduleURLRecheck(job.id)
     }
@@ -162,7 +172,7 @@ extension AppState {
     /// counts the fire, so it is counted once.
     func recheckDeferredURLFire(_ jobId: UUID) {
         guard let pending = pendingURLFires[jobId] else { return }
-        switch URLDeferral.decide(holderAlive: isProcessAlive(pending.holder),
+        switch URLDeferral.decide(holderAlive: isHolderAlive(pending.holder, started: pending.holderStart),
                                   waited: urlClock().timeIntervalSince(pending.since)) {
         case .wait:
             scheduleURLRecheck(jobId)
@@ -178,6 +188,7 @@ extension AppState {
         case .fire:
             pendingURLFires[jobId] = nil
             foreignStoreHolder = nil
+            foreignStoreHolderStart = nil
             let job: Job
             switch deferredFireCheck(pending) {
             case .failure(let refusal): return abandonDeferredFire(pending, refusal)
@@ -237,24 +248,60 @@ extension AppState {
         }
     }
 
-    /// Says a refusal in Iris, coalesced (plan note 8): the first in an hour is a line, and each
-    /// later one updates that line's count, so a flood cannot fill the conversation.
-    func refuseURLFire(job: Job?, reason: String, to iris: UUID) {
+    /// Says a refusal in Iris, coalesced (plan note 8): the first in an hour is a line, and later
+    /// ones raise its count. A later one costs a dictionary update and nothing else; the line
+    /// catches up at most once a second (the D2 throttle), so a page opening links in a loop never
+    /// scans Iris, rewrites a message or persists anything per link. `iris` is asked only when a
+    /// line is made.
+    func refuseURLFire(job: Job?, reason: String, to iris: @autoclosure () -> UUID) {
         let key = job?.id.uuidString ?? "unmatched"
         let now = urlClock()
-        if var entry = urlRefusalLines[key], entry.conversationId == iris,
-           now.timeIntervalSince(entry.since) < RunJobURL.window,
-           conversations.first(where: { $0.id == iris })?.messages.contains(where: { $0.id == entry.messageId }) == true {
+        if var entry = urlRefusalLines[key], now.timeIntervalSince(entry.since) < RunJobURL.window {
             entry.count += 1
+            entry.reason = reason
             urlRefusalLines[key] = entry
-            updateMessageContent(id: entry.messageId,
-                                 content: RunJobURL.refusalLine(subject: job?.name, reason: reason, count: entry.count),
-                                 in: iris, persist: true)
+            scheduleURLRefusalFlush(key)
             return
         }
+        // The window has rolled: the old line gets the count it had before a new one starts.
+        if urlRefusalLines[key] != nil { flushURLRefusalLine(key) }
+        let conversation = iris()
         let id = UUID()
         appendMessage(role: .system, content: RunJobURL.refusalLine(subject: job?.name, reason: reason, count: 1),
-                      id: id, to: iris)
-        urlRefusalLines[key] = URLRefusalLine(messageId: id, since: now, count: 1, conversationId: iris)
+                      id: id, to: conversation)
+        urlRefusalLines[key] = URLRefusalLine(messageId: id, since: now, count: 1, written: 1,
+                                              conversationId: conversation, subject: job?.name, reason: reason)
+    }
+
+    private func scheduleURLRefusalFlush(_ key: String) {
+        guard urlRefusalFlushPending.insert(key).inserted else { return }
+        urlRefusalFlushTimer.schedule(RunJobURL.refusalFlushInterval) { [weak self] in
+            self?.flushURLRefusalLine(key)
+        }
+    }
+
+    /// Brings one coalesced line up to its count. The one place the line is looked for: if the
+    /// owner deleted it, or Iris has been replaced since, the count goes on a new line in Iris.
+    func flushURLRefusalLine(_ key: String) {
+        urlRefusalFlushPending.remove(key)
+        guard var entry = urlRefusalLines[key], entry.count != entry.written else { return }
+        let text = RunJobURL.refusalLine(subject: entry.subject, reason: entry.reason, count: entry.count)
+        let iris = activityConversationId()
+        if entry.conversationId == iris,
+           conversations.first(where: { $0.id == iris })?.messages.contains(where: { $0.id == entry.messageId }) == true {
+            updateMessageContent(id: entry.messageId, content: text, in: iris, persist: true)
+        } else {
+            let id = UUID()
+            appendMessage(role: .system, content: text, id: id, to: iris)
+            entry.messageId = id
+            entry.conversationId = iris
+        }
+        entry.written = entry.count
+        urlRefusalLines[key] = entry
+    }
+
+    /// Every line still behind its count, now: at quit, and in tests.
+    func flushURLRefusalLines() {
+        for key in Array(urlRefusalLines.keys) { flushURLRefusalLine(key) }
     }
 }
