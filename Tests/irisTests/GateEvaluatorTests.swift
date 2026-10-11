@@ -740,6 +740,32 @@ struct JobGateAdmissionTests {
         #expect(reasons.contains(JobRunner.gateFailingReason))
     }
 
+    @Test("a gate's third error never replaces an owner's pause set while it was being asked")
+    func gateErrorKeepsOwnerPause() async throws {
+        let (store, state, engine, _) = try harness([textResponse("tick")])
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let job = polled()
+        try store.ledger.upsert(job)
+        let calls = Locked(0)
+        let ledger = store.ledger, jobId = job.id
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
+                               protectionEnabled: false,
+                               gateEvaluator: { _, _ in
+                                   calls.mutate { $0 += 1 }
+                                   // The owner pauses while the third check is out.
+                                   if calls.value == 3 { try? ledger.setPaused(jobId: jobId, reason: JobsCommand.pausedByUserReason) }
+                                   return .error("HEAD answered 500")
+                               })
+        await runner.fire(job: job, origin: .cadence(kind: "poll"))
+        await runner.fire(job: job, origin: .cadence(kind: "poll"))
+        await runner.fire(job: job, origin: .cadence(kind: "poll"))
+
+        #expect(calls.value == 3)
+        #expect(try store.ledger.job(id: job.id)?.pausedReason == JobsCommand.pausedByUserReason)
+        #expect(cards(state).isEmpty, "no card says it paused for a gate when the owner had")
+    }
+
     /// R34: a gate whose *ledger* cannot be read is a gate that cannot answer, and it is counted
     /// as one. Before, the row it wrote carried no gate-error prefix, so the streak never saw it:
     /// an unreadable ledger left the job writing a row every tick for ever — never running, never

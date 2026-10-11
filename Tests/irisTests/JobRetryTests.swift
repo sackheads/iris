@@ -150,6 +150,35 @@ struct JobRetryTests {
                 "got: \(card.outcome ?? "nil")")
     }
 
+    /// Pauses the job as its owner would, from inside the turn, then fails it.
+    private final class OwnerPausesMidRun: LLMClientProtocol, @unchecked Sendable {
+        let ledger: JobLedger
+        let jobId: UUID
+        init(ledger: JobLedger, jobId: UUID) { self.ledger = ledger; self.jobId = jobId }
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            try ledger.setPaused(jobId: jobId, reason: JobsCommand.pausedByUserReason)
+            return GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "")]))],
+                                  usageMetadata: nil)
+        }
+    }
+
+    @Test("the ladder's pause never replaces an owner's pause set mid-run")
+    func ladderKeepsOwnerPause() async throws {
+        let store = try ConversationStore.inMemory()
+        let j = job(attempt: 3)
+        let (_, state, engine) = try harness([], client: OwnerPausesMidRun(ledger: store.ledger, jobId: j.id))
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
+                               config: config, activity: RecordingActivity())
+
+        await runner.fire(job: j, origin: .schedule)
+
+        #expect(try store.ledger.job(id: j.id)?.pausedReason == JobsCommand.pausedByUserReason,
+                "a model's re-schedule could otherwise lift the runner's reason and leave a link live")
+    }
+
     @Test("a failed watch fire leaves the schedule alone, ladder and all")
     func watcherFailureDoesNotClimbTheLadder() async throws {
         let (store, state, engine) = try harness([textResponse("")])
@@ -215,7 +244,7 @@ struct JobRetryTests {
         let id = UUID()
         app.createNewConversation(id: id)
         app.selectedConversationId = id
-        for job in jobs { try? app.store.ledger.upsert(job) }
+        for job in jobs { _ = try? app.store.ledger.upsert(job) }
         return (app, id)
     }
 

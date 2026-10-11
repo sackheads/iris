@@ -386,6 +386,11 @@ struct ScheduleJobArguments: Equatable, Sendable {
         "This replaced '\(name)' from this conversation; its run history is kept."
     }
 
+    /// D6 decision 11: what the model is told when its change turned a job's URL trigger off.
+    static func urlTriggerClearedNote(_ name: String) -> String {
+        "The URL trigger for '\(name)' was turned off, because what the job does changed or a pause its owner set was lifted; only the owner can turn it back on."
+    }
+
     /// A job's next fire, written for the model: minute precision in the zone the job's own cadence
     /// is evaluated in (the user's, for an interval), with that zone named so "09:00" is never
     /// ambiguous when the job was created with an explicit timezone.

@@ -23,6 +23,10 @@ enum BuildIdentity: Equatable, Sendable {
     /// Appended to every Keychain service name, so dev and release never share an item.
     var keychainServiceSuffix: String { self == .release ? "" : ".dev" }
 
+    /// The URL scheme this build answers (D6 decision 12): a separate one per build, so a link
+    /// made for the dev build can never fire the release app's job, or the other way round.
+    var urlScheme: String { self == .release ? "iris" : "iris-dev" }
+
     /// A separate name, not just a separate default: a shortcut the user recorded under the old
     /// shared name stays with release instead of firing both apps.
     var hotkeyName: String { self == .release ? "toggleIris" : "toggleIrisDev" }

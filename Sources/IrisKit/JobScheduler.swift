@@ -509,13 +509,18 @@ actor JobScheduler {
     /// matches nothing is stored paused rather than silently never running.
     @discardableResult
     func schedule(_ job: Job) async throws -> Job {
+        try await scheduleReporting(job).job
+    }
+
+    /// `schedule`, plus whether the write turned the job's URL trigger off (D6 decision 11).
+    func scheduleReporting(_ job: Job) async throws -> (job: Job, urlTriggerCleared: Bool) {
         var stored = job
         if let cadence = Self.cadence(of: job.trigger) {
             stored.nextFireAt = cadence.next(after: now())
             if stored.nextFireAt == nil { stored.pausedReason = Self.unmatchableReason }
         }
-        try ledger.upsert(stored)
-        return stored
+        let outcome = try ledger.upsert(stored)
+        return (stored, outcome.urlTriggerCleared)
     }
 
     /// Drops the two `UserDefaults` keys the pre-ledger scheduler and watcher persisted to, so a

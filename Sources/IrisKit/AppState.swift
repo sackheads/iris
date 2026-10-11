@@ -1063,7 +1063,7 @@ class AppState {
         self.engine = engine
     }
 
-    private var engine: IrisEngine!
+    private(set) var engine: IrisEngine!
     /// Durable conversation persistence (#163). Injected so tests get an in-memory database.
     let store: ConversationStore
     /// Rows `loadConversations()` could not decode on the most recent load (#163). Internal for
@@ -3952,6 +3952,15 @@ class AppState {
         }
     }
 
+    /// The URL trigger link `/jobs url … on` just minted, shown once in `URLTriggerLinkSheet`
+    /// (plan note 17). Transient: never on a `Codable` type, never persisted, never logged, and
+    /// cleared when the sheet closes or the trigger is turned off.
+    var revealedURLTrigger: RevealedURLTrigger?
+
+    /// Test seam: where `/jobs url … on` gets its token, so a test can force a digest collision
+    /// or a failed random source.
+    @ObservationIgnored var urlTriggerTokenSource: () -> String? = { URLTriggerToken.generate() }
+
     /// `/jobs` (#187 §9). Works in every conversation, pinned or not, and never starts a turn:
     /// everything it says comes from the ledger through `JobsCommand`'s pure rendering. The
     /// ledger calls are synchronous, so the answer is in the transcript before this returns —
@@ -3960,6 +3969,27 @@ class AppState {
     /// Test seam (#366): the most recent `/jobs` listing hop, so a test can await the listing
     /// instead of polling a wall clock that a busy main actor makes meaningless.
     @ObservationIgnored private(set) var jobsListingTask: Task<Void, Never>? = nil
+
+    /// D6 decisions 12-13: one refusal line per job (or per `unmatched`) per hour, updated with a
+    /// running count. Written only by `refuseURLFire`.
+    @ObservationIgnored var urlRefusalLines: [String: URLRefusalLine] = [:]
+    /// Each job's outstanding URL fires (in flight, or held by the `queue` policy), counted by
+    /// the limit until their runs have started. Written only by `RunJobURLHandling.swift`.
+    @ObservationIgnored var urlFireBatches: [UUID: URLFireBatch] = [:]
+    /// The clock the URL limit, the coalescing window and the deferral read. A seam for tests.
+    @ObservationIgnored var urlClock: @Sendable () -> Date = { Date() }
+    /// Test seam: the most recent URL fire, so a test can await it.
+    @ObservationIgnored var urlFireTask: Task<JobRunner.Admission?, Never>?
+    /// D6 decision 14: a live Iris process that held the store at launch (a `--run-job`), read
+    /// before this app took the lock and never taken or broken here. A URL fire waits while it
+    /// lives. nil once it has gone, so a reused pid cannot hold fires back later.
+    @ObservationIgnored var foreignStoreHolder: Int32?
+    @ObservationIgnored var isProcessAlive: @Sendable (Int32) -> Bool = { GUILock.isAlive($0) }
+    /// Schedules the deferral's re-check, on a dispatch queue. A seam for tests.
+    @ObservationIgnored var urlDeferralTimer = URLDeferralTimer.dispatch
+    /// The URL fires waiting for `foreignStoreHolder`, one per job (plan note 10). Each counts as
+    /// one fire against the URL limit while it waits. Written only by `RunJobURLHandling.swift`.
+    @ObservationIgnored var pendingURLFires: [UUID: PendingURLFire] = [:]
 
     private func handleJobsCommand(_ trimmed: String, convId: UUID) {
         let ledger = store.ledger
@@ -4036,50 +4066,7 @@ class AppState {
                     emitCommandOutput("No job named '\(name)'.", format: .markdown, to: convId)
                     return
                 }
-                // Admission drops a paused or disabled job without a word, and both are states the
-                // user has to undo before a hand-started fire can do anything. Saying so here —
-                // before anything is started — is the difference between a command that did
-                // nothing and a command that looks like it worked.
-                guard job.pausedReason == nil else {
-                    emitCommandOutput("'\(job.name)' is paused (\(job.pausedReason ?? "")); `/jobs resume \(job.name)` first.",
-                                      format: .markdown, to: convId)
-                    return
-                }
-                guard job.enabled else {
-                    emitCommandOutput("'\(job.name)' is disabled.", format: .markdown, to: convId)
-                    return
-                }
-                // Said before anything is attempted, because admission only answers when the fire
-                // is over — and a run can take minutes. Silence in between reads as a command that
-                // did nothing.
-                emitCommandOutput("Starting **\(job.name)** …", format: .markdown, to: convId)
-                // Through `fire`, not `run`: a hand-started fire meets the same overlap, breaker
-                // and budget checks a scheduled one does (§4) — and what it says is what admission
-                // decided, reported when the fire is over rather than promised before it starts.
-                let engine = self.engine
-                Task { [weak self] in
-                    guard let runner = await engine?.jobRunner() else {
-                        // No engine means no runner and no turn: the app has not finished wiring
-                        // itself up (or is shutting down). Saying so beats the line above being
-                        // the last word on a fire that never started.
-                        self?.emitCommandOutput("Jobs are not available yet.", format: .markdown, to: convId)
-                        return
-                    }
-                    let admission = await runner.fire(job: job, origin: .manual)
-                    guard let self else { return }
-                    guard let admission else {
-                        self.emitCommandOutput("'\(job.name)' is no longer in the jobs table.",
-                                               format: .markdown, to: convId)
-                        return
-                    }
-                    if let refusal = JobRunner.refusalText(admission) {
-                        self.emitCommandOutput("**\(job.name)** was not started: \(refusal).",
-                                               format: .markdown, to: convId)
-                    } else {
-                        self.emitCommandOutput("Fired **\(job.name)**; the result arrives as a card.",
-                                               format: .markdown, to: convId)
-                    }
-                }
+                runJobByHand(job: job, origin: .manual, announceTo: convId)
             } catch {
                 emitCommandOutput("Could not run that job: \(error).", format: .markdown, to: convId)
             }
@@ -4112,12 +4099,18 @@ class AppState {
                     } else if updated.pausedReason == JobScheduler.unmatchableReason {
                         updated.pausedReason = nil
                     }
-                    try ledger.upsert(updated)
+                    // A cron that never matches replaces even the owner's pause, and lifting that
+                    // pause turns the link off (`JobLedger.upsert`): said like every other clear.
+                    let outcome = try ledger.upsert(updated)
                     emitCommandOutput(JobsCommand.rescheduledText(updated), format: .markdown, to: convId)
+                    if outcome.urlTriggerCleared { announceURLTriggerCleared(jobId: job.id, jobName: job.name) }
                 }
             } catch {
                 emitCommandOutput("Could not reschedule that job: \(error).", format: .markdown, to: convId)
             }
+
+        case .url(let name, let setting):
+            handleURLTriggerCommand(name: name, setting: setting, ledger: ledger, convId: convId)
 
         case .delete(let name):
             do {
@@ -4142,6 +4135,8 @@ class AppState {
                 let runCount = try ledger.runCount(jobId: job.id)
                 try ledger.delete(jobId: job.id)
                 refreshLedgerAttention()
+                withdrawRevealedURLTrigger(jobId: job.id)
+                forgetURLState(jobId: job.id)
                 // The delete fires the ledger's `onJobsChanged` hook, which drops the job's
                 // subscriber and stops its stream if nothing else is watching that directory. What
                 // the hook cannot reach is the runner's own memory of a fire it held for this job.
@@ -4153,6 +4148,81 @@ class AppState {
                 emitCommandOutput("Could not delete that job: \(error).", format: .markdown, to: convId)
             }
         }
+    }
+
+    /// `/jobs url <name> [on|off]` (D6 decisions 9 and 10). Plan note 17: only the token's digest
+    /// is stored, and the link never passes through `appendMessage`, `ConversationStore` or a log.
+    /// It lives in `revealedURLTrigger` until the sheet closes; the conversation keeps a redacted
+    /// line. A failure prints fixed words, never the error, which can be a raw SQLite message.
+    private func handleURLTriggerCommand(name: String, setting: Bool?, ledger: JobLedger, convId: UUID) {
+        let job: Job
+        do {
+            guard let found = try ledger.job(named: name) else {
+                emitCommandOutput("No job named '\(name)'.", format: .markdown, to: convId)
+                return
+            }
+            job = found
+        } catch {
+            emitCommandOutput("Could not read the jobs table. Nothing changed.", format: .markdown, to: convId)
+            return
+        }
+        switch setting {
+        case nil:
+            emitCommandOutput(JobsCommand.urlStatusText(job), format: .markdown, to: convId)
+        case false?:
+            do {
+                try ledger.setURLTrigger(jobId: job.id, tokenHash: nil)
+            } catch {
+                emitCommandOutput(JobsCommand.urlChangeFailedText(job), format: .markdown, to: convId)
+                return
+            }
+            withdrawRevealedURLTrigger(jobId: job.id)
+            emitCommandOutput(JobsCommand.urlOffText(job), format: .markdown, to: convId)
+        case true?:
+            // Two attempts: a digest another job holds fails the unique index, and a fresh token
+            // cures that. A second collision means the random source is not random; stop there.
+            for attempt in 1...2 {
+                guard let token = urlTriggerTokenSource() else {
+                    emitCommandOutput("Could not make a link for **\(job.name)**: the system's random source failed. Nothing changed.",
+                                      format: .markdown, to: convId)
+                    return
+                }
+                do {
+                    try ledger.setURLTrigger(jobId: job.id, tokenHash: URLTriggerToken.digest(token))
+                } catch {
+                    if attempt == 1 && JobLedger.isURLTokenHashCollision(error) { continue }
+                    emitCommandOutput(JobsCommand.urlChangeFailedText(job), format: .markdown, to: convId)
+                    return
+                }
+                revealedURLTrigger = RevealedURLTrigger(jobId: job.id, jobName: job.name,
+                                                        url: RunJobURL.url(token: token, identity: .current))
+                emitCommandOutput(JobsCommand.urlOnText(job), format: .markdown, to: convId)
+                return
+            }
+        }
+    }
+
+    /// Closes the link sheet when it shows `jobId`'s link, which `off`, `delete` or a model's
+    /// change (`announceURLTriggerCleared`) just killed.
+    /// Ends the reveal of one link, and only that one: a sheet that disappears because a newer
+    /// reveal replaced it must not take the newer one with it.
+    func endURLTriggerReveal(_ id: UUID) {
+        if revealedURLTrigger?.id == id { revealedURLTrigger = nil }
+    }
+
+    private func withdrawRevealedURLTrigger(jobId: UUID) {
+        if revealedURLTrigger?.jobId == jobId { revealedURLTrigger = nil }
+    }
+
+    /// D6 decision 11's line in Iris, when a change turned a job's URL trigger off.
+    nonisolated static func urlTriggerClearedLine(_ name: String) -> String {
+        "URL trigger for \(name) turned off: the job was changed. `/jobs url \(name) on` makes a new link."
+    }
+
+    /// Said once the ledger has cleared the trigger. The sheet goes too: its link is dead.
+    func announceURLTriggerCleared(jobId: UUID, jobName: String) {
+        withdrawRevealedURLTrigger(jobId: jobId)
+        appendMessage(role: .system, content: Self.urlTriggerClearedLine(jobName), to: activityConversationId())
     }
 
     private func handleJourneyCommand(convId: UUID) {

@@ -18,11 +18,14 @@ enum JobsCommand: Equatable {
     case delete(name: String)
     /// A new cron for a scheduled or polled job; `timeZone` nil keeps the job's own.
     case reschedule(name: String, cron: String, timeZone: String?)
+    /// `setting` nil asks whether the job's URL trigger is on; true turns it on (minting a new
+    /// link), false turns it off (D6 decision 9).
+    case url(name: String, setting: Bool?)
     case usage
 
     static let usageText = "Usage: /jobs · /jobs ack <run id> · /jobs pause <name> · "
         + "/jobs resume <name> · /jobs run <name> · /jobs delete <name> · "
-        + "/jobs reschedule <name> <cron> [timezone]"
+        + "/jobs reschedule <name> <cron> [timezone] · /jobs url <name> [on|off]"
 
     /// What `/jobs pause` writes, and what `/jobs` then prints in the Next column. Spelled once so
     /// the command that clears it and the table that shows it cannot drift.
@@ -54,6 +57,9 @@ enum JobsCommand: Equatable {
         }
         if args == "reschedule" || args.hasPrefix("reschedule ") {
             return parseReschedule(String(args.dropFirst("reschedule".count)))
+        }
+        if args == "url" || args.hasPrefix("url ") {
+            return parseURL(String(args.dropFirst("url".count)))
         }
         for (verb, form) in named {
             guard args == verb || args.hasPrefix(verb + " ") else { continue }
@@ -189,6 +195,60 @@ enum JobsCommand: Equatable {
             text += " It is paused (\(reason)); `/jobs resume \(job.name)` starts it on the new schedule."
         }
         return text
+    }
+
+    // MARK: /jobs url
+
+    /// `<name> [on|off]`, read from the right (D6 decision 9): the last word is `on` or `off`, and
+    /// the rest of the line is the name, quoted or not. A name of one word that is itself `on` or
+    /// `off` is a name, since there is nothing left of the line to be one. So `/jobs url "turn on"`
+    /// asks about a job called "turn on".
+    static func parseURL(_ rest: String) -> JobsCommand {
+        var tokens = quotedTokens(rest)
+        var setting: Bool?
+        if tokens.count >= 2, let last = tokens.last?.lowercased(), last == "on" || last == "off" {
+            setting = last == "on"
+            tokens.removeLast()
+        }
+        let name = tokens.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return .usage }
+        return .url(name: name, setting: setting)
+    }
+
+    /// Plan note 13: said until the scheme is registered, and deleted by the PR that registers it.
+    static let urlSchemePendingNote = "Nothing opens the link yet: the app registers the scheme in a later update."
+
+    static func urlStatusText(_ job: Job) -> String {
+        job.urlTrigger
+            ? "The URL trigger for **\(job.name)** is on. Its link was shown once, when it was turned on, and is not saved anywhere; `/jobs url \(job.name) on` makes a new one and retires the old."
+            : "The URL trigger for **\(job.name)** is off. `/jobs url \(job.name) on` turns it on and shows its link."
+    }
+
+    /// The line the conversation keeps (plan note 17): it never holds the link, because every
+    /// message is persisted in plain text in `conversations.sqlite`, where an approved host
+    /// `run_command` could read it.
+    static func urlOnText(_ job: Job) -> String {
+        "URL trigger on for **\(job.name)**: the link was shown once and is not saved. `/jobs url \(job.name) on` makes a new one. "
+            + urlSchemePendingNote
+    }
+
+    /// What the transient sheet says around the link. Plain words, no markdown: the sheet shows
+    /// it with `Text(String)`, which is verbatim, and a job name is not markdown either.
+    static func urlSheetText(_ jobName: String) -> String {
+        "Opening this link fires \(jobName) now, as /jobs run would, at most \(RunJobURL.maxFiresPerHour) times an hour. "
+            + "Iris keeps only a hash of it: copy it now, because it cannot be shown again. Turning the trigger on again "
+            + "replaces it, /jobs url \(jobName) off retires it, and changing the job's prompt, profile or policy, or a "
+            + "model lifting your pause, turns it off. \(urlSchemePendingNote)"
+    }
+
+    static func urlOffText(_ job: Job) -> String {
+        "The URL trigger for **\(job.name)** is off. Any link made for it no longer works."
+    }
+
+    /// What `/jobs url … on|off` says when the ledger write fails. Fixed words only: the error
+    /// itself can be a raw SQLite message, which says nothing the owner can act on.
+    static func urlChangeFailedText(_ job: Job) -> String {
+        "Could not change the URL trigger for **\(job.name)**: the jobs table could not be written. Nothing changed."
     }
 
     /// The forms that take a job name. A table rather than four near-identical branches, since the

@@ -499,6 +499,12 @@ struct ChatView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("RerunSetupWizard"))) { _ in
             showSetupWizard = true
         }
+        .sheet(item: $state.revealedURLTrigger) { link in
+            // Every chat window binds this sheet, so closing any window that shows it ends the
+            // reveal everywhere: the link is not shown again in another window or after a reopen.
+            URLTriggerLinkSheet(link: link) { state.endURLTriggerReveal(link.id) }
+                .onDisappear { state.endURLTriggerReveal(link.id) }
+        }
     }
     
     /// Shared row body for both the Conversations and Archived sections, so archiving a
