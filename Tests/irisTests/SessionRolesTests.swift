@@ -106,10 +106,40 @@ struct SessionRolesTests {
         var archived = Conversation(title: "arch"); archived.role = "bug-minder"; archived.isArchived = true
         var pinned = Conversation(title: "Iris"); pinned.role = "x"; pinned.isPinned = true
         var all = [older, newer, archived, pinned]
-        SessionRoles.normalize(&all)
+        let changed = SessionRoles.normalize(&all)
         #expect(all[0].role == nil && all[1].role == "planner")
         #expect(all[0].sessionCard?.skills.isEmpty == true)
         #expect(all[2].role == nil && all[3].role == nil)
+        // #480 review item 5: the load path needs this set back to `markChanged` the ids it
+        // repaired, so the store stays in sync with what the in-memory array now says.
+        #expect(changed == [older.id, archived.id, pinned.id])
+    }
+
+    /// #480 review item 5. Two conversations with the SAME role are written straight to the
+    /// store — bypassing `assignRole`, which never allows this — the way a duplicate could reach
+    /// disk from an old build or a hand edit. `sanitizeLoaded` already repaired this in memory
+    /// before #480; the bug was that the repair stopped there; the loser's stale role was never
+    /// written back, so it could resurface the duplicate at the very next launch.
+    @Test("a duplicate role persisted to the store is repaired on load, and the repair reaches disk")
+    func loadRepairsDuplicateRoleOnDisk() throws {
+        let store = try ConversationStore.inMemory()
+        var older = Conversation(id: UUID(), title: "o"); older.role = "overseer"
+        older.updatedAt = Date(timeIntervalSince1970: 1)
+        var newer = Conversation(id: UUID(), title: "n"); newer.role = "overseer"
+        newer.updatedAt = Date(timeIntervalSince1970: 2)
+        func created(_ c: Conversation) -> ConversationWrite {
+            var s = ChangeSet(); s.add(.created)
+            return ConversationWrite(id: c.id, snapshot: c, changes: s)
+        }
+        try store.apply([created(older), created(newer)])
+
+        let app = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        #expect(app.conversations.first { $0.id == older.id }?.role == nil, "repaired in memory on load")
+        app.flushSave()
+
+        let rows = try store.loadAll().conversations
+        #expect(rows.first { $0.id == older.id }?.role == nil, "and the repair reached disk")
+        #expect(rows.first { $0.id == newer.id }?.role == "overseer", "the more recently updated holder keeps it")
     }
 
     @Test("a role loaded from the store that doesn't normalize to itself is cleared, with its skills")

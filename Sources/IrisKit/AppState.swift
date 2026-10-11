@@ -3788,9 +3788,15 @@ class AppState {
     /// answerable. The unconditional clear that used to live here was the workaround for a
     /// window-blanking render bug whose root cause was fixed in aa141d5 (invariant 8); if
     /// blanking returns at launch, this is the change to suspect (spec §3.1).
-    nonisolated static func sanitizeLoaded(_ decoded: [Conversation]) -> [Conversation] {
+    ///
+    /// `roleNormalizationChanged` is `SessionRoles.normalize`'s own return (#480 review item 5):
+    /// this function only touches the in-memory array, so the load path (`loadConversations`)
+    /// needs the ids back to `markChanged` them — without that, a duplicate-role repair's loser
+    /// keeps its stale role in the STORE and can win it back at the next launch, even though this
+    /// in-memory copy is already correct.
+    nonisolated static func sanitizeLoaded(_ decoded: [Conversation]) -> (conversations: [Conversation], roleNormalizationChanged: Set<UUID>) {
         var loaded = durableConversations(decoded)
-        SessionRoles.normalize(&loaded)
+        let roleNormalizationChanged = SessionRoles.normalize(&loaded)
         for i in loaded.indices {
             // #191: while the run is stopped on the user, the surfacing fields are the pause's
             // inputs — `lastGoalEvaluation` is the only thing Accept/Reject act on and the only
@@ -3808,7 +3814,7 @@ class AppState {
             }
             loaded[i].messages = loaded[i].messages.map(LLMErrorMessage.migrateLegacy)
         }
-        return loaded
+        return (loaded, roleNormalizationChanged)
     }
 
     /// Quiet period before a debounced save fires.
@@ -4020,9 +4026,13 @@ class AppState {
             let result = try store.loadAll()
             loadedSkippedRows = result.skipped
             loadedRepairFailed = result.repairFailed
-            let loaded = Self.sanitizeLoaded(result.conversations)
+            let (loaded, roleNormalizationChanged) = Self.sanitizeLoaded(result.conversations)
             self.conversations = loaded
             self.selectedConversationId = Self.selectLaunchConversation(loaded)?.id
+            // #480 review item 5: persist the repair, not just this in-memory copy — otherwise
+            // the loser of a duplicate-role (or invalid-role) cleanup keeps its stale role in the
+            // store and can win it back at the next launch.
+            for id in roleNormalizationChanged { markChanged(id, .metadata) }
             // A whole-table corruption can be thousands of rows; one line each would bury
             // everything else in the log.
             let logCap = 10

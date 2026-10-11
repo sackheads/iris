@@ -112,7 +112,7 @@ struct LLMErrorMessageTests {
     func sanitizeLoadedMigrates() throws {
         let legacy = ChatMessage(role: .agent, content: "Error calling LLM: HTTP 429: " + giantBody)
         let conv = Conversation(title: "t", messages: [ChatMessage(role: .user, content: "hi"), legacy])
-        let loaded = AppState.sanitizeLoaded([conv])
+        let loaded = AppState.sanitizeLoaded([conv]).conversations
         let msgs = try #require(loaded.first?.messages)
         #expect(msgs.count == 2)
         #expect(msgs[0].role == .user)

@@ -61,22 +61,35 @@ enum SessionRoles {
     /// survive `normalizedName` unchanged (a value written before validation existed, or edited
     /// directly in the store) is cleared too. §4.4: skills never survive a role loss, so every
     /// branch that nils `role` here clears `sessionCard?.skills` with it.
-    static func normalize(_ conversations: inout [Conversation]) {
+    ///
+    /// Returns the ids this pass actually changed, so the load path (#480 review item 5) can
+    /// `markChanged` them — this function only touches the in-memory array, and without that the
+    /// loser of a duplicate-role repair keeps its stale role in the store and can win it back at
+    /// the next launch.
+    @discardableResult
+    static func normalize(_ conversations: inout [Conversation]) -> Set<UUID> {
         var keeper: [String: Int] = [:]
+        var changed: Set<UUID> = []
         for i in conversations.indices {
             guard let role = conversations[i].role else { continue }
             guard mayHoldRole(conversations[i]), SessionRoles.normalizedName(role) == role else {
-                conversations[i].role = nil; conversations[i].sessionCard?.skills = []; continue
+                conversations[i].role = nil; conversations[i].sessionCard?.skills = []
+                changed.insert(conversations[i].id)
+                continue
             }
             if let j = keeper[role] {
                 if conversations[i].updatedAt > conversations[j].updatedAt {
-                    conversations[j].role = nil; conversations[j].sessionCard?.skills = []; keeper[role] = i
+                    conversations[j].role = nil; conversations[j].sessionCard?.skills = []
+                    changed.insert(conversations[j].id)
+                    keeper[role] = i
                 } else {
                     conversations[i].role = nil; conversations[i].sessionCard?.skills = []
+                    changed.insert(conversations[i].id)
                 }
             } else {
                 keeper[role] = i
             }
         }
+        return changed
     }
 }
