@@ -618,7 +618,17 @@ class AppState {
     }
 
     var subagentWriteLedger: [UUID: [String]] = [:]
-    var pendingApprovals: [ToolApprovalRequest] = []
+    var pendingApprovals: [ToolApprovalRequest] = [] {
+        // D6 decision 7: every mutation passes through here, so a new ask meets the notification
+        // policy and a gone one's banner is withdrawn without any site having to remember to.
+        didSet { approvalsChanged(from: oldValue) }
+    }
+    /// Where notifications go: nil unless `IrisApp.init` installed one in a real `.app` bundle
+    /// (D6 decision 8). Never set by `init`, which every test runs.
+    @ObservationIgnored var notificationSink: (any NotificationSink)?
+    /// The app's state when the policy decides. `.off` until `IrisApp.init` replaces it, so a
+    /// sink installed with no context still posts nothing.
+    @ObservationIgnored var notificationContext: @MainActor () -> NotificationContext = { .off }
     /// Fail-closed denials recorded for background (unattended) conversations (#187) — never
     /// enqueued in `pendingApprovals`, since nobody is watching to resolve them. The ledger drains
     /// this per run via `takeBackgroundDenials(for:)` to mark it `blockedOnApproval`. The whole
@@ -3475,6 +3485,9 @@ class AppState {
                 }
             }.value
             guard written, let self else { return }
+            // Only once the run is really acknowledged: a failed write leaves it blocked, and
+            // its banner up.
+            self.withdrawCardBanner(runId: runId)
             await self.refreshLedgerAttention().value
         }
     }
@@ -4258,6 +4271,7 @@ class AppState {
                     emitCommandOutput("Ambiguous run id prefix.", format: .markdown, to: convId)
                 case .found(let id):
                     try ledger.acknowledge(runId: id, at: Date())
+                    withdrawCardBanner(runId: id)
                     refreshLedgerAttention()
                     let short = id.uuidString.lowercased().prefix(8)
                     emitCommandOutput("Acknowledged run \(short).", format: .markdown, to: convId)

@@ -830,6 +830,12 @@ actor JobRunner {
         await MainActor.run { state.bumpRunLogRevision() }
     }
 
+    /// The blocked run's banner, if one is up: the claim acknowledged the run (D6 decision 7).
+    private func withdrawCardBanner(_ runId: UUID) async {
+        guard let state else { return }
+        await MainActor.run { state.withdrawCardBanner(runId: runId) }
+    }
+
     /// D6 decision 5: one activity of `job` began (`+1`) or ended (`-1`), told to
     /// `AppState.runningJobs` in one hop (the actor-helper rule). Keyed by the job id, so a gate, a
     /// built-in and an approved call all count, which `engineTurnCounts` never sees.
@@ -1466,6 +1472,7 @@ actor JobRunner {
         // The claim stamped `acknowledgedAt`, so the run is no longer blocked: say so now, not
         // after a call that can take an hour, and not never on a refusal below (D6 decision 16).
         await refreshAttention()
+        await withdrawCardBanner(runId)
 
         let startedAt = now()
         // Pinned to the container whenever the call could run a command: `openConversation`'s

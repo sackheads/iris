@@ -118,11 +118,14 @@ struct LedgerAttentionTests {
         let run = try row(j, .failed, ledger: store.ledger)
         try await value(of: app.refreshLedgerAttention())
         #expect(app.ledgerAttention.failedCount == 1)
+        let sink = NotificationWiringTests.FakeSink()
+        app.notificationSink = sink
 
         app.sendMessage("/jobs ack \(run.id.uuidString.prefix(8))")
         try await landed(app)
 
         #expect(app.ledgerAttention.failedCount == 0)
+        #expect(sink.withdrawn == [run.id.uuidString], "its banner comes down too")
     }
 
     @Test("/jobs pause, resume and delete refresh the snapshot")
@@ -185,12 +188,15 @@ struct LedgerAttentionTests {
         try await value(of: app.refreshLedgerAttention())
         #expect(app.ledgerAttention.blocked.map(\.runId) == [blocked.id])
 
+        let sink = NotificationWiringTests.FakeSink()
+        app.notificationSink = sink
         let approval = Task { await runner.runApproved(runId: blocked.id) }
         var spins = 0
         while !(await call.isRunning), spins < 10_000 { await Task.yield(); spins += 1 }
         try #require(await call.isRunning, "the approved call never started")
         try await landed(app)
         #expect(app.ledgerAttention.blocked.isEmpty, "the claim acknowledged the run before the call began")
+        #expect(sink.withdrawn == [blocked.id.uuidString], "and its banner came down with the claim")
 
         await call.release()
         guard case .dispatched = try await value(of: approval) else {

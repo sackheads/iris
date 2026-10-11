@@ -436,7 +436,7 @@ struct SessionToolsTests {
             app.setSessionCard(for: id, SessionCard(name: "notes-bot", description: "drafting 0.2 notes"))
         }
         #expect(text.contains("You are session \(id.uuidString)"), Comment(rawValue: text))
-        #expect(text.contains("card as \u{201C}notes-bot\u{201D}, doing \u{201C}drafting 0.2 notes\u{201D}"))
+        #expect(text.contains("Your card reads \u{201C}notes-bot\u{201D}, doing \u{201C}drafting 0.2 notes\u{201D}"))
     }
 
     @Test("a lone, uncarded session pays nothing for identity")

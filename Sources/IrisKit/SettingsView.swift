@@ -200,6 +200,11 @@ struct SettingsView: View {
                         .help("If disabled, copies will default to plain text without markdown formatting.")
                     Toggle("Stream responses as they are generated", isOn: $config.streamResponses)
                         .help("Show Iris's reply while the model is still writing it. Turn off to receive whole replies.")
+                    Picker("Notifications", selection: $config.notificationMode) {
+                        Text("Off").tag(NotificationMode.off)
+                        Text("Needs attention").tag(NotificationMode.needsAttention)
+                    }
+                    .help("Needs attention: a banner when a background job is blocked on a call, when a failed run's job is paused by a limit (not by you), or when an approval is waiting and the chat window is not in front. A banner never approves anything: Open shows the details, Deny refuses an approval, Dismiss clears a blocked run. Only the installed app posts them, not swift run.")
                     Toggle("Show model activity LEDs", isOn: $config.showModelLEDs)
                         .help("Show the row of model status lights above the message box. A guard model that is installed but failing still reports itself in the conversation with this off.")
                     Picker("Default emoji skin tone", selection: $config.defaultEmojiSkinTone) {

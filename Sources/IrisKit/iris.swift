@@ -980,7 +980,7 @@ actor IrisEngine {
                                                    hasPeers: Bool = false) -> TurnContext.Section {
         var body = "You are session \(id.uuidString), titled \(Briefing.quoted(title))."
         if let card {
-            body += " Peers see your card as \(Briefing.quoted(card.name)), doing \(Briefing.quoted(card.description, maxBytes: cardDescriptionMaxBytes))."
+            body += " Your card reads \(Briefing.quoted(card.name)), doing \(Briefing.quoted(card.description, maxBytes: cardDescriptionMaxBytes))."
         } else {
             body += " You have no session card yet, so peers see no name for you."
         }
@@ -5482,6 +5482,8 @@ struct IrisApp: App {
             AppState.shared.refreshLedgerAttention()
             AppState.shared.raiseMainWindow = { MainWindow.raise() }
             AppState.shared.openRunLogWindow = { RunLogWindow.open() }
+            // D6 decision 8: only here, and only in a real `.app` bundle.
+            SurfaceInstall.installNotifications(on: AppState.shared)
         }
         Task {
             await SandboxSessionManager.shared.reapOrphans()
