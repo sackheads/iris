@@ -372,8 +372,8 @@ struct SessionToolsTests {
         app.createNewConversation(id: target)
 
         let result = await runToolCall(sendCall(to: target), on: app, as: me)
-        #expect(result.contains("Accepted — sent to"))
-        #expect(result.contains("delivered in the background. You will not be notified when it completes."))
+        #expect(result.contains("Sent msg"))
+        #expect(result.contains("delivered in the background. A reply, if any, arrives as a message."))
         #expect(app.peerDepth(for: target) == 1,
                 "an accepted send carries the sender's depth (0) plus one to the target")
     }
@@ -391,8 +391,8 @@ struct SessionToolsTests {
         #expect(app.hasTurnInFlight(for: target))
 
         let result = await runToolCall(sendCall(to: target), on: app, as: me)
-        #expect(result.contains("Accepted — sent to"))
-        #expect(result.contains("it is busy and will see this at its next turn."))
+        #expect(result.contains("Sent msg"))
+        #expect(result.contains("it is busy and will see it at its next turn."))
         #expect(app.pendingUserMessageCount(for: target) >= 1, "and it is actually in the inbox")
         app.endEngineTurn(for: target)
     }
