@@ -88,34 +88,55 @@ enum SessionDirectory {
     /// Most recently active first (#418). When the set is over the cap, live sessions (busy or
     /// waiting) are kept ahead of idle ones, so a session blocked on the user for a day is not
     /// pushed off the list by twenty tabs someone opened this morning.
+    ///
+    /// Returns rows with `project` unfilled (#480 review item 3): `GitHead.read` is a filesystem
+    /// read — symlink-chasing, and a `gitdir:` that can point at an iCloud or network mount — and
+    /// this function runs inside the caller's `MainActor.run`, alongside everything else reading
+    /// `conversations`. Doing that I/O there blocks the UI actor on a read with no bound of its
+    /// own. Callers fill `project` afterwards, off the MainActor, with `withProjects(_:)`.
     static func peers(in conversations: [Conversation], excluding selfId: UUID, now: Date,
                       status: (Conversation) -> SessionStatus) -> (peers: [SessionPeer], total: Int) {
         let active = activePeers(in: conversations, excluding: selfId)
         // Keyed on the conversation, not `card.updatedAt`, which would rank a session that
-        // re-describes itself above one actually doing work. `project` is filled in below, only
-        // for the rows that survive the cut — `GitHead.read` is a filesystem read per peer, and a
-        // listing of twenty idle tabs plus the one row that keeps its cap should not pay for the
-        // nineteen it is about to drop.
+        // re-describes itself above one actually doing work.
         let all = active.map { c -> (Conversation, SessionPeer) in (c, peer(for: c, now: now, status: status(c), project: false)) }
         let byActivity: (SessionPeer, SessionPeer) -> Bool = {
             $0.lastActive != $1.lastActive ? $0.lastActive > $1.lastActive : $0.id.uuidString < $1.id.uuidString
         }
         let byActivityPair: ((Conversation, SessionPeer), (Conversation, SessionPeer)) -> Bool = { byActivity($0.1, $1.1) }
-        // #469 §4.6: role-holders first and outside the cap — a large worker pool never
-        // truncates a role out of view. The rest keep #418's live-ahead-of-idle cut.
+        // #469 §4.6 / #480 review item 7: role-holders AND the pinned Iris (at most one row) are
+        // both exempt from the 20-entry cap below, so a large worker pool can never push either
+        // out of view — "Iris last" (the README and this tool's own description) is then always
+        // true, rather than true only until enough workers pile up. Workers alone keep #418's
+        // live-ahead-of-idle cut.
         let roles = all.filter { $0.1.kind == .role }.sorted(by: byActivityPair)
-        let rest = all.filter { $0.1.kind != .role }
-        let kept = (rest.filter { $0.1.status.isLive }.sorted(by: byActivityPair)
-                    + rest.filter { !$0.1.status.isLive }.sorted(by: byActivityPair)).prefix(listCap)
-        let ordered = kept.sorted { a, b in
-            a.1.kind != b.1.kind ? (a.1.kind == .worker) : byActivityPair(a, b)   // workers before iris
-        }
-        let final = (roles + ordered).map { c, p -> SessionPeer in
-            var p = p
-            p.project = c.workspacePath.flatMap { GitHead.read(workspace: $0) }
-            return p
-        }
+        let iris = all.filter { $0.1.kind == .iris }
+        let workers = all.filter { $0.1.kind == .worker }
+        // Live-ahead-of-idle decides who SURVIVES the cut — a session blocked on the user for a
+        // day must not be pushed off by twenty tabs opened this morning — but the surviving set
+        // then displays by activity alone, oldest last, same as every other row: `capKeepsLiveSessions`
+        // pins a blocked session kept ahead of fresher idle ones for survival, yet still LAST in
+        // the rendered order, because it is the stalest thing on the list once idle rows that
+        // outrank it by recency are no longer competing for the same cap slot.
+        let kept = (workers.filter { $0.1.status.isLive }.sorted(by: byActivityPair)
+                    + workers.filter { !$0.1.status.isLive }.sorted(by: byActivityPair)).prefix(listCap)
+        let displayOrder = kept.sorted(by: byActivityPair)
+        let final = (roles + displayOrder + iris).map(\.1)
         return (final, active.count)
+    }
+
+    /// Fills `project` for each row by reading ITS OWN `workspace` path (#480 review item 3) —
+    /// there is no need to thread `conversations` or a separate id-to-path map through, since
+    /// `SessionPeer.workspace` already carries exactly the path `peer(for:)` would otherwise read
+    /// `project` from. `nonisolated`: pure file I/O with no actor affinity of its own, so callers
+    /// run it off the MainActor, after the hop that produced `peers` — `list_sessions` and
+    /// `describe_session` in `iris.swift` do, each only for the rows that survived the cut.
+    nonisolated static func withProjects(_ peers: [SessionPeer]) -> [SessionPeer] {
+        peers.map { peer in
+            var peer = peer
+            peer.project = peer.workspace.flatMap { GitHead.read(workspace: $0) }
+            return peer
+        }
     }
 
     /// "<1m", "12m", "3h", "4d": how long ago `date` was, coarse on purpose — a peer deciding

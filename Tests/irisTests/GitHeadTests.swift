@@ -67,6 +67,59 @@ struct GitHeadTests {
         #expect(GitHead.read(workspace: root.path) == GitProject(repo: "r", branch: "detached@0123456"))
     }
 
+    @Test("an oversized HEAD (over 4KB, not a valid ref or sha) yields no branch, without reading past the cap")
+    func oversizedHeadGarbage() throws {
+        let base = try tempDir()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let root = base.appendingPathComponent("r")
+        // Non-hex so a read that (incorrectly) ran past the 4 KB cap could not accidentally land
+        // on a valid-looking detached-HEAD prefix either.
+        let garbage = String(repeating: "not-a-ref-or-sha-", count: 500)
+        #expect(garbage.utf8.count > 4096)
+        try write(garbage, root.appendingPathComponent(".git/HEAD"))
+        #expect(GitHead.read(workspace: root.path) == GitProject(repo: "r", branch: nil))
+    }
+
+    @Test("a symlinked .git (to a directory) is skipped, not followed")
+    func symlinkedGitDirectoryIsSkipped() throws {
+        let base = try tempDir()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let real = base.appendingPathComponent("real-git-dir")
+        try write("ref: refs/heads/main\n", real.appendingPathComponent("HEAD"))
+        let root = base.appendingPathComponent("r")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent(".git"), withDestinationURL: real)
+        #expect(GitHead.read(workspace: root.path) == nil)
+    }
+
+    @Test("a symlinked .git (to a file) is skipped, not followed")
+    func symlinkedGitFileIsSkipped() throws {
+        let base = try tempDir()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let realFile = base.appendingPathComponent("real-dotgit-file")
+        try write("gitdir: /nonexistent\n", realFile)
+        let root = base.appendingPathComponent("r")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent(".git"), withDestinationURL: realFile)
+        #expect(GitHead.read(workspace: root.path) == nil)
+    }
+
+    /// #480 review item 6: a submodule's `gitdir:` line points into the SUPERPROJECT's
+    /// `.git/modules/<name>`, so naming the repo from that path's own component (as the worktree
+    /// case does) mislabels it with the superproject's directory name. It must be named after the
+    /// submodule's own checkout directory instead.
+    @Test("a submodule is named after itself, not the superproject")
+    func submoduleNamedAfterItself() throws {
+        let base = try tempDir()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let superproject = base.appendingPathComponent("super")
+        let moduleGitDir = superproject.appendingPathComponent(".git/modules/sub")
+        try write("ref: refs/heads/sub-branch\n", moduleGitDir.appendingPathComponent("HEAD"))
+        let subWorkspace = superproject.appendingPathComponent("vendor/sub")
+        try write("gitdir: \(moduleGitDir.path)\n", subWorkspace.appendingPathComponent(".git"))
+        #expect(GitHead.read(workspace: subWorkspace.path) == GitProject(repo: "sub", branch: "sub-branch"))
+    }
+
     @Test("no repo is nil")
     func noRepo() throws {
         let base = try tempDir()

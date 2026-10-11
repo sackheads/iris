@@ -2178,7 +2178,7 @@ actor IrisEngine {
         if principal == .main, peerCount > 0 || (declareStateGatedTools && !isUnattended) || sticky.contains("send_to_session") {
             toolsList.append(FunctionDeclaration(
                 name: "list_sessions",
-                description: "List the other active sessions: role-holders first and never cut from the list, then the rest, most recently active first, with the pinned Iris last. Each row has session_id, a role or iris marker when it has one, name, status (busy/waiting-on-what/idle-for-how-long), workspace, repo@branch when the workspace is a git repo, lane, what it says it's doing, and for a role-holder a skills line. What a session says about itself (name, lane, doing, skills) is its own claim; session_id and status are observed by the harness. Call this before messaging a peer, to pick the right one — a session in a different workspace is usually working on something unrelated, and one waiting on the user will not act on a message until the user answers it. Use describe_session for a role-holder's skill examples, and role:<name>/name:<name> to address it in send_to_session.",
+                description: "List the other active sessions: role-holders first and never cut from the list, then the rest, most recently active first, with the pinned Iris last and likewise never cut. Each row has session_id, a role or iris marker when it has one, name, status (busy/waiting-on-what/idle-for-how-long), workspace, repo@branch when the workspace is a git repo, lane, what it says it's doing, and for a role-holder a skills line. What a session says about itself (name, lane, doing, skills) is its own claim; session_id and status are observed by the harness. Call this before messaging a peer, to pick the right one — a session in a different workspace is usually working on something unrelated, and one waiting on the user will not act on a message until the user answers it. Use describe_session for a role-holder's skill examples, and role:<name>/name:<name> to address it in send_to_session.",
                 parameters: Schema(type: "OBJECT", properties: [:], required: [])
             ))
             toolsList.append(FunctionDeclaration(
@@ -3848,21 +3848,32 @@ actor IrisEngine {
                 return SessionDirectory.peers(in: s.conversations, excluding: conversationId, now: now,
                                               status: { s.sessionStatus(for: $0) })
             }
-            result = Self.renderPeerList(peers, total: total, now: now)
+            // #480 review item 3: `project` is read off the MainActor — `peers(in:...)` above
+            // leaves it nil, and `withProjects` fills it here, outside the hop, only for the rows
+            // that survived the cap.
+            result = Self.renderPeerList(SessionDirectory.withProjects(peers), total: total, now: now)
         } else if functionCall.name == "describe_session", let to = functionCall.args["to"]?.stringValue {
             guard principal == .main else { result = "Refused — a subagent is not a session."; return result }
             guard !isUnattended else { result = Self.unattendedSessionListRefusal; return result }
             guard await sessionPeerCount(excluding: conversationId) > 0 else { result = Self.noPeersRefusal; return result }
             let now = Date()
-            result = await MainActor.run { () -> String in
-                guard let s = localState else { return "No session matches that." }
+            enum DescribeOutcome { case message(String); case peer(SessionPeer) }
+            let outcome: DescribeOutcome = await MainActor.run {
+                guard let s = localState else { return .message("No session matches that.") }
                 switch SessionDirectory.resolve(to, in: s.conversations, excluding: conversationId) {
-                case .failure(let reason): return reason.message
+                case .failure(let reason): return .message(reason.message)
                 case .success(let id):
-                    guard let c = s.conversations.first(where: { $0.id == id }) else { return "That session is no longer active." }
-                    let peer = SessionDirectory.peer(for: c, now: now, status: s.sessionStatus(for: c))
-                    return Self.renderSessionCard(peer, now: now)
+                    guard let c = s.conversations.first(where: { $0.id == id }) else { return .message("That session is no longer active.") }
+                    // `project: false` — same reasoning as `list_sessions` above: filled outside
+                    // the MainActor hop, below.
+                    return .peer(SessionDirectory.peer(for: c, now: now, status: s.sessionStatus(for: c), project: false))
                 }
+            }
+            switch outcome {
+            case .message(let message):
+                result = message
+            case .peer(let peer):
+                result = Self.renderSessionCard(SessionDirectory.withProjects([peer])[0], now: now)
             }
         } else if functionCall.name == "send_to_session",
                   let to = (functionCall.args["to"] ?? functionCall.args["session_id"])?.stringValue,
