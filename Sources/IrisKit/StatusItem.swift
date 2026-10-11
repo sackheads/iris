@@ -104,15 +104,29 @@ final class MainWindowTracking {
 
     var isFrontmost: Bool { appIsActive() && (current?.isKeyWindow ?? false) }
 
-    /// Brings the most recently key chat window forward, or opens the scene through `open` only
-    /// when no chat window is left: never a second window while one still exists.
-    func raise(open: (@MainActor () -> Void)?) {
+    /// How to open a chat window when none is left, for a raise that brings no opener of its own:
+    /// the hotkey, and a notification's Open. Adopted from the status item's label at launch,
+    /// replaced by `ChatView`'s own once one appears.
+    private(set) var opener: (@MainActor () -> Void)?
+
+    /// Keeps the first opener offered and ignores later ones: an environment that exists before
+    /// any chat window (the status item's label, its menu) never displaces what is known.
+    func adoptOpener(_ open: @escaping @MainActor () -> Void) {
+        if opener == nil { opener = open }
+    }
+
+    func replaceOpener(_ open: @escaping @MainActor () -> Void) { opener = open }
+
+    /// Brings the most recently key chat window forward, or opens the scene through `open` (else
+    /// the known `opener`) only when no chat window is left: never a second window while one
+    /// still exists.
+    func raise(open: (@MainActor () -> Void)? = nil) {
         activate()
         if let window = current {
             if window.isMiniaturized { window.deminiaturize(nil) }
             window.makeKeyAndOrderFront(nil)
         } else {
-            open?()
+            (open ?? opener)?()
         }
     }
 
@@ -139,20 +153,29 @@ enum MainWindow {
     static let tracking = MainWindowTracking(appIsActive: { NSApp.isActive },
                                              activate: { NSApp.activate(ignoringOtherApps: true) })
     static var current: NSWindow? { tracking.current as? NSWindow }
-    /// `ChatView`'s `openWindow`, for a surface with no SwiftUI environment of its own (a
-    /// notification's Open) once the window has been closed.
-    static var openAction: OpenWindowAction?
+    /// `ChatView`'s `openWindow`, or the status item's until a `ChatView` appears, for a surface
+    /// with no SwiftUI environment of its own (the hotkey, a notification's Open) once no chat
+    /// window is left.
+    static var openAction: OpenWindowAction? {
+        didSet {
+            guard let action = openAction else { return }
+            tracking.replaceOpener { action(id: sceneId) }
+        }
+    }
+
+    /// From an environment that exists before any chat window does (the status item's label at
+    /// launch, its menu). Never replaces one already known.
+    static func adoptOpenAction(_ action: OpenWindowAction) {
+        if openAction == nil { openAction = action }
+    }
 
     static func track(_ window: NSWindow?) { tracking.track(window) }
     static var isVisible: Bool { tracking.isVisible }
     static var isFrontmost: Bool { tracking.isFrontmost }
 
     static func raise(fallback: OpenWindowAction? = nil) {
-        guard let action = fallback ?? openAction else {
-            tracking.raise(open: nil)
-            return
-        }
-        tracking.raise(open: { action(id: sceneId) })
+        guard let fallback else { return tracking.raise() }
+        tracking.raise(open: { fallback(id: sceneId) })
     }
 
     static func hide() { tracking.hide() }
@@ -178,8 +201,14 @@ struct MainWindowTracker: NSViewRepresentable {
 /// #473), so a counted glyph is drawn into one template `NSImage` here. Idle stays the plain symbol.
 struct StatusItemLabel: View {
     let state: AppState
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
+        // The label is drawn at launch even when no window opens (a link's cold start), so this
+        // is the environment certain to exist before the hotkey is pressed (Task 24 follow-up).
+        // In `body`, not `onAppear`: whether a `MenuBarExtra` label runs `onAppear` is unverified,
+        // and the adoption sets an unobserved static, so it triggers no view update.
+        let _ = MainWindow.adoptOpenAction(openWindow)
         let glyph = StatusGlyph.make(state.surfaceAttention, identity: .current)
         if let image = StatusItemImage.make(glyph) {
             Image(nsImage: image)
@@ -265,6 +294,6 @@ struct StatusMenu: View {
     /// The menu has an environment of its own, so a closed window can reopen from here even
     /// before `ChatView` ever appeared to hand over its action.
     private func adoptOpenAction() {
-        if MainWindow.openAction == nil { MainWindow.openAction = openWindow }
+        MainWindow.adoptOpenAction(openWindow)
     }
 }

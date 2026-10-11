@@ -394,4 +394,50 @@ struct MainWindowTrackerTests {
         tracker.toggleFromHotkey(state: state)
         #expect(raises == 2)
     }
+
+    @Test("with no window, a raise opens through the adopted opener")
+    func adoptedOpenerOpens() {
+        let (tracker, _, _) = makeTracker()
+        var opened = 0
+        tracker.adoptOpener { opened += 1 }
+        tracker.raise()
+        #expect(opened == 1)
+    }
+
+    @Test("the first adoption stays; a replacement wins; an explicit open beats both")
+    func openerPrecedence() {
+        let (tracker, _, _) = makeTracker()
+        var calls: [String] = []
+        tracker.adoptOpener { calls.append("label") }
+        tracker.adoptOpener { calls.append("menu") }
+        tracker.raise()
+        tracker.replaceOpener { calls.append("chat") }
+        tracker.raise()
+        tracker.raise(open: { calls.append("explicit") })
+        #expect(calls == ["label", "chat", "explicit"])
+    }
+
+    @Test("with a window open, a raise never opens, whatever opener is known")
+    func windowBeatsOpener() {
+        let (tracker, _, _) = makeTracker()
+        var opened = 0
+        tracker.adoptOpener { opened += 1 }
+        let window = FakeWindow()
+        tracker.track(window)
+        tracker.raise()
+        #expect(opened == 0)
+        #expect(window.calls == ["front"])
+    }
+
+    @Test("the hotkey after a windowless start opens the chat window (Task 24 follow-up)")
+    func hotkeyAfterWindowlessStart() throws {
+        let (tracker, _, _) = makeTracker()
+        var opened = 0
+        tracker.adoptOpener { opened += 1 }          // the status item's label, at launch
+        let app = AppState(store: try ConversationStore.inMemory(),
+                           tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        app.raiseMainWindow = { tracker.raise() }
+        tracker.toggleFromHotkey(state: app)
+        #expect(opened == 1)
+    }
 }
