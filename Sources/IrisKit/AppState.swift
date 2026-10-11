@@ -945,8 +945,8 @@ class AppState {
         return rotating && inRotation
     }
 
-    /// Whether Esc/Stop has anything to reach in `conversationId`: its own turn or rotation, or a
-    /// background subagent working for it while it is idle (#236), settled ones included: a Stop
+    /// Whether Esc/Stop has anything to reach in `conversationId`: its own turn or rotation, a
+    /// follow-up turn still waiting to start, or a background subagent working for it while it is idle (#236), settled ones included: a Stop
     /// while one is being graded must still record `.parent` so its result does not wake the
     /// parent (`stopBackgroundSubagents`). Wider than `isThinking(in:)` on
     /// purpose; the indicator stays scoped to the conversation's own turn. Both Esc guards
@@ -955,6 +955,9 @@ class AppState {
         guard let conversationId else { return false }
         return isThinking(in: conversationId)
             || !backgroundSubagents(under: conversationId, stoppableOnly: false).isEmpty
+            // A follow-up turn waiting out its delay (a reprompt, the goal-complete skill check):
+            // nothing is in flight yet, but Esc must still be able to cancel it (#474).
+            || engine?.goalLoopIsLive(for: conversationId) == true
     }
 
     func enqueuePendingUserMessage(text: String, attachments: [FileAttachment], for conversationId: UUID, isPeer: Bool = false) {
