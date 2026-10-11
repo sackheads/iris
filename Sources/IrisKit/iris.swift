@@ -3955,6 +3955,15 @@ actor IrisEngine {
                 result = "A name is required."
                 return result
             }
+            // A name built entirely of default-ignorable code points (a lone zero-width space) or
+            // of newlines is non-blank by `.whitespaces` — that check above does not catch it —
+            // but canonicalizes to nothing: `SessionRoles.canonicalKey` strips the one and folds
+            // the other away. Refused the same way, with the same message, rather than stored as
+            // a handle nothing can read or type.
+            guard !SessionRoles.canonicalKey(name).isEmpty else {
+                result = "A name is required."
+                return result
+            }
             // #246: bound what is STORED, not only what the listing renders. This card is
             // persisted to the `sessionCard` column and decoded on every launch, so an unbounded
             // one is a cost carried forever by every future reader. Capped here, at the point the

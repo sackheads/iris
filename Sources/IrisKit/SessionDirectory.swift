@@ -71,11 +71,12 @@ enum SessionDirectory {
 
     /// One conversation's row. Shared by `peers(in:...)` and `describe_session`'s direct lookup,
     /// which must be able to build a peer that the 20-entry cap below would otherwise hide.
-    /// `project` defaults to true (read `GitHead` now) for that single-row caller; the bulk
-    /// `peers(in:...)` below passes false and fills it in itself, only for rows that survive the
-    /// cut — a listing otherwise reads every active session's `.git` on every call, most of which
-    /// the cut then throws away.
-    static func peer(for c: Conversation, now: Date, status: SessionStatus, project: Bool = true) -> SessionPeer {
+    /// `project` has no default: both callers pass `false` and fill it in afterwards with
+    /// `withProjects(_:)`, off the MainActor — a listing or a single-row lookup reading `.git`
+    /// inline, inside the MainActor hop both run under, would block the UI actor on filesystem
+    /// I/O with no bound of its own. A default here was unused by any caller and invited a third
+    /// one to reintroduce exactly that inline read by omission.
+    static func peer(for c: Conversation, now: Date, status: SessionStatus, project: Bool) -> SessionPeer {
         let kind: SessionKind = c.isPinned ? .iris : (c.role != nil ? .role : .worker)
         return SessionPeer(id: c.id, name: c.sessionCard?.name, description: c.sessionCard?.description,
                            workspace: c.workspacePath, status: status,

@@ -14,7 +14,9 @@ struct GitProject: Equatable, Sendable {
 /// anywhere) is skipped rather than opened. Only a regular file (or, for `.git` itself, a plain
 /// directory) is read, and never with `String(contentsOf:)`: that has no size cap and a `gitdir:`
 /// line can point anywhere, including an iCloud or network mount, so each read is capped at 4 KB
-/// through `FileHandle`.
+/// through `FileHandle`. A symlinked `.git` is a dead end: the walk returns nil there rather than
+/// continuing upward, so a workspace sitting under an unrelated outer repo is never credited with
+/// it.
 enum GitHead {
     static let maxDepth = 32
     private static let maxReadBytes = 4096
@@ -69,8 +71,10 @@ enum GitHead {
                     }
                     return GitProject(repo: repo, branch: branch(gitDir: gitDir))
                 }
-                // A symlink, FIFO, socket, or anything else: not a `.git` this walk can trust.
-                // Fall through and keep walking up rather than opening it.
+                // A symlink, FIFO, socket, or anything else: not a `.git` this walk can trust, and
+                // a dead end rather than something to walk past — continuing upward could credit
+                // this workspace with an unrelated repo that happens to sit further up the tree.
+                return nil
             }
             let parent = dir.deletingLastPathComponent()
             if parent.path == dir.path { return nil }

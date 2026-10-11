@@ -104,6 +104,40 @@ struct GitHeadTests {
         #expect(GitHead.read(workspace: root.path) == nil)
     }
 
+    /// A symlinked `.git` is a dead end, not a reason to keep walking up: an outer directory that
+    /// happens to BE a real repo must not get credited to a workspace whose own `.git` is a
+    /// symlink. Walking past it would misreport the OUTER repo as this workspace's project rather
+    /// than correctly reporting that this workspace has none.
+    @Test("a symlinked .git does not fall through to a real repo further up")
+    func symlinkedGitStopsTheWalkEvenUnderARealRepo() throws {
+        let base = try tempDir()
+        defer { try? FileManager.default.removeItem(at: base) }
+        // The outer directory IS a repo.
+        try write("ref: refs/heads/outer\n", base.appendingPathComponent(".git/HEAD"))
+        let realGitDir = base.appendingPathComponent("elsewhere-git-dir")
+        try write("ref: refs/heads/inner\n", realGitDir.appendingPathComponent("HEAD"))
+        let workspace = base.appendingPathComponent("workspace")
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: workspace.appendingPathComponent(".git"), withDestinationURL: realGitDir)
+        #expect(GitHead.read(workspace: workspace.path) == nil)
+    }
+
+    /// Pins the 4 KB read cap against the exact shape #480 review item 3 was worried about: a
+    /// `HEAD` that starts with a valid ref prefix but keeps going well past the cap. The read
+    /// must never hand back anywhere near the full 5,000-character branch name.
+    @Test("a HEAD far longer than 4KB never yields its full branch name")
+    func headLongerThanCapIsBounded() throws {
+        let base = try tempDir()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let root = base.appendingPathComponent("r")
+        let longBranch = String(repeating: "a", count: 5_000)
+        try write("ref: refs/heads/" + longBranch, root.appendingPathComponent(".git/HEAD"))
+        let project = GitHead.read(workspace: root.path)
+        #expect(project?.repo == "r")
+        let branchLength = project?.branch?.count ?? 0
+        #expect(branchLength < 4_096, "branch length \(branchLength) must be bounded well under the 5,000-char input")
+    }
+
     /// #480 review item 6: a submodule's `gitdir:` line points into the SUPERPROJECT's
     /// `.git/modules/<name>`, so naming the repo from that path's own component (as the worktree
     /// case does) mislabels it with the superproject's directory name. It must be named after the

@@ -615,6 +615,26 @@ struct SessionToolsTests {
         #expect(app.conversations.first { $0.id == me }?.sessionCard == nil)
     }
 
+    /// A name that is non-blank by `CharacterSet.whitespaces` (neither a zero-width space nor a
+    /// newline is in that set) but canonicalizes to nothing — `SessionRoles.canonicalKey` strips
+    /// default-ignorable code points and folds newlines to a space that then collapses away —
+    /// must be refused the same way an all-whitespace name already is, not stored as a handle
+    /// nothing can read or type.
+    @Test("set_session_card refuses a name that canonicalizes to nothing", arguments: ["\u{200B}", "\n"])
+    func setSessionCardRefusesBlankCanonicalName(_ name: String) async {
+        let app = AppState(); app.conversations.removeAll()
+        let me = UUID()
+        app.createNewConversation(id: me)
+        app.createNewConversation(id: UUID())
+
+        let call = FunctionCall(name: "set_session_card",
+                                args: ["name": .string(name), "description": .string("something")],
+                                id: "c1")
+        let result = await runToolCall(call, on: app, as: me)
+        #expect(result.contains("A name is required."))
+        #expect(app.conversations.first { $0.id == me }?.sessionCard == nil)
+    }
+
     @Test("a subagent's forged set_session_card call is refused by the handler")
     func subagentSetCardRefused() async {
         let app = AppState(); app.conversations.removeAll()
