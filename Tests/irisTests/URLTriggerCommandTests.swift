@@ -200,6 +200,27 @@ struct URLTriggerCommandTests {
         #expect(types.contains(URLTriggerLinkSheet.transientType))
     }
 
+    private final class RecordingPasteboard: LinkPasteboard {
+        var calls: [String] = []
+        func prepareForNewContents(with options: NSPasteboard.ContentsOptions) -> Int {
+            calls.append(options.contains(.currentHostOnly) ? "prepare:currentHostOnly" : "prepare"); return 0
+        }
+        func setData(_ data: Data?, forType dataType: NSPasteboard.PasteboardType) -> Bool {
+            calls.append(dataType.rawValue); return true
+        }
+        func setString(_ string: String, forType dataType: NSPasteboard.PasteboardType) -> Bool {
+            calls.append("string"); return true
+        }
+    }
+
+    @Test("Copy marks the item before it writes the link, so no poll ever sees it unmarked")
+    func copyMarksFirst() {
+        let board = RecordingPasteboard()
+        URLTriggerLinkSheet.copy("iris-dev://run-job/x", to: board)
+        #expect(board.calls == ["prepare:currentHostOnly", URLTriggerLinkSheet.concealedType.rawValue,
+                                URLTriggerLinkSheet.transientType.rawValue, "string"])
+    }
+
     @Test("the sheet text is plain words: Text(String) shows markdown literally")
     func sheetTextIsPlain() {
         #expect(!JobsCommand.urlSheetText("pr-sweep").contains("`"))

@@ -10,6 +10,15 @@ struct RevealedURLTrigger: Identifiable, Equatable, Sendable {
     let url: String
 }
 
+/// The three pasteboard calls Copy makes, so a test can see their order.
+protocol LinkPasteboard {
+    func prepareForNewContents(with options: NSPasteboard.ContentsOptions) -> Int
+    func setData(_ data: Data?, forType dataType: NSPasteboard.PasteboardType) -> Bool
+    func setString(_ string: String, forType dataType: NSPasteboard.PasteboardType) -> Bool
+}
+
+extension NSPasteboard: LinkPasteboard {}
+
 /// Shows a URL trigger's link once, with Copy. The link is never written to the conversation:
 /// every message is persisted in plain text, where an approved host `run_command` could read it.
 /// Copying puts it on the pasteboard, which is the owner's choice and lasts until the next copy.
@@ -23,12 +32,13 @@ struct URLTriggerLinkSheet: View {
     static let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
 
     /// For this Mac only, so Universal Clipboard does not carry the link to the owner's other
-    /// devices, and marked so clipboard history does not keep it.
-    static func copy(_ url: String, to pasteboard: NSPasteboard) {
+    /// devices, and marked so clipboard history does not keep it. The markers go on before the
+    /// link: a clipboard manager polling between two writes must never find the link unmarked.
+    static func copy(_ url: String, to pasteboard: some LinkPasteboard) {
         _ = pasteboard.prepareForNewContents(with: .currentHostOnly)
-        pasteboard.setString(url, forType: .string)
-        pasteboard.setData(Data(), forType: concealedType)
-        pasteboard.setData(Data(), forType: transientType)
+        _ = pasteboard.setData(Data(), forType: concealedType)
+        _ = pasteboard.setData(Data(), forType: transientType)
+        _ = pasteboard.setString(url, forType: .string)
     }
 
     var body: some View {
@@ -40,7 +50,7 @@ struct URLTriggerLinkSheet: View {
             Text(JobsCommand.urlSheetText(link.jobName)).font(.callout).foregroundStyle(.secondary)
             HStack {
                 Spacer()
-                Button("Copy") { Self.copy(link.url, to: .general) }
+                Button("Copy") { Self.copy(link.url, to: NSPasteboard.general) }
                 Button("Done", action: onDone).keyboardShortcut(.defaultAction)
             }
         }

@@ -1197,7 +1197,12 @@ rather than adding a line each. A link carries no input, so nothing in it reache
 At most three URL runs of a job start in any hour; a link held behind a running job counts as
 one from the moment it is held. A fourth is refused before admission: it writes no row, never
 counts toward the breaker and never pauses the job. The three that are admitted are ordinary runs:
-with the job's own cadence they can still trip the breaker or spend its budget. If
+with the job's own cadence they can still trip the breaker or spend its budget. A failed URL
+run is retried by the scheduler after 1, 5 and 25 minutes, as any failed run is, and those retries
+are not URL runs, so
+a failing job can see three URL runs plus their retries in an hour; one URL run on a failing job
+can walk the retry ladder all the way to "failed 3 times; paused". A job whose own
+`maxRunsPerHour` is 1 to 3 can trip its breaker within the three admitted runs. If
 `schedule_job` or `register_directory_watcher` changes what the job does (its prompt, profile,
 grant or budgets), or lifts a pause you put on it, the link is turned off, and Iris says so.
 

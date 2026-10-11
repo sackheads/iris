@@ -199,6 +199,25 @@ final class JobLedger: JobUsageReading, Sendable {
         notifyJobsChanged()
     }
 
+    /// Pauses a job unless its owner already has: one write, so a `/jobs pause` that lands
+    /// while a run is going is never replaced by a reason the runner reaches afterwards (the
+    /// retry ladder's, a gate's). An owner's pause replaced that way could be lifted by a model's
+    /// re-schedule without turning the URL trigger off (`upsert` treats only an owner's pause
+    /// as one). Returns whether it paused; false for an owner-paused job or one that is gone.
+    @discardableResult
+    func pauseUnlessOwnerPaused(jobId: UUID, reason: String) throws -> Bool {
+        let owner = Self.ownerPauseReasons.sorted()
+        let changed: Bool = try writer.write { db in
+            try db.execute(sql: """
+                UPDATE jobs SET pausedReason = ?
+                WHERE id = ? AND (pausedReason IS NULL OR pausedReason NOT IN (\(owner.map { _ in "?" }.joined(separator: ", "))))
+                """, arguments: StatementArguments([reason, jobId.uuidString] + owner))
+            return db.changesCount > 0
+        }
+        if changed { notifyJobsChanged() }
+        return changed
+    }
+
     /// Stamps when a job last actually started a turn, without touching its cadence. The runner
     /// writes it as a run begins: the scheduler hands a trigger over before it knows whether
     /// admission will refuse it, so a refused fire must not move the field `/jobs` prints as "last

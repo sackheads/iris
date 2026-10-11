@@ -963,7 +963,9 @@ actor JobRunner {
     private func pause(job: Job, origin: FireOrigin, reason: String, at: Date,
                        note: String? = nil) async {
         do {
-            try ledger.setPaused(jobId: job.id, reason: reason)
+            // An owner's pause stands: it is what keeps a model's re-schedule from making a URL
+            // link live again, and the job is stopped either way. Nothing to record or tell.
+            guard try ledger.pauseUnlessOwnerPaused(jobId: job.id, reason: reason) else { return }
         } catch {
             print("[JobRunner] could not pause \(job.name): \(error)")
         }
@@ -1613,8 +1615,9 @@ actor JobRunner {
                 try ledger.setRetry(jobId: job.id, attempt: job.retryAttempt + 1, nextFireAt: at)
             case .pause(let reason):
                 // The attempt count is left where it is: `/jobs resume` clears both, and until
-                // then the table can say how the job got here.
-                try ledger.setPaused(jobId: job.id, reason: reason)
+                // then the table can say how the job got here. An owner's pause set mid-run
+                // stands (`pauseUnlessOwnerPaused`).
+                try ledger.pauseUnlessOwnerPaused(jobId: job.id, reason: reason)
             }
         } catch {
             print("[JobRunner] could not record the retry state of \(job.name): \(error)")
