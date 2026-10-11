@@ -749,6 +749,14 @@ A run ends in one of five statuses:
 A run that says nothing is a failure, not a success: "it worked and had nothing to report" and "it
 never got as far as a reply" must not look the same on a card.
 
+**The Run Log window** (the menu bar item, then **Open Run Log…**) shows every row, newest first,
+running rows and built-ins included: started, duration, job, trigger kind, status, weighted tokens
+and outcome. Gate checks that found nothing are hidden unless **Show gate checks** is on. A failed
+or blocked run nobody has acknowledged offers **Acknowledge**, the one-click way to clear a plain
+failure from the menu's count. A blocked run offers **Show card**, because the call and Vibecop's
+verdict are on the card and the log never approves anything. A run whose transcript is still kept
+opens it in the main window; one that retention has pruned says so.
+
 ## Event cards and the Iris conversation
 
 When a run ends, one **event card** is delivered: job name, status, the one-line outcome, tokens,
@@ -802,10 +810,10 @@ five-minute agent loop. Raw run output never enters the destination's messages.
 
 The menu bar item carries the same news without opening the window. A blocked run that nobody has
 acknowledged turns the icon to `!` with a count until the run is cleared: dismissed on its card,
-acknowledged with `/jobs ack`, approved with **Approve and run**, or gone with its job when you
-`/jobs delete` it. So does a job paused by its breaker, a budget, its retry ladder, a failing
-gate, a vanished folder, a built-in this build does not know, or a schedule that never matches,
-until you `/jobs resume` (or delete) it. A plain failure, including one still on its retry
+acknowledged with `/jobs ack` or the Run Log window's **Acknowledge**, approved with **Approve
+and run**, or gone with its job when you `/jobs delete` it. So does a job paused by its breaker, a
+budget, its retry ladder, a failing gate, a vanished folder, a built-in this build does not know,
+or a schedule that never matches, until you `/jobs resume` (or delete) it. A plain failure, including one still on its retry
 ladder, and a job you paused with `/jobs pause` are counts in the menu only. While a job is
 running, the icon shows how many.
 
@@ -1080,7 +1088,7 @@ pause reason the table prints, on the `interrupted` row and on the card.
 | Form | What it does |
 | --- | --- |
 | `/jobs` | A table of every job — name, trigger (with its gate, if it has one), its policy where it departs from the defaults, when it next fires (or why it is paused), how its last run ended, its weighted tokens today against its daily budget and its runs in the last hour against the breaker — then one line per watch with what its last burst saw and what it has absorbed since launch (see "Watches"), one paragraph per granted job with its mounts and network (see "Grants"), then the day's weighted tokens across every job, then one line per unacknowledged failure with the first eight characters of the run's id |
-| `/jobs ack <run id>` | Marks a failed or blocked run as seen: it leaves the failure list, and it stops being exempt from retention. Takes a full id or the first eight or more characters of one, as a card prints it; an ambiguous prefix is refused rather than guessed |
+| `/jobs ack <run id>` | Marks a failed or blocked run as seen: it leaves the failure list, and it stops being exempt from retention. Takes a full id or the first eight or more characters of one, as a card prints it; an ambiguous prefix is refused rather than guessed. The Run Log window's Acknowledge does the same in one click |
 | `/jobs pause <name>` | Stops a job firing, with "paused by user" as the reason the table shows |
 | `/jobs resume <name>` | Clears the pause *and* the retry ladder, and recomputes the next fire from the job's own schedule |
 | `/jobs run <name>` | Fires the job now, through the same admission a scheduled fire meets. Says it is starting straight away, then reports what admission decided once the fire is over — an overlap, the breaker or an exhausted budget is named rather than reported as a run. The result itself arrives as a card. A paused or disabled job is refused up front |

@@ -71,7 +71,7 @@ Each decision gives its default and the reason for it. A reviewer should weigh t
 4. **The status item is the existing `MenuBarExtra`, with a label that changes.**
    - Menu bar images are template-rendered, so the states differ in **shape**, not colour. Idle is the base symbol. Running is the base symbol plus the count as text. Action required is the base symbol plus `!` and the count.
    - The base symbol is `sparkles` for release and `hammer` for dev, so two running builds can be told apart.
-   - The menu lists the reasons with counts ("2 approvals waiting", "pr-sweep blocked: run_command", "1 job paused (budget)", "3 failed runs"). Each row opens the main window on the conversation or card concerned. It also has "Open Run Log…" and a working "Show Chat".
+   - The menu lists the reasons with counts ("2 approvals waiting", "pr-sweep blocked: run_command", "1 job paused (budget)", "3 failed runs"). Each row opens the main window on the conversation or card concerned, except the failed-runs row, which opens the Run Log instead (decision 15, PR B): a count of failures has no single card or conversation to land on, and the log is where a failure is acknowledged. It also has "Open Run Log…" and a working "Show Chat".
    - All window raising goes through one `showMainWindow(selecting:)`, which the hotkey reuses (`iris.swift:5220`).
    - The status item is plain SwiftUI, so it works in the bare binary too.
    - *Cost if wrong:* the glyphs are constants.

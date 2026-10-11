@@ -3,7 +3,7 @@ import Foundation
 @testable import IrisKit
 
 /// #187 §9 — `/jobs` is the deterministic surface: it works in every conversation, never wakes a
-/// model turn, and is the only way to acknowledge a failure or delete a job by hand. Parsing and
+/// model turn, and is a way to acknowledge a failure or delete a job by hand. Parsing and
 /// rendering are pure so the table, the failure lines and the run-id matching can be pinned
 /// exactly; the handlers are driven through a real in-memory `AppState`.
 @MainActor
