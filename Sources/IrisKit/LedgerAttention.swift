@@ -28,9 +28,10 @@ struct LedgerAttention: Equatable, Sendable {
     static let empty = LedgerAttention()
 
     /// The pauses the owner made: `/jobs pause`, and the seeder's pause of every job it copied
-    /// into a dev home. Neither waits on anyone, so neither lights the icon or notifies.
-    static let ownerPauseReasons: Set<String> = [JobsCommand.pausedByUserReason,
-                                                 DevHomeSeeder.copiedJobPausedReason]
+    /// into a dev home. Neither waits on anyone, so neither lights the icon or notifies. One set,
+    /// the ledger's (ruling R4): it also decides which pauses no unattended write may replace and
+    /// which a model may not lift without turning the URL trigger off.
+    static var ownerPauseReasons: Set<String> { JobLedger.ownerPauseReasons }
 
     static func make(unacknowledged: [JobRun], paused: [Job]) -> LedgerAttention {
         var out = LedgerAttention()

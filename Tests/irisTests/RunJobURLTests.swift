@@ -529,6 +529,28 @@ struct RunJobURLTests {
         _ = try store.ledger.runs(jobId: job.id, limit: 10)
     }
 
+    @Test("each run of a URL fire's loop is counted in runningJobs once, in and out")
+    func runningJobsCountsEachRunOnce() async throws {
+        let (_, app, job, client, minted) = try queueApp()
+        let runner = try #require(await app.engine.jobRunner())
+        var seen: [Int] = []
+        app.runningJobsDidChange = { seen.append($0[job.id]?.activities ?? 0) }
+        var tasks: [Task<JobRunner.Admission?, Never>] = []
+
+        #expect(open(app, minted, into: &tasks) == .fired(job.id))
+        try await client.waitForArrivals(1)
+        #expect(app.runningJobs[job.id]?.activities == 1)
+        #expect(await runner.fire(job: job, origin: .manual) == .queued)
+        await client.turnstile.release()
+        try await client.waitForArrivals(2)          // the held run, inside L1's loop
+        #expect(app.runningJobs[job.id]?.activities == 1)
+        await client.turnstile.release()
+        _ = try await settle(tasks)
+
+        #expect(app.runningJobs[job.id] == nil)
+        #expect(seen == [1, 0, 1, 0], "one in and one out per run: \(seen)")
+    }
+
     @Test("a held run that is itself held again leaves its links waiting in the new hold")
     func reheldPassKeepsItsLinks() async throws {
         let job = Job(name: "url-rehold", prompt: "Reply with just the word tick.",
