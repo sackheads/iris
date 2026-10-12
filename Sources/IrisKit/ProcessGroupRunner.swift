@@ -41,6 +41,9 @@ final class ProcessGroupRunner: @unchecked Sendable {
     static let abandonGraceSeconds: Double = 1
 
     private let queue = DispatchQueue(label: "iris.process-group")
+    private let registry: LiveProcessGroups
+
+    init(registry: LiveProcessGroups = .shared) { self.registry = registry }
 
     // Everything below is read and written on `queue` only.
     private var pid: pid_t = 0
@@ -102,8 +105,9 @@ final class ProcessGroupRunner: @unchecked Sendable {
     /// is not `run_command` (which layers its own `withTimeout` on top) wants (#364).
     static func capture(executable: String, arguments: [String], environment: [String: String]?,
                         currentDirectory: String? = nil, stdin: Data? = nil, mergeStderr: Bool = false,
-                        timeoutSeconds: Double?, onKilled: (@Sendable () -> Void)? = nil) async -> Result<Output, Error> {
-        let runner = ProcessGroupRunner()
+                        timeoutSeconds: Double?, onKilled: (@Sendable () -> Void)? = nil,
+                        registry: LiveProcessGroups = .shared) async -> Result<Output, Error> {
+        let runner = ProcessGroupRunner(registry: registry)
         return await withTaskCancellationHandler {
             await runner.run(executable: executable, arguments: arguments, environment: environment,
                              currentDirectory: currentDirectory, stdin: stdin, mergeStderr: mergeStderr,
@@ -121,6 +125,13 @@ final class ProcessGroupRunner: @unchecked Sendable {
             guard self.pid > 0 else { self.cancelled = true; return }
             self.beginTermination()
         }
+    }
+
+    /// SIGKILL to the whole group now, synchronously, for a process about to `_exit` (#463).
+    /// Through the queue, so it never signals a group whose leader was reaped. Never call it
+    /// from this runner's own queue.
+    func killNow() {
+        queue.sync { signalGroup(SIGKILL) }
     }
 
     // MARK: - On `queue`
@@ -216,6 +227,7 @@ final class ProcessGroupRunner: @unchecked Sendable {
             return resume(.failure(POSIXError(POSIXErrorCode(rawValue: rc) ?? .EIO)))
         }
         pid = child
+        registry.add(self)
         outSource = drain(outFDs[0], isStdout: true)
         if !mergeStderr { errSource = drain(errFDs[0], isStdout: false) }
         if let inFDs, let stdin { inSource = feed(inFDs[1], stdin) }
@@ -326,6 +338,7 @@ final class ProcessGroupRunner: @unchecked Sendable {
         closeInput()
         var raw: Int32 = 0
         while waitpid(pid, &raw, 0) == -1, errno == EINTR {}
+        registry.remove(self)   // reaped, and the ladder is over
         let signal = raw & 0x7f
         let status = signal == 0 ? (raw >> 8) & 0xff : 128 + signal
         if terminating { onKilled?() }
