@@ -5496,7 +5496,7 @@ struct IrisApp: App {
         //
         // D6 decision 14: who held the store before this app takes it. Reads only the lock file,
         // never the store, so the rule above (nothing touches the store before the acquire) holds.
-        let priorHolder = LaunchLock.read(at: IrisPaths.default.guiLockFile)
+        let priorHolder = LaunchLock.read(at: IrisPaths.default.storeLockFile)
         GUILock.acquire()
         IrisMigrator.migrate(.default)
         ShippedSkills.seedIfNeeded(.default)

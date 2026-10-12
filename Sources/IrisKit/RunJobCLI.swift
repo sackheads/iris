@@ -231,7 +231,7 @@ enum GUILock {
     /// otherwise a takeover that had just read a dead pid would move the app's fresh lock aside and
     /// claim the store under it. Best-effort like every write here: no lock, and it writes anyway.
     /// `pid` is a test seam, standing in for an app that is not this process.
-    static func acquire(at url: URL = IrisPaths.default.guiLockFile,
+    static func acquire(at url: URL = IrisPaths.default.storeLockFile,
                         pid: Int32 = ProcessInfo.processInfo.processIdentifier) {
         let directory = url.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -241,7 +241,7 @@ enum GUILock {
 
     /// Gives it back, if it is ours to give: a lock file naming another live process belongs to
     /// another app instance, and this one must not delete it on its way out.
-    static func release(at url: URL = IrisPaths.default.guiLockFile) {
+    static func release(at url: URL = IrisPaths.default.storeLockFile) {
         guard case .held(let pid) = state(at: url),
               pid == ProcessInfo.processInfo.processIdentifier else { return }
         try? FileManager.default.removeItem(at: url)
@@ -338,7 +338,7 @@ enum RunJobCLI {
                     store openStore: @autoclosure () throws -> ConversationStore,
                     client: any LLMClientProtocol,
                     runner injectedRunner: JobRunner? = nil,
-                    lockPath: URL = IrisPaths.default.guiLockFile,
+                    lockPath: URL = IrisPaths.default.storeLockFile,
                     protectionEnabled: Bool? = nil,
                     gate: (@Sendable (Gate, String?) async -> GateResult)? = nil,
                     out: (String) -> Void = { print($0) },

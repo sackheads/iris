@@ -1,0 +1,203 @@
+import Darwin
+import Foundation
+import os
+
+/// `Darwin.flock` names the C struct, and inside `Syscalls` a bare `flock` names the property.
+private func systemFlock(_ fd: Int32, _ operation: Int32) -> Int32 { flock(fd, operation) }
+
+/// #463: one writer per home. Whoever holds this `flock` is the only process that may open the
+/// home's `conversations.sqlite`: the app, one `--run-job`, the seeder, or (on its own scratch
+/// path) `--perf`.
+///
+/// - `flock(2)`, never `fcntl`/`lockf`: a POSIX lock drops when *any* descriptor for the file
+///   closes, including a read of the payload.
+/// - The descriptor is opened `O_CLOEXEC`, so no child keeps the lock alive, and kept in a
+///   process-lifetime table: never closed, never `dup`ed (a `dup` loses `FD_CLOEXEC`), never
+///   wrapped in anything that closes on `deinit`. `claim` returns a value with no ownership, so a
+///   dropped result releases nothing. The kernel releases it when the process dies, however.
+/// - The file is never unlinked or renamed. Others may replace it (a pre-#463 app's atomic write,
+///   an editor, the old docs' "delete the file"), so every successful `flock` checks it locked the
+///   file that is at the path now.
+/// - The payload only describes the holder. The lock decides who holds it.
+enum StoreLock {
+    enum Kind: String, Sendable {
+        case app
+        case runJob = "run-job"
+        case seedDevHome = "seed-dev-home"
+        /// `--perf`'s scratch workspace lock (plan note 3). No GUI ever reads it.
+        case perf
+    }
+
+    struct Holder: Equatable, Sendable {
+        let pid: Int32
+        let kind: Kind
+        /// The CLI argument as typed. Resolving a name needs the store, which needs the lock.
+        let job: String?
+    }
+
+    enum Claim: Equatable, Sendable {
+        case acquired
+        /// Someone else holds it. nil while their payload is empty, unparsable or names a dead pid
+        /// (a new holder between its `flock` and its `pwrite`): re-read, don't guess.
+        case held(Holder?)
+        /// A pre-#463 process: a bare pid naming a live process, in a file it never flocks.
+        case legacy(pid: Int32)
+        /// The lock could not be taken or advertised: refuse, never open unlocked (decision 4).
+        case failed(detail: String)
+    }
+
+    /// The syscalls a test needs to fail, plus a hook between the open and the `flock`.
+    struct Syscalls: Sendable {
+        var flock: @Sendable (Int32, Int32) -> Int32 = { fd, operation in systemFlock(fd, operation) }
+        var pwrite: @Sendable (Int32, UnsafeRawPointer, Int, off_t) -> Int = { Darwin.pwrite($0, $1, $2, $3) }
+        var afterOpen: @Sendable (_ attempt: Int) -> Void = { _ in }
+        static let live = Syscalls()
+    }
+
+    static let maxAttempts = 3
+    static let replacedDetail = "the lock file kept being replaced while it was claimed"
+
+    /// Path to descriptor, for every lock this process holds. Written once per path, never removed.
+    private static let descriptors = OSAllocatedUnfairLock<[String: Int32]>(initialState: [:])
+
+    private static func key(_ url: URL) -> String { url.standardizedFileURL.path }
+
+    static func claim(at url: URL, kind: Kind, job: String? = nil, syscalls: Syscalls = .live) -> Claim {
+        let path = key(url)
+        // Everything that can take time happens here, before the first `flock`: from the `flock`
+        // to the `pwrite` only the inode check runs (and one `kill(pid, 0)` for a bare-pid prior
+        // payload), so a holder is never unnamed for longer than a few syscalls (decision 5).
+        let me = getpid()
+        let line = Payload.encode(Holder(pid: me, kind: kind, job: job))
+        let directory = url.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            return .failed(detail: "could not create \(directory.path): \(error.localizedDescription)")
+        }
+        for attempt in 0..<maxAttempts {
+            let fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
+            guard fd >= 0 else { return .failed(detail: errnoDetail("open", path, errno)) }
+            syscalls.afterOpen(attempt)
+            // Read before the `flock` (plan note 1): only a bare pid matters here, and a pre-#463
+            // writer replaces the file by path, which the inode check below catches.
+            let priorPid = Payload.legacyPid(readAll(fd))
+            guard syscalls.flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+                let code = errno
+                close(fd)
+                if code == EWOULDBLOCK { return .held(readHolder(at: url)) }
+                return .failed(detail: errnoDetail("flock", path, code))
+            }
+            guard isStillAtPath(fd, path) else {
+                close(fd)
+                continue
+            }
+            if let pid = priorPid, pid != me, isAlive(pid) {
+                close(fd)   // releases a lock this process never advertised
+                return .legacy(pid: pid)
+            }
+            let written = line.withUnsafeBytes { syscalls.pwrite(fd, $0.baseAddress!, $0.count, 0) }
+            guard written == line.count else {
+                let code = errno
+                close(fd)
+                return .failed(detail: errnoDetail("write", path, code))
+            }
+            guard ftruncate(fd, off_t(line.count)) == 0 else {
+                let code = errno
+                close(fd)
+                return .failed(detail: errnoDetail("truncate", path, code))
+            }
+            descriptors.withLock { $0[path] = fd }
+            return .acquired
+        }
+        return .failed(detail: "\(replacedDetail): \(path)")
+    }
+
+    /// `claim`, retrying a held lock whose holder has not said what it is, for up to `settle`
+    /// seconds (decision 5's re-read). For the CLI and the seeder, which may block; the app counts
+    /// the same second across its polls instead (plan note 2).
+    static func claimSettling(at url: URL, kind: Kind, job: String? = nil, settle: TimeInterval = 1,
+                              syscalls: Syscalls = .live) -> Claim {
+        let deadline = Date().addingTimeInterval(settle)
+        while true {
+            let result = claim(at: url, kind: kind, job: job, syscalls: syscalls)
+            guard case .held(nil) = result, Date() < deadline else { return result }
+            usleep(100_000)
+        }
+    }
+
+    static func holds(_ url: URL) -> Bool {
+        let path = key(url)
+        return descriptors.withLock { $0[path] != nil }
+    }
+
+    /// Empties this process's payload on a clean exit. The lock stays held until the process
+    /// ends. A no-op for a path this process does not hold: a refused or waiting process must
+    /// never erase the holder's payload.
+    static func vacate(at url: URL) {
+        let path = key(url)
+        guard let fd = descriptors.withLock({ $0[path] }) else { return }
+        _ = ftruncate(fd, 0)
+    }
+
+    static func descriptor(for url: URL) -> Int32? {
+        let path = key(url)
+        return descriptors.withLock { $0[path] }
+    }
+
+    /// Who the payload names, if it names a live process. Its own descriptor, opened and closed
+    /// here: harmless with `flock`, which no other descriptor's close can release.
+    static func readHolder(at url: URL) -> Holder? {
+        let fd = open(key(url), O_RDONLY | O_CLOEXEC)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        guard let holder = Payload.decode(readAll(fd)), isAlive(holder.pid) else { return nil }
+        return holder
+    }
+
+    /// Signal 0 asks the kernel without sending anything. `EPERM` is alive and somebody else's.
+    static func isAlive(_ pid: Int32) -> Bool { IrisDefaults.isProcessAlive(pid) }
+
+    enum Payload {
+        static func encode(_ holder: Holder) -> Data {
+            var object: [String: Any] = ["pid": Int(holder.pid), "kind": holder.kind.rawValue]
+            if let job = holder.job { object["job"] = job }
+            let json = (try? JSONSerialization.data(withJSONObject: object,
+                                                    options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data("{}".utf8)
+            return json + Data("\n".utf8)
+        }
+
+        /// Up to the first newline only. A line with none was never finished.
+        static func decode(_ data: Data) -> Holder? {
+            guard let newline = data.firstIndex(of: UInt8(ascii: "\n")),
+                  let object = try? JSONSerialization.jsonObject(with: Data(data[data.startIndex..<newline])) as? [String: Any],
+                  let pid = object["pid"] as? Int, pid > 0, pid <= Int(Int32.max),
+                  let raw = object["kind"] as? String, let kind = Kind(rawValue: raw) else { return nil }
+            return Holder(pid: Int32(pid), kind: kind, job: object["job"] as? String)
+        }
+
+        /// The whole file as a bare positive pid: what pre-#463 binaries wrote.
+        static func legacyPid(_ data: Data) -> Int32? {
+            guard let text = String(data: data, encoding: .utf8),
+                  let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0 else { return nil }
+            return pid
+        }
+    }
+
+    private static func readAll(_ fd: Int32) -> Data {
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        let count = buffer.withUnsafeMutableBytes { Darwin.pread(fd, $0.baseAddress, $0.count, 0) }
+        return count > 0 ? Data(buffer[..<count]) : Data()
+    }
+
+    private static func isStillAtPath(_ fd: Int32, _ path: String) -> Bool {
+        var mine = stat()
+        var there = stat()
+        guard fstat(fd, &mine) == 0, stat(path, &there) == 0 else { return false }
+        return mine.st_dev == there.st_dev && mine.st_ino == there.st_ino
+    }
+
+    private static func errnoDetail(_ call: String, _ path: String, _ code: Int32) -> String {
+        "\(call) \(path): \(String(cString: strerror(code))) (errno \(code))"
+    }
+}

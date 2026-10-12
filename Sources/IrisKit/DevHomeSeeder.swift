@@ -47,7 +47,7 @@ enum DevHomeSeeder {
         // `.unreadable` is held, not free (GUILock's own doc): a lock file that names no pid is
         // still something refusing can recover from, while seeding past it cannot tell whether
         // an app has the store open.
-        switch GUILock.state(at: source.guiLockFile) {
+        switch GUILock.state(at: source.storeLockFile) {
         case .held(let pid): throw Failure.sourceInUse(pid: pid)
         case .unreadable(let path): throw Failure.sourceLockUnreadable(path)
         case .free: break
@@ -98,7 +98,7 @@ enum DevHomeSeeder {
             let to = staging.root.appendingPathComponent(name)
             if name == source.modelsDir.lastPathComponent {
                 try fm.createSymbolicLink(at: to, withDestinationURL: from)
-            } else if from.path != source.guiLockFile.path {
+            } else if from.path != source.storeLockFile.path {
                 try copyEntry(from: from, to: to, sourceRoot: source.root, destRoot: finalDest.root)
             }
         }

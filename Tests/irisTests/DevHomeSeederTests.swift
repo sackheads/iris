@@ -60,7 +60,7 @@ struct DevHomeSeederTests {
     func refusesWhileHeld() throws {
         let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }
         let me = ProcessInfo.processInfo.processIdentifier
-        try Data("\(me)\n".utf8).write(to: src.guiLockFile)
+        try Data("\(me)\n".utf8).write(to: src.storeLockFile)
         #expect(throws: DevHomeSeeder.Failure.sourceInUse(pid: me)) {
             try DevHomeSeeder.seed(from: src, to: dst, identity: .dev,
                                    sourceKeychain: .init(serviceSuffix: ""), destKeychain: .init(serviceSuffix: ".dev"))
@@ -71,8 +71,8 @@ struct DevHomeSeederTests {
     @Test("refuses while the lock file names no readable pid")
     func refusesWhenLockUnreadable() throws {
         let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }
-        try Data("not-a-pid".utf8).write(to: src.guiLockFile)
-        #expect(throws: DevHomeSeeder.Failure.sourceLockUnreadable(src.guiLockFile.path)) {
+        try Data("not-a-pid".utf8).write(to: src.storeLockFile)
+        #expect(throws: DevHomeSeeder.Failure.sourceLockUnreadable(src.storeLockFile.path)) {
             try DevHomeSeeder.seed(from: src, to: dst, identity: .dev,
                                    sourceKeychain: .init(serviceSuffix: ""), destKeychain: .init(serviceSuffix: ".dev"))
         }
@@ -83,10 +83,10 @@ struct DevHomeSeederTests {
     func lockFileNotCopied() throws {
         let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }
         // A pid far past any real process, so GUILock reads this as free, not held.
-        try Data("999999\n".utf8).write(to: src.guiLockFile)
+        try Data("999999\n".utf8).write(to: src.storeLockFile)
         _ = try DevHomeSeeder.seed(from: src, to: dst, identity: .dev,
                                    sourceKeychain: .init(serviceSuffix: ""), destKeychain: .init(serviceSuffix: ".dev"))
-        #expect(!FileManager.default.fileExists(atPath: dst.guiLockFile.path))
+        #expect(!FileManager.default.fileExists(atPath: dst.storeLockFile.path))
     }
 
     @Test("rewrites ~/.iris references inside rules/ too, not just memory/")
