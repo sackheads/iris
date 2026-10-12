@@ -11,10 +11,11 @@ private func systemFlock(_ fd: Int32, _ operation: Int32) -> Int32 { flock(fd, o
 ///
 /// - `flock(2)`, never `fcntl`/`lockf`: a POSIX lock drops when *any* descriptor for the file
 ///   closes, including a read of the payload.
-/// - The descriptor is opened `O_CLOEXEC`, so no child keeps the lock alive, and kept in a
-///   process-lifetime table: never closed, never `dup`ed (a `dup` loses `FD_CLOEXEC`), never
+/// - The descriptor is opened `O_CLOEXEC`, so no child keeps the lock alive past its exec, and
+///   kept in a process-lifetime table: never closed, never `dup`ed (a `dup` loses `FD_CLOEXEC`), never
 ///   wrapped in anything that closes on `deinit`. `claim` returns a value with no ownership, so a
 ///   dropped result releases nothing. The kernel releases it when the process dies, however.
+///   A lock the claim gives up is unlocked before it is closed (`release`).
 /// - The file is never unlinked or renamed. Others may replace it (a pre-#463 app's atomic write,
 ///   an editor, the old docs' "delete the file"), so every successful `flock` checks it locked the
 ///   file that is at the path now.
@@ -102,11 +103,11 @@ enum StoreLock {
                 return .failed(detail: errnoDetail("flock", path, code))
             }
             guard isStillAtPath(fd, path) else {
-                close(fd)
+                release(fd)
                 continue
             }
             if let pid = priorPid, pid != me, !staleLegacy, isAlive(pid) {
-                close(fd)   // releases a lock this process never advertised
+                release(fd)   // a lock this process never advertised
                 return .legacy(pid: pid)
             }
             let written = line.withUnsafeBytes { syscalls.pwrite(fd, $0.baseAddress!, $0.count, 0) }
@@ -151,6 +152,14 @@ enum StoreLock {
     /// the lock is still held, so no partial line or stale payload outlives the failed claim.
     private static func abandon(_ fd: Int32) {
         _ = ftruncate(fd, 0)
+        release(fd)
+    }
+
+    /// Unlocks, then closes. `close` alone releases nothing while another reference to the open
+    /// file description exists, and a child mid-`posix_spawn` or between `fork` and `exec` holds
+    /// one, `O_CLOEXEC` or not, until its exec. `LOCK_UN` acts on the description itself.
+    private static func release(_ fd: Int32) {
+        _ = systemFlock(fd, LOCK_UN)
         close(fd)
     }
 
