@@ -367,12 +367,24 @@ struct ToolApprovalRequest: Identifiable {
 @MainActor
 @Observable
 class AppState {
-    /// The single app-wide AppState. `ChatView` and `SubagentManager` MUST share one instance —
+    /// The app's one `AppState`. `ChatView` and `SubagentManager` MUST share one instance —
     /// SwiftUI evaluates a `@State`'s default expression on every view re-init, so
-    /// `@State var state = AppState()` was constructing several AppStates (each registering itself
-    /// as the SubagentManager global and racing on UserDefaults). Referencing the singleton means
-    /// the expression returns the same object every time.
-    static let shared = AppState()
+    /// `@State var state = AppState()` was constructing several AppStates. Referencing the
+    /// singleton means the expression returns the same object every time.
+    ///
+    /// #463 decision 14: it traps unless this process is the app and holds its home's store lock.
+    /// Everything else — `--run-job`, `--perf`, `--bench`, the seeder, every test — builds an
+    /// `AppState(store:)` of its own. A second `AppState` over one store is the #463 bug.
+    static var shared: AppState {
+        guard ProcessRole.mayUseSharedAppState(role: ProcessRole.current,
+                                               holdsStore: StoreLock.holds(IrisPaths.default.storeLockFile)) else {
+            // Worded so the source scan (Review Focus 5) does not read it as a use.
+            fatalError("the shared AppState was reached outside the app's own store holder (role: "
+                       + "\(String(describing: ProcessRole.current))). Build an AppState(store:) instead (#463).")
+        }
+        return sharedInstance
+    }
+    private static let sharedInstance = AppState()
 
     var conversations: [Conversation] = []
     var selectedConversationId: UUID?

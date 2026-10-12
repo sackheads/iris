@@ -11,6 +11,7 @@ public enum IrisMain {
         AppDefaultsImport.runIfNeeded()
         // `run` is @MainActor, so the @MainActor entry points can execute directly.
         if let perf = PerfCLI.parse(CommandLine.arguments) {
+            ProcessRole.set(.perf)
             switch perf {
             case .success(let cmd):
                 exit(await PerfCLI.execute(cmd, environment: .process))
@@ -19,9 +20,11 @@ public enum IrisMain {
                 exit(64)
             }
         } else if let benchOptions = BenchCLI.parse(CommandLine.arguments) {
+            ProcessRole.set(.bench)
             await BenchCLI.run(benchOptions)
             exit(0)
         } else if let invocation = RunJobCLI.parse(arguments: CommandLine.arguments) {
+            ProcessRole.set(.runJob)
             // The real store and the real model client (#187 §8): a `--run-job` measurement is only
             // worth anything if it is the run the scheduler would have done. No volatile defaults and
             // no `HeadlessMode`: approvals fail closed exactly as unattended. `store:` is an
@@ -42,12 +45,14 @@ public enum IrisMain {
             StoreLock.vacate(at: IrisPaths.default.storeLockFile)
             _exit(code)
         } else if CommandLine.arguments.contains("--seed-dev-home") {
+            ProcessRole.set(.seed)
             let code = DevHomeSeeder.runCLI()
             // Last (P6): until now the source lock's payload names this seeder, so an app launched
             // mid-seed waits. A no-op when the claim was refused.
             StoreLock.vacate(at: IrisPaths.release.storeLockFile)
             exit(code)
         } else {
+            ProcessRole.set(.app)
             IrisApp.main()
         }
     }

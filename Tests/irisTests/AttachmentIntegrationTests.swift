@@ -42,8 +42,8 @@ final class AttachmentIntegrationTests: XCTestCase {
     }
 
     @MainActor
-    func testAppStateSendMessageWithAttachments() {
-        let appState = AppState.shared
+    func testAppStateSendMessageWithAttachments() throws {
+        let appState = AppState(store: try ConversationStore.inMemory())
         appState.createNewConversation()
         guard let convId = appState.selectedConversationId else {
             XCTFail("Failed to get selected conversation ID")
@@ -79,8 +79,8 @@ final class AttachmentIntegrationTests: XCTestCase {
     }
 
     @MainActor
-    func testAutoTitleWithEmptyTextAndAttachment() {
-        let appState = AppState.shared
+    func testAutoTitleWithEmptyTextAndAttachment() throws {
+        let appState = AppState(store: try ConversationStore.inMemory())
         appState.createNewConversation()
         guard let convId = appState.selectedConversationId else {
             XCTFail("Failed to get selected conversation ID")
