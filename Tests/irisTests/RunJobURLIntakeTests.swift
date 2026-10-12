@@ -72,6 +72,64 @@ struct RunJobURLIntakeTests {
         #expect(try store.ledger.runs(jobId: job.id, limit: 1).first?.triggerKind == "url")
     }
 
+    // The drain re-reads the job fresh from the ledger, through the same `handleRunJobURL` a live
+    // arrival uses: nothing cached at hold time is trusted at drain time. Each case below changes
+    // the job between the hold and the drain and expects exactly what a fresh link opened after
+    // that change would get.
+
+    @Test("the control case: a held link whose job is unchanged fires at the drain")
+    func drainFiresWhenNothingChanged() async throws {
+        let (store, app, job, link) = try makeApp()
+        app.receiveRunJobURL(link)
+        #expect(app.urlIntake == .starting([link]))
+        app.jobsBecameReady()
+        _ = try await value(of: try #require(app.urlFireTask))
+        #expect(try store.ledger.runs(jobId: job.id, limit: 1).first?.triggerKind == "url")
+    }
+
+    @Test("a held link whose token was rotated before the drain is refused, not fired on the old digest")
+    func drainRefusesARotatedToken() throws {
+        let (store, app, job, link) = try makeApp()
+        app.receiveRunJobURL(link)
+        let rotated = try #require(URLTriggerToken.generate())
+        try store.ledger.setURLTrigger(jobId: job.id, tokenHash: URLTriggerToken.digest(rotated))
+        app.jobsBecameReady()
+        #expect(try store.ledger.runs(jobId: job.id, limit: 5).isEmpty)
+        #expect(irisLines(app) == [RunJobURL.refusalLine(subject: nil, reason: RunJobURL.unknownTokenReason, count: 1)])
+    }
+
+    @Test("a held link whose trigger was turned off before the drain is refused, not fired on the old digest")
+    func drainRefusesATurnedOffTrigger() throws {
+        let (store, app, job, link) = try makeApp()
+        app.receiveRunJobURL(link)
+        try store.ledger.setURLTrigger(jobId: job.id, tokenHash: nil)
+        app.jobsBecameReady()
+        #expect(try store.ledger.runs(jobId: job.id, limit: 5).isEmpty)
+        #expect(irisLines(app) == [RunJobURL.refusalLine(subject: nil, reason: RunJobURL.unknownTokenReason, count: 1)])
+    }
+
+    @Test("a held link whose job was paused before the drain is refused with the pause, not fired")
+    func drainRefusesAPausedJob() throws {
+        let (store, app, job, link) = try makeApp()
+        app.receiveRunJobURL(link)
+        try store.ledger.setPaused(jobId: job.id, reason: JobsCommand.pausedByUserReason)
+        app.jobsBecameReady()
+        #expect(try store.ledger.runs(jobId: job.id, limit: 5).isEmpty)
+        var paused = job
+        paused.pausedReason = JobsCommand.pausedByUserReason
+        #expect(irisLines(app) == [RunJobURL.refusalLine(subject: job.name, reason: RunJobURL.pausedReason(paused), count: 1)])
+    }
+
+    @Test("a held link whose job was deleted before the drain is refused, not fired")
+    func drainRefusesADeletedJob() throws {
+        let (store, app, job, link) = try makeApp()
+        app.receiveRunJobURL(link)
+        try store.ledger.delete(jobId: job.id)
+        app.jobsBecameReady()
+        #expect(try store.ledger.runs(jobId: job.id, limit: 5).isEmpty)
+        #expect(irisLines(app) == [RunJobURL.refusalLine(subject: nil, reason: RunJobURL.unknownTokenReason, count: 1)])
+    }
+
     @Test("a flood while starting holds only the first few and refuses the rest in one line")
     func startupFloodIsCapped() throws {
         let (_, app, _, _) = try makeApp()
