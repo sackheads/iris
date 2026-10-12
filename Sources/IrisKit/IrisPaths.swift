@@ -141,11 +141,11 @@ struct IrisPaths: Sendable {
     /// before `run-dev.sh`), so it was never seeded; `run-dev.sh` and perf say so.
     var seedMarker: URL { root.appendingPathComponent(".seeded-from-release") }
 
-    /// The lock the running app holds beside the store, so `iris --run-job` refuses rather than
-    /// writing behind a live `AppState` (#187 §8). Held by `GUILock`; created at launch and
-    /// removed at exit, with a dead pid in it treated as stale. Beside the database on purpose:
-    /// it guards *that file*, and a volatile copy gets its own lock for its own store.
-    var guiLockFile: URL { conversationsDB.appendingPathExtension("lock") }
+    /// The lock that makes one process at a time the store's only writer (#463). Whoever holds
+    /// its `flock` may open `conversations.sqlite`; nobody else may. Held for the holder's whole
+    /// life and never unlinked, so the kernel releases it on any exit, SIGKILL included. Beside
+    /// the database on purpose: it guards *that file*, and a volatile copy gets its own lock.
+    var storeLockFile: URL { conversationsDB.appendingPathExtension("lock") }
 
     // memory/
     var memoryDir: URL { root.appendingPathComponent("memory") }

@@ -17,9 +17,10 @@ protocol NotificationCenterClient: AnyObject {
 
 /// The one file that touches `UserNotifications` (D6 decisions 7 and 8). Built only by
 /// `SurfaceInstall.installNotifications`, after the `.app` bundle check:
-/// `UNUserNotificationCenter.current()` raises in a process without one. The system client sets
-/// itself as the center's delegate when it is built, in `IrisApp.init`, before `NSApplication`
-/// finishes launching, so a click that cold-launches the app is still delivered.
+/// `UNUserNotificationCenter.current()` raises in a process without one. The system client is
+/// the center's delegate from `applicationWillFinishLaunching` (`SurfaceInstall.installNotificationDelegate`),
+/// before the store may be open, so a click that cold-launches the app is still delivered, even
+/// while it waits for a `--run-job` (#463). This sink reuses that one client.
 @MainActor
 final class UserNotificationSink: NotificationSink {
     private let center: any NotificationCenterClient
@@ -32,7 +33,9 @@ final class UserNotificationSink: NotificationSink {
     var unsettledCountForTesting: Int { unsettled.count }
 
     convenience init(state: AppState) {
-        self.init(state: state, center: SystemNotificationCenter())
+        // A free lock opens the store in `IrisApp.init`, before will-finish: the client is made
+        // here then, with the same gate route, and will-finish reuses it.
+        self.init(state: state, center: SurfaceInstall.notificationDelegate())
     }
 
     init(state: AppState, center: any NotificationCenterClient) {
@@ -117,12 +120,37 @@ final class UserNotificationSink: NotificationSink {
 /// captured across isolation: each call asks `.current()` itself, and the async ones do so from
 /// a nonisolated helper.
 @MainActor
-private final class SystemNotificationCenter: NSObject, NotificationCenterClient, UNUserNotificationCenterDelegate {
-    var onResponse: (@MainActor (NotificationResponse) -> Void)?
+final class SystemNotificationCenter: NSObject, NotificationCenterClient, UNUserNotificationCenterDelegate {
+    /// The one delegate, built by whichever of will-finish and the sink asks first. The center
+    /// does not retain its delegate.
+    private(set) static var shared: SystemNotificationCenter?
 
-    override init() {
+    /// The sink's handler, set once the store is open. Reached only through `LaunchGate`, whose
+    /// `deliverNotification` calls it: the gate keeps the order of clicks held while waiting.
+    var onResponse: (@MainActor (NotificationResponse) -> Void)?
+    /// Where every click goes first: `LaunchGate`, which holds it until Iris is open (#463).
+    /// Touches no `AppState`.
+    private var route: @MainActor (NotificationResponse) -> Void = { _ in }
+    /// Whether a banner may be shown: not while Iris waits, since nothing it names can open.
+    private var presenting: @MainActor () -> Bool = { true }
+
+    /// Private: `installEarly` is the only way in, so there is never a second delegate.
+    private override init() {
         super.init()
         UNUserNotificationCenter.current().delegate = self
+    }
+
+    /// The one delegate: built on the first call, returned on every later one. Touches no
+    /// `AppState`, so it can run before anything has built one.
+    @discardableResult
+    static func installEarly(route: @escaping @MainActor (NotificationResponse) -> Void,
+                             presenting: @escaping @MainActor () -> Bool) -> SystemNotificationCenter {
+        if let shared { return shared }
+        let center = SystemNotificationCenter()
+        center.route = route
+        center.presenting = presenting
+        shared = center
+        return center
     }
 
     func authorizationStatus() async -> NotificationPermission.Status { await Self.currentStatus() }
@@ -170,12 +198,15 @@ private final class SystemNotificationCenter: NSObject, NotificationCenterClient
             if let key = key as? String, let value = value as? String { info[key] = value }
         }
         let reply = NotificationResponse(actionId: actionId, userInfo: info)
-        await MainActor.run { self.onResponse?(reply) }
+        await MainActor.run {
+            self.route(reply)
+        }
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
                                             willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
         // The policy already decided whether a banner is worth showing; show what it posted.
-        [.banner, .list]
+        // While Iris waits for the store nothing it posted can be acted on, so show nothing.
+        await MainActor.run { self.presenting() } ? [.banner, .list] : []
     }
 }

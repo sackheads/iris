@@ -108,31 +108,33 @@ enum PerfCLI {
     /// `PerfCLI.execute`'s cleanup `defer`, and `IrisPaths.makeVolatileCopy`'s `copyItem` throws
     /// into a destination that already exists) must never leak into the next run.
     ///
-    /// Reuses `GUILock`'s pid-file protocol rather than inventing a second one: a lock naming a
-    /// dead pid is stale and taken over exactly as the GUI lock is, and a live holder is refused
-    /// rather than raced, so two perf runs started at once cannot clobber the same workspace.
+    /// The lock is `StoreLock`'s, as kind `perf`: a live holder is refused rather than raced, and
+    /// a crashed one's lock is gone with it. It is held for this process's life (#463 decision 2),
+    /// so a second claim here gets `.acquired` from `StoreLock.claim`, which reuses this process's
+    /// hold (plan note 4) instead of conflicting with it.
     static func claimScratchWorkspace(base: URL = FileManager.default.temporaryDirectory) throws -> URL {
         let url = scratchWorkspaceURL(base: base)
         let lockURL = scratchLockURL(base: base)
-        switch GUILock.acquireExclusively(at: lockURL) {
+        switch StoreLock.claimSettling(at: lockURL, kind: .perf) {
         case .acquired:
             break
-        case .held(let pid):
+        case .held(let holder):
+            let who = holder.map { "pid \($0.pid)" } ?? "an unnamed process"
             throw PerfCLIError.usage(
-                "perf: another run (pid \(pid)) already holds the scratch workspace at \(url.path) — wait for it to finish, or stop it")
-        case .blocked(let detail):
-            throw PerfCLIError.usage(
-                "perf: could not claim the scratch workspace lock at \(lockURL.path)" + ": \(detail)")
+                "perf: another run (\(who)) already holds the scratch workspace at \(url.path) — wait for it to finish, or stop it")
+        case .legacy(let pid):
+            throw PerfCLIError.usage("perf: an older Iris build (pid \(pid)) holds \(lockURL.path) — wait for it, or stop it")
+        case .failed(let detail):
+            throw PerfCLIError.usage("perf: could not claim the scratch workspace lock at \(lockURL.path): \(detail)")
         }
         try? FileManager.default.removeItem(at: url)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
 
-    /// Gives back the lock `claimScratchWorkspace` took. Safe to call even when the claim never
-    /// succeeded: `GUILock.release` is itself a no-op unless this process is the holder.
+    /// Empties the scratch lock's payload. The lock itself stays held until the process exits.
     static func releaseScratchWorkspace(base: URL = FileManager.default.temporaryDirectory) {
-        GUILock.release(at: scratchLockURL(base: base))
+        StoreLock.vacate(at: scratchLockURL(base: base))
     }
 
     /// True when a real-lane run can skip the Keychain entirely: Gemini over ADC and Anthropic on
@@ -203,10 +205,9 @@ enum PerfCLI {
             let realMemory = environment.realHome().memoryDir   // the real home, before any override
             if suite.lane == .real {
                 // If anything between this claim and `scratch = dir` throws, the defer below
-                // never sees `scratch`: the lock and the half-built directory are left for the
-                // next run's claim, which reclaims a dead pid's lock and resets the directory.
-                // That relies on the process exiting after `execute` returns (main.swift); a
-                // long-lived host calling `execute` repeatedly would keep the lock instead.
+                // never sees `scratch`: the half-built directory is left for the next run's
+                // claim to reset. The lock goes with this process when it exits (main.swift); a
+                // long-lived host calling `execute` repeatedly reuses its own hold (plan note 4).
                 if let warning = DevHomeSeeder.unseededCopyWarning(standard: .standard, release: .release) {
                     print(warning)
                 }

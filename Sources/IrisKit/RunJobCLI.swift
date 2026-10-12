@@ -1,253 +1,5 @@
 import Foundation
 
-/// The lock file the running app holds beside the conversation store, so a `--run-job` from a
-/// terminal refuses rather than races it (#187 spec §8, ruling R35).
-///
-/// GRDB's WAL would survive two writers, but `AppState` holds conversation state in memory: a CLI
-/// write behind a live app desyncs the UI, and the app then saves its stale copy over the top.
-/// Refusing costs the user one "quit the app first"; racing costs them conversations.
-///
-/// The file holds the holder's pid and nothing else, because the interesting failure is not the
-/// app running — it is the app having *crashed*. A bare "the file exists" lock would then refuse
-/// every run until someone found and deleted it. A pid the kernel no longer knows about is stale
-/// and ignored. (Pid reuse can in principle resurrect a stale lock; the window is a reboot's worth
-/// of pid wraparound, and the cost is the same recoverable refusal.)
-///
-/// Every write here is best-effort: a GUI that cannot create its lock must still launch. The worst
-/// case is exactly today's behaviour, a CLI that does not know the app is up.
-enum GUILock {
-    /// What is holding the lock right now.
-    enum State: Equatable {
-        /// Nothing holds it: no file, or a file naming a process that is gone.
-        case free
-        /// A live Iris process holds it — the app, or another `--run-job`. The file carries a pid
-        /// and nothing else, so which of the two it is cannot be known from here; the refusal
-        /// says both rather than sending the user hunting for an app that is not running.
-        case held(pid: Int32)
-        /// A file that is there but says nothing a pid check can be made of. Held, not free:
-        /// refusing is recoverable (delete it), and two writers at the store is not.
-        case unreadable(path: String)
-    }
-
-    static func state(at url: URL) -> State {
-        switch read(url) {
-        case .absent, .dead: return .free
-        case .live(let pid): return .held(pid: pid)
-        case .unreadable: return .unreadable(path: url.path)
-        }
-    }
-
-    /// What one read of the lock file found. Finer than `State`, which folds "no file" and "a dead
-    /// pid" into `.free`: a takeover must move the second aside and never touch the first, since
-    /// the path may by then hold a live lock linked after the read.
-    private enum Reading { case absent, dead, live(Int32), unreadable }
-
-    private static func read(_ url: URL) -> Reading {
-        // Existence and readability are two questions, and `try?` answers both with the same nil:
-        // no file, a file that is not valid UTF-8, and a file this user may not read all looked
-        // alike, and only the first of them is free. Asked in one read, not an existence check
-        // and then a read: a takeover renaming the file away between the two made a vanished
-        // file read as unreadable, and a racing claimant refused with no holder named (#390).
-        let data: Data
-        do {
-            data = try Data(contentsOf: url)
-        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
-            return .absent
-        } catch {
-            return .unreadable
-        }
-        guard let text = String(data: data, encoding: .utf8),
-              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0 else {
-            return .unreadable
-        }
-        return isAlive(pid) ? .live(pid) : .dead
-    }
-
-    /// Whether `pid` names a live process. Signal 0 asks the kernel without sending anything;
-    /// `EPERM` means it exists and belongs to somebody else, which is still alive. A pid of 0 or
-    /// below names a process group, never one process, so it is not alive here.
-    static func isAlive(_ pid: Int32) -> Bool {
-        guard pid > 0 else { return false }
-        if kill(pid, 0) == 0 { return true }
-        return errno != ESRCH
-    }
-
-    /// What an exclusive claim came back with.
-    enum Claim: Equatable, Sendable {
-        /// The file is this process's: it was created by this call, and `release` will remove it.
-        case acquired
-        /// A live Iris process — the app, or another `--run-job` — already has it.
-        case held(pid: Int32)
-        /// The file is there and says nothing a pid check can be made of, could not be created at
-        /// all, or kept changing hands. `detail` says which, so a refusal always carries a reason.
-        case blocked(detail: String)
-    }
-
-    /// The refusal for a lock file that is there but names no pid.
-    static let unreadableDetail = "it does not hold a readable pid"
-    /// The refusal when every attempt found the file gone or stale again.
-    static let churnDetail = "the lock changed hands during the claim"
-    /// Claims made before giving up with `churnDetail`.
-    static let maxClaimAttempts = 3
-
-    /// Claims the lock for a process that must **refuse** rather than race: the CLI.
-    ///
-    /// Create-with-content, in one atomic step: the pid is written to a private file in the same
-    /// directory and then `link(2)`ed to the lock path, which either succeeds — nothing was there
-    /// and the file now exists *already holding the pid* — or fails `EEXIST`. Checking
-    /// `state(at:)` and then writing cannot do that: two `--run-job` started at the same instant
-    /// both read `.free`, both write, both open the store, and the documented eval-harness use
-    /// (`xargs -P 4 iris --run-job …`) is precisely that shape. Nor can `O_CREAT | O_EXCL` on its
-    /// own: between the create and the `write` the file exists and says nothing, so a loser
-    /// reading it in that window sees a lock with no pid in it and tells the user to delete a file
-    /// that is about to be perfectly valid.
-    ///
-    /// `EEXIST` is not the end of it. A file naming a pid the kernel no longer knows about — a
-    /// crash — is taken over, and a file gone by the time it is read was released in between;
-    /// either way the link is tried again, up to `maxClaimAttempts` in all. Each retry has seen the
-    /// path change hands, so the bound is only reached by churn, and then the refusal says so
-    /// rather than claiming a holder it never saw.
-    ///
-    /// The takeover is the dangerous half: every claimant that read the stale pid goes on to
-    /// remove what is at the lock path, and by then the first taker-over may have linked its live
-    /// lock there. Removing by path cannot tell the two files apart — a `rename(2)` aside is no
-    /// better than an `unlink` at that, and measured 109 double claims in 20,000 two-way races
-    /// (#390). So takeovers are serialized under an `flock(2)` on the lock's directory, which the
-    /// app's `acquire` takes too, and the file is read again inside it: only a file still naming a
-    /// dead pid is moved aside, and a live pid found there is the winner, reported as `.held`. The
-    /// directory rather than a guard file of its own, so nothing is left beside the lock; the
-    /// kernel drops the `flock` with the process, so a crash inside a takeover cannot wedge the
-    /// next one.
-    ///
-    /// The hooks are test seams, each pinning one interleaving: `beforeLink` runs before each
-    /// attempt's link, `afterLinkFailed` between a failed link and the read of who has the file,
-    /// `afterReadingStale` once a dead holder has been read and before the takeover, and
-    /// `duringTakeover` inside it, between the re-read and the move.
-    static func acquireExclusively(at url: URL,
-                                   beforeLink: (_ attempt: Int) -> Void = { _ in },
-                                   afterLinkFailed: () -> Void = {},
-                                   afterReadingStale: () -> Void = {},
-                                   duringTakeover: () -> Void = {}) -> Claim {
-        let directory = url.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        for attempt in 0..<maxClaimAttempts {
-            // Same directory, so the link cannot cross a filesystem, and a name no other process
-            // will pick, so two claims in flight cannot share a staging file.
-            let staged = directory.appendingPathComponent(Self.privateName(beside: url, "pid"))
-            let pid = Data("\(ProcessInfo.processInfo.processIdentifier)\n".utf8)
-            guard (try? pid.write(to: staged)) != nil else {
-                return .blocked(detail: "could not write \(staged.path)")
-            }
-            defer { try? FileManager.default.removeItem(at: staged) }
-
-            beforeLink(attempt)
-            if link(staged.path, url.path) == 0 { return .acquired }
-            // Anything other than "it is already there" is this process's own problem — a
-            // directory it may not write, a full disk — and it is still a refusal: a CLI that
-            // cannot take the lock cannot know whether the app has it, and two writers at one
-            // store is the thing this exists to prevent.
-            guard errno == EEXIST else { return .blocked(detail: String(cString: strerror(errno))) }
-            afterLinkFailed()
-            switch read(url) {
-            case .live(let pid): return .held(pid: pid)
-            case .unreadable: return .blocked(detail: unreadableDetail)
-            // Released between the link and the read: the path is free, so claim it again.
-            case .absent: continue
-            case .dead:
-                afterReadingStale()
-                switch takeOver(staleAt: url, in: directory, duringTakeover: duringTakeover) {
-                case .tryAgain: continue
-                case .held(let pid): return .held(pid: pid)
-                case .blocked(let detail): return .blocked(detail: detail)
-                }
-            }
-        }
-        return .blocked(detail: churnDetail)
-    }
-
-    private enum Takeover { case tryAgain, held(pid: Int32), blocked(detail: String) }
-
-    /// Moves a stale lock out of the way, if it is still stale once this process is the only one
-    /// taking over. See `acquireExclusively` for why the re-read has to happen under the lock.
-    private static func takeOver(staleAt url: URL, in directory: URL,
-                                 duringTakeover: () -> Void) -> Takeover {
-        let outcome = withDirectoryLock(directory) { () -> Takeover in
-            switch read(url) {
-            case .live(let pid): return .held(pid: pid)
-            case .unreadable: return .blocked(detail: unreadableDetail)
-            // Gone already: a taker-over before this one moved it and may be about to link.
-            // Nothing to move, and renaming by path now could move that live lock instead.
-            case .absent: return .tryAgain
-            case .dead:
-                duringTakeover()
-                // Nothing can replace a dead holder's file while this lock is held: `link` needs
-                // the path empty, a takeover waits here, and so does the app's `acquire`, whose
-                // atomic write is a rename over the path.
-                let aside = directory.appendingPathComponent(Self.privateName(beside: url, "stale"))
-                if rename(url.path, aside.path) == 0 {
-                    try? FileManager.default.removeItem(at: aside)
-                } else if errno != ENOENT {
-                    // A stale file this process cannot move would be found stale again on every
-                    // attempt; refuse now, with the reason.
-                    return .blocked(detail: String(cString: strerror(errno)))
-                }
-                return .tryAgain
-            }
-        }
-        switch outcome {
-        case .success(let takeover): return takeover
-        case .failure(let detail): return .blocked(detail: detail)
-        }
-    }
-
-    private enum Locked<T> { case success(T), failure(String) }
-
-    /// Runs `body` holding an exclusive `flock` on `directory`, the lock every writer that
-    /// replaces or removes the lock file by path takes.
-    private static func withDirectoryLock<T>(_ directory: URL, _ body: () -> T) -> Locked<T> {
-        let fd = open(directory.path, O_RDONLY)
-        guard fd >= 0 else { return .failure(String(cString: strerror(errno))) }
-        defer { close(fd) }
-        guard flock(fd, LOCK_EX) == 0 else { return .failure(String(cString: strerror(errno))) }
-        defer { flock(fd, LOCK_UN) }
-        return .success(body())
-    }
-
-    /// A name beside the lock file that belongs to this claim and no other: hidden, so a user
-    /// listing `~/.iris` never sees it, and carrying the pid and a UUID, so two claims racing in
-    /// one process (the tests do exactly that) cannot stage over each other.
-    private static func privateName(beside url: URL, _ purpose: String) -> String {
-        ".\(url.lastPathComponent).\(purpose).\(ProcessInfo.processInfo.processIdentifier)."
-            + UUID().uuidString
-    }
-
-    /// Claims the lock for this process, whatever was there before. Called once, at app launch.
-    ///
-    /// The app overwrites rather than claiming exclusively, and deliberately: it is the owner of
-    /// the store, and a lock file left behind by a killed build must never stop it launching.
-    /// `--run-job` is the side that has to yield, and it does — see `acquireExclusively`.
-    ///
-    /// The write is a rename over the lock path, so it takes the directory lock a takeover holds:
-    /// otherwise a takeover that had just read a dead pid would move the app's fresh lock aside and
-    /// claim the store under it. Best-effort like every write here: no lock, and it writes anyway.
-    /// `pid` is a test seam, standing in for an app that is not this process.
-    static func acquire(at url: URL = IrisPaths.default.guiLockFile,
-                        pid: Int32 = ProcessInfo.processInfo.processIdentifier) {
-        let directory = url.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let write = { try? Data("\(pid)\n".utf8).write(to: url, options: .atomic) }
-        if case .failure = withDirectoryLock(directory, { write() }) { write() }
-    }
-
-    /// Gives it back, if it is ours to give: a lock file naming another live process belongs to
-    /// another app instance, and this one must not delete it on its way out.
-    static func release(at url: URL = IrisPaths.default.guiLockFile) {
-        guard case .held(let pid) = state(at: url),
-              pid == ProcessInfo.processInfo.processIdentifier else { return }
-        try? FileManager.default.removeItem(at: url)
-    }
-}
-
 /// `iris --run-job <id-or-name> [--dry-run] [--json]` (#187 spec §0.5, §8, ruling R35): one job,
 /// fired once, headless, against the real store, printing the ledger row it wrote.
 ///
@@ -329,16 +81,18 @@ enum RunJobCLI {
     /// in-memory store, a fake client and a lock path of their own (AGENTS invariant 7).
     ///
     /// `store` is an autoclosure because the order matters: usage and the lock are decided
-    /// *before* anything opens a database file, so a run refused behind a live app never touches
-    /// the store at all. The lock is then *taken* for the length of the run, which is what keeps
-    /// two CLI runs off one store. `runner` is nil in production — the CLI builds the same
-    /// `AppState`, engine and `JobRunner` the app fires through.
+    /// *before* anything opens a database file, so a run refused behind a live holder never
+    /// migrates, repairs or reads the store (#463 decision 7; pinned by
+    /// `refusedRunNeverOpensTheStore`). The lock is held for the rest of the process. `runner` is
+    /// nil in production — the CLI builds the same `AppState`, engine and `JobRunner` the app
+    /// fires through.
     @MainActor
     static func run(_ invocation: Invocation,
                     store openStore: @autoclosure () throws -> ConversationStore,
                     client: any LLMClientProtocol,
                     runner injectedRunner: JobRunner? = nil,
-                    lockPath: URL = IrisPaths.default.guiLockFile,
+                    lockPath: URL = IrisPaths.default.storeLockFile,
+                    lockSyscalls: StoreLock.Syscalls = .live,
                     protectionEnabled: Bool? = nil,
                     gate: (@Sendable (Gate, String?) async -> GateResult)? = nil,
                     out: (String) -> Void = { print($0) },
@@ -352,37 +106,13 @@ enum RunJobCLI {
             return refuse(invocation.problem ?? "--run-job needs a job id or name",
                           appendingUsage: true)
         }
-        // Taken for a `--dry-run` too, which writes no row: `ConversationStore.onDisk` may *migrate*
-        // the file it opens, and a schema migration running under a live app is a worse failure
-        // than the refusal. Stricter than §8 asks for, and the stricter direction is the cheap one.
-        //
-        // Claim the lock, rather than check it and then take it: the two have to be one syscall or
-        // two `--run-job` invocations started together both read "free" and both build an
-        // `AppState` over the same file — the two in-memory copies of one store that this exists
-        // to prevent, for as long as a model turn. It does not close the other direction: the GUI
-        // never checks, it overwrites, so an app launched *during* a run still races (and,
-        // acquiring second, keeps the lock — `release` below is pid-guarded and will not take the
-        // app's).
-        switch GUILock.acquireExclusively(at: lockPath) {
-        case .acquired:
-            break
-        case .held(let pid):
-            // Named as what the lock file can actually prove: a live Iris process. It is the app
-            // most of the time, but a second `--run-job` takes the same lock and writes the same
-            // bare pid, and telling that user to quit an app that is not running is worse than
-            // telling them the truth. The file is named too, because a pid the kernel has since
-            // handed to something else entirely leaves nothing to wait for and no app to quit.
-            return refuse("another Iris process holds the store (pid \(pid)) — the app, or another "
-                          + "--run-job. Wait for it to finish, or quit the app, and try again; the "
-                          + "CLI will not write to the store behind a live one. If nothing "
-                          + "Iris-shaped is running, that pid belongs to something else now: "
-                          + "delete \(lockPath.path).")
-        case .blocked(let detail):
-            return refuse("another Iris process holds the store, or left \(lockPath.path) behind"
-                          + " (\(detail)); the CLI will not write to the "
-                          + "store behind a live one. Delete that file if nothing is running.")
-        }
-        defer { GUILock.release(at: lockPath) }
+        // Taken for a `--dry-run` too, which writes no row: opening the store may migrate it.
+        // One `flock`, held until this process exits, so two `--run-job` started together cannot
+        // both pass, and an app launched during the run waits behind it (#463).
+        let claim = StoreLock.claimSettling(at: lockPath, kind: .runJob, job: target, syscalls: lockSyscalls)
+        if let refusal = refusal(for: claim, path: lockPath) { return refuse(refusal) }
+        // Not vacated here: `IrisMain` empties the payload just before `_exit`, so an empty
+        // payload never sits under the held lock while this process still runs (decision 5).
 
         let store: ConversationStore
         do {
@@ -408,6 +138,38 @@ enum RunJobCLI {
         return await fire(job: job, store: store, client: client, runner: injectedRunner,
                           protectionEnabled: protectionEnabled, json: invocation.json,
                           out: out, err: err)
+    }
+
+    /// What a claim that did not acquire says, or nil when it did (decision 7). None of these
+    /// tells the user to delete the file: a JSON payload names a process that flocks it, and
+    /// deleting the file under a live holder is what lets a second writer in. Only a bare pid
+    /// (`.legacy`) can name a process that is not Iris at all, a reused pid, so only it says how
+    /// to clear the file, and names it.
+    static func refusal(for claim: StoreLock.Claim, path: URL) -> String? {
+        let wait = "the CLI will not write to the store behind a live one. Try again when it has finished."
+        switch claim {
+        case .acquired:
+            return nil
+        case .held(let holder?):
+            switch holder.kind {
+            case .app:
+                return "the Iris app (pid \(holder.pid)) has this home open; quit it and try again — the CLI will not write behind a live app."
+            case .runJob:
+                let job = holder.job.map { ", job \($0)" } ?? ""
+                return "another --run-job (pid \(holder.pid)\(job)) has this home; \(wait)"
+            case .seedDevHome:
+                return "an iris --seed-dev-home (pid \(holder.pid)) is copying this home; \(wait)"
+            case .perf:
+                return "an iris --perf (pid \(holder.pid)) holds \(path.path); \(wait)"
+            }
+        case .held(nil):
+            return "another Iris process holds \(path.path) and has not said which; \(wait)"
+        case .legacy(let pid):
+            return "an older Iris build (pid \(pid)) holds the store; quit it and try again. If pid \(pid) "
+                + "is not Iris, the pid was reused: delete \(path.path) and try again."
+        case .failed(let detail):
+            return "could not lock the store (\(detail)); the CLI will not open it without the lock."
+        }
     }
 
     /// A full UUID names a job directly; anything else is a name. Both, because a card and `/jobs`

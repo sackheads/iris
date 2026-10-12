@@ -1,7 +1,6 @@
 import Foundation
 import CryptoKit
 import SwiftUI
-import KeyboardShortcuts
 
 /// What one turn may spend before it is stopped (#187 §4). An unattended run has nobody watching
 /// it, so the two ways a turn runs away — rounds that keep spending tokens, and a turn that never
@@ -141,6 +140,14 @@ actor IrisEngine {
     var executor: ToolExecutor {
         var executor = ToolExecutor.shared
         executor.jobToolsProvider = jobToolsProvider()
+        // #489: a skill written through this engine's tools rebuilds this engine's prompt, and
+        // the owner's main engine's too (plan note 14): a delegate's skill must reach the main
+        // chat, whose engine caches its prompt for the life of the app. Never `AppState.shared`.
+        executor.onSkillsChanged = { [weak self, weak state] in
+            await self?.invalidateSystemPrompt()
+            let owner = await MainActor.run { state?.engine }
+            if let owner, owner !== self { await owner.invalidateSystemPrompt() }
+        }
         return executor
     }
 
@@ -3434,9 +3441,10 @@ actor IrisEngine {
     /// bounded by the run's budget and stays allowed.
     static let unattendedBackgroundDelegationRefusal = "Not run: a background run cannot start a subagent in the background; call invoke_subagent again without `background` and it will run within this run's budget."
 
-    /// The failure reason written onto runs that were still `running` when the app came up: the
-    /// last process died in the middle of them and nothing will ever finish them.
-    static let interruptedByQuitReason = "app was not running"
+    /// The failure reason written onto runs that were still `running` when this process opened the
+    /// store: only the lock's holder runs this sweep, so whatever process was running them has
+    /// ended, and nothing will ever finish them (#463 decision 11).
+    static let interruptedByQuitReason = "the Iris process running it ended"
 
     /// Closes out those runs, once per launch, and says how many there were. Once per launch
     /// matters: `AppState.start()` runs once at launch or first window appear, and again from the
@@ -5432,148 +5440,5 @@ extension IrisEngine {
                                                      options: [.sortedKeys, .withoutEscapingSlashes])
         else { return nil }
         return String(decoding: data, as: UTF8.self)
-    }
-}
-
-class AppDelegate: NSObject, NSApplicationDelegate {
-    /// Kept for the life of the app: `NSAppleEventManager` is not documented to retain a handler.
-    private var runJobURLEvents: RunJobURLEvents?
-
-    func applicationWillFinishLaunching(_ notification: Notification) {
-        // Here, not in did-finish: a link that launches Iris arrives between the two (Task 24).
-        // Never `application(_:open:)` or `.handlesExternalEvents`: SwiftUI opened a window per
-        // link with either (owner ruling C2).
-        runJobURLEvents = RunJobURLEvents.installForApp()
-    }
-
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.activate(ignoringOtherApps: true)
-        // Sparkle wants its scheduled checks started after launch, not at construction.
-        MainActor.assumeIsolated {
-            UpdaterController.shared?.start()
-            // D2: a link's cold start opens no window, so `ChatView.onAppear` may never start the
-            // engine; start it here. The window's own call is then a no-op.
-            if AppState.isSetUp() {
-                AppState.shared.startOnce()
-            } else {
-                AppState.shared.refuseRunJobURLsUntilSetUp()
-            }
-        }
-    }
-
-    func applicationWillTerminate(_ notification: Notification) {
-        // Flush BEFORE _exit: it runs no atexit handlers, so it would kill the pending debounced
-        // save and skip the cfprefsd flush, losing every unwritten change (#62).
-        MainActor.assumeIsolated {
-            AppState.shared.flushURLRefusalLines()
-            AppState.shared.flushSave()
-        }
-        // And give the store back to the command line (#187 §8). `_exit` below runs no atexit
-        // handler, so this is the only orderly release; a crash instead leaves a lock naming a
-        // dead pid, which `GUILock` reads as stale.
-        GUILock.release()
-        // Conversations live in their own database now (#163), but settings and other state
-        // still ride on UserDefaults, and `_exit` skips the cfprefsd flush for those too.
-        IrisDefaults.store.synchronize()
-        // Bypass static destructors in llama.cpp ggml-metal to prevent GGML_ASSERT crash on exit
-        _exit(0)
-    }
-}
-
-struct IrisApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    init() {
-        // AppDefaultsImport.runIfNeeded() already ran in IrisMain.run(), before this initializer —
-        // that is the earliest call site (also covers --run-job/--perf/--bench from a bundle
-        // executable) and importOnce is idempotent, so it is not repeated here.
-        //
-        // Next, before anything else in the launch sequence: this claims the store for this app
-        // instance, and `iris --run-job` refuses while the file names a live process (#187 §8).
-        // Nothing above it may touch `conversations.sqlite` — today nothing here does, and keeping
-        // the acquire first is what stops that becoming a window rather than a rule.
-        // Best-effort, deliberately: a lock that cannot be written must not stop the app
-        // launching. `AppDelegate.applicationWillTerminate` gives it back.
-        //
-        // D6 decision 14: who held the store before this app takes it. Reads only the lock file,
-        // never the store, so the rule above (nothing touches the store before the acquire) holds.
-        let priorHolder = LaunchLock.read(at: IrisPaths.default.guiLockFile)
-        GUILock.acquire()
-        IrisMigrator.migrate(.default)
-        ShippedSkills.seedIfNeeded(.default)
-        // Once, in the app, on the one `AppState` that exists here — never from `AppState.init`,
-        // which a test suite runs hundreds of times (#218).
-        //
-        // `assumeIsolated` is safe *here* specifically: `App.init` is documented to run on the
-        // main thread, and this is a synchronous call in it. It is not a general escape hatch —
-        // the same construct trapped in #187's D3 PR B when it was reached from a non-isolated
-        // closure. If this moves anywhere else, it needs a real hop instead.
-        MainActor.assumeIsolated {
-            AppState.shared.installGuardHealthSink()
-            AppState.shared.noteForeignStoreHolder(priorHolder)
-            // D6 decision 16: the snapshot at launch. Here and not in `AppState.init`, which a
-            // test suite runs hundreds of times.
-            AppState.shared.refreshLedgerAttention()
-            AppState.shared.raiseMainWindow = { MainWindow.raise() }
-            AppState.shared.openRunLogWindow = { RunLogWindow.open() }
-            // D6 decision 8: only here, and only in a real `.app` bundle.
-            SurfaceInstall.installNotifications(on: AppState.shared)
-        }
-        Task {
-            await SandboxSessionManager.shared.reapOrphans()
-            while true {
-                try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000) // every 5 min
-                let minutes = await MainActor.run { ConfigManager.shared.sandboxIdleTimeoutMinutes }
-                await SandboxSessionManager.shared.reapIdle(olderThan: TimeInterval(minutes * 60))
-            }
-        }
-        NSApplication.shared.setActivationPolicy(.regular)
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        
-        if let imagePath = Bundle.module.path(forResource: "iris-icon", ofType: "png"),
-           let image = NSImage(contentsOfFile: imagePath) {
-            NSApplication.shared.applicationIconImage = image
-        }
-        
-        // D6 decision 4: the raise goes through `showMainWindow`, like every other surface's.
-        KeyboardShortcuts.onKeyUp(for: .toggleIris) {
-            MainWindow.tracking.toggleFromHotkey(state: AppState.shared)
-        }
-    }
-    
-    var body: some Scene {
-        WindowGroup("Iris", id: MainWindow.sceneId) {
-            ChatView()
-                .tint(.irisIndigo)
-        }
-        .commands {
-            CommandGroup(after: .appSettings) {
-                if let updater = UpdaterController.shared {
-                    CheckForUpdatesButton(updater: updater)
-                }
-                Divider()
-                Button("Rerun Setup Wizard...") {
-                    NotificationCenter.default.post(name: NSNotification.Name("RerunSetupWizard"), object: nil)
-                }
-            }
-        }
-        
-        Window("Diagnostics", id: "diagnostics") {
-            DiagnosticsView()
-        }
-
-        Window("Run Log", id: RunLogWindow.sceneId) {
-            RunLogView(state: AppState.shared)
-        }
-        .defaultSize(width: RunLogView.defaultWidth, height: RunLogView.defaultHeight)
-        
-        MenuBarExtra {
-            StatusMenu(state: AppState.shared)
-        } label: {
-            StatusItemLabel(state: AppState.shared)
-        }
-
-        Settings {
-            SettingsView()
-        }
     }
 }

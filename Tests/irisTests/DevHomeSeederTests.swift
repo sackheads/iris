@@ -3,7 +3,7 @@ import GRDB
 import Testing
 @testable import IrisKit
 
-@Suite("Dev home seeding")
+@Suite("Dev home seeding", .timeLimit(.minutes(1)))
 struct DevHomeSeederTests {
     private func tempHomes() throws -> (IrisPaths, IrisPaths, () -> Void) {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent("seed-\(UUID().uuidString)")
@@ -56,37 +56,59 @@ struct DevHomeSeederTests {
         }
     }
 
-    @Test("refuses while an app holds the source store")
+    @Test("refuses while another process holds the source store, naming it")
     func refusesWhileHeld() throws {
         let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }
-        let me = ProcessInfo.processInfo.processIdentifier
-        try Data("\(me)\n".utf8).write(to: src.guiLockFile)
-        #expect(throws: DevHomeSeeder.Failure.sourceInUse(pid: me)) {
+        let stub = try LockStub.start(holding: src.storeLockFile, payload: #"{"kind":"app","pid":%PID%}"# + "\n")
+        defer { stub.kill() }
+        #expect(throws: DevHomeSeeder.Failure.sourceInUse(pid: stub.pid)) {
             try DevHomeSeeder.seed(from: src, to: dst, identity: .dev,
                                    sourceKeychain: .init(serviceSuffix: ""), destKeychain: .init(serviceSuffix: ".dev"))
         }
         #expect(!FileManager.default.fileExists(atPath: dst.root.path))
     }
 
-    @Test("refuses while the lock file names no readable pid")
-    func refusesWhenLockUnreadable() throws {
+    @Test("refuses a pre-#463 holder (a bare live pid)")
+    func refusesLegacyHolder() throws {
         let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }
-        try Data("not-a-pid".utf8).write(to: src.guiLockFile)
-        #expect(throws: DevHomeSeeder.Failure.sourceLockUnreadable(src.guiLockFile.path)) {
+        let parent = getppid()   // alive, this user's, not us, started before the file was written
+        try Data("\(parent)\n".utf8).write(to: src.storeLockFile)
+        let failure = DevHomeSeeder.Failure.sourceHeldByOlderBuild(pid: parent, lockPath: src.storeLockFile.path)
+        #expect(throws: failure) {
             try DevHomeSeeder.seed(from: src, to: dst, identity: .dev,
                                    sourceKeychain: .init(serviceSuffix: ""), destKeychain: .init(serviceSuffix: ".dev"))
         }
-        #expect(!FileManager.default.fileExists(atPath: dst.root.path))
+        #expect(failure.description.contains(
+            "If pid \(parent) is not Iris, the pid was reused: delete \(src.storeLockFile.path) and try again."))
+        #expect(!DevHomeSeeder.Failure.sourceInUse(pid: 7).description.contains("delete"),
+                "only a bare pid gets deletion advice")
+    }
+
+    // P6: `seed` leaves the payload in place; IrisMain's seed branch vacates just before exit, so
+    // an app launched between the copy and the exit still reads seed-dev-home and waits.
+    @Test("holds the source lock as seed-dev-home while it copies, and keeps it until the process vacates")
+    func holdsTheSourceWhileSeeding() throws {
+        let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }
+        let during = LockedCell<StoreLock.Holder?>(nil)
+        _ = try DevHomeSeeder.seed(from: src, to: dst, identity: .dev,
+                                   sourceKeychain: .init(serviceSuffix: ""), destKeychain: .init(serviceSuffix: ".dev"),
+                                   whileHeld: { during.value = StoreLock.readHolder(at: src.storeLockFile) })
+        let me = StoreLock.Holder(pid: ProcessInfo.processInfo.processIdentifier, kind: .seedDevHome, job: nil)
+        #expect(during.value == me, "an app launched mid-seed reads seed-dev-home, and waits")
+        #expect(StoreLock.holds(src.storeLockFile))
+        #expect(StoreLock.readHolder(at: src.storeLockFile) == me, "seed itself does not vacate (P6)")
+        StoreLock.vacate(at: src.storeLockFile)
+        #expect(try Data(contentsOf: src.storeLockFile).isEmpty)
     }
 
     @Test("a dead-pid lock file is not copied into the new home")
     func lockFileNotCopied() throws {
         let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }
-        // A pid far past any real process, so GUILock reads this as free, not held.
-        try Data("999999\n".utf8).write(to: src.guiLockFile)
+        // A pid far past any real process: a dead bare pid, which the claim takes over.
+        try Data("999999\n".utf8).write(to: src.storeLockFile)
         _ = try DevHomeSeeder.seed(from: src, to: dst, identity: .dev,
                                    sourceKeychain: .init(serviceSuffix: ""), destKeychain: .init(serviceSuffix: ".dev"))
-        #expect(!FileManager.default.fileExists(atPath: dst.guiLockFile.path))
+        #expect(!FileManager.default.fileExists(atPath: dst.storeLockFile.path))
     }
 
     @Test("rewrites ~/.iris references inside rules/ too, not just memory/")

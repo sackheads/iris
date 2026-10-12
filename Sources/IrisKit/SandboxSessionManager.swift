@@ -238,16 +238,16 @@ actor SandboxSessionManager {
 
     private struct SessionClosed: Error {}
 
-    /// Deletes the containers a previous process left behind. Launch only, before anything else
-    /// can have started one.
+    /// Deletes the containers a previous process left behind. Launch only, and only in the process
+    /// holding the home's store lock (#463), before anything else can have started one.
     ///
     /// Everything Iris creates carries `namePrefix`, a gate's per-evaluation container included —
     /// that is deliberate, and it is what makes a gate container a crash left behind sweepable at
     /// all. The price is that the prefix alone no longer means "an orphan", so two sets of names
     /// are spared: this manager's live sessions, the gate containers `GateContainerRegistry` says
     /// are mid-evaluation, and the one-off hook and `run_command` containers
-    /// `EphemeralContainerRegistry` says are running. Nothing schedules this today; the
-    /// exclusions are what keep it from killing live work if anything ever does.
+    /// `EphemeralContainerRegistry` says are running. The one caller is `IrisApp.openStore()`;
+    /// the exclusions keep it from killing live work if anything else ever calls it.
     func reapOrphans() async {
         await reapOrphans(inFlight: {
             await GateContainerRegistry.shared.current()

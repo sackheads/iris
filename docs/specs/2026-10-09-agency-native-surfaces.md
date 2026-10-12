@@ -154,7 +154,7 @@ Each decision gives its default and the reason for it. A reviewer should weigh t
    - Refusals are reported in Iris, coalesced to one line per job per hour with a running count, so a flood cannot fill the conversation.
    - Admitted URL fires still count toward the breaker like any other run. Three of them plus the job's own cadence can still trip it, and that is accepted.
    - *Cost if wrong:* a legitimate Shortcut that fires more often than three times an hour is refused. The limit is a constant.
-14. **The store-lock hazard: a mitigation in D6, the fix in #463.**
+14. **The store-lock hazard: a mitigation in D6, the fix in #463.** Superseded by `docs/specs/2026-10-11-single-writer-store.md`.
    - A URL can launch a closed app while `iris --run-job` holds the store. The app's overwrite then makes two writers.
    - D6 does three things:
      - (a) `IrisApp.init` reads `GUILock.state` before `acquire`, and keeps the foreign pid if one is live.
@@ -191,7 +191,7 @@ Each decision gives its default and the reason for it. A reviewer should weigh t
   - `showMainWindow(selecting:)`;
   - `runJobByHand(job:origin:announceTo:)`;
   - `handleRunJobURL(_:)`, which parses, hashes, looks up, applies the URL limit, defers or fires, and announces. It is callable from a test, with no GUI;
-  - the deferral timer for a foreign lock holder.
+  - the deferral timer for a foreign lock holder. Superseded by `docs/specs/2026-10-11-single-writer-store.md`.
 - **`NotificationPolicy`** (new, pure) and **`UserNotificationSink`** (new, the only file that imports `UserNotifications`): categories, the permission state, posting, withdrawal and responses.
 - **`RunJobURL`** (new, pure): `parse(URL, identity:) -> Result<Token, Refusal>`. **`URLTriggerToken`** (new): generation, base64url and the SHA-256 digest.
 - **`IrisApp` / `AppDelegate`**:
@@ -199,7 +199,7 @@ Each decision gives its default and the reason for it. A reviewer should weigh t
   - the `Run Log` scene;
   - the bundle-guarded notifier install;
   - the bundle-guarded `kAEGetURL` handler, installed in `AppDelegate.applicationWillFinishLaunching` (owner ruling after the window spike: no `application(_:open:)`, no `.handlesExternalEvents`);
-  - the pre-acquire `GUILock.state` read.
+  - the pre-acquire `GUILock.state` read. Superseded by `docs/specs/2026-10-11-single-writer-store.md`.
 - **`RunLogView`** (new) over `runLog(...)`.
 - **Ledger:**
   - migration `v19_job_url_trigger`: a nullable `urlTrigger INTEGER` (NULL means false) and a nullable, unique `urlTokenHash TEXT`;
@@ -252,7 +252,7 @@ Dated specs are history and are not edited.
   - each of these is refused with a line in Iris: a job id, a slug, a query, a fragment, extra path parts, the other build's scheme, an unknown token, a rotated-out token, a token after `off`, a disabled job and a paused job;
   - an accepted fire writes `triggerKind == "url"` and skips the gate;
   - the fourth URL fire in an hour is refused, writes no row, and leaves the breaker count and `pausedReason` unchanged; a flood of refusals posts one coalesced line;
-  - with a live foreign lock holder (a test seam for the pid check), the fire is deferred with a line, fires once the holder is gone, and gives up with "try again" at the deadline.
+  - with a live foreign lock holder (a test seam for the pid check), the fire is deferred with a line, fires once the holder is gone, and gives up with "try again" at the deadline. Superseded by `docs/specs/2026-10-11-single-writer-store.md`.
 - Opt-in and token:
   - a pre-D6 job row loads `urlTrigger == false` and no digest;
   - `on` returns a URL whose token hashes to the stored digest; a second `on` rotates it; `off` clears it;
@@ -272,7 +272,7 @@ Dated specs are history and are not edited.
 - a live ask with the window hidden: the banner appears, Deny unparks the turn with a denial, and resolving the ask in the app withdraws the banner;
 - the icon through idle → running (a one-minute job) → action required (a blocked job) → idle after Dismiss. A failed job leaves the icon alone and raises the menu count. With both builds running, the release and dev icons can be told apart;
 - **The window spike (D2's first step, which gates the rest of D2):** does SwiftUI's `WindowGroup` open a second window on an external URL, and does `.handlesExternalEvents(matching: [])` or `application(_:open:)` alone prevent it? Answered on #187: both variants opened a window; the owner ruled for an AppKit `kAEGetURL` handler.
-- `open 'iris-dev://run-job/<token>'` with the app running, with it quit, and with it quit while a `--run-job` holds the store (the deferral). Then the same from Shortcuts' "Open URL" and from Raycast;
+- `open 'iris-dev://run-job/<token>'` with the app running, with it quit, and with it quit while a `--run-job` holds the store (the deferral, superseded by `docs/specs/2026-10-11-single-writer-store.md`: the app now waits for the run). Then the same from Shortcuts' "Open URL" and from Raycast;
 - the Run Log: a row opens the transcript sheet, and Acknowledge clears the menu's count;
 - the bare `scripts/run-dev.sh`: it launches with no crash and the status item works.
 
@@ -295,7 +295,7 @@ Each PR carries its own slice of §2's docs sweep.
 - Any approve action on a notification (ruling 1).
 - URL parameters of any kind, and URL fires for #330's script actions with arguments (decision 12).
 - Re-displaying a token: only its digest is stored, so a lost URL means `on` again (decision 10).
-- The store-lock fix: the app waiting for a CLI holder, or the CLI yielding (decision 14; #463).
+- The store-lock fix: the app waiting for a CLI holder, or the CLI yielding (decision 14; #463). Superseded by `docs/specs/2026-10-11-single-writer-store.md`.
 - A Dismiss on failed cards, as distinct from Acknowledge in the log.
 - Notifications for completed runs, reflections or the digest. A finer per-kind setting.
 - Making `run-dev.sh` build the `.app`.

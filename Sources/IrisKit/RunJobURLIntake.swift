@@ -2,9 +2,10 @@ import Foundation
 
 /// Where a run-job link waits while Iris starts (D2, owner ruling C2). A cold launch delivers the
 /// link between `applicationWillFinishLaunching` and `applicationDidFinishLaunching`, before the
-/// job bookkeeping `IrisEngine.start()` does first, which closes every `running` row as the last
-/// session's. A link fired before that could have its own run closed under it, so links wait until
-/// it is done, in order, and are then handled as if they had just arrived.
+/// job bookkeeping `IrisEngine.start()` does first, which closes every `running` row as a dead
+/// process's. So links wait here until that is done, in order, and are then handled as if they had
+/// just arrived. A link that came while another process held the store waited at `LaunchGate`
+/// first, and arrives here at `finishLaunch` (#463 decision 12).
 enum RunJobURLIntake: Equatable, Sendable {
     /// Waiting for the job bookkeeping, holding these links.
     case starting([URL])
@@ -54,6 +55,13 @@ extension AppState {
         guard case .starting(let held) = urlIntake else { return }
         urlIntake = .notSetUp
         for _ in held { refuseURLFire(job: nil, reason: RunJobURL.notSetUpReason, to: activityConversationId()) }
+    }
+
+    /// The gate's overflow, said once in Iris after the launch completes. The links were never
+    /// read, so nothing can say which jobs they named.
+    func noteLinksDroppedWhileWaiting(_ count: Int) {
+        guard count > 0 else { return }
+        appendMessage(role: .system, content: RunJobURL.droppedWhileWaitingLine(count), to: activityConversationId())
     }
 
     /// The rule `ChatView` uses to choose between the setup wizard and starting the engine.

@@ -14,11 +14,8 @@ public final class SkillCurator: Sendable {
 
     private init() {}
 
-    public func curateSkills() async -> CurationReport {
-        await curateSkills(paths: .default)
-    }
-
-    func curateSkills(paths: IrisPaths) async -> CurationReport {
+    func curateSkills(paths: IrisPaths = .default,
+                      onSkillsChanged: (@Sendable () async -> Void)? = nil) async -> CurationReport {
         let fileManager = FileManager.default
         let skillsDir = paths.skillsDir
         let trashDir = paths.memoryDir.appendingPathComponent("trash/skills")
@@ -70,7 +67,7 @@ public final class SkillCurator: Sendable {
         }
 
         if prunedNames.count > 0 {
-            await AppState.shared.invalidateEnginePrompt()
+            await onSkillsChanged?()
         }
 
         let report = CurationReport(

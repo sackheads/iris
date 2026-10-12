@@ -701,7 +701,7 @@ struct RunJobURLTests {
     func floodWritesOnceASecond() throws {
         let (_, app, iris) = try makeApp([])
         let timer = ManualTimer()
-        app.urlRefusalFlushTimer = URLDeferralTimer { delay, body in
+        app.urlRefusalFlushTimer = URLTimer { delay, body in
             #expect(delay == RunJobURL.refusalFlushInterval)
             timer.pending.append(body)
         }
@@ -723,7 +723,7 @@ struct RunJobURLTests {
     @Test("a line the owner deleted mid-flood comes back at the next flush, with the count")
     func deletedLineComesBack() throws {
         let (_, app, iris) = try makeApp([])
-        app.urlRefusalFlushTimer = URLDeferralTimer { _, _ in }
+        app.urlRefusalFlushTimer = URLTimer { _, _ in }
         app.handleRunJobURL(URL(string: "iris-dev://run-job/junk")!, identity: .dev)
         let idx = try #require(app.conversations.firstIndex { $0.id == iris })
         app.conversations[idx].messages.removeAll { $0.role == .system }
@@ -735,7 +735,7 @@ struct RunJobURLTests {
     @Test("a refusal after the window first writes the old line's count, then starts a new line")
     func windowRollFlushesFirst() throws {
         let (_, app, iris) = try makeApp([])
-        app.urlRefusalFlushTimer = URLDeferralTimer { _, _ in }
+        app.urlRefusalFlushTimer = URLTimer { _, _ in }
         let start = Date()
         app.urlClock = { start }
         for _ in 0..<3 { app.handleRunJobURL(URL(string: "iris-dev://run-job/junk")!, identity: .dev) }
@@ -750,7 +750,7 @@ struct RunJobURLTests {
     func hundredLinksBoundedWrites() throws {
         let (_, app, iris) = try makeApp([])
         let timer = ManualTimer()
-        app.urlRefusalFlushTimer = URLDeferralTimer { _, body in timer.pending.append(body) }
+        app.urlRefusalFlushTimer = URLTimer { _, body in timer.pending.append(body) }
         func conversation() -> Conversation? { app.conversations.first { $0.id == iris } }
         app.handleRunJobURL(URL(string: "iris-dev://run-job/junk")!, identity: .dev)
         let afterFirst = try #require(conversation())

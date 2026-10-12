@@ -65,11 +65,12 @@ more (it is the process-name domain the bare binary used before #447); it is onl
 `IRIS_IMPORTED_DEV_DEFAULTS`), and on a machine that has never launched the release app it still
 holds the user's real settings, so leave it alone. One exception: KeyboardShortcuts always uses
 `.standard`, so a dev hotkey recorded from `swift run` lands in `iris` under its own
-`toggleIrisDev` name. `Iris Dev.app` and `scripts/run-dev.sh` are still separate processes — do
-not run both at once against one `~/.iris-dev`: both would open the store's GUI lock and run the
-same jobs. An `iris-dev://` link opened while `swift run` or `run-dev.sh` is running
-does exactly that: the bare binary registers no scheme, so Launch Services launches Iris Dev.app
-beside it on the same `~/.iris-dev`.
+`toggleIrisDev` name. `Iris Dev.app` and `scripts/run-dev.sh` are still separate processes on one
+`~/.iris-dev`, and only one of them can have it (#463): the second to launch says "Iris is already
+running on this home" and quits. An `iris-dev://` link opened while `swift run` or `run-dev.sh` is
+running launches Iris Dev.app (the bare binary registers no scheme), which refuses the same way and
+says the link was not run. An app launched while a dev `--run-job` holds `~/.iris-dev` waits for
+that run instead, and a `--run-job` started while a dev app is up refuses.
 
 **Dev builds use `~/.iris-dev`, not `~/.iris`.** `swift build`/`swift run`, `scripts/run-dev.sh`,
 Xcode Debug and `swift test` are all dev builds (`BuildIdentity.current == .dev`): they read and
@@ -86,9 +87,10 @@ copied `conversations.sqlite` it re-points absolute paths under the release home
 conversation's `workspacePath`, and the goal contract, sandbox, job trigger/policy and blocked-call
 JSON columns; transcripts are left alone), pauses every copied job ("copied into the dev home;
 unpause to run it here"), and writes `.seeded-from-release` at the new home's root. It
-refuses outright if the installed app currently holds the release store's GUI lock (quit it and
-retry), if that lock file exists but doesn't hold a readable pid (delete it and retry), or if the
-dev home already has content (remove it first to reseed). Exit codes: `0` seeded; `3` nothing to seed
+refuses outright if another Iris process holds the release store's lock (the installed app or a
+`--run-job`: quit it and retry), if that lock cannot be taken at all, or if the
+dev home already has content (remove it first to reseed). While it copies it holds that lock, so
+the installed app launched mid-seed waits for it. Exit codes: `0` seeded; `3` nothing to seed
 — no release home yet, the normal case on a machine that has never installed the app, not a
 failure; `1` anything else. `run-dev.sh` continues past `3` and stops on `1` (or any other
 non-zero, non-3 exit), because launching anyway would populate `~/.iris-dev`, and the
