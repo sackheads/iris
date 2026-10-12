@@ -698,23 +698,21 @@ struct JobRetryTests {
         #expect(try store.ledger.runs(jobId: j.id, limit: 5).count == 1, "and only the one run")
     }
 
-    @Test("the turn and the deadline race for one claim, and exactly one of them wins it")
+    @Test("the turn, the deadline and a stop race for one claim, and exactly one of them wins it")
     func theEndingIsClaimedOnce() async {
         let ending = DeadlineFlag()
-        #expect(await ending.claim(deadline: false) == true)
-        #expect(await ending.claim(deadline: true) == false, "the loser gets no say in how the run ended")
-        #expect(await ending.claim(deadline: false) == false)
-        #expect(await ending.wait() == false, "and the run hears the winner's answer, not the loser's")
+        #expect(await ending.claim(.turn) == true)
+        #expect(await ending.claim(.deadline) == false, "the loser gets no say in how the run ended")
+        #expect(await ending.claim(.signal("stopped by a signal (SIGINT)")) == false)
+        #expect(await ending.wait() == .turn, "and the run hears the winner's answer, not the loser's")
     }
 
-    @Test("the run waits for the claim, and the deadline taking it is what releases the wait")
+    @Test("the run waits for the claim, and whichever claims it is what releases the wait")
     func theRunWaitsForWhicheverClaimsTheEnding() async throws {
         let ending = DeadlineFlag()
         let waiting = Task { await ending.wait() }
-        // Resolved by the claim, not by the racer it belongs to finishing: this is the difference
-        // between a run that ends at its deadline and one that waits on a turn that never returns.
-        #expect(await ending.claim(deadline: true) == true)
-        #expect(try await value(of: waiting) == true)
+        #expect(await ending.claim(.signal("stopped by a signal (SIGTERM)")) == true)
+        #expect(try await value(of: waiting) == .signal("stopped by a signal (SIGTERM)"))
     }
 
     @Test("a turn that came back on its own is never written up as a timeout, whatever the watchdog does")
@@ -750,6 +748,123 @@ struct JobRetryTests {
         #expect(run.failureReason == nil, "got: \(run.failureReason ?? "nil")")
         #expect(run.outcome == "tick")
         #expect(activity.events == [.begin("Iris job pr-sweep"), .end], "and the assertion went back once")
+    }
+
+    // MARK: The CLI's stop (#463 decision 16)
+
+    private final class Count: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+        func bump() { lock.withLock { n += 1 } }
+        var value: Int { lock.withLock { n } }
+    }
+
+    @Test("a stop mid-turn cancels it, ends the groups, and closes the row stopped, with a card")
+    func stopMidTurn() async throws {
+        let client = GatedClient(response: textResponse("tick"))
+        let (store, state, engine) = try harness([], client: client)
+        let j = job(timeoutSeconds: Self.heldTimeout)
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let terminated = Count()
+        let stop = RunStop(grace: 5, terminateGroups: { terminated.bump() })
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
+                               activity: RecordingActivity(), stop: stop)
+        let fire = Task { await runner.fire(job: j, origin: .manual) }
+        defer { client.release() }
+        try #require(await client.calls.reach(1), "the turn reached the model")
+        #expect(stop.request(reason: RunStop.reason(for: SIGINT)) == .runWillStop)
+        try #require(await finished(fire) != nil, "the stop ended the run")
+
+        let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
+        #expect(run.status == .interrupted)
+        #expect(run.failureReason == "stopped by a signal (SIGINT)")
+        #expect(terminated.value == 1)
+        #expect(card(state)?.runId == run.id, "the card was delivered")
+    }
+
+    /// The turn parks in `WedgedClient`'s stream (this file, `:459-524`), where cancellation cannot
+    /// reach it. A client parked in `generateContent` would not do: the engine reads it through
+    /// `LLMStreamEvent.replay`, whose `next()` is cancellable, so the turn would come straight back
+    /// and the grace would never be exercised (the trap `WedgedClient`'s own comment records).
+    @Test("a turn that ignores cancellation is abandoned after the grace, and the row still closes")
+    func stopAbandonsAStubbornTurn() async throws {
+        let client = WedgedClient(response: textResponse("late"))
+        let (store, state, engine) = try harness([], client: client, streamResponses: true)
+        let j = job(timeoutSeconds: Self.heldTimeout)
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let stop = RunStop(grace: 0.3, terminateGroups: {})
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
+                               activity: RecordingActivity(), stop: stop)
+        let fire = Task { await runner.fire(job: j, origin: .manual) }
+        defer { client.releaseAll() }
+        try #require(await client.parks.reach(1), "the turn is parked in the stream")
+        let asked = Date()
+        _ = stop.request(reason: RunStop.reason(for: SIGTERM))
+        try #require(await finished(fire, within: 10) != nil, "the grace bounded the wait")
+        #expect(Date().timeIntervalSince(asked) >= 0.3)
+        let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
+        #expect(run.status == .interrupted)
+        #expect(run.failureReason == "stopped by a signal (SIGTERM)")
+        #expect(client.replayCount == 0, "the park was the stream's, not the cancellable replay's")
+    }
+
+    @Test("the stop's teardown is bounded: a container delete that hangs does not hold the run")
+    func stopBoundsTheTeardown() async throws {
+        let client = GatedClient(response: textResponse("tick"))
+        let (store, state, engine) = try harness([], client: client)
+        let j = job(timeoutSeconds: Self.heldTimeout)
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let stop = RunStop(grace: 5, teardown: 0.3, terminateGroups: {})
+        // `container stop` and `delete` can each take 60 s (`ContainerRuntime.swift:601`, `:726-729`).
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                               endSandboxSession: { _ in try? await Task.sleep(nanoseconds: 30_000_000_000) },
+                               config: config, activity: RecordingActivity(), stop: stop)
+        let fire = Task { await runner.fire(job: j, origin: .manual) }
+        defer { client.release() }
+        try #require(await client.calls.reach(1))
+        _ = stop.request(reason: RunStop.reason(for: SIGINT))
+        try #require(await finished(fire, within: 10) != nil, "the teardown was abandoned at its bound")
+        let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
+        #expect(run.status == .interrupted)
+        #expect(card(state)?.runId == run.id, "the card is still delivered")
+    }
+
+    @Test("a stop before the run starts means no run: no row, no conversation")
+    func stopBeforeTheRun() async throws {
+        let (store, state, engine) = try harness([textResponse("tick")])
+        let j = job()
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let stop = RunStop(grace: 5, terminateGroups: {})
+        #expect(stop.request(reason: RunStop.reason(for: SIGINT)) == .exitNow)
+        let conversations = state.conversations.count
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
+                               activity: RecordingActivity(), stop: stop)
+        await runner.fire(job: j, origin: .manual)
+        #expect(try store.ledger.runs(jobId: j.id, limit: 5).isEmpty)
+        #expect(state.conversations.count == conversations)
+    }
+
+    @Test("a stop after the turn came back changes nothing")
+    func stopAfterTheTurn() async throws {
+        let (store, state, engine) = try harness([textResponse("tick")])
+        let j = job()
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let stop = RunStop(grace: 5, terminateGroups: {})
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
+                               activity: RecordingActivity(), stop: stop)
+        await runner.fire(job: j, origin: .manual)
+        #expect(stop.request(reason: RunStop.reason(for: SIGINT)) == .ignored)
+        #expect(try store.ledger.runs(jobId: j.id, limit: 1).first?.status == .completed)
     }
 
     // MARK: What the fire was, after it is over (R7)
