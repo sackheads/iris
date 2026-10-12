@@ -5501,10 +5501,6 @@ struct IrisApp: App {
         // the acquire first is what stops that becoming a window rather than a rule.
         // Best-effort, deliberately: a lock that cannot be written must not stop the app
         // launching. `AppDelegate.applicationWillTerminate` gives it back.
-        //
-        // D6 decision 14: who held the store before this app takes it. Reads only the lock file,
-        // never the store, so the rule above (nothing touches the store before the acquire) holds.
-        let priorHolder = LaunchLock.read(at: IrisPaths.default.storeLockFile)
         GUILock.acquire()
         IrisMigrator.migrate(.default)
         ShippedSkills.seedIfNeeded(.default)
@@ -5517,7 +5513,6 @@ struct IrisApp: App {
         // closure. If this moves anywhere else, it needs a real hop instead.
         MainActor.assumeIsolated {
             AppState.shared.installGuardHealthSink()
-            AppState.shared.noteForeignStoreHolder(priorHolder)
             // D6 decision 16: the snapshot at launch. Here and not in `AppState.init`, which a
             // test suite runs hundreds of times.
             AppState.shared.refreshLedgerAttention()

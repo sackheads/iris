@@ -4223,26 +4223,16 @@ class AppState {
     /// running count at most once a second. Written only by `RunJobURLHandling.swift`.
     @ObservationIgnored var urlRefusalLines: [String: URLRefusalLine] = [:]
     /// Schedules a coalesced refusal line's catch-up, on a dispatch queue. A seam for tests.
-    @ObservationIgnored var urlRefusalFlushTimer = URLDeferralTimer.dispatch
+    @ObservationIgnored var urlRefusalFlushTimer = URLTimer.dispatch
     /// The lines with a catch-up already scheduled. Written only by `RunJobURLHandling.swift`.
     @ObservationIgnored var urlRefusalFlushPending: Set<String> = []
     /// Each job's outstanding URL fires (in flight, or held by the `queue` policy), counted by
     /// the limit until their runs have started. Written only by `RunJobURLHandling.swift`.
     @ObservationIgnored var urlFireBatches: [UUID: URLFireBatch] = [:]
-    /// The clock the URL limit, the coalescing window and the deferral read. A seam for tests.
+    /// The clock the URL limit and the coalescing window read. A seam for tests.
     @ObservationIgnored var urlClock: @Sendable () -> Date = { Date() }
     /// Test seam: the most recent URL fire, so a test can await it.
     @ObservationIgnored var urlFireTask: Task<JobRunner.Admission?, Never>?
-    /// D6 decision 14: a live Iris process that held the store at launch (a `--run-job`), read
-    /// before this app took the lock and never taken or broken here. A URL fire waits while it
-    /// lives. nil once it has gone, so a reused pid cannot hold fires back later.
-    @ObservationIgnored var foreignStoreHolder: Int32?
-    @ObservationIgnored var isProcessAlive: @Sendable (Int32) -> Bool = { GUILock.isAlive($0) }
-    /// When `foreignStoreHolder` started, recorded at launch: a pid whose process started at any
-    /// other time is a reused pid, not the holder (Task 26, the pid-reuse carry-forward).
-    @ObservationIgnored var foreignStoreHolderStart: ProcessStart?
-    /// A process's start time. A seam for tests.
-    @ObservationIgnored var processStart: @Sendable (Int32) -> ProcessStart? = { ProcessStart.of($0) }
     /// D2: links held until the job bookkeeping is done. Written only by `RunJobURLIntake.swift`.
     @ObservationIgnored var urlIntake: RunJobURLIntake = .starting([])
     /// Whether `start()` has run in this process; `startOnce()` reads it.
@@ -4251,11 +4241,6 @@ class AppState {
     @ObservationIgnored var launchEngine: @MainActor (IrisEngine) -> Void = { engine in
         Task { await engine.start() }
     }
-    /// Schedules the deferral's re-check, on a dispatch queue. A seam for tests.
-    @ObservationIgnored var urlDeferralTimer = URLDeferralTimer.dispatch
-    /// The URL fires waiting for `foreignStoreHolder`, one per job (plan note 10). Each counts as
-    /// one fire against the URL limit while it waits. Written only by `RunJobURLHandling.swift`.
-    @ObservationIgnored var pendingURLFires: [UUID: PendingURLFire] = [:]
 
     private func handleJobsCommand(_ trimmed: String, convId: UUID) {
         let ledger = store.ledger
