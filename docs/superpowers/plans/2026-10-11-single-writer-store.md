@@ -17,7 +17,7 @@
 
 **Scope:** spec §4, both PRs.
 - PR 1 (Tasks 1-10): decisions 1-15 and 18. Branch `feat/463-single-writer`, based on `main`.
-- PR 2 (Tasks 11-15): decisions 16-17. Branch `feat/463-cli-clean-stop`. **Cut from `main` after PR 1 merges.** It uses PR 1's `StoreLock.vacate(at:)` and `ProcessRole`. Never stack it on PR 1's branch.
+- PR 2 (Tasks 11-16): decisions 16-17, plus the coordinator's ruling on #490 that a second Ctrl-C deletes the run's containers (plan note 15). Branch `feat/463-cli-clean-stop`. **Cut from `main` after PR 1 merges.** It uses PR 1's `StoreLock.vacate(at:)` and `ProcessRole`. Never stack it on PR 1's branch.
 
 Every line number below was read on `main` at `e418b29`. Re-read the cited lines before editing, because earlier tasks in a PR move them.
 
@@ -52,12 +52,12 @@ Every line number below was read on `main` at `e418b29`. Re-read the cited lines
   - Await every unstructured task through `value(of:within:)` (`Tests/irisTests/BoundedWait.swift`), never bare.
   - Every suite that starts a task, a process or a timer carries `.timeLimit(.minutes(1))`.
   - Stub processes (`LockStub`, Task 1) wait for readiness with a semaphore timeout, never unbounded.
-  - CI runs `swift test --no-parallel` on a 3-core runner, so timing margins are generous. A grace a test shortens is never under 0.3 s, and nothing asserts an upper bound under 5 s. Exit tests re-launch the test binary, so this plan keeps them to the eight that need a process of their own.
+  - CI runs `swift test --no-parallel` on a 3-core runner, so timing margins are generous. A grace a test shortens is never under 0.3 s, and nothing asserts an upper bound under 5 s. Exit tests re-launch the test binary, so this plan keeps them to the nine that need a process of their own (five in Task 8, four in Task 14).
   - Run focused tests as `timeout 300 scripts/test-filter.sh <TypeName>` and quote the count it ran (`--filter` takes the type name, AGENTS.md).
   - The full suite is `timeout 900 swift test`. It is green only with exit 0, the Swift Testing line `Test run with N tests … passed`, and XCTest's `Executed N tests, with 0 failures`. If a `timeout` fires, sweep `pkill -f swiftpm-testing-helper`.
 - **Every task ends with `scripts/check-warnings.sh` exiting 0** (#286). Fix a warning at its source and never suppress it.
 - **No paid calls in tests.** Model turns run on `FakeLLMClient` or a stub client.
-- **GUI work** (Tasks 10 and 15) is done by `work` on its laptop, under the host-wide lease (`python3 ~/.claude/skills/gui-test-lease/lease.py acquire --purpose "iris: …" --minutes N --on-behalf-of <peer>`, and `release` as soon as the pass ends, pass or fail). It runs Iris Dev.app built by `scripts/build-app.sh Debug` into a non-temp directory inside the worktree, signed with `scripts/sign.sh`, with stale LaunchServices registrations removed first. Evidence is command output (`osascript` UI queries, `sqlite3`, `stat`, `pgrep`, `container list`, exit codes), not screenshots. Never launch a Release configuration.
+- **GUI work** (Tasks 10 and 16) is done by `work` on its laptop, under the host-wide lease (`python3 ~/.claude/skills/gui-test-lease/lease.py acquire --purpose "iris: …" --minutes N --on-behalf-of <peer>`, and `release` as soon as the pass ends, pass or fail). It runs Iris Dev.app built by `scripts/build-app.sh Debug` into a non-temp directory inside the worktree, signed with `scripts/sign.sh`, with stale LaunchServices registrations removed first. Evidence is command output (`osascript` UI queries, `sqlite3`, `stat`, `pgrep`, `container list`, exit codes), not screenshots. Never launch a Release configuration.
 - **Commits:** conventional (`feat:`, `fix:`, `docs:`, `test:`), no emoji, ending with:
   ```
   Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -72,8 +72,8 @@ Every line number below was read on `main` at `e418b29`. Re-read the cited lines
    - Tests: Task 5, `quitWhileWaitingFlushesNothing`. Task 1, `vacateIsANoOpForANonHolder`.
 3. **A harness batch while the app waits** (decision 6's accepted cost). Each new `--run-job` may claim the store between polls. A person expects the waiting window to name the run that is actually going, not the first one. And if a GUI wins in between, this waiter quits (decision 8's last bullet).
    - Test: Task 5, `waitingTracksTheCurrentHolder`.
-4. **Ctrl-C during `--dry-run` while its gate is running.** A person expects exit 2 at once, no row, and nothing the gate spawned left running. A dry run never arms a run, so the stop takes the before-admission path, which has to kill the host groups as well.
-   - Test: Task 13, `signalDuringDryRun`.
+4. **Ctrl-C during `--dry-run` while its gate is running.** A person expects exit 2 at once, no row, and nothing the gate spawned left running. A dry run never arms a run, so the stop takes the before-admission path. That path has to kill the host groups and delete the gate's `iris-gate-*` container as well.
+   - Tests: Task 14, `signalDuringDryRun` (the exit path runs the kill and the delete, in order). Task 12, `registriesRecord` (a gate's container is in the box the delete reads) and `deletesInParallelInTheirOwnGroups` (the delete itself).
 5. **A new `AppState.shared` reference outside the GUI shell.** A helper, a default argument or a view added later, reached from a headless path or a test. Decision 14's trap turns that into a crash only when a test happens to reach it. A source scan catches it at test time whether or not anything reaches it.
    - Test: Task 8, `sharedAppearsOnlyInTheGUIShell`.
 
@@ -86,17 +86,32 @@ Every line number below was read on `main` at `e418b29`. Re-read the cited lines
 3. **`PerfCLI`'s scratch lock needs a kind.** Decision 5's kinds are `app`, `run-job` and `seed-dev-home`, and decision 18 puts `PerfCLI` on the same primitive. The payload gains `perf`. No GUI reads that lock, and `LaunchDecision` treats `perf` like `app`.
 4. **`PerfCLI` re-claims inside one process.** A held lock is never released (decision 2), and a second claim in one process conflicts with the first (spec §3). But `PerfCLITests.skillsListStableAcrossRunsAtFixedLocation` claims twice. `claimScratchWorkspace` therefore reuses this process's own hold (`StoreLock.holds`) rather than claiming again. `releaseScratchWorkspace` becomes a vacate.
 5. **`URLDeferralTimer` is also the refusal-flush timer** (`AppState.swift:4231`, `RunJobURLHandling.swift:278`). Decision 12 deletes D2's deferral, but this type outlives it. It is renamed `URLTimer`, not deleted (Task 6).
-6. **#489's test cannot go through a CLI turn.** Spec §3 asks for "a `--run-job` (fake client) whose turn calls `write_file` into a skill folder, then `create_skill`". A read-only job is refused both tools unattended (`Job.readOnlyAllowed`, `Job.swift:42-47`). A mutating job needs the VM (`JobRunner.swift:1102-1106`). So Task 8's exit test, with `ProcessRole.runJob` set, drives the CLI's own engine executor (`RunJobCLI.makeState(store:).engine.executor`), which is exactly the object a CLI turn dispatches through.
+6. **#489's test cannot go through a CLI turn.** Spec §3 asks for "a `--run-job` (fake client) whose turn calls `write_file` into a skill folder, then `create_skill`".
+    - Both tools need an approval, and the CLI fails closed: `makeState` leaves `autoApproveTools` off (`RunJobCLI.swift:437-440`). So a CLI turn's call is blocked before it reaches the executor.
+    - Task 8's exit test therefore sets `ProcessRole.runJob` and builds its engine exactly as `fire` does: `IrisEngine(state: makeState(store:), client:, protectionEnabled:)` (`RunJobCLI.swift:463`). That is a second engine over the state, not `state.engine`. It then drives that engine's own executor, the object a CLI turn dispatches through after an approval.
 7. **The spec's perl stub needs `$|=1`.** Otherwise its `ok` sits in perl's buffer behind a pipe and the readiness wait times out (Task 1's `LockStub`).
 8. **A job's `run_command` never runs on the host, so decision 17's registry does not reach it.** A read-only run's `run_command` is refused unless sandboxed (`Job.readOnlyDenies`, `Job.swift:63-68`). A mutating job's commands always run in the VM (`docs/jobs.md`, "A mutating job…"). In the VM they run through `CLIContainerRuntime.exec` and `CLIProcessRunner`, not `ProcessGroupRunner`. So in a `--run-job`, `LiveProcessGroups` holds hooks, `search_web` and plugin checks, and never a job's `sleep`.
    - The clean stop still ends a VM command: the cancelled turn fires `CLIProcessRunner`'s in-VM kill, and `closeSession` deletes the run's container.
-   - A second Ctrl-C's `_exit` leaves the session container (and its `sleep`) for the next app launch's `reapOrphans`.
-   - So GUI check 6 (Task 15) asserts the container state, not `pgrep sleep`. Killing VM work on exit-now needs its own ruling. It is not in this plan.
-9. **`DeadlineFlag` goes from `Bool` to a three-way `Ending`** (`.turn`, `.deadline`, `.signal(String)`), since decision 16 adds a third claimant (Task 12).
+   - The exit-now path deletes the container too, by name (plan note 15, the coordinator's ruling on #490).
+   - GUI check 6 (Task 16) therefore asserts the container state, not `pgrep sleep`.
+9. **`DeadlineFlag` goes from `Bool` to a three-way `Ending`** (`.turn`, `.deadline`, `.signal(String)`), since decision 16 adds a third claimant (Task 13).
 10. **A stop during a built-in job does nothing until the second signal.** A built-in has no turn to cancel and runs in milliseconds. `RunStop` is armed, so the first signal answers `.runWillStop` and the built-in finishes normally.
 11. **The waiting sentence drops the spec's backticks.** SwiftUI `Text` renders a `String` verbatim, so the backticks would show literally, and rendering it as Markdown would let a job name inject markup. The job is flattened to one line and capped at 80 characters.
-12. **One GUI task per PR.** Spec §3's GUI checks 1-5 and 7 are one `work` pass for PR 1 (Task 10), and check 6 is PR 2's (Task 15). Each numbered check is a numbered step with its own expected output.
+12. **One GUI task per PR.** Spec §3's GUI checks 1-5 and 7 are one `work` pass for PR 1 (Task 10), and check 6 is PR 2's (Task 16). Each numbered check is a numbered step with its own expected output.
 
+
+13. **The waiting notice does not activate Iris, and launch activation moves into the gate.** Decision 13 opens the notice "without activating the app". But SwiftUI's `OpenWindowAction` has no non-activating form, and `IrisApp.init` and `applicationDidFinishLaunching` both call `NSApp.activate` unconditionally (`iris.swift:5450`, `:5528`).
+    - The notice is an AppKit `NSPanel` with `.nonactivatingPanel`, ordered front with `orderFrontRegardless()` (Task 7, `WaitingNoticePanel`).
+    - `init` no longer activates. Did-finish activates through `Seams.activate` in every case but one: a link that launched Iris while it waits.
+    - A Dock launch, a free-lock link launch (D2's) and the hotkey still activate, as before.
+14. **For the owner: a delegate's skill write no longer refreshes the main chat's prompt** (#489, Task 2). Today a subagent's or evaluator's `create_skill` reaches the main engine through `.shared` (`SubagentManager.swift:152`, `GoalEvaluator.swift:77`). Afterwards it refreshes only the delegate's own short-lived engine. The main chat's skill list stays stale until its next prompt rebuild (a `/skills reload`, a skill write of its own, or a new conversation). Decision 15 permits this. The plan ships it, and asks the owner whether a follow-up should route a delegate's hook to its parent engine.
+15. **A second Ctrl-C deletes the run's containers (coordinator ruling on #490).** This extends decision 16's exit-now, and plan note 8's gap closes with it.
+    - The names come from a lock-protected `LiveContainerNames` box, not the registry actors, so the signal path reads them synchronously with no pool hop (#372). Each container is recorded where it is created: the session in `SandboxSessionManager.create`, gate containers in `GateContainerRegistry.register`, and the hook and `run_command` one-offs in `EphemeralContainerRegistry.register`.
+    - It never sweeps by the `iris-` prefix, which `~/.iris` and `~/.iris-dev` share.
+    - The deletes run in parallel through `BlockingSpawn` with `POSIX_SPAWN_SETPGROUP` (so the terminal's Ctrl-C does not hit them), bounded at 5 s in all.
+    - SIGINT is reset to `SIG_DFL` first, so a third Ctrl-C kills the CLI at once.
+    - The clean stop uses the same box. After its turn and its bounded teardown, it waits up to 3 s for the host groups to drain, SIGKILLs what is left, and deletes any container still recorded, before `_exit` (Tasks 12-14).
+16. **An inherited ignore is kept** (`nohup`). If SIGHUP or SIGINT is already `SIG_IGN` when the CLI starts, it stays ignored, and no source is installed for it. SIGTERM is always caught.
 ---
 
 ## PR 1: the lock, the waiting launch, and #489
@@ -242,11 +257,14 @@ import Darwin
 /// Every claim here is held for the rest of the test process (decision 2), so every test uses a
 /// path of its own.
 @Suite("StoreLock (#463)", .timeLimit(.minutes(1)))
-struct StoreLockTests {
+final class StoreLockTests {
+    /// Swift Testing makes one instance per test, so `deinit` removes that test's files (a
+    /// crowded `TMPDIR` slows Foundation's listings to seconds, #309).
+    private let base = FileManager.default.temporaryDirectory.appendingPathComponent("iris-storelock-\(UUID().uuidString)")
+    deinit { try? FileManager.default.removeItem(at: base) }
+
     private func path(_ name: String = "store") -> URL {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent("iris-storelock-\(UUID().uuidString)")
-            .appendingPathComponent("\(name).sqlite.lock")
+        base.appendingPathComponent(UUID().uuidString).appendingPathComponent("\(name).sqlite.lock")
     }
 
     private var me: Int32 { ProcessInfo.processInfo.processIdentifier }
@@ -740,6 +758,26 @@ struct SkillInvalidationTests {
         #expect(count.value == 3)
     }
 
+    @Test("write_file onto a skill's SKILL.md calls onSkillsChanged once, through execute")
+    func writeFileOntoASkillCallsTheHook() async throws {
+        let (paths, cleanup) = try tempHome(); defer { cleanup() }
+        let count = Count()
+        var executor = ToolExecutor()
+        executor.irisPaths = paths   // the temp home, never the process's test home
+        executor.onSkillsChanged = { count.bump() }
+        let file = paths.skillsDir.appendingPathComponent("probe/SKILL.md")
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let body = String(repeating: "A procedure step. ", count: 4)
+        let result = await executor.execute(name: "write_file", args: [
+            "path": .string(file.path), "content": .string("---\nname: probe\ndescription: d\n---\n\(body)"),
+        ])
+        #expect(result.hasPrefix("Successfully wrote to"))
+        #expect(count.value == 1)
+        let elsewhere = paths.root.appendingPathComponent("notes.txt")
+        _ = await executor.execute(name: "write_file", args: ["path": .string(elsewhere.path), "content": .string("x")])
+        #expect(count.value == 1, "a file outside the skills tree is not a skill write")
+    }
+
     @Test("an executor with no hook writes skills and invalidates nothing")
     func noHookIsANoOp() async throws {
         let (paths, cleanup) = try tempHome(); defer { cleanup() }
@@ -831,11 +869,11 @@ At `:4086`, replace `await ToolExecutor.shared.createSkill(` with `await self.en
 - [ ] **Step 7: Run the tests to verify they pass.**
 
 Run: `timeout 300 scripts/test-filter.sh SkillInvalidationTests` then `timeout 300 scripts/test-filter.sh SkillCurationAdvancementsTests`
-Expected: PASS, 4 tests, then the curation suite's count unchanged from `main` (its `curateSkills(paths:)` call compiles as it is, with no hook).
+Expected: PASS, 5 tests, then the curation suite's count unchanged from `main` (its `curateSkills(paths:)` call compiles as it is, with no hook).
 
 - [ ] **Step 8: Confirm nothing in the module names `invalidateEnginePrompt`.** Run `grep -rn "invalidateEnginePrompt\|AppState.shared.invalidate" Sources Tests`. Expected: no output.
 
-- [ ] **Step 9: Mutation check.** Put `await AppState.shared.invalidateEnginePrompt()` back in place of `await onSkillsChanged?()` in `createSkill` only, and restore `invalidateEnginePrompt` in `AppState`. Run `SkillInvalidationTests`. Expected: `crudCallsTheHook` fails (count 2). Revert. The no-`.shared` half is Task 8 Step 7.
+- [ ] **Step 9: Mutation checks.** Put `await AppState.shared.invalidateEnginePrompt()` back in place of `await onSkillsChanged?()` in `createSkill` only, and restore `invalidateEnginePrompt` in `AppState`. Run `SkillInvalidationTests`. Expected: `crudCallsTheHook` fails (count 2). Revert. Do the same in `afterSkillFileWrite`. Expected: `writeFileOntoASkillCallsTheHook` fails. Revert. The no-`.shared` half is Task 8 Step 8.
 
 - [ ] **Step 10: Check warnings.** Run `scripts/check-warnings.sh`. Expected: exit 0.
 
@@ -853,8 +891,8 @@ Claude-Session: https://claude.ai/code/session_017NLGyK8ozWezeZeijjgGJx"
 
 **Files:**
 - Modify: `Sources/IrisKit/RunJobCLI.swift:328-386` (the `run` doc comment, the claim, the refusals, the `defer`)
-- Modify: `Sources/IrisKit/IrisMain.swift:24-41` (the comment at `:25-29`)
-- Modify: `Tests/irisTests/RunJobCLITests.swift`: delete the 14 `GUILock` cases (`:150-458` and `:491-499`), rewrite `:501-522`, add 5
+- Modify: `Sources/IrisKit/IrisMain.swift:24-41` (the comment at `:25-29`, and a vacate just before `_exit` at `:41`)
+- Modify: `Tests/irisTests/RunJobCLITests.swift`: delete the 14 `GUILock` cases (`:150-458` and `:491-499`), rewrite `:501-522`, add 5, and make the suite a `final class` that removes its lock files
 
 **Interfaces:**
 - Consumes: Task 1's `StoreLock.claimSettling`, `.vacate(at:)`, `.readHolder(at:)`, `.holds`, `Claim`, `Holder`, `Syscalls`, and the test helpers `LockStub` and `LockedCell`.
@@ -919,10 +957,20 @@ Claude-Session: https://claude.ai/code/session_017NLGyK8ozWezeZeijjgGJx"
         try FileManager.default.createDirectory(at: lock.deletingLastPathComponent(), withIntermediateDirectories: true)
         let stub = try LockStub.start(holding: lock, payload: #"{"kind":"app","pid":%PID%}"# + "\n")
         defer { stub.kill() }
-        let code = await RunJobCLI.run(RunJobCLI.Invocation(target: "pr-sweep", dryRun: true),
-                                       store: try ConversationStore.inMemory(), client: FakeLLMClient(responses: []),
-                                       lockPath: lock, protectionEnabled: false, out: { _ in }, err: { _ in })
+        // A job that exists and has a gate, so the only thing that can refuse is the lock.
+        let store = try ConversationStore.inMemory()
+        try store.ledger.upsert(self.job(name: "polled",
+                                         trigger: .poll(PollSpec(schedule: .interval(seconds: 60),
+                                                                 gate: .pathChanged(path: "/tmp/whatever")))))
+        let opened = LockedCell(0)
+        func openStore() throws -> ConversationStore { opened.value += 1; return store }
+        let err = Output()
+        let code = await RunJobCLI.run(RunJobCLI.Invocation(target: "polled", dryRun: true),
+                                       store: try openStore(), client: FakeLLMClient(responses: []),
+                                       lockPath: lock, protectionEnabled: false, out: { _ in }, err: { err.write($0) })
         #expect(code == RunJobCLI.Exit.usage)
+        #expect(err.text.contains("the Iris app (pid \(stub.pid))"))
+        #expect(opened.value == 0)
     }
 
     @Test("a lock that cannot be taken is exit 1 naming the path and errno, and the store is never opened")
@@ -959,7 +1007,7 @@ Claude-Session: https://claude.ai/code/session_017NLGyK8ozWezeZeijjgGJx"
 Replace `aRunHoldsTheLockWhileItRuns` (`:501-522`) with:
 
 ```swift
-    @Test("a run holds the lock while it runs, with its own payload, and vacates it at the end")
+    @Test("a run holds the lock while it runs, with its own payload, and keeps both until IrisMain exits")
     func aRunHoldsTheLockWhileItRuns() async throws {
         let store = try ConversationStore.inMemory()
         try store.ledger.upsert(self.job(name: "holder"))
@@ -971,18 +1019,22 @@ Replace `aRunHoldsTheLockWhileItRuns` (`:501-522`) with:
                                        out: { _ in }, err: { _ in })
         #expect(code == RunJobCLI.Exit.completed)
         #expect(seen.value == .init(pid: ProcessInfo.processInfo.processIdentifier, kind: .runJob, job: "holder"))
-        #expect(try Data(contentsOf: path).isEmpty, "vacated on the way out")
+        #expect(StoreLock.readHolder(at: path) == seen.value,
+                "not vacated in `run`: IrisMain vacates just before `_exit`, so no empty payload sits under a held lock")
         #expect(StoreLock.holds(path), "and still held: the process exits next (decision 2)")
     }
 ```
 
-`lockPath()` (`:76-79`) now returns a path in a directory of its own:
+Lock files now outlive a run (decision 2), so the suite cleans up after itself: a crowded `TMPDIR` slows Foundation's listings to seconds (#309). Change `struct RunJobCLITests` (`:15`) to `final class RunJobCLITests`, and replace `lockPath()` (`:76-79`) with:
 
 ```swift
+    /// Every lock path this instance hands out lives under `base`, which `deinit` removes. The
+    /// held descriptors stay open on the unlinked files, which is harmless.
+    private let base = FileManager.default.temporaryDirectory.appendingPathComponent("iris-runjob-\(UUID().uuidString)")
+    deinit { try? FileManager.default.removeItem(at: base) }
+
     private func lockPath() -> URL {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent("iris-runjob-\(UUID().uuidString)")
-            .appendingPathComponent("conversations.sqlite.lock")
+        base.appendingPathComponent(UUID().uuidString).appendingPathComponent("conversations.sqlite.lock")
     }
 ```
 
@@ -1017,7 +1069,8 @@ Replace `:355-385` (the comment block, the `switch GUILock.acquireExclusively` a
         // both pass, and an app launched during the run waits behind it (#463).
         let claim = StoreLock.claimSettling(at: lockPath, kind: .runJob, job: target, syscalls: lockSyscalls)
         if let refusal = refusal(for: claim, path: lockPath) { return refuse(refusal) }
-        defer { StoreLock.vacate(at: lockPath) }
+        // Not vacated here: `IrisMain` empties the payload just before `_exit`, so an empty
+        // payload never sits under the held lock while this process still runs (decision 5).
 ```
 
 Add below `run`:
@@ -1061,7 +1114,7 @@ In `IrisMain.swift`, replace the comment at `:25-29` with:
             // run never opens, migrates or repairs it.
 ```
 
-and the end of the `_exit` comment (`:37-38`) with `// Nothing is lost by skipping the atexit handlers: the run's save was flushed and the lock's payload vacated inside \`run\`, and the two streams are flushed here.`
+and the end of the `_exit` comment (`:37-38`) with `// Nothing is lost by skipping the atexit handlers: the run's save was flushed inside \`run\`, and the two streams are flushed here.` Then add `StoreLock.vacate(at: IrisPaths.default.storeLockFile)` between `fflush(stderr)` and `_exit(code)`, with the comment `// Last: an empty payload under a held lock reads as an unnamed holder (decision 5).`
 
 - [ ] **Step 4: Run the tests to verify they pass.**
 
@@ -1087,13 +1140,14 @@ Claude-Session: https://claude.ai/code/session_017NLGyK8ozWezeZeijjgGJx"
 
 **Files:**
 - Modify: `Sources/IrisKit/DevHomeSeeder.swift:9-31` (`Failure`), `:47-54` (the check), `:139-159` (`runCLI` vacates)
-- Modify: `Sources/IrisKit/PerfCLI.swift:94-136`
+- Modify: `Sources/IrisKit/PerfCLI.swift:94-136`, `:205-209` (a comment)
 - Modify: `Tests/irisTests/DevHomeSeederTests.swift:59-81`
 - Modify: `Tests/irisTests/PerfCLITests.swift:217-241`
 
 **Interfaces:**
 - Consumes: Task 1's `StoreLock` and the test helper `LockStub`.
 - Produces:
+  - `DevHomeSeeder.seed(from:to:identity:sourceKeychain:destKeychain:whileHeld:)`, where `whileHeld: (() -> Void)? = nil` is a test seam
   - `DevHomeSeeder.Failure.sourceInUse(pid: Int32?)` (an optional pid now) and `.sourceLockFailed(String)`. `.sourceLockUnreadable` is gone.
   - `PerfCLI.claimScratchWorkspace(base:)`, which reuses this process's own hold (plan note 4)
   - `PerfCLI.releaseScratchWorkspace(base:)`, which vacates
@@ -1126,8 +1180,12 @@ Claude-Session: https://claude.ai/code/session_017NLGyK8ozWezeZeijjgGJx"
     @Test("holds the source lock as seed-dev-home while it copies, and vacates it after")
     func holdsTheSourceWhileSeeding() throws {
         let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }
+        let during = LockedCell<StoreLock.Holder?>(nil)
         _ = try DevHomeSeeder.seed(from: src, to: dst, identity: .dev,
-                                   sourceKeychain: .init(serviceSuffix: ""), destKeychain: .init(serviceSuffix: ".dev"))
+                                   sourceKeychain: .init(serviceSuffix: ""), destKeychain: .init(serviceSuffix: ".dev"),
+                                   whileHeld: { during.value = StoreLock.readHolder(at: src.storeLockFile) })
+        #expect(during.value == .init(pid: ProcessInfo.processInfo.processIdentifier, kind: .seedDevHome, job: nil),
+                "an app launched mid-seed reads seed-dev-home, and waits")
         #expect(StoreLock.holds(src.storeLockFile))
         #expect(try Data(contentsOf: src.storeLockFile).isEmpty)
     }
@@ -1165,7 +1223,11 @@ In `PerfCLITests.swift`, replace `secondClaimWhileHeldIsRefused` and `releaseAll
 - [ ] **Step 2: Run the tests to verify they fail.**
 
 Run: `timeout 300 scripts/test-filter.sh DevHomeSeederTests`
-Expected: the build fails with `type 'Int32?' …` (or `cannot convert value of type 'Int32' to expected argument type 'Int32?'`) at `sourceInUse`.
+Expected: it builds (an `Int32` converts to `Int32?`, and `whileHeld:` is not there yet, so first add the parameter from Step 3 as a no-op to get a build), then fails at runtime:
+- `refusesWhileHeld` fails: `GUILock` reads the stub's JSON payload as unreadable and throws `sourceLockUnreadable`.
+- `holdsTheSourceWhileSeeding` fails: nothing claims the lock.
+
+`refusesLegacyHolder` already passes on `main`, since a bare live pid is `GUILock`'s `.held`. It is kept as a regression pin.
 
 - [ ] **Step 3: Move the seeder.** In `DevHomeSeeder.swift`:
   - Replace `case sourceInUse(pid: Int32)` and `case sourceLockUnreadable(String)` (`:13-14`) with `case sourceInUse(pid: Int32?)` and `case sourceLockFailed(String)`.
@@ -1189,7 +1251,10 @@ Expected: the build fails with `type 'Int32?' …` (or `cannot convert value of 
         case .failed(let detail): throw Failure.sourceLockFailed(detail)
         }
         defer { StoreLock.vacate(at: source.storeLockFile) }
+        whileHeld?()
 ```
+
+Add `whileHeld: (() -> Void)? = nil` as `seed`'s last parameter: a test seam, called once the claim is held, so a test can read the payload mid-seed.
 
 - [ ] **Step 4: Move `PerfCLI`.** Replace `claimScratchWorkspace`'s doc paragraph at `:111-113` and its `switch GUILock.acquireExclusively` (`:117-127`) with:
 
@@ -1230,7 +1295,24 @@ Replace `releaseScratchWorkspace` (`:132-136`) with:
 Run: `timeout 300 scripts/test-filter.sh DevHomeSeederTests` then `timeout 300 scripts/test-filter.sh PerfCLITests`
 Expected: PASS. The seeder's count is `main`'s plus 1, and perf's is unchanged.
 
-- [ ] **Step 6: Confirm `GUILock`'s last users are the app's.** Run `grep -rn "GUILock" Sources Tests`. Expected: only `RunJobCLI.swift` (the enum itself), `iris.swift` (`acquire`, `release`), `LaunchLock.swift`, `AppState.swift:4245`, and `PerfCLITests.swift:223`'s comment, which you now rewrite to `// a stub process holds the lock (StoreLockTests' LockStub)`.
+- [ ] **Step 6: Confirm `GUILock`'s last users are the app's.** Run `grep -rn "GUILock" Sources Tests`. Expected: only these, all deleted by Tasks 6-7:
+  - `RunJobCLI.swift` (the enum itself)
+  - `iris.swift` (`acquire`, `release`)
+  - `LaunchLock.swift`
+  - `AppState.swift:4245`
+  - `LaunchLockTests.swift:53`, `:58`
+  - `RunJobURLDeferralTests.swift:284-292`
+
+  Also `PerfCLITests.swift:223`'s comment, which you now rewrite to `// a stub process holds the lock (LockStub)`.
+
+- [ ] **Step 6b: Fix the comment this falsifies.** `PerfCLI.swift:205-209` says the next claim "reclaims a dead pid's lock". Replace those five lines with:
+
+```swift
+                // If anything between this claim and `scratch = dir` throws, the defer below
+                // never sees `scratch`: the half-built directory is left for the next run's
+                // claim to reset. The lock goes with this process when it exits (main.swift); a
+                // long-lived host calling `execute` repeatedly reuses its own hold (plan note 4).
+```
 
 - [ ] **Step 7: Check warnings.** Run `scripts/check-warnings.sh`. Expected: exit 0.
 
@@ -1258,10 +1340,10 @@ Claude-Session: https://claude.ai/code/session_017NLGyK8ozWezeZeijjgGJx"
   - `enum LaunchRefusal: Equatable { case otherApp(pid: Int32?), legacy(pid: Int32), failed(detail: String) }`, with `title`, `message(hadLinks:)`, `holderPid`
   - `@MainActor @Observable final class LaunchGate`, with:
     - `State` (`.waiting(Holder?)`, `.open`, `.refused(LaunchRefusal)`), `state`, `isOpen`, `sentence`, `heldLinkCount`
-    - `Seams` (`claim`, `openStore`, `finishLaunch`, `deliver`, `refuse`, `startPolling`, `stopPolling`, `showWaitingNotice`, `now`)
+    - `Seams` (`claim`, `openStore`, `finishLaunch`, `deliver`, `refuse`, `startPolling(interval, tick)`, `stopPolling`, `showWaitingNotice`, `hideWaitingNotice`, `activate`, `now`)
     - `init(seams:)`, `begin()`, `poll()`, `didFinishLaunching()`, `receive(_:)`, `willTerminate(flush:)`, `showNoticeNow()`
-    - `static let waitingSceneId = "iris-waiting"`, `static func waitingSentence(_:) -> String`
-  - Views: `WaitingView(gate:)`, `WaitingMenu(gate:)`, `GatedStatusMenu(gate:)`, `WaitingNoticeView(gate:)`, `GatedContent(gate:content:)`, `GatedStatusLabel(gate:)`
+    - `static let knownPollInterval: TimeInterval = 1`, `static let unknownPollInterval: TimeInterval = 0.2`, `static func waitingSentence(_:) -> String`
+  - Views: `WaitingView(gate:)`, `WaitingMenu(gate:)`, `GatedStatusMenu(gate:)`, `GatedContent(gate:content:)`, `GatedStatusLabel(gate:)`
 
 - [ ] **Step 1: Write the failing tests.** Create `Tests/irisTests/LaunchGateTests.swift`:
 
@@ -1330,9 +1412,11 @@ struct LaunchGateTests {
         var delivered: [URL?] = []
         var refusals: [(LaunchRefusal, Bool)] = []
         var tick: (@MainActor () -> Void)?
+        var intervals: [TimeInterval] = []
         var stops = 0
         var notices = 0
-        var noticeOpens = true
+        var hides = 0
+        var activations = 0
         var clock = Date(timeIntervalSince1970: 1_000)
 
         init(_ claims: [StoreLock.Claim]) { self.claims = claims }
@@ -1343,9 +1427,11 @@ struct LaunchGateTests {
             finishLaunch: { [unowned self] links, dropped in self.finishes.append(links); self.droppedReported.append(dropped) },
             deliver: { [unowned self] in self.delivered.append($0) },
             refuse: { [unowned self] refusal, hadLinks in self.refusals.append((refusal, hadLinks)) },
-            startPolling: { [unowned self] in self.tick = $0 },
+            startPolling: { [unowned self] interval, tick in self.intervals.append(interval); self.tick = tick },
             stopPolling: { [unowned self] in self.stops += 1; self.tick = nil },
-            showWaitingNotice: { [unowned self] in self.notices += 1; return self.noticeOpens },
+            showWaitingNotice: { [unowned self] in self.notices += 1 },
+            hideWaitingNotice: { [unowned self] in self.hides += 1 },
+            activate: { [unowned self] in self.activations += 1 },
             now: { [unowned self] in self.clock }))
 
         func advance(_ seconds: TimeInterval) { clock = clock.addingTimeInterval(seconds); tick?() }
@@ -1361,6 +1447,7 @@ struct LaunchGateTests {
         #expect(h.tick == nil, "no poll")
         h.gate.didFinishLaunching()
         #expect(h.finishes.count == 1)
+        #expect(h.activations == 1, "did-finish activates, as today")
     }
 
     @Test("while a CLI holds the store, openStore is never called; when it lets go, the launch completes")
@@ -1421,28 +1508,28 @@ struct LaunchGateTests {
         #expect(h.finishes == [[]])
     }
 
-    @Test("a cold start from a link shows the waiting notice, retrying each poll until it opens")
+    @Test("a cold start from a link shows the notice without activating, and hides it when Iris opens")
     func coldStartShowsTheNotice() {
-        let h = Harness([.held(Self.cli)])
-        h.noticeOpens = false
+        let h = Harness([.held(Self.cli), .acquired])
         h.gate.begin()
         h.gate.receive(URL(string: "iris-dev://run-job/x"))
         #expect(h.notices == 0, "not before did-finish")
         h.gate.didFinishLaunching()
         #expect(h.notices == 1)
-        h.noticeOpens = true
+        #expect(h.activations == 0, "decision 13: the notice is shown without activating Iris")
         h.advance(1)
-        #expect(h.notices == 2)
-        h.advance(1)
-        #expect(h.notices == 2, "shown once it opened")
+        #expect(h.gate.isOpen)
+        #expect(h.hides == 1)
+        #expect(h.activations == 0)
     }
 
-    @Test("a Dock launch while waiting shows no extra notice")
+    @Test("a Dock launch while waiting activates as today and shows no extra notice")
     func dockLaunchHasNoNotice() {
         let h = Harness([.held(Self.cli)])
         h.gate.begin()
         h.gate.didFinishLaunching()
         #expect(h.notices == 0)
+        #expect(h.activations == 1)
     }
 
     @Test("a GUI holder at launch is refused at did-finish, and the alert knows about a link")
@@ -1486,10 +1573,20 @@ struct LaunchGateTests {
         let h = Harness([.held(nil)])
         h.gate.begin()
         h.gate.didFinishLaunching()
-        h.advance(0.5)
-        #expect(h.refusals.isEmpty)
-        h.advance(0.5)
+        #expect(h.intervals == [LaunchGate.unknownPollInterval], "an unnamed holder is re-read fast")
+        for _ in 0..<4 { h.advance(0.2) }
+        #expect(h.refusals.isEmpty, "four re-reads inside the second, none refused")
+        h.advance(0.2)
         #expect(h.refusals.map(\.0) == [.otherApp(pid: nil)])
+    }
+
+    @Test("a named holder is polled once a second, and the poll speeds up while the holder is unnamed")
+    func pollRateFollowsTheHolder() {
+        let h = Harness([.held(Self.cli), .held(nil), .held(Self.cli)])
+        h.gate.begin()
+        h.advance(1)
+        h.advance(0.2)
+        #expect(h.intervals == [LaunchGate.knownPollInterval, LaunchGate.unknownPollInterval, LaunchGate.knownPollInterval])
     }
 
     @Test("Review Focus 3: the waiting state tracks whichever run holds the store now")
@@ -1626,15 +1723,23 @@ final class LaunchGate {
         var deliver: @MainActor (URL?) -> Void
         /// The alert, the holder brought forward, and quit.
         var refuse: @MainActor (LaunchRefusal, _ hadLinks: Bool) -> Void
-        /// A 1 s repeating main-queue `DispatchSourceTimer`, never `Task.sleep` (invariant 4).
-        var startPolling: @MainActor (_ tick: @escaping @MainActor () -> Void) -> Void
+        /// A repeating main-queue `DispatchSourceTimer` at `interval`, never `Task.sleep`
+        /// (invariant 4). Called again with a new interval when the poll rate changes.
+        var startPolling: @MainActor (_ interval: TimeInterval, _ tick: @escaping @MainActor () -> Void) -> Void
         var stopPolling: @MainActor () -> Void
-        /// Opens the "Iris is waiting" window without activating; false when no opener exists yet.
-        var showWaitingNotice: @MainActor () -> Bool
+        /// Orders the "Iris is waiting" panel front without activating Iris (decision 13).
+        var showWaitingNotice: @MainActor () -> Void
+        var hideWaitingNotice: @MainActor () -> Void
+        /// `NSApp.activate`, which did-finish did unconditionally before #463. Skipped only for a
+        /// link that launched Iris while it waits (plan note 13).
+        var activate: @MainActor () -> Void
         var now: @MainActor () -> Date = { Date() }
     }
 
-    static let waitingSceneId = "iris-waiting"
+    /// Decision 9's poll, while the holder is named.
+    static let knownPollInterval: TimeInterval = 1
+    /// While the holder is unnamed, so decision 5's second of re-reading is several reads, not one.
+    static let unknownPollInterval: TimeInterval = 0.2
 
     private(set) var state: State = .waiting(nil)
     var isOpen: Bool { state == .open }
@@ -1645,8 +1750,8 @@ final class LaunchGate {
     @ObservationIgnored private var didFinish = false
     @ObservationIgnored private var finished = false
     @ObservationIgnored private var refusalShown = false
-    @ObservationIgnored private var noticePending = false
-    @ObservationIgnored private var polling = false
+    @ObservationIgnored private var noticeShown = false
+    @ObservationIgnored private var pollInterval: TimeInterval?
     @ObservationIgnored private var unknownSince: Date?
 
     init(seams: Seams) { self.seams = seams }
@@ -1660,16 +1765,21 @@ final class LaunchGate {
     func poll() {
         guard case .waiting = state else { return }
         apply(seams.claim())
-        if noticePending, case .waiting = state { showNoticeNow() }
     }
 
     func didFinishLaunching() {
         guard !didFinish else { return }
         didFinish = true
         switch state {
-        case .refused(let refusal): showRefusal(refusal)
-        case .waiting: if !links.isEmpty { noticePending = true; showNoticeNow() }
-        case .open: finishIfReady()
+        case .refused(let refusal):
+            showRefusal(refusal)   // the alert activates Iris itself
+        case .waiting where !links.isEmpty:
+            showNoticeNow()   // a link launched Iris: no activation (decision 13)
+        case .waiting:
+            seams.activate()
+        case .open:
+            seams.activate()
+            finishIfReady()
         }
     }
 
@@ -1678,7 +1788,7 @@ final class LaunchGate {
         if isOpen { return seams.deliver(url) }
         guard links.count < RunJobURLIntake.capacity else { dropped += 1; return }
         links.append(url)
-        if didFinish, case .waiting = state { noticePending = true; showNoticeNow() }
+        if didFinish, case .waiting = state { showNoticeNow() }
     }
 
     /// `applicationWillTerminate`: only an open app has anything to flush (Review Focus 2).
@@ -1686,12 +1796,11 @@ final class LaunchGate {
         if isOpen { flush() }
     }
 
-    /// The hotkey and the poll's retry. Clears the pending flag once a window actually opened.
-    @discardableResult
-    func showNoticeNow() -> Bool {
-        let opened = seams.showWaitingNotice()
-        if opened { noticePending = false }
-        return opened
+    /// A held link after did-finish, and the hotkey (which activates first, on purpose).
+    func showNoticeNow() {
+        guard case .waiting = state else { return }
+        noticeShown = true
+        seams.showWaitingNotice()
     }
 
     var sentence: String {
@@ -1725,26 +1834,38 @@ final class LaunchGate {
         switch LaunchDecision.decide(claim, unknownFor: unknownFor) {
         case .open:
             stopPolling()
+            hideNotice()
             seams.openStore()
             state = .open
             finishIfReady()
         case .wait(let holder):
             if state != .waiting(holder) { state = .waiting(holder) }
-            if !polling {
-                polling = true
-                seams.startPolling { [weak self] in self?.poll() }
-            }
+            poll(every: holder == nil ? Self.unknownPollInterval : Self.knownPollInterval)
         case .refuse(let refusal):
             stopPolling()
+            hideNotice()
             state = .refused(refusal)
             if didFinish { showRefusal(refusal) }
         }
     }
 
+    private func poll(every interval: TimeInterval) {
+        guard pollInterval != interval else { return }
+        if pollInterval != nil { seams.stopPolling() }
+        pollInterval = interval
+        seams.startPolling(interval) { [weak self] in self?.poll() }
+    }
+
     private func stopPolling() {
-        guard polling else { return }
-        polling = false
+        guard pollInterval != nil else { return }
+        pollInterval = nil
         seams.stopPolling()
+    }
+
+    private func hideNotice() {
+        guard noticeShown else { return }
+        noticeShown = false
+        seams.hideWaitingNotice()
     }
 
     private func showRefusal(_ refusal: LaunchRefusal) {
@@ -1834,21 +1955,6 @@ struct GatedStatusLabel: View {
             Image(systemName: "hourglass")
                 .accessibilityLabel("Iris is waiting")
         }
-    }
-}
-
-/// The small "Iris is waiting" window of a windowless cold start (decision 13). It closes itself
-/// when the launch completes.
-struct WaitingNoticeView: View {
-    let gate: LaunchGate
-    @Environment(\.dismissWindow) private var dismissWindow
-
-    var body: some View {
-        WaitingView(gate: gate)
-            .onAppear { if gate.isOpen { dismissWindow(id: LaunchGate.waitingSceneId) } }
-            .onChange(of: gate.isOpen) { _, open in
-                if open { dismissWindow(id: LaunchGate.waitingSceneId) }
-            }
     }
 }
 ```
@@ -1952,7 +2058,10 @@ Claude-Session: https://claude.ai/code/session_017NLGyK8ozWezeZeijjgGJx"
 ### Task 7: the app opens through the gate; `GUILock` goes
 
 **Files:**
-- Modify: `Sources/IrisKit/iris.swift:5438-5579` (`AppDelegate`, `IrisApp`), `:3437-3439` (`interruptedByQuitReason`)
+- Create: `Sources/IrisKit/IrisApp.swift` (`AppDelegate` and `IrisApp`, moved out of `iris.swift:5438-5579` and rewired)
+- Create: `Sources/IrisKit/LaunchGate+App.swift` (`Seams.app()`, `GatePollTimer`, `WaitingNoticePanel`)
+- Modify: `Sources/IrisKit/iris.swift:5438-5579` (deleted, moved), `:3437-3439` (`interruptedByQuitReason`)
+- Modify: `Tests/irisTests/RunJobURLEventsTests.swift:52-53` (scan the two new files)
 - Modify: `Sources/IrisKit/RunJobURLEvents.swift:18-27`
 - Modify: `Sources/IrisKit/RunJobURLIntake.swift:3-7` (comment), plus `noteLinksDroppedWhileWaiting`
 - Modify: `Sources/IrisKit/RunJobURL.swift` (add `droppedWhileWaitingLine`)
@@ -1963,7 +2072,7 @@ Claude-Session: https://claude.ai/code/session_017NLGyK8ozWezeZeijjgGJx"
 **Interfaces:**
 - Consumes: Task 5's `LaunchGate`, `Seams` and views. Task 1's `StoreLock`. `RunJobURLIntake.capacity`.
 - Produces:
-  - `extension LaunchGate { static let shared }`, `LaunchGate.Seams.app()`
+  - `extension LaunchGate { static let shared }`, `LaunchGate.Seams.app()`, `GatePollTimer`, `WaitingNoticePanel`
   - `@MainActor static func IrisApp.openStore()`
   - `AppState.noteLinksDroppedWhileWaiting(_ count: Int)`
   - `RunJobURL.droppedWhileWaitingLine(_ count: Int) -> String`
@@ -2024,14 +2133,20 @@ Replace the intake's header comment (`RunJobURLIntake.swift:3-7`) with:
 Run: `timeout 300 scripts/test-filter.sh RunJobURLIntakeTests`
 Expected: PASS, `main`'s count plus 1.
 
-- [ ] **Step 5: Wire the app.** Replace `iris.swift:5438-5579` (`AppDelegate` and `IrisApp`) with the code below. It does five things:
+- [ ] **Step 5: Move the GUI shell into a file of its own, and wire it.** Cut `iris.swift:5438-5579` (`AppDelegate` and `IrisApp`) out of `iris.swift`. Their new home is `Sources/IrisKit/IrisApp.swift`, so the `.shared` scan (Task 8) can exempt the GUI shell without exempting `IrisEngine`. The seams that carry raw links go in `Sources/IrisKit/LaunchGate+App.swift`, which `RunJobURLEventsTests.nothingLogs` reads. That keeps `iris.swift`'s `print` calls out of the link's path. Five changes come with the move:
   - `IrisApp.init` asks the gate.
   - `openStore()` holds today's store half (`:5501-5528`, minus the lock lines).
-  - did-finish keeps Sparkle and hands the rest to the gate.
-  - terminate flushes only an open app and vacates.
+  - Activation moves from `init` and did-finish into the gate, so a link that launches Iris while it waits does not activate it (plan note 13).
+  - terminate flushes only an open app.
   - Every store-backed scene is gated.
 
+Create `Sources/IrisKit/IrisApp.swift`:
+
 ```swift
+import AppKit
+import KeyboardShortcuts
+import SwiftUI
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     /// Kept for the life of the app: `NSAppleEventManager` is not documented to retain a handler.
     private var runJobURLEvents: RunJobURLEvents?
@@ -2044,12 +2159,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.activate(ignoringOtherApps: true)
         MainActor.assumeIsolated {
             // Sparkle wants its scheduled checks started after launch, not at construction.
             UpdaterController.shared?.start()
             // #463 decision 11: `finishLaunch` (startOnce, then the held links) runs once both this
-            // and `openStore()` have happened, whichever is later. A refused launch alerts here.
+            // and `openStore()` have happened, whichever is later. The gate also activates Iris,
+            // except for a link launch while it waits (decision 13), and alerts a refused launch.
             LaunchGate.shared.didFinishLaunching()
         }
     }
@@ -2064,12 +2179,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 AppState.shared.flushSave()
             }
         }
-        // Empty the payload. The lock itself goes with the process; `vacate` is a no-op in a
-        // process that never held it, so a refused second GUI leaves the holder's payload alone.
-        StoreLock.vacate(at: IrisPaths.default.storeLockFile)
         // Conversations live in their own database now (#163), but settings and other state
         // still ride on UserDefaults, and `_exit` skips the cfprefsd flush for those too.
         IrisDefaults.store.synchronize()
+        // Last, just before `_exit`: an empty payload under a held lock reads as an unnamed holder
+        // (decision 5), so it must not sit there while anything else runs. A no-op in a process
+        // that never held the lock, so a refused second GUI leaves the holder's payload alone.
+        StoreLock.vacate(at: IrisPaths.default.storeLockFile)
         // Bypass static destructors in llama.cpp ggml-metal to prevent GGML_ASSERT crash on exit
         _exit(0)
     }
@@ -2096,7 +2212,8 @@ struct IrisApp: App {
             LaunchGate.shared.begin()
         }
         NSApplication.shared.setActivationPolicy(.regular)
-        NSApplication.shared.activate(ignoringOtherApps: true)
+        // No `activate` here any more: did-finish activates through the gate, which knows whether
+        // a link launched Iris while it waits (plan note 13).
 
         if let imagePath = Bundle.module.path(forResource: "iris-icon", ofType: "png"),
            let image = NSImage(contentsOfFile: imagePath) {
@@ -2104,7 +2221,8 @@ struct IrisApp: App {
         }
 
         // D6 decision 4: the raise goes through `showMainWindow`, like every other surface's.
-        // The gate is asked when the key is pressed, not here (#463 decision 10).
+        // The gate is asked when the key is pressed, not here (#463 decision 10). A hotkey is the
+        // owner asking for Iris, so it activates even while waiting.
         KeyboardShortcuts.onKeyUp(for: .toggleIris) {
             if LaunchGate.shared.isOpen {
                 MainWindow.tracking.toggleFromHotkey(state: AppState.shared)
@@ -2173,12 +2291,6 @@ struct IrisApp: App {
         }
         .defaultSize(width: RunLogView.defaultWidth, height: RunLogView.defaultHeight)
 
-        // #463 decision 13: the windowless cold start's notice. Opened by the gate, never at launch.
-        Window("Iris is waiting", id: LaunchGate.waitingSceneId) {
-            WaitingNoticeView(gate: LaunchGate.shared)
-        }
-        .windowResizability(.contentSize)
-
         MenuBarExtra {
             GatedStatusMenu(gate: LaunchGate.shared)
         } label: {
@@ -2192,15 +2304,24 @@ struct IrisApp: App {
         }
     }
 }
+```
 
-/// The 1 s poll's timer, held between `startPolling` and `stopPolling`.
+Create `Sources/IrisKit/LaunchGate+App.swift`. It holds the production seams, the poll's timer and the waiting notice. The notice is an AppKit panel rather than a SwiftUI `Window` scene: `OpenWindowAction` has no non-activating form, and decision 13 opens the notice without activating Iris.
+
+```swift
+import AppKit
+import SwiftUI
+
+/// The poll's timer, held between `startPolling` and `stopPolling`. A main-queue dispatch timer,
+/// never `Task.sleep` (invariant 4).
 @MainActor
-private final class GatePollTimer {
+final class GatePollTimer {
     private var timer: DispatchSourceTimer?
 
-    func start(_ tick: @escaping @MainActor () -> Void) {
+    func start(every interval: TimeInterval, _ tick: @escaping @MainActor () -> Void) {
+        stop()
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now() + 1, repeating: 1)
+        timer.schedule(deadline: .now() + interval, repeating: interval)
         timer.setEventHandler { MainActor.assumeIsolated { tick() } }
         timer.resume()
         self.timer = timer
@@ -2212,6 +2333,30 @@ private final class GatePollTimer {
     }
 }
 
+/// Decision 13's "Iris is waiting" notice for a link's windowless cold start: a non-activating
+/// panel, ordered front without taking focus from whatever the owner is doing.
+@MainActor
+final class WaitingNoticePanel {
+    private var panel: NSPanel?
+
+    func show(gate: LaunchGate) {
+        if panel == nil {
+            let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 380, height: 180),
+                                styleMask: [.titled, .closable, .nonactivatingPanel, .utilityWindow],
+                                backing: .buffered, defer: false)
+            panel.title = "Iris is waiting"
+            panel.isReleasedWhenClosed = false
+            panel.hidesOnDeactivate = false
+            panel.contentView = NSHostingView(rootView: WaitingView(gate: gate))
+            panel.center()
+            self.panel = panel
+        }
+        panel?.orderFrontRegardless()
+    }
+
+    func hide() { panel?.orderOut(nil) }
+}
+
 extension LaunchGate {
     /// The app's one gate. Built on first use, from `IrisApp.init`. Tests build their own.
     static let shared = LaunchGate(seams: .app())
@@ -2221,6 +2366,7 @@ extension LaunchGate.Seams {
     @MainActor
     static func app() -> LaunchGate.Seams {
         let poll = GatePollTimer()
+        let notice = WaitingNoticePanel()
         let lock = IrisPaths.default.storeLockFile
         return LaunchGate.Seams(
             claim: { StoreLock.claim(at: lock, kind: .app) },
@@ -2249,16 +2395,16 @@ extension LaunchGate.Seams {
                 }
                 NSApp.terminate(nil)
             },
-            startPolling: { poll.start($0) },
+            startPolling: { interval, tick in poll.start(every: interval, tick) },
             stopPolling: { poll.stop() },
-            showWaitingNotice: {
-                guard MainWindow.tracking.openScene != nil else { return false }
-                MainWindow.open(scene: LaunchGate.waitingSceneId)
-                return true
-            })
+            showWaitingNotice: { notice.show(gate: LaunchGate.shared) },
+            hideWaitingNotice: { notice.hide() },
+            activate: { NSApp.activate(ignoringOtherApps: true) })
     }
 }
 ```
+
+In `RunJobURLEventsTests.swift`'s `nothingLogs` list, add `"LaunchGate+App.swift"` and `"IrisApp.swift"` beside `"LaunchGate.swift"`.
 
 In `RunJobURLEvents.swift`, replace `:18-27` with:
 
@@ -2296,9 +2442,10 @@ Run: `scripts/check-warnings.sh` (expected: exit 0). Then `timeout 300 scripts/t
 - [ ] **Step 9: Commit.**
 
 ```bash
-git add Sources/IrisKit/iris.swift Sources/IrisKit/RunJobURLEvents.swift Sources/IrisKit/RunJobURLIntake.swift \
+git add Sources/IrisKit/iris.swift Sources/IrisKit/IrisApp.swift Sources/IrisKit/LaunchGate+App.swift \
+  Sources/IrisKit/RunJobURLEvents.swift Sources/IrisKit/RunJobURLIntake.swift \
   Sources/IrisKit/RunJobURL.swift Sources/IrisKit/SandboxSessionManager.swift Sources/IrisKit/RunJobCLI.swift \
-  Tests/irisTests/RunJobURLIntakeTests.swift
+  Tests/irisTests/RunJobURLIntakeTests.swift Tests/irisTests/RunJobURLEventsTests.swift
 git commit -m "feat: the app opens its store through the gate, waits behind a CLI, refuses a second GUI (#463)" \
   -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_017NLGyK8ozWezeZeijjgGJx"
@@ -2386,8 +2533,15 @@ struct SharedAppStateTrapTests {
     @Test("Review Focus 5: AppState.shared appears only in the GUI shell")
     func sharedAppearsOnlyInTheGUIShell() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let allowed: Set<String> = ["AppState.swift", "iris.swift", "ChatView.swift", "SettingsView.swift",
-                                    "PluginsSettingsView.swift", "WaitingView.swift"]
+        // The GUI shell only: `IrisApp.swift` (Task 7 moved `IrisApp` and `AppDelegate` out of
+        // `iris.swift`, which is mostly `IrisEngine`, the headless path), the gate's app seams,
+        // and the views. `AppState.swift` is scanned too: its declaration is `static var shared`,
+        // which neither pattern matches.
+        let allowed: Set<String> = ["IrisApp.swift", "LaunchGate+App.swift", "WaitingView.swift", "ChatView.swift",
+                                    "SettingsView.swift", "PluginsSettingsView.swift"]
+        // `AppState.shared`, and the implicit-member spellings `: AppState = .shared` and
+        // `AppState? = .shared`, which a literal-text match would miss.
+        let use = try Regex(#"\bAppState\.shared\b|:\s*AppState[?!]?\s*=\s*\.shared\b"#)
         var offenders: [String] = []
         for dir in ["Sources/IrisKit", "Tests/irisTests"] {
             let base = root.appendingPathComponent(dir)
@@ -2396,7 +2550,7 @@ struct SharedAppStateTrapTests {
                 let text = try String(contentsOf: base.appendingPathComponent(name), encoding: .utf8)
                 for (index, line) in text.components(separatedBy: .newlines).enumerated() {
                     let code = line.trimmingCharacters(in: .whitespaces)
-                    guard !code.hasPrefix("//"), code.contains("AppState.shared") else { continue }
+                    guard !code.hasPrefix("//"), code.firstMatch(of: use) != nil else { continue }
                     offenders.append("\(dir)/\(name):\(index + 1)")
                 }
             }
@@ -2405,16 +2559,18 @@ struct SharedAppStateTrapTests {
     }
 }
 
-/// #489, in a child process with `ProcessRole.runJob` set, so any path that reached
-/// `AppState.shared` would trap and fail the exit test. Drives the CLI's own engine executor,
-/// which is what a CLI turn dispatches through (plan note 6).
+/// #489, in a child process with `ProcessRole.runJob` set, so any path that reached the shared
+/// `AppState` would trap and fail the exit test. Drives an engine built as `fire` builds one,
+/// through its own executor: what a CLI turn dispatches through after an approval (plan note 6).
 @MainActor
 enum RunJobSkillScenario {
     static func run() async -> Bool {
         ProcessRole.set(.runJob)
         guard let store = try? ConversationStore.inMemory() else { return false }
         let state = RunJobCLI.makeState(store: store)
-        let engine: IrisEngine = state.engine
+        // Built the way `RunJobCLI.fire` builds its engine (`RunJobCLI.swift:463`): a second engine
+        // over the state, not `state.engine`.
+        let engine = IrisEngine(state: state, client: FakeLLMClient(responses: []), protectionEnabled: false)
         let body = String(repeating: "A procedure step. ", count: 4)
         let skillFile = IrisPaths.default.skillsDir.appendingPathComponent("probe/SKILL.md")
         try? FileManager.default.createDirectory(at: skillFile.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -2486,7 +2642,8 @@ enum ProcessRole: Sendable, Equatable {
     static var shared: AppState {
         guard ProcessRole.mayUseSharedAppState(role: ProcessRole.current,
                                                holdsStore: StoreLock.holds(IrisPaths.default.storeLockFile)) else {
-            fatalError("AppState.shared outside the app's own store holder (role: "
+            // Worded so the source scan (Review Focus 5) does not read it as a use.
+            fatalError("the shared AppState was reached outside the app's own store holder (role: "
                        + "\(String(describing: ProcessRole.current))). Build an AppState(store:) instead (#463).")
         }
         return sharedInstance
@@ -2516,12 +2673,12 @@ Expected: PASS, 7 tests; then XCTest's `Executed N tests, with 0 failures` for t
   - Replace the `guard` in `shared` with `return sharedInstance`. Expected: `trapsWithNoRole`, `appWithoutTheLockTraps` and `runJobTraps` fail (the `AppState.shared` trap).
   - In `ToolExecutor.createSkill`, add `_ = await MainActor.run { AppState.shared }` before `await onSkillsChanged?()`. Expected: `runJobSkillWritesStayOnTheRunsEngine` fails (#489: no shared `AppState` in the CLI).
   - In `IrisEngine.executor`, delete the `onSkillsChanged` line. Expected: `runJobSkillWritesStayOnTheRunsEngine` fails.
-  - Add `let _ = AppState.shared` to the body of any function in `RunJobURLHandling.swift`. Expected: `sharedAppearsOnlyInTheGUIShell` fails.
+  - Add `let _ = AppState.shared` to the body of any function in `RunJobURLHandling.swift`. Expected: `sharedAppearsOnlyInTheGUIShell` fails. Then try `let s: AppState = .shared` in `iris.swift`. Expected: it fails again.
 
 - [ ] **Step 9: Run the full suite.** Any test that reaches `.shared` by another path now crashes the run (decision 14's alarm).
 
 Run: `timeout 900 swift test 2>&1 | tee /tmp/463-pr1-full.log; echo "exit=$?"`
-Expected: `exit=0`, `Test run with N tests … passed`, and `Executed N tests, with 0 failures`. If it crashes with `AppState.shared outside the app's own store holder`, the stack trace names the path. Route that path to an injected `AppState`, as #489 did. Never add a disarm.
+Expected: `exit=0`, `Test run with N tests … passed`, and `Executed N tests, with 0 failures`. If it crashes with `the shared AppState was reached outside the app's own store holder`, the stack trace names the path. Route that path to an injected `AppState`, as #489 did. Never add a disarm.
 
 - [ ] **Step 10: Check warnings.** Run `scripts/check-warnings.sh`. Expected: exit 0.
 
@@ -2664,6 +2821,9 @@ Run on `work`'s laptop, on PR 1's branch, before the PR merges. Post each number
 - `ITEM='osascript -e "tell application \"System Events\" to get description of every menu bar item of menu bar 2 of process \"Iris Dev\""'`
 - `HOTKEY='osascript -e "tell application \"System Events\" to key code 49 using {command down, shift down, option down}"'`
 - `ROW='sqlite3 ~/.iris-dev/conversations.sqlite "SELECT triggerKind, status, failureReason FROM job_runs WHERE jobName = '"'"'463-nap'"'"' ORDER BY startedAt DESC LIMIT 1"'`
+- `DENY='/tmp/irisgui/ui click 930 413; sleep 1; osascript -e "tell application \"System Events\" to count windows of process \"SecurityAgent\""'`. A freshly signed Iris Dev raises a Keychain prompt on every launch, and it blocks `App.init` until answered. So the waiting gate never shows until it is denied. ≈930,413 pt is its Deny button on `work`'s display. **Every launch below** (`open "$APP"`, `open "$LINK"`, and the bare `$CLI &` GUI) is followed at once by `eval $DENY`, before anything else is read. Expected output: `0`. Run it after a `$CLI --run-job` start too, whenever `pgrep -x SecurityAgent` lists one.
+- `SETTINGS='/tmp/irisgui/ui cmdkey 43'`: Cmd-, through `work`'s CGEvent helper (key code 43 is the comma). System Events keystrokes do not reliably reach SwiftUI there.
+- `PD=com.bnaylor.iris.dev` and `PKEYS="PRIMARY_PROVIDER ANTHROPIC_AUTH_MODE ANTHROPIC_VERTEX_PROJECT ANTHROPIC_VERTEX_LOCATION"`.
 
 1. `pgrep -fl "Iris Dev|\.build/debug/iris"`. Expected: no output. Quit anything listed.
 2. `python3 ~/.claude/skills/gui-test-lease/lease.py acquire --purpose "iris: #463 PR 1 single writer" --minutes 90 --on-behalf-of <requesting peer>`. Expected: exit 0.
@@ -2673,22 +2833,34 @@ Run on `work`'s laptop, on PR 1's branch, before the PR merges. Post each number
    - `$LSR -dump | awk '/^path:/ && /Iris Dev\.app/ {sub(/^path: +/, ""); sub(/ \(0x[0-9a-f]+\)$/, ""); print}' | sort -u > "$DD/registered.txt"; cat "$DD/registered.txt"`.
    - Then `while read -r p; do [[ "$p" == "$APP" ]] || $LSR -u "$p"; done < "$DD/registered.txt"; $LSR -f "$APP"`.
    - Re-run the dump line. Expected: exactly one line, `$APP`.
+3b. **Provider: Claude on Vertex in the dev domain.** Job runs need it, because Gemini refuses job prompts (#475). With nothing running:
+
+   ```sh
+   for k in $=PKEYS; do defaults read $PD $k > "$DD/prev-$k" 2>/dev/null || rm -f "$DD/prev-$k"; done
+   defaults write $PD PRIMARY_PROVIDER Anthropic
+   defaults write $PD ANTHROPIC_AUTH_MODE "Vertex AI (ADC)"
+   defaults write $PD ANTHROPIC_VERTEX_PROJECT "$VPROJ"    # the project work's Vertex budget is on
+   defaults write $PD ANTHROPIC_VERTEX_LOCATION "$VLOC"    # the region that project serves Claude from
+   for k in $=PKEYS; do echo "$k=$(defaults read $PD $k)"; done
+   ```
+
+   Expected: the four values just written. `gcloud auth application-default print-access-token >/dev/null && echo adc-ok` prints `adc-ok`.
 4. **(spend) Setup.**
-   - `open "$APP"`. Ask: "Schedule a mutating job named 463-nap every 12 hours with a grant on `$DD/nap` (read-write, no network): run the shell command `sleep 90` with run_command, then reply done." Approve the grant. Then `mkdir -p "$DD/nap"`.
+   - `open "$APP"`, then `eval $DENY`. Ask: "Schedule a mutating job named 463-nap every 12 hours with a grant on `$DD/nap` (read-write, no network): run the shell command `sleep 90` with run_command, then reply done." Approve the grant. Then `mkdir -p "$DD/nap"`.
    - Type `/jobs url 463-nap on`, Copy the link, Done, and `export LINK='<the link>'`.
    - Quit Iris Dev (Cmd-Q).
    - Run `container system status`. Expected: running. If not, record "no VM: 463-nap cannot run" and stop the pass at step 12.
 5. **Spec check 1: a Dock launch during a run.**
    - `( $CLI --run-job 463-nap; echo "cli-exit=$?" ) &`, then wait until `eval $HOLDER` prints `{"job":"463-nap","kind":"run-job","pid":N}`.
-   - `BEFORE=$(eval $MT)`, then `open "$APP"`, and wait 5 s.
+   - `BEFORE=$(eval $MT)`, then `open "$APP"`, `eval $DENY`, and wait 5 s.
    - `eval $TEXTS`. Expected: contains `An iris --run-job is using this home (pid N, job 463-nap). Iris will open when it finishes.`
    - `eval $ITEM`. Expected: contains `Iris is waiting`.
    - Every 10 s until the CLI exits: `[ "$(eval $MT)" = "$BEFORE" ] && echo same`. Expected: `same` each time.
    - After `cli-exit=0`, within 3 s: `eval $TEXTS` no longer contains `is using this home`, `eval $ROW` is `manual|completed|`, and `sqlite3 ~/.iris-dev/conversations.sqlite "SELECT count(*) FROM messages WHERE payload LIKE '%jobName%463-nap%'"` is at least 1 (the card).
 6. **Spec check 3: the hotkey, Settings, the Run Log and Quit, while waiting.**
-   - Quit Iris Dev. Start the CLI as in step 5. Once it holds, `open "$APP"` and take `BEFORE=$(eval $MT)`.
+   - Quit Iris Dev. Start the CLI as in step 5. Once it holds, `open "$APP"`, `eval $DENY`, and take `BEFORE=$(eval $MT)`.
    - `eval $HOTKEY`, then `eval $WINDOWS`. Expected: no crash (`pgrep -fl "Iris Dev"` still lists it), and the windows listed.
-   - `osascript -e 'tell application "System Events" to keystroke "," using command down'`, then `eval $TEXTS`. Expected: a settings window showing the waiting sentence.
+   - `eval $SETTINGS`, then `eval $WINDOWS` and `eval $TEXTS`. Expected: a settings window, showing the waiting sentence.
    - `osascript -e 'tell application "System Events" to click menu item "Run Log" of menu "Window" of menu bar 1 of process "Iris Dev"'`, then `eval $WINDOWS` and `eval $TEXTS`. Expected: "Run Log" is listed, showing the waiting sentence.
    - `[ "$(eval $MT)" = "$BEFORE" ] && echo same`. Expected: `same`.
    - **Review Focus 2:** take `REPORTS=$(ls ~/Library/Logs/DiagnosticReports | grep -c "Iris Dev")`. Then `osascript -e 'tell application "System Events" to click menu bar item 1 of menu bar 2 of process "Iris Dev"'` and choose Quit Iris from that menu. Within 3 s:
@@ -2698,7 +2870,7 @@ Run on `work`'s laptop, on PR 1's branch, before the PR merges. Post each number
      - The CLI is still running.
    - Wait for `cli-exit=0`.
 7. **Spec check 2: a cold start from a link during a run.**
-   - `( $CLI --run-job 463-nap; echo "cli-exit=$?" ) &`. Once it holds, `open "$LINK"` and wait 5 s.
+   - `( $CLI --run-job 463-nap; echo "cli-exit=$?" ) &`. Once it holds, `open "$LINK"`, `eval $DENY`, and wait 5 s.
    - `pgrep -fl "Iris Dev"`. Expected: running.
    - `eval $WINDOWS`. Expected: exactly `Iris is waiting`.
    - `eval $ITEM`. Expected: contains `Iris is waiting`.
@@ -2710,13 +2882,13 @@ Run on `work`'s laptop, on PR 1's branch, before the PR merges. Post each number
    - (b) Quit Iris Dev. `$CLI &`, wait until its window opens, then `open "$APP"`. Expected: Iris Dev shows the same alert; after Quit, `pgrep -fl "Iris Dev"` is empty and `$CLI`'s GUI is still running.
    - (c) With the bare binary still up, note `N=$(sqlite3 ~/.iris-dev/conversations.sqlite "SELECT count(*) FROM job_runs WHERE jobName = '463-nap'")`. Run `open "$LINK"`. Expected: Iris Dev's alert text also contains `The link you opened was not run.`, and after Quit the count is still `N` 10 s later. Quit the bare binary.
 10. **Spec check 7: SIGKILL the CLI while the app waits.**
-    - `$CLI --run-job 463-nap & CLIPID=$!`. Once it holds, `open "$APP"`, and wait 15 s (the turn is inside `sleep 90`).
+    - `$CLI --run-job 463-nap & CLIPID=$!`. Once it holds, `open "$APP"`, `eval $DENY`, and wait 15 s (the turn is inside `sleep 90`).
     - `kill -9 $CLIPID`.
     - Within 2 s: `eval $TEXTS` no longer contains `is using this home`.
     - `eval $ROW`. Expected: `manual|interrupted|the Iris process running it ended`.
     - `container list --all | grep -c iris-`. Expected: `0` (`reapOrphans` in `openStore()` took the dead CLI's container).
 11. **The lock file is never replaced.** `stat -f %i ~/.iris-dev/conversations.sqlite.lock` printed at step 4 and now. Expected: the same inode.
-12. **Teardown.** In Iris Dev: `/jobs delete 463-nap`. Quit. `$LSR -u "$APP"`, `rm -rf "$DD"`, and `python3 ~/.claude/skills/gui-test-lease/lease.py release`. Expected: exit 0.
+12. **Teardown.** In Iris Dev: `/jobs delete 463-nap`. Quit. Restore the provider settings, before `$DD` goes: `for k in $=PKEYS; do if [ -f "$DD/prev-$k" ]; then defaults write $PD $k "$(cat "$DD/prev-$k")"; else defaults delete $PD $k 2>/dev/null; fi; done`. Then `$LSR -u "$APP"`, `rm -rf "$DD"`, and `python3 ~/.claude/skills/gui-test-lease/lease.py release`. Expected: exit 0.
 
 ---
 
@@ -2734,7 +2906,7 @@ Cut after PR 1 merges: `git fetch origin && git switch -c feat/463-cli-clean-sto
 **Interfaces:**
 - Consumes: nothing new.
 - Produces:
-  - `final class LiveProcessGroups: @unchecked Sendable`, with `static let shared`, `add(_:)`, `remove(_:)`, `count`, `terminateAll()`, `killAll()`
+  - `final class LiveProcessGroups: @unchecked Sendable`, with `static let shared`, `add(_:)`, `remove(_:)`, `count`, `terminateAll()`, `killAll()`, `waitUntilEmpty(within:) -> Bool`
   - `ProcessGroupRunner.init(registry: LiveProcessGroups = .shared)` and `func killNow()`
   - `ProcessGroupRunner.capture(…, registry: LiveProcessGroups = .shared)`
 
@@ -2767,10 +2939,25 @@ struct LiveProcessGroupsTests {
     @Test("a running group is registered, and leaves the registry when it finishes")
     func registeredWhileRunning() async throws {
         let registry = LiveProcessGroups()
-        let (_, task) = try await spawn(registry, "sleep 0.3")
+        // Long enough that no load can reap it before the count is read; ended by the test.
+        let (runner, task) = try await spawn(registry, "sleep 30")
         #expect(registry.count == 1)
-        _ = try await value(of: task)
+        runner.terminate()
+        _ = try await value(of: task, within: 10)
         #expect(registry.count == 0)
+    }
+
+    @Test("waitUntilEmpty returns true once the groups drain, and false at its bound while one lives")
+    func waitUntilEmptyIsBounded() async throws {
+        let registry = LiveProcessGroups()
+        #expect(registry.waitUntilEmpty(within: 0.1), "an empty registry is already drained")
+        let (runner, task) = try await spawn(registry, "trap '' TERM; sleep 30")
+        let started = Date()
+        #expect(!registry.waitUntilEmpty(within: 0.3))
+        #expect(Date().timeIntervalSince(started) >= 0.3)
+        runner.terminate()   // SIGTERM is ignored, so this drains at the SIGKILL rung, 2 s on
+        #expect(registry.waitUntilEmpty(within: 5))
+        _ = try await value(of: task, within: 10)
     }
 
     @Test("terminateAll ends every group with SIGTERM, through each runner's own ladder")
@@ -2843,6 +3030,18 @@ final class LiveProcessGroups: @unchecked Sendable {
     /// SIGKILL to every group, now, for an exit that will not wait. Returns once each is sent.
     func killAll() { snapshot().forEach { $0.killNow() } }
 
+    /// Blocks until every group has been reaped, or `seconds` pass: what a stopping CLI waits on
+    /// before `_exit`, so a group the SIGTERM did not end gets its SIGKILL rung first. Polls with
+    /// `usleep` on the caller's thread, never the cooperative pool (invariant 4). True when drained.
+    func waitUntilEmpty(within seconds: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while count > 0 {
+            if Date() >= deadline { return false }
+            usleep(10_000)
+        }
+        return true
+    }
+
     /// Copied out first: a runner finishing calls `remove` from its queue, and `killNow` waits on
     /// that queue, so holding this lock across either would deadlock.
     private func snapshot() -> [ProcessGroupRunner] { lock.withLock { Array(runners.values) } }
@@ -2876,7 +3075,7 @@ final class LiveProcessGroups: @unchecked Sendable {
 - [ ] **Step 5: Run the tests to verify they pass.**
 
 Run: `timeout 300 scripts/test-filter.sh LiveProcessGroupsTests`, then `RunCommandProcessGroupTests`, then `SpawnerProcessGroupTests`
-Expected: PASS, 4 tests, then both existing suites at `main`'s counts.
+Expected: PASS, 5 tests, then both existing suites at `main`'s counts.
 
 - [ ] **Step 6: Mutation check.** Delete `registry.add(self)`. Expected: `registeredWhileRunning`, `terminateAllEndsThemAll` and `killAllIsImmediate` fail. Revert. Then delete `registry.remove(self)`. Expected: `registeredWhileRunning` fails. Revert.
 
@@ -2891,7 +3090,261 @@ git commit -m "feat: LiveProcessGroups, every ProcessGroupRunner group until it 
 Claude-Session: https://claude.ai/code/session_017NLGyK8ozWezeZeijjgGJx"
 ```
 
-### Task 12: `RunStop`, a third claimant on a run's ending
+### Task 12: `LiveContainerNames`, so an exiting CLI can delete its containers
+
+The coordinator ruled on #490 that a second Ctrl-C also deletes the run's containers (plan note 15). This task builds the names box and the parallel, bounded delete. Task 14 calls it.
+
+**Files:**
+- Create: `Sources/IrisKit/LiveContainerNames.swift`
+- Modify: `Sources/IrisKit/BlockingSpawn.swift:21-72` (`newGroup:` on `run` and `detached`)
+- Modify: `Sources/IrisKit/SandboxSessionManager.swift:50-60` (init), `:325-345` (`attemptCreate` records the name), and every `runtime.remove(name:)` / `removeIgnoringCancellation(name:)` in the file (`:157`, `:216`, `:323`, and the close path): they go through a new `removeContainer(_:)` that also drops the name
+- Modify: `Sources/IrisKit/GateEvaluator.swift:530-543` (`GateContainerRegistry` records and drops)
+- Modify: `Sources/IrisKit/HookManager.swift:268-275` (`EphemeralContainerRegistry` records and drops)
+- Create: `Tests/irisTests/LiveContainerNamesTests.swift`
+- Modify: `Tests/irisTests/SandboxClosedSessionTests.swift` (one test)
+
+**Interfaces:**
+- Consumes: nothing new.
+- Produces:
+  - `final class LiveContainerNames: @unchecked Sendable`, with `static let shared`, `add(_:)`, `remove(_:)`, `names: Set<String>`, and `deleteAll(within:command:) -> Int`
+  - `BlockingSpawn.run(_:_:timeoutSeconds:newGroup:)` and `BlockingSpawn.detached(_:_:timeoutSeconds:newGroup:then:)`, with `newGroup: Bool = false`
+  - `SandboxSessionManager.init(…, live: LiveContainerNames = .shared)`
+  - `GateContainerRegistry.init(live: LiveContainerNames = .shared)` and `EphemeralContainerRegistry.init(live: LiveContainerNames = .shared)`
+
+- [ ] **Step 1: Write the failing tests.** Create `Tests/irisTests/LiveContainerNamesTests.swift`:
+
+```swift
+import Testing
+import Foundation
+import Darwin
+@testable import IrisKit
+
+/// #463, the coordinator's ruling on #490: an exiting CLI deletes the containers it created, from
+/// a lock-protected box (no actor hop), in parallel, each in a process group of its own, bounded
+/// in all. A stub stands in for the `container` binary, run through `/bin/sh` so no freshly
+/// written executable meets the first-exec check. Every test has its own box (invariant 7).
+@Suite("LiveContainerNames (#463)", .timeLimit(.minutes(1)))
+final class LiveContainerNamesTests {
+    private let base = FileManager.default.temporaryDirectory.appendingPathComponent("iris-463-names-\(UUID().uuidString)")
+    deinit { try? FileManager.default.removeItem(at: base) }
+
+    /// A `container` stand-in: logs `delete --force <name>`, its own pid and its process group,
+    /// then sleeps `seconds`.
+    private func stub(sleeping seconds: Double) throws -> (script: URL, log: URL) {
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let log = base.appendingPathComponent("log-\(UUID().uuidString)")
+        let script = base.appendingPathComponent("container-\(UUID().uuidString).sh")
+        try """
+        echo "$* pid=$$ pgid=$(ps -o pgid= -p $$ | tr -d ' ')" >> '\(log.path)'
+        sleep \(seconds)
+        """.write(to: script, atomically: true, encoding: .utf8)
+        return (script, log)
+    }
+
+    private func lines(_ log: URL) -> [String] {
+        ((try? String(contentsOf: log, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+    }
+
+    @Test("names are recorded and dropped")
+    func recordsAndDrops() {
+        let live = LiveContainerNames()
+        live.add("iris-a")
+        live.add("iris-b")
+        live.remove("iris-a")
+        #expect(live.names == ["iris-b"])
+    }
+
+    @Test("every recorded container is deleted, in parallel, each in a process group of its own")
+    func deletesInParallelInTheirOwnGroups() async throws {
+        let live = LiveContainerNames()
+        for name in ["iris-a", "iris-b", "iris-c"] { live.add(name) }
+        let (script, log) = try stub(sleeping: 1)
+        let started = Date()
+        let task = Task.detached {
+            live.deleteAll(within: 5) { name in ("/bin/sh", [script.path, "delete", "--force", name]) }
+        }
+        let finished = try await value(of: task, within: 15)
+        #expect(finished == 3)
+        #expect(Date().timeIntervalSince(started) < 2.5, "three 1 s deletes in parallel, not 3 s in series")
+        let logged = lines(log)
+        #expect(Set(logged.compactMap { $0.split(separator: " ").dropFirst(2).first.map(String.init) })
+            == ["iris-a", "iris-b", "iris-c"])
+        for line in logged {
+            let fields = Dictionary(uniqueKeysWithValues: line.split(separator: " ").compactMap { part -> (String, String)? in
+                let kv = part.split(separator: "=")
+                return kv.count == 2 ? (String(kv[0]), String(kv[1])) : nil
+            })
+            #expect(fields["pid"] == fields["pgid"], "SETPGROUP: a terminal's Ctrl-C cannot reach the delete: \(line)")
+        }
+        #expect(live.names.isEmpty, "a delete that succeeded drops its name")
+    }
+
+    @Test("a delete that hangs is cut off at the bound")
+    func hungDeleteIsBounded() async throws {
+        let live = LiveContainerNames()
+        live.add("iris-stuck")
+        let (script, _) = try stub(sleeping: 30)
+        let started = Date()
+        let task = Task.detached {
+            live.deleteAll(within: 0.5) { name in ("/bin/sh", [script.path, "delete", "--force", name]) }
+        }
+        _ = try await value(of: task, within: 10)
+        #expect(Date().timeIntervalSince(started) < 4)
+        #expect(live.names == ["iris-stuck"], "not deleted, so still recorded")
+    }
+
+    @Test("with no container binary, or nothing recorded, nothing is spawned")
+    func nothingToDelete() {
+        #expect(LiveContainerNames().deleteAll(within: 1) { _ in ("/usr/bin/false", []) } == 0)
+    }
+
+    @Test("the gate and one-off registries record their names in the box")
+    func registriesRecord() async {
+        let live = LiveContainerNames()
+        let gates = GateContainerRegistry(live: live)
+        let ephemeral = EphemeralContainerRegistry(live: live)
+        await gates.register("iris-gate-x")
+        await ephemeral.register("iris-hook-y")
+        #expect(live.names == ["iris-gate-x", "iris-hook-y"])
+        await gates.unregister("iris-gate-x")
+        await ephemeral.unregister("iris-hook-y")
+        #expect(live.names.isEmpty)
+    }
+}
+```
+
+In `SandboxClosedSessionTests.swift`, add:
+
+```swift
+    @Test("#463: a session's container name is recorded at create and dropped at close")
+    func sessionNameIsRecorded() async {
+        let live = LiveContainerNames()
+        let m = SandboxSessionManager(runtime: MockRuntime(), image: { "ubuntu:latest" }, live: live)
+        let id = UUID()
+        _ = await m.run(command: "a", conversationId: id, workspace: "/ws")
+        #expect(live.names == ["iris-\(id.uuidString.lowercased())"])
+        await m.closeSession(id)
+        #expect(live.names.isEmpty)
+    }
+```
+
+- [ ] **Step 2: Run the tests to verify they fail.**
+
+Run: `timeout 300 scripts/test-filter.sh LiveContainerNamesTests`
+Expected: the build fails with `cannot find 'LiveContainerNames' in scope`.
+
+- [ ] **Step 3: A process group of its own for `BlockingSpawn`.** In `BlockingSpawn.run`, add `newGroup: Bool = false` after `timeoutSeconds`, and replace the `setflags` line with:
+
+```swift
+        var flags = POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK
+        // A group of its own, so a terminal's Ctrl-C (sent to the CLI's foreground group) does
+        // not end the helper the CLI is waiting on (#463).
+        if newGroup { flags |= POSIX_SPAWN_SETPGROUP }
+        posix_spawnattr_setflags(&attr, Int16(flags))
+        if newGroup { posix_spawnattr_setpgroup(&attr, 0) }
+```
+
+Give `detached` the same parameter and pass it through.
+
+- [ ] **Step 4: Write the box.** Create `Sources/IrisKit/LiveContainerNames.swift`:
+
+```swift
+import Foundation
+
+/// #463, the coordinator's ruling on #490: the containers this process created and has not
+/// removed — its sessions, gate containers and one-offs — for a CLI that is exiting at once.
+///
+/// A lock-protected set, not an actor: the signal path reads it synchronously, with no hop onto a
+/// cooperative pool that may be starved (#372). It names only what this process made, never a
+/// sweep by `SandboxSessionManager.namePrefix`, which `~/.iris` and `~/.iris-dev` share.
+final class LiveContainerNames: @unchecked Sendable {
+    static let shared = LiveContainerNames()
+
+    private let lock = NSLock()
+    private var set: Set<String> = []
+
+    func add(_ name: String) { lock.withLock { _ = set.insert(name) } }
+    func remove(_ name: String) { lock.withLock { _ = set.remove(name) } }
+    var names: Set<String> { lock.withLock { set } }
+
+    /// Deletes every recorded container in parallel, each through `BlockingSpawn` in a process
+    /// group of its own, and returns within `seconds` (plus a moment) whatever they are doing: a
+    /// helper still running at the bound is SIGKILLed by `BlockingSpawn`. A delete that exits 0
+    /// drops its name. Returns how many exited 0. `command` is a seam for the `container` binary;
+    /// nil means the installed one, and none installed means nothing to do.
+    @discardableResult
+    func deleteAll(within seconds: TimeInterval,
+                   command: ((String) -> (path: String, arguments: [String]))? = nil) -> Int {
+        let targets = names
+        guard !targets.isEmpty else { return 0 }
+        let build: (String) -> (path: String, arguments: [String])
+        if let command {
+            build = command
+        } else if let binary = SandboxingManager.resolveBinaryPath() {
+            build = { (binary, ["delete", "--force", $0]) }
+        } else {
+            return 0
+        }
+        let group = DispatchGroup()
+        let deleted = OSAllocatedUnfairLock(initialState: 0)
+        for name in targets {
+            let (path, arguments) = build(name)
+            group.enter()
+            BlockingSpawn.detached(path, arguments, timeoutSeconds: seconds, newGroup: true) { status in
+                if status == 0 {
+                    self.remove(name)
+                    deleted.withLock { $0 += 1 }
+                }
+                group.leave()
+            }
+        }
+        _ = group.wait(timeout: .now() + seconds + 0.5)
+        return deleted.withLock { $0 }
+    }
+}
+```
+
+(`import os` for `OSAllocatedUnfairLock`.)
+
+- [ ] **Step 5: Record where containers are made.**
+  - `SandboxSessionManager`: add a stored property and init parameter `live: LiveContainerNames = .shared` (last). In `attemptCreate`, before the first `createDetached`, add `live.add(name(for: id))`. Add the helper below, and route every `runtime.remove(name:)` and `runtime.removeIgnoringCancellation(name:)` in this file through it (`reapOrphans` included: removing a name that is not recorded is a no-op):
+
+```swift
+    /// Removes a container and drops its name from the exit-now box (#463).
+    private func removeContainer(_ name: String, ignoringCancellation: Bool = false) async {
+        if ignoringCancellation { await runtime.removeIgnoringCancellation(name: name) }
+        else { await runtime.remove(name: name) }
+        live.remove(name)
+    }
+```
+
+  - `GateContainerRegistry` (`GateEvaluator.swift:530`) and `EphemeralContainerRegistry` (`HookManager.swift:268`): each gets `private let live: LiveContainerNames` and `init(live: LiveContainerNames = .shared) { self.live = live }`. `register` also calls `live.add(name)`, and `unregister` calls `live.remove(name)`. Their `static let shared` keep the default.
+
+- [ ] **Step 6: Run the tests to verify they pass.**
+
+Run: `timeout 300 scripts/test-filter.sh LiveContainerNamesTests`, then `SandboxClosedSessionTests`, then `BlockingSpawnTests`
+Expected: PASS, 5 tests; then `main`'s closed-session count plus 1; then `main`'s `BlockingSpawnTests` count.
+
+- [ ] **Step 7: Mutation checks.** Make each change alone, run `LiveContainerNamesTests`, confirm the named test fails, then revert it.
+  - Pass `newGroup: false` in `deleteAll`. Expected: `deletesInParallelInTheirOwnGroups` fails on `pid == pgid`.
+  - Replace `BlockingSpawn.detached(…)` with a synchronous `BlockingSpawn.run(…)` in the loop (serial deletes). Expected: `deletesInParallelInTheirOwnGroups` fails on the 2.5 s bound.
+  - Drop `timeoutSeconds: seconds`. Expected: `hungDeleteIsBounded` fails on its 4 s bound.
+  - Delete `live.add(name(for: id))` in `attemptCreate`. Expected: `SandboxClosedSessionTests/sessionNameIsRecorded` fails.
+
+- [ ] **Step 8: Check warnings.** Run `scripts/check-warnings.sh`. Expected: exit 0.
+
+- [ ] **Step 9: Commit.**
+
+```bash
+git add Sources/IrisKit/LiveContainerNames.swift Sources/IrisKit/BlockingSpawn.swift Sources/IrisKit/SandboxSessionManager.swift \
+  Sources/IrisKit/GateEvaluator.swift Sources/IrisKit/HookManager.swift \
+  Tests/irisTests/LiveContainerNamesTests.swift Tests/irisTests/SandboxClosedSessionTests.swift
+git commit -m "feat: LiveContainerNames, so an exiting CLI deletes the containers it made (#463)" \
+  -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017NLGyK8ozWezeZeijjgGJx"
+```
+
+### Task 13: `RunStop`, a third claimant on a run's ending
 
 **Files:**
 - Create: `Sources/IrisKit/RunStop.swift`
@@ -2904,14 +3357,14 @@ Claude-Session: https://claude.ai/code/session_017NLGyK8ozWezeZeijjgGJx"
 - Produces:
   - `final class RunStop: @unchecked Sendable`, with:
     - `enum Answer { case exitNow, runWillStop, ignored }`
-    - `grace: TimeInterval`, `terminateGroups: @Sendable () -> Void`
-    - `init(grace: TimeInterval = 15, terminateGroups: … = { LiveProcessGroups.shared.terminateAll() })`
+    - `grace: TimeInterval`, `teardown: TimeInterval`, `terminateGroups: @Sendable () -> Void`, `wasRequested: Bool`
+    - `init(grace: TimeInterval = 15, teardown: TimeInterval = 5, terminateGroups: … = { LiveProcessGroups.shared.terminateAll() })`
     - `request(reason:) -> Answer`, `arm() -> String?`, `disarm()`, `wait() async -> String?`
     - `static func reason(for signal: Int32) -> String`, `static func signalName(_:) -> String`
   - `DeadlineFlag.Ending` (`.turn`, `.deadline`, `.signal(String)`), `claim(_ how: Ending) -> Bool`, `wait() async -> Ending`
   - `JobRunner.init(…, stop: RunStop? = nil)`
   - `IrisEngine.jobRunner(stop: RunStop? = nil) async -> JobRunner?`
-  - `static func JobRunner.turnReturned(_ task: Task<Bool, Never>, within: TimeInterval) async -> Bool`
+  - `static func JobRunner.returnsWithin(_ seconds: TimeInterval, _ operation: @escaping @Sendable () async -> Void) async -> Bool`
 
 - [ ] **Step 1: Write the failing tests.** In `JobRetryTests.swift`, rewrite the two `DeadlineFlag` tests (`:701-717`) to:
 
@@ -2937,21 +3390,6 @@ Claude-Session: https://claude.ai/code/session_017NLGyK8ozWezeZeijjgGJx"
 Then add, in a new `// MARK: The CLI's stop (#463 decision 16)` section of `JobRetryTests`:
 
 ```swift
-    /// Parks inside the model call and ignores cancellation, the way a bare continuation or a
-    /// stuck MCP call would. Released by the test so the abandoned turn can finish.
-    private final class StubbornClient: LLMClientProtocol, @unchecked Sendable {
-        private let lock = NSLock()
-        private var released = false
-        let calls = Signal()
-        func release() { lock.withLock { released = true } }
-        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
-            calls.bump()
-            while !lock.withLock({ released }) { try? await Task.sleep(nanoseconds: 10_000_000) }
-            return GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "late")]))],
-                                  usageMetadata: nil)
-        }
-    }
-
     private final class Count: @unchecked Sendable {
         private let lock = NSLock()
         private var n = 0
@@ -2984,10 +3422,14 @@ Then add, in a new `// MARK: The CLI's stop (#463 decision 16)` section of `JobR
         #expect(card(state)?.runId == run.id, "the card was delivered")
     }
 
+    /// The turn parks in `WedgedClient`'s stream (this file, `:459-524`), where cancellation cannot
+    /// reach it. A client parked in `generateContent` would not do: the engine reads it through
+    /// `LLMStreamEvent.replay`, whose `next()` is cancellable, so the turn would come straight back
+    /// and the grace would never be exercised (the trap `WedgedClient`'s own comment records).
     @Test("a turn that ignores cancellation is abandoned after the grace, and the row still closes")
     func stopAbandonsAStubbornTurn() async throws {
-        let client = StubbornClient()
-        let (store, state, engine) = try harness([], client: client)
+        let client = WedgedClient(response: textResponse("late"))
+        let (store, state, engine) = try harness([], client: client, streamResponses: true)
         let j = job(timeoutSeconds: Self.heldTimeout)
         try store.ledger.upsert(j)
         let (config, teardown) = isolatedConfig()
@@ -2996,8 +3438,8 @@ Then add, in a new `// MARK: The CLI's stop (#463 decision 16)` section of `JobR
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                activity: RecordingActivity(), stop: stop)
         let fire = Task { await runner.fire(job: j, origin: .manual) }
-        defer { client.release() }
-        try #require(await client.calls.reach(1))
+        defer { client.releaseAll() }
+        try #require(await client.parks.reach(1), "the turn is parked in the stream")
         let asked = Date()
         _ = stop.request(reason: RunStop.reason(for: SIGTERM))
         try #require(await finished(fire, within: 10) != nil, "the grace bounded the wait")
@@ -3005,6 +3447,30 @@ Then add, in a new `// MARK: The CLI's stop (#463 decision 16)` section of `JobR
         let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
         #expect(run.status == .interrupted)
         #expect(run.failureReason == "stopped by a signal (SIGTERM)")
+        #expect(client.replayCount == 0, "the park was the stream's, not the cancellable replay's")
+    }
+
+    @Test("the stop's teardown is bounded: a container delete that hangs does not hold the run")
+    func stopBoundsTheTeardown() async throws {
+        let client = GatedClient(response: textResponse("tick"))
+        let (store, state, engine) = try harness([], client: client)
+        let j = job(timeoutSeconds: Self.heldTimeout)
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let stop = RunStop(grace: 5, teardown: 0.3, terminateGroups: {})
+        // `container stop` and `delete` can each take 60 s (`ContainerRuntime.swift:601`, `:726-729`).
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                               endSandboxSession: { _ in try? await Task.sleep(nanoseconds: 30_000_000_000) },
+                               config: config, activity: RecordingActivity(), stop: stop)
+        let fire = Task { await runner.fire(job: j, origin: .manual) }
+        defer { client.release() }
+        try #require(await client.calls.reach(1))
+        _ = stop.request(reason: RunStop.reason(for: SIGINT))
+        try #require(await finished(fire, within: 10) != nil, "the teardown was abandoned at its bound")
+        let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
+        #expect(run.status == .interrupted)
+        #expect(card(state)?.runId == run.id, "the card is still delivered")
     }
 
     @Test("a stop before the run starts means no run: no row, no conversation")
@@ -3070,6 +3536,10 @@ final class RunStop: @unchecked Sendable {
     /// How long the run waits for a cancelled turn before abandoning it, so an uncancellable
     /// await cannot hang the stop.
     let grace: TimeInterval
+    /// How long the run's teardown (`closeSession`: the container's stop and delete, each up to
+    /// 60 s) may take on the stop path before the run goes on without it. A container it leaves is
+    /// deleted by the CLI's settle (Task 14).
+    let teardown: TimeInterval
     /// SIGTERM to the run's host process groups, then SIGKILL after the runner's grace.
     let terminateGroups: @Sendable () -> Void
 
@@ -3077,10 +3547,20 @@ final class RunStop: @unchecked Sendable {
     private var phase: Phase = .idle
     private var waiter: CheckedContinuation<String?, Never>?
 
-    init(grace: TimeInterval = 15,
+    init(grace: TimeInterval = 15, teardown: TimeInterval = 5,
          terminateGroups: @escaping @Sendable () -> Void = { LiveProcessGroups.shared.terminateAll() }) {
         self.grace = grace
+        self.teardown = teardown
         self.terminateGroups = terminateGroups
+    }
+
+    /// Whether a stop was ever asked for, armed or not. The CLI settles its groups and containers
+    /// before `_exit` when it was.
+    var wasRequested: Bool {
+        lock.withLock {
+            if case .requested = phase { return true }
+            return false
+        }
     }
 
     static func reason(for signal: Int32) -> String { "stopped by a signal (\(signalName(signal)))" }
@@ -3248,23 +3728,37 @@ Keep its doc comment (`:2036-2040`), with "Which of the two racers" changed to "
         // or the stop's grace abandoned never will, so this is the only release it gets.
         var abandoned = overran
         if stoppedBy != nil, let stop {
-            abandoned = !(await Self.turnReturned(turnTask, within: stop.grace))
+            abandoned = !(await Self.returnsWithin(stop.grace) { _ = await turnTask.value })
         }
         if abandoned { await lifetime.release() }
 ```
 
   - In the status block (`:1224-1232`), annotate `let status: JobRun.Status` and replace `overran ? .failed : Self.status(…)` with `overran ? .failed : stoppedBy != nil ? .interrupted : Self.status(…)`, `let blockedCall = overran ? nil : turn.denials.first` with `let blockedCall = (overran || stoppedBy != nil) ? nil : turn.denials.first`, and `let failureReason = overran ? TurnBudget.timeExceeded : Self.failureReason(…)` with `let failureReason = overran ? TurnBudget.timeExceeded : stoppedBy ?? Self.failureReason(…)`.
+  - Bound the teardown on the stop path. Replace the `await closeSession(conversationId, status: card.statusText)` before `deliver` (`:1300`) with:
+
+```swift
+        if stoppedBy != nil, let stop {
+            // A container stop and delete can each take 60 s; a stopping CLI does not wait that
+            // long. What this leaves, the CLI's settle deletes by name (Task 14).
+            let status = card.statusText
+            _ = await Self.returnsWithin(stop.teardown) { await self.closeSession(conversationId, status: status) }
+        } else {
+            await closeSession(conversationId, status: card.statusText)
+        }
+```
+
   - Add beside `DeadlineFlag`:
 
 ```swift
 extension JobRunner {
-    /// Whether `task` came back within `seconds`. Timed on a dispatch queue (invariant 4); the
-    /// task is never awaited past the bound, since it may never come back.
-    static func turnReturned(_ task: Task<Bool, Never>, within seconds: TimeInterval) async -> Bool {
+    /// Whether `operation` came back within `seconds`. Timed on a dispatch queue (invariant 4);
+    /// the operation is never awaited past the bound, since it may never come back.
+    static func returnsWithin(_ seconds: TimeInterval,
+                              _ operation: @escaping @Sendable () async -> Void) async -> Bool {
         let first = FirstBool()
         return await withCheckedContinuation { continuation in
             first.install(continuation)
-            Task { _ = await task.value; first.resolve(true) }
+            Task { await operation(); first.resolve(true) }
             DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { first.resolve(false) }
         }
     }
@@ -3296,11 +3790,12 @@ private final class FirstBool: @unchecked Sendable {
 - [ ] **Step 6: Run the tests to verify they pass.**
 
 Run: `timeout 300 scripts/test-filter.sh JobRetryTests`
-Expected: PASS, `main`'s count plus 4.
+Expected: PASS, `main`'s count plus 5.
 
 - [ ] **Step 7: Mutation checks (a clean stop).** Make each change alone, run `JobRetryTests`, confirm the named test fails, then revert it.
   - Delete the `stopWatch` task. Expected: `stopMidTurn` and `stopAbandonsAStubbornTurn` fail. The second runs until `finished` gives up.
-  - Replace `abandoned = !(await Self.turnReturned(…))` with `_ = await turnTask.value`. Expected: `stopAbandonsAStubbornTurn` fails.
+  - Replace `abandoned = !(await Self.returnsWithin(…))` with `_ = await turnTask.value`. Expected: `stopAbandonsAStubbornTurn` fails (the wedged turn never comes back, so `finished` gives up).
+  - Replace the bounded teardown with the plain `await closeSession(…)`. Expected: `stopBoundsTheTeardown` fails.
   - Delete `stop.terminateGroups()`. Expected: `stopMidTurn` fails on `terminated.value == 1`.
   - Delete the `arm()` block. Expected: `stopBeforeTheRun` fails.
 
@@ -3315,20 +3810,30 @@ git commit -m "feat: RunStop, a CLI stop as the run's third claimant (#463 decis
 Claude-Session: https://claude.ai/code/session_017NLGyK8ozWezeZeijjgGJx"
 ```
 
-### Task 13: `CLISignals` and `CLIStop`, wired into `--run-job`
+### Task 14: `CLISignals` and `CLIStop`, wired into `--run-job`
 
 **Files:**
 - Create: `Sources/IrisKit/CLISignals.swift`
-- Modify: `Sources/IrisKit/RunJobCLI.swift` (`run` gains `stop:`, and `fire` passes it to `jobRunner(stop:)`)
+- Modify: `Sources/IrisKit/RunJobCLI.swift` (`run` gains `stop:` and settles a stopped run; `fire` passes the stop to `jobRunner(stop:)`)
 - Modify: `Sources/IrisKit/IrisMain.swift` (the `--run-job` branch)
 - Create: `Tests/irisTests/RunJobCLIStopTests.swift`
 - Create: `Tests/irisTests/CLISignalTests.swift`
 
 **Interfaces:**
-- Consumes: Task 11's `LiveProcessGroups`, `ProcessGroupRunner(registry:)`. Task 12's `RunStop`, `IrisEngine.jobRunner(stop:)`. PR 1's `StoreLock.vacate(at:)`, `ProcessRole`.
+- Consumes:
+  - Task 11's `LiveProcessGroups` (`terminateAll`, `killAll`, `waitUntilEmpty(within:)`) and `ProcessGroupRunner(registry:)`.
+  - Task 12's `LiveContainerNames.deleteAll(within:command:)`.
+  - Task 13's `RunStop` (`wasRequested`, `teardown`) and `IrisEngine.jobRunner(stop:)`.
+  - PR 1's `StoreLock.vacate(at:)` and `ProcessRole`, and IrisMain's vacate just before `_exit`.
 - Produces:
-  - `enum CLISignals`, with `static let stopping: [Int32] = [SIGINT, SIGTERM, SIGHUP]`, `final class Installation` (`uninstall()`), and `static func install(_:queue:onSignal:) -> Installation`
-  - `final class CLIStop: @unchecked Sendable`, with `run: RunStop`, `init(grace:terminateGroups:killGroups:vacate:exitNow:)` and `receive(_ signal: Int32)`
+  - `enum CLISignals`, with:
+    - `static let stopping: [Int32] = [SIGINT, SIGTERM, SIGHUP]`
+    - `static let keepsInheritedIgnore: Set<Int32> = [SIGINT, SIGHUP]`
+    - `final class Installation` (`installed: [Int32]`, `uninstall()`), and `static func install(_:queue:onSignal:) -> Installation`
+  - `final class CLIStop: @unchecked Sendable`, with:
+    - `run: RunStop`
+    - `init(grace:teardown:terminateGroups:drainGroups:killGroups:deleteContainers:resetInterrupt:vacate:exitNow:)`
+    - `receive(_ signal: Int32)`, `settle()`
   - `RunJobCLI.run(…, stop: CLIStop? = nil, …)`
 
 - [ ] **Step 1: Write the failing in-process tests.** Create `Tests/irisTests/RunJobCLIStopTests.swift`:
@@ -3341,19 +3846,21 @@ import Darwin
 
 /// #463 decision 16, in this process: signals are *delivered by hand* to `CLIStop.receive`, so
 /// nothing installs a handler here and Ctrl-C still stops `swift test`. Each test has its own
-/// registry and records exits rather than taking them. Real signals run in `CLISignalTests`.
+/// registry and box, and records exits, deletes and the SIGINT reset rather than doing them.
+/// Real signals run in `CLISignalTests`.
 @MainActor
 @Suite("--run-job's clean stop (#463)", .timeLimit(.minutes(1)))
-struct RunJobCLIStopTests {
-    final class Exits: @unchecked Sendable {
+final class RunJobCLIStopTests {
+    private let base = FileManager.default.temporaryDirectory.appendingPathComponent("iris-463-stop-\(UUID().uuidString)")
+    deinit { try? FileManager.default.removeItem(at: base) }
+
+    /// What the stop did, in order.
+    final class Events: @unchecked Sendable {
         private let lock = NSLock()
-        private var codes: [Int32] = []
-        private(set) var kills = 0
-        private(set) var vacates = 0
-        func exit(_ code: Int32) { lock.withLock { codes.append(code) } }
-        func kill() { lock.withLock { kills += 1 } }
-        func vacate() { lock.withLock { vacates += 1 } }
-        var values: [Int32] { lock.withLock { codes } }
+        private var list: [String] = []
+        func add(_ event: String) { lock.withLock { list.append(event) } }
+        var values: [String] { lock.withLock { list } }
+        var exits: [Int32] { values.compactMap { $0.hasPrefix("exit ") ? Int32($0.dropFirst(5)) : nil } }
     }
 
     /// Spawns `/bin/sleep 30` in a group of the test's registry, says so, then waits on it,
@@ -3387,56 +3894,59 @@ struct RunJobCLIStopTests {
     }
 
     private func lockPath() -> URL {
-        FileManager.default.temporaryDirectory.appendingPathComponent("iris-463-stop-\(UUID().uuidString)")
-            .appendingPathComponent("conversations.sqlite.lock")
+        base.appendingPathComponent(UUID().uuidString).appendingPathComponent("conversations.sqlite.lock")
     }
 
-    private func stop(_ registry: LiveProcessGroups, _ exits: Exits, grace: TimeInterval = 5) -> CLIStop {
-        CLIStop(grace: grace, terminateGroups: { registry.terminateAll() }, killGroups: { exits.kill(); registry.killAll() },
-                vacate: { exits.vacate() }, exitNow: { exits.exit($0) })
+    private func stop(_ registry: LiveProcessGroups, _ events: Events, grace: TimeInterval = 5) -> CLIStop {
+        CLIStop(grace: grace, teardown: 2,
+                terminateGroups: { registry.terminateAll() },
+                drainGroups: { registry.waitUntilEmpty(within: 3) },
+                killGroups: { events.add("kill"); registry.killAll() },
+                deleteContainers: { events.add("delete") },
+                resetInterrupt: { events.add("reset") },
+                vacate: { events.add("vacate") },
+                exitNow: { events.add("exit \($0)") })
     }
 
-    @Test("SIGINT, SIGTERM and SIGHUP mid-run: interrupted with the reason, the card, the payload empty, the groups gone, exit 2",
+    @Test("SIGINT, SIGTERM and SIGHUP mid-run: interrupted with the reason, the card, the groups drained, exit 2",
           arguments: [SIGINT, SIGTERM, SIGHUP])
     func signalMidRun(_ signal: Int32) async throws {
         let store = try ConversationStore.inMemory()
         let job = Job(name: "napper", prompt: "Nap.", trigger: .schedule(.interval(seconds: 60)))
         try store.ledger.upsert(job)
-        let path = lockPath()
         let registry = LiveProcessGroups()
-        let exits = Exits()
-        let cliStop = stop(registry, exits)
+        let events = Events()
+        let cliStop = stop(registry, events)
         let client = SleepingClient(registry: registry, onRunning: { cliStop.receive(signal) })
 
         let code = await RunJobCLI.run(RunJobCLI.Invocation(target: "napper"), store: store, client: client,
-                                       lockPath: path, protectionEnabled: false, stop: cliStop,
+                                       lockPath: lockPath(), protectionEnabled: false, stop: cliStop,
                                        out: { _ in }, err: { _ in })
 
         #expect(code == RunJobCLI.Exit.notCompleted)
-        #expect(exits.values.isEmpty, "the first signal stops the run; it does not exit the process")
+        #expect(events.exits.isEmpty, "the first signal stops the run; it does not exit the process")
         let row = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(row.status == .interrupted)
         #expect(row.failureReason == "stopped by a signal (\(RunStop.signalName(signal)))")
         let cards = try store.loadAll().conversations.flatMap(\.messages).compactMap { EventCard.decode($0.content) }
         #expect(cards.contains { $0.runId == row.id }, "the card was delivered and the save flushed")
-        #expect(try Data(contentsOf: path).isEmpty, "the payload was vacated")
+        // `settle` waited for the SIGTERM'd group's ladder (its SIGKILL rung is 2 s on) before
+        // `run` returned, so a group that ignored SIGTERM could not outlive the `_exit`.
         #expect(registry.count == 0)
         #expect(kill(client.sleepPid, 0) == -1 && errno == ESRCH, "the sleep's group is gone")
+        #expect(events.values == ["delete"], "settle deletes what containers are left; nothing was killed early")
     }
 
-    @Test("a signal before admission: exit 2, no row")
+    @Test("a signal before admission: groups killed, containers deleted, the payload emptied, exit 2, no row")
     func signalBeforeAdmission() async throws {
         let store = try ConversationStore.inMemory()
         let job = Job(name: "napper", prompt: "Nap.", trigger: .schedule(.interval(seconds: 60)))
         try store.ledger.upsert(job)
-        let registry = LiveProcessGroups()
-        let exits = Exits()
-        let cliStop = stop(registry, exits)
+        let events = Events()
+        let cliStop = stop(LiveProcessGroups(), events)
         cliStop.receive(SIGINT)
-        #expect(exits.values == [RunJobCLI.Exit.notCompleted])
-        #expect(exits.kills == 1)
-        #expect(exits.vacates == 1)
-        // In production that exit is `_exit`. Here the run goes on, and the armed-too-late run
+        #expect(events.values == ["reset", "kill", "delete", "vacate", "exit 2"])
+        // In production that exit is `_exit`. Here the run goes on, and the run armed too late
         // writes nothing.
         let code = await RunJobCLI.run(RunJobCLI.Invocation(target: "napper"), store: store,
                                        client: FakeLLMClient(responses: []), lockPath: lockPath(),
@@ -3445,50 +3955,59 @@ struct RunJobCLIStopTests {
         #expect(try store.ledger.runs(jobId: job.id, limit: 5).isEmpty)
     }
 
-    @Test("Review Focus 4: a signal during --dry-run while its gate runs: exit 2, groups killed, nothing written")
+    @Test("Review Focus 4: a signal during --dry-run while its gate runs: exit 2 at once, host groups killed, containers deleted, nothing written")
     func signalDuringDryRun() async throws {
         let store = try ConversationStore.inMemory()
         let job = Job(name: "gated", prompt: "p",
                       trigger: .poll(PollSpec(schedule: .interval(seconds: 60), gate: .pathChanged(path: "/tmp/whatever"))))
         try store.ledger.upsert(job)
-        let registry = LiveProcessGroups()
-        let exits = Exits()
-        let cliStop = stop(registry, exits)
+        let events = Events()
+        let cliStop = stop(LiveProcessGroups(), events)
         _ = await RunJobCLI.run(RunJobCLI.Invocation(target: "gated", dryRun: true), store: store,
                                 client: FakeLLMClient(responses: []), lockPath: lockPath(), protectionEnabled: false,
                                 gate: { _, _ in cliStop.receive(SIGINT); return .unchanged(signal: "same") },
                                 stop: cliStop, out: { _ in }, err: { _ in })
-        #expect(exits.values == [RunJobCLI.Exit.notCompleted])
-        #expect(exits.kills == 1, "the gate's host groups are killed before the exit")
+        #expect(events.values == ["reset", "kill", "delete", "vacate", "exit 2"],
+                "a script gate's container is in the box (Task 12), so the delete reaches it")
         #expect(try store.ledger.runs(jobId: job.id, limit: 5).isEmpty)
     }
 
-    @Test("a second signal kills the groups and exits 128 + signal at once")
+    @Test("a second signal resets SIGINT, kills the groups, deletes the containers, and exits 128 + signal")
     func secondSignalExitsNow() {
-        let registry = LiveProcessGroups()
-        let exits = Exits()
-        let cliStop = stop(registry, exits)
+        let events = Events()
+        let cliStop = stop(LiveProcessGroups(), events)
         #expect(cliStop.run.arm() == nil)
         cliStop.receive(SIGINT)
-        #expect(exits.values.isEmpty)
+        #expect(events.values.isEmpty)
         cliStop.receive(SIGINT)
-        #expect(exits.values == [130])
-        #expect(exits.kills == 1)
+        #expect(events.values == ["reset", "kill", "delete", "vacate", "exit 130"],
+                "SIGINT back to its default first, so a third Ctrl-C ends the CLI while the deletes run")
     }
 
     @Test("a signal after the run is over is left to the CLI's own exit")
     func signalAfterTheRun() {
-        let exits = Exits()
-        let cliStop = stop(LiveProcessGroups(), exits)
+        let events = Events()
+        let cliStop = stop(LiveProcessGroups(), events)
         _ = cliStop.run.arm()
         cliStop.run.disarm()
         cliStop.receive(SIGTERM)
-        #expect(exits.values.isEmpty)
+        #expect(events.values.isEmpty)
+    }
+
+    @Test("settle kills what has not drained by its bound")
+    func settleKillsTheStragglers() async throws {
+        let events = Events()
+        let cliStop = CLIStop(drainGroups: { false }, killGroups: { events.add("kill") },
+                              deleteContainers: { events.add("delete") }, resetInterrupt: {},
+                              vacate: {}, exitNow: { _ in })
+        cliStop.settle()
+        #expect(events.values == ["kill", "delete"])
     }
 
     @Test("the stopping signals are SIGINT, SIGTERM and SIGHUP")
     func stoppingSignals() {
         #expect(CLISignals.stopping == [SIGINT, SIGTERM, SIGHUP])
+        #expect(CLISignals.keepsInheritedIgnore == [SIGINT, SIGHUP], "SIGTERM is always caught")
     }
 }
 ```
@@ -3507,20 +4026,42 @@ import Darwin
 /// because installing handlers in the shared test process would stop Ctrl-C from ending the run.
 @Suite("CLI signals (#463)", .timeLimit(.minutes(1)))
 struct CLISignalTests {
+    /// SIG_DFL is 0 and SIG_IGN is 1; anything else is a handler.
+    static func raw(_ signal: Int32) -> UInt {
+        var now = sigaction()
+        sigaction(signal, nil, &now)
+        return unsafeBitCast(now.__sigaction_u, to: UInt.self)
+    }
+
     @Test("the handler is a do-nothing catch with SA_RESTART, and the signal reaches its source")
     func installCatchesAndRestarts() async {
         await #expect(processExitsWith: .success) {
             let fired = DispatchSemaphore(value: 0)
             let installation = CLISignals.install(onSignal: { if $0 == SIGHUP { fired.signal() } })
+            guard installation.installed == CLISignals.stopping else { exit(5) }
             for signal in CLISignals.stopping {
+                guard CLISignalTests.raw(signal) > 1 else { exit(2) }
                 var now = sigaction()
                 sigaction(signal, nil, &now)
-                // SIG_DFL is 0 and SIG_IGN is 1: anything else is our handler.
-                guard unsafeBitCast(now.__sigaction_u, to: UInt.self) > 1 else { exit(2) }
                 guard now.sa_flags & SA_RESTART != 0 else { exit(3) }
             }
             kill(getpid(), SIGHUP)   // its default would end this process
             guard fired.wait(timeout: .now() + 5) == .success else { exit(4) }
+            withExtendedLifetime(installation) {}
+        }
+    }
+
+    @Test("nohup: an inherited ignore on SIGHUP or SIGINT is kept, and SIGTERM is caught anyway")
+    func inheritedIgnoreIsKept() async {
+        await #expect(processExitsWith: .success) {
+            _ = signal(SIGHUP, SIG_IGN)
+            _ = signal(SIGINT, SIG_IGN)
+            _ = signal(SIGTERM, SIG_IGN)
+            let installation = CLISignals.install(onSignal: { _ in })
+            guard CLISignalTests.raw(SIGHUP) == 1, CLISignalTests.raw(SIGINT) == 1 else { exit(2) }
+            guard CLISignalTests.raw(SIGTERM) > 1 else { exit(3) }
+            guard installation.installed == [SIGTERM] else { exit(4) }
+            kill(getpid(), SIGHUP)   // ignored: this process carries on
             withExtendedLifetime(installation) {}
         }
     }
@@ -3553,7 +4094,7 @@ struct CLISignalTests {
         #expect(process.terminationStatus == SIGTERM)
     }
 
-    @Test("a second SIGINT SIGKILLs the registered groups and _exits 130")
+    @Test("a second SIGINT resets SIGINT, SIGKILLs the registered groups and _exits 130")
     func secondSignalKillsAndExits() async throws {
         let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("iris-463-\(UUID().uuidString).pid")
         defer { try? FileManager.default.removeItem(at: pidFile) }
@@ -3567,11 +4108,14 @@ struct CLISignalTests {
                 waited += 1
             }
             try? Data("\(runner.processIdentifier)".utf8).write(to: URL(fileURLWithPath: path))
-            let stop = CLIStop(terminateGroups: { registry.terminateAll() }, killGroups: { registry.killAll() }, vacate: {})
+            let installation = CLISignals.install(onSignal: { _ in })
+            let stop = CLIStop(terminateGroups: { registry.terminateAll() }, killGroups: { registry.killAll() },
+                               deleteContainers: {}, vacate: {},
+                               exitNow: { code in _exit(CLISignalTests.raw(SIGINT) == 0 ? code : 7) })   // the real reset ran
             _ = stop.run.arm()
             stop.receive(SIGINT)
             stop.receive(SIGINT)   // exits here
-            withExtendedLifetime(running) {}
+            withExtendedLifetime((running, installation)) {}
             exit(1)
         }
         let pid = try #require(Int32(String(decoding: try Data(contentsOf: pidFile), as: UTF8.self)))
@@ -3598,19 +4142,27 @@ import Foundation
 
 /// #463 decision 16: the CLI's own SIGINT, SIGTERM and SIGHUP.
 ///
-/// A do-nothing `sigaction` handler, not `SIG_IGN`: a caught disposition resets to the default
-/// across `exec`, so no child — `Process` or `posix_spawn` — inherits an ignore. `SA_RESTART`, so
-/// blocking calls on whichever thread takes the signal are not failed with `EINTR` mid-stop. A
-/// `DispatchSource` per signal, on the CLI's own serial queue rather than `.main`: a long
-/// main-actor stretch (Vibecop loading ggml) must not delay the stop.
+/// - A do-nothing `sigaction` handler, not `SIG_IGN`: a caught disposition resets to the default
+///   across `exec`, so no child — `Process` or `posix_spawn` — inherits an ignore.
+/// - `SA_RESTART`, so blocking calls on whichever thread takes the signal do not fail with `EINTR`
+///   mid-stop.
+/// - A `DispatchSource` per signal, on the CLI's own serial queue rather than `.main`: a long
+///   main-actor stretch (Vibecop loading ggml) must not delay the stop.
+/// - An inherited ignore on SIGHUP or SIGINT is kept (plan note 16). `nohup iris --run-job x &`
+///   sets SIGHUP ignored so a closed terminal does not end the run, and a non-interactive shell
+///   starts `&` jobs with SIGINT ignored. SIGTERM is always caught.
 enum CLISignals {
     static let stopping: [Int32] = [SIGINT, SIGTERM, SIGHUP]
+    static let keepsInheritedIgnore: Set<Int32> = [SIGINT, SIGHUP]
 
     final class Installation: @unchecked Sendable {
+        /// The signals this installation caught: `stopping` minus any inherited ignore it kept.
+        let installed: [Int32]
         fileprivate let sources: [DispatchSourceSignal]
         fileprivate let previous: [(Int32, sigaction)]
 
-        fileprivate init(sources: [DispatchSourceSignal], previous: [(Int32, sigaction)]) {
+        fileprivate init(installed: [Int32], sources: [DispatchSourceSignal], previous: [(Int32, sigaction)]) {
+            self.installed = installed
             self.sources = sources
             self.previous = previous
         }
@@ -3628,48 +4180,70 @@ enum CLISignals {
     static func install(_ signals: [Int32] = stopping,
                         queue: DispatchQueue = DispatchQueue(label: "iris.cli.signals"),
                         onSignal: @escaping @Sendable (Int32) -> Void) -> Installation {
+        var installed: [Int32] = []
         var sources: [DispatchSourceSignal] = []
         var previous: [(Int32, sigaction)] = []
         for signal in signals {
+            var old = sigaction()
+            sigaction(signal, nil, &old)
+            let ignored = unsafeBitCast(old.__sigaction_u, to: UInt.self) == 1   // SIG_IGN
+            if ignored, keepsInheritedIgnore.contains(signal) { continue }
             var action = sigaction()
             action.__sigaction_u.__sa_handler = { _ in }
             action.sa_flags = SA_RESTART
             sigemptyset(&action.sa_mask)
-            var old = sigaction()
-            sigaction(signal, &action, &old)
+            sigaction(signal, &action, nil)
             previous.append((signal, old))
             let source = DispatchSource.makeSignalSource(signal: signal, queue: queue)
             source.setEventHandler { onSignal(signal) }
             source.resume()
             sources.append(source)
+            installed.append(signal)
         }
-        return Installation(sources: sources, previous: previous)
+        return Installation(installed: installed, sources: sources, previous: previous)
     }
 }
 
-/// What the CLI does with a stopping signal. The first one stops the run cleanly (`RunStop`), or,
-/// with no run armed yet, kills the host groups, vacates the lock's payload and exits 2. A second
-/// one means exit now: SIGKILL every registered group, then `_exit(128 + signal)`.
+/// What the CLI does with a stopping signal.
+/// - The first stops the run cleanly (`RunStop`). With no run armed yet (before admission, or a
+///   dry run), it exits now instead, with 2.
+/// - A second means exit now, with `128 + signal`.
+/// - Exiting now resets SIGINT to its default first, so a third Ctrl-C ends the CLI at once while
+///   the deletes run. It then SIGKILLs every registered host group, deletes every container this
+///   process made (bounded at 5 s, in parallel, plan note 15), empties the lock's payload and
+///   `_exit`s.
+/// - After a clean stop, `settle()` runs before `_exit`: up to 3 s for the host groups to drain
+///   (their SIGKILL rung is 2 s after the SIGTERM), a SIGKILL for any that did not, and a delete
+///   for any container the bounded teardown left behind.
 final class CLIStop: @unchecked Sendable {
     let run: RunStop
 
+    private let drainGroups: @Sendable () -> Bool
     private let killGroups: @Sendable () -> Void
+    private let deleteContainers: @Sendable () -> Void
+    private let resetInterrupt: @Sendable () -> Void
     private let vacate: @Sendable () -> Void
     private let exitNow: @Sendable (Int32) -> Void
     private let lock = NSLock()
     private var received = 0
 
-    init(grace: TimeInterval = 15,
+    init(grace: TimeInterval = 15, teardown: TimeInterval = 5,
          terminateGroups: @escaping @Sendable () -> Void = { LiveProcessGroups.shared.terminateAll() },
+         drainGroups: @escaping @Sendable () -> Bool = { LiveProcessGroups.shared.waitUntilEmpty(within: 3) },
          killGroups: @escaping @Sendable () -> Void = { LiveProcessGroups.shared.killAll() },
+         deleteContainers: @escaping @Sendable () -> Void = { _ = LiveContainerNames.shared.deleteAll(within: 5) },
+         resetInterrupt: @escaping @Sendable () -> Void = { _ = signal(SIGINT, SIG_DFL) },
          vacate: @escaping @Sendable () -> Void,
          exitNow: @escaping @Sendable (Int32) -> Void = { code in
              fflush(stdout)
              fflush(stderr)
              _exit(code)
          }) {
-        self.run = RunStop(grace: grace, terminateGroups: terminateGroups)
+        self.run = RunStop(grace: grace, teardown: teardown, terminateGroups: terminateGroups)
+        self.drainGroups = drainGroups
         self.killGroups = killGroups
+        self.deleteContainers = deleteContainers
+        self.resetInterrupt = resetInterrupt
         self.vacate = vacate
         self.exitNow = exitNow
     }
@@ -3682,23 +4256,45 @@ final class CLIStop: @unchecked Sendable {
         guard count == 1 else {
             // Exit now. A row this leaves `running` is closed by the next app launch's sweep
             // (decision 11), with "the Iris process running it ended".
-            killGroups()
-            exitNow(128 + signal)
-            return
+            return exitAtOnce(128 + signal)
         }
         if run.request(reason: RunStop.reason(for: signal)) == .exitNow {
-            killGroups()
-            vacate()
-            exitNow(RunJobCLI.Exit.notCompleted)
+            exitAtOnce(RunJobCLI.Exit.notCompleted)
         }
+    }
+
+    /// After a stopped run has returned, before `_exit`.
+    func settle() {
+        if !drainGroups() { killGroups() }
+        deleteContainers()
+    }
+
+    private func exitAtOnce(_ code: Int32) {
+        resetInterrupt()
+        killGroups()
+        deleteContainers()
+        vacate()
+        exitNow(code)
     }
 }
 ```
 
 - [ ] **Step 5: Wire it into the CLI.**
-  - In `RunJobCLI.run`, add `stop: CLIStop? = nil,` after `gate:`, and pass `stop: stop` through to `fire`.
+  - In `RunJobCLI.run`, add `stop: CLIStop? = nil,` after `gate:`.
+  - Replace the final `return await fire(…)` with:
+
+```swift
+        let code = await fire(job: job, store: store, client: client, runner: injectedRunner,
+                              protectionEnabled: protectionEnabled, json: invocation.json, stop: stop,
+                              out: out, err: err)
+        // A stopped run's host groups get their SIGKILL rung, and its leftover containers a
+        // delete, before the process exits (#463).
+        if let stop, stop.run.wasRequested { stop.settle() }
+        return code
+```
+
   - In `fire`, add the parameter `stop: CLIStop?` and replace `irisEngine.jobRunner()` with `irisEngine.jobRunner(stop: stop?.run)`. An injected runner was built by its test with its own `RunStop`.
-  - In `IrisMain.swift`'s `--run-job` branch, after `ProcessRole.set(.runJob)`, replace the `let code = await RunJobCLI.run(…)` call with:
+  - In `IrisMain.swift`'s `--run-job` branch, after `ProcessRole.set(.runJob)`, replace the `let code = await RunJobCLI.run(…)` call with the block below. PR 1's `StoreLock.vacate` just before `_exit` stays where it is.
 
 ```swift
             // #463 decision 16: SIGINT, SIGTERM and SIGHUP stop the run cleanly; a second one exits
@@ -3715,16 +4311,20 @@ final class CLIStop: @unchecked Sendable {
 - [ ] **Step 6: Run the tests to verify they pass.**
 
 Run: `timeout 300 scripts/test-filter.sh RunJobCLIStopTests`, then `CLISignalTests`, then `RunJobCLITests`
-Expected: PASS: 6 tests (8 cases: `signalMidRun` runs once per signal), then 4, then PR 1's 27.
+Expected: PASS: 7 tests (9 cases: `signalMidRun` runs once per signal), then 5, then PR 1's 27.
 
 - [ ] **Step 7: Mutation checks.** Make each change alone, run the named suite, confirm the named test fails, then revert it.
-  - In `CLIStop.receive`, delete `killGroups()` in the `count != 1` branch. Expected: `CLISignalTests/secondSignalKillsAndExits` fails (the sleep outlives the exit), and `RunJobCLIStopTests/secondSignalExitsNow` fails on `kills == 1` (a second Ctrl-C kills the registered groups).
+  - In `exitAtOnce`, delete `killGroups()`. Expected: `CLISignalTests/secondSignalKillsAndExits` fails (the sleep outlives the exit), and `RunJobCLIStopTests/secondSignalExitsNow` fails on its event list (a second Ctrl-C kills the registered groups).
+  - In `exitAtOnce`, delete `deleteContainers()`. Expected: `secondSignalExitsNow`, `signalBeforeAdmission` and `signalDuringDryRun` fail (the coordinator's ruling: exit-now deletes the containers).
+  - Move `resetInterrupt()` after `deleteContainers()`. Expected: `secondSignalExitsNow` fails on the order.
+  - In `RunJobCLI.run`, delete the `settle()` line. Expected: `signalMidRun` fails on `registry.count == 0` for all three signals.
   - Replace the handler with `action.__sigaction_u.__sa_handler = SIG_IGN`. Expected: `installCatchesAndRestarts` and `childrenKeepTheDefaultDisposition` fail.
   - Drop `SA_RESTART`. Expected: `installCatchesAndRestarts` fails.
+  - Delete the `if ignored, keepsInheritedIgnore.contains(signal) { continue }` line. Expected: `inheritedIgnoreIsKept` fails.
   - Remove `SIGHUP` from `stopping`. Expected: `stoppingSignals` and `installCatchesAndRestarts` fail (a clean stop on SIGINT/TERM/HUP).
   - In `fire`, call `irisEngine.jobRunner()` without the stop. Expected: `signalMidRun` fails for all three signals.
 
-- [ ] **Step 8: Full suite and warnings.** Run `timeout 900 swift test 2>&1 | tee /tmp/463-pr2-full.log` and `scripts/check-warnings.sh`. Expected: green on all three counts, and exit 0.
+- [ ] **Step 8: Full suite and warnings.** Run `timeout 900 swift test 2>&1 | tee /tmp/463-pr2-full.log` and `scripts/check-warnings.sh`. Expected: green on all three counts, and exit 0. The three trapping exit tests (Task 8) leave a crash report each in `~/Library/Logs/DiagnosticReports`. That is expected and harmless.
 
 - [ ] **Step 9: Commit.**
 
@@ -3736,15 +4336,15 @@ git commit -m "feat: --run-job stops cleanly on SIGINT, SIGTERM and SIGHUP (#463
 Claude-Session: https://claude.ai/code/session_017NLGyK8ozWezeZeijjgGJx"
 ```
 
-### Task 14: invariant 9 sweep for PR 2, and open it
+### Task 15: invariant 9 sweep for PR 2, and open it
 
 **Files:**
 - Modify: `docs/jobs.md` (after the exit-code table at `:1170-1175`)
 - Modify: `README.md` (after the `--run-job` exit-code line, `:260`)
 
 **Interfaces:**
-- Consumes: Tasks 11-13.
-- Produces: docs for the clean stop and its gap.
+- Consumes: Tasks 11-14.
+- Produces: docs for the clean stop, the exit-now, and their gap.
 
 - [ ] **Step 1: Search, do not compose.** Run `grep -rnE "Ctrl-C|SIGINT|SIGTERM|interrupt|kills? the CLI|orphan" README.md docs/jobs.md AGENTS.md`. Read every hit. Any sentence that says Ctrl-C kills a `--run-job` outright, or that its `run_command` groups survive it, is now untrue. Fix it to match Step 2.
 
@@ -3755,16 +4355,18 @@ Claude-Session: https://claude.ai/code/session_017NLGyK8ozWezeZeijjgGJx"
 cleanly: the turn is cancelled, its host process groups get SIGTERM and then SIGKILL, and the CLI
 waits up to 15 seconds for the turn to come back (a turn that never does is abandoned). The row is
 then closed `interrupted` with "stopped by a signal (SIGINT)" (or `SIGTERM`, `SIGHUP`), the card is
-delivered, the store is flushed, and it exits `2`. A signal before the run starts, or during a
-`--dry-run`, exits `2` at once with nothing written. A **second** Ctrl-C exits at once with `130`:
-the host process groups are SIGKILLed first, and the row is closed the next time Iris opens, as
-"the Iris process running it ended".
+delivered, the store is flushed, and it exits `2`. The run's container is given 5 seconds to stop
+and be deleted, and is then deleted by name before the CLI exits. A signal before the run starts,
+or during a `--dry-run`, exits `2` at once with nothing written. A **second** Ctrl-C exits at once
+with `130`. It SIGKILLs the host process groups, then deletes the containers this run made (its
+session, any gate or one-off container), in parallel, for at most 5 seconds. A third Ctrl-C during
+those 5 seconds ends the CLI outright. The row is closed the next time Iris opens, as "the Iris
+process running it ended". Under `nohup` (or any shell that starts the CLI with SIGHUP or SIGINT
+ignored), that signal stays ignored, so closing the terminal does not stop the run. `kill` still
+does.
 
-Two things a stop does not reach. A command in the VM (every job's `run_command` runs there) ends
-with the clean stop, because the run's container is deleted, but a second Ctrl-C leaves that
-container running until Iris next opens and sweeps it. And a background process a command started
-with its output redirected (`nohup x >/dev/null 2>&1 &`) is left running by either, as it is when
-any command finishes.
+One thing a stop does not reach: a background process a command started with its output
+redirected (`nohup x >/dev/null 2>&1 &`) is left running, as it is when any command finishes.
 ```
 
 In `README.md`, after the exit-code line, add one sentence: `Ctrl-C (or SIGTERM, SIGHUP) stops a run cleanly — its row reads "stopped by a signal", and it exits 2 — and a second Ctrl-C exits at once; see docs/jobs.md, "Stopping a run".`
@@ -3781,18 +4383,24 @@ Claude-Session: https://claude.ai/code/session_017NLGyK8ozWezeZeijjgGJx"
 git push -u origin feat/463-cli-clean-stop
 ```
 
-Open the PR against `main` (`gh api repos/sackheads/iris/pulls -f base=main -f head=feat/463-cli-clean-stop -f title="feat: --run-job stops cleanly on SIGINT, SIGTERM and SIGHUP (#463 PR 2)" -F body=@<file>`). The body lists decisions 16-17, plan notes 8-10, the full-suite counts, and "GUI pass: Task 15, pending". It ends with the session's PR attribution lines.
+Open the PR against `main` (`gh api repos/sackheads/iris/pulls -f base=main -f head=feat/463-cli-clean-stop -f title="feat: --run-job stops cleanly on SIGINT, SIGTERM and SIGHUP (#463 PR 2)" -F body=@<file>`). The body lists decisions 16-17, plan notes 8-10 and 15-16, the full-suite counts, and "GUI pass: Task 16, pending". It ends with the session's PR attribution lines.
 
-### Task 15: GUI pass for PR 2 (`work`, under the lease)
+### Task 16: GUI pass for PR 2 (`work`, under the lease)
 
-Spec check 6, adjusted by plan note 8. Run on `work`, on PR 2's branch, before it merges. Post each result as the command and its output. The setup variables are Task 10's; repeat its "Before you start" block and steps 1-4 (build, registrations, the `463-nap` job), with `--purpose "iris: #463 PR 2 clean stop"`. The CLI is signalled the way a terminal's Ctrl-C reaches it: `set -m` gives each background job its own process group, and the signal goes to that whole group, the CLI and its `Process` children (the `container exec` client) together.
+Spec check 6, adjusted by plan note 8. Run on `work`, on PR 2's branch, before it merges. Post each result as the command and its output. The setup variables are Task 10's; repeat its "Before you start" block and steps 1-4 (build, registrations, the `463-nap` job), with `--purpose "iris: #463 PR 2 clean stop"`. The CLI is signalled the way a terminal's Ctrl-C reaches it: to its whole process group, the CLI and its `Process` children (the `container exec` client) together.
+- `set -m` cannot do this from an agent's shell. A non-interactive zsh refuses it (`can't change option: -m`).
+- A non-interactive shell also starts `&` jobs with SIGINT ignored (POSIX).
+- So every start below goes through this wrapper, tested on `work`. It restores SIGINT and SIGHUP to their defaults and makes the CLI the leader of a group of its own, so `$PG` is both its pid and its group id:
+
+```sh
+GROUP() { perl -e '$SIG{INT}=$SIG{HUP}="DEFAULT"; setpgrp(0,0); exec @ARGV' "$@"; }
+```
 
 1. **A clean stop, SIGINT.**
-   - Run, in one zsh session for the whole task (`$PG` is the CLI's pid and its group id):
+   - Take the card baseline for step 3. Then run, in one shell session for the whole task:
 
      ```sh
-     set -m
-     "$CLI" --run-job 463-nap & PG=$!
+     GROUP "$CLI" --run-job 463-nap & PG=$!
      ```
 
    - Wait until `eval $HOLDER` shows the run-job payload, then 15 s more (the turn is inside `sleep 90`). Run `container list --all | grep iris-` and note the session container's name.
@@ -3801,15 +4409,21 @@ Spec check 6, adjusted by plan note 8. Run on `work`, on PR 2's branch, before i
    - `wc -c < ~/.iris-dev/conversations.sqlite.lock`. Expected: `0`.
    - `container list --all | grep -c iris-`. Expected: `0`.
    - `pgrep -fl "container exec|sleep 90"`. Expected: no output.
+   - The whole stop took under 15 s + 5 s + 3 s from the `kill`. Record the time from the `kill` to `exit=`.
 2. **SIGTERM, then SIGHUP.** Repeat step 1 with `kill -TERM -$PG`, then with `kill -HUP -$PG`. Expected: the same, with `SIGTERM` and `SIGHUP` in the reason.
 3. **The cards.** `sqlite3 ~/.iris-dev/conversations.sqlite "SELECT count(*) FROM messages WHERE payload LIKE '%jobName%463-nap%' AND payload LIKE '%interrupted%'"`. Expected: 3 more than the same query printed before step 1 (run it once there, as the baseline).
 4. **A second Ctrl-C.**
    - Start as in step 1 and wait the same way.
-   - Run `kill -INT -$PG; sleep 0.2; kill -INT -$PG; wait $PG; echo "exit=$?"`. Expected: within 2 s, `exit=130`.
+   - Run `kill -INT -$PG; sleep 0.2; kill -INT -$PG; wait $PG; echo "exit=$?"`. Expected: within 7 s (the deletes are bounded at 5), `exit=130`.
    - `eval $ROW`. Expected: `manual|running|` (closed later).
-   - `container list --all | grep -c iris-`. Expected: `1` (plan note 8).
-   - `open "$APP"`, and wait 5 s. `eval $ROW` is then `manual|interrupted|the Iris process running it ended`, and `container list --all | grep -c iris-` is `0`.
-5. **Before admission.** Run `"$CLI" --run-job 463-nap & P=$!; sleep 0.5; kill -INT $P; wait $P; echo "exit=$?"` (the pause lets `IrisMain` install its handlers; a signal before that is the default action, 130). Expected: `exit=2`, and `sqlite3 ~/.iris-dev/conversations.sqlite "SELECT count(*) FROM job_runs WHERE jobName = '463-nap'"` is unchanged. (If the signal lands after admission on this machine, the row reads stopped and exits 2. Record which.)
+   - `container list --all | grep -c iris-`. Expected: `0`: the exit-now deleted the session container (plan note 15).
+   - `open "$APP"`, `eval $DENY`, and wait 5 s. `eval $ROW` is then `manual|interrupted|the Iris process running it ended`.
+4b. **A third Ctrl-C during the deletes.** Start and wait as in step 1. Then run `kill -INT -$PG; sleep 0.2; kill -INT -$PG; sleep 0.2; kill -INT -$PG; wait $PG; echo "exit=$?"`. Expected: within 1 s, `exit=130` (SIGINT was reset to its default before the deletes, so the third one ended the CLI). Then `container list --all | grep iris-` may list the session container: record it, and delete it with `container delete --force <name>`.
+4c. **`nohup` keeps SIGHUP ignored.**
+   - `nohup "$CLI" --run-job 463-nap >"$DD/nohup.out" 2>&1 & P=$!`. Wait until `eval $HOLDER` shows it.
+   - `kill -HUP $P; sleep 3; kill -0 $P && echo alive`. Expected: `alive`.
+   - Then `kill -TERM $P; wait $P; echo "exit=$?"`. Expected: `exit=2`, and `eval $ROW` reads `manual|interrupted|stopped by a signal (SIGTERM)`.
+5. **Before admission.** Run `GROUP "$CLI" --run-job 463-nap & P=$!; sleep 0.5; kill -INT -$P; wait $P; echo "exit=$?"` (the pause lets `IrisMain` install its handlers; through the wrapper, a signal before that is SIGINT's default, 130). Expected: `exit=2`, and `sqlite3 ~/.iris-dev/conversations.sqlite "SELECT count(*) FROM job_runs WHERE jobName = '463-nap'"` is unchanged. (If the signal lands after admission on this machine, the row reads stopped and exits 2. Record which.)
 6. **Teardown** as in Task 10 step 12.
 
 ---
@@ -3829,13 +4443,13 @@ Spec check 6, adjusted by plan note 8. Run on `work`, on PR 2's branch, before i
 - 10: Tasks 5 and 7 (gated scenes, `GatedStatusLabel`, the hotkey checked when pressed, Diagnostics left alone).
 - 11: Task 5 (`freeLockKeepsTodaysOrder`, `finishOnceEitherOrder`) and Task 7 (`openStore`, `interruptedByQuitReason`).
 - 12: Task 5 (`linksAreHeldThenDrained`), Task 6 (the deletion) and Task 7 (`noteLinksDroppedWhileWaiting`).
-- 13: Task 5 (`coldStartShowsTheNotice`, `dockLaunchHasNoNotice`) and Task 7's `Window("Iris is waiting")`.
+- 13: Task 5 (`coldStartShowsTheNotice`, `dockLaunchHasNoNotice`) and Task 7's non-activating `WaitingNoticePanel` (plan note 13).
 - 14: Task 8.
 - 15: Task 2, with Task 8's exit test.
-- 16: Tasks 12-13.
+- 16: Tasks 13-14, with the exit-now container delete in Task 12.
 - 17: Task 11, with plan note 8.
 - 18: Task 4.
-- §3's unit tests each map to a test named above. §3's GUI checks: 1-5 and 7 are Task 10, and 6 is Task 15. §4's doc fixes are Tasks 9 and 14.
+- §3's unit tests each map to a test named above. §3's GUI checks: 1-5 and 7 are Task 10, and 6 is Task 16. §4's doc fixes are Tasks 9 and 15.
 
 **Mutation checks.**
 - Open only after the lock: Task 3 Step 5.
@@ -3846,16 +4460,19 @@ Spec check 6, adjusted by plan note 8. Run on `work`, on PR 2's branch, before i
 - A second GUI refuses: Task 5 Step 6.
 - The `AppState.shared` trap: Task 8 Step 8.
 - #489, no shared `AppState` in the CLI: Task 2 Step 9 and Task 8 Step 8.
-- A clean stop on SIGINT/TERM/HUP: Task 12 Step 7 and Task 13 Step 7.
-- A second Ctrl-C kills the registered groups: Task 13 Step 7.
+- A clean stop on SIGINT/TERM/HUP: Task 13 Step 7 (including the wedged turn and the teardown bound) and Task 14 Step 7.
+- A second Ctrl-C kills the registered groups, resets SIGINT and deletes the containers: Task 14 Step 7, and Task 12 Step 7 for the delete's group, parallelism and bound.
+- An inherited ignore is kept: Task 14 Step 7.
+- The `write_file` skill path: Task 2 Step 9.
 
 **Type consistency.** Names are used as Task 1 and Task 5 define them, in every later task:
 - `StoreLock.claim`, `claimSettling`, `holds`, `vacate(at:)`, `readHolder(at:)`, `Claim`, `Holder`, `Kind` (`.runJob`, `.seedDevHome`, `.perf`, `.app`), `Syscalls`
 - `LaunchDecision.decide(_:unknownFor:)`, `LaunchRefusal`, `LaunchGate.Seams`
-- `RunStop.request(reason:)`, `arm()`, `disarm()`, `wait()`, `reason(for:)`, `signalName(_:)`
-- `CLIStop(grace:terminateGroups:killGroups:vacate:exitNow:)`, `LiveProcessGroups` (`terminateAll`, `killAll`), `ProcessGroupRunner(registry:)`
+- `RunStop.request(reason:)`, `arm()`, `disarm()`, `wait()`, `wasRequested`, `teardown`, `reason(for:)`, `signalName(_:)`, `JobRunner.returnsWithin(_:_:)`
+- `CLIStop(grace:teardown:terminateGroups:drainGroups:killGroups:deleteContainers:resetInterrupt:vacate:exitNow:)`, `settle()`, `LiveProcessGroups` (`terminateAll`, `killAll`, `waitUntilEmpty(within:)`), `ProcessGroupRunner(registry:)`, `LiveContainerNames.deleteAll(within:command:)`
+- `LaunchGate.Seams` (`startPolling(interval, tick)`, `showWaitingNotice`, `hideWaitingNotice`, `activate`)
 - `IrisEngine.jobRunner(stop:)`, `DeadlineFlag.Ending`
 
 **Checked and left alone.**
 - `IrisMain`'s `try ConversationStore.onDisk` stays inside the autoclosure. Only Task 3's test pins it.
-- `SubagentManager` and `PluginAuthRunner`'s `ToolExecutor()` get no `onSkillsChanged`. They run no skill writes for an engine that caches a prompt, and nil invalidates nothing.
+- `PluginAuthRunner`'s throwaway `ToolExecutor()` gets no `onSkillsChanged`. It runs no skill writes, and nil invalidates nothing. Subagents and evaluators are `IrisEngine`s, so they get their own hook (plan note 14).
