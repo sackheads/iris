@@ -2,6 +2,8 @@
 
 Status: **proposed** (2026-10-11). This is the lean version, revised after `work`'s review of #487. The design brief is `.superpowers/sdd/463-design-brief.md`.
 
+Where PR 1 was built differently, the decision says so in an "(As built …)" note; "plan note N" is note N in `docs/superpowers/plans/2026-10-11-single-writer-store.md`.
+
 **Owner rulings (2026-10-11), binding**
 1. The CLI keeps refusing while the app holds the store. There is no IPC hand-off.
 2. An app launched during a CLI run waits behind a window that never touches the store. It never times out into opening the store.
@@ -46,11 +48,11 @@ Checked against `main` at `e418b29`. Paths are under `Sources/IrisKit/`.
    - The CLI and the seeder exit 1.
    - The app shows an alert and quits. It never opens the store unlocked.
 5. **The payload.**
-   - It is one JSON line, `{"pid", "kind": "app"|"run-job"|"seed-dev-home", "job"?}`.
-   - It is written inside `claim()`, in this order: `flock`, the inode check (decision 3), `pwrite` at offset 0, then `ftruncate` to the payload's length. Nothing runs between the `flock` and the `pwrite`. If the write fails, `claim()` closes the fd and returns `.failed`.
+   - It is one JSON line, `{"pid", "kind": "app"|"run-job"|"seed-dev-home"|"perf", "job"?}`, keys sorted. (As built: `perf` is `PerfCLI`'s scratch lock, plan note 3; the app treats it like `app`.)
+   - It is written inside `claim()`, in this order: `flock`, the inode check (decision 3), `pwrite` at offset 0, then `ftruncate` to the payload's length. Nothing else runs between the `flock` and the `pwrite`, except one `kill(pid, 0)` when the prior payload, read before the `flock`, is a bare pid (as built, plan note 1). If the write fails, `claim()` closes the fd and returns `.failed`.
    - *Why:* otherwise a GUI whose write failed would hold the lock over a crashed CLI's stale `run-job` payload. If that pid had been reused, a waiting GUI would read a live `run-job` holder and wait forever.
    - `job` is the CLI argument as typed. Resolving a name to a job needs the store.
-   - It is vacated (truncated to empty) on a clean exit, by the CLI and the app.
+   - It is vacated (truncated to empty) on a clean exit, by the CLI, the seeder, `--perf` and the app.
    - The payload only describes the holder; the lock decides who holds it.
    - A reader that finds it empty, unparsable or naming a dead pid (a new holder that hasn't written yet) re-reads for up to 1 s.
    - Pre-#463 binaries can't parse it as a pid, so they refuse, which is safe.
@@ -67,11 +69,11 @@ Checked against `main` at `e418b29`. Paths are under `Sources/IrisKit/`.
    - A GUI that gets `.legacy` (a pre-#463 app, which never flocks) refuses and quits the same way.
    - A `seed-dev-home` holder is waited on, like a CLI. A copy takes seconds.
 9. **A GUI that finds a CLI holder waits** (ruling 2).
-   - It polls `LOCK_NB` once a second on a main-queue `DispatchSourceTimer`, never `Task.sleep`, running decision 3's check each time.
+   - It polls `LOCK_NB` once a second on a main-queue `DispatchSourceTimer`, never `Task.sleep`, running decision 3's check each time. (As built: every 0.2 s while the holder is unnamed, so decision 5's second is several reads.)
    - There is no timeout and no Stop. When it wins the lock it completes the launch (decision 11).
 10. **The waiting window touches nothing of `AppState`.**
     - A `@MainActor @Observable LaunchGate` (`.waiting(Holder)` / `.open`) is the only state.
-    - `WindowGroup`, `Settings` and `Run Log` render `WaitingView` until `.open`. It says: "An `iris --run-job` is using this home (pid N, job X). Iris will open when it finishes."
+    - `WindowGroup`, `Settings` and `Run Log` render `WaitingView` until `.open`. It says: "An iris --run-job is using this home (pid N, job X). Iris will open when it finishes." (As built without the backticks, plan note 11: `Text` renders the string verbatim.)
     - The `MenuBarExtra` label and content take the gate's branch: an hourglass, the same sentence, and Quit.
     - The hotkey closure checks the gate *when pressed*.
     - Diagnostics touches no store and needs no gate.
@@ -85,8 +87,9 @@ Checked against `main` at `e418b29`. Paths are under `Sources/IrisKit/`.
     - `LaunchGate` holds raw URLs in memory, never logs them, and keeps up to `RunJobURLIntake.capacity`.
     - At `finishLaunch` they go to `receiveRunJobURL`, oldest first. `RunJobURLIntake` holds them until the bookkeeping is done, then fires them.
     - Overflow posts one line, "N links that arrived while Iris waited were dropped unread".
+    - (As built.) Notification clicks are held the same way. The notification delegate is installed at will-finish and touches no `AppState`, so a banner click that launches Iris while it waits is kept, up to 16, and handed to `handleNotificationResponse` at `finishLaunch`, in order.
     - D2's deferral is deleted: `URLDeferral`, `PendingURLFire`, `deferURLFire`, `.deferred`, `foreignStoreHolder*`, `noteForeignStoreHolder`, the notice, the waiting lines, and all of `LaunchLock.swift`, `ProcessStart` included. Nothing signals a holder any more, and the refusal message needs only the pid.
-13. **A windowless cold start (D2) still shows the waiting notice**, as the status item's hourglass plus a small `Window("Iris is waiting")` scene, opened without activating the app.
+13. **A windowless cold start (D2) still shows the waiting notice**, as the status item's hourglass plus a small "Iris is waiting" window, opened without activating the app. (As built, plan note 13: an AppKit `NSPanel` with `.nonactivatingPanel`, ordered front with `orderFrontRegardless()`, since SwiftUI's `OpenWindowAction` always activates.)
     - *Why both:* the status item alone is easy to miss, and nothing else would explain a link that seems to do nothing for up to the run's timeout.
     - D2 kept link launches windowless so that a chat window wouldn't open per link. One small notice, shown only in this rare case and closed when the launch completes, doesn't break that.
     - *Cost if wrong:* a Shortcut user sees a small window they didn't ask for.
@@ -139,7 +142,7 @@ Checked against `main` at `e418b29`. Paths are under `Sources/IrisKit/`.
   - the fd static, the inode check, and the pure payload codec.
   - `.legacy` is a bare-pid file naming a live pid: a pre-#463 holder, refused.
 - **`ProcessRole`**, **`LiveProcessGroups`**.
-- **`LaunchGate`**, with `LaunchDecision.decide(_ claim:) -> .open | .wait | .refuse`, pure; **`WaitingView`**; the waiting `Window` scene.
+- **`LaunchGate`**, with `LaunchDecision.decide(_:unknownFor:) -> .open | .wait | .refuse`, pure (plan note 2); **`WaitingView`**; the waiting notice panel (`WaitingNoticePanel`).
 - **`IrisApp` / `AppDelegate`:** `openStore()`, `finishLaunch()`, the gated scenes, hotkey and terminate, and `RunJobURLEvents` delivering to the gate.
 - **`ToolExecutor`, `SkillCurator`, `IrisEngine`:** decision 15.
 - **`RunJobCLI` / `JobRunner`:** the claim, the signal sources, and the stop claimant.
@@ -204,5 +207,4 @@ Each PR is based on `main`, never stacked, and carries the doc fixes its change 
 - A Stop or Force stop for a CLI run from the app (dropped by the lean ruling).
 - `--run-job` while the app is open, over a socket (ruling 1).
 - Reaping containers across homes. The `iris-` prefix is shared, so a dev launch can still reap the release app's live containers; that needs its own issue.
-- A notification response that launches the app while it waits. The delegate is installed in `openStore()`, so the response is lost. The card is still in Iris.
 - Mixed pre-#463 binaries, beyond decision 3 and `.legacy`.

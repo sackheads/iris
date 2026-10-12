@@ -1143,34 +1143,49 @@ measurement must not (creating an empty conversation in a store with nothing sel
 the guard-provisioning and unreadable-row notices) are suppressed for a CLI run; the fire, its
 row, its card and its approvals are untouched by that.
 
-**It refuses while another Iris process holds the store**, `--dry-run` included — a dry run
+**It refuses while another Iris process has this home**, `--dry-run` included — a dry run
 writes nothing, but opening the store may *migrate* it, and a schema migration under a live app is
-a worse failure than being told to try again. The app writes a lock file holding its
-pid beside the store (`conversations.sqlite.lock`) at launch and removes it at exit; `--run-job`
-takes the same lock for the length of its run and gives it back. The file holds a pid and nothing
-else, so the refusal names both possibilities — "another Iris process holds the store (pid N) —
-the app, or another `--run-job`" — rather than sending you off to quit an app that may not be
-running. GRDB's WAL would survive two writers, but
+a worse failure than being told to try again. Whoever holds a `flock(2)` on
+`conversations.sqlite.lock`, beside the store, is the only process that may open it: the app for
+its whole session, a `--run-job` for its whole run, `--seed-dev-home` while it copies. The kernel
+releases the lock however the holder exits, a crash or `kill -9` included, so nothing is left
+behind to clean up. The file also holds one line saying who has it, so the refusal names them:
+"the Iris app (pid N) has this home open", "another --run-job (pid N, job X) has this home", or
+"an iris --seed-dev-home (pid N) is copying this home". GRDB's WAL would survive two writers, but
 `AppState` keeps conversation state in memory, so a CLI write behind a live app desyncs the UI and
-the app then saves its stale copy over the top. A lock left behind by a crash names a process that
-no longer exists and is taken over; one that cannot be read or parsed is treated as held, and the
-message names the file to delete. Very occasionally a crashed holder's pid has since been handed
-to some unrelated process, and then there is nothing to wait for and no app to quit: the refusal
-names the lock file for that case too, and deleting it is the fix.
+the app then saves its stale copy over the top.
 
-What that covers, exactly: a CLI run started while the app is up, a second CLI run started while
-the first one is going, and — because the CLI *creates* the lock file rather than checking and
-then writing it — several `--run-job` launched at the same instant, of which exactly one proceeds
-and the rest refuse. A harness may therefore run them in parallel and read the refusals. What it
-does **not** cover is the app being launched *during* a CLI run — the app never checks the lock,
-it simply takes it — so do not start Iris while a `--run-job` is in flight. (An app that starts
-mid-run also keeps the lock afterwards: the CLI's release is pid-guarded and will not delete
-somebody else's.)
+Two refusals are about the lock itself rather than a holder. An Iris build from before this lock
+wrote only a pid into the file and never locks it; while that pid is alive the refusal says "an
+older Iris build (pid N) holds the store", and only then does it name the file: if pid N is not
+Iris at all (a crashed old build's pid handed to something else), delete that file and try again.
+No other refusal suggests deleting the file, because doing that under a live holder is what lets a
+second writer in. And a home whose filesystem cannot lock (some network or read-only mounts)
+refuses with "could not lock the store", naming the path and the error, rather than opening it
+unlocked.
+
+What that covers: a CLI run started while the app is up, a second CLI run started while the first
+is going, and several `--run-job` launched at the same instant, of which exactly one proceeds and
+the rest refuse. A harness may run them in parallel and read the refusals. **The app launched
+during a CLI run waits**: every window shows "An iris --run-job is using this home (pid N, job X).
+Iris will open when it finishes." with a Quit button, the menu bar shows an hourglass, and nothing
+opens the store until the run ends. It never times out into opening the store, and the app has no
+way to stop the run: end it from its terminal, or quit Iris. A harness batch keeps the app waiting
+until the batch ends, since each new run may claim the store before the app looks again. A second
+app (or `swift run`) on the same home says "Iris is already running on this home" and quits, and
+so does an app that finds an older build's pid in the file, or a holder that has not said what it
+is within a second. An app that cannot lock the store says "Iris could not lock its store" and
+quits.
+
+Ctrl-C (or SIGTERM, or SIGHUP) ends a `--run-job` at once, exactly as it always has: nothing
+catches it, so the run's row is left `running` and no card is delivered. The lock goes with the process, so
+a waiting app opens on its next poll, and the next Iris app to open the store closes that row as
+`interrupted`, "the Iris process running it ended".
 
 | Exit | Meaning |
 | --- | --- |
 | `0` | The run `completed` — or, with `--dry-run`, the gate says something changed |
-| `1` | Usage; no job with that id or name; `--dry-run` on a job that has no gate; a store that would not open; the app (or another `--run-job`) holding the lock; or the job being deleted out from under the fire |
+| `1` | Usage; no job with that id or name; `--dry-run` on a job that has no gate; a store that would not open; the store's lock held by the app, another `--run-job`, the seeder or an older Iris build; a lock that could not be taken (the path and error are named); or the job being deleted out from under the fire |
 | `2` | The run did not complete: `failed`, `blocked on approval`, `interrupted`, an admission refusal (paused, disabled, overlap, breaker, budget), or a gate that could not answer |
 | `3` | The gate looked and nothing had changed (`--dry-run`) |
 
@@ -1180,11 +1195,12 @@ Without `--json` the row prints one field per line (`job`, `run`, `status`, `tri
 refusal or an error prints its sentence to stderr and, under `--json`, a `{"error": …,
 "exitCode": …}` object on stdout too, so a pipeline is never handed an empty stdout.
 
-One known gap, and it is pre-existing rather than new: a few tool implementations reach
-`AppState.shared` directly (skill curation, plugin auth). In the app that is the app's own state;
-in a `--run-job` process it would open a *second* `AppState` over the same store. A read-only job
-cannot reach any of those tools, so this is only in play for a `mutating` job, and the durable fix
-is threading the run's own state to those call sites.
+A `--run-job` builds one `AppState` of its own, over the store it has locked, and never touches the
+app's. A skill written during the run (`write_file` into a skill folder, `create_skill`,
+`update_skill`, `delete_skill`, the curator) refreshes the prompts of the run's own engines, never
+the app's. The app's shared `AppState` is usable only in the app, and only while it holds this
+lock: any other process that reaches it stops with a fatal error rather than open a second
+`AppState` over the store.
 
 ## The job tools
 
@@ -1231,16 +1247,20 @@ can walk the retry ladder all the way to "failed 3 times; paused". A job whose o
 `schedule_job` or `register_directory_watcher` changes what the job does (its prompt, profile,
 grant or budgets), or lifts a pause you put on it, the link is turned off, and Iris says so.
 
-If the app is launched by a link while `iris --run-job` holds the store, the fire waits, and says
-it is waiting, until that process finishes. The holder is identified by when it started, not only
-its pid, so a pid the kernel has since reused for something else is never mistaken for it. It
-re-checks every five seconds and gives up after ten minutes.
+If a link launches Iris while `iris --run-job` holds the store, Iris does not open until that run
+has finished: the menu bar shows an hourglass, and a small "Iris is waiting" window names the run,
+without taking focus from what you are doing. Up to 16 links are held this way, in order, and
+checked and fired once Iris has opened, exactly as a link arriving after launch would be. Any
+beyond those are dropped unread, and Iris says how many. If the store is held by another Iris *app* instead (for
+example `swift run` beside `Iris Dev.app`), the app the link launched says "Iris is already running
+on this home", says the link was not run, and quits.
 
-A link that launches Iris starts it without a window: the job runs once Iris has finished
-starting, the menu bar icon counts it while it runs, and its card lands in Iris. Click the Dock
-icon, choose Show Chat from the menu bar icon, or press the hotkey to open the chat. With Iris
-already open, a link opens no window. A release build answers only `iris://` and a dev build only
-`iris-dev://`, so the two never take each other's links. Iris never writes a link to a log.
+A link that launches Iris starts it without a chat window (only the waiting notice above, when a
+run holds the store): the job runs once Iris has finished starting, the menu bar icon counts it
+while it runs, and its card lands in Iris. Click the Dock icon, choose Show Chat from the menu bar
+icon, or press the hotkey to open the chat. With Iris already open, a link opens no window. A
+release build answers only `iris://` and a dev build only `iris-dev://`, so the two never take each
+other's links. Iris never writes a link to a log.
 
 A link that arrives while Iris is still starting is held rather than fired early — up to 16 of
 them, a flood beyond that refused with one line — and is then checked exactly as a link arriving
