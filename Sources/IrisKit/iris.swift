@@ -141,6 +141,14 @@ actor IrisEngine {
     var executor: ToolExecutor {
         var executor = ToolExecutor.shared
         executor.jobToolsProvider = jobToolsProvider()
+        // #489: a skill written through this engine's tools rebuilds this engine's prompt, and
+        // the owner's main engine's too (plan note 14): a delegate's skill must reach the main
+        // chat, whose engine caches its prompt for the life of the app. Never `AppState.shared`.
+        executor.onSkillsChanged = { [weak self, weak state] in
+            await self?.invalidateSystemPrompt()
+            let owner = await MainActor.run { state?.engine }
+            if let owner, owner !== self { await owner.invalidateSystemPrompt() }
+        }
         return executor
     }
 

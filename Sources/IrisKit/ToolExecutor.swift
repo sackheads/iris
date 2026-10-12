@@ -23,6 +23,12 @@ struct ToolExecutor {
     /// means the tool declines instead of registering a watch nothing runs.
     var jobToolsProvider: (@Sendable () async -> JobTools?)?
 
+    /// #489: how a skill write tells the engine it ran for, so that engine's cached system prompt
+    /// (and only that engine's) is rebuilt. nil — `ToolExecutor.shared`, a plugin's throwaway
+    /// executor, a test — invalidates nothing: no engine is behind it. Never `AppState.shared`,
+    /// which inside `--run-job` built a second `AppState` over the store (#463 decision 15).
+    var onSkillsChanged: (@Sendable () async -> Void)?
+
     /// Where Iris's own directory and the user's home are, for `register_directory_watcher`'s
     /// refusals (`WatchRoot.refusal`). nil — the case in the app — means the real ones, resolved
     /// when the tool runs rather than when the executor is built, so a headless run that installs
@@ -687,7 +693,7 @@ struct ToolExecutor {
         // goes stale until something else invalidates it — and a check of what landed, surfaced
         // as a warning rather than a refusal (`write_file` must still work for a skill the user
         // is actively editing by hand, even mid-edit).
-        await AppState.shared.invalidateEnginePrompt()
+        await onSkillsChanged?()
         var suffix = " Skill prompt cache invalidated."
         let warnings = SkillFrontmatter.warnings(content: content, folderName: targetedSkillFolder)
         if !warnings.isEmpty {
@@ -1142,7 +1148,7 @@ except Exception as e:
         do {
             try fileManager.createDirectory(at: skillFolder, withIntermediateDirectories: true)
             try okfContent.write(to: skillFile, atomically: true, encoding: .utf8)
-            await AppState.shared.invalidateEnginePrompt()
+            await onSkillsChanged?()
             return "Successfully saved skill '\(cleanName)' to \(skillFile.path). System prompt cache updated."
         } catch {
             return "Error saving skill '\(cleanName)': \(error.localizedDescription)"
@@ -1199,7 +1205,7 @@ except Exception as e:
 
         do {
             try finalContent.write(to: skillFile, atomically: true, encoding: .utf8)
-            await AppState.shared.invalidateEnginePrompt()
+            await onSkillsChanged?()
             return "Successfully updated skill '\(cleanName)' in \(skillFile.path). System prompt cache updated."
         } catch {
             return "Error updating skill '\(cleanName)': \(error.localizedDescription)"
@@ -1216,7 +1222,7 @@ except Exception as e:
         }
         do {
             try fileManager.removeItem(at: skillFolder)
-            await AppState.shared.invalidateEnginePrompt()
+            await onSkillsChanged?()
             return "Successfully deleted skill '\(cleanName)'. System prompt cache updated."
         } catch {
             return "Error deleting skill '\(cleanName)': \(error.localizedDescription)"

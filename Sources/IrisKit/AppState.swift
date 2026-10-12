@@ -1308,12 +1308,6 @@ class AppState {
         }
     }
 
-    func invalidateEnginePrompt() {
-        Task {
-            await engine?.invalidateSystemPrompt()
-        }
-    }
-    
     var activeConversationIndex: Int? {
         conversations.firstIndex(where: { $0.id == selectedConversationId })
     }
@@ -4067,7 +4061,8 @@ class AppState {
         Task { [weak self] in
             guard let self = self else { return }
             if args.hasPrefix("curate") {
-                let report = await SkillCurator.shared.curateSkills()
+                let engine = self.engine
+                let report = await SkillCurator.shared.curateSkills(onSkillsChanged: { await engine?.invalidateSystemPrompt() })
                 let markdown = SkillCurator.shared.formatReportMarkdown(report)
                 self.emitCommandOutput(markdown, format: .markdown, to: convId)
             } else if args.hasPrefix("new ") {
@@ -4083,7 +4078,7 @@ class AppState {
                 # Pitfalls & Verification
                 - Step verification criteria
                 """
-                let res = await ToolExecutor.shared.createSkill(
+                let res = await self.engine.executor.createSkill(
                     name: name,
                     description: "Scaffolded skill '\(name)'",
                     body: templateBody
