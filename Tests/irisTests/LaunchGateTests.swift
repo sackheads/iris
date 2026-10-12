@@ -51,6 +51,36 @@ struct LaunchGateTests {
         #expect(sentence.count < 200)
     }
 
+    @Test("the job name loses tabs, ESC, bidi overrides and zero-width marks before it is shown")
+    func waitingSentenceDropsInvisibleScalars() {
+        let job = "a\tb\u{1B}[31mc\u{202E}d\u{200B}e\u{2066}f\u{00AD}g\r\nh"
+        let sentence = LaunchGate.waitingSentence(.init(pid: 1, kind: .runJob, job: job))
+        #expect(sentence.contains("job a b[31mcdefg  h)"))
+        for scalar in sentence.unicodeScalars {
+            #expect(scalar.properties.generalCategory != .control, "control U+\(String(scalar.value, radix: 16))")
+            #expect(scalar.properties.generalCategory != .format, "format U+\(String(scalar.value, radix: 16))")
+            #expect(!scalar.properties.isDefaultIgnorableCodePoint)
+        }
+    }
+
+    @Test("an app or perf holder, which the gate never waits on, gets the unnamed sentence")
+    func refusedKindsHaveNoWaitingWords() {
+        #expect(LaunchGate.waitingSentence(Self.app) == LaunchGate.waitingSentence(nil))
+        #expect(LaunchGate.waitingSentence(.init(pid: 9, kind: .perf, job: "x")) == LaunchGate.waitingSentence(nil))
+    }
+
+    @Test("the gate's default clock is monotonic uptime, not the wall clock")
+    func defaultClockIsMonotonic() {
+        let seams = LaunchGate.Seams(
+            claim: { .acquired }, openStore: {}, finishLaunch: { _, _ in }, deliver: { _ in },
+            refuse: { _, _ in }, startPolling: { _, _ in }, stopPolling: {},
+            showWaitingNotice: {}, hideWaitingNotice: {}, activate: {})
+        let before = ProcessInfo.processInfo.systemUptime
+        let now = seams.now()
+        let after = ProcessInfo.processInfo.systemUptime
+        #expect(now >= before && now <= after)
+    }
+
     // MARK: The gate
 
     @MainActor
@@ -67,7 +97,7 @@ struct LaunchGateTests {
         var notices = 0
         var hides = 0
         var activations = 0
-        var clock = Date(timeIntervalSince1970: 1_000)
+        var clock: TimeInterval = 1_000
 
         /// A real claim, when set: `StoreLock.claim` on a temp file another process may hold.
         var claimer: (() -> StoreLock.Claim)?
@@ -91,7 +121,7 @@ struct LaunchGateTests {
             activate: { [unowned self] in self.activations += 1 },
             now: { [unowned self] in self.clock }))
 
-        func advance(_ seconds: TimeInterval) { clock = clock.addingTimeInterval(seconds); tick?() }
+        func advance(_ seconds: TimeInterval) { clock += seconds; tick?() }
     }
 
     @Test("a free lock opens the store at begin and finishes at did-finish, as today")
@@ -288,6 +318,7 @@ struct LaunchGateTests {
         let url = try Self.tempLock()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let stub = try LockStub.start(holding: url, payload: #"{"job":"nap","kind":"run-job","pid":%PID%}"# + "\n")
+        defer { stub.kill() }   // idempotent: the test kills it on purpose below
         let h = Harness(claim: { StoreLock.claim(at: url, kind: .app) })
         h.gate.begin()
         h.gate.didFinishLaunching()
@@ -310,13 +341,13 @@ struct LaunchGateTests {
         let url = try Self.tempLock()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let stub = try LockStub.start(holding: url, payload: #"{"kind":"app","pid":%PID%}"# + "\n")
+        defer { stub.kill() }
         let h = Harness(claim: { StoreLock.claim(at: url, kind: .app) })
         h.gate.begin()
         h.gate.didFinishLaunching()
         #expect(h.refusals.map(\.0) == [.otherApp(pid: stub.pid)])
         #expect(h.opened == 0)
         #expect(h.tick == nil)
-        stub.kill()
     }
 
     @Test("a real holder that never writes a payload is re-read for a second, then refused as a GUI")
@@ -324,6 +355,7 @@ struct LaunchGateTests {
         let url = try Self.tempLock()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let stub = try LockStub.start(holding: url)
+        defer { stub.kill() }
         let h = Harness(claim: { StoreLock.claim(at: url, kind: .app) })
         h.gate.begin()
         h.gate.didFinishLaunching()
@@ -333,6 +365,5 @@ struct LaunchGateTests {
         h.advance(0.2)
         #expect(h.refusals.map(\.0) == [.otherApp(pid: nil)])
         #expect(h.opened == 0)
-        stub.kill()
     }
 }

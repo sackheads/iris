@@ -103,7 +103,9 @@ final class LaunchGate {
         /// `NSApp.activate`, which did-finish did unconditionally before #463. Skipped only for a
         /// link that launched Iris while it waits (plan note 13).
         var activate: @MainActor () -> Void
-        var now: @MainActor () -> Date = { Date() }
+        /// Seconds on a monotonic clock. Never `Date()`: a wall clock stepped backwards would
+        /// keep the unknown-holder window from ever reaching `unknownGrace`.
+        var now: @MainActor () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     }
 
     /// Decision 9's poll, while the holder is named.
@@ -122,7 +124,7 @@ final class LaunchGate {
     @ObservationIgnored private var refusalShown = false
     @ObservationIgnored private var noticeShown = false
     @ObservationIgnored private var pollInterval: TimeInterval?
-    @ObservationIgnored private var unknownSince: Date?
+    @ObservationIgnored private var unknownSince: TimeInterval?
 
     init(seams: Seams) { self.seams = seams }
 
@@ -186,21 +188,37 @@ final class LaunchGate {
         switch holder.kind {
         case .seedDevHome:
             return "An iris --seed-dev-home is copying into this home (pid \(holder.pid)). Iris will open when it finishes."
-        case .runJob, .app, .perf:
+        case .runJob:
             let job = holder.job.map { ", job \(flattened($0))" } ?? ""
             return "An iris --run-job is using this home (pid \(holder.pid)\(job)). Iris will open when it finishes."
+        case .app, .perf:
+            // Unreachable: `decide` refuses these holders, so the gate never waits on one.
+            return waitingSentence(nil)
         }
     }
 
+    /// One line of visible text: line breaks and tabs become spaces, and control, format (bidi
+    /// overrides, zero-width marks) and default-ignorable scalars are dropped.
     private static func flattened(_ job: String) -> String {
-        let line = job.components(separatedBy: .newlines).joined(separator: " ")
+        var scalars = String.UnicodeScalarView()
+        for scalar in job.unicodeScalars {
+            if scalar == "\t" || CharacterSet.newlines.contains(scalar) {
+                scalars.append(" ")
+            } else if scalar.properties.generalCategory == .control || scalar.properties.generalCategory == .format
+                        || scalar.properties.isDefaultIgnorableCodePoint {
+                continue
+            } else {
+                scalars.append(scalar)
+            }
+        }
+        let line = String(scalars)
         return line.count > 80 ? String(line.prefix(79)) + "…" : line
     }
 
     private func apply(_ claim: StoreLock.Claim) {
         let now = seams.now()
         if case .held(nil) = claim { unknownSince = unknownSince ?? now } else { unknownSince = nil }
-        let unknownFor = unknownSince.map { now.timeIntervalSince($0) } ?? 0
+        let unknownFor = unknownSince.map { now - $0 } ?? 0
         switch LaunchDecision.decide(claim, unknownFor: unknownFor) {
         case .open:
             stopPolling()
