@@ -17,8 +17,12 @@ enum BlockingSpawn {
     /// With `timeoutSeconds`, a child still running at the deadline is SIGKILLed and reaped, so a
     /// helper that hangs (a `container` daemon that never answers) cannot hold the caller's thread
     /// for good.
+    ///
+    /// With `newGroup`, the child leads a process group of its own, so a terminal's Ctrl-C (sent
+    /// to the caller's foreground group) does not end the helper the caller is waiting on (#463).
     @discardableResult
-    static func run(_ path: String, _ arguments: [String], timeoutSeconds: Double? = nil) -> Int32? {
+    static func run(_ path: String, _ arguments: [String], timeoutSeconds: Double? = nil,
+                    newGroup: Bool = false) -> Int32? {
         var actions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&actions)
         defer { posix_spawn_file_actions_destroy(&actions) }
@@ -32,7 +36,10 @@ enum BlockingSpawn {
         var attr: posix_spawnattr_t?
         posix_spawnattr_init(&attr)
         defer { posix_spawnattr_destroy(&attr) }
-        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK))
+        var flags = POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK
+        if newGroup { flags |= POSIX_SPAWN_SETPGROUP }
+        posix_spawnattr_setflags(&attr, Int16(flags))
+        if newGroup { posix_spawnattr_setpgroup(&attr, 0) }
         var all = sigset_t(), none = sigset_t()
         sigfillset(&all)
         sigemptyset(&none)
@@ -64,9 +71,9 @@ enum BlockingSpawn {
     /// does, so a burst of blocked waits elsewhere cannot delay this one. `then` gets the status
     /// on that queue.
     static func detached(_ path: String, _ arguments: [String], timeoutSeconds: Double?,
-                         then: (@Sendable (Int32?) -> Void)? = nil) {
+                         newGroup: Bool = false, then: (@Sendable (Int32?) -> Void)? = nil) {
         DispatchQueue(label: "iris.blocking-spawn").async {
-            let status = run(path, arguments, timeoutSeconds: timeoutSeconds)
+            let status = run(path, arguments, timeoutSeconds: timeoutSeconds, newGroup: newGroup)
             then?(status)
         }
     }

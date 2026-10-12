@@ -26,6 +26,8 @@ final class LiveProcessGroups: @unchecked Sendable {
     func terminateAll() { snapshot().forEach { $0.terminate() } }
 
     /// SIGKILL to every group, now, for an exit that will not wait. Returns once each is sent.
+    /// No runner's `onKilled` fires (see `ProcessGroupRunner.killNow`): pair it with
+    /// `LiveContainerNames.deleteAll` for the containers those groups were driving.
     func killAll() { snapshot().forEach { $0.killNow() } }
 
     /// Blocks until every group has been reaped, or `seconds` pass: what a stopping CLI waits on

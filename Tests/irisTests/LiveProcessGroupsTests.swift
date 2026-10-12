@@ -67,7 +67,9 @@ struct LiveProcessGroupsTests {
     @Test("a group stays registered until its SIGKILL rung, though its leader died at SIGTERM")
     func leavesOnlyAfterTheLadder() async throws {
         let registry = LiveProcessGroups()
-        // The leader dies at SIGTERM; its child ignores it, holds no pipe, and lives to rung two.
+        // The leader dies at SIGTERM; its child ignores it and holds no pipe. The stray rung
+        // SIGKILLs the child about 1 s on, but the group stays listed until the ladder's SIGKILL
+        // rung at 2 s.
         let (runner, task) = try await spawnIgnoringTerm(registry) {
             "(trap '' TERM; : > '\($0)'; exec sleep 30) >/dev/null 2>&1 & wait"
         }

@@ -531,9 +531,13 @@ actor GateContainerRegistry {
     static let shared = GateContainerRegistry()
 
     private var names: Set<String> = []
+    /// The same names, readable without an actor hop by an exiting CLI (#463).
+    private let live: LiveContainerNames
 
-    func register(_ name: String) { names.insert(name) }
-    func unregister(_ name: String) { names.remove(name) }
+    init(live: LiveContainerNames = .shared) { self.live = live }
+
+    func register(_ name: String) { names.insert(name); live.add(name) }
+    func unregister(_ name: String) { names.remove(name); live.remove(name) }
 
     /// The names in flight at this instant. A snapshot: a gate that starts after it is taken is
     /// not in it, which is why the sweep is a launch-time job and not a periodic one.

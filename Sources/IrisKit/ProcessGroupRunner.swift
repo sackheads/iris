@@ -129,7 +129,9 @@ final class ProcessGroupRunner: @unchecked Sendable {
 
     /// SIGKILL to the whole group now, synchronously, for a process about to `_exit` (#463).
     /// Through the queue, so it never signals a group whose leader was reaped. Never call it
-    /// from this runner's own queue.
+    /// from this runner's own queue. It is not the ladder: it fires no `onKilled` and does not
+    /// make the output report `killed`, so a one-off `container run` it ends is not deleted here.
+    /// The exit path deletes those itself, from `LiveContainerNames`.
     func killNow() {
         queue.sync { signalGroup(SIGKILL) }
     }

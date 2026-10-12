@@ -232,4 +232,29 @@ struct SandboxClosedSessionTests {
         #expect(rt.createdCount == 0)
         #expect(rt.execCount == 0)
     }
+
+    @Test("#463: a session's container name is recorded at create and dropped at close")
+    func sessionNameIsRecorded() async {
+        let live = LiveContainerNames()
+        let m = SandboxSessionManager(runtime: MockRuntime(), image: { "ubuntu:latest" }, live: live)
+        let id = UUID()
+        _ = await m.run(command: "a", conversationId: id, workspace: "/ws")
+        #expect(live.names == ["iris-\(id.uuidString.lowercased())"])
+        await m.closeSession(id)
+        #expect(live.names.isEmpty)
+    }
+
+    @Test("#463: a close from a cancelled task, whose remove launches nothing, keeps the name recorded")
+    func cancelledCloseKeepsTheName() async throws {
+        let live = LiveContainerNames()
+        let m = SandboxSessionManager(runtime: MockRuntime(), image: { "ubuntu:latest" }, live: live)
+        let id = UUID()
+        _ = await m.run(command: "a", conversationId: id, workspace: "/ws")
+        let close = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            await m.closeSession(id)
+        }
+        _ = try await value(of: close, within: 10)
+        #expect(live.names == ["iris-\(id.uuidString.lowercased())"], "left for the exit path to delete")
+    }
 }
