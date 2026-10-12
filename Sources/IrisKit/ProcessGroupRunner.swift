@@ -217,19 +217,25 @@ final class ProcessGroupRunner: @unchecked Sendable {
         let envp = Self.cStrings((environment ?? ProcessInfo.processInfo.environment).map { "\($0.key)=\($0.value)" })
         defer { argv.forEach { free($0) }; envp.forEach { free($0) } }
 
+        // Admitted before the spawn (#463): an exiting CLI that has closed the registry gets no
+        // new group, and one that snapshots after this reaches it through this queue.
+        guard registry.admit(self) else {
+            fds.forEach { close($0) }
+            return resume(.failure(CancellationError()))
+        }
         var child: pid_t = 0
         let rc = posix_spawn(&child, executable, &actions, &attr, argv, envp)
         close(outFDs[1])
         if !mergeStderr { close(errFDs[1]) }
         if let inFDs { close(inFDs[0]) }
         guard rc == 0 else {
+            registry.remove(self)
             close(outFDs[0])
             if !mergeStderr { close(errFDs[0]) }
             if let inFDs { close(inFDs[1]) }
             return resume(.failure(POSIXError(POSIXErrorCode(rawValue: rc) ?? .EIO)))
         }
         pid = child
-        registry.add(self)
         outSource = drain(outFDs[0], isStdout: true)
         if !mergeStderr { errSource = drain(errFDs[0], isStdout: false) }
         if let inFDs, let stdin { inSource = feed(inFDs[1], stdin) }

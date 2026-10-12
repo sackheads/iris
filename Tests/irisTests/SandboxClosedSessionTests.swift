@@ -233,6 +233,19 @@ struct SandboxClosedSessionTests {
         #expect(rt.execCount == 0)
     }
 
+    @Test("#463: once the exit path has closed the name box, a session's create is refused and nothing is created")
+    func closedBoxRefusesTheCreate() async {
+        let live = LiveContainerNames()
+        live.deleteAll(within: 1) { _ in ("/usr/bin/true", []) }
+        let rt = MockRuntime()
+        let m = SandboxSessionManager(runtime: rt, image: { "ubuntu:latest" }, live: live)
+        let out = await m.run(command: "a", conversationId: UUID(), workspace: "/ws")
+        #expect(out.contains(LiveContainerNames.exitingError), "got: \(out)")
+        #expect(rt.createdCount == 0)
+        #expect(rt.execCount == 0)
+        #expect(live.names.isEmpty)
+    }
+
     @Test("#463: a session's container name is recorded at create and dropped at close")
     func sessionNameIsRecorded() async {
         let live = LiveContainerNames()

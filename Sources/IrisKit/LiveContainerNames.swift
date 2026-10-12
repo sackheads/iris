@@ -11,10 +11,24 @@ import os
 final class LiveContainerNames: @unchecked Sendable {
     static let shared = LiveContainerNames()
 
+    /// What a container refused because the box is closed says. Nothing was created.
+    static let exitingError = "Iris is exiting, so no new container was started. Nothing was run."
+
     private let lock = NSLock()
     private var set: Set<String> = []
+    /// Set by `deleteAll`: the process is exiting, and no new container may be created.
+    private var closed = false
 
-    func add(_ name: String) { lock.withLock { _ = set.insert(name) } }
+    /// Records `name` before its container is created. False once `deleteAll` has closed the
+    /// box: the caller must not create it, since nothing would delete it before `_exit`.
+    @discardableResult
+    func add(_ name: String) -> Bool {
+        lock.withLock {
+            guard !closed else { return false }
+            set.insert(name)
+            return true
+        }
+    }
     func remove(_ name: String) { lock.withLock { _ = set.remove(name) } }
     var names: Set<String> { lock.withLock { set } }
 
@@ -24,10 +38,14 @@ final class LiveContainerNames: @unchecked Sendable {
     /// drops its name. Returns how many exited 0 by the time it returns. `command` is a seam for
     /// the `container` binary; nil means the installed one, and none installed means nothing to do.
     /// Blocks its caller: call it from a signal source's queue or the exit path, never the pool.
+    /// Closes the box first, in the same lock as the snapshot: a later `add` is refused.
     @discardableResult
     func deleteAll(within seconds: TimeInterval,
                    command: ((String) -> (path: String, arguments: [String]))? = nil) -> Int {
-        let targets = names
+        let targets: Set<String> = lock.withLock {
+            closed = true
+            return set
+        }
         guard !targets.isEmpty else { return 0 }
         let build: (String) -> (path: String, arguments: [String])
         if let command {

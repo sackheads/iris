@@ -329,6 +329,9 @@ actor SandboxSessionManager {
         }
         do {
             try await attemptCreate(id, workspace: workspace, mounts: mounts, network: network)
+        } catch ContainerRuntimeError.createFailed(let message) where message == LiveContainerNames.exitingError {
+            // Refused before anything was created (#463): nothing to sweep, and no delete to spawn.
+            throw ContainerRuntimeError.createFailed(message)
         } catch {
             // Ignoring cancellation on purpose: a cancelled create is one of the two ways this is
             // reached, and the ordinary `remove` would launch nothing at all from a cancelled task
@@ -341,7 +344,9 @@ actor SandboxSessionManager {
     private func attemptCreate(_ id: UUID, workspace: ContainerMount?, mounts: [String], network: NetworkMode) async throws {
         let workdir = Self.workdir(for: workspace)
         // Before the create, so a signal mid-create still deletes it; `create`'s sweep drops it.
-        live.add(name(for: id))
+        guard live.add(name(for: id)) else {
+            throw ContainerRuntimeError.createFailed(LiveContainerNames.exitingError)
+        }
         do {
             try await runtime.createDetached(name: name(for: id), image: image(),
                                              mounts: mounts, workdir: workdir, network: network)

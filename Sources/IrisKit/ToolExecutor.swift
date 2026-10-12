@@ -559,7 +559,9 @@ struct ToolExecutor {
                     // life so the launch sweep does not take it for an orphan (#364). Here, inside
                     // the work, not before `withTimeout`: a caller already cancelled never starts
                     // the work, and a name registered outside it was never given back.
-                    if let ephemeralName { await registry.register(ephemeralName) }
+                    if let ephemeralName, !(await registry.register(ephemeralName)) {
+                        return "Error: \(LiveContainerNames.exitingError)"
+                    }
                     let outcome = await runner.run(executable: executable, arguments: arguments,
                                                    environment: environment, currentDirectory: directory,
                                                    onKilled: onKilled)

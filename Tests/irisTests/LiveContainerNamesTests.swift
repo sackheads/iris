@@ -41,6 +41,15 @@ final class LiveContainerNamesTests {
         #expect(live.names == ["iris-b"])
     }
 
+    @Test("deleteAll closes the box: a name recorded after it is refused")
+    func addAfterDeleteAllIsRefused() {
+        let live = LiveContainerNames()
+        #expect(live.add("iris-a"))
+        live.deleteAll(within: 1) { _ in ("/usr/bin/true", []) }
+        #expect(!live.add("iris-b"), "the exit path has read the box; nothing would delete this one")
+        #expect(!live.names.contains("iris-b"))
+    }
+
     @Test("every recorded container is deleted, in parallel, each in a process group of its own")
     func deletesInParallelInTheirOwnGroups() async throws {
         let live = LiveContainerNames()
@@ -100,8 +109,8 @@ final class LiveContainerNamesTests {
         let live = LiveContainerNames()
         let gates = GateContainerRegistry(live: live)
         let ephemeral = EphemeralContainerRegistry(live: live)
-        await gates.register("iris-gate-x")
-        await ephemeral.register("iris-hook-y")
+        #expect(await gates.register("iris-gate-x"))
+        #expect(await ephemeral.register("iris-hook-y"))
         #expect(live.names == ["iris-gate-x", "iris-hook-y"])
         await gates.unregister("iris-gate-x")
         await ephemeral.unregister("iris-hook-y")

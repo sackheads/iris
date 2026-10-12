@@ -8,7 +8,7 @@ import Darwin
 /// registry and box, and records exits, deletes and the SIGINT reset rather than doing them.
 /// Real signals run in `CLISignalTests`.
 @MainActor
-@Suite("--run-job's clean stop (#463)", .serialized, .timeLimit(.minutes(1)))
+@Suite("--run-job's clean stop (#463)", .timeLimit(.minutes(1)))
 final class RunJobCLIStopTests {
     private let base = FileManager.default.temporaryDirectory.appendingPathComponent("iris-463-stop-\(UUID().uuidString)")
     deinit { try? FileManager.default.removeItem(at: base) }
@@ -77,6 +77,7 @@ final class RunJobCLIStopTests {
                 killGroups: { events.add("kill"); registry.killAll() },
                 deleteContainers: { events.add("delete") },
                 resetInterrupt: { events.add("reset") },
+                flush: { events.add("flush") },
                 vacate: { events.add("vacate") },
                 exitNow: { events.add("exit \($0)") })
     }
@@ -118,7 +119,7 @@ final class RunJobCLIStopTests {
         let events = Events()
         let cliStop = stop(LiveProcessGroups(), events)
         cliStop.receive(SIGINT)
-        #expect(events.values == ["reset", "kill", "delete", "vacate", "exit 2"])
+        #expect(events.values == ["reset", "kill", "delete", "flush", "vacate", "exit 2"])
         // In production that exit is `_exit`. Here the run goes on, and the run armed too late
         // writes nothing.
         let code = await RunJobCLI.run(RunJobCLI.Invocation(target: "napper"), store: store,
@@ -140,7 +141,7 @@ final class RunJobCLIStopTests {
                                 client: FakeLLMClient(responses: []), lockPath: lockPath(), protectionEnabled: false,
                                 gate: { _, _ in cliStop.receive(SIGINT); return .unchanged(signal: "same") },
                                 stop: cliStop, out: { _ in }, err: { _ in })
-        #expect(events.values == ["reset", "kill", "delete", "vacate", "exit 2"],
+        #expect(events.values == ["reset", "kill", "delete", "flush", "vacate", "exit 2"],
                 "the exit path runs the kill and the delete, in that order; Task 12 shows a gate's container is in the box")
         #expect(try store.ledger.runs(jobId: job.id, limit: 5).isEmpty)
     }
@@ -153,7 +154,7 @@ final class RunJobCLIStopTests {
         cliStop.receive(SIGINT)
         #expect(events.values.isEmpty)
         cliStop.receive(SIGINT)
-        #expect(events.values == ["reset", "kill", "delete", "vacate", "exit 130"],
+        #expect(events.values == ["reset", "kill", "delete", "flush", "vacate", "exit 130"],
                 "SIGINT back to its default first, so a third Ctrl-C ends the CLI while the deletes run")
     }
 
@@ -168,7 +169,7 @@ final class RunJobCLIStopTests {
         cliStop.receive(SIGINT)
         #expect(events.values.isEmpty, "the first signal leaves the cancel to the run's stop watcher")
         cliStop.receive(SIGINT)
-        #expect(events.values == ["reset", "cancel", "kill", "delete", "vacate", "exit 130"])
+        #expect(events.values == ["reset", "cancel", "kill", "delete", "flush", "vacate", "exit 130"])
     }
 
     @Test("a signal after the run is over is left to the CLI's own exit")

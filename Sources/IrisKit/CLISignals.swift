@@ -4,11 +4,14 @@ import Foundation
 /// #463 decision 16: the CLI's own SIGINT, SIGTERM and SIGHUP.
 ///
 /// - A do-nothing `sigaction` handler, not `SIG_IGN`: a caught disposition resets to the default
-///   across `exec`, so no child — `Process` or `posix_spawn` — inherits an ignore.
+///   across `exec`, so a child cannot inherit an ignore from it whatever spawned it. Iris's own
+///   spawners would reset one anyway: `ProcessGroupRunner` and `BlockingSpawn` pass
+///   `POSIX_SPAWN_SETSIGDEF`, and Foundation's `Process` was measured to reset it as well.
 /// - `SA_RESTART`, so blocking calls on whichever thread takes the signal do not fail with `EINTR`
 ///   mid-stop.
 /// - A `DispatchSource` per signal, on the CLI's own serial queue rather than `.main`: a long
-///   main-actor stretch (Vibecop loading ggml) must not delay the stop.
+///   main-actor stretch (Vibecop loading ggml) must not delay the stop. Each source is resumed
+///   before its handler replaces the default, so no signal lands in the gap and is swallowed.
 /// - An inherited ignore on SIGHUP or SIGINT is kept (plan note 16). `nohup iris --run-job x &`
 ///   sets SIGHUP ignored so a closed terminal does not end the run, and a non-interactive shell
 ///   starts `&` jobs with SIGINT ignored. SIGTERM is always caught.
@@ -49,15 +52,15 @@ enum CLISignals {
             sigaction(signal, nil, &old)
             let ignored = unsafeBitCast(old.__sigaction_u, to: UInt.self) == 1   // SIG_IGN
             if ignored, keepsInheritedIgnore.contains(signal) { continue }
+            let source = DispatchSource.makeSignalSource(signal: signal, queue: queue)
+            source.setEventHandler { onSignal(signal) }
+            source.resume()
             var action = sigaction()
             action.__sigaction_u.__sa_handler = { _ in }
             action.sa_flags = SA_RESTART
             sigemptyset(&action.sa_mask)
             sigaction(signal, &action, nil)
             previous.append((signal, old))
-            let source = DispatchSource.makeSignalSource(signal: signal, queue: queue)
-            source.setEventHandler { onSignal(signal) }
-            source.resume()
             sources.append(source)
             installed.append(signal)
         }
@@ -72,8 +75,10 @@ enum CLISignals {
 /// - Exiting now resets SIGINT to its default first, so a third Ctrl-C ends the CLI at once while
 ///   the deletes run. It then cancels the run's turn, so a runner queued but not yet spawned (in
 ///   neither registry) never spawns, and only then SIGKILLs every registered host group, deletes
-///   every container this process made (bounded at 5 s, in parallel, plan note 15), empties the
-///   lock's payload and `_exit`s. All of it on the signal queue, nothing on the pool (#372).
+///   every container this process made (bounded at 5 s, in parallel, plan note 15), flushes
+///   stdout and stderr, empties the lock's payload and `_exit`s, in that order: the payload is
+///   emptied last, as on the CLI's ordinary exit. All of it on the signal queue, nothing on the
+///   pool (#372).
 /// - After a clean stop, `settle()` runs before `_exit`: up to 3 s for the host groups to drain
 ///   (their SIGKILL rung is 2 s after the SIGTERM), a SIGKILL for any that did not, and a delete
 ///   for any container the bounded teardown left behind.
@@ -84,11 +89,15 @@ final class CLIStop: @unchecked Sendable {
     private let killGroups: @Sendable () -> Void
     private let deleteContainers: @Sendable () -> Void
     private let resetInterrupt: @Sendable () -> Void
+    private let flush: @Sendable () -> Void
     private let vacate: @Sendable () -> Void
     private let exitNow: @Sendable (Int32) -> Void
     private let lock = NSLock()
     private var received = 0
 
+    /// The registry defaults are the process-wide `.shared` ones, which only the CLI may use. A
+    /// test injects its own `LiveProcessGroups` and `LiveContainerNames` closures for every one
+    /// of `terminateGroups`, `drainGroups`, `killGroups` and `deleteContainers` (invariant 7).
     init(grace: TimeInterval = 15, teardown: TimeInterval = 5,
          terminateGroups: @escaping @Sendable () -> Void = { LiveProcessGroups.shared.terminateAll() },
          drainGroups: @escaping @Sendable () -> Bool = { LiveProcessGroups.shared.waitUntilEmpty(within: 3) },
@@ -100,17 +109,18 @@ final class CLIStop: @unchecked Sendable {
              sigaction(SIGINT, nil, &now)
              if unsafeBitCast(now.__sigaction_u, to: UInt.self) > 1 { _ = signal(SIGINT, SIG_DFL) }
          },
-         vacate: @escaping @Sendable () -> Void,
-         exitNow: @escaping @Sendable (Int32) -> Void = { code in
+         flush: @escaping @Sendable () -> Void = {
              fflush(stdout)
              fflush(stderr)
-             _exit(code)
-         }) {
+         },
+         vacate: @escaping @Sendable () -> Void,
+         exitNow: @escaping @Sendable (Int32) -> Void = { _exit($0) }) {
         self.run = RunStop(grace: grace, teardown: teardown, terminateGroups: terminateGroups)
         self.drainGroups = drainGroups
         self.killGroups = killGroups
         self.deleteContainers = deleteContainers
         self.resetInterrupt = resetInterrupt
+        self.flush = flush
         self.vacate = vacate
         self.exitNow = exitNow
     }
@@ -155,6 +165,8 @@ final class CLIStop: @unchecked Sendable {
         run.cancelTurn()
         killGroups()
         deleteContainers()
+        flush()
+        // Last before `_exit`: an empty payload under a held lock reads as an unnamed holder.
         vacate()
         exitNow(code)
     }

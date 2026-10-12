@@ -59,7 +59,10 @@ struct CLISignalTests {
         }
     }
 
-    @Test("with the handlers installed, a child that signals itself still dies of it, through Process and ProcessGroupRunner")
+    /// The `Process` half is the CLI's real configuration, not a check of the handler: Foundation
+    /// resets dispositions in the child itself, so it passes with `SIG_IGN` installed too
+    /// (measured, Task 14 mutation 5). The `ProcessGroupRunner` half is the check that bites.
+    @Test("with the handlers installed a Process child dies of its own SIGTERM, and ProcessGroupRunner resets an inherited ignore")
     func childrenKeepTheDefaultDisposition() async {
         await #expect(processExitsWith: .success) {
             let installation = CLISignals.install(onSignal: { _ in })
@@ -79,7 +82,7 @@ struct CLISignalTests {
         }
     }
 
-    @Test("without handlers, the same child dies of SIGTERM too: the check above can tell")
+    @Test("without handlers or an ignore, the shell child dies of its own SIGTERM: the probe itself is sound")
     func baselineWithoutHandlers() throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")

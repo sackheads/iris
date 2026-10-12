@@ -16,8 +16,19 @@ final class LiveProcessGroups: @unchecked Sendable {
 
     private let lock = NSLock()
     private var runners: [ObjectIdentifier: ProcessGroupRunner] = [:]
+    /// Set by `closeAndSnapshot`: the process is exiting, and no new group may start.
+    private var closed = false
 
-    func add(_ runner: ProcessGroupRunner) { lock.withLock { runners[ObjectIdentifier(runner)] = runner } }
+    /// Records `runner` just before its spawn, so a kill that snapshots now still reaches it: the
+    /// kill waits on the runner's queue, where the spawn is. False once closed: the runner must
+    /// not spawn, since nothing would end it before `_exit`.
+    func admit(_ runner: ProcessGroupRunner) -> Bool {
+        lock.withLock {
+            guard !closed else { return false }
+            runners[ObjectIdentifier(runner)] = runner
+            return true
+        }
+    }
     func remove(_ runner: ProcessGroupRunner) { lock.withLock { _ = runners.removeValue(forKey: ObjectIdentifier(runner)) } }
     var count: Int { lock.withLock { runners.count } }
 
@@ -28,7 +39,17 @@ final class LiveProcessGroups: @unchecked Sendable {
     /// SIGKILL to every group, now, for an exit that will not wait. Returns once each is sent.
     /// No runner's `onKilled` fires (see `ProcessGroupRunner.killNow`): pair it with
     /// `LiveContainerNames.deleteAll` for the containers those groups were driving.
-    func killAll() { snapshot().forEach { $0.killNow() } }
+    /// Closes the registry first, in the same lock as the snapshot, so no runner can be admitted
+    /// after it and spawn behind the kill.
+    func killAll() { closeAndSnapshot().forEach { $0.killNow() } }
+
+    /// Closes the registry and copies out its runners under one lock.
+    func closeAndSnapshot() -> [ProcessGroupRunner] {
+        lock.withLock {
+            closed = true
+            return Array(runners.values)
+        }
+    }
 
     /// Blocks until every group has been reaped, or `seconds` pass: what a stopping CLI waits on
     /// before `_exit`, so a group the SIGTERM did not end gets its SIGKILL rung first. Polls with

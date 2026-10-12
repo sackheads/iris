@@ -259,7 +259,7 @@ struct SandboxSessionManagerTests {
     @Test("a run_command container stays registered through its delete, then is released")
     func ephemeralDeleteReleasesName() async {
         let name = "iris-run-\(UUID().uuidString.lowercased())"
-        await EphemeralContainerRegistry.shared.register(name)
+        #expect(await EphemeralContainerRegistry.shared.register(name))
         #expect(await EphemeralContainerRegistry.shared.current().contains(name))
         EphemeralContainerRegistry.deleteNow(binary: "/usr/bin/true", name: name)
         let deadline = Date().addingTimeInterval(5)
@@ -273,7 +273,7 @@ struct SandboxSessionManagerTests {
     func hookRegistryLifetime() async {
         let registry = EphemeralContainerRegistry()
         let name = "iris-hook-\(UUID().uuidString.lowercased())"
-        await registry.register(name)
+        #expect(await registry.register(name))
         #expect(await registry.current() == [name])
         await registry.unregister(name)
         #expect(await registry.current().isEmpty)

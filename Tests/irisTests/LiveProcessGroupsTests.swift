@@ -114,4 +114,23 @@ struct LiveProcessGroupsTests {
         #expect(out.status == 128 + SIGKILL)
         #expect(kill(pid, 0) == -1 && errno == ESRCH)
     }
+
+    /// Fix round 1: a runner the kill could not see must not spawn behind it. Closing and the
+    /// snapshot are one lock, and a runner is admitted just before its spawn, so after the kill a
+    /// runner is refused and nothing runs.
+    @Test("a closed registry refuses a runner, and no process appears")
+    func closedRegistryRefusesARunner() async throws {
+        let registry = LiveProcessGroups()
+        registry.killAll()
+        let marker = FileManager.default.temporaryDirectory.appendingPathComponent("iris-lpg-closed-\(UUID().uuidString)").path
+        defer { unlink(marker) }
+        let runner = ProcessGroupRunner(registry: registry)
+        let task = Task { await runner.run(executable: "/usr/bin/touch", arguments: [marker], environment: nil, currentDirectory: nil) }
+        let result = try await value(of: task, within: 10)
+        guard case .failure(let error) = result else { Issue.record("it ran: \(result)"); return }
+        #expect(error is CancellationError)
+        #expect(runner.processIdentifier == 0)
+        #expect(!FileManager.default.fileExists(atPath: marker), "nothing was spawned")
+        #expect(registry.count == 0)
+    }
 }

@@ -285,7 +285,9 @@ enum GateEvaluator {
         let name = "\(SandboxSessionManager.namePrefix)gate-\(UUID().uuidString.lowercased())"
         // Registered before the create and taken out again by `sweep`, so a sweep of the leftovers
         // of a previous process cannot delete a container that is mid-evaluation right now.
-        await GateContainerRegistry.shared.register(name)
+        guard await GateContainerRegistry.shared.register(name) else {
+            return .error(LiveContainerNames.exitingError)
+        }
         do {
             try await createWithinCeiling(runtime, name: name, image: image,
                                           mounts: readOnly(mounts), seconds: createCeiling)
@@ -536,7 +538,13 @@ actor GateContainerRegistry {
 
     init(live: LiveContainerNames = .shared) { self.live = live }
 
-    func register(_ name: String) { names.insert(name); live.add(name) }
+    /// False when the process is exiting (`LiveContainerNames` is closed): the gate must not
+    /// create the container, since nothing would delete it before `_exit` (#463).
+    func register(_ name: String) -> Bool {
+        guard live.add(name) else { return false }
+        names.insert(name)
+        return true
+    }
     func unregister(_ name: String) { names.remove(name); live.remove(name) }
 
     /// The names in flight at this instant. A snapshot: a gate that starts after it is taken is

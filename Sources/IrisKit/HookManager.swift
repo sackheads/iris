@@ -175,7 +175,9 @@ struct HookManager {
         let timeout = hook.timeout ?? Self.defaultTimeoutSeconds
         // It carries `SandboxSessionManager.namePrefix`, so the launch sweep would take it for an
         // orphan; registered for its whole life, and one a crash left behind is still swept.
-        if let ephemeralContainer { await EphemeralContainerRegistry.shared.register(ephemeralContainer.name) }
+        if let ephemeralContainer, !(await EphemeralContainerRegistry.shared.register(ephemeralContainer.name)) {
+            return .block(reason: LiveContainerNames.exitingError)
+        }
         // Deleted by the runner's ladder once the client is dead, off the cooperative pool (#377);
         // the hook also gives the name back. Any other ending left nothing in the VM.
         let ephemeralName = ephemeralContainer?.name
@@ -274,7 +276,13 @@ actor EphemeralContainerRegistry {
 
     init(live: LiveContainerNames = .shared) { self.live = live }
 
-    func register(_ name: String) { names.insert(name); live.add(name) }
+    /// False when the process is exiting (`LiveContainerNames` is closed): the one-off must not
+    /// start, since nothing would delete it before `_exit` (#463).
+    func register(_ name: String) -> Bool {
+        guard live.add(name) else { return false }
+        names.insert(name)
+        return true
+    }
     func unregister(_ name: String) { names.remove(name); live.remove(name) }
     func current() -> Set<String> { names }
 
