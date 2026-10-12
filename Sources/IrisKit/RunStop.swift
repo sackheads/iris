@@ -38,10 +38,13 @@ final class RunStop: @unchecked Sendable {
 
     /// Whether a stop was ever asked for, armed or not. The CLI settles its groups and containers
     /// before `_exit` when it was.
-    var wasRequested: Bool {
+    var wasRequested: Bool { requestedReason != nil }
+
+    /// The reason a stop was asked for, or nil when none was.
+    var requestedReason: String? {
         lock.withLock {
-            if case .requested = phase { return true }
-            return false
+            if case .requested(let reason) = phase { return reason }
+            return nil
         }
     }
 
@@ -76,10 +79,14 @@ final class RunStop: @unchecked Sendable {
     }
 
     /// At the top of a run. nil: armed. A reason: a stop came first, so the run must not start.
+    /// One armed run at a time: a second would be a second waiter, so it traps here, before it
+    /// has a row.
     func arm() -> String? {
         lock.withLock {
             switch phase {
-            case .idle, .done, .armed:
+            case .armed:
+                preconditionFailure("RunStop arms one run at a time: the CLI's")
+            case .idle, .done:
                 phase = .armed
                 return nil
             case .requested(let reason):
@@ -107,6 +114,7 @@ final class RunStop: @unchecked Sendable {
                     if case .requested(let reason) = phase { return continuation.resume(returning: reason) }
                     if case .done = phase { return continuation.resume(returning: nil) }
                     if Task.isCancelled { return continuation.resume(returning: nil) }
+                    // One waiter at a time: the armed run's stop watcher, then its teardown's.
                     precondition(waiter == nil, "RunStop has one waiter: the armed run")
                     waiter = continuation
                 }

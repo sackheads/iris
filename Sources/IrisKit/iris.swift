@@ -3240,6 +3240,7 @@ actor IrisEngine {
     /// `nil` only for an engine whose `AppState` has gone away.
     /// The first call builds the runner, so the stop it was given is the one it keeps.
     func jobRunner(stop: RunStop? = nil) async -> JobRunner? {
+        assert(stop == nil || jobRunnerInstance == nil, "a stop is kept only by the call that builds the runner")
         if let jobRunnerInstance { return jobRunnerInstance }
         guard let state else { return nil }
         let ledger = await MainActor.run { state.store.ledger }

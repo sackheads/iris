@@ -835,6 +835,94 @@ struct JobRetryTests {
         #expect(card(state)?.runId == run.id, "the card is still delivered")
     }
 
+    @Test("a stop after the turn won the ending still bounds the teardown the CLI waits on")
+    func stopAfterTheTurnBoundsTheTeardown() async throws {
+        let client = GatedClient(response: textResponse("tick"))
+        let (store, state, engine) = try harness([], client: client)
+        let j = job(timeoutSeconds: Self.heldTimeout)
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let stop = RunStop(grace: 5, teardown: 0.3, terminateGroups: {})
+        let closing = Signal()
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                               endSandboxSession: { _ in
+                                   closing.bump()
+                                   try? await Task.sleep(nanoseconds: 30_000_000_000)
+                               },
+                               config: config, activity: RecordingActivity(), stop: stop)
+        let fire = Task { await runner.fire(job: j, origin: .manual) }
+        defer { client.release() }
+        try #require(await client.calls.reach(1))
+        client.release()
+        try #require(await closing.reach(1), "the turn came back and the teardown is under way")
+        let asked = Date()
+        #expect(stop.request(reason: RunStop.reason(for: SIGINT)) == .runWillStop)
+        try #require(await finished(fire, within: 10) != nil, "the teardown was abandoned at its bound")
+        #expect(Date().timeIntervalSince(asked) < 5)
+        let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
+        #expect(run.status == .completed, "the turn won the ending, so the row is the turn's")
+    }
+
+    @Test("a stop after the deadline won the ending leaves the row a timeout and bounds the teardown")
+    func stopAfterTheDeadline() async throws {
+        let client = GatedClient(response: textResponse("tick"))
+        let (store, state, engine) = try harness([], client: client)
+        let j = job(timeoutSeconds: Self.heldTimeout)
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let stop = RunStop(grace: 5, teardown: 0.3, terminateGroups: {})
+        let closing = Signal()
+        let clock = ManualClock()
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                               endSandboxSession: { _ in
+                                   closing.bump()
+                                   try? await Task.sleep(nanoseconds: 30_000_000_000)
+                               },
+                               config: config, activity: RecordingActivity(), watchdogSlice: 0.01,
+                               deadlineClock: clock.now, stop: stop)
+        let fire = Task { await runner.fire(job: j, origin: .manual) }
+        defer { client.release() }
+        try #require(await client.calls.reach(1))
+        clock.advance(by: TimeInterval(Self.heldTimeout + 1))
+        try #require(await closing.reach(1), "the deadline ended the run and the teardown is under way")
+        let asked = Date()
+        #expect(stop.request(reason: RunStop.reason(for: SIGINT)) == .runWillStop)
+        try #require(await finished(fire, within: 10) != nil, "the teardown was abandoned at its bound")
+        #expect(Date().timeIntervalSince(asked) < 5)
+        let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
+        #expect(run.status == .failed)
+        #expect(run.failureReason == TurnBudget.timeExceeded)
+    }
+
+    @Test("a stop while the row is written starts no turn, and the row closes stopped")
+    func stopBeforeTheTurn() async throws {
+        let client = GatedClient(response: textResponse("tick"))
+        let (store, state, engine) = try harness([], client: client)
+        let j = job()
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let stop = RunStop(grace: 5, terminateGroups: {})
+        let activity = RecordingActivity()
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
+                               activity: activity, stop: stop)
+        defer { client.release() }
+        // `onDecided` for the run's own pass is awaited once its row is written, before the turn.
+        let fire = Task {
+            await runner.fire(job: j, origin: .manual, onDecided: { decision in
+                if decision.admission == .run { _ = stop.request(reason: RunStop.reason(for: SIGHUP)) }
+            })
+        }
+        try #require(await finished(fire, within: 10) != nil)
+        let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
+        #expect(run.status == .interrupted)
+        #expect(run.failureReason == "stopped by a signal (SIGHUP)")
+        #expect(activity.events.isEmpty, "no turn, so no sleep assertion was taken for one")
+        #expect(client.callCount == 0, "the model was never asked")
+    }
+
     @Test("a stop before the run starts means no run: no row, no conversation")
     func stopBeforeTheRun() async throws {
         let (store, state, engine) = try harness([textResponse("tick")])
