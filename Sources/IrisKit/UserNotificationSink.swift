@@ -33,7 +33,9 @@ final class UserNotificationSink: NotificationSink {
     var unsettledCountForTesting: Int { unsettled.count }
 
     convenience init(state: AppState) {
-        self.init(state: state, center: SystemNotificationCenter.shared ?? SystemNotificationCenter())
+        // A free lock opens the store in `IrisApp.init`, before will-finish: the client is made
+        // here then, with the same gate route, and will-finish reuses it.
+        self.init(state: state, center: SurfaceInstall.notificationDelegate())
     }
 
     init(state: AppState, center: any NotificationCenterClient) {
@@ -129,19 +131,23 @@ final class SystemNotificationCenter: NSObject, NotificationCenterClient, UNUser
     /// Whether a banner may be shown: not while Iris waits, since nothing it names can open.
     private var presenting: @MainActor () -> Bool = { true }
 
-    override init() {
+    /// Private: `installEarly` is the only way in, so there is never a second delegate.
+    private override init() {
         super.init()
         UNUserNotificationCenter.current().delegate = self
     }
 
-    /// Becomes the center's delegate before anything has built `AppState`. Idempotent.
+    /// The one delegate: built on the first call, returned on every later one. Touches no
+    /// `AppState`, so it can run before anything has built one.
+    @discardableResult
     static func installEarly(route: @escaping @MainActor (NotificationResponse) -> Void,
-                             presenting: @escaping @MainActor () -> Bool) {
-        guard shared == nil else { return }
+                             presenting: @escaping @MainActor () -> Bool) -> SystemNotificationCenter {
+        if let shared { return shared }
         let center = SystemNotificationCenter()
         center.route = route
         center.presenting = presenting
         shared = center
+        return center
     }
 
     func authorizationStatus() async -> NotificationPermission.Status { await Self.currentStatus() }

@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import Testing
 
 /// Another process holding `flock(LOCK_EX)` on a file: the stand-in for another Iris (spec §3).
 /// perl because it is on every Mac and its `flock` is flock(2). `$|=1`, or "ok" waits in perl's
@@ -41,7 +42,7 @@ final class LockStub {
         try process.run()
         guard ready.wait(timeout: .now() + seconds) == .success else {
             Darwin.kill(process.processIdentifier, SIGKILL)
-            process.waitUntilExit()
+            _ = Self.waitForExit(process)
             throw StubError.notReady
         }
         out.fileHandleForReading.readabilityHandler = nil
@@ -53,8 +54,16 @@ final class LockStub {
     func kill() {
         guard process.isRunning else { return }
         Darwin.kill(pid, SIGKILL)
+        if !Self.waitForExit(process) {
+            Issue.record("LockStub pid \(pid) still running 10 s after SIGKILL")
+        }
+    }
+
+    /// Up to 10 s for `process` to be reaped. False when it is still running.
+    private static func waitForExit(_ process: Process) -> Bool {
         let deadline = Date().addingTimeInterval(10)
         while process.isRunning && Date() < deadline { usleep(10_000) }
+        return !process.isRunning
     }
 
     deinit { kill() }

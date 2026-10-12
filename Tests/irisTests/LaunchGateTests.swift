@@ -247,6 +247,21 @@ struct LaunchGateTests {
         #expect(h.notified.count == 2, "delivered once")
     }
 
+    @Test("a click after the store opens but before did-finish queues behind the clicks already held")
+    func notificationOpenBeforeFinishKeepsOrder() {
+        let h = Harness([.held(Self.cli), .acquired])
+        h.gate.begin()
+        h.gate.receiveNotification(Self.click(1))
+        h.advance(1)   // the poll opens the store before did-finish has run
+        #expect(h.gate.isOpen)
+        h.gate.receiveNotification(Self.click(2))
+        #expect(h.notified.isEmpty, "delivered now, it would reach AppState ahead of the held click")
+        h.gate.didFinishLaunching()
+        #expect(h.notified == [Self.click(1), Self.click(2)])
+        h.gate.receiveNotification(Self.click(3))
+        #expect(h.notified == [Self.click(1), Self.click(2), Self.click(3)])
+    }
+
     @Test("a notification click after Iris is open goes straight through")
     func notificationAfterOpenGoesThrough() {
         let h = Harness([.acquired])

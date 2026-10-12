@@ -13,6 +13,13 @@ enum SurfaceInstall {
     /// open, so a click that launches Iris while it waits is held by the gate, not lost (#463).
     static func installNotificationDelegate(bundleURL: URL = Bundle.main.bundleURL) {
         guard isAppBundle(bundleURL) else { return }
+        notificationDelegate()
+    }
+
+    /// The one `SystemNotificationCenter`, whichever of will-finish and the sink asks first. Only
+    /// after the `.app` check: `UNUserNotificationCenter.current()` raises without a bundle.
+    @discardableResult
+    static func notificationDelegate() -> SystemNotificationCenter {
         SystemNotificationCenter.installEarly(route: { LaunchGate.shared.receiveNotification($0) },
                                               presenting: { LaunchGate.shared.isOpen })
     }
