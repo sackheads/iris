@@ -46,7 +46,8 @@ struct SharedAppStateTrapTests {
     func runJobTraps() async {
         await #expect(processExitsWith: .failure) {
             ProcessRole.set(.runJob)
-            _ = StoreLock.claim(at: IrisPaths.default.storeLockFile, kind: .runJob)
+            // Exit 0 fails the test: a claim that did not acquire would prove nothing about the lock.
+            guard StoreLock.claim(at: IrisPaths.default.storeLockFile, kind: .runJob) == .acquired else { exit(0) }
             await MainActor.run { _ = AppState.shared }
         }
     }
@@ -65,25 +66,32 @@ struct SharedAppStateTrapTests {
         // `iris.swift`, which is mostly `IrisEngine`, the headless path), the gate's app seams,
         // and the views. `AppState.swift` is scanned too: its declaration is `static var shared`,
         // which neither pattern matches.
-        let allowed: Set<String> = ["IrisApp.swift", "LaunchGate+App.swift", "WaitingView.swift", "ChatView.swift",
-                                    "SettingsView.swift", "PluginsSettingsView.swift"]
+        // Counted per file, not just named: a new use in an exempt file must change its count here,
+        // on purpose, rather than ride in under the file's exemption.
+        let allowed: [String: Int] = ["IrisApp.swift": 9, "LaunchGate+App.swift": 6, "WaitingView.swift": 2,
+                                      "ChatView.swift": 1, "SettingsView.swift": 1, "PluginsSettingsView.swift": 2]
         // `AppState.shared`, and the implicit-member spellings `: AppState = .shared` and
         // `AppState? = .shared`, which a literal-text match would miss.
-        let use = try Regex(#"\bAppState\.shared\b|:\s*AppState[?!]?\s*=\s*\.shared\b"#)
+        // Simple word boundaries: under the default Unicode ones `shared.startOnce` is one word, so
+        // `\b` after `shared` never matched a use followed by a member access.
+        let use = try Regex(#"\bAppState\.shared\b|:\s*AppState[?!]?\s*=\s*\.shared\b"#).wordBoundaryKind(.simple)
         var offenders: [String] = []
+        var shellCounts: [String: Int] = [:]
         for dir in ["Sources/IrisKit", "Tests/irisTests"] {
             let base = root.appendingPathComponent(dir)
             for name in try FileManager.default.contentsOfDirectory(atPath: base.path) where name.hasSuffix(".swift") {
-                guard !allowed.contains(name), name != "SharedAppStateTrapTests.swift" else { continue }
+                guard name != "SharedAppStateTrapTests.swift" else { continue }
+                let exempt = dir == "Sources/IrisKit" && allowed[name] != nil
                 let text = try String(contentsOf: base.appendingPathComponent(name), encoding: .utf8)
                 for (index, line) in text.components(separatedBy: .newlines).enumerated() {
                     let code = line.trimmingCharacters(in: .whitespaces)
                     guard !code.hasPrefix("//"), code.firstMatch(of: use) != nil else { continue }
-                    offenders.append("\(dir)/\(name):\(index + 1)")
+                    if exempt { shellCounts[name, default: 0] += 1 } else { offenders.append("\(dir)/\(name):\(index + 1)") }
                 }
             }
         }
         #expect(offenders.isEmpty, "AppState.shared outside the GUI shell: \(offenders)")
+        #expect(shellCounts == allowed, "AppState.shared lines per GUI-shell file changed: \(shellCounts), expected \(allowed)")
     }
 }
 

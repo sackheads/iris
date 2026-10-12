@@ -330,8 +330,10 @@ final class RunJobCLITests {
         #expect(RunJobCLI.refusal(for: .acquired, path: path) == nil)
     }
 
-    @Test("#463's repro: behind a holder nothing opens the store; after it dies the run's card is at its ordinal")
-    func issue463Repro() async throws {
+    // A regression pin for the CLI's half of #463, not the repro: the two runs here are sequential.
+    // The interleaved one (an app launched during a CLI run) is LaunchGateTests'.
+    @Test("regression pin (#463): behind a holder the CLI never opens the store; after it dies a run's card is at its ordinal")
+    func refusedRunOpensNothingAndTheNextCardLandsAtItsOrdinal() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-runjob-\(UUID().uuidString)")
         let db = dir.appendingPathComponent("conversations.sqlite")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -377,7 +379,7 @@ final class RunJobCLITests {
         let iris = try #require(try ConversationStore.onDisk(at: db).loadAll().conversations
             .first { $0.title == AppState.activityConversationTitle })
         let cardIndices = iris.messages.indices.filter { EventCard.decode(iris.messages[$0].content) != nil }
-        #expect(cardIndices.count == 2, "both cards are there: neither write landed over the other")
+        #expect(cardIndices.count == 2, "both runs' cards are in Iris")
         let last = try #require(cardIndices.last)
         #expect(last == iris.messages.count - 1, "the second card is the last message")
         let secondRun = try #require(runs.first { $0.id != firstRun.id })
