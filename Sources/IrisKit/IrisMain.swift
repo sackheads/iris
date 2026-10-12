@@ -22,11 +22,11 @@ public enum IrisMain {
             await BenchCLI.run(benchOptions)
             exit(0)
         } else if let invocation = RunJobCLI.parse(arguments: CommandLine.arguments) {
-            // The real store and the real model client (#187 §8): a `--run-job` measurement is only worth
-            // anything if it is the run the scheduler would have done. No volatile defaults and no
-            // `HeadlessMode` for the same reason — approvals have to fail closed exactly as unattended.
-            // The store is opened inside `run`, after the lock is claimed, so a refused run never touches
-            // it; exiting here means no scheduler, no watchers and no window ever start.
+            // The real store and the real model client (#187 §8): a `--run-job` measurement is only
+            // worth anything if it is the run the scheduler would have done. No volatile defaults and
+            // no `HeadlessMode`: approvals fail closed exactly as unattended. `store:` is an
+            // autoclosure that `run` calls only once it holds the store lock (#463), so a refused
+            // run never opens, migrates or repairs it.
             let code = await RunJobCLI.run(invocation,
                                            store: try ConversationStore.onDisk(at: IrisPaths.default.conversationsDB),
                                            client: LLMClient())
@@ -35,9 +35,11 @@ public enum IrisMain {
             // llama.cpp's `GGML_ASSERT` — so a script would read 134 for a run whose row says "blocked on
             // approval" and whose documented code is 2. This command's contract *is* its exit code.
             // Nothing is lost by skipping the atexit handlers: the run's save was flushed inside `run`,
-            // the lock released by its `defer`, and the two streams are flushed here.
+            // and the two streams are flushed here.
             fflush(stdout)
             fflush(stderr)
+            // Last: an empty payload under a held lock reads as an unnamed holder (decision 5).
+            StoreLock.vacate(at: IrisPaths.default.storeLockFile)
             _exit(code)
         } else if CommandLine.arguments.contains("--seed-dev-home") {
             exit(DevHomeSeeder.runCLI())

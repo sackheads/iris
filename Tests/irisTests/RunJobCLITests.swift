@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import GRDB
 @testable import IrisKit
 
 /// `iris --run-job <id-or-name> [--dry-run] [--json]` (#187 spec §8, ruling R35): one job, run once
@@ -11,8 +12,8 @@ import Foundation
 /// touch (`HeadlessMode`, the volatile defaults) are asserted rather than assumed: they are what
 /// keeps a CLI run's approvals as fail-closed as an unattended one's.
 @MainActor
-@Suite("iris --run-job (#187 §8)")
-struct RunJobCLITests {
+@Suite("iris --run-job (#187 §8)", .timeLimit(.minutes(1)))
+final class RunJobCLITests {
 
     // MARK: Fixtures
 
@@ -73,9 +74,14 @@ struct RunJobCLITests {
     }
 
     /// A lock path of this test's own, under the temp directory — never beside the real store.
+    /// Every lock path this instance hands out lives under `base`, which `deinit` removes: lock
+    /// files now outlive a run (decision 2), and a crowded `TMPDIR` slows Foundation's listings to
+    /// seconds (#309). The held descriptors stay open on the unlinked files, which is harmless.
+    private let base = FileManager.default.temporaryDirectory.appendingPathComponent("iris-runjob-\(UUID().uuidString)")
+    deinit { try? FileManager.default.removeItem(at: base) }
+
     private func lockPath() -> URL {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent("iris-runjob-\(UUID().uuidString).lock")
+        base.appendingPathComponent(UUID().uuidString).appendingPathComponent("conversations.sqlite.lock")
     }
 
     // MARK: Parsing
@@ -148,315 +154,6 @@ struct RunJobCLITests {
         #expect(RunJobCLI.Exit.gateUnchanged == 3)
     }
 
-    // MARK: The GUI lock (ruling R35, spec §8)
-
-    @Test("the CLI refuses while another Iris process holds the lock, and says which it might be")
-    func aLiveGUIRefusesTheRun() async throws {
-        let store = try ConversationStore.inMemory()
-        let job = self.job()
-        try store.ledger.upsert(job)
-        let path = lockPath()
-        // This process is alive by definition, so its own pid is the one lock state that is
-        // unambiguously held.
-        try Data("\(ProcessInfo.processInfo.processIdentifier)\n".utf8).write(to: path)
-        defer { try? FileManager.default.removeItem(at: path) }
-
-        let err = Output()
-        let code = await RunJobCLI.run(RunJobCLI.Invocation(target: "pr-sweep"), store: store,
-                                       client: FakeLLMClient(responses: []),
-                                       lockPath: path, protectionEnabled: false,
-                                       out: { _ in }, err: { err.write($0) })
-        #expect(code == RunJobCLI.Exit.usage)
-        // The file holds a bare pid, so the holder may be the app or a second `--run-job`. The
-        // refusal must not send the user off to quit an app that is not running.
-        #expect(err.text.contains("another Iris process holds the store"))
-        #expect(err.text.contains("--run-job"))
-        #expect(err.text.contains("\(ProcessInfo.processInfo.processIdentifier)"))
-        // And the file, because a pid the kernel has since handed to something unrelated leaves
-        // nothing to wait for and no app to quit — only a file to delete.
-        #expect(err.text.contains(path.path), "the refusal has to name the lock file")
-        #expect(try store.ledger.runs(jobId: job.id, limit: 5).isEmpty, "and nothing was run")
-    }
-
-    /// Releases every racer at once, so the claims below really do collide rather than queueing.
-    private final class StartLine: @unchecked Sendable {
-        private let gate = DispatchSemaphore(value: 0)
-        private let lock = NSLock()
-        private var arrived = 0
-        private let racers: Int
-        init(racers: Int) { self.racers = racers }
-        func arrive() {
-            lock.lock(); arrived += 1; let last = arrived == racers; lock.unlock()
-            if last { for _ in 0..<racers { gate.signal() } }
-            gate.wait()
-        }
-    }
-
-    private final class Claims: @unchecked Sendable {
-        private let lock = NSLock()
-        private var all: [GUILock.Claim] = []
-        func add(_ claim: GUILock.Claim) { lock.withLock { all.append(claim) } }
-        var value: [GUILock.Claim] { lock.withLock { all } }
-    }
-
-    /// Runs `racers` claims against one path, all released together.
-    private func race(racers: Int, at path: URL) -> [GUILock.Claim] {
-        let startLine = StartLine(racers: racers)
-        let claims = Claims()
-        let finished = DispatchGroup()
-        for _ in 0..<racers {
-            DispatchQueue.global().async(group: finished) {
-                startLine.arrive()
-                claims.add(GUILock.acquireExclusively(at: path))
-            }
-        }
-        #expect(finished.wait(timeout: .now() + 30) == .success)
-        return claims.value
-    }
-
-    /// A lock path in a directory of this test's own, so "what is beside the lock afterwards" is
-    /// answerable without walking the whole of `/tmp`.
-    private func lockPathInOwnDirectory() throws -> URL {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("iris-runjob-lock-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory.appendingPathComponent("conversations.sqlite.lock")
-    }
-
-    /// Anything the claim staged beside the lock and did not clean up.
-    private func leftovers(beside path: URL) throws -> [String] {
-        try FileManager.default.contentsOfDirectory(atPath: path.deletingLastPathComponent().path)
-            .filter { $0 != path.lastPathComponent }
-    }
-
-    @Test("two CLI runs starting at the same instant: exactly one takes the lock")
-    func simultaneousAcquiresHaveOneWinner() throws {
-        // The scenario the command is documented *for*: an eval harness that launches several
-        // `--run-job` at once. A check-then-write lock passes them all — both read "free", both
-        // write, both open the store — so the claim has to be the check. And the claim has to
-        // create the file *with the pid already in it*: an `O_CREAT | O_EXCL` create followed by a
-        // write leaves a window in which the file exists and says nothing, and a loser reading it
-        // then would be told to delete a lock that is about to be perfectly valid. `link(2)` of a
-        // staged file closes that window, so both assertions below hold every time rather than
-        // almost every time.
-        let path = try lockPathInOwnDirectory()
-        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
-
-        let all = race(racers: 2, at: path)
-        #expect(all.filter { $0 == .acquired }.count == 1, "exactly one claim, whoever gets there first")
-        // Both racers are this test process, so the pid the loser is told about is this one — it
-        // is the winner's pid, which is the fact the message has to carry.
-        #expect(all.filter { $0 == .held(pid: ProcessInfo.processInfo.processIdentifier) }.count == 1,
-                "and the loser is told who has it, never an empty file: \(all)")
-        #expect(GUILock.state(at: path) == .held(pid: ProcessInfo.processInfo.processIdentifier))
-        #expect(try leftovers(beside: path).isEmpty, "and nothing is staged beside it afterwards")
-    }
-
-    @Test("two runs taking over one crashed process's lock: still exactly one winner")
-    func simultaneousTakeoversHaveOneWinner() throws {
-        // Crash recovery is the other half of the claim, and the place a careless one hands out
-        // the double claim it exists to prevent: both racers read the stale pid, and whichever
-        // removes "the stale file" second by path removes the live lock the first has just linked
-        // in its place — a rename aside does that as surely as an unlink (#390). Takeovers are
-        // serialized and look again first; the pinned interleaving is the next test.
-        let path = try lockPathInOwnDirectory()
-        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
-        // Above any pid macOS will hand out, so the file names nothing that exists.
-        try Data("999999\n".utf8).write(to: path)
-
-        let all = race(racers: 2, at: path)
-        #expect(all.filter { $0 == .acquired }.count == 1,
-                "a crashed holder must not let two runs at the store: \(all)")
-        #expect(all.filter { $0 == .held(pid: ProcessInfo.processInfo.processIdentifier) }.count == 1,
-                "and the loser is told the taker-over has it: \(all)")
-        // The winner's lock is still there and still names it — the loser's takeover must not have
-        // removed a live file on its way past.
-        #expect(GUILock.state(at: path) == .held(pid: ProcessInfo.processInfo.processIdentifier))
-        #expect(try leftovers(beside: path).isEmpty,
-                "and the stale file was moved aside and deleted, not left lying about")
-    }
-
-    @Test("a claimant that read the stale pid before another took over leaves the new lock alone")
-    func aLateTakeoverDoesNotMoveTheLiveLock() throws {
-        // The interleaving behind #390, pinned rather than raced for: B reads the dead pid, then A
-        // takes over and links its live lock before B acts. Removing "the stale file" by path then
-        // removes A's lock, and B links its own: two claims. B has to look again before it moves
-        // anything, and find A there.
-        let path = try lockPathInOwnDirectory()
-        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
-        try Data("999999\n".utf8).write(to: path)
-
-        let bReadStale = DispatchSemaphore(value: 0)
-        let aFinished = DispatchSemaphore(value: 0)
-        let claims = Claims()
-        let finished = DispatchGroup()
-        DispatchQueue.global().async(group: finished) {
-            claims.add(GUILock.acquireExclusively(at: path, afterReadingStale: {
-                bReadStale.signal()
-                _ = aFinished.wait(timeout: .now() + 30)
-            }))
-        }
-        #expect(bReadStale.wait(timeout: .now() + 30) == .success)
-        let a = GUILock.acquireExclusively(at: path)
-        aFinished.signal()
-        #expect(finished.wait(timeout: .now() + 30) == .success)
-
-        let me = ProcessInfo.processInfo.processIdentifier
-        #expect(a == .acquired)
-        #expect(claims.value == [.held(pid: me)], "the late taker-over is told A has it")
-        #expect(GUILock.state(at: path) == .held(pid: me))
-        #expect(try leftovers(beside: path).isEmpty)
-    }
-
-    @Test("the app launching mid-takeover keeps its lock")
-    func anAppAcquireDuringATakeoverSurvives() throws {
-        // The takeover has read a dead pid and is about to move the file aside when the app
-        // launches and writes its lock — an atomic write, so a rename over the path. Unserialized,
-        // the takeover then moves the *app's* lock aside and claims the store under a live app.
-        // The app's write waits on the same directory lock, so it lands after the takeover. It
-        // then races the claim's next link: the app first, and the claim is told the app holds
-        // it; the link first, and the app overwrites the run's lock — the documented direction,
-        // the app keeping the store. Either way the app's lock is the one left. pid 1 stands in
-        // for the app, because it is alive and is not this process.
-        let path = try lockPathInOwnDirectory()
-        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
-        try Data("999999\n".utf8).write(to: path)
-
-        let appWrote = DispatchSemaphore(value: 0)
-        let landedMidTakeover = Claims()
-        let claim = GUILock.acquireExclusively(at: path, duringTakeover: {
-            DispatchQueue.global().async {
-                GUILock.acquire(at: path, pid: 1)
-                appWrote.signal()
-            }
-            // Unserialized, the app's write lands well inside this; serialized, it cannot.
-            if appWrote.wait(timeout: .now() + 0.5) == .success { landedMidTakeover.add(.acquired) }
-        })
-        #expect(landedMidTakeover.value.isEmpty, "the app's write waits for the takeover")
-        if landedMidTakeover.value.isEmpty {
-            #expect(appWrote.wait(timeout: .now() + 30) == .success)
-        }
-        #expect(claim == .held(pid: 1) || claim == .acquired, "\(claim)")
-        #expect(GUILock.state(at: path) == .held(pid: 1),
-                "the app's lock is never moved aside by a takeover that read the dead pid first")
-        #expect(try leftovers(beside: path).isEmpty)
-    }
-
-    @Test("the app launching before the takeover looks again: the claim is told the app has it")
-    func anAppAcquireBeforeTheTakeoverIsHeld() throws {
-        let path = try lockPathInOwnDirectory()
-        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
-        try Data("999999\n".utf8).write(to: path)
-        let claim = GUILock.acquireExclusively(at: path, afterReadingStale: {
-            GUILock.acquire(at: path, pid: 1)
-        })
-        #expect(claim == .held(pid: 1))
-        #expect(GUILock.state(at: path) == .held(pid: 1))
-    }
-
-    @Test("a holder releasing between a failed link and the read is retried, not refused")
-    func aReleaseMidClaimIsRetried() throws {
-        // The holder is there at each link and gone by the read, twice: the claim sees the path
-        // change hands and tries again rather than refusing with no holder to name.
-        let path = try lockPathInOwnDirectory()
-        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
-        let me = ProcessInfo.processInfo.processIdentifier
-        let claim = GUILock.acquireExclusively(at: path, beforeLink: { attempt in
-            if attempt < 2 { try? Data("\(me)\n".utf8).write(to: path) }
-        }, afterLinkFailed: {
-            try? FileManager.default.removeItem(at: path)
-        })
-        #expect(claim == .acquired)
-        #expect(GUILock.state(at: path) == .held(pid: me))
-        #expect(try leftovers(beside: path).isEmpty)
-    }
-
-    @Test("a lock that never stops changing hands is refused with a reason, after a bounded wait")
-    func endlessChurnIsRefusedWithADetail() throws {
-        let path = try lockPathInOwnDirectory()
-        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
-        let me = ProcessInfo.processInfo.processIdentifier
-        let attempts = Claims()
-        let claim = GUILock.acquireExclusively(at: path, beforeLink: { _ in
-            attempts.add(.acquired)
-            try? Data("\(me)\n".utf8).write(to: path)
-        }, afterLinkFailed: {
-            try? FileManager.default.removeItem(at: path)
-        })
-        #expect(claim == .blocked(detail: GUILock.churnDetail))
-        #expect(attempts.value.count == GUILock.maxClaimAttempts)
-        #expect(try leftovers(beside: path).isEmpty)
-    }
-
-    @Test("release only takes a lock this process holds")
-    func releaseIsPidGuarded() throws {
-        // pid 1 is launchd: alive, and not us. A release that went by "the file is there" would
-        // let a CLI run ending at the wrong moment delete the app's lock.
-        let path = lockPath()
-        defer { try? FileManager.default.removeItem(at: path) }
-        try Data("1\n".utf8).write(to: path)
-        GUILock.release(at: path)
-        #expect(FileManager.default.fileExists(atPath: path.path),
-                "somebody else's lock is not ours to give back")
-        #expect(GUILock.acquireExclusively(at: path) == .held(pid: 1))
-    }
-
-    @Test("a lock file left by a crashed process is taken over, once")
-    func aStaleLockIsTakenOver() throws {
-        let path = lockPath()
-        defer { try? FileManager.default.removeItem(at: path) }
-        // Above any pid macOS will hand out, so the file names nothing that exists.
-        try Data("999999\n".utf8).write(to: path)
-
-        #expect(GUILock.acquireExclusively(at: path) == .acquired,
-                "a crash must not brick the command until somebody finds the file")
-        #expect(GUILock.state(at: path) == .held(pid: ProcessInfo.processInfo.processIdentifier))
-        // And having taken it over, this process holds it against itself too: a second claim is
-        // refused rather than quietly overwriting the first.
-        #expect(GUILock.acquireExclusively(at: path)
-                == .held(pid: ProcessInfo.processInfo.processIdentifier))
-        GUILock.release(at: path)
-        #expect(!FileManager.default.fileExists(atPath: path.path))
-    }
-
-    @Test("a lock file that says nothing usable is not taken over")
-    func garbageIsNotTakenOver() throws {
-        let path = lockPath()
-        defer { try? FileManager.default.removeItem(at: path) }
-        try Data("not a pid".utf8).write(to: path)
-        #expect(GUILock.acquireExclusively(at: path) == .blocked(detail: GUILock.unreadableDetail))
-        #expect(try String(contentsOf: path, encoding: .utf8) == "not a pid",
-                "refusing is recoverable; overwriting somebody else's file is not")
-    }
-
-    @Test("a lock left behind by a crashed GUI is stale, not a refusal")
-    func aDeadPIDIsStale() throws {
-        let path = lockPath()
-        // Above any pid macOS will hand out, so it cannot be a live process.
-        try Data("999999\n".utf8).write(to: path)
-        defer { try? FileManager.default.removeItem(at: path) }
-        #expect(GUILock.state(at: path) == .free)
-
-        try Data("\(ProcessInfo.processInfo.processIdentifier)".utf8).write(to: path)
-        #expect(GUILock.state(at: path) == .held(pid: ProcessInfo.processInfo.processIdentifier))
-
-        // A lock file nobody can read is held, not free: refusing is recoverable (delete it), and
-        // racing two writers at the store is not.
-        try Data("not a pid".utf8).write(to: path)
-        #expect(GUILock.state(at: path) == .unreadable(path: path.path))
-    }
-
-    @Test("acquire writes this process's pid and release takes it away again")
-    func acquireAndRelease() throws {
-        let path = lockPath()
-        defer { try? FileManager.default.removeItem(at: path) }
-        #expect(GUILock.state(at: path) == .free, "nothing there yet")
-        GUILock.acquire(at: path)
-        #expect(GUILock.state(at: path) == .held(pid: ProcessInfo.processInfo.processIdentifier))
-        GUILock.release(at: path)
-        #expect(!FileManager.default.fileExists(atPath: path.path))
-    }
-
     @Test("the state a CLI run fires through never auto-approves, and is not a launch")
     func theCLIStateFailsClosedAndLeavesNothingBehind() throws {
         let store = try ConversationStore.inMemory()
@@ -488,37 +185,207 @@ struct RunJobCLITests {
         #expect(reloaded.contains { $0.title == AppState.activityConversationTitle })
     }
 
-    @Test("a lock file that cannot be read at all is held, not free")
-    func anUnreadableLockFileIsHeld() throws {
-        let path = lockPath()
-        defer { try? FileManager.default.removeItem(at: path) }
-        // Not valid UTF-8: `try? String(contentsOf:)` answers nil for this exactly as it does for
-        // a file that is not there, and only one of those two is free.
-        try Data([0xFF, 0xFE, 0x00, 0x01]).write(to: path)
-        #expect(GUILock.state(at: path) == .unreadable(path: path.path))
-    }
-
-    @Test("a run takes the lock for its own length, so a second CLI run is refused")
+    @Test("a run holds the lock while it runs, with its own payload, and keeps both until IrisMain exits")
     func aRunHoldsTheLockWhileItRuns() async throws {
         let store = try ConversationStore.inMemory()
-        let job = self.job(name: "holder")
-        try store.ledger.upsert(job)
+        try store.ledger.upsert(self.job(name: "holder"))
         let path = lockPath()
-        defer { try? FileManager.default.removeItem(at: path) }
-        let seen = Output()
-
-        // The fake client is asked mid-run, which is the only moment a second invocation could
-        // arrive: the lock has to be held *then*, not merely checked at the start.
-        let client = ProbingLLMClient(reply: "done") { seen.write("\(GUILock.state(at: path))") }
+        let seen = LockedCell<StoreLock.Holder?>(nil)
+        let client = ProbingLLMClient(reply: "done") { seen.value = StoreLock.readHolder(at: path) }
         let code = await RunJobCLI.run(RunJobCLI.Invocation(target: "holder"), store: store,
                                        client: client, lockPath: path, protectionEnabled: false,
                                        out: { _ in }, err: { _ in })
-
         #expect(code == RunJobCLI.Exit.completed)
-        #expect(seen.text.contains("held(pid: \(ProcessInfo.processInfo.processIdentifier))"),
-                "the run must hold the lock while it runs, not only check it")
-        #expect(!FileManager.default.fileExists(atPath: path.path),
-                "and give it back when it is over")
+        #expect(seen.value == .init(pid: ProcessInfo.processInfo.processIdentifier, kind: .runJob, job: "holder"))
+        #expect(StoreLock.readHolder(at: path) == seen.value,
+                "not vacated in `run`: IrisMain vacates just before `_exit`, so no empty payload sits under a held lock")
+        #expect(StoreLock.holds(path), "and still held: the process exits next (decision 2)")
+    }
+
+    // MARK: The store lock (#463 decision 7)
+
+    /// One integer from the database file at `url`. Synchronous on purpose: inside an async test
+    /// GRDB's `read` resolves to its async overload.
+    private func sqlInt(_ url: URL, _ sql: String, _ arguments: StatementArguments = []) throws -> Int? {
+        try DatabaseQueue(path: url.path).read { try Int.fetchOne($0, sql: sql, arguments: arguments) }
+    }
+
+    @Test("a stub --run-job holding the lock: exit 1 naming it, and the store is never opened")
+    func refusedRunNeverOpensTheStore() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-runjob-\(UUID().uuidString)")
+        let db = dir.appendingPathComponent("conversations.sqlite")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = try ConversationStore.onDisk(at: db)   // a real, migrated store, closed again
+        // The count first: closing a reader can checkpoint the WAL into the file, so the mtime is
+        // taken after it, and compared before the second read.
+        let migrations = try sqlInt(db, "SELECT count(*) FROM grdb_migrations")
+        let mtime = try FileManager.default.attributesOfItem(atPath: db.path)[.modificationDate] as? Date
+        let lock = db.appendingPathExtension("lock")
+        let stub = try LockStub.start(holding: lock, payload: #"{"job":"nightly","kind":"run-job","pid":%PID%}"# + "\n")
+        defer { stub.kill() }
+        let opened = LockedCell(0)
+        func openStore() throws -> ConversationStore {
+            opened.value += 1
+            return try ConversationStore.onDisk(at: db)
+        }
+
+        let err = Output()
+        let code = await RunJobCLI.run(RunJobCLI.Invocation(target: "pr-sweep"), store: try openStore(),
+                                       client: FakeLLMClient(responses: []), lockPath: lock,
+                                       protectionEnabled: false, out: { _ in }, err: { err.write($0) })
+
+        #expect(code == RunJobCLI.Exit.usage)
+        #expect(err.text.contains("another --run-job (pid \(stub.pid), job nightly)"))
+        #expect(opened.value == 0, "the store factory never ran")
+        #expect(try FileManager.default.attributesOfItem(atPath: db.path)[.modificationDate] as? Date == mtime)
+        #expect(try sqlInt(db, "SELECT count(*) FROM grdb_migrations") == migrations)
+    }
+
+    @Test("the app holding the lock is named as the app")
+    func appHolderIsNamed() async throws {
+        let lock = lockPath()
+        try FileManager.default.createDirectory(at: lock.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let stub = try LockStub.start(holding: lock, payload: #"{"kind":"app","pid":%PID%}"# + "\n")
+        defer { stub.kill() }
+        let err = Output()
+        let code = await RunJobCLI.run(RunJobCLI.Invocation(target: "pr-sweep"), store: try ConversationStore.inMemory(),
+                                       client: FakeLLMClient(responses: []), lockPath: lock,
+                                       protectionEnabled: false, out: { _ in }, err: { err.write($0) })
+        #expect(code == RunJobCLI.Exit.usage)
+        #expect(err.text.contains("the Iris app (pid \(stub.pid))"))
+    }
+
+    @Test("--dry-run claims too")
+    func dryRunClaims() async throws {
+        let lock = lockPath()
+        try FileManager.default.createDirectory(at: lock.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let stub = try LockStub.start(holding: lock, payload: #"{"kind":"app","pid":%PID%}"# + "\n")
+        defer { stub.kill() }
+        // A job that exists and has a gate, so the only thing that can refuse is the lock.
+        let store = try ConversationStore.inMemory()
+        try store.ledger.upsert(self.job(name: "polled",
+                                         trigger: .poll(PollSpec(schedule: .interval(seconds: 60),
+                                                                 gate: .pathChanged(path: "/tmp/whatever")))))
+        let opened = LockedCell(0)
+        func openStore() throws -> ConversationStore { opened.value += 1; return store }
+        let err = Output()
+        let code = await RunJobCLI.run(RunJobCLI.Invocation(target: "polled", dryRun: true),
+                                       store: try openStore(), client: FakeLLMClient(responses: []),
+                                       lockPath: lock, protectionEnabled: false, out: { _ in }, err: { err.write($0) })
+        #expect(code == RunJobCLI.Exit.usage)
+        #expect(err.text.contains("the Iris app (pid \(stub.pid))"))
+        #expect(opened.value == 0)
+    }
+
+    @Test("a lock that cannot be taken is exit 1 naming the path and errno, and the store is never opened")
+    func failedLockRefuses() async throws {
+        let lock = lockPath()
+        var calls = StoreLock.Syscalls.live
+        calls.flock = { _, _ in errno = ENOLCK; return -1 }
+        let opened = LockedCell(0)
+        func openStore() throws -> ConversationStore { opened.value += 1; return try ConversationStore.inMemory() }
+        let err = Output()
+        let code = await RunJobCLI.run(RunJobCLI.Invocation(target: "pr-sweep"), store: try openStore(),
+                                       client: FakeLLMClient(responses: []), lockPath: lock, lockSyscalls: calls,
+                                       protectionEnabled: false, out: { _ in }, err: { err.write($0) })
+        #expect(code == RunJobCLI.Exit.usage)
+        #expect(err.text.contains(lock.path))
+        #expect(err.text.contains("errno \(ENOLCK)"))
+        #expect(opened.value == 0)
+    }
+
+    @Test("a pre-#463 holder (a bare live pid) refuses")
+    func legacyHolderRefuses() async throws {
+        let lock = lockPath()
+        try FileManager.default.createDirectory(at: lock.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("1\n".utf8).write(to: lock)
+        let err = Output()
+        let code = await RunJobCLI.run(RunJobCLI.Invocation(target: "pr-sweep"), store: try ConversationStore.inMemory(),
+                                       client: FakeLLMClient(responses: []), lockPath: lock,
+                                       protectionEnabled: false, out: { _ in }, err: { err.write($0) })
+        #expect(code == RunJobCLI.Exit.usage)
+        #expect(err.text.contains("an older Iris build (pid 1)"))
+        // A bare pid may have been reused by something that is not Iris, and only then is
+        // deleting the file the way out; the refusal names the file so the user can.
+        #expect(err.text.contains(lock.path))
+    }
+
+    @Test("no refusal for a JSON-payload holder ever tells the user to delete the lock file")
+    func refusalsNeverAdviseDeletingALiveLock() {
+        let path = URL(fileURLWithPath: "/tmp/x/conversations.sqlite.lock")
+        let claims: [StoreLock.Claim] = [
+            .held(.init(pid: 42, kind: .app, job: nil)),
+            .held(.init(pid: 42, kind: .runJob, job: "nightly")),
+            .held(.init(pid: 42, kind: .seedDevHome, job: nil)),
+            .held(.init(pid: 42, kind: .perf, job: nil)),
+            .held(nil),
+            .failed(detail: "flock \(path.path): No locks available (errno 77)"),
+        ]
+        for claim in claims {
+            let text = RunJobCLI.refusal(for: claim, path: path) ?? ""
+            #expect(!text.isEmpty, "\(claim) refuses")
+            #expect(!text.lowercased().contains("delete"), "\(claim): \(text)")
+        }
+        #expect(RunJobCLI.refusal(for: .acquired, path: path) == nil)
+    }
+
+    @Test("#463's repro: behind a holder nothing opens the store; after it dies the run's card is at its ordinal")
+    func issue463Repro() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-runjob-\(UUID().uuidString)")
+        let db = dir.appendingPathComponent("conversations.sqlite")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // A first run puts a card in Iris (the pinned conversation), so the second card has an
+        // ordinal to land after. Its own lock path: a lock this process holds is never released.
+        let seed = try ConversationStore.onDisk(at: db)
+        let job = self.job(name: "nightly")
+        try seed.ledger.upsert(job)
+        let first = await RunJobCLI.run(RunJobCLI.Invocation(target: "nightly"), store: seed,
+                                        client: FakeLLMClient(responses: [textResponse("first")]),
+                                        lockPath: lockPath(), protectionEnabled: false,
+                                        out: { _ in }, err: { _ in })
+        #expect(first == RunJobCLI.Exit.completed)
+        let firstRun = try #require(try seed.ledger.runs(jobId: job.id, limit: 1).first)
+
+        let lock = lockPath()
+        try FileManager.default.createDirectory(at: lock.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let stub = try LockStub.start(holding: lock, payload: #"{"kind":"app","pid":%PID%}"# + "\n")
+        defer { stub.kill() }
+        let opened = LockedCell(0)
+        func openStore() throws -> ConversationStore {
+            opened.value += 1
+            return try ConversationStore.onDisk(at: db)
+        }
+        let refused = await RunJobCLI.run(RunJobCLI.Invocation(target: "nightly"), store: try openStore(),
+                                          client: FakeLLMClient(responses: [textResponse("never")]),
+                                          lockPath: lock, protectionEnabled: false,
+                                          out: { _ in }, err: { _ in })
+        #expect(refused == RunJobCLI.Exit.usage)
+        #expect(opened.value == 0, "nothing opens the store while the stub holds the lock")
+
+        stub.kill()
+        let second = await RunJobCLI.run(RunJobCLI.Invocation(target: "nightly"), store: try openStore(),
+                                         client: FakeLLMClient(responses: [textResponse("second")]),
+                                         lockPath: lock, protectionEnabled: false,
+                                         out: { _ in }, err: { _ in })
+        #expect(second == RunJobCLI.Exit.completed)
+        #expect(opened.value == 1)
+
+        let runs = try ConversationStore.onDisk(at: db).ledger.runs(jobId: job.id, limit: 10)
+        #expect(runs.count == 2, "the refused run wrote no row")
+        let iris = try #require(try ConversationStore.onDisk(at: db).loadAll().conversations
+            .first { $0.title == AppState.activityConversationTitle })
+        let cardIndices = iris.messages.indices.filter { EventCard.decode(iris.messages[$0].content) != nil }
+        #expect(cardIndices.count == 2, "both cards are there: neither write landed over the other")
+        let last = try #require(cardIndices.last)
+        #expect(last == iris.messages.count - 1, "the second card is the last message")
+        let secondRun = try #require(runs.first { $0.id != firstRun.id })
+        #expect(EventCard.decode(iris.messages[last].content)?.runId == secondRun.id)
+        // And on disk at that same ordinal, not merely in the loaded array.
+        let ordinal = try sqlInt(db, "SELECT ordinal FROM messages WHERE conversationId = ? AND id = ?",
+                                 [iris.id.uuidString, iris.messages[last].id.uuidString])
+        #expect(ordinal == last)
     }
 
     // MARK: Lookup

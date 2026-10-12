@@ -329,16 +329,18 @@ enum RunJobCLI {
     /// in-memory store, a fake client and a lock path of their own (AGENTS invariant 7).
     ///
     /// `store` is an autoclosure because the order matters: usage and the lock are decided
-    /// *before* anything opens a database file, so a run refused behind a live app never touches
-    /// the store at all. The lock is then *taken* for the length of the run, which is what keeps
-    /// two CLI runs off one store. `runner` is nil in production — the CLI builds the same
-    /// `AppState`, engine and `JobRunner` the app fires through.
+    /// *before* anything opens a database file, so a run refused behind a live holder never
+    /// migrates, repairs or reads the store (#463 decision 7; pinned by
+    /// `refusedRunNeverOpensTheStore`). The lock is held for the rest of the process. `runner` is
+    /// nil in production — the CLI builds the same `AppState`, engine and `JobRunner` the app
+    /// fires through.
     @MainActor
     static func run(_ invocation: Invocation,
                     store openStore: @autoclosure () throws -> ConversationStore,
                     client: any LLMClientProtocol,
                     runner injectedRunner: JobRunner? = nil,
                     lockPath: URL = IrisPaths.default.storeLockFile,
+                    lockSyscalls: StoreLock.Syscalls = .live,
                     protectionEnabled: Bool? = nil,
                     gate: (@Sendable (Gate, String?) async -> GateResult)? = nil,
                     out: (String) -> Void = { print($0) },
@@ -352,37 +354,13 @@ enum RunJobCLI {
             return refuse(invocation.problem ?? "--run-job needs a job id or name",
                           appendingUsage: true)
         }
-        // Taken for a `--dry-run` too, which writes no row: `ConversationStore.onDisk` may *migrate*
-        // the file it opens, and a schema migration running under a live app is a worse failure
-        // than the refusal. Stricter than §8 asks for, and the stricter direction is the cheap one.
-        //
-        // Claim the lock, rather than check it and then take it: the two have to be one syscall or
-        // two `--run-job` invocations started together both read "free" and both build an
-        // `AppState` over the same file — the two in-memory copies of one store that this exists
-        // to prevent, for as long as a model turn. It does not close the other direction: the GUI
-        // never checks, it overwrites, so an app launched *during* a run still races (and,
-        // acquiring second, keeps the lock — `release` below is pid-guarded and will not take the
-        // app's).
-        switch GUILock.acquireExclusively(at: lockPath) {
-        case .acquired:
-            break
-        case .held(let pid):
-            // Named as what the lock file can actually prove: a live Iris process. It is the app
-            // most of the time, but a second `--run-job` takes the same lock and writes the same
-            // bare pid, and telling that user to quit an app that is not running is worse than
-            // telling them the truth. The file is named too, because a pid the kernel has since
-            // handed to something else entirely leaves nothing to wait for and no app to quit.
-            return refuse("another Iris process holds the store (pid \(pid)) — the app, or another "
-                          + "--run-job. Wait for it to finish, or quit the app, and try again; the "
-                          + "CLI will not write to the store behind a live one. If nothing "
-                          + "Iris-shaped is running, that pid belongs to something else now: "
-                          + "delete \(lockPath.path).")
-        case .blocked(let detail):
-            return refuse("another Iris process holds the store, or left \(lockPath.path) behind"
-                          + " (\(detail)); the CLI will not write to the "
-                          + "store behind a live one. Delete that file if nothing is running.")
-        }
-        defer { GUILock.release(at: lockPath) }
+        // Taken for a `--dry-run` too, which writes no row: opening the store may migrate it.
+        // One `flock`, held until this process exits, so two `--run-job` started together cannot
+        // both pass, and an app launched during the run waits behind it (#463).
+        let claim = StoreLock.claimSettling(at: lockPath, kind: .runJob, job: target, syscalls: lockSyscalls)
+        if let refusal = refusal(for: claim, path: lockPath) { return refuse(refusal) }
+        // Not vacated here: `IrisMain` empties the payload just before `_exit`, so an empty
+        // payload never sits under the held lock while this process still runs (decision 5).
 
         let store: ConversationStore
         do {
@@ -408,6 +386,38 @@ enum RunJobCLI {
         return await fire(job: job, store: store, client: client, runner: injectedRunner,
                           protectionEnabled: protectionEnabled, json: invocation.json,
                           out: out, err: err)
+    }
+
+    /// What a claim that did not acquire says, or nil when it did (decision 7). None of these
+    /// tells the user to delete the file: a JSON payload names a process that flocks it, and
+    /// deleting the file under a live holder is what lets a second writer in. Only a bare pid
+    /// (`.legacy`) can name a process that is not Iris at all, a reused pid, so only it says how
+    /// to clear the file, and names it.
+    static func refusal(for claim: StoreLock.Claim, path: URL) -> String? {
+        let wait = "the CLI will not write to the store behind a live one. Try again when it has finished."
+        switch claim {
+        case .acquired:
+            return nil
+        case .held(let holder?):
+            switch holder.kind {
+            case .app:
+                return "the Iris app (pid \(holder.pid)) has this home open; quit it and try again — the CLI will not write behind a live app."
+            case .runJob:
+                let job = holder.job.map { ", job \($0)" } ?? ""
+                return "another --run-job (pid \(holder.pid)\(job)) has this home; \(wait)"
+            case .seedDevHome:
+                return "an iris --seed-dev-home (pid \(holder.pid)) is copying this home; \(wait)"
+            case .perf:
+                return "an iris --perf (pid \(holder.pid)) holds \(path.path); \(wait)"
+            }
+        case .held(nil):
+            return "another Iris process holds \(path.path) and has not said which; \(wait)"
+        case .legacy(let pid):
+            return "an older Iris build (pid \(pid)) holds the store; quit it and try again. If pid \(pid) "
+                + "is not Iris, the pid was reused: delete \(path.path) and try again."
+        case .failed(let detail):
+            return "could not lock the store (\(detail)); the CLI will not open it without the lock."
+        }
     }
 
     /// A full UUID names a job directly; anything else is a name. Both, because a card and `/jobs`

@@ -23,10 +23,13 @@ struct ToolExecutor {
     /// means the tool declines instead of registering a watch nothing runs.
     var jobToolsProvider: (@Sendable () async -> JobTools?)?
 
-    /// #489: how a skill write tells the engine it ran for, so that engine's cached system prompt
-    /// (and only that engine's) is rebuilt. nil — `ToolExecutor.shared`, a plugin's throwaway
-    /// executor, a test — invalidates nothing: no engine is behind it. Never `AppState.shared`,
-    /// which inside `--run-job` built a second `AppState` over the store (#463 decision 15).
+    /// #489: how a skill write tells the engine it ran for to rebuild its cached system prompt.
+    /// The engine's hook (`IrisEngine.executor`) also rebuilds its owner's main engine, so a
+    /// delegate's skill reaches the main chat (plan note 14). nil — `ToolExecutor.shared`, a
+    /// plugin's throwaway executor, a test — invalidates nothing: no engine is behind it. So a
+    /// hookless executor must never be handed to an engine: its skill tools would report "cache
+    /// invalidated/updated" while the engine kept the stale prompt. Never `AppState.shared`, which
+    /// inside `--run-job` built a second `AppState` over the store (#463 decision 15).
     var onSkillsChanged: (@Sendable () async -> Void)?
 
     /// Where Iris's own directory and the user's home are, for `register_directory_watcher`'s
