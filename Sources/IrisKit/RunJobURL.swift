@@ -92,6 +92,11 @@ enum RunJobURL {
 
     static let notSetUpReason = "Iris is not set up yet; finish setup in the chat window, then open the link again"
     static let startupFloodReason = "too many links arrived while Iris was starting"
+
+    /// #463 decision 12: links past the gate's capacity while Iris waited for the store.
+    static func droppedWhileWaitingLine(_ count: Int) -> String {
+        "\(count) link\(count == 1 ? "" : "s") that arrived while Iris waited \(count == 1 ? "was" : "were") dropped unread."
+    }
     static let unknownTokenReason = "the link matches no job's URL trigger; it may have been turned off or replaced"
     static let ledgerUnreadableReason = "the jobs table could not be read"
     static let overLimitReason = "URL fires are limited to \(maxFiresPerHour) an hour per job"

@@ -89,7 +89,8 @@ final class LaunchGate {
         var openStore: @MainActor () -> Void
         /// `startOnce` or `refuseRunJobURLsUntilSetUp`, then the held links, oldest first.
         var finishLaunch: @MainActor (_ links: [URL?], _ dropped: Int) -> Void
-        /// A link after the store is open: `AppState.shared.receiveRunJobURL`.
+        /// A link after the store is open and nothing is held ahead of it:
+        /// `AppState.shared.receiveRunJobURL`.
         var deliver: @MainActor (URL?) -> Void
         /// The alert, the holder brought forward, and quit.
         var refuse: @MainActor (LaunchRefusal, _ hadLinks: Bool) -> Void
@@ -156,8 +157,12 @@ final class LaunchGate {
     }
 
     /// Every link from `RunJobURLEvents`. Never logged: it carries a live token.
+    ///
+    /// Open but not yet finished, a link still queues here behind any the gate already holds:
+    /// delivered now, it would reach `AppState`'s intake ahead of them, which `finishLaunch` only
+    /// hands over later. With nothing held, the intake keeps the order itself (D2).
     func receive(_ url: URL?) {
-        if isOpen { return seams.deliver(url) }
+        if isOpen && (finished || links.isEmpty) { return seams.deliver(url) }
         guard links.count < RunJobURLIntake.capacity else { dropped += 1; return }
         links.append(url)
         if didFinish, case .waiting = state { showNoticeNow() }

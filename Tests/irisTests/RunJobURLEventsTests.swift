@@ -51,7 +51,7 @@ struct RunJobURLEventsTests {
         let banned = try Regex(#"\b(print|debugPrint|NSLog|os_log|dump|fputs)\(|\bLogger\(|FileHandle\.standardError"#)
         for file in ["RunJobURLEvents.swift", "RunJobURLIntake.swift", "RunJobURLHandling.swift",
                      "RunJobURL.swift", "URLTriggerToken.swift", "URLTriggerLinkSheet.swift",
-                     "LaunchGate.swift"] {
+                     "LaunchGate.swift", "LaunchGate+App.swift", "IrisApp.swift"] {
             let text = try String(contentsOf: sources.appendingPathComponent(file), encoding: .utf8)
             #expect(text.firstMatch(of: banned) == nil, "\(file) logs")
         }

@@ -157,6 +157,15 @@ struct RunJobURLIntakeTests {
         #expect(try store.ledger.runs(jobId: job.id, limit: 1).first?.triggerKind == "url")
     }
 
+    @Test("#463 decision 12: links dropped while Iris waited are counted in one line in Iris")
+    func droppedWhileWaitingIsOneLine() throws {
+        let (_, app, _, _) = try makeApp()
+        app.noteLinksDroppedWhileWaiting(3)
+        #expect(irisLines(app).contains("3 links that arrived while Iris waited were dropped unread."))
+        app.noteLinksDroppedWhileWaiting(0)
+        #expect(irisLines(app).filter { $0.contains("dropped unread") }.count == 1, "nothing for zero")
+    }
+
     @Test("an event that carried no readable link is refused with a line")
     func unreadableIsRefused() throws {
         let (_, app, _, _) = try makeApp()

@@ -101,6 +101,9 @@ struct LaunchGateTests {
 
         /// A real claim, when set: `StoreLock.claim` on a temp file another process may hold.
         var claimer: (() -> StoreLock.Claim)?
+        /// What the app does at `openStore` and `finishLaunch`, when a test gives it a real store.
+        var onOpen: (() -> Void)?
+        var onFinish: (() -> Void)?
 
         init(_ claims: [StoreLock.Claim]) { self.claims = claims }
         init(claim: @escaping () -> StoreLock.Claim) { self.claims = []; self.claimer = claim }
@@ -110,8 +113,10 @@ struct LaunchGateTests {
                 if let claimer = self.claimer { return claimer() }
                 return self.claims.count > 1 ? self.claims.removeFirst() : self.claims[0]
             },
-            openStore: { [unowned self] in self.opened += 1 },
-            finishLaunch: { [unowned self] links, dropped in self.finishes.append(links); self.droppedReported.append(dropped) },
+            openStore: { [unowned self] in self.opened += 1; self.onOpen?() },
+            finishLaunch: { [unowned self] links, dropped in
+                self.finishes.append(links); self.droppedReported.append(dropped); self.onFinish?()
+            },
             deliver: { [unowned self] in self.delivered.append($0) },
             refuse: { [unowned self] refusal, hadLinks in self.refusals.append((refusal, hadLinks)) },
             startPolling: { [unowned self] interval, tick in self.intervals.append(interval); self.tick = tick },
@@ -193,6 +198,24 @@ struct LaunchGateTests {
         #expect(h.delivered.count == 1)
         h.gate.didFinishLaunching()
         #expect(h.finishes == [[]])
+    }
+
+    @Test("a link after the store opens but before did-finish queues behind the links already held")
+    func openBeforeFinishKeepsLinkOrder() {
+        let h = Harness([.held(Self.cli), .acquired])
+        h.gate.begin()
+        let first = URL(string: "iris-dev://run-job/first")
+        let second = URL(string: "iris-dev://run-job/second")
+        h.gate.receive(first)
+        h.advance(1)   // the poll opens the store before did-finish has run
+        #expect(h.gate.isOpen)
+        h.gate.receive(second)
+        #expect(h.delivered.isEmpty, "delivered now, it would reach the intake ahead of the held link")
+        h.gate.didFinishLaunching()
+        #expect(h.finishes == [[first, second]])
+        let third = URL(string: "iris-dev://run-job/third")
+        h.gate.receive(third)
+        #expect(h.delivered == [third])
     }
 
     @Test("a cold start from a link shows the notice without activating, and hides it when Iris opens")
@@ -365,5 +388,66 @@ struct LaunchGateTests {
         h.advance(0.2)
         #expect(h.refusals.map(\.0) == [.otherApp(pid: nil)])
         #expect(h.opened == 0)
+    }
+
+    /// Every message of the one conversation, as the disk has it.
+    private static func messagesOnDisk(_ db: URL, _ id: UUID) throws -> [String] {
+        try ConversationStore.onDisk(at: db).loadAll().conversations.first { $0.id == id }?.messages.map(\.content) ?? []
+    }
+
+    /// A whole-copy save, the shape that let the later writer win before #463.
+    private static func save(_ conversation: Conversation, to store: ConversationStore, created: Bool = false) throws {
+        var changes = ChangeSet()
+        if created { changes.add(.created) }
+        changes.add(.messagesReplaced)
+        try store.apply([ConversationWrite(id: conversation.id, snapshot: conversation, changes: changes)])
+    }
+
+    @Test("#463 repro: an app launched while a --run-job writes never opens the store until it exits, so neither write is lost")
+    func appLaunchedDuringACLIRunLosesNothing() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-gate-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let db = dir.appendingPathComponent("conversations.sqlite")
+        let lock = dir.appendingPathComponent("conversations.sqlite.lock")
+
+        // The CLI: it holds the lock, loaded its copy of the conversation at its start, and saves
+        // that copy as it goes. Its lock is a real flock in another process.
+        let stub = try LockStub.start(holding: lock, payload: #"{"job":"nightly","kind":"run-job","pid":%PID%}"# + "\n")
+        defer { stub.kill() }
+        let cliStore = try ConversationStore.onDisk(at: db)
+        var cliCopy = Conversation(id: UUID(), title: "Iris", workspacePath: dir.path)
+        cliCopy.messages = [ChatMessage(role: .system, content: "cli one")]
+        try Self.save(cliCopy, to: cliStore, created: true)
+
+        // The app, launched mid-run. Its store half loads its in-memory copy; its launch then
+        // writes a line into that copy and saves it, as `AppState` does.
+        var appCopy: Conversation?
+        let h = Harness(claim: { StoreLock.claim(at: lock, kind: .app) })
+        h.onOpen = { appCopy = try? ConversationStore.onDisk(at: db).loadAll().conversations.first { $0.id == cliCopy.id } }
+        h.onFinish = {
+            guard var copy = appCopy, let store = try? ConversationStore.onDisk(at: db) else { return }
+            copy.messages.append(ChatMessage(role: .system, content: "app"))
+            try? Self.save(copy, to: store)
+        }
+        h.gate.begin()
+        h.gate.didFinishLaunching()
+        #expect(h.gate.state == .waiting(.init(pid: stub.pid, kind: .runJob, job: "nightly")))
+        #expect(h.opened == 0, "the app never opens the store while the CLI holds it")
+        #expect(try Self.messagesOnDisk(db, cliCopy.id) == ["cli one"], "and has written nothing")
+
+        // The CLI's next save, from its own copy, while the app waits.
+        cliCopy.messages.append(ChatMessage(role: .system, content: "cli two"))
+        try Self.save(cliCopy, to: cliStore)
+        h.advance(1)
+        #expect(h.opened == 0, "still held")
+
+        stub.kill()   // the CLI exits
+        h.advance(1)
+        #expect(h.gate.isOpen)
+        #expect(h.opened == 1)
+        #expect(h.finishes.count == 1)
+        #expect(try Self.messagesOnDisk(db, cliCopy.id) == ["cli one", "cli two", "app"],
+                "the app loaded after the CLI's last write, and nothing it wrote was written over")
     }
 }

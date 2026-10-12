@@ -15,13 +15,14 @@ final class RunJobURLEvents: NSObject {
         self.deliver = deliver
     }
 
-    /// The app's handler, delivering to `AppState.shared`. Here rather than in `AppDelegate` so the
-    /// closure that carries the raw link sits in a file the no-logging test reads. A real `.app`
-    /// only (decision 8), by the predicate notifications use: the bare binary registers no scheme,
-    /// so nothing routes a link to it, and it installs nothing it cannot use.
+    /// The app's handler, delivering to `LaunchGate`, which holds a link while another process has
+    /// the store and passes it to `AppState.shared` once Iris is open (#463 decision 12). Here
+    /// rather than in `AppDelegate` so the closure that carries the raw link sits in a file the
+    /// no-logging test reads. A real `.app` only (decision 8), by the predicate notifications use:
+    /// the bare binary registers no scheme, so nothing routes a link to it.
     static func installForApp(bundleURL: URL = Bundle.main.bundleURL) -> RunJobURLEvents? {
         guard SurfaceInstall.isAppBundle(bundleURL) else { return nil }
-        let events = RunJobURLEvents { url in AppState.shared.receiveRunJobURL(url) }
+        let events = RunJobURLEvents { url in LaunchGate.shared.receive(url) }
         events.install()
         return events
     }
