@@ -104,8 +104,9 @@ struct IrisApp: App {
         AppState.shared.refreshLedgerAttention()
         AppState.shared.raiseMainWindow = { MainWindow.raise() }
         AppState.shared.openRunLogWindow = { RunLogWindow.open() }
-        // D6 decision 8: only here, and only in a real `.app` bundle. The sink reuses the
-        // delegate will-finish installed; clicks still pass through the gate, which keeps their order.
+        // D6 decision 8: only here, and only in a real `.app` bundle. The sink and will-finish share
+        // one delegate, whichever builds it first (on a free lock, this runs before will-finish);
+        // clicks still pass through the gate, which keeps their order.
         SurfaceInstall.installNotifications(on: AppState.shared)
         Task {
             // Only the lock's holder runs this, so every `iris-` container on this home it does

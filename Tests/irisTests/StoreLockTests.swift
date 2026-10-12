@@ -37,19 +37,24 @@ final class StoreLockTests {
         #expect(StoreLock.claim(at: url, kind: .app) == .acquired)
     }
 
-    @Test("two claims in one process conflict, and the second names the first")
-    func twoClaimsConflict() {
+    @Test("a second claim in one process reuses its hold and re-advertises, and another process is still excluded")
+    func secondClaimReusesTheHold() throws {
         let url = path()
         #expect(StoreLock.claim(at: url, kind: .app) == .acquired)
-        #expect(StoreLock.claim(at: url, kind: .runJob) == .held(.init(pid: me, kind: .app, job: nil)))
+        let fd = StoreLock.descriptor(for: url)
+        StoreLock.vacate(at: url)
+        #expect(StoreLock.claim(at: url, kind: .runJob, job: "again") == .acquired)
+        #expect(StoreLock.descriptor(for: url) == fd, "the same descriptor: nothing reopened or released")
+        #expect(StoreLock.readHolder(at: url) == .init(pid: me, kind: .runJob, job: "again"))
+        #expect(LockStub.tryLock(url) == 3)
     }
 
-    @Test("a dropped claim still excludes, in this process and in another")
+    @Test("a dropped claim still excludes another process")
     func droppedClaimStillExcludes() {
         let url = path()
         _ = StoreLock.claim(at: url, kind: .runJob)
-        #expect(StoreLock.claim(at: url, kind: .app) != .acquired)
-        #expect(LockStub.tryLock(url) == 3, "another process cannot take it either")
+        #expect(StoreLock.holds(url))
+        #expect(LockStub.tryLock(url) == 3, "another process cannot take it")
     }
 
     @Test("the descriptor is close-on-exec from the open")
@@ -213,10 +218,43 @@ final class StoreLockTests {
     func bareLivePidIsLegacy() throws {
         let url = path()
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data("1\n".utf8).write(to: url)   // launchd: alive, and not us
-        #expect(StoreLock.claim(at: url, kind: .app) == .legacy(pid: 1))
+        // The test runner's parent: alive, this user's, not us, and started before the file was
+        // written. Not launchd: its start time is another user's, so it reads as a reused pid.
+        let parent = getppid()
+        try Data("\(parent)\n".utf8).write(to: url)
+        #expect(StoreLock.claim(at: url, kind: .app) == .legacy(pid: parent))
         #expect(!StoreLock.holds(url))
         #expect(LockStub.tryLock(url) == 0, "the refused claim let go of the lock")
+    }
+
+    /// A bare pid naming launchd (alive, not us), with its start time chosen by the seam.
+    private func legacyClaim(started: Date?) throws -> (URL, StoreLock.Claim) {
+        let url = path()
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("1\n".utf8).write(to: url)
+        var syscalls = StoreLock.Syscalls()
+        syscalls.processStart = { _ in started }
+        return (url, StoreLock.claim(at: url, kind: .app, syscalls: syscalls))
+    }
+
+    @Test("a bare live pid whose process started after the file was written is a reused pid: stale, taken over")
+    func reusedLegacyPidIsTakenOver() throws {
+        let (url, claim) = try legacyClaim(started: Date().addingTimeInterval(3600))
+        #expect(claim == .acquired)
+        #expect(StoreLock.readHolder(at: url) == .init(pid: me, kind: .app, job: nil))
+    }
+
+    @Test("a bare live pid whose process started before the file was written is still .legacy")
+    func olderLegacyPidStillRefuses() throws {
+        let (url, claim) = try legacyClaim(started: Date().addingTimeInterval(-3600))
+        #expect(claim == .legacy(pid: 1))
+        #expect(!StoreLock.holds(url))
+    }
+
+    @Test("a start time that cannot be read (EPERM) fails open: the file is stale")
+    func unreadableStartFailsOpen() throws {
+        let (_, claim) = try legacyClaim(started: nil)
+        #expect(claim == .acquired)
     }
 
     @Test("a bare pid naming nobody is stale, and the claim takes it")

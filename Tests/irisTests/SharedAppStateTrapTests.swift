@@ -68,7 +68,7 @@ struct SharedAppStateTrapTests {
         // which neither pattern matches.
         // Counted per file, not just named: a new use in an exempt file must change its count here,
         // on purpose, rather than ride in under the file's exemption.
-        let allowed: [String: Int] = ["IrisApp.swift": 9, "LaunchGate+App.swift": 6, "WaitingView.swift": 2,
+        let allowed: [String: Int] = ["IrisApp.swift": 9, "LaunchGate+App.swift": 5, "WaitingView.swift": 2,
                                       "ChatView.swift": 1, "SettingsView.swift": 1, "PluginsSettingsView.swift": 2]
         // `AppState.shared`, and the implicit-member spellings `: AppState = .shared` and
         // `AppState? = .shared`, which a literal-text match would miss.

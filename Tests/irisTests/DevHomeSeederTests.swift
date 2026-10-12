@@ -71,11 +71,17 @@ struct DevHomeSeederTests {
     @Test("refuses a pre-#463 holder (a bare live pid)")
     func refusesLegacyHolder() throws {
         let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }
-        try Data("1\n".utf8).write(to: src.storeLockFile)
-        #expect(throws: DevHomeSeeder.Failure.sourceInUse(pid: 1)) {
+        let parent = getppid()   // alive, this user's, not us, started before the file was written
+        try Data("\(parent)\n".utf8).write(to: src.storeLockFile)
+        let failure = DevHomeSeeder.Failure.sourceHeldByOlderBuild(pid: parent, lockPath: src.storeLockFile.path)
+        #expect(throws: failure) {
             try DevHomeSeeder.seed(from: src, to: dst, identity: .dev,
                                    sourceKeychain: .init(serviceSuffix: ""), destKeychain: .init(serviceSuffix: ".dev"))
         }
+        #expect(failure.description.contains(
+            "If pid \(parent) is not Iris, the pid was reused: delete \(src.storeLockFile.path) and try again."))
+        #expect(!DevHomeSeeder.Failure.sourceInUse(pid: 7).description.contains("delete"),
+                "only a bare pid gets deletion advice")
     }
 
     // P6: `seed` leaves the payload in place; IrisMain's seed branch vacates just before exit, so

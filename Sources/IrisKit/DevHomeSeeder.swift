@@ -11,6 +11,9 @@ enum DevHomeSeeder {
         case destinationNotEmpty(String)
         case sourceMissing(String)
         case sourceInUse(pid: Int32?)
+        /// A pre-#463 build's bare pid, still live. The one holder whose file may be deleted: the
+        /// pid may have been reused by something that is not Iris (spec §1 row 7).
+        case sourceHeldByOlderBuild(pid: Int32, lockPath: String)
         case sourceLockFailed(String)
         /// The copied `conversations.sqlite` will not open for the rewrite pass — corrupt, or not
         /// a database at all. Named for the release store, not "the staged copy": the copy is
@@ -25,6 +28,9 @@ enum DevHomeSeeder {
             case .sourceMissing(let p): "nothing to seed from: \(p) does not exist"
             case .sourceInUse(let pid?): "refusing: Iris (pid \(pid)) has the source store open; quit it and retry"
             case .sourceInUse(nil): "refusing: another Iris process has the source store open; quit it and retry"
+            case .sourceHeldByOlderBuild(let pid, let path):
+                "refusing: an older Iris build (pid \(pid)) has the source store open; quit it and retry. "
+                    + "If pid \(pid) is not Iris, the pid was reused: delete \(path) and try again."
             case .sourceLockFailed(let detail): "refusing: could not lock the source store (\(detail))"
             case .storeUnreadable(let p): "refusing: the release store could not be opened: \(p)"
             }
@@ -53,7 +59,7 @@ enum DevHomeSeeder {
         switch StoreLock.claimSettling(at: source.storeLockFile, kind: .seedDevHome) {
         case .acquired: break
         case .held(let holder): throw Failure.sourceInUse(pid: holder?.pid)
-        case .legacy(let pid): throw Failure.sourceInUse(pid: pid)
+        case .legacy(let pid): throw Failure.sourceHeldByOlderBuild(pid: pid, lockPath: source.storeLockFile.path)
         case .failed(let detail): throw Failure.sourceLockFailed(detail)
         }
         whileHeld?()
@@ -94,7 +100,7 @@ enum DevHomeSeeder {
     }
 
     /// Copies `source.root`'s entries into `staging.root`, except `models/` (symlinked to the
-    /// original, gigabytes, read-only) and the source's own GUI lock file (meaningless, and
+    /// original, gigabytes, read-only) and the source's own store lock (meaningless, and
     /// possibly live, at the new home).
     private static func copyTree(from source: IrisPaths, into staging: IrisPaths, finalDest: IrisPaths) throws {
         let fm = FileManager.default

@@ -51,6 +51,9 @@ enum StoreLock {
         var flock: @Sendable (Int32, Int32) -> Int32 = { fd, operation in systemFlock(fd, operation) }
         var pwrite: @Sendable (Int32, UnsafeRawPointer, Int, off_t) -> Int = { Darwin.pwrite($0, $1, $2, $3) }
         var afterOpen: @Sendable (_ attempt: Int) -> Void = { _ in }
+        /// When a process started (`proc_pidinfo`), nil when it cannot be read. For the bare-pid
+        /// staleness check only.
+        var processStart: @Sendable (Int32) -> Date? = { ProcessStart.of($0)?.date }
         static let live = Syscalls()
     }
 
@@ -69,6 +72,13 @@ enum StoreLock {
         // payload), so a holder is never unnamed for longer than a few syscalls (decision 5).
         let me = getpid()
         let line = Payload.encode(Holder(pid: me, kind: kind, job: job))
+        // This process already holds it (a lock is never released, decision 2): the claim is
+        // already won. Re-advertised, so a vacated payload names this process again.
+        if let fd = descriptors.withLock({ $0[path] }) {
+            let written = line.withUnsafeBytes { syscalls.pwrite(fd, $0.baseAddress!, $0.count, 0) }
+            if written == line.count { _ = ftruncate(fd, off_t(line.count)) }
+            return .acquired
+        }
         let directory = url.deletingLastPathComponent()
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -82,6 +92,9 @@ enum StoreLock {
             // Read before the `flock` (plan note 1): only a bare pid matters here, and a pre-#463
             // writer replaces the file by path, which the inode check below catches.
             let priorPid = Payload.legacyPid(readAll(fd))
+            // A bare pid whose process started after the file was written is a reused pid, not
+            // the pre-#463 writer: that file is stale, and this claim takes it over.
+            let staleLegacy = priorPid.map { isReusedPid($0, writtenAt: mtime(fd), syscalls: syscalls) } ?? false
             guard syscalls.flock(fd, LOCK_EX | LOCK_NB) == 0 else {
                 let code = errno
                 close(fd)
@@ -92,7 +105,7 @@ enum StoreLock {
                 close(fd)
                 continue
             }
-            if let pid = priorPid, pid != me, isAlive(pid) {
+            if let pid = priorPid, pid != me, !staleLegacy, isAlive(pid) {
                 close(fd)   // releases a lock this process never advertised
                 return .legacy(pid: pid)
             }
@@ -112,6 +125,26 @@ enum StoreLock {
             return .acquired
         }
         return .failed(detail: "\(replacedDetail): \(path)")
+    }
+
+    /// Allowance between the clock that stamps a process's start and the one that stamps a file.
+    static let clockSlack: TimeInterval = 1
+
+    /// True when `pid` cannot be the process that wrote a file at `writtenAt`: it started later,
+    /// so the kernel handed the pid out again after the writer died. Fails open: a start that
+    /// cannot be read (no such process, or `EPERM` for another user's, which a pre-#463 Iris of
+    /// this user's never is) is a reused pid too, so a stale file never refuses every launch.
+    static func isReusedPid(_ pid: Int32, writtenAt: Date?, syscalls: Syscalls) -> Bool {
+        guard let writtenAt else { return false }
+        guard let started = syscalls.processStart(pid) else { return true }
+        return started > writtenAt.addingTimeInterval(clockSlack)
+    }
+
+    private static func mtime(_ fd: Int32) -> Date? {
+        var info = stat()
+        guard fstat(fd, &info) == 0 else { return nil }
+        let m = info.st_mtimespec
+        return Date(timeIntervalSince1970: TimeInterval(m.tv_sec) + TimeInterval(m.tv_nsec) / 1_000_000_000)
     }
 
     /// Gives up a lock this process holds but failed to advertise. Empties the file first, while
@@ -216,5 +249,26 @@ enum StoreLock {
 
     private static func errnoDetail(_ call: String, _ path: String, _ code: Int32) -> String {
         "\(call) \(path): \(String(cString: strerror(code))) (errno \(code))"
+    }
+}
+
+/// When a process started, as the kernel records it. A pid the kernel hands out again belongs to
+/// a process that started later (restored from D2's `LaunchLock`, deleted in #463 Task 6).
+struct ProcessStart: Equatable, Sendable {
+    let seconds: UInt64
+    let microseconds: UInt64
+
+    var date: Date {
+        Date(timeIntervalSince1970: TimeInterval(seconds) + TimeInterval(microseconds) / 1_000_000)
+    }
+
+    /// nil when no process has that pid, and also when it belongs to another user
+    /// (`proc_pidinfo` fails with `EPERM`). Callers treat nil as "not the writer" (fail open).
+    static func of(_ pid: Int32) -> ProcessStart? {
+        guard pid > 0 else { return nil }
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+        return ProcessStart(seconds: info.pbi_start_tvsec, microseconds: info.pbi_start_tvusec)
     }
 }

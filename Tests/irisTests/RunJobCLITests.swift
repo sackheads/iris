@@ -299,13 +299,14 @@ final class RunJobCLITests {
     func legacyHolderRefuses() async throws {
         let lock = lockPath()
         try FileManager.default.createDirectory(at: lock.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data("1\n".utf8).write(to: lock)
+        let parent = getppid()   // alive, this user's, not us, started before the file was written
+        try Data("\(parent)\n".utf8).write(to: lock)
         let err = Output()
         let code = await RunJobCLI.run(RunJobCLI.Invocation(target: "pr-sweep"), store: try ConversationStore.inMemory(),
                                        client: FakeLLMClient(responses: []), lockPath: lock,
                                        protectionEnabled: false, out: { _ in }, err: { err.write($0) })
         #expect(code == RunJobCLI.Exit.usage)
-        #expect(err.text.contains("an older Iris build (pid 1)"))
+        #expect(err.text.contains("an older Iris build (pid \(parent))"))
         // A bare pid may have been reused by something that is not Iris, and only then is
         // deleting the file the way out; the refusal names the file so the user can.
         #expect(err.text.contains(lock.path))

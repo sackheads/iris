@@ -75,7 +75,7 @@ extension LaunchGate.Seams {
             refuse: { refusal, hadLinks in
                 let alert = NSAlert()
                 alert.messageText = refusal.title
-                alert.informativeText = refusal.message(hadLinks: hadLinks)
+                alert.informativeText = refusal.message(hadLinks: hadLinks, lockPath: lock.path)
                 alert.addButton(withTitle: "Quit")
                 NSApp.activate(ignoringOtherApps: true)
                 alert.runModal()
@@ -89,6 +89,7 @@ extension LaunchGate.Seams {
             showWaitingNotice: { notice.show(gate: LaunchGate.shared) },
             hideWaitingNotice: { notice.hide() },
             activate: { NSApp.activate(ignoringOtherApps: true) },
-            deliverNotification: { _ = AppState.shared.handleNotificationResponse($0) })
+            // Through the sink's handler on the one delegate, so there is a single path in.
+            deliverNotification: { SystemNotificationCenter.shared?.onResponse?($0) })
     }
 }

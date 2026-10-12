@@ -66,7 +66,7 @@ Checked against `main` at `e418b29`. Paths are under `Sources/IrisKit/`.
    - It shows an alert, "Iris is already running on this home", activates the holder (`NSRunningApplication`), and exits 0.
    - When the launch carried a link (the bare-binary case), the alert says the link was not run.
    - A GUI that is itself waiting re-reads `kind` on every poll. If a second waiting GUI won the race, the loser quits the same way.
-   - A GUI that gets `.legacy` (a pre-#463 app, which never flocks) refuses and quits the same way.
+   - A GUI that gets `.legacy` (a pre-#463 app, which never flocks) refuses and quits the same way. (As built: the refusal adds "If pid N is not Iris, the pid was reused: delete <path> and open Iris again.", and the seeder's the same with "try again". A bare pid whose process started more than 1 s after the file's mtime, or whose start cannot be read, is a reused pid: the claim takes the file over rather than returning `.legacy`.)
    - A `seed-dev-home` holder is waited on, like a CLI. A copy takes seconds.
 9. **A GUI that finds a CLI holder waits** (ruling 2).
    - It polls `LOCK_NB` once a second on a main-queue `DispatchSourceTimer`, never `Task.sleep`, running decision 3's check each time. (As built: every 0.2 s while the holder is unnamed, so decision 5's second is several reads.)
@@ -87,8 +87,8 @@ Checked against `main` at `e418b29`. Paths are under `Sources/IrisKit/`.
     - `LaunchGate` holds raw URLs in memory, never logs them, and keeps up to `RunJobURLIntake.capacity`.
     - At `finishLaunch` they go to `receiveRunJobURL`, oldest first. `RunJobURLIntake` holds them until the bookkeeping is done, then fires them.
     - Overflow posts one line, "N links that arrived while Iris waited were dropped unread".
-    - (As built.) Notification clicks are held the same way. The notification delegate is installed at will-finish and touches no `AppState`, so a banner click that launches Iris while it waits is kept, up to 16, and handed to `handleNotificationResponse` at `finishLaunch`, in order.
-    - D2's deferral is deleted: `URLDeferral`, `PendingURLFire`, `deferURLFire`, `.deferred`, `foreignStoreHolder*`, `noteForeignStoreHolder`, the notice, the waiting lines, and all of `LaunchLock.swift`, `ProcessStart` included. Nothing signals a holder any more, and the refusal message needs only the pid.
+    - (As built.) Notification clicks are held the same way. The one notification delegate is built at will-finish, or earlier by the sink when a free lock opens the store in `IrisApp.init`, and touches no `AppState`, so a banner click that launches Iris while it waits is kept, up to 16, and handed to `handleNotificationResponse` at `finishLaunch`, in order.
+    - D2's deferral is deleted: `URLDeferral`, `PendingURLFire`, `deferURLFire`, `.deferred`, `foreignStoreHolder*`, `noteForeignStoreHolder`, the notice, the waiting lines, and all of `LaunchLock.swift`. (As built: `ProcessStart` moved to `StoreLock`, for the bare-pid staleness check under decision 8.) Nothing signals a holder any more, and the refusal message needs only the pid.
 13. **A windowless cold start (D2) still shows the waiting notice**, as the status item's hourglass plus a small "Iris is waiting" window, opened without activating the app. (As built, plan note 13: an AppKit `NSPanel` with `.nonactivatingPanel`, ordered front with `orderFrontRegardless()`, since SwiftUI's `OpenWindowAction` always activates.)
     - *Why both:* the status item alone is easy to miss, and nothing else would explain a link that seems to do nothing for up to the run's timeout.
     - D2 kept link launches windowless so that a chat window wouldn't open per link. One small notice, shown only in this rare case and closed when the launch completes, doesn't break that.
@@ -140,7 +140,7 @@ Checked against `main` at `e418b29`. Paths are under `Sources/IrisKit/`.
 - **`StoreLock`** (new, replaces `GUILock`):
   - `claim(at:kind:job:) -> Claim` (`.acquired`, `.held(Holder?)`, `.legacy(pid)`, `.failed(detail)`), plus `vacate()` and `holds(_:)`;
   - the fd static, the inode check, and the pure payload codec.
-  - `.legacy` is a bare-pid file naming a live pid: a pre-#463 holder, refused.
+  - `.legacy` is a bare-pid file naming a live pid that started before the file was written: a pre-#463 holder, refused.
 - **`ProcessRole`**, **`LiveProcessGroups`**.
 - **`LaunchGate`**, with `LaunchDecision.decide(_:unknownFor:) -> .open | .wait | .refuse`, pure (plan note 2); **`WaitingView`**; the waiting notice panel (`WaitingNoticePanel`).
 - **`IrisApp` / `AppDelegate`:** `openStore()`, `finishLaunch()`, the gated scenes, hotkey and terminate, and `RunJobURLEvents` delivering to the gate.
@@ -152,7 +152,7 @@ Checked against `main` at `e418b29`. Paths are under `Sources/IrisKit/`.
 
 **Unit tests.** They use Swift Testing and real `flock` on temp files, never `~/.iris` or `~/.iris-dev`. Suites that spawn get `.timeLimit(.minutes(1))` and `value(of:within:)`.
 - **`StoreLock`:**
-  - two claims in one process conflict;
+  - two claims in one process conflict; (as built: a second claim in the holding process returns `.acquired` and re-advertises, so `PerfCLI` needs no special case; another process is still refused);
   - a dropped claim still excludes;
   - a stub holder (`perl -MFcntl=:flock -e 'open F,">>",shift; flock F,LOCK_EX; print "ok\n"; sleep 60'`) blocks a claim, and SIGKILLing it frees the lock;
   - the fd has `FD_CLOEXEC` from the `open` (`fcntl(F_GETFD)`);

@@ -56,13 +56,17 @@ enum LaunchRefusal: Equatable, Sendable {
         }
     }
 
-    func message(hadLinks: Bool) -> String {
+    /// `lockPath` is named only for a `.legacy` holder: a bare pid may have been reused by a
+    /// process that is not Iris, and only then is deleting the file the way out (spec §1 row 7).
+    /// A JSON payload names a process that flocks the file; deleting it lets a second writer in.
+    func message(hadLinks: Bool, lockPath: String) -> String {
         let body: String
         switch self {
         case .otherApp(let pid):
             body = "Another Iris\(pid.map { " (pid \($0))" } ?? "") has this home open, so this one is quitting. Use that one."
         case .legacy(let pid):
-            body = "An older Iris build (pid \(pid)) has this home open, so this one is quitting. Quit it, then open Iris again."
+            body = "An older Iris build (pid \(pid)) has this home open, so this one is quitting. Quit it, then open Iris again. "
+                + "If pid \(pid) is not Iris, the pid was reused: delete \(lockPath) and open Iris again."
         case .failed(let detail):
             body = "Iris will not open its conversations without the lock, so it is quitting. \(detail)"
         }
@@ -124,6 +128,7 @@ final class LaunchGate {
     @ObservationIgnored private var links: [URL?] = []
     @ObservationIgnored private var responses: [NotificationResponse] = []
     @ObservationIgnored private var dropped = 0
+    @ObservationIgnored private var begun = false
     @ObservationIgnored private var didFinish = false
     @ObservationIgnored private var finished = false
     @ObservationIgnored private var refusalShown = false
@@ -141,7 +146,12 @@ final class LaunchGate {
     static let notificationCapacity = 16
 
     /// `IrisApp.init`: when the lock is free this opens the store right here, as today's `init` did.
-    func begin() { apply(seams.claim()) }
+    /// Once: a second call is a no-op, so a second `IrisApp.init` can never open the store twice.
+    func begin() {
+        guard !begun else { return }
+        begun = true
+        apply(seams.claim())
+    }
 
     /// One poll: re-claim, re-read the holder's `kind`, re-run decision 3's inode check.
     func poll() {

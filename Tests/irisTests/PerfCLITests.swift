@@ -232,7 +232,7 @@ struct PerfCLITests {
         defer { try? FileManager.default.removeItem(at: base) }
         let lockURL = PerfCLI.scratchLockURL(base: base)
         try FileManager.default.createDirectory(at: lockURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data("1\n".utf8).write(to: lockURL)   // pid 1 is launchd: alive, and not us
+        try Data("\(getppid())\n".utf8).write(to: lockURL)   // the runner's parent: alive, not us, started earlier
         #expect(throws: PerfCLIError.self) { try PerfCLI.claimScratchWorkspace(base: base) }
         #expect(!StoreLock.holds(lockURL))
     }

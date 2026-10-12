@@ -121,13 +121,16 @@ final class UserNotificationSink: NotificationSink {
 /// a nonisolated helper.
 @MainActor
 final class SystemNotificationCenter: NSObject, NotificationCenterClient, UNUserNotificationCenterDelegate {
-    /// The one delegate, from will-finish. The center does not retain its delegate.
+    /// The one delegate, built by whichever of will-finish and the sink asks first. The center
+    /// does not retain its delegate.
     private(set) static var shared: SystemNotificationCenter?
 
+    /// The sink's handler, set once the store is open. Reached only through `LaunchGate`, whose
+    /// `deliverNotification` calls it: the gate keeps the order of clicks held while waiting.
     var onResponse: (@MainActor (NotificationResponse) -> Void)?
-    /// Where a click goes first, when set: `LaunchGate`, which holds it until Iris is open
-    /// (#463). Touches no `AppState`.
-    private var route: (@MainActor (NotificationResponse) -> Void)?
+    /// Where every click goes first: `LaunchGate`, which holds it until Iris is open (#463).
+    /// Touches no `AppState`.
+    private var route: @MainActor (NotificationResponse) -> Void = { _ in }
     /// Whether a banner may be shown: not while Iris waits, since nothing it names can open.
     private var presenting: @MainActor () -> Bool = { true }
 
@@ -196,7 +199,7 @@ final class SystemNotificationCenter: NSObject, NotificationCenterClient, UNUser
         }
         let reply = NotificationResponse(actionId: actionId, userInfo: info)
         await MainActor.run {
-            if let route = self.route { route(reply) } else { self.onResponse?(reply) }
+            self.route(reply)
         }
     }
 

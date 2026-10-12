@@ -34,11 +34,22 @@ struct LaunchGateTests {
     func refusalWords() {
         let refusal = LaunchRefusal.otherApp(pid: 12)
         #expect(refusal.title == "Iris is already running on this home")
-        #expect(!refusal.message(hadLinks: false).contains(LaunchRefusal.linkNotRun))
-        #expect(refusal.message(hadLinks: true).contains("The link you opened was not run."))
+        #expect(!refusal.message(hadLinks: false, lockPath: "/l").contains(LaunchRefusal.linkNotRun))
+        #expect(refusal.message(hadLinks: true, lockPath: "/l").contains("The link you opened was not run."))
         #expect(LaunchRefusal.legacy(pid: 3).title == "Iris is already running on this home")
-        #expect(LaunchRefusal.failed(detail: "flock /x: Operation not supported (errno 45)").message(hadLinks: false)
+        #expect(LaunchRefusal.failed(detail: "flock /x: Operation not supported (errno 45)").message(hadLinks: false, lockPath: "/l")
             .contains("errno 45"))
+    }
+
+    @Test("only a .legacy refusal says how to clear the file, and names it")
+    func legacyRefusalNamesTheFile() {
+        let path = "/tmp/h/conversations.sqlite.lock"
+        #expect(LaunchRefusal.legacy(pid: 3).message(hadLinks: false, lockPath: path)
+            .contains("If pid 3 is not Iris, the pid was reused: delete \(path) and open Iris again."))
+        for refusal in [LaunchRefusal.otherApp(pid: 3), .otherApp(pid: nil), .failed(detail: "x")] {
+            let text = refusal.message(hadLinks: false, lockPath: path)
+            #expect(!text.contains("delete") && !text.contains(path), "a JSON holder flocks the file: never delete it")
+        }
     }
 
     @Test("the waiting sentence names the run, flattened and capped")
@@ -146,6 +157,19 @@ struct LaunchGateTests {
         h.gate.didFinishLaunching()
         #expect(h.finishes.count == 1)
         #expect(h.activations == 1, "did-finish activates, as today")
+    }
+
+    @Test("begin runs once: a second call claims nothing and opens nothing")
+    func beginIsIdempotent() {
+        let h = Harness([.acquired])
+        h.gate.begin()
+        h.gate.begin()
+        #expect(h.opened == 1)
+        let waiting = Harness([.held(Self.cli), .acquired])
+        waiting.gate.begin()
+        waiting.gate.begin()   // would claim again, and open, if not guarded
+        #expect(waiting.opened == 0)
+        #expect(waiting.intervals.count == 1)
     }
 
     @Test("while a CLI holds the store, openStore is never called; when it lets go, the launch completes")

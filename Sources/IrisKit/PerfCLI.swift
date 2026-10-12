@@ -110,23 +110,22 @@ enum PerfCLI {
     ///
     /// The lock is `StoreLock`'s, as kind `perf`: a live holder is refused rather than raced, and
     /// a crashed one's lock is gone with it. It is held for this process's life (#463 decision 2),
-    /// so a second claim here reuses that hold (plan note 4) instead of conflicting with it.
+    /// so a second claim here gets `.acquired` from `StoreLock.claim`, which reuses this process's
+    /// hold (plan note 4) instead of conflicting with it.
     static func claimScratchWorkspace(base: URL = FileManager.default.temporaryDirectory) throws -> URL {
         let url = scratchWorkspaceURL(base: base)
         let lockURL = scratchLockURL(base: base)
-        if !StoreLock.holds(lockURL) {
-            switch StoreLock.claimSettling(at: lockURL, kind: .perf) {
-            case .acquired:
-                break
-            case .held(let holder):
-                let who = holder.map { "pid \($0.pid)" } ?? "an unnamed process"
-                throw PerfCLIError.usage(
-                    "perf: another run (\(who)) already holds the scratch workspace at \(url.path) — wait for it to finish, or stop it")
-            case .legacy(let pid):
-                throw PerfCLIError.usage("perf: an older Iris build (pid \(pid)) holds \(lockURL.path) — wait for it, or stop it")
-            case .failed(let detail):
-                throw PerfCLIError.usage("perf: could not claim the scratch workspace lock at \(lockURL.path): \(detail)")
-            }
+        switch StoreLock.claimSettling(at: lockURL, kind: .perf) {
+        case .acquired:
+            break
+        case .held(let holder):
+            let who = holder.map { "pid \($0.pid)" } ?? "an unnamed process"
+            throw PerfCLIError.usage(
+                "perf: another run (\(who)) already holds the scratch workspace at \(url.path) — wait for it to finish, or stop it")
+        case .legacy(let pid):
+            throw PerfCLIError.usage("perf: an older Iris build (pid \(pid)) holds \(lockURL.path) — wait for it, or stop it")
+        case .failed(let detail):
+            throw PerfCLIError.usage("perf: could not claim the scratch workspace lock at \(lockURL.path): \(detail)")
         }
         try? FileManager.default.removeItem(at: url)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
