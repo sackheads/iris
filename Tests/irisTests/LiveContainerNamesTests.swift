@@ -14,11 +14,14 @@ final class LiveContainerNamesTests {
 
     /// A `container` stand-in: logs `delete --force <name>`, its own pid and its process group,
     /// then `exec`s `sleep`, so the logged pid *is* the sleep and a kill at the bound leaves no orphan.
+    /// The pid gets a line of its own before `ps` is forked, so a kill that lands while `ps` runs
+    /// still finds it; the full line follows. Each is one append, so parallel stubs never interleave.
     private func stub(sleeping seconds: Double) throws -> (script: URL, log: URL) {
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let log = base.appendingPathComponent("log-\(UUID().uuidString)")
         let script = base.appendingPathComponent("container-\(UUID().uuidString).sh")
         try """
+        echo "$* pid=$$" >> '\(log.path)'
         echo "$* pid=$$ pgid=$(ps -o pgid= -p $$ | tr -d ' ')" >> '\(log.path)'
         exec sleep \(seconds)
         """.write(to: script, atomically: true, encoding: .utf8)
@@ -51,7 +54,7 @@ final class LiveContainerNamesTests {
         #expect(finished == 3)
         // No bound under 5 s (CI is serial on 3 cores): three 2 s deletes in series take 6 s.
         #expect(Date().timeIntervalSince(started) < 5, "three 2 s deletes in parallel, not 6 s in series")
-        let logged = lines(log)
+        let logged = lines(log).filter { $0.contains(" pgid=") }
         #expect(Set(logged.compactMap { $0.split(separator: " ").dropFirst(2).first.map(String.init) })
             == ["iris-a", "iris-b", "iris-c"])
         for line in logged {

@@ -57,6 +57,22 @@ struct BlockingSpawnTests {
         #expect(!RunCommandProcessGroupTests.exists("sleep \(nap)"))
     }
 
+    @Test("#463: with newGroup, the timeout kills the child's whole group, not only the child")
+    func timeoutKillsTheGroup() {
+        let nap = Self.marker()
+        defer { RunCommandProcessGroupTests.killAll(nap) }
+        // The shell forks the sleep and waits on it: a pid-only kill ends the shell and orphans it.
+        let status = BlockingSpawn.run("/bin/sh", ["-c", "sleep \(nap) & wait"], timeoutSeconds: 0.5,
+                                       newGroup: true)
+        #expect(status == 128 + SIGKILL)
+        var gone = false
+        for _ in 0..<100 {
+            if !RunCommandProcessGroupTests.exists("sleep \(nap)") { gone = true; break }
+            usleep(20_000)
+        }
+        #expect(gone, "the forked sleep died with its group")
+    }
+
     @Test("detached returns at once and reports the status on a queue that is not the caller's")
     func detachedRuns() async {
         final class Box: @unchecked Sendable {

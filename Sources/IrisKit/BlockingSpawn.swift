@@ -16,7 +16,7 @@ enum BlockingSpawn {
     ///
     /// With `timeoutSeconds`, a child still running at the deadline is SIGKILLed and reaped, so a
     /// helper that hangs (a `container` daemon that never answers) cannot hold the caller's thread
-    /// for good.
+    /// for good. With `newGroup`, the SIGKILL goes to the child's whole group.
     ///
     /// With `newGroup`, the child leads a process group of its own, so a terminal's Ctrl-C (sent
     /// to the caller's foreground group) does not end the helper the caller is waiting on (#463).
@@ -58,7 +58,9 @@ enum BlockingSpawn {
                 if Date() >= deadline { break }
                 usleep(pollInterval)
             }
-            kill(pid, SIGKILL)
+            // With `newGroup` the child leads its group, so the kill takes what it forked with it
+            // (a pid-only kill left a stub's `ps` running). The pid kill is the fallback.
+            if !newGroup || (kill(-pid, SIGKILL) == -1 && errno == ESRCH) { kill(pid, SIGKILL) }
         }
         while waitpid(pid, &raw, 0) == -1 {
             if errno != EINTR { return nil }

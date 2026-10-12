@@ -244,7 +244,9 @@ struct SandboxClosedSessionTests {
         #expect(live.names.isEmpty)
     }
 
-    @Test("#463: a close from a cancelled task, whose remove launches nothing, keeps the name recorded")
+    /// The manager's bookkeeping only: MockRuntime launches nothing, so whether the real `remove`
+    /// spawns a delete from a cancelled task is not what this pins.
+    @Test("#463: a close from a cancelled task keeps the name recorded, because Task.isCancelled is set")
     func cancelledCloseKeepsTheName() async throws {
         let live = LiveContainerNames()
         let m = SandboxSessionManager(runtime: MockRuntime(), image: { "ubuntu:latest" }, live: live)
