@@ -99,12 +99,13 @@ enum StoreLock {
             let written = line.withUnsafeBytes { syscalls.pwrite(fd, $0.baseAddress!, $0.count, 0) }
             guard written == line.count else {
                 let code = errno
-                close(fd)
+                abandon(fd)
+                if written >= 0 { return .failed(detail: "write \(path): wrote \(written) of \(line.count) bytes") }
                 return .failed(detail: errnoDetail("write", path, code))
             }
             guard ftruncate(fd, off_t(line.count)) == 0 else {
                 let code = errno
-                close(fd)
+                abandon(fd)
                 return .failed(detail: errnoDetail("truncate", path, code))
             }
             descriptors.withLock { $0[path] = fd }
@@ -113,9 +114,17 @@ enum StoreLock {
         return .failed(detail: "\(replacedDetail): \(path)")
     }
 
+    /// Gives up a lock this process holds but failed to advertise. Empties the file first, while
+    /// the lock is still held, so no partial line or stale payload outlives the failed claim.
+    private static func abandon(_ fd: Int32) {
+        _ = ftruncate(fd, 0)
+        close(fd)
+    }
+
     /// `claim`, retrying a held lock whose holder has not said what it is, for up to `settle`
     /// seconds (decision 5's re-read). For the CLI and the seeder, which may block; the app counts
     /// the same second across its polls instead (plan note 2).
+    /// Blocks its thread with `usleep`: never call it from the cooperative pool (invariant 4).
     static func claimSettling(at url: URL, kind: Kind, job: String? = nil, settle: TimeInterval = 1,
                               syscalls: Syscalls = .live) -> Claim {
         let deadline = Date().addingTimeInterval(settle)
@@ -159,9 +168,17 @@ enum StoreLock {
     static func isAlive(_ pid: Int32) -> Bool { IrisDefaults.isProcessAlive(pid) }
 
     enum Payload {
+        /// Caps `job` in Unicode scalars, not graphemes: a scalar is at most 6 bytes once encoded
+        /// (`\uXXXX`), so the line stays far below `readAll`'s 4 KiB and always reads back whole.
+        static let maxJobScalars = 256
+
         static func encode(_ holder: Holder) -> Data {
             var object: [String: Any] = ["pid": Int(holder.pid), "kind": holder.kind.rawValue]
-            if let job = holder.job { object["job"] = job }
+            if let job = holder.job {
+                var scalars = String.UnicodeScalarView()
+                scalars.append(contentsOf: job.unicodeScalars.prefix(maxJobScalars))
+                object["job"] = String(scalars)
+            }
             let json = (try? JSONSerialization.data(withJSONObject: object,
                                                     options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data("{}".utf8)
             return json + Data("\n".utf8)

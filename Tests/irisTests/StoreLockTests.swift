@@ -158,6 +158,57 @@ final class StoreLockTests {
         #expect(StoreLock.claim(at: url, kind: .app) == .acquired, "a lock it never advertised was released")
     }
 
+    @Test("a short payload write is .failed, leaves the file empty, and frees the lock")
+    func shortWriteLeavesNothingBehind() throws {
+        let url = path()
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data((#"{"kind":"app","pid":999999}"# + "\n").utf8).write(to: url)   // a dead holder's line
+        var calls = StoreLock.Syscalls.live
+        calls.pwrite = { fd, buffer, count, offset in Darwin.pwrite(fd, buffer, count / 2, offset) }
+        guard case .failed(let detail) = StoreLock.claim(at: url, kind: .runJob, job: "half", syscalls: calls) else {
+            Issue.record("expected .failed"); return
+        }
+        #expect(detail.contains("wrote"))
+        #expect(try Data(contentsOf: url).isEmpty, "no half line and no stale payload outlive the claim")
+        #expect(!StoreLock.holds(url))
+        #expect(LockStub.tryLock(url) == 0)
+    }
+
+    @Test("a lock file replaced once with nobody holding it is reopened, and the payload lands on the new inode")
+    func replacedOnceWithoutHolderAcquires() throws {
+        let url = path()
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        let tries = LockedCell(0)
+        var calls = StoreLock.Syscalls.live
+        calls.afterOpen = { attempt in
+            tries.value += 1
+            guard attempt == 0 else { return }
+            let fresh = url.deletingLastPathComponent().appendingPathComponent("fresh")
+            FileManager.default.createFile(atPath: fresh.path, contents: nil)
+            _ = rename(fresh.path, url.path)
+        }
+        #expect(StoreLock.claim(at: url, kind: .app, syscalls: calls) == .acquired)
+        #expect(tries.value == 2, "the first descriptor was on the replaced inode")
+        let fd = try #require(StoreLock.descriptor(for: url))
+        var mine = stat()
+        var there = stat()
+        #expect(fstat(fd, &mine) == 0)
+        #expect(stat(url.path, &there) == 0)
+        #expect(mine.st_ino == there.st_ino && mine.st_dev == there.st_dev)
+        #expect(StoreLock.readHolder(at: url) == .init(pid: me, kind: .app, job: nil))
+        #expect(LockStub.tryLock(url) == 3)
+    }
+
+    @Test("a long job is capped, so the payload always fits the read and decodes")
+    func longJobIsCapped() {
+        let job = String(repeating: "\u{1}", count: 5000)   // each escapes to six bytes
+        let line = StoreLock.Payload.encode(.init(pid: 7, kind: .runJob, job: job))
+        #expect(line.count < 4096)
+        let decoded = StoreLock.Payload.decode(line)
+        #expect(decoded?.job?.unicodeScalars.count == StoreLock.Payload.maxJobScalars)
+    }
+
     @Test("a bare pid naming a live process is a pre-#463 holder, .legacy")
     func bareLivePidIsLegacy() throws {
         let url = path()

@@ -41,7 +41,7 @@ Checked against `main` at `e418b29`. Paths are under `Sources/IrisKit/`.
 3. **The locked file must be the one at the path.**
    - After every successful `flock`, including the waiting app's, compare the fd's `fstat` device and inode with a `stat` of the path. If they differ, close the fd, reopen and retry.
    - After 3 tries the claim is `.failed`.
-   - This covers a pre-#463 app's rename, the old docs' "delete the file", and an editor.
+   - This protects the claimer from a pre-#463 app's rename, the old docs' "delete the file", and an editor. It does not protect a holder whose file is replaced under it (§1 row 7).
 4. **`.failed` refuses everywhere.** Any error other than `EWOULDBLOCK` (`ENOTSUP`, `ENOLCK`, `EACCES`, a read-only or network mount) refuses, naming the path and the errno.
    - The CLI and the seeder exit 1.
    - The app shows an alert and quits. It never opens the store unlocked.
@@ -126,7 +126,7 @@ Checked against `main` at `e418b29`. Paths are under `Sources/IrisKit/`.
 | 4. `closeRunningRuns` marks the CLI's live run interrupted | 11: it runs after the CLI is dead. |
 | 5. Double runs | One process runs jobs per home. |
 | 6. `reapOrphans` kills the CLI's containers | 11, for one home (§5). |
-| 7. App deletes the lock on quit | 1, 2: nothing unlinks or closes it. 3 survives anyone who does. |
+| 7. App deletes the lock on quit | 1, 2: nothing unlinks or closes it. 3 protects the claimer only: a claim never takes an inode that is no longer at the path. It does not protect the incumbent. If a pre-#463 build rename-overwrites or deletes the lock file while a new-style holder is alive, the next new claimer locks the new file and acquires beside that holder. Old builds never flock, so this is an accepted mixed-version hazard while the upgrade is in progress. Because of it, a new build's refusal text never advises deleting a lock file with a JSON payload. Deletion advice is only for a `.legacy` bare-pid file whose pid is not Iris. |
 | 8. Two GUIs on one home | 8. |
 | 9. Migrations against an open store | The CLI opens only after its claim (pinned in §3). The app migrates in `openStore()`. |
 
