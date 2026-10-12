@@ -104,7 +104,11 @@ Every line number below was read on `main` at `e418b29`. Re-read the cited lines
     - The notice is an AppKit `NSPanel` with `.nonactivatingPanel`, ordered front with `orderFrontRegardless()` (Task 7, `WaitingNoticePanel`).
     - `init` no longer activates. Did-finish activates through `Seams.activate` in every case but one: a link that launched Iris while it waits.
     - A Dock launch, a free-lock link launch (D2's) and the hotkey still activate, as before.
-14. **For the owner: a delegate's skill write no longer refreshes the main chat's prompt** (#489, Task 2). Today a subagent's or evaluator's `create_skill` reaches the main engine through `.shared` (`SubagentManager.swift:152`, `GoalEvaluator.swift:77`). Afterwards it refreshes only the delegate's own short-lived engine. The main chat's skill list stays stale until its next prompt rebuild (a `/skills reload`, a skill write of its own, or a new conversation). Decision 15 permits this. The plan ships it, and asks the owner whether a follow-up should route a delegate's hook to its parent engine.
+14. **A delegate's skill write must still reach the main chat (coordinator re-ruling on #490).**
+    - Today a subagent's or evaluator's `create_skill` reaches the main engine through `.shared` (`SubagentManager.swift:152`, `GoalEvaluator.swift:77`), and the skill appears on the main chat's next turn.
+    - The main engine caches its prompt (`ensureSystemPrompt` returns the cache, `iris.swift:533-535`), and the app has one main engine for its whole life (`AppState.swift:1192`). A new conversation, a switch and `/new` never rebuild that cache. So a hook that refreshed only the writing engine would keep a delegate's skill out of the main chat until a restart.
+    - So the injected `onSkillsChanged` invalidates the writing engine **and** its owner's main engine (`state?.engine`, which is `AppState.engine`, never `.shared`). In the CLI that owner is the run's own `AppState`, so #489's fix still holds.
+    - Task 2's `delegateWriteInvalidatesTheOwner` pins it, with a mutation check.
 15. **A second Ctrl-C deletes the run's containers (coordinator ruling on #490).** This extends decision 16's exit-now, and plan note 8's gap closes with it.
     - The names come from a lock-protected `LiveContainerNames` box, not the registry actors, so the signal path reads them synchronously with no pool hop (#372). Each container is recorded where it is created: the session in `SandboxSessionManager.create`, gate containers in `GateContainerRegistry.register`, and the hook and `run_command` one-offs in `EphemeralContainerRegistry.register`.
     - It never sweeps by the `iris-` prefix, which `~/.iris` and `~/.iris-dev` share.
@@ -797,6 +801,23 @@ struct SkillInvalidationTests {
     }
 
     @MainActor
+    @Test("plan note 14: a delegate engine's skill write invalidates the owner's main engine too")
+    func delegateWriteInvalidatesTheOwner() async throws {
+        let (paths, cleanup) = try tempHome(); defer { cleanup() }
+        let state = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
+        let main: IrisEngine = state.engine
+        // A delegate over the same state, built the way `SubagentManager` builds one.
+        let delegate = IrisEngine(state: state, client: FakeLLMClient(responses: []), protectionEnabled: false)
+        await main.setSystemPrompt(text: "main, primed")
+        await delegate.setSystemPrompt(text: "delegate, primed")
+        let executor = await delegate.executor
+        let body = String(repeating: "A procedure step. ", count: 4)
+        #expect(await executor.createSkill(name: "probe", description: "d", body: body, paths: paths).hasPrefix("Successfully"))
+        #expect(await delegate.systemPrompt == nil)
+        #expect(await main.systemPrompt == nil, "the main chat sees the delegate's skill on its next turn, not after a restart")
+    }
+
+    @MainActor
     @Test("an engine's executor invalidates that engine's prompt")
     func engineExecutorInvalidatesItsOwnEngine() async throws {
         let (paths, cleanup) = try tempHome(); defer { cleanup() }
@@ -851,8 +872,14 @@ Replace each of the four `await AppState.shared.invalidateEnginePrompt()` lines 
     var executor: ToolExecutor {
         var executor = ToolExecutor.shared
         executor.jobToolsProvider = jobToolsProvider()
-        // #489: a skill written through this engine's tools rebuilds this engine's prompt.
-        executor.onSkillsChanged = { [weak self] in await self?.invalidateSystemPrompt() }
+        // #489: a skill written through this engine's tools rebuilds this engine's prompt, and
+        // the owner's main engine's too (plan note 14): a delegate's skill must reach the main
+        // chat, whose engine caches its prompt for the life of the app. Never `AppState.shared`.
+        executor.onSkillsChanged = { [weak self, weak state] in
+            await self?.invalidateSystemPrompt()
+            let owner = await MainActor.run { state?.engine }
+            if let owner, owner !== self { await owner.invalidateSystemPrompt() }
+        }
         return executor
     }
 ```
@@ -869,11 +896,11 @@ At `:4086`, replace `await ToolExecutor.shared.createSkill(` with `await self.en
 - [ ] **Step 7: Run the tests to verify they pass.**
 
 Run: `timeout 300 scripts/test-filter.sh SkillInvalidationTests` then `timeout 300 scripts/test-filter.sh SkillCurationAdvancementsTests`
-Expected: PASS, 5 tests, then the curation suite's count unchanged from `main` (its `curateSkills(paths:)` call compiles as it is, with no hook).
+Expected: PASS, 6 tests, then the curation suite's count unchanged from `main` (its `curateSkills(paths:)` call compiles as it is, with no hook).
 
 - [ ] **Step 8: Confirm nothing in the module names `invalidateEnginePrompt`.** Run `grep -rn "invalidateEnginePrompt\|AppState.shared.invalidate" Sources Tests`. Expected: no output.
 
-- [ ] **Step 9: Mutation checks.** Put `await AppState.shared.invalidateEnginePrompt()` back in place of `await onSkillsChanged?()` in `createSkill` only, and restore `invalidateEnginePrompt` in `AppState`. Run `SkillInvalidationTests`. Expected: `crudCallsTheHook` fails (count 2). Revert. Do the same in `afterSkillFileWrite`. Expected: `writeFileOntoASkillCallsTheHook` fails. Revert. The no-`.shared` half is Task 8 Step 8.
+- [ ] **Step 9: Mutation checks.** Put `await AppState.shared.invalidateEnginePrompt()` back in place of `await onSkillsChanged?()` in `createSkill` only, and restore `invalidateEnginePrompt` in `AppState`. Run `SkillInvalidationTests`. Expected: `crudCallsTheHook` fails (count 2). Revert. Do the same in `afterSkillFileWrite`. Expected: `writeFileOntoASkillCallsTheHook` fails. Revert. Then delete the `owner` lines from `IrisEngine.executor`'s hook. Expected: `delegateWriteInvalidatesTheOwner` fails. Revert. The no-`.shared` half is Task 8 Step 8.
 
 - [ ] **Step 10: Check warnings.** Run `scripts/check-warnings.sh`. Expected: exit 0.
 
@@ -2821,7 +2848,10 @@ Run on `work`'s laptop, on PR 1's branch, before the PR merges. Post each number
 - `ITEM='osascript -e "tell application \"System Events\" to get description of every menu bar item of menu bar 2 of process \"Iris Dev\""'`
 - `HOTKEY='osascript -e "tell application \"System Events\" to key code 49 using {command down, shift down, option down}"'`
 - `ROW='sqlite3 ~/.iris-dev/conversations.sqlite "SELECT triggerKind, status, failureReason FROM job_runs WHERE jobName = '"'"'463-nap'"'"' ORDER BY startedAt DESC LIMIT 1"'`
-- `DENY='/tmp/irisgui/ui click 930 413; sleep 1; osascript -e "tell application \"System Events\" to count windows of process \"SecurityAgent\""'`. A freshly signed Iris Dev raises a Keychain prompt on every launch, and it blocks `App.init` until answered. So the waiting gate never shows until it is denied. ≈930,413 pt is its Deny button on `work`'s display. **Every launch below** (`open "$APP"`, `open "$LINK"`, and the bare `$CLI &` GUI) is followed at once by `eval $DENY`, before anything else is read. Expected output: `0`. Run it after a `$CLI --run-job` start too, whenever `pgrep -x SecurityAgent` lists one.
+- `DENY='sleep 1; pgrep -x SecurityAgent >/dev/null && /tmp/irisgui/ui click 930 413; sleep 1; pgrep -x SecurityAgent >/dev/null && echo prompt-still-up || echo no-prompt'`. A freshly signed Iris Dev raises a Keychain prompt, and the prompt blocks until it is answered. ≈930,413 pt is its Deny button on `work`'s display. The command clicks only when SecurityAgent is up, so it never lands on the waiting panel or the refusal alert.
+  - Under the gate, the Keychain read probably moves from launch to `openStore()` (`ConfigManager.swift:422` is first touched there; unverified).
+  - So run `eval $DENY` after every launch (`open "$APP"`, `open "$LINK"`, the bare `$CLI &` GUI), **and again right after each gate opens** (each `cli-exit=`, `exit=` or `kill -9` below, before the "within N s" checks), and after any `$CLI --run-job` start.
+  - Expected output: `no-prompt`.
 - `SETTINGS='/tmp/irisgui/ui cmdkey 43'`: Cmd-, through `work`'s CGEvent helper (key code 43 is the comma). System Events keystrokes do not reliably reach SwiftUI there.
 - `PD=com.bnaylor.iris.dev` and `PKEYS="PRIMARY_PROVIDER ANTHROPIC_AUTH_MODE ANTHROPIC_VERTEX_PROJECT ANTHROPIC_VERTEX_LOCATION"`.
 
@@ -2836,11 +2866,12 @@ Run on `work`'s laptop, on PR 1's branch, before the PR merges. Post each number
 3b. **Provider: Claude on Vertex in the dev domain.** Job runs need it, because Gemini refuses job prompts (#475). With nothing running:
 
    ```sh
+   VPROJ=gke-claude-dev; VLOC=global
    for k in $=PKEYS; do defaults read $PD $k > "$DD/prev-$k" 2>/dev/null || rm -f "$DD/prev-$k"; done
    defaults write $PD PRIMARY_PROVIDER Anthropic
    defaults write $PD ANTHROPIC_AUTH_MODE "Vertex AI (ADC)"
-   defaults write $PD ANTHROPIC_VERTEX_PROJECT "$VPROJ"    # the project work's Vertex budget is on
-   defaults write $PD ANTHROPIC_VERTEX_LOCATION "$VLOC"    # the region that project serves Claude from
+   defaults write $PD ANTHROPIC_VERTEX_PROJECT "$VPROJ"
+   defaults write $PD ANTHROPIC_VERTEX_LOCATION "$VLOC"
    for k in $=PKEYS; do echo "$k=$(defaults read $PD $k)"; done
    ```
 
@@ -2878,7 +2909,7 @@ Run on `work`'s laptop, on PR 1's branch, before the PR merges. Post each number
    - Within 120 s more: `sqlite3 ~/.iris-dev/conversations.sqlite "SELECT triggerKind, status FROM job_runs WHERE jobName = '463-nap' ORDER BY startedAt DESC LIMIT 2"` is `url|completed` then `manual|completed`, and the step-5 card count has grown by 2.
 8. **Spec check 5: `--run-job` with the app open.** With Iris Dev open (from step 7), run `$CLI --run-job 463-nap; echo "exit=$?"`. Expected: stderr contains `the Iris app (pid N) has this home open`, and `exit=1`.
 9. **Spec check 4: two GUIs on one home, both orders, and a link.**
-   - (a) With Iris Dev open, `$CLI &` (the bare binary's GUI) and wait 5 s. `osascript -e 'tell application "System Events" to get value of every static text of every window of process "iris"'`. Expected: contains `Iris is already running on this home`. Click Quit (`osascript -e 'tell application "System Events" to click button "Quit" of window 1 of process "iris"'`). Expected: `pgrep -fl "\.build/debug/iris"` is empty and Iris Dev is frontmost.
+   - (a) With Iris Dev open, `$CLI &` (the bare binary's GUI) and wait 5 s. `osascript -e 'tell application "System Events" to get value of every static text of every window of process "iris"'`. Expected: contains `Iris is already running on this home`. Click Quit (`osascript -e 'tell application "System Events" to click button "Quit" of window 1 of process "iris"'`). Expected: `pgrep -fl "\.build/debug/iris"` is empty, and Iris Dev is frontmost or was offered activation (macOS 14's cooperative activation may refuse `NSRunningApplication.activate()`; record which).
    - (b) Quit Iris Dev. `$CLI &`, wait until its window opens, then `open "$APP"`. Expected: Iris Dev shows the same alert; after Quit, `pgrep -fl "Iris Dev"` is empty and `$CLI`'s GUI is still running.
    - (c) With the bare binary still up, note `N=$(sqlite3 ~/.iris-dev/conversations.sqlite "SELECT count(*) FROM job_runs WHERE jobName = '463-nap'")`. Run `open "$LINK"`. Expected: Iris Dev's alert text also contains `The link you opened was not run.`, and after Quit the count is still `N` 10 s later. Quit the bare binary.
 10. **Spec check 7: SIGKILL the CLI while the app waits.**
@@ -2886,7 +2917,7 @@ Run on `work`'s laptop, on PR 1's branch, before the PR merges. Post each number
     - `kill -9 $CLIPID`.
     - Within 2 s: `eval $TEXTS` no longer contains `is using this home`.
     - `eval $ROW`. Expected: `manual|interrupted|the Iris process running it ended`.
-    - `container list --all | grep -c iris-`. Expected: `0` (`reapOrphans` in `openStore()` took the dead CLI's container).
+    - `eval $DENY` (the gate just opened). Then `container list --all | grep -c "$SESSION"`, where `SESSION` is the session name `container list --all | grep iris-` showed before the `kill -9`. Expected: `0` (`reapOrphans` in `openStore()` took the dead CLI's container).
 11. **The lock file is never replaced.** `stat -f %i ~/.iris-dev/conversations.sqlite.lock` printed at step 4 and now. Expected: the same inode.
 12. **Teardown.** In Iris Dev: `/jobs delete 463-nap`. Quit. Restore the provider settings, before `$DD` goes: `for k in $=PKEYS; do if [ -f "$DD/prev-$k" ]; then defaults write $PD $k "$(cat "$DD/prev-$k")"; else defaults delete $PD $k 2>/dev/null; fi; done`. Then `$LSR -u "$APP"`, `rm -rf "$DD"`, and `python3 ~/.claude/skills/gui-test-lease/lease.py release`. Expected: exit 0.
 
@@ -3129,14 +3160,14 @@ final class LiveContainerNamesTests {
     deinit { try? FileManager.default.removeItem(at: base) }
 
     /// A `container` stand-in: logs `delete --force <name>`, its own pid and its process group,
-    /// then sleeps `seconds`.
+    /// then `exec`s `sleep`, so the logged pid *is* the sleep and a kill at the bound leaves no orphan.
     private func stub(sleeping seconds: Double) throws -> (script: URL, log: URL) {
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let log = base.appendingPathComponent("log-\(UUID().uuidString)")
         let script = base.appendingPathComponent("container-\(UUID().uuidString).sh")
         try """
         echo "$* pid=$$ pgid=$(ps -o pgid= -p $$ | tr -d ' ')" >> '\(log.path)'
-        sleep \(seconds)
+        exec sleep \(seconds)
         """.write(to: script, atomically: true, encoding: .utf8)
         return (script, log)
     }
@@ -3183,7 +3214,7 @@ final class LiveContainerNamesTests {
     func hungDeleteIsBounded() async throws {
         let live = LiveContainerNames()
         live.add("iris-stuck")
-        let (script, _) = try stub(sleeping: 30)
+        let (script, log) = try stub(sleeping: 30)
         let started = Date()
         let task = Task.detached {
             live.deleteAll(within: 0.5) { name in ("/bin/sh", [script.path, "delete", "--force", name]) }
@@ -3191,6 +3222,15 @@ final class LiveContainerNamesTests {
         _ = try await value(of: task, within: 10)
         #expect(Date().timeIntervalSince(started) < 4)
         #expect(live.names == ["iris-stuck"], "not deleted, so still recorded")
+        // The helper itself was SIGKILLed at the bound, not merely stopped being waited for.
+        let pid = try #require(lines(log).first?.split(separator: " ").first { $0.hasPrefix("pid=") }
+            .flatMap { Int32($0.dropFirst(4)) })
+        var gone = false
+        for _ in 0..<200 {
+            if kill(pid, 0) == -1 && errno == ESRCH { gone = true; break }
+            usleep(10_000)
+        }
+        #expect(gone, "BlockingSpawn's timeout killed and reaped the hung delete")
     }
 
     @Test("with no container binary, or nothing recorded, nothing is spawned")
@@ -3328,7 +3368,7 @@ Expected: PASS, 5 tests; then `main`'s closed-session count plus 1; then `main`'
 - [ ] **Step 7: Mutation checks.** Make each change alone, run `LiveContainerNamesTests`, confirm the named test fails, then revert it.
   - Pass `newGroup: false` in `deleteAll`. Expected: `deletesInParallelInTheirOwnGroups` fails on `pid == pgid`.
   - Replace `BlockingSpawn.detached(…)` with a synchronous `BlockingSpawn.run(…)` in the loop (serial deletes). Expected: `deletesInParallelInTheirOwnGroups` fails on the 2.5 s bound.
-  - Drop `timeoutSeconds: seconds`. Expected: `hungDeleteIsBounded` fails on its 4 s bound.
+  - Drop `timeoutSeconds: seconds`. Expected: `hungDeleteIsBounded` fails on `gone` (the 0.5 s wait still returns, so it is the stub's pid that tells: it is still alive).
   - Delete `live.add(name(for: id))` in `attemptCreate`. Expected: `SandboxClosedSessionTests/sessionNameIsRecorded` fails.
 
 - [ ] **Step 8: Check warnings.** Run `scripts/check-warnings.sh`. Expected: exit 0.
@@ -3759,7 +3799,8 @@ extension JobRunner {
         return await withCheckedContinuation { continuation in
             first.install(continuation)
             Task { await operation(); first.resolve(true) }
-            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { first.resolve(false) }
+            // A queue of its own, as `BlockingSpawn.detached` uses: `.global()` does not overcommit.
+            DispatchQueue(label: "iris.jobrunner.bound").asyncAfter(deadline: .now() + seconds) { first.resolve(false) }
         }
     }
 }
@@ -3968,7 +4009,7 @@ final class RunJobCLIStopTests {
                                 gate: { _, _ in cliStop.receive(SIGINT); return .unchanged(signal: "same") },
                                 stop: cliStop, out: { _ in }, err: { _ in })
         #expect(events.values == ["reset", "kill", "delete", "vacate", "exit 2"],
-                "a script gate's container is in the box (Task 12), so the delete reaches it")
+                "the exit path runs the kill and the delete, in that order; Task 12 shows a gate's container is in the box")
         #expect(try store.ledger.runs(jobId: job.id, limit: 5).isEmpty)
     }
 
@@ -4038,6 +4079,8 @@ struct CLISignalTests {
         await #expect(processExitsWith: .success) {
             let fired = DispatchSemaphore(value: 0)
             let installation = CLISignals.install(onSignal: { if $0 == SIGHUP { fired.signal() } })
+            // Exit 5 also means this `swift test` itself started with SIGINT or SIGHUP ignored
+            // (`nohup`, a non-interactive `&`): run it in the foreground.
             guard installation.installed == CLISignals.stopping else { exit(5) }
             for signal in CLISignals.stopping {
                 guard CLISignalTests.raw(signal) > 1 else { exit(2) }
@@ -4076,6 +4119,9 @@ struct CLISignalTests {
             guard (try? process.run()) != nil else { exit(2) }
             process.waitUntilExit()
             guard process.terminationReason == .uncaughtSignal, process.terminationStatus == SIGTERM else { exit(3) }
+            // ProcessGroupRunner resets every disposition in the child (POSIX_SPAWN_SETSIGDEF), so it
+            // is checked against a real inherited ignore: only that reset can make this child die.
+            _ = signal(SIGTERM, SIG_IGN)
             let result = await ProcessGroupRunner(registry: LiveProcessGroups())
                 .run(executable: "/bin/sh", arguments: ["-c", "kill -TERM $$; sleep 5"], environment: nil, currentDirectory: nil)
             guard case .success(let out) = result, out.status == 128 + SIGTERM else { exit(4) }
@@ -4232,7 +4278,12 @@ final class CLIStop: @unchecked Sendable {
          drainGroups: @escaping @Sendable () -> Bool = { LiveProcessGroups.shared.waitUntilEmpty(within: 3) },
          killGroups: @escaping @Sendable () -> Void = { LiveProcessGroups.shared.killAll() },
          deleteContainers: @escaping @Sendable () -> Void = { _ = LiveContainerNames.shared.deleteAll(within: 5) },
-         resetInterrupt: @escaping @Sendable () -> Void = { _ = signal(SIGINT, SIG_DFL) },
+         resetInterrupt: @escaping @Sendable () -> Void = {
+             // Only our own catch is reset: an inherited ignore (plan note 16) stays ignored.
+             var now = sigaction()
+             sigaction(SIGINT, nil, &now)
+             if unsafeBitCast(now.__sigaction_u, to: UInt.self) > 1 { _ = signal(SIGINT, SIG_DFL) }
+         },
          vacate: @escaping @Sendable () -> Void,
          exitNow: @escaping @Sendable (Int32) -> Void = { code in
              fflush(stdout)
@@ -4318,7 +4369,8 @@ Expected: PASS: 7 tests (9 cases: `signalMidRun` runs once per signal), then 5, 
   - In `exitAtOnce`, delete `deleteContainers()`. Expected: `secondSignalExitsNow`, `signalBeforeAdmission` and `signalDuringDryRun` fail (the coordinator's ruling: exit-now deletes the containers).
   - Move `resetInterrupt()` after `deleteContainers()`. Expected: `secondSignalExitsNow` fails on the order.
   - In `RunJobCLI.run`, delete the `settle()` line. Expected: `signalMidRun` fails on `registry.count == 0` for all three signals.
-  - Replace the handler with `action.__sigaction_u.__sa_handler = SIG_IGN`. Expected: `installCatchesAndRestarts` and `childrenKeepTheDefaultDisposition` fail.
+  - Replace the handler with `action.__sigaction_u.__sa_handler = SIG_IGN`. Expected: `installCatchesAndRestarts` fails, and so does the `Process` half of `childrenKeepTheDefaultDisposition` (exit 3).
+  - In `ProcessGroupRunner.launch`, drop `POSIX_SPAWN_SETSIGDEF` from the flags. Expected: the `ProcessGroupRunner` half of `childrenKeepTheDefaultDisposition` fails (exit 4): the child inherits the ignore and sleeps out its 5 s.
   - Drop `SA_RESTART`. Expected: `installCatchesAndRestarts` fails.
   - Delete the `if ignored, keepsInheritedIgnore.contains(signal) { continue }` line. Expected: `inheritedIgnoreIsKept` fails.
   - Remove `SIGHUP` from `stopping`. Expected: `stoppingSignals` and `installCatchesAndRestarts` fail (a clean stop on SIGINT/TERM/HUP).
@@ -4387,7 +4439,7 @@ Open the PR against `main` (`gh api repos/sackheads/iris/pulls -f base=main -f h
 
 ### Task 16: GUI pass for PR 2 (`work`, under the lease)
 
-Spec check 6, adjusted by plan note 8. Run on `work`, on PR 2's branch, before it merges. Post each result as the command and its output. The setup variables are Task 10's; repeat its "Before you start" block and steps 1-4 (build, registrations, the `463-nap` job), with `--purpose "iris: #463 PR 2 clean stop"`. The CLI is signalled the way a terminal's Ctrl-C reaches it: to its whole process group, the CLI and its `Process` children (the `container exec` client) together.
+Spec check 6, adjusted by plan note 8. Run on `work`, on PR 2's branch, before it merges. Post each result as the command and its output. The setup variables are Task 10's; repeat its "Before you start" block and steps 1-4 (build, registrations, the `463-nap` job), with `--purpose "iris: #463 PR 2 clean stop"`. The CLI is signalled the way a terminal's Ctrl-C reaches it: to its process group. That reaches the CLI, but not its `Process` children: those lead groups of their own (`ProcessGroupRunner.swift:15-16`), so it is the CLI's stop that ends them.
 - `set -m` cannot do this from an agent's shell. A non-interactive zsh refuses it (`can't change option: -m`).
 - A non-interactive shell also starts `&` jobs with SIGINT ignored (POSIX).
 - So every start below goes through this wrapper, tested on `work`. It restores SIGINT and SIGHUP to their defaults and makes the CLI the leader of a group of its own, so `$PG` is both its pid and its group id:
@@ -4403,28 +4455,29 @@ GROUP() { perl -e '$SIG{INT}=$SIG{HUP}="DEFAULT"; setpgrp(0,0); exec @ARGV' "$@"
      GROUP "$CLI" --run-job 463-nap & PG=$!
      ```
 
-   - Wait until `eval $HOLDER` shows the run-job payload, then 15 s more (the turn is inside `sleep 90`). Run `container list --all | grep iris-` and note the session container's name.
-   - `kill -INT -$PG; wait $PG; echo "exit=$?"`. Expected: within 20 s, `exit=2`.
+   - Wait until `eval $HOLDER` shows the run-job payload, then 15 s more (the turn is inside `sleep 90`). Run `container list --all | grep iris-` and note the session container's name as `SESSION`. Grep for that name below, never the bare `iris-` prefix: the installed `~/.iris` app's containers share it.
+   - `kill -INT -$PG; wait $PG; echo "exit=$?"`. Expected: `exit=2`, within the worst case of 15 s (grace) + 5 s (teardown) + 3 s (drain) + 5 s (deletes) = 28 s, and normally a few seconds.
    - `eval $ROW`. Expected: `manual|interrupted|stopped by a signal (SIGINT)`.
    - `wc -c < ~/.iris-dev/conversations.sqlite.lock`. Expected: `0`.
-   - `container list --all | grep -c iris-`. Expected: `0`.
+   - `container list --all | grep -c "$SESSION"`. Expected: `0`.
    - `pgrep -fl "container exec|sleep 90"`. Expected: no output.
-   - The whole stop took under 15 s + 5 s + 3 s from the `kill`. Record the time from the `kill` to `exit=`.
+   - Record the time from the `kill` to `exit=`.
 2. **SIGTERM, then SIGHUP.** Repeat step 1 with `kill -TERM -$PG`, then with `kill -HUP -$PG`. Expected: the same, with `SIGTERM` and `SIGHUP` in the reason.
 3. **The cards.** `sqlite3 ~/.iris-dev/conversations.sqlite "SELECT count(*) FROM messages WHERE payload LIKE '%jobName%463-nap%' AND payload LIKE '%interrupted%'"`. Expected: 3 more than the same query printed before step 1 (run it once there, as the baseline).
 4. **A second Ctrl-C.**
    - Start as in step 1 and wait the same way.
    - Run `kill -INT -$PG; sleep 0.2; kill -INT -$PG; wait $PG; echo "exit=$?"`. Expected: within 7 s (the deletes are bounded at 5), `exit=130`.
    - `eval $ROW`. Expected: `manual|running|` (closed later).
-   - `container list --all | grep -c iris-`. Expected: `0`: the exit-now deleted the session container (plan note 15).
+   - `container list --all | grep -c "$SESSION"` (this step's own session name). Expected: `0`: the exit-now deleted it (plan note 15).
    - `open "$APP"`, `eval $DENY`, and wait 5 s. `eval $ROW` is then `manual|interrupted|the Iris process running it ended`.
-4b. **A third Ctrl-C during the deletes.** Start and wait as in step 1. Then run `kill -INT -$PG; sleep 0.2; kill -INT -$PG; sleep 0.2; kill -INT -$PG; wait $PG; echo "exit=$?"`. Expected: within 1 s, `exit=130` (SIGINT was reset to its default before the deletes, so the third one ended the CLI). Then `container list --all | grep iris-` may list the session container: record it, and delete it with `container delete --force <name>`.
+   - **Quit Iris Dev** (Cmd-Q, then `pgrep -fl "Iris Dev"` is empty). Steps 4b-5 start `--run-job`, which PR 1 refuses while the app holds the home.
+4b. **A third Ctrl-C during the deletes.** Start and wait as in step 1. Then run `kill -INT -$PG; sleep 0.2; kill -INT -$PG; sleep 0.2; kill -INT -$PG; wait $PG; echo "exit=$?"`. Expected: within 1 s, `exit=130` (SIGINT was reset to its default before the deletes, so the third one ended the CLI). Then `container list --all | grep "$SESSION"` may list this step's session container: record it, and delete it with `container delete --force "$SESSION"`.
 4c. **`nohup` keeps SIGHUP ignored.**
    - `nohup "$CLI" --run-job 463-nap >"$DD/nohup.out" 2>&1 & P=$!`. Wait until `eval $HOLDER` shows it.
    - `kill -HUP $P; sleep 3; kill -0 $P && echo alive`. Expected: `alive`.
    - Then `kill -TERM $P; wait $P; echo "exit=$?"`. Expected: `exit=2`, and `eval $ROW` reads `manual|interrupted|stopped by a signal (SIGTERM)`.
 5. **Before admission.** Run `GROUP "$CLI" --run-job 463-nap & P=$!; sleep 0.5; kill -INT -$P; wait $P; echo "exit=$?"` (the pause lets `IrisMain` install its handlers; through the wrapper, a signal before that is SIGINT's default, 130). Expected: `exit=2`, and `sqlite3 ~/.iris-dev/conversations.sqlite "SELECT count(*) FROM job_runs WHERE jobName = '463-nap'"` is unchanged. (If the signal lands after admission on this machine, the row reads stopped and exits 2. Record which.)
-6. **Teardown** as in Task 10 step 12.
+6. **Teardown.** `open "$APP"` and `eval $DENY`, then as in Task 10 step 12.
 
 ---
 
