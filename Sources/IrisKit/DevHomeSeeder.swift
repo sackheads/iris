@@ -10,8 +10,8 @@ enum DevHomeSeeder {
         case releaseBuild
         case destinationNotEmpty(String)
         case sourceMissing(String)
-        case sourceInUse(pid: Int32)
-        case sourceLockUnreadable(String)
+        case sourceInUse(pid: Int32?)
+        case sourceLockFailed(String)
         /// The copied `conversations.sqlite` will not open for the rewrite pass — corrupt, or not
         /// a database at all. Named for the release store, not "the staged copy": the copy is
         /// byte-for-byte the release content at this point, so whatever is wrong with it was
@@ -23,8 +23,9 @@ enum DevHomeSeeder {
             case .releaseBuild: "refusing: this is the installed release build; only dev builds seed"
             case .destinationNotEmpty(let p): "refusing: \(p) already has content; remove it first to reseed"
             case .sourceMissing(let p): "nothing to seed from: \(p) does not exist"
-            case .sourceInUse(let pid): "refusing: Iris (pid \(pid)) has the source store open; quit it and retry"
-            case .sourceLockUnreadable(let p): "refusing: \(p) does not hold a readable pid; delete it and retry"
+            case .sourceInUse(let pid?): "refusing: Iris (pid \(pid)) has the source store open; quit it and retry"
+            case .sourceInUse(nil): "refusing: another Iris process has the source store open; quit it and retry"
+            case .sourceLockFailed(let detail): "refusing: could not lock the source store (\(detail))"
             case .storeUnreadable(let p): "refusing: the release store could not be opened: \(p)"
             }
         }
@@ -37,21 +38,25 @@ enum DevHomeSeeder {
     static let copiedJobPausedReason = "copied into the dev home; unpause to run it here"
 
     static func seed(from source: IrisPaths, to dest: IrisPaths, identity: BuildIdentity,
-                     sourceKeychain: KeychainManager, destKeychain: KeychainManager) throws -> Report {
+                     sourceKeychain: KeychainManager, destKeychain: KeychainManager,
+                     whileHeld: (() -> Void)? = nil) throws -> Report {
         guard identity == .dev else { throw Failure.releaseBuild }
         let fm = FileManager.default
         guard fm.fileExists(atPath: source.root.path) else { throw Failure.sourceMissing(source.root.path) }
         if let contents = try? fm.contentsOfDirectory(atPath: dest.root.path), !contents.isEmpty {
             throw Failure.destinationNotEmpty(dest.root.path)
         }
-        // `.unreadable` is held, not free (GUILock's own doc): a lock file that names no pid is
-        // still something refusing can recover from, while seeding past it cannot tell whether
-        // an app has the store open.
-        switch GUILock.state(at: source.storeLockFile) {
-        case .held(let pid): throw Failure.sourceInUse(pid: pid)
-        case .unreadable(let path): throw Failure.sourceLockUnreadable(path)
-        case .free: break
+        // Held as `seed-dev-home` for the rest of this process (#463 decision 18), so an app
+        // launched mid-seed waits rather than opening the store under the copy. Not vacated
+        // here: IrisMain's seed branch vacates just before exit (P6), so the payload names this
+        // process for as long as it runs.
+        switch StoreLock.claimSettling(at: source.storeLockFile, kind: .seedDevHome) {
+        case .acquired: break
+        case .held(let holder): throw Failure.sourceInUse(pid: holder?.pid)
+        case .legacy(let pid): throw Failure.sourceInUse(pid: pid)
+        case .failed(let detail): throw Failure.sourceLockFailed(detail)
         }
+        whileHeld?()
 
         // Built in a sibling staging directory, same volume as `dest.root`, and renamed into
         // place only once every step below — copy, rewrite, Keychain — has succeeded. A failure

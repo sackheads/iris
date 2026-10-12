@@ -2,7 +2,7 @@ import Testing
 import Foundation
 @testable import IrisKit
 
-@Suite("PerfCLI parsing")
+@Suite("PerfCLI parsing", .timeLimit(.minutes(1)))
 struct PerfCLITests {
     @Test("absent --perf is nil")
     func absent() {
@@ -214,30 +214,52 @@ struct PerfCLITests {
         #expect(try FileManager.default.contentsOfDirectory(atPath: claimed.path).isEmpty)
     }
 
-    @Test("a second claim while the lock is held is refused, not raced (#321)")
+    @Test("a claim while another process holds the lock is refused, not raced (#321)")
     func secondClaimWhileHeldIsRefused() throws {
         let base = testBase()
         defer { try? FileManager.default.removeItem(at: base) }
         let lockURL = PerfCLI.scratchLockURL(base: base)
         try FileManager.default.createDirectory(at: lockURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        // pid 1 is launchd: alive, and not us (same idiom as RunJobCLITests' GUILock coverage).
-        try Data("1\n".utf8).write(to: lockURL)
-        #expect(throws: PerfCLIError.self) {
-            try PerfCLI.claimScratchWorkspace(base: base)
-        }
+        // a stub process holds the lock (LockStub)
+        let stub = try LockStub.start(holding: lockURL, payload: #"{"kind":"perf","pid":%PID%}"# + "\n")
+        defer { stub.kill() }
+        #expect(throws: PerfCLIError.self) { try PerfCLI.claimScratchWorkspace(base: base) }
     }
 
-    @Test("releasing the workspace lets a later claim succeed again (#321)")
-    func releaseAllowsReclaim() throws {
+    @Test("a claim against a pre-#463 run's bare live pid is refused")
+    func legacyHolderIsRefused() throws {
         let base = testBase()
-        defer {
-            PerfCLI.releaseScratchWorkspace(base: base)
-            try? FileManager.default.removeItem(at: base)
-        }
+        defer { try? FileManager.default.removeItem(at: base) }
+        let lockURL = PerfCLI.scratchLockURL(base: base)
+        try FileManager.default.createDirectory(at: lockURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("1\n".utf8).write(to: lockURL)   // pid 1 is launchd: alive, and not us
+        #expect(throws: PerfCLIError.self) { try PerfCLI.claimScratchWorkspace(base: base) }
+        #expect(!StoreLock.holds(lockURL))
+    }
+
+    @Test("the claim holds the lock as perf, and release empties the payload")
+    func claimAdvertisesPerf() throws {
+        let base = testBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let lockURL = PerfCLI.scratchLockURL(base: base)
         _ = try PerfCLI.claimScratchWorkspace(base: base)
+        #expect(StoreLock.holds(lockURL))
+        #expect(StoreLock.readHolder(at: lockURL) == .init(pid: ProcessInfo.processInfo.processIdentifier, kind: .perf, job: nil))
+        #expect(LockStub.tryLock(lockURL) == 3, "another process cannot take it")
+        PerfCLI.releaseScratchWorkspace(base: base)
+        #expect(try Data(contentsOf: lockURL).isEmpty)
+    }
+
+    @Test("a second claim in the same process reuses its hold and resets the directory (plan note 4)")
+    func sameProcessReclaims() throws {
+        let base = testBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let first = try PerfCLI.claimScratchWorkspace(base: base)
+        try Data("stale".utf8).write(to: first.appendingPathComponent("stale.txt"))
         PerfCLI.releaseScratchWorkspace(base: base)
         let again = try PerfCLI.claimScratchWorkspace(base: base)
         #expect(again == PerfCLI.scratchWorkspaceURL(base: base))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: again.path).isEmpty)
     }
 
     // #321: the whole point of a fixed scratch location is that the system prompt's skills list —

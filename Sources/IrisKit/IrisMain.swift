@@ -42,7 +42,11 @@ public enum IrisMain {
             StoreLock.vacate(at: IrisPaths.default.storeLockFile)
             _exit(code)
         } else if CommandLine.arguments.contains("--seed-dev-home") {
-            exit(DevHomeSeeder.runCLI())
+            let code = DevHomeSeeder.runCLI()
+            // Last (P6): until now the source lock's payload names this seeder, so an app launched
+            // mid-seed waits. A no-op when the claim was refused.
+            StoreLock.vacate(at: IrisPaths.release.storeLockFile)
+            exit(code)
         } else {
             IrisApp.main()
         }
