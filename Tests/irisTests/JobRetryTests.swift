@@ -940,6 +940,51 @@ struct JobRetryTests {
         #expect(state.conversations.count == conversations)
     }
 
+    @Test("the run attaches its turn to the stop, so cancelling it there ends the turn")
+    func cancelTurnReachesTheRunsTurn() async throws {
+        let client = GatedClient(response: textResponse("tick"))
+        let (store, state, engine) = try harness([], client: client)
+        let j = job(timeoutSeconds: Self.heldTimeout)
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let stop = RunStop(grace: 5, terminateGroups: {})
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
+                               activity: RecordingActivity(), stop: stop)
+        let fire = Task { await runner.fire(job: j, origin: .manual) }
+        defer { client.release() }
+        try #require(await client.calls.reach(1), "the turn reached the model")
+        // No `request`: nothing but the attached cancel can end this turn while the client is held.
+        stop.cancelTurn()
+        try #require(await finished(fire, within: 10) != nil, "the cancelled turn came back and ended the run")
+        #expect(!stop.hasTurn, "disarm drops the turn")
+    }
+
+    /// Task 13 re-review: `onCancel` resumed whichever continuation was parked, so a wait cancelled
+    /// before it parked could resume a later waiter's continuation with nil.
+    @Test("a cancelled wait never resumes another waiter")
+    func staleCancelLeavesTheNextWaiter() async throws {
+        let stop = RunStop(grace: 5, terminateGroups: {})
+        #expect(stop.arm() == nil)
+        let second = Task { await stop.wait() }
+        var parked = false
+        for _ in 0..<500 {
+            if stop.isWaiting { parked = true; break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try #require(parked, "the second waiter parked")
+        // Cancelled before it calls `wait`, so its `onCancel` runs before its body.
+        let first = Task { () -> String? in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await stop.wait()
+        }
+        #expect(try await value(of: first, within: 10) == nil)
+        #expect(stop.isWaiting, "the second waiter is still parked")
+        _ = stop.request(reason: RunStop.reason(for: SIGINT))
+        #expect(try await value(of: second, within: 10) == "stopped by a signal (SIGINT)")
+        stop.disarm()
+    }
+
     @Test("a stop after the turn came back changes nothing")
     func stopAfterTheTurn() async throws {
         let (store, state, engine) = try harness([textResponse("tick")])

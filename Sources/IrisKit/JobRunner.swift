@@ -1195,6 +1195,9 @@ actor JobRunner {
             }
             return false
         }
+        // So a CLI exiting at once can cancel this turn from its signal queue before it reads the
+        // registries (#463): the clean stop below goes through the claim, that path cannot wait.
+        stop?.attachTurn { turnTask.cancel() }
         let watchdogSlice = self.watchdogSlice
         let watchdog = Task.detached {
             // Sliced, and re-read from the wall clock every time round, because the two clocks
@@ -1254,7 +1257,7 @@ actor JobRunner {
 
         guard let turn = await readTurn(conversationId: conversationId) else {
             await closeInterrupted(run: run, conversationId: conversationId, at: finishedAt,
-                                   reason: stop?.requestedReason ?? Self.releasedReason)
+                                   reason: stoppedBy ?? Self.releasedReason)
             return
         }
 

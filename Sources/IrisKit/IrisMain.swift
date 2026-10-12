@@ -30,9 +30,15 @@ public enum IrisMain {
             // no `HeadlessMode`: approvals fail closed exactly as unattended. `store:` is an
             // autoclosure that `run` calls only once it holds the store lock (#463), so a refused
             // run never opens, migrates or repairs it.
+            // #463 decision 16: SIGINT, SIGTERM and SIGHUP stop the run cleanly; a second one exits
+            // at once. Installed before the claim, so a signal there still exits 2 with no row.
+            let lockPath = IrisPaths.default.storeLockFile
+            let stop = CLIStop(vacate: { StoreLock.vacate(at: lockPath) })
+            let signals = CLISignals.install { stop.receive($0) }
             let code = await RunJobCLI.run(invocation,
                                            store: try ConversationStore.onDisk(at: IrisPaths.default.conversationsDB),
-                                           client: LLMClient())
+                                           client: LLMClient(), lockPath: lockPath, stop: stop)
+            withExtendedLifetime(signals) {}
             // `_exit`, the way `AppDelegate` leaves at terminate: a blocked tool call asks Vibecop for a
             // verdict, which on the embedded engine loads ggml, and `exit`'s static destructors then trip
             // llama.cpp's `GGML_ASSERT` — so a script would read 134 for a run whose row says "blocked on

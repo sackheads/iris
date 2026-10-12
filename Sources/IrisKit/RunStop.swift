@@ -27,7 +27,12 @@ final class RunStop: @unchecked Sendable {
 
     private let lock = NSLock()
     private var phase: Phase = .idle
-    private var waiter: CheckedContinuation<String?, Never>?
+    /// The parked waiter, with the token of the `wait` call that parked it: a cancellation only
+    /// ever resumes its own call's continuation, never a later waiter's.
+    private var waiter: (token: UInt64, continuation: CheckedContinuation<String?, Never>)?
+    private var nextToken: UInt64 = 0
+    /// Cancels the armed run's turn. Set by the run once its turn exists, dropped at `disarm`.
+    private var turn: (@Sendable () -> Void)?
 
     init(grace: TimeInterval = 15, teardown: TimeInterval = 5,
          terminateGroups: @escaping @Sendable () -> Void = { LiveProcessGroups.shared.terminateAll() }) {
@@ -67,7 +72,7 @@ final class RunStop: @unchecked Sendable {
                 return (.exitNow, nil)
             case .armed:
                 phase = .requested(reason)
-                let w = waiter
+                let w = waiter?.continuation
                 waiter = nil
                 return (.runWillStop, w)
             case .requested, .done:
@@ -99,16 +104,37 @@ final class RunStop: @unchecked Sendable {
     func disarm() {
         let waiting: CheckedContinuation<String?, Never>? = lock.withLock {
             if case .armed = phase { phase = .done }
-            let w = waiter
+            turn = nil
+            let w = waiter?.continuation
             waiter = nil
             return w
         }
         waiting?.resume(returning: nil)
     }
 
+    /// The armed run's turn, so the CLI's exit-now can cancel it synchronously, from the signal
+    /// queue, before it reads the registries: a runner queued but not yet spawned is in neither,
+    /// and a cancelled turn's runner refuses to spawn. The clean stop cancels through its watcher.
+    func attachTurn(_ cancel: @escaping @Sendable () -> Void) {
+        lock.withLock { turn = cancel }
+    }
+
+    /// Cancels the attached turn, if any. Outside the lock: cancellation handlers run inline.
+    func cancelTurn() {
+        lock.withLock { turn }?()
+    }
+
+    /// For tests.
+    var hasTurn: Bool { lock.withLock { turn != nil } }
+    var isWaiting: Bool { lock.withLock { waiter != nil } }
+
     /// The reason once a stop is requested, or nil when the run ends or the waiting task is cancelled.
     func wait() async -> String? {
-        await withTaskCancellationHandler {
+        let token: UInt64 = lock.withLock {
+            nextToken += 1
+            return nextToken
+        }
+        return await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
                 lock.withLock {
                     if case .requested(let reason) = phase { return continuation.resume(returning: reason) }
@@ -116,14 +142,16 @@ final class RunStop: @unchecked Sendable {
                     if Task.isCancelled { return continuation.resume(returning: nil) }
                     // One waiter at a time: the armed run's stop watcher, then its teardown's.
                     precondition(waiter == nil, "RunStop has one waiter: the armed run")
-                    waiter = continuation
+                    waiter = (token, continuation)
                 }
             }
         } onCancel: {
+            // Only this call's own continuation: a cancel that lands before this call parked
+            // (its body then sees `isCancelled`) must not resume another call's waiter.
             let waiting: CheckedContinuation<String?, Never>? = lock.withLock {
-                let w = waiter
+                guard let w = waiter, w.token == token else { return nil }
                 waiter = nil
-                return w
+                return w.continuation
             }
             waiting?.resume(returning: nil)
         }
