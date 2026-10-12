@@ -17,9 +17,10 @@ protocol NotificationCenterClient: AnyObject {
 
 /// The one file that touches `UserNotifications` (D6 decisions 7 and 8). Built only by
 /// `SurfaceInstall.installNotifications`, after the `.app` bundle check:
-/// `UNUserNotificationCenter.current()` raises in a process without one. The system client sets
-/// itself as the center's delegate when it is built, in `IrisApp.init`, before `NSApplication`
-/// finishes launching, so a click that cold-launches the app is still delivered.
+/// `UNUserNotificationCenter.current()` raises in a process without one. The system client is
+/// the center's delegate from `applicationWillFinishLaunching` (`SurfaceInstall.installNotificationDelegate`),
+/// before the store may be open, so a click that cold-launches the app is still delivered, even
+/// while it waits for a `--run-job` (#463). This sink reuses that one client.
 @MainActor
 final class UserNotificationSink: NotificationSink {
     private let center: any NotificationCenterClient
@@ -32,7 +33,7 @@ final class UserNotificationSink: NotificationSink {
     var unsettledCountForTesting: Int { unsettled.count }
 
     convenience init(state: AppState) {
-        self.init(state: state, center: SystemNotificationCenter())
+        self.init(state: state, center: SystemNotificationCenter.shared ?? SystemNotificationCenter())
     }
 
     init(state: AppState, center: any NotificationCenterClient) {
@@ -117,12 +118,30 @@ final class UserNotificationSink: NotificationSink {
 /// captured across isolation: each call asks `.current()` itself, and the async ones do so from
 /// a nonisolated helper.
 @MainActor
-private final class SystemNotificationCenter: NSObject, NotificationCenterClient, UNUserNotificationCenterDelegate {
+final class SystemNotificationCenter: NSObject, NotificationCenterClient, UNUserNotificationCenterDelegate {
+    /// The one delegate, from will-finish. The center does not retain its delegate.
+    private(set) static var shared: SystemNotificationCenter?
+
     var onResponse: (@MainActor (NotificationResponse) -> Void)?
+    /// Where a click goes first, when set: `LaunchGate`, which holds it until Iris is open
+    /// (#463). Touches no `AppState`.
+    private var route: (@MainActor (NotificationResponse) -> Void)?
+    /// Whether a banner may be shown: not while Iris waits, since nothing it names can open.
+    private var presenting: @MainActor () -> Bool = { true }
 
     override init() {
         super.init()
         UNUserNotificationCenter.current().delegate = self
+    }
+
+    /// Becomes the center's delegate before anything has built `AppState`. Idempotent.
+    static func installEarly(route: @escaping @MainActor (NotificationResponse) -> Void,
+                             presenting: @escaping @MainActor () -> Bool) {
+        guard shared == nil else { return }
+        let center = SystemNotificationCenter()
+        center.route = route
+        center.presenting = presenting
+        shared = center
     }
 
     func authorizationStatus() async -> NotificationPermission.Status { await Self.currentStatus() }
@@ -170,12 +189,15 @@ private final class SystemNotificationCenter: NSObject, NotificationCenterClient
             if let key = key as? String, let value = value as? String { info[key] = value }
         }
         let reply = NotificationResponse(actionId: actionId, userInfo: info)
-        await MainActor.run { self.onResponse?(reply) }
+        await MainActor.run {
+            if let route = self.route { route(reply) } else { self.onResponse?(reply) }
+        }
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
                                             willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
         // The policy already decided whether a banner is worth showing; show what it posted.
-        [.banner, .list]
+        // While Iris waits for the store nothing it posted can be acted on, so show nothing.
+        await MainActor.run { self.presenting() } ? [.banner, .list] : []
     }
 }

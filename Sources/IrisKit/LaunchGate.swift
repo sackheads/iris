@@ -104,6 +104,9 @@ final class LaunchGate {
         /// `NSApp.activate`, which did-finish did unconditionally before #463. Skipped only for a
         /// link that launched Iris while it waits (plan note 13).
         var activate: @MainActor () -> Void
+        /// A notification click, once Iris is open: `AppState.shared.handleNotificationResponse`.
+        /// Clicks that came while waiting are handed over the same way at `finishLaunch`, in order.
+        var deliverNotification: @MainActor (NotificationResponse) -> Void = { _ in }
         /// Seconds on a monotonic clock. Never `Date()`: a wall clock stepped backwards would
         /// keep the unknown-holder window from ever reaching `unknownGrace`.
         var now: @MainActor () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
@@ -119,6 +122,7 @@ final class LaunchGate {
 
     private let seams: Seams
     @ObservationIgnored private var links: [URL?] = []
+    @ObservationIgnored private var responses: [NotificationResponse] = []
     @ObservationIgnored private var dropped = 0
     @ObservationIgnored private var didFinish = false
     @ObservationIgnored private var finished = false
@@ -130,6 +134,11 @@ final class LaunchGate {
     init(seams: Seams) { self.seams = seams }
 
     var heldLinkCount: Int { links.count }
+    var heldNotificationCount: Int { responses.count }
+
+    /// Clicks held while waiting. Past this they are dropped: each names a run or an ask that the
+    /// ledger and the Run Log still show once Iris opens.
+    static let notificationCapacity = 16
 
     /// `IrisApp.init`: when the lock is free this opens the store right here, as today's `init` did.
     func begin() { apply(seams.claim()) }
@@ -166,6 +175,14 @@ final class LaunchGate {
         guard links.count < RunJobURLIntake.capacity else { dropped += 1; return }
         links.append(url)
         if didFinish, case .waiting = state { showNoticeNow() }
+    }
+
+    /// A notification click, from the one delegate `SystemNotificationCenter` installs at
+    /// will-finish. Held, like a link, until the launch completes, then passed on in order.
+    func receiveNotification(_ response: NotificationResponse) {
+        if isOpen && (finished || responses.isEmpty) { return seams.deliverNotification(response) }
+        guard responses.count < Self.notificationCapacity else { return }
+        responses.append(response)
     }
 
     /// `applicationWillTerminate`: only an open app has anything to flush (Review Focus 2).
@@ -228,6 +245,7 @@ final class LaunchGate {
         case .open:
             stopPolling()
             hideNotice()
+            // Runs before `state = .open`: nothing reached from it may ask `isOpen`.
             seams.openStore()
             state = .open
             finishIfReady()
@@ -273,5 +291,8 @@ final class LaunchGate {
         let held = links
         links = []
         seams.finishLaunch(held, dropped)
+        let clicks = responses
+        responses = []
+        for response in clicks { seams.deliverNotification(response) }
     }
 }

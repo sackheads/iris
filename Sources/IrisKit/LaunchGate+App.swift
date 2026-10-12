@@ -88,6 +88,7 @@ extension LaunchGate.Seams {
             stopPolling: { poll.stop() },
             showWaitingNotice: { notice.show(gate: LaunchGate.shared) },
             hideWaitingNotice: { notice.hide() },
-            activate: { NSApp.activate(ignoringOtherApps: true) })
+            activate: { NSApp.activate(ignoringOtherApps: true) },
+            deliverNotification: { _ = AppState.shared.handleNotificationResponse($0) })
     }
 }

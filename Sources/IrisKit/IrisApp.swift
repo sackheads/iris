@@ -11,6 +11,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Never `application(_:open:)` or `.handlesExternalEvents`: SwiftUI opened a window per
         // link with either (owner ruling C2).
         runJobURLEvents = RunJobURLEvents.installForApp()
+        // The same moment for a notification click that launches Iris: the delegate exists before
+        // the store may be open, and the gate holds the click until it is (#463).
+        SurfaceInstall.installNotificationDelegate()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -101,7 +104,8 @@ struct IrisApp: App {
         AppState.shared.refreshLedgerAttention()
         AppState.shared.raiseMainWindow = { MainWindow.raise() }
         AppState.shared.openRunLogWindow = { RunLogWindow.open() }
-        // D6 decision 8: only here, and only in a real `.app` bundle.
+        // D6 decision 8: only here, and only in a real `.app` bundle. The sink reuses the
+        // delegate will-finish installed; clicks still pass through the gate, which keeps their order.
         SurfaceInstall.installNotifications(on: AppState.shared)
         Task {
             // Only the lock's holder runs this, so every `iris-` container on this home it does
@@ -112,6 +116,17 @@ struct IrisApp: App {
                 let minutes = await MainActor.run { ConfigManager.shared.sandboxIdleTimeoutMinutes }
                 await SandboxSessionManager.shared.reapIdle(olderThan: TimeInterval(minutes * 60))
             }
+        }
+    }
+
+    /// A view, not inline, so the menu item re-reads the gate when it opens.
+    private struct RerunSetupWizardButton: View {
+        let gate: LaunchGate
+        var body: some View {
+            Button("Rerun Setup Wizard...") {
+                NotificationCenter.default.post(name: NSNotification.Name("RerunSetupWizard"), object: nil)
+            }
+            .disabled(!gate.isOpen)   // the wizard needs `AppState`, which waiting must not build
         }
     }
 
@@ -128,9 +143,7 @@ struct IrisApp: App {
                     CheckForUpdatesButton(updater: updater)
                 }
                 Divider()
-                Button("Rerun Setup Wizard...") {
-                    NotificationCenter.default.post(name: NSNotification.Name("RerunSetupWizard"), object: nil)
-                }
+                RerunSetupWizardButton(gate: LaunchGate.shared)
             }
         }
 

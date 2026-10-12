@@ -27,8 +27,30 @@ struct GatedContent<Content: View>: View {
     @ViewBuilder let content: () -> Content
 
     var body: some View {
-        if gate.isOpen { content() } else { WaitingView(gate: gate) }
+        if gate.isOpen {
+            content()
+        } else if case .refused = gate.state {
+            RefusedWindowHider()   // the alert says it all; no window flashes behind it
+        } else {
+            WaitingView(gate: gate)
+        }
     }
+}
+
+/// A refused launch's window: made invisible and click-through before it is first drawn. The app
+/// quits once the alert is dismissed, so it never needs to come back.
+private struct RefusedWindowHider: NSViewRepresentable {
+    final class HidingView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window else { return }
+            window.alphaValue = 0
+            window.ignoresMouseEvents = true
+        }
+    }
+
+    func makeNSView(context: Context) -> NSView { HidingView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 /// The status item's menu while waiting: the sentence and Quit.

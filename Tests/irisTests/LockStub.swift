@@ -48,11 +48,13 @@ final class LockStub {
         return LockStub(process: process)
     }
 
-    /// SIGKILL, the death no handler sees, and wait for it: the kernel has dropped the lock on return.
+    /// SIGKILL, the death no handler sees, and wait for it, for up to 10 s: the kernel has dropped
+    /// the lock on return. Bounded, so a lost termination fails the test instead of hanging it.
     func kill() {
         guard process.isRunning else { return }
         Darwin.kill(pid, SIGKILL)
-        process.waitUntilExit()
+        let deadline = Date().addingTimeInterval(10)
+        while process.isRunning && Date() < deadline { usleep(10_000) }
     }
 
     deinit { kill() }

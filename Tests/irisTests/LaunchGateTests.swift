@@ -90,6 +90,9 @@ struct LaunchGateTests {
         var finishes: [[URL?]] = []
         var droppedReported: [Int] = []
         var delivered: [URL?] = []
+        var notified: [NotificationResponse] = []
+        /// Where each delivery landed relative to `finishLaunch`: the finish count at the time.
+        var notifiedAfterFinishes: [Int] = []
         var refusals: [(LaunchRefusal, Bool)] = []
         var tick: (@MainActor () -> Void)?
         var intervals: [TimeInterval] = []
@@ -124,6 +127,9 @@ struct LaunchGateTests {
             showWaitingNotice: { [unowned self] in self.notices += 1 },
             hideWaitingNotice: { [unowned self] in self.hides += 1 },
             activate: { [unowned self] in self.activations += 1 },
+            deliverNotification: { [unowned self] in
+                self.notified.append($0); self.notifiedAfterFinishes.append(self.finishes.count)
+            },
             now: { [unowned self] in self.clock }))
 
         func advance(_ seconds: TimeInterval) { clock += seconds; tick?() }
@@ -216,6 +222,50 @@ struct LaunchGateTests {
         let third = URL(string: "iris-dev://run-job/third")
         h.gate.receive(third)
         #expect(h.delivered == [third])
+    }
+
+    private static func click(_ n: Int) -> NotificationResponse {
+        NotificationResponse(actionId: NotificationPolicy.Action.open, userInfo: ["n": "\(n)"])
+    }
+
+    @Test("a notification click while waiting is held, then delivered once, in order, at finishLaunch")
+    func notificationWhileWaitingIsHeld() {
+        let h = Harness([.held(Self.cli), .acquired])
+        h.gate.begin()
+        h.gate.didFinishLaunching()
+        h.gate.receiveNotification(Self.click(1))
+        h.gate.receiveNotification(Self.click(2))
+        #expect(h.notified.isEmpty, "nothing reaches AppState while waiting")
+        #expect(h.gate.heldNotificationCount == 2)
+        h.advance(1)
+        #expect(h.finishes.count == 1)
+        #expect(h.notified == [Self.click(1), Self.click(2)])
+        #expect(h.notifiedAfterFinishes == [1, 1], "handed over after the launch completed, not before")
+        #expect(h.gate.heldNotificationCount == 0)
+        h.gate.didFinishLaunching()
+        h.gate.poll()
+        #expect(h.notified.count == 2, "delivered once")
+    }
+
+    @Test("a notification click after Iris is open goes straight through")
+    func notificationAfterOpenGoesThrough() {
+        let h = Harness([.acquired])
+        h.gate.begin()
+        h.gate.didFinishLaunching()
+        h.gate.receiveNotification(Self.click(1))
+        #expect(h.notified == [Self.click(1)])
+        #expect(h.gate.heldNotificationCount == 0)
+    }
+
+    @Test("held notification clicks stop at capacity")
+    func notificationCapacity() {
+        let h = Harness([.held(Self.cli), .acquired])
+        h.gate.begin()
+        for n in 0..<(LaunchGate.notificationCapacity + 2) { h.gate.receiveNotification(Self.click(n)) }
+        #expect(h.gate.heldNotificationCount == LaunchGate.notificationCapacity)
+        h.gate.didFinishLaunching()
+        h.advance(1)
+        #expect(h.notified == (0..<LaunchGate.notificationCapacity).map(Self.click))
     }
 
     @Test("a cold start from a link shows the notice without activating, and hides it when Iris opens")
