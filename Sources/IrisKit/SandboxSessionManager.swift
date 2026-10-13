@@ -357,6 +357,11 @@ actor SandboxSessionManager {
                 try refuseIfClosed(id)
                 if await startContainerSystem() {
                     try refuseIfClosed(id)
+                    // The start can take seconds: an exit path that read the box meanwhile has
+                    // already deleted what it held, so this retry must not create (#463).
+                    guard live.add(name(for: id)) else {
+                        throw ContainerRuntimeError.createFailed(LiveContainerNames.exitingError)
+                    }
                     try await runtime.createDetached(name: name(for: id), image: image(),
                                                      mounts: mounts, workdir: workdir, network: network)
                     try refuseIfClosed(id)

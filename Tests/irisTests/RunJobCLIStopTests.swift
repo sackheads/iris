@@ -73,6 +73,7 @@ final class RunJobCLIStopTests {
     private func stop(_ registry: LiveProcessGroups, _ events: Events, grace: TimeInterval = 5) -> CLIStop {
         CLIStop(grace: grace, teardown: 2,
                 terminateGroups: { registry.terminateAll() },
+                closeGroups: { events.add("close"); _ = registry.closeAndSnapshot() },
                 drainGroups: { registry.waitUntilEmpty(within: 3) },
                 killGroups: { events.add("kill"); registry.killAll() },
                 deleteContainers: { events.add("delete") },
@@ -108,7 +109,8 @@ final class RunJobCLIStopTests {
         // `run` returned, so a group that ignored SIGTERM could not outlive the `_exit`.
         #expect(registry.count == 0)
         #expect(kill(client.sleepPid, 0) == -1 && errno == ESRCH, "the sleep's group is gone")
-        #expect(events.values == ["delete"], "settle deletes what containers are left; nothing was killed early")
+        #expect(events.values == ["close", "delete"], "settle closes the registry and deletes what containers are left; nothing was killed early")
+        #expect(!registry.admit(ProcessGroupRunner(registry: registry)), "no group may start after the settle")
     }
 
     @Test("a signal before admission: groups killed, containers deleted, the payload emptied, exit 2, no row")
@@ -185,11 +187,24 @@ final class RunJobCLIStopTests {
     @Test("settle kills what has not drained by its bound")
     func settleKillsTheStragglers() async throws {
         let events = Events()
-        let cliStop = CLIStop(drainGroups: { false }, killGroups: { events.add("kill") },
+        let cliStop = CLIStop(closeGroups: { events.add("close") }, drainGroups: { false }, killGroups: { events.add("kill") },
                               deleteContainers: { events.add("delete") }, resetInterrupt: {},
                               vacate: {}, exitNow: { _ in })
         cliStop.settle()
-        #expect(events.values == ["kill", "delete"])
+        #expect(events.values == ["close", "kill", "delete"])
+    }
+
+    @Test("settle closes the host registry on the drained path too")
+    func settleClosesWhenDrained() {
+        let events = Events()
+        let registry = LiveProcessGroups()
+        let cliStop = CLIStop(terminateGroups: {}, closeGroups: { events.add("close"); _ = registry.closeAndSnapshot() },
+                              drainGroups: { registry.waitUntilEmpty(within: 3) }, killGroups: { events.add("kill") },
+                              deleteContainers: { events.add("delete") }, resetInterrupt: {},
+                              vacate: {}, exitNow: { _ in })
+        cliStop.settle()
+        #expect(events.values == ["close", "delete"], "drained, so nothing to kill")
+        #expect(!registry.admit(ProcessGroupRunner(registry: registry)), "closed all the same")
     }
 
     @Test("the stopping signals are SIGINT, SIGTERM and SIGHUP")

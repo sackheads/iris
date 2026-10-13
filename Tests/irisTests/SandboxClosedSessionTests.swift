@@ -246,6 +246,25 @@ struct SandboxClosedSessionTests {
         #expect(live.names.isEmpty)
     }
 
+    /// Fix round 2: the system start can take seconds, and an exit path that read the box during
+    /// it has deleted what it held; the retry after the start must not create a container.
+    @Test("#463: a box closed while the container system starts refuses the retry create")
+    func closedDuringSystemStartRefusesTheRetry() async {
+        let live = LiveContainerNames()
+        let rt = MockRuntime()
+        rt.nextCreateError = ContainerRuntimeError.createFailed("Error: run `container system start` first")
+        let m = SandboxSessionManager(runtime: rt, image: { "ubuntu:latest" },
+                                      startContainerSystem: {
+                                          live.deleteAll(within: 1) { _ in ("/usr/bin/true", []) }
+                                          return true
+                                      },
+                                      live: live)
+        let out = await m.run(command: "a", conversationId: UUID(), workspace: "/ws")
+        #expect(out.contains(LiveContainerNames.exitingError), "got: \(out)")
+        #expect(rt.createdCount == 0, "the retry create never ran")
+        #expect(rt.execCount == 0)
+    }
+
     @Test("#463: a session's container name is recorded at create and dropped at close")
     func sessionNameIsRecorded() async {
         let live = LiveContainerNames()

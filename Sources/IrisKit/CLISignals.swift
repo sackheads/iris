@@ -79,12 +79,14 @@ enum CLISignals {
 ///   stdout and stderr, empties the lock's payload and `_exit`s, in that order: the payload is
 ///   emptied last, as on the CLI's ordinary exit. All of it on the signal queue, nothing on the
 ///   pool (#372).
-/// - After a clean stop, `settle()` runs before `_exit`: up to 3 s for the host groups to drain
+/// - After a clean stop, `settle()` runs before `_exit`: it closes the host registry, so no new
+///   group starts, then waits up to 3 s for the host groups to drain
 ///   (their SIGKILL rung is 2 s after the SIGTERM), a SIGKILL for any that did not, and a delete
 ///   for any container the bounded teardown left behind.
 final class CLIStop: @unchecked Sendable {
     let run: RunStop
 
+    private let closeGroups: @Sendable () -> Void
     private let drainGroups: @Sendable () -> Bool
     private let killGroups: @Sendable () -> Void
     private let deleteContainers: @Sendable () -> Void
@@ -95,11 +97,15 @@ final class CLIStop: @unchecked Sendable {
     private let lock = NSLock()
     private var received = 0
 
-    /// The registry defaults are the process-wide `.shared` ones, which only the CLI may use. A
-    /// test injects its own `LiveProcessGroups` and `LiveContainerNames` closures for every one
-    /// of `terminateGroups`, `drainGroups`, `killGroups` and `deleteContainers` (invariant 7).
+    /// Five seams default to the process-wide `.shared` registries, which only the CLI may use:
+    /// `terminateGroups`, `closeGroups`, `drainGroups` and `killGroups` (`LiveProcessGroups`) and
+    /// `deleteContainers` (`LiveContainerNames`). A test passes its own closure for each of them
+    /// that its path can reach, over a registry of its own, or it closes or kills the registry of
+    /// every suite running beside it (invariant 7). `resetInterrupt`, `flush` and `exitNow` default
+    /// to the real process-wide actions; a test that reaches the exit path replaces them too.
     init(grace: TimeInterval = 15, teardown: TimeInterval = 5,
          terminateGroups: @escaping @Sendable () -> Void = { LiveProcessGroups.shared.terminateAll() },
+         closeGroups: @escaping @Sendable () -> Void = { _ = LiveProcessGroups.shared.closeAndSnapshot() },
          drainGroups: @escaping @Sendable () -> Bool = { LiveProcessGroups.shared.waitUntilEmpty(within: 3) },
          killGroups: @escaping @Sendable () -> Void = { LiveProcessGroups.shared.killAll() },
          deleteContainers: @escaping @Sendable () -> Void = { _ = LiveContainerNames.shared.deleteAll(within: 5) },
@@ -116,6 +122,7 @@ final class CLIStop: @unchecked Sendable {
          vacate: @escaping @Sendable () -> Void,
          exitNow: @escaping @Sendable (Int32) -> Void = { _exit($0) }) {
         self.run = RunStop(grace: grace, teardown: teardown, terminateGroups: terminateGroups)
+        self.closeGroups = closeGroups
         self.drainGroups = drainGroups
         self.killGroups = killGroups
         self.deleteContainers = deleteContainers
@@ -143,6 +150,9 @@ final class CLIStop: @unchecked Sendable {
     /// After a stopped run has returned, before `_exit`. Blocks its caller for up to the drain
     /// and delete bounds: call it from a dispatch queue, never the main thread or the pool.
     func settle() {
+        // Closed first, whichever way the drain goes: the run is over, and a group admitted
+        // after the drain would outlive the `_exit` (the kill path closes it too).
+        closeGroups()
         if !drainGroups() { killGroups() }
         deleteContainers()
     }
