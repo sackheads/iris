@@ -42,14 +42,22 @@ struct TimeoutTests {
 
     @Test("a blocking operation is abandoned at the deadline")
     func blockingReturnsAtDeadline() async {
+        // The block is released by the test once `withTimeout` is back, so the pool thread is held
+        // for about the deadline; the 30 s backstop only matters if the test never gets there.
+        let release = DispatchSemaphore(value: 0)
+        let finished = Flag()
         let started = Date()
         await #expect(throws: TimeoutError.self) {
             try await withTimeout(seconds: 0.2) { () -> Int in
-                Self.block(seconds: 15)
+                Self.block(until: release, backstop: 30)
+                finished.set()
                 return 1
             }
         }
-        #expect(Date().timeIntervalSince(started) < 10, "the deadline, not the 15 s block")
+        let elapsed = Date().timeIntervalSince(started)
+        #expect(!finished.isSet, "withTimeout returned while the operation was still blocked")
+        release.signal()
+        #expect(elapsed < 10, "returned after \(elapsed)s; the deadline was 0.2s")
     }
 
     @Test("a cooperative operation that finishes in time returns its value")
@@ -177,8 +185,11 @@ struct TimeoutTests {
 
     // MARK: - helpers
 
-    /// Holds a thread for `seconds`, like a synchronous native call.
-    static func block(seconds: Double) { Thread.sleep(forTimeInterval: seconds) }
+    /// Holds a thread, like a synchronous native call, until `release` is signalled or `backstop`
+    /// seconds pass.
+    static func block(until release: DispatchSemaphore, backstop: Double) {
+        _ = release.wait(timeout: .now() + backstop)
+    }
 
     /// Suspends for `seconds` on a continuation nothing cancels, like a native inference call.
     static func ignoresCancellation(seconds: Double) async {

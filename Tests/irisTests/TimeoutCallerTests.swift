@@ -56,11 +56,12 @@ struct VibecopTimeoutTests {
     func nonCooperativeEvaluationTimesOut() async {
         let started = Date()
         let verdict = await AppState.boundedVibecopVerdict(seconds: 0.2) {
-            await TimeoutTests.ignoresCancellation(seconds: 2)
+            await TimeoutTests.ignoresCancellation(seconds: 20)
             return VibecopDecision(decision: "APPROVE", reason: "too late to count")
         }
         #expect(verdict == nil, "a late APPROVE must not be honoured")
-        #expect(Date().timeIntervalSince(started) < 1.0)
+        // Separates the deadline from the 20 s evaluation, not from pool latency.
+        #expect(Date().timeIntervalSince(started) < 10)
     }
 
     @Test("an evaluation inside the deadline passes its verdict through")
@@ -75,10 +76,11 @@ struct VibecopTimeoutTests {
     func wedgedOllamaProbeIsBounded() async {
         let started = Date()
         let budget = await AppState.ollamaVibecopBudget(configured: 7, probeSeconds: 0.2) {
-            await TimeoutTests.ignoresCancellation(seconds: 3)
+            await TimeoutTests.ignoresCancellation(seconds: 20)
             return true
         }
-        #expect(Date().timeIntervalSince(started) < 1.0)
+        // Separates the probe's deadline from the 20 s probe, not from pool latency.
+        #expect(Date().timeIntervalSince(started) < 10)
         #expect(budget == AppState.ollamaColdBudgetSeconds)
     }
 
