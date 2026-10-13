@@ -2,7 +2,7 @@
 
 Status: **proposed** (2026-10-11). This is the lean version, revised after `work`'s review of #487. The design brief is `.superpowers/sdd/463-design-brief.md`.
 
-Where PR 1 was built differently, the decision says so in an "(As built …)" note; "plan note N" is note N in `docs/superpowers/plans/2026-10-11-single-writer-store.md`.
+Where PR 1 or PR 2 was built differently, the decision says so in an "(As built …)" note; "plan note N" is note N in `docs/superpowers/plans/2026-10-11-single-writer-store.md`.
 
 **Owner rulings (2026-10-11), binding**
 1. The CLI keeps refusing while the app holds the store. There is no IPC hand-off.
@@ -105,17 +105,18 @@ Checked against `main` at `e418b29`. Paths are under `Sources/IrisKit/`.
     - `ToolExecutor.execute`, the skill CRUD and `SkillCurator.curateSkills` take an `onSkillsChanged: @Sendable () async -> Void`. `IrisEngine` supplies its own `invalidateSystemPrompt()`, and `AppState.swift:4070` supplies its engine's.
     - The CLI never builds `AppState.shared`.
 16. **The CLI stops cleanly on SIGINT, SIGTERM and SIGHUP.**
-    - It installs a do-nothing `sigaction` handler with `SA_RESTART`, not `SIG_IGN`. A caught disposition resets to the default across `exec`, so no child inherits an ignore.
+    - It installs a do-nothing `sigaction` handler with `SA_RESTART`, not `SIG_IGN`. A caught disposition resets to the default across `exec`, so no child inherits an ignore. (As built, plan note 16: a SIGHUP or SIGINT already ignored when the CLI starts, as under `nohup`, stays ignored and gets no source. SIGTERM is always caught.)
     - Each signal gets a `DispatchSource` on the CLI's own serial queue, not `.main`.
-    - The first signal claims the run's `ending` as a third claimant, beside the turn and the watchdog. It cancels the turn, calls `LiveProcessGroups.terminateAll`, and waits up to 15 s for the turn to come back.
+    - The first signal claims the run's `ending` as a third claimant, beside the turn and the watchdog. It cancels the turn, calls `LiveProcessGroups.terminateAll`, and waits up to 15 s for the turn to come back. (As built, plan note 10: a built-in job has no turn, so it finishes normally. A signal after the turn or the deadline claimed the ending leaves the row and the exit code as they are.)
     - When the turn is back, or the 15 s are up (the turn is then abandoned, so an uncancellable await can't hang the stop), the CLI:
       - closes the row `interrupted`, "stopped by a signal (SIGINT)";
       - delivers the card;
       - flushes;
       - vacates the payload;
       - exits 2.
+    - (As built, Tasks 12-14.) The run's teardown (`closeSession`, the container's stop and delete) is bounded at 5 s once a stop is asked for. Before `_exit` the CLI then closes `LiveProcessGroups`, waits up to 3 s for it to drain, SIGKILLs what is left, and deletes by name every container still in `LiveContainerNames`, in parallel, bounded at 5 s. It never sweeps by the `iris-` prefix, which both homes share (#492): a container whose delete fails, or one a crash leaves, stays until the app next launches. A stop that lands before the turn has started closes the row the same way with no card.
     - Before admission it exits 2 with no row, and a dry run exits 2 with nothing written.
-    - A second SIGINT means exit now: `LiveProcessGroups.killAll()`, then `_exit(130)`. Decision 11's sweep closes the row later.
+    - A second SIGINT means exit now: `LiveProcessGroups.killAll()`, then `_exit(130)`. Decision 11's sweep closes the row later. (As built, plan note 15: any second signal, exiting `128 + signal`. It resets SIGINT to `SIG_DFL` first, so a third Ctrl-C ends the CLI at once; then it cancels the turn, calls `killAll`, deletes every container in `LiveContainerNames` in parallel for at most 5 s, flushes, vacates and `_exit`s. A second signal during a cold create, an image pull, can leave that container.)
 17. **`LiveProcessGroups`.** `ProcessGroupRunner` records each group at spawn and drops it once the leader is reaped and the kill sequence is over. `terminateAll` sends SIGTERM, then SIGKILL after the runner's grace, on a dispatch queue (invariant 4).
     - *Known gap:* a background job that redirected its output, so invariant 4 deliberately leaves it running, has left the registry once its leader is reaped. A CLI exit doesn't end it. The same is true today, and of the app.
 18. **The seeder and `PerfCLI`** claim through the same primitive (`kind` `seed-dev-home`; `PerfCLI` on its scratch path). The seeder's "no readable pid" refusal goes.
@@ -173,7 +174,7 @@ Checked against `main` at `e418b29`. Paths are under `Sources/IrisKit/`.
   - an injected signal before admission: exit 2, no row;
   - an injected signal mid-run: `interrupted` with the stop reason, the card delivered, the save flushed, the payload empty, the stub's `ProcessGroupRunner` groups gone, exit 2;
   - a turn that ignores cancellation: the same, after the (shortened) grace;
-  - a second SIGINT: `killAll`, exit 130.
+  - a second SIGINT: `killAll`, exit 130. (As built: and the recorded containers deleted.)
 - **Signal inheritance:** with the handlers installed, `/bin/sh -c 'kill -TERM $$; sleep 5'` dies by SIGTERM, both through `Process` and through `ProcessGroupRunner`.
 - **#463's repro:** while a stub holds a temp lock, nothing opens the store. After it dies, the store opens and the CLI's card is at its ordinal.
 
@@ -183,7 +184,7 @@ Checked against `main` at `e418b29`. Paths are under `Sources/IrisKit/`.
 3. While waiting: the hotkey, Cmd-, the Run Log menu item, and Quit. No crash, and the store doesn't open.
 4. `run-dev.sh` beside `Iris Dev.app` in both orders, and an `iris-dev://` link with `swift run` up: the second GUI shows the alert and quits.
 5. `--run-job` with the app open: exit 1, naming the app.
-6. Ctrl-C a terminal `--run-job` mid-`sleep`: exit 2, the row says stopped, and `pgrep sleep` finds nothing. Repeat with a second Ctrl-C: it exits at once, and the `sleep` is gone.
+6. Ctrl-C a terminal `--run-job` mid-`sleep`: exit 2, the row says stopped, and `pgrep sleep` finds nothing. Repeat with a second Ctrl-C: it exits at once, and the `sleep` is gone. (As built, plan note 8: a job's `run_command` runs in its container, so the check asserts that the run's container is gone, not `pgrep sleep`.)
 7. SIGKILL the CLI mid-run while the app waits: the app opens within a second, and the row is closed at open.
 
 ## 4. PR split and docs (invariant 9)
@@ -199,12 +200,12 @@ Each PR is based on `main`, never stacked, and carries the doc fixes its change 
    - Comments: `GUILock`'s header (`RunJobCLI.swift:2-17`), `:355-364`, `IrisMain.swift:27-28`, `iris.swift:5471-5473`, `:5487-5498`, `SandboxSessionManager.swift:244-249`, `RunJobURLIntake.swift:3-6`.
    - GUI checks 1-5 and 7.
 2. **The CLI's clean stop:** decisions 16-17.
-   - Add to `docs/jobs.md` and the README: Ctrl-C and SIGTERM stop a run cleanly, its row reads "stopped by a signal", it exits 2, and a second Ctrl-C exits at once. Also document decision 17's known gap.
+   - Add to `docs/jobs.md` and the README: Ctrl-C and SIGTERM stop a run cleanly, its row reads "stopped by a signal", it exits 2, and a second Ctrl-C exits at once. Also document decision 17's known gap. (As built: also replaces PR 1's "Ctrl-C ends a `--run-job` at once" paragraph in `docs/jobs.md`, adds the second signal's exit codes to both exit tables, documents the kept inherited ignore and the containers a stop can leave, and extends AGENTS.md invariant 4 with the two registries.)
    - GUI check 6.
 
 ## 5. Not in this deliverable
 
 - A Stop or Force stop for a CLI run from the app (dropped by the lean ruling).
 - `--run-job` while the app is open, over a socket (ruling 1).
-- Reaping containers across homes. The `iris-` prefix is shared, so a dev launch can still reap the release app's live containers; that needs its own issue.
+- Reaping containers across homes. The `iris-` prefix is shared, so a dev launch can still reap the release app's live containers; that needs its own issue. (As built: #492. For the same reason the CLI does no prefix sweep of its own, so a `--run-job`-only user keeps a container whose delete failed until they delete it.)
 - Mixed pre-#463 binaries, beyond decision 3 and `.legacy`.

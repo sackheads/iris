@@ -266,9 +266,14 @@ Exit codes: `0` completed (or a `--dry-run` gate that saw a change); `2` failed,
 approval, interrupted, or refused by admission (and a gate that could not answer); `3` a
 `--dry-run` gate that saw no change; `1` usage, an unknown job, `--dry-run` on a job with no gate,
 a store that would not open, the store's lock held by the app, another `--run-job`, the seeder or
-an older Iris build, or a lock that could not be taken at all (the path and error are named). Full
-detail, including what a dry run does and does not record and what the lock does and does not
-protect, is in **[docs/jobs.md](docs/jobs.md)**.
+an older Iris build, or a lock that could not be taken at all (the path and error are named);
+`130` (or `143`, `129`) a second signal. The first Ctrl-C, SIGTERM or SIGHUP stops a run cleanly:
+its turn is cancelled, its row reads "stopped by a signal (SIGINT)", the card is delivered, the
+containers it made are deleted by name, and it exits `2`. A second exits at once, and a third
+Ctrl-C kills it outright. Under `nohup`, closing the terminal does not stop it. A container whose
+delete fails, or one a crash leaves, stays until the app next launches (#492). Full detail,
+including what a dry run does and does not record, what the lock does and does not protect, and
+what a stop does not reach, is in **[docs/jobs.md](docs/jobs.md)** ("Stopping a run").
 
 ### Updates & Releases
 
