@@ -44,12 +44,13 @@ public enum IrisMain {
             // llama.cpp's `GGML_ASSERT` — so a script would read 134 for a run whose row says "blocked on
             // approval" and whose documented code is 2. This command's contract *is* its exit code.
             // Nothing is lost by skipping the atexit handlers: the run's save was flushed inside `run`,
-            // and the two streams are flushed here.
-            fflush(stdout)
-            fflush(stderr)
-            // Last: an empty payload under a held lock reads as an unnamed holder (decision 5).
-            StoreLock.vacate(at: IrisPaths.default.storeLockFile)
-            _exit(code)
+            // and `stop.exit` flushes the two streams, then empties the payload last (decision 5).
+            // Through the stop's single-shot exit, so a second signal landing now cannot race this
+            // to a different code: whichever gets there first exits.
+            stop.exit(code: code)
+            // Lost to a second signal's exit, which is under way on the signal queue and ends the
+            // process: returning would run `exit`'s destructors, so wait for it here.
+            while true { pause() }
         } else if CommandLine.arguments.contains("--seed-dev-home") {
             ProcessRole.set(.seed)
             let code = DevHomeSeeder.runCLI()

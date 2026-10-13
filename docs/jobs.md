@@ -1195,17 +1195,25 @@ refusal or an error prints its sentence to stderr and, under `--json`, a `{"erro
 `--run-job` cleanly:
 
 - The turn is cancelled, and every host process group the run started (hooks, plugin checks) gets
-  SIGTERM, then SIGKILL 2 seconds later. A job's `run_command` runs in its container, not on the
-  host, and the cancelled turn ends it there.
-- The CLI waits up to 15 seconds for the turn to come back. A turn that does not is abandoned.
+  SIGTERM, then SIGKILL 2 seconds later. Both happen as the signal arrives, on the CLI's signal
+  queue, so they do not wait for a free Swift thread (#372). A job's `run_command` runs in its
+  container, not on the host, and the cancelled turn ends it there.
+- The CLI waits for the turn to come back until 15 seconds after the signal. A turn that does not
+  is abandoned.
 - The row is closed `interrupted`, "stopped by a signal (SIGINT)" (or `SIGTERM`, `SIGHUP`), and
-  the card is delivered. A stop that lands before the turn has started closes the row the same way,
-  with no card.
+  the card is delivered. A stop that lands before the turn has started (including before the
+  isolated-network check of a `network: false` grant, which it then skips) closes the row and
+  delivers the card the same way.
 - The run's session container gets up to 5 seconds to stop and be deleted. The CLI then starts no
   new host process, waits up to 3 seconds for the host groups to end, SIGKILLs any still running,
   and deletes by name every container this process created that is still recorded, in parallel,
   for at most 5 seconds. It never deletes by the `iris-` prefix (see below).
 - It flushes its output, and exits `2`.
+
+The worst case is about 28.5 seconds after the signal: the 15-second grace, 5 for the container,
+3 for the host groups and 5.5 for the deletes. Writing the row and the card needs a free Swift
+thread, so a process whose threads are all blocked finishes those steps only once one frees; the
+grace still counts from the signal, so that wait is not added to it.
 
 A signal that lands once the run has closed its row does not change the row or the exit code,
 which are the run's own. A built-in job has no turn to cancel and runs in milliseconds, so it ignores the first signal and
@@ -1222,7 +1230,9 @@ so a waiting app opens on its next poll, and the next Iris app to open the store
 
 If the CLI starts with SIGHUP or SIGINT already ignored (`nohup`, or a `&` job in a
 non-interactive shell), it keeps that signal ignored, so under `nohup` closing the terminal does
-not stop the run. SIGTERM is always caught.
+not stop the run. It can still break a call in flight: the `container` CLI and MCP servers the run
+starts share its process group, so the terminal's SIGHUP reaches them, and a container command or
+MCP tool call under way at that moment can fail (#497). SIGTERM is always caught.
 
 What a stop does not reach:
 
@@ -1233,8 +1243,10 @@ What a stop does not reach:
   know. The CLI does no such sweep, because `~/.iris` and `~/.iris-dev` share the prefix and a
   sweep from one home would delete the other's live containers. So someone who only ever runs
   `--run-job` keeps that container until they delete it themselves (#492).
-- A second signal while a container is still being created (a cold create pulling its image) can
-  leave that container: its delete can run before the container exists.
+- A container still being created (a cold create pulling its image) when the CLI deletes the
+  recorded containers can be left: its delete can run before the container exists. A second signal
+  does that at once; a clean stop does it when the create outlasts the 15-second grace and the
+  5-second teardown.
 
 A `--run-job` builds one `AppState` of its own, over the store it has locked, and never touches the
 app's. A skill written during the run (`write_file` into a skill folder, `create_skill`,

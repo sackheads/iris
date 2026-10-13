@@ -53,7 +53,9 @@ enum CLISignals {
             let ignored = unsafeBitCast(old.__sigaction_u, to: UInt.self) == 1   // SIG_IGN
             if ignored, keepsInheritedIgnore.contains(signal) { continue }
             let source = DispatchSource.makeSignalSource(signal: signal, queue: queue)
-            source.setEventHandler { onSignal(signal) }
+            // A signal source coalesces: two quick SIGINTs can arrive as one event whose `data`
+            // is 2, and the second must still mean "exit now".
+            source.setEventHandler { for _ in 0..<max(1, Int(source.data)) { onSignal(signal) } }
             source.resume()
             var action = sigaction()
             action.__sigaction_u.__sa_handler = { _ in }
@@ -69,8 +71,9 @@ enum CLISignals {
 }
 
 /// What the CLI does with a stopping signal.
-/// - The first stops the run cleanly (`RunStop`). With no run armed yet (before admission, or a
-///   dry run), it exits now instead, with 2.
+/// - The first stops the run cleanly (`RunStop`): on the signal queue, it cancels the turn and
+///   SIGTERMs the host groups, and the run then closes itself as stopped. With no run armed yet
+///   (before admission, or a dry run), it exits now instead, with 2.
 /// - A second means exit now, with `128 + signal`.
 /// - Exiting now resets SIGINT to its default first, so a third Ctrl-C ends the CLI at once while
 ///   the deletes run. It then cancels the run's turn, so a runner queued but not yet spawned (in
@@ -78,7 +81,8 @@ enum CLISignals {
 ///   every container this process made (bounded at 5 s, in parallel, plan note 15), flushes
 ///   stdout and stderr, empties the lock's payload and `_exit`s, in that order: the payload is
 ///   emptied last, as on the CLI's ordinary exit. All of it on the signal queue, nothing on the
-///   pool (#372).
+///   pool (#372). The flush, the vacate and the `_exit` are `exit(code:)`, which the ordinary exit
+///   shares: whichever reaches it first exits, with its own code.
 /// - After a clean stop, `settle()` runs before `_exit`: it closes the host registry, so no new
 ///   group starts, then waits up to 3 s for the host groups to drain
 ///   (their SIGKILL rung is 2 s after the SIGTERM), a SIGKILL for any that did not, and a delete
@@ -96,6 +100,8 @@ final class CLIStop: @unchecked Sendable {
     private let exitNow: @Sendable (Int32) -> Void
     private let lock = NSLock()
     private var received = 0
+    /// Set by the first `exit(code:)`: the process has one exit, and one exit code.
+    private var exiting = false
 
     /// Five seams default to the process-wide `.shared` registries, which only the CLI may use:
     /// `terminateGroups`, `closeGroups`, `drainGroups` and `killGroups` (`LiveProcessGroups`) and
@@ -170,11 +176,28 @@ final class CLIStop: @unchecked Sendable {
     }
 
     private func exitAtOnce(_ code: Int32) {
-        resetInterrupt()
-        // Before either registry is read: a cancelled turn's queued runner refuses to spawn.
-        run.cancelTurn()
-        killGroups()
-        deleteContainers()
+        exit(code: code) {
+            resetInterrupt()
+            // Before either registry is read: a cancelled turn's queued runner refuses to spawn.
+            run.cancelTurn()
+            killGroups()
+            deleteContainers()
+        }
+    }
+
+    /// The CLI's one way out: `before` (the exit-now's kills and deletes), then flush, vacate and
+    /// `_exit`. Single-shot, so the run returning on the main thread and a second signal on the
+    /// signal queue cannot race to two exit codes: whichever gets here first exits, with its code.
+    /// The other returns at once without doing anything, and the caller must not go on as if it
+    /// had exited (`IrisMain` parks). Returns only in a test, whose `exitNow` records the code.
+    func exit(code: Int32, before: () -> Void = {}) {
+        let first: Bool = lock.withLock {
+            guard !exiting else { return false }
+            exiting = true
+            return true
+        }
+        guard first else { return }
+        before()
         flush()
         // Last before `_exit`: an empty payload under a held lock reads as an unnamed holder.
         vacate()

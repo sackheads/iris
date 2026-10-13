@@ -47,9 +47,10 @@ final class GateRuntime: ContainerRuntime, @unchecked Sendable {
     /// child for a caller that has already given up, so a cleanup taken down the ordinary path
     /// from a cancelled evaluation spawns neither `stop` nor `delete`. Modelled here so the test
     /// of that can fail when it is wrong.
-    func remove(name: String) async {
-        guard !Task.isCancelled else { return }
+    func remove(name: String) async -> Bool {
+        guard !Task.isCancelled else { return false }
         lock.withLock { removed.append(name) }
+        return true
     }
     func list(prefix: String) async -> [String] { [] }
 

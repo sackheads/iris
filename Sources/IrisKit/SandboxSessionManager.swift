@@ -284,12 +284,13 @@ actor SandboxSessionManager {
 
     // MARK: - Helpers
 
-    /// Removes a container and drops its name from the exit-now box (#463). A plain `remove` from
-    /// a cancelled task launches nothing, so then the name stays for the exit path to delete.
+    /// Removes a container, and drops its name from the exit-now box (#463) only once the delete
+    /// succeeded: a failed delete, or a plain `remove` from a cancelled task (which launches
+    /// nothing), leaves the name for the CLI's exit path to delete.
     private func removeContainer(_ name: String, ignoringCancellation: Bool = false) async {
-        if ignoringCancellation { await runtime.removeIgnoringCancellation(name: name) }
-        else { await runtime.remove(name: name) }
-        if ignoringCancellation || !Task.isCancelled { live.remove(name) }
+        let removed = ignoringCancellation ? await runtime.removeIgnoringCancellation(name: name)
+            : await runtime.remove(name: name)
+        if removed { live.remove(name) }
     }
 
     /// Ensures a container exists for `id`, coalescing concurrent first-commands onto a single

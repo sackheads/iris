@@ -83,3 +83,24 @@ private final class FirstOf<T: Sendable>: @unchecked Sendable {
         }
     }
 }
+
+/// `blocking`'s answer, run on a dispatch queue of its own, so a bounded blocking wait (a
+/// `usleep` poll, `LiveProcessGroups.waitUntilEmpty`) never parks a cooperative thread: CI's pool
+/// is 3 threads. `blocking` must be bounded itself, since the continuation waits for it.
+func offPool<T: Sendable>(_ blocking: @escaping @Sendable () -> T) async -> T {
+    await withCheckedContinuation { continuation in
+        DispatchQueue(label: "iris.tests.offpool").async { continuation.resume(returning: blocking()) }
+    }
+}
+
+/// Whether `condition` held within `seconds`, polled every 10 ms off the pool (`offPool`).
+func polled(within seconds: Double, _ condition: @escaping @Sendable () -> Bool) async -> Bool {
+    await offPool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !condition() {
+            if Date() >= deadline { return false }
+            usleep(10_000)
+        }
+        return true
+    }
+}

@@ -8,6 +8,11 @@ import Darwin
 /// shared one belongs to whatever else is running in this process (invariant 7).
 @Suite("LiveProcessGroups (#463)", .timeLimit(.minutes(1)))
 struct LiveProcessGroupsTests {
+    /// `waitUntilEmpty`, off the pool: it blocks its caller with a `usleep` poll.
+    private func drained(_ registry: LiveProcessGroups, within seconds: TimeInterval) async -> Bool {
+        await offPool { registry.waitUntilEmpty(within: seconds) }
+    }
+
     private func spawn(_ registry: LiveProcessGroups, _ script: String)
         async throws -> (ProcessGroupRunner, Task<Result<ProcessGroupRunner.Output, Error>, Never>) {
         let runner = ProcessGroupRunner(registry: registry)
@@ -48,19 +53,19 @@ struct LiveProcessGroupsTests {
         runner.terminate()
         _ = try await value(of: task, within: 10)
         // Bounded, not read at once: the drain is the runner's to finish (#490 review).
-        #expect(registry.waitUntilEmpty(within: 5))
+        #expect(await drained(registry, within: 5))
     }
 
     @Test("waitUntilEmpty returns true once the groups drain, and false at its bound while one lives")
     func waitUntilEmptyIsBounded() async throws {
         let registry = LiveProcessGroups()
-        #expect(registry.waitUntilEmpty(within: 0.1), "an empty registry is already drained")
+        #expect(await drained(registry, within: 0.1), "an empty registry is already drained")
         let (runner, task) = try await spawnIgnoringTerm(registry)
         let started = Date()
-        #expect(!registry.waitUntilEmpty(within: 0.3))
+        #expect(await drained(registry, within: 0.3) == false)
         #expect(Date().timeIntervalSince(started) >= 0.3)
         runner.terminate()   // SIGTERM is ignored, so this drains at the SIGKILL rung, 2 s on
-        #expect(registry.waitUntilEmpty(within: 5))
+        #expect(await drained(registry, within: 5))
         _ = try await value(of: task, within: 10)
     }
 
@@ -74,8 +79,8 @@ struct LiveProcessGroupsTests {
             "(trap '' TERM; : > '\($0)'; exec sleep 30) >/dev/null 2>&1 & wait"
         }
         runner.terminate()
-        #expect(!registry.waitUntilEmpty(within: 1), "the SIGKILL rung is 2 s on: the group must still be listed")
-        #expect(registry.waitUntilEmpty(within: 5))
+        #expect(await drained(registry, within: 1) == false, "the SIGKILL rung is 2 s on: the group must still be listed")
+        #expect(await drained(registry, within: 5))
         guard case .success(let out) = try await value(of: task, within: 10) else { Issue.record("spawn failed"); return }
         #expect(out.status == 128 + SIGTERM)
     }
@@ -92,7 +97,7 @@ struct LiveProcessGroupsTests {
             #expect(out.status == 128 + SIGTERM)
             #expect(out.killed)
         }
-        #expect(registry.waitUntilEmpty(within: 5))
+        #expect(await drained(registry, within: 5))
     }
 
     @Test("terminateAll reaches a group that ignores SIGTERM with the SIGKILL rung")

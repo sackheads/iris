@@ -16,7 +16,7 @@ final class RunStop: @unchecked Sendable {
     private enum Phase { case idle, armed, requested(String), done }
 
     /// How long the run waits for a cancelled turn before abandoning it, so an uncancellable
-    /// await cannot hang the stop.
+    /// await cannot hang the stop. Counted from the request (`graceDeadline`).
     let grace: TimeInterval
     /// How long the run's teardown (`closeSession`: the container's stop and delete, each up to
     /// 60 s) may take on the stop path before the run goes on without it. A container it leaves is
@@ -33,6 +33,8 @@ final class RunStop: @unchecked Sendable {
     private var nextToken: UInt64 = 0
     /// Cancels the armed run's turn. Set by the run once its turn exists, dropped at `disarm`.
     private var turn: (@Sendable () -> Void)?
+    /// Set by the armed `request`: see `graceDeadline`.
+    private var graceEnd: DispatchTime?
 
     init(grace: TimeInterval = 15, teardown: TimeInterval = 5,
          terminateGroups: @escaping @Sendable () -> Void = { LiveProcessGroups.shared.terminateAll() }) {
@@ -64,24 +66,43 @@ final class RunStop: @unchecked Sendable {
         }
     }
 
+    /// On an armed run, the first stop acts here, on the caller's queue (the CLI's signal queue),
+    /// not in the run's stop watcher: under a held cooperative pool (#372) the watcher never runs,
+    /// and a stop that waited for it would do nothing. So this cancels the attached turn, sends the
+    /// host groups their SIGTERM and starts the grace, all before it returns. The claim on the
+    /// run's ending and the row stay the run's, on its actor. Losing that claim (the turn came back
+    /// first) makes this harmless: cancelling a finished turn is a no-op, and the CLI's settle
+    /// ends whatever group is left.
     func request(reason: String) -> Answer {
-        let (answer, waiting): (Answer, CheckedContinuation<String?, Never>?) = lock.withLock {
+        let (answer, waiting, cancel): (Answer, CheckedContinuation<String?, Never>?, (@Sendable () -> Void)?) = lock.withLock {
             switch phase {
             case .idle:
                 phase = .requested(reason)
-                return (.exitNow, nil)
+                return (.exitNow, nil, nil)
             case .armed:
                 phase = .requested(reason)
+                graceEnd = .now() + grace
                 let w = waiter?.continuation
                 waiter = nil
-                return (.runWillStop, w)
+                return (.runWillStop, w, turn)
             case .requested, .done:
-                return (.ignored, nil)
+                return (.ignored, nil, nil)
             }
+        }
+        if answer == .runWillStop {
+            // Outside the lock: cancellation handlers run inline. The turn first, so a runner
+            // queued but not yet spawned (in no registry) refuses to spawn.
+            cancel?()
+            terminateGroups()
         }
         waiting?.resume(returning: reason)
         return answer
     }
+
+    /// When the grace for a cancelled turn runs out: `grace` after the stop was asked for, not
+    /// after the run's actor got round to waiting, which a held pool can delay without limit. Nil
+    /// until an armed run is asked to stop.
+    var graceDeadline: DispatchTime? { lock.withLock { graceEnd } }
 
     /// At the top of a run. nil: armed. A reason: a stop came first, so the run must not start.
     /// One armed run at a time: a second would be a second waiter, so it traps here, before it
@@ -112,11 +133,18 @@ final class RunStop: @unchecked Sendable {
         waiting?.resume(returning: nil)
     }
 
-    /// The armed run's turn, so the CLI's exit-now can cancel it synchronously, from the signal
-    /// queue, before it reads the registries: a runner queued but not yet spawned is in neither,
-    /// and a cancelled turn's runner refuses to spawn. The clean stop cancels through its watcher.
+    /// The armed run's turn, so a stop can cancel it synchronously, from the signal queue: the
+    /// clean stop in `request`, and the CLI's exit-now before it reads the registries (a runner
+    /// queued but not yet spawned is in neither, and a cancelled turn's runner refuses to spawn).
+    /// A stop that came before the turn existed found nothing to cancel, so the turn is cancelled
+    /// here, at once.
     func attachTurn(_ cancel: @escaping @Sendable () -> Void) {
-        lock.withLock { turn = cancel }
+        let late: Bool = lock.withLock {
+            turn = cancel
+            if case .requested = phase { return true }
+            return false
+        }
+        if late { cancel() }
     }
 
     /// Cancels the attached turn, if any. Outside the lock: cancellation handlers run inline.

@@ -155,8 +155,10 @@ protocol ContainerRuntime: Sendable {
     /// `timeoutSeconds` is a wall-clock deadline for the whole command; past it the CLI process is
     /// killed and `ContainerRuntimeError.timedOut` is thrown. `nil` means no deadline.
     func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?) async throws -> (stdout: String, stderr: String, exitCode: Int32)
-    /// `container stop <name>` then `container delete <name>` — best-effort, never throws.
-    func remove(name: String) async
+    /// `container stop <name>` then `container delete <name>` — best-effort, never throws. True
+    /// when the delete exited 0, so the caller knows the container is gone (#463).
+    @discardableResult
+    func remove(name: String) async -> Bool
     /// Names of existing containers whose name starts with `prefix`.
     func list(prefix: String) async -> [String]
 }
@@ -178,7 +180,8 @@ extension ContainerRuntime {
     /// awaiting it keeps the cleanup ordered before whatever the caller does next. Bounded by the
     /// remove's own `housekeepingTimeoutSeconds`, so a cancelled caller waits seconds, not
     /// indefinitely.
-    func removeIgnoringCancellation(name: String) async {
+    @discardableResult
+    func removeIgnoringCancellation(name: String) async -> Bool {
         await Task { await self.remove(name: name) }.value
     }
 }
@@ -723,9 +726,10 @@ struct CLIContainerRuntime: ContainerRuntime {
             + "sleep \(Int(CLIProcessRunner.killGraceSeconds)); kill -KILL -- -\"$p\" 2>/dev/null; exit 0"
     }
 
-    func remove(name: String) async {
+    @discardableResult
+    func remove(name: String) async -> Bool {
         _ = try? await launch(["stop", name], Self.housekeepingTimeoutSeconds)
-        _ = try? await launch(["delete", name], Self.housekeepingTimeoutSeconds)
+        return (try? await launch(["delete", name], Self.housekeepingTimeoutSeconds))?.exitCode == 0
     }
 
     func list(prefix: String) async -> [String] {

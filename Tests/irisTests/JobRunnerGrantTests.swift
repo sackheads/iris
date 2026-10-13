@@ -108,6 +108,38 @@ struct JobRunnerGrantTests {
         #expect(openCard.network == true)
     }
 
+    /// #463 fix wave, finding 5: the network check can take seconds (a `container network ls`, and
+    /// a system start on a miss), so a stop that came before it skips it. The stop lands in the
+    /// sandbox check, the step just before, once the row exists: past the run's earlier stop check,
+    /// so only the one in front of the network can catch it.
+    @Test("a CLI stop before the network check skips it and closes the row stopped, with a card")
+    func stopBeforeTheNetworkCheck() async throws {
+        let dir = try tempDirectory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let (store, state, engine) = try harness([textResponse("never reached")])
+        let job = grantedJob(dir)
+        try store.ledger.upsert(job)
+        let (config, teardown) = isolatedConfig(); defer { teardown() }
+        let asked = CallCount()
+        let stop = RunStop(grace: 5, teardown: 1, terminateGroups: {})
+        let r = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
+                          ensureIsolatedNetwork: { _ = asked.bump(); return nil },
+                          startContainerSystem: { false }, config: config,
+                          sandboxAvailable: { [ledger = store.ledger] in
+                              if (try? ledger.runs(jobId: job.id, limit: 1).first) != nil {
+                                  _ = stop.request(reason: RunStop.reason(for: SIGINT))
+                              }
+                              return true
+                          }, stop: stop)
+        await r.fire(job: job, origin: .manual)
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(run.status == .interrupted)
+        #expect(run.failureReason == "stopped by a signal (SIGINT)")
+        #expect(asked.value == 0, "the network was never checked")
+        let activityId = state.activityConversationId()
+        let card = state.conversations.first { $0.id == activityId }?.messages.compactMap { EventCard.decode($0.content) }.last
+        #expect(card?.runId == run.id)
+    }
+
     @Test("an ungranted mutating job still gets no workspace and no grant, and never asks for the isolated network")
     func ungrantedFireIsUnchanged() async throws {
         let (store, state, engine) = try harness([textResponse("done")])

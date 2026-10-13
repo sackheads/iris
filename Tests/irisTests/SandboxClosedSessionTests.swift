@@ -50,7 +50,7 @@ struct SandboxClosedSessionTests {
             if lock.withLock({ removed.contains(name) }) { throw ContainerRuntimeError.launchFailed("no such container") }
             return ("ok", "", 0)
         }
-        func remove(name: String) async { lock.withLock { removed.append(name) } }
+        func remove(name: String) async -> Bool { lock.withLock { removed.append(name) }; return true }
         func list(prefix: String) async -> [String] { [] }
     }
 
@@ -276,9 +276,24 @@ struct SandboxClosedSessionTests {
         #expect(live.names.isEmpty)
     }
 
+    /// Fix wave: the name used to be dropped whenever the close was not cancelled, so a delete
+    /// that failed left a container the exit path no longer knew to delete.
+    @Test("#463: a close whose delete fails keeps the name recorded for the exit path")
+    func failedRemoveKeepsTheName() async {
+        let live = LiveContainerNames()
+        let rt = MockRuntime()
+        let m = SandboxSessionManager(runtime: rt, image: { "ubuntu:latest" }, live: live)
+        let id = UUID()
+        _ = await m.run(command: "a", conversationId: id, workspace: "/ws")
+        rt.failRemove = true
+        await m.closeSession(id)
+        #expect(rt.removedNames == ["iris-\(id.uuidString.lowercased())"], "the delete was tried")
+        #expect(live.names == ["iris-\(id.uuidString.lowercased())"], "left for the exit path to delete")
+    }
+
     /// The manager's bookkeeping only: MockRuntime launches nothing, so whether the real `remove`
     /// spawns a delete from a cancelled task is not what this pins.
-    @Test("#463: a close from a cancelled task keeps the name recorded, because Task.isCancelled is set")
+    @Test("#463: a close from a cancelled task keeps the name recorded, because its remove reports no delete")
     func cancelledCloseKeepsTheName() async throws {
         let live = LiveContainerNames()
         let m = SandboxSessionManager(runtime: MockRuntime(), image: { "ubuntu:latest" }, live: live)

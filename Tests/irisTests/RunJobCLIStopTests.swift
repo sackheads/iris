@@ -169,9 +169,63 @@ final class RunJobCLIStopTests {
         #expect(cliStop.run.arm() == nil)
         cliStop.run.attachTurn { events.add("cancel") }
         cliStop.receive(SIGINT)
-        #expect(events.values.isEmpty, "the first signal leaves the cancel to the run's stop watcher")
+        #expect(events.values == ["cancel"], "the first signal cancels the turn itself")
         cliStop.receive(SIGINT)
-        #expect(events.values == ["reset", "cancel", "kill", "delete", "flush", "vacate", "exit 130"])
+        #expect(events.values == ["cancel", "reset", "cancel", "kill", "delete", "flush", "vacate", "exit 130"])
+    }
+
+    /// Fix wave, finding 1: the first signal acts on the caller's queue, before it returns, rather
+    /// than in a stop watcher that needs a pool thread. `CLISignalTests.firstSignalActsOffThePool`
+    /// holds the pool for real.
+    @Test("the first signal cancels the turn, SIGTERMs the groups and starts the grace before it returns")
+    func firstSignalActsAtOnce() {
+        let events = Events()
+        let cliStop = CLIStop(grace: 7, terminateGroups: { events.add("terminate") }, closeGroups: {},
+                              drainGroups: { true }, killGroups: { events.add("kill") }, deleteContainers: {},
+                              resetInterrupt: {}, flush: {}, vacate: {}, exitNow: { events.add("exit \($0)") })
+        #expect(cliStop.run.arm() == nil)
+        cliStop.run.attachTurn { events.add("cancel") }
+        #expect(cliStop.run.graceDeadline == nil)
+        let before = DispatchTime.now()
+        cliStop.receive(SIGINT)
+        #expect(events.values == ["cancel", "terminate"], "the turn first, so a queued runner refuses to spawn")
+        let deadline = cliStop.run.graceDeadline
+        #expect(deadline != nil)
+        if let deadline { #expect(deadline >= before + 7 && deadline <= .now() + 7, "the grace counts from the request") }
+    }
+
+    @Test("a turn attached after the stop was asked for is cancelled at once")
+    func lateTurnIsCancelled() {
+        let events = Events()
+        let cliStop = stop(LiveProcessGroups(), events)
+        #expect(cliStop.run.arm() == nil)
+        cliStop.receive(SIGTERM)
+        cliStop.run.attachTurn { events.add("cancel") }
+        #expect(events.values == ["cancel"])
+    }
+
+    /// Fix wave, finding 3: the run's own exit and a second signal's used to race to two codes.
+    @Test("the exit is single-shot: the run's exit first keeps its code, and a later second signal does nothing")
+    func runExitWins() {
+        let events = Events()
+        let cliStop = stop(LiveProcessGroups(), events)
+        #expect(cliStop.run.arm() == nil)
+        cliStop.receive(SIGINT)
+        cliStop.exit(code: RunJobCLI.Exit.notCompleted)
+        cliStop.receive(SIGINT)
+        #expect(events.values == ["flush", "vacate", "exit 2"])
+    }
+
+    @Test("the exit is single-shot: a second signal first keeps 130, and the run's exit after it does nothing")
+    func secondSignalWins() {
+        let events = Events()
+        let cliStop = stop(LiveProcessGroups(), events)
+        #expect(cliStop.run.arm() == nil)
+        cliStop.receive(SIGINT)
+        cliStop.receive(SIGINT)
+        cliStop.exit(code: RunJobCLI.Exit.notCompleted)
+        #expect(events.exits == [130])
+        #expect(events.values.filter { $0 == "flush" }.count == 1)
     }
 
     @Test("a signal after the run is over is left to the CLI's own exit")
@@ -187,7 +241,8 @@ final class RunJobCLIStopTests {
     @Test("settle kills what has not drained by its bound")
     func settleKillsTheStragglers() async throws {
         let events = Events()
-        let cliStop = CLIStop(closeGroups: { events.add("close") }, drainGroups: { false }, killGroups: { events.add("kill") },
+        let cliStop = CLIStop(terminateGroups: {}, closeGroups: { events.add("close") }, drainGroups: { false },
+                              killGroups: { events.add("kill") },
                               deleteContainers: { events.add("delete") }, resetInterrupt: {},
                               vacate: {}, exitNow: { _ in })
         cliStop.settle()

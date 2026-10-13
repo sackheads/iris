@@ -921,6 +921,8 @@ struct JobRetryTests {
         #expect(run.failureReason == "stopped by a signal (SIGHUP)")
         #expect(activity.events.isEmpty, "no turn, so no sleep assertion was taken for one")
         #expect(client.callCount == 0, "the model was never asked")
+        #expect(card(state)?.runId == run.id, "the card is delivered, as for a stop mid-turn")
+        #expect(card(state)?.outcome == "stopped by a signal (SIGHUP)")
     }
 
     @Test("a stop before the run starts means no run: no row, no conversation")

@@ -118,11 +118,83 @@ struct CLISignalTests {
             exit(1)
         }
         let pid = try #require(Int32(String(decoding: try Data(contentsOf: pidFile), as: UTF8.self)))
-        var gone = false
-        for _ in 0..<200 {   // a zombie until launchd reaps it, at most a moment
-            if kill(pid, 0) == -1 && errno == ESRCH { gone = true; break }
-            usleep(10_000)
-        }
+        // A zombie until launchd reaps it, at most a moment. Polled off the pool.
+        let gone = await polled(within: 2) { kill(pid, 0) == -1 && errno == ESRCH }
         #expect(gone, "the sleep's group was SIGKILLed before the exit")
+    }
+
+    /// Counts what the signal source hands on.
+    final class Tally: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+        func bump() { lock.withLock { n += 1 } }
+        var value: Int { lock.withLock { n } }
+    }
+
+    /// A dispatch signal source coalesces: signals that land before its handler runs arrive as one
+    /// event whose `data` is their count. The queue is suspended so both land first.
+    @Test("two signals the source coalesces into one event are still two signals")
+    func coalescedSignalsCountTwice() async {
+        await #expect(processExitsWith: .success) {
+            let queue = DispatchQueue(label: "iris.tests.signals")
+            let tally = Tally()
+            let installation = CLISignals.install([SIGTERM], queue: queue, onSignal: { _ in tally.bump() })
+            queue.suspend()
+            kill(getpid(), SIGTERM)
+            kill(getpid(), SIGTERM)
+            usleep(200_000)   // both are with the source before its queue runs
+            queue.resume()
+            for _ in 0..<500 where tally.value < 2 { usleep(10_000) }
+            usleep(100_000)   // and no third
+            withExtendedLifetime(installation) {}
+            exit(tally.value == 2 ? 0 : 10 + Int32(min(tally.value, 9)))
+        }
+    }
+
+    /// Blocks the calling thread on `gate`. Synchronous, so a pool thread can be held with it
+    /// without the async-context warning.
+    static func park(_ gate: DispatchSemaphore) { gate.wait() }
+
+    /// Fix wave, finding 1: the first signal used to do nothing until the run's stop watcher got a
+    /// pool thread, so under a held pool (#372) a Ctrl-C was lost. Every cooperative thread is
+    /// parked on a semaphore (the probe task proves it), then a real SIGINT must still SIGTERM the
+    /// registered group: the group drains at its SIGKILL rung, on the runner's queue.
+    @Test("under a held cooperative pool, the first signal still SIGTERMs the run's host groups")
+    func firstSignalActsOffThePool() async {
+        await #expect(processExitsWith: .success) {
+            let registry = LiveProcessGroups()
+            let runner = ProcessGroupRunner(registry: registry)
+            let running = Task { await runner.run(executable: "/bin/sleep", arguments: ["30"], environment: nil, currentDirectory: nil) }
+            for _ in 0..<500 where runner.processIdentifier == 0 { try? await Task.sleep(nanoseconds: 10_000_000) }
+            guard runner.processIdentifier > 0 else { exit(2) }
+            let stop = CLIStop(terminateGroups: { registry.terminateAll() }, closeGroups: {}, drainGroups: { true },
+                               killGroups: {}, deleteContainers: {}, resetInterrupt: {}, flush: {}, vacate: {},
+                               exitNow: { _ in _exit(3) })   // a first signal must not exit
+            guard stop.run.arm() == nil else { exit(4) }
+            let cancelled = Fired()
+            stop.run.attachTurn { cancelled.set() }
+            let installation = CLISignals.install([SIGINT], onSignal: { stop.receive($0) })
+            guard installation.installed == [SIGINT] else { exit(5) }   // run `swift test` in the foreground
+
+            // This body holds one pool thread; park every other, with spares.
+            let gate = DispatchSemaphore(value: 0)
+            let parked = Tally()
+            let width = ProcessInfo.processInfo.activeProcessorCount
+            for _ in 0..<(width + 4) { Task.detached { parked.bump(); CLISignalTests.park(gate) } }
+            for _ in 0..<500 where parked.value < width - 1 { usleep(10_000) }
+            let probe = Fired()
+            Task.detached { probe.set() }
+            usleep(300_000)
+            guard !probe.value else { exit(6) }   // the pool is not held: the test proves nothing
+
+            kill(getpid(), SIGINT)
+            var drained = false
+            for _ in 0..<800 { if registry.count == 0 { drained = true; break }; usleep(10_000) }   // rung at 2 s
+            guard cancelled.value else { exit(7) }
+            guard drained else { exit(8) }
+            guard stop.run.graceDeadline != nil else { exit(9) }
+            withExtendedLifetime((running, installation)) {}
+            _exit(0)   // the parked threads never come back
+        }
     }
 }
