@@ -1210,14 +1210,17 @@ refusal or an error prints its sentence to stderr and, under `--json`, a `{"erro
   for at most 5 seconds. It never deletes by the `iris-` prefix (see below).
 - It flushes its output, and exits `2`.
 
-The worst case is about 28.5 seconds after the signal: the 15-second grace, 5 for the container,
-3 for the host groups and 5.5 for the deletes. Writing the row and the card needs a free Swift
+For a stop while the turn is running, the worst case is about 28.5 seconds after the signal: the
+15-second grace, 5 for the container, 3 for the host groups and 5.5 for the deletes. A stop that
+lands during the steps before the turn waits first for the step under way: the prompt guard's
+model load, or the isolated-network check of a `network: false` grant, which can take about 2
+minutes (a `container network ls` and a `network create`, up to 60 seconds each). Writing the row and the card needs a free Swift
 thread, so a process whose threads are all blocked finishes those steps only once one frees; the
 grace still counts from the signal, so that wait is not added to it.
 
 A signal that lands once the run has closed its row does not change the row or the exit code,
-which are the run's own. A built-in job has no turn to cancel and runs in milliseconds, so it ignores the first signal and
-finishes. A signal before the run starts (while the CLI claims the store or admits the job), or
+which are the run's own. A built-in job has no turn to cancel and runs in milliseconds, so it finishes as usual: the first
+signal only SIGTERMs the run's registered host process groups, and a built-in starts none. A signal before the run starts (while the CLI claims the store or admits the job), or
 during a `--dry-run`, exits `2` at once and starts no run.
 
 **A second signal exits at once**, with 128 plus its number: `130` for a second Ctrl-C, `143` for

@@ -91,11 +91,7 @@ final class LiveContainerNamesTests {
         // The helper itself was SIGKILLed at the bound, not merely stopped being waited for.
         let pid = try #require(lines(log).first?.split(separator: " ").first { $0.hasPrefix("pid=") }
             .flatMap { Int32($0.dropFirst(4)) })
-        var gone = false
-        for _ in 0..<200 {
-            if kill(pid, 0) == -1 && errno == ESRCH { gone = true; break }
-            usleep(10_000)
-        }
+        let gone = await polled(within: 2) { kill(pid, 0) == -1 && errno == ESRCH }
         #expect(gone, "BlockingSpawn's timeout killed and reaped the hung delete")
     }
 

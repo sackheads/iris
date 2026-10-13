@@ -784,6 +784,33 @@ struct JobRetryTests {
         #expect(card(state)?.runId == run.id, "the card was delivered")
     }
 
+    /// Fix-wave residual (M8): the stop cancels the turn on the signal queue before the watcher
+    /// can claim. Here the request is held inside `terminateGroups`, after the cancel and before it
+    /// wakes the watcher, so the cancelled turn is back first and claims; it must claim for the stop.
+    @Test("a turn that comes back after a stop was asked for claims the ending as the stop's")
+    func turnBackAfterAStopClaimsTheStop() async throws {
+        let client = GatedClient(response: textResponse("tick"))
+        let (store, state, engine) = try harness([], client: client)
+        let j = job(timeoutSeconds: Self.heldTimeout)
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let gate = DispatchSemaphore(value: 0)
+        let stop = RunStop(grace: 5, terminateGroups: { _ = gate.wait(timeout: .now() + 10) })
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
+                               activity: RecordingActivity(), stop: stop)
+        let fire = Task { await runner.fire(job: j, origin: .manual) }
+        defer { client.release() }
+        try #require(await client.calls.reach(1), "the turn reached the model")
+        DispatchQueue(label: "iris.tests.signal").async { _ = stop.request(reason: RunStop.reason(for: SIGINT)) }
+        let ended = await finished(fire)
+        gate.signal()
+        try #require(ended != nil, "the cancelled turn ended the run before the watcher woke")
+        let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
+        #expect(run.status == .interrupted)
+        #expect(run.failureReason == "stopped by a signal (SIGINT)")
+    }
+
     /// The turn parks in `WedgedClient`'s stream (this file, `:459-524`), where cancellation cannot
     /// reach it. A client parked in `generateContent` would not do: the engine reads it through
     /// `LLMStreamEvent.replay`, whose `next()` is cancellable, so the turn would come straight back

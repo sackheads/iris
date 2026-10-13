@@ -269,8 +269,9 @@ a store that would not open, the store's lock held by the app, another `--run-jo
 an older Iris build, or a lock that could not be taken at all (the path and error are named);
 `130` (or `143`, `129`) a second signal. The first Ctrl-C, SIGTERM or SIGHUP stops a run cleanly:
 its turn is cancelled, its row reads "stopped by a signal (SIGINT)", the card is delivered (for a
-stop before the turn started too), the containers it made are deleted by name, and it exits `2`,
-within about 28.5 seconds. A second exits at once, and a third Ctrl-C kills it outright. Under
+stop before the turn started too), the containers it made are deleted by name, and it exits `2`:
+for a stop mid-turn, within about 28.5 seconds; a stop during the checks before the turn first
+waits for the one under way, up to about 2 minutes for a grant's isolated-network check. A second exits at once, and a third Ctrl-C kills it outright. Under
 `nohup`, closing the terminal does not stop it, though a container or MCP call in flight can fail
 (#497). A container whose delete fails, or one a crash leaves, stays until the app next launches
 (#492). Full detail,
