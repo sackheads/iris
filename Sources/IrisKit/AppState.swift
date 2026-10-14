@@ -1180,7 +1180,8 @@ class AppState {
     /// Rows `loadConversations()` could not decode on the most recent load (#163). Internal for
     /// the one-time system-line notice below and for tests.
     private(set) var loadedSkippedRows: [SkippedRow] = []
-    /// Conversations whose quarantine repair failed to write on the most recent load (#189).
+    /// Conversations whose quarantine or ordinal-gap repair failed to write on the most recent
+    /// load (#189, #501).
     /// Internal for the launch-notice below and for tests.
     private(set) var loadedRepairFailed: [UUID] = []
 
@@ -1309,10 +1310,10 @@ class AppState {
                 appendLaunchNotice(notice, to: target)
             }
         }
-        // A quarantine repair had rows to write but the write itself failed (#189, e.g. a
-        // read-only database): the conversation is left out of this load entirely, untouched on
-        // disk, rather than returned with its in-memory array compacted past ordinals the disk
-        // still has gaps in.
+        // A quarantine or gap repair had rows to write but the write itself failed (#189, #501,
+        // e.g. a read-only database): the conversation is left out of this load entirely,
+        // untouched on disk, rather than returned with its in-memory array compacted past
+        // ordinals the disk still has gaps in.
         if !loadedRepairFailed.isEmpty, let target = noticeTarget {
             let n = loadedRepairFailed.count
             appendLaunchNotice("\(n) conversation\(n == 1 ? "" : "s") need\(n == 1 ? "s" : "") a repair that could not be written to \(IrisPaths.default.conversationsDB.lastPathComponent); \(n == 1 ? "it was" : "they were") left untouched and will be retried at the next launch.",

@@ -81,11 +81,12 @@ struct SkippedRow: Sendable, Equatable {
 struct LoadResult: Sendable {
     var conversations: [Conversation]
     var skipped: [SkippedRow]
-    /// Conversations that had a quarantine repair to write, where the repair transaction itself
-    /// failed (#189) — e.g. a read-only database. They are excluded from `conversations` rather
-    /// than returned with their in-memory array compacted past ordinals the disk still has gaps
-    /// in, which would re-open the append-clobber bug #163's quarantine exists to prevent. Left
-    /// entirely untouched on disk, so the repair is retried at the next launch.
+    /// Conversations that had a quarantine or ordinal-gap repair to write (#501), where the
+    /// repair transaction itself failed (#189) — e.g. a read-only database. They are excluded
+    /// from `conversations` rather than returned with their in-memory array compacted past
+    /// ordinals the disk still has gaps in, which would re-open the append-clobber bug #163's
+    /// quarantine exists to prevent. Left entirely untouched on disk, so the repair is retried
+    /// at the next launch.
     var repairFailed: [UUID] = []
 }
 
@@ -105,6 +106,12 @@ private struct QuarantineCandidate {
     let rowid: Int64?
     let payload: Data?
     let reason: String
+}
+
+/// One conversation's `messages` or `history` table, to be renumbered to 0..<n at load.
+private struct RenumberTarget: Hashable {
+    let conversationId: UUID
+    let table: String   // "messages" | "history"
 }
 
 /// Thrown by `apply(_:)` when one or more conversations in the batch failed to write. The
@@ -961,9 +968,10 @@ final class ConversationStore: Sendable {
 
     func loadAll() throws -> LoadResult {
         let decoder = JSONDecoder()
-        var (result, candidates): (LoadResult, [QuarantineCandidate]) = try writer.read { db in
+        var (result, candidates, gapped): (LoadResult, [QuarantineCandidate], [RenumberTarget]) = try writer.read { db in
             var out = LoadResult(conversations: [], skipped: [])
             var candidates: [QuarantineCandidate] = []
+            var gapped: [RenumberTarget] = []
             let rows = try Row.fetchAll(db, sql: "SELECT * FROM conversations ORDER BY position")
             for row in rows {
                 guard let idString = Self.readText(row, "id"), let id = UUID(uuidString: idString) else {
@@ -1199,6 +1207,10 @@ final class ConversationStore: Sendable {
                 var localCandidates: [QuarantineCandidate] = []
                 var totals: [String: Int] = ["messages": 0, "history": 0]
                 var failures: [String: Int] = ["messages": 0, "history": 0]
+                // The ordinals of the rows that decoded, in order (#501). The in-memory array is
+                // indexed 0..<n and the next append writes at index n, so any gap here means that
+                // append lands on a row that is already there.
+                var kept: [String: [Int]] = ["messages": [], "history": []]
 
                 // `rowid` is selected alongside `ordinal`/`payload` so a row whose ordinal is
                 // itself unreadable can still be found and removed in the repair transaction
@@ -1220,7 +1232,7 @@ final class ConversationStore: Sendable {
                             localCandidates.append(QuarantineCandidate(conversationId: id, table: "messages", ordinal: ordinal, rowid: rowid, payload: nil, reason: "unreadable payload"))
                             continue
                         }
-                        do { c.messages.append(try decoder.decode(ChatMessage.self, from: raw)) }
+                        do { c.messages.append(try decoder.decode(ChatMessage.self, from: raw)); kept["messages", default: []].append(ordinal) }
                         catch {
                             failures["messages", default: 0] += 1
                             localSkipped.append(SkippedRow(conversationId: id, table: "messages", ordinal: ordinal, reason: "\(error)"))
@@ -1244,7 +1256,7 @@ final class ConversationStore: Sendable {
                             localCandidates.append(QuarantineCandidate(conversationId: id, table: "history", ordinal: ordinal, rowid: rowid, payload: nil, reason: "unreadable payload"))
                             continue
                         }
-                        do { c.history.append(try decoder.decode(Content.self, from: raw)) }
+                        do { c.history.append(try decoder.decode(Content.self, from: raw)); kept["history", default: []].append(ordinal) }
                         catch {
                             failures["history", default: 0] += 1
                             localSkipped.append(SkippedRow(conversationId: id, table: "history", ordinal: ordinal, reason: "\(error)"))
@@ -1280,37 +1292,45 @@ final class ConversationStore: Sendable {
                                                   reason: "unreadable \(loss.column): \(loss.detail)", kept: true))
                 }
                 candidates.append(contentsOf: localCandidates)
+                for table in ["messages", "history"] {
+                    let ordinals = kept[table] ?? []
+                    if ordinals != Array(0..<ordinals.count) { gapped.append(RenumberTarget(conversationId: id, table: table)) }
+                }
                 out.conversations.append(c)
             }
-            return (out, candidates)
+            return (out, candidates, gapped)
         }
 
-        guard !candidates.isEmpty else { return result }
-        let candidateConversationIds = Set(candidates.map(\.conversationId))
+        guard !candidates.isEmpty || !gapped.isEmpty else { return result }
+        let candidateConversationIds = Set(candidates.map(\.conversationId) + gapped.map(\.conversationId))
 
         // Repair inside one write transaction, only when there is something to repair: quarantine
         // the bad rows, then renumber what's left so ordinals stay contiguous 0..<n. Left as-is,
         // the in-memory array above (already compacted by the skips) and the on-disk ordinals
         // disagree — the next append uses the compacted in-memory index as the ordinal, so it
         // `INSERT OR REPLACE`s the wrong row while the trailing-row `DELETE` drops a good one
-        // (review finding, #163 round 1).
+        // (review finding, #163 round 1). A gap with no bad row in it, such as the hole two
+        // writers left before #491, disagrees the same way and is renumbered the same way (#501).
         //
         // A thrown error here rolls the whole transaction back — every group's quarantine and
         // renumber together, not just the one that failed — so on failure every conversation that
-        // had a candidate is excluded and reported via `repairFailed` (#189); a conversation with
-        // nothing to repair was never touched by this transaction and is returned as-is.
+        // had a candidate or a gap is excluded and reported via `repairFailed` (#189); a
+        // conversation with nothing to repair was never touched by this transaction and is
+        // returned as-is.
         do {
             try writer.write { db in
                 let now = Date()
-                var grouped: [String: [QuarantineCandidate]] = [:]
+                // A gap with nothing to quarantine (#501) is a group with no candidates: the
+                // renumber below still runs for it.
+                var grouped: [RenumberTarget: [QuarantineCandidate]] = [:]
                 for candidate in candidates {
-                    grouped[candidate.conversationId.uuidString + "|" + candidate.table, default: []].append(candidate)
+                    grouped[RenumberTarget(conversationId: candidate.conversationId, table: candidate.table), default: []].append(candidate)
                 }
-                for (_, group) in grouped {
-                    guard let first = group.first else { continue }
-                    let convIdString = first.conversationId.uuidString
-                    let table = first.table
-                    if self.failInjection?(first.conversationId) == true {
+                for target in gapped where grouped[target] == nil { grouped[target] = [] }
+                for (target, group) in grouped {
+                    let convIdString = target.conversationId.uuidString
+                    let table = target.table
+                    if self.failInjection?(target.conversationId) == true {
                         throw InjectedWriteFailure()
                     }
                     for candidate in group {
