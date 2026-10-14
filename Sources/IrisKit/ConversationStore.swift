@@ -648,7 +648,8 @@ final class ConversationStore: Sendable {
     }
 
     /// Rebuilds one conversation's index rows from what is currently in `messages`. Used by the
-    /// load-time quarantine repair, which renumbers the surviving rows underneath the index. A
+    /// load-time repair, quarantine or ordinal gap (#501), which renumbers the surviving rows
+    /// underneath the index. A
     /// direct wipe by `conversationId` rather than `deleteIndex`'s rowid subselect: some of the
     /// stale index rows here point at `messages` rows already quarantined and deleted, so a
     /// subselect against the current table would silently leave those orphaned.
@@ -968,10 +969,14 @@ final class ConversationStore: Sendable {
 
     func loadAll() throws -> LoadResult {
         let decoder = JSONDecoder()
-        var (result, candidates, gapped): (LoadResult, [QuarantineCandidate], [RenumberTarget]) = try writer.read { db in
+        var (result, candidates, gapped, gapNotes): (LoadResult, [QuarantineCandidate], [RenumberTarget], [RenumberTarget: String])
+            = try writer.read { db in
             var out = LoadResult(conversations: [], skipped: [])
             var candidates: [QuarantineCandidate] = []
             var gapped: [RenumberTarget] = []
+            // What each gap was, for the console line once it is healed. Absent for a table whose
+            // only gap is a row being quarantined, which `skipped` already reports.
+            var gapNotes: [RenumberTarget: String] = [:]
             let rows = try Row.fetchAll(db, sql: "SELECT * FROM conversations ORDER BY position")
             for row in rows {
                 guard let idString = Self.readText(row, "id"), let id = UUID(uuidString: idString) else {
@@ -1211,6 +1216,8 @@ final class ConversationStore: Sendable {
                 // indexed 0..<n and the next append writes at index n, so any gap here means that
                 // append lands on a row that is already there.
                 var kept: [String: [Int]] = ["messages": [], "history": []]
+                // Every readable ordinal, decoded or not, to tell a real hole from a quarantine.
+                var seen: [String: [Int]] = ["messages": [], "history": []]
 
                 // `rowid` is selected alongside `ordinal`/`payload` so a row whose ordinal is
                 // itself unreadable can still be found and removed in the repair transaction
@@ -1220,7 +1227,9 @@ final class ConversationStore: Sendable {
                     let rowid: Int64? = r["rowid"]
                     let raw: Data? = r["payload"]
                     totals["messages", default: 0] += 1
-                    switch Self.readInt(r, "ordinal") {
+                    let readOrdinal = Self.readInt(r, "ordinal")
+                    if case .value(let ordinal) = readOrdinal { seen["messages", default: []].append(ordinal) }
+                    switch readOrdinal {
                     case .null, .unconvertible:
                         failures["messages", default: 0] += 1
                         localSkipped.append(SkippedRow(conversationId: id, table: "messages", ordinal: nil, reason: "unreadable ordinal"))
@@ -1244,7 +1253,9 @@ final class ConversationStore: Sendable {
                     let rowid: Int64? = r["rowid"]
                     let raw: Data? = r["payload"]
                     totals["history", default: 0] += 1
-                    switch Self.readInt(r, "ordinal") {
+                    let readOrdinal = Self.readInt(r, "ordinal")
+                    if case .value(let ordinal) = readOrdinal { seen["history", default: []].append(ordinal) }
+                    switch readOrdinal {
                     case .null, .unconvertible:
                         failures["history", default: 0] += 1
                         localSkipped.append(SkippedRow(conversationId: id, table: "history", ordinal: nil, reason: "unreadable ordinal"))
@@ -1293,16 +1304,18 @@ final class ConversationStore: Sendable {
                 }
                 candidates.append(contentsOf: localCandidates)
                 for table in ["messages", "history"] {
-                    let ordinals = kept[table] ?? []
-                    if ordinals != Array(0..<ordinals.count) { gapped.append(RenumberTarget(conversationId: id, table: table)) }
+                    let target = RenumberTarget(conversationId: id, table: table)
+                    if !Self.isContiguousFromZero(kept[table] ?? []) { gapped.append(target) }
+                    if let note = Self.gapNote(seen[table] ?? []) { gapNotes[target] = note }
                 }
                 out.conversations.append(c)
             }
-            return (out, candidates, gapped)
+            return (out, candidates, gapped, gapNotes)
         }
 
         guard !candidates.isEmpty || !gapped.isEmpty else { return result }
         let candidateConversationIds = Set(candidates.map(\.conversationId) + gapped.map(\.conversationId))
+        var failed: Set<UUID> = []
 
         // Repair inside one write transaction, only when there is something to repair: quarantine
         // the bad rows, then renumber what's left so ordinals stay contiguous 0..<n. Left as-is,
@@ -1312,11 +1325,11 @@ final class ConversationStore: Sendable {
         // (review finding, #163 round 1). A gap with no bad row in it, such as the hole two
         // writers left before #491, disagrees the same way and is renumbered the same way (#501).
         //
-        // A thrown error here rolls the whole transaction back — every group's quarantine and
-        // renumber together, not just the one that failed — so on failure every conversation that
-        // had a candidate or a gap is excluded and reported via `repairFailed` (#189); a
-        // conversation with nothing to repair was never touched by this transaction and is
-        // returned as-is.
+        // Each conversation's repair runs in its own savepoint (#501 review): one that throws rolls
+        // back only that conversation's quarantine and renumber, and only it is excluded and
+        // reported via `repairFailed` (#189). If the transaction itself fails, every conversation
+        // that had a candidate or a gap is excluded. A conversation with nothing to repair was
+        // never touched by this transaction and is returned as-is.
         do {
             try writer.write { db in
                 let now = Date()
@@ -1327,50 +1340,101 @@ final class ConversationStore: Sendable {
                     grouped[RenumberTarget(conversationId: candidate.conversationId, table: candidate.table), default: []].append(candidate)
                 }
                 for target in gapped where grouped[target] == nil { grouped[target] = [] }
-                for (target, group) in grouped {
-                    let convIdString = target.conversationId.uuidString
-                    let table = target.table
-                    if self.failInjection?(target.conversationId) == true {
-                        throw InjectedWriteFailure()
-                    }
-                    for candidate in group {
-                        try db.execute(sql: """
-                            INSERT INTO quarantine (conversationId, sourceTable, ordinal, payload, reason, quarantinedAt)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                            """, arguments: [convIdString, table, candidate.ordinal, candidate.payload, candidate.reason, now])
-                        // A normal candidate is found by its (conversationId, ordinal) primary key;
-                        // one whose ordinal is itself unreadable (#189) has no usable ordinal to
-                        // match on, so it is found and removed by rowid instead.
-                        if let ordinal = candidate.ordinal {
-                            try db.execute(sql: "DELETE FROM \(table) WHERE conversationId = ? AND ordinal = ?",
-                                           arguments: [convIdString, ordinal])
-                        } else if let rowid = candidate.rowid {
-                            try db.execute(sql: "DELETE FROM \(table) WHERE rowid = ?", arguments: [rowid])
+                // One savepoint per conversation, as `apply` does: a repair that fails rolls back
+                // only that conversation's tables, and the others still heal.
+                for (conversationId, targets) in Dictionary(grouping: grouped.keys, by: \.conversationId) {
+                    do {
+                        try db.inSavepoint {
+                            if self.failInjection?(conversationId) == true {
+                                throw InjectedWriteFailure()
+                            }
+                            for target in targets {
+                                try Self.repairTable(target, quarantining: grouped[target] ?? [], at: now, db: db)
+                            }
+                            return .commit
                         }
-                    }
-                    // Renumber the survivors to a contiguous 0..<n, preserving relative order.
-                    // Shifting by a large, out-of-range offset first avoids colliding with the
-                    // (conversationId, ordinal) primary key while rows are retargeted one at a time.
-                    try db.execute(sql: "UPDATE \(table) SET ordinal = ordinal + 1000000 WHERE conversationId = ?", arguments: [convIdString])
-                    let survivors = try Row.fetchAll(db, sql: "SELECT ordinal FROM \(table) WHERE conversationId = ? ORDER BY ordinal ASC", arguments: [convIdString])
-                    for (index, row) in survivors.enumerated() {
-                        let shifted: Int = row["ordinal"]
-                        try db.execute(sql: "UPDATE \(table) SET ordinal = ? WHERE conversationId = ? AND ordinal = ?", arguments: [index, convIdString, shifted])
-                    }
-                    // The index row itself is now correctly keyed (rowid is untouched by the plain
-                    // UPDATEs above, #201), but it still carries the pre-renumber `ordinal` as a
-                    // display column, and some index rows point at messages just quarantined and
-                    // deleted. Rebuild from the survivors so both are right (#177).
-                    if table == "messages" {
-                        try Self.rebuildIndex(conversationId: convIdString, db: db)
+                    } catch {
+                        failed.insert(conversationId)
                     }
                 }
             }
         } catch {
-            result.conversations.removeAll { candidateConversationIds.contains($0.id) }
-            result.repairFailed = candidateConversationIds.sorted { $0.uuidString < $1.uuidString }
+            // The transaction itself failed (it could not begin or commit): nothing was written.
+            failed = candidateConversationIds
+        }
+        if !failed.isEmpty {
+            result.conversations.removeAll { failed.contains($0.id) }
+            result.repairFailed = failed.sorted { $0.uuidString < $1.uuidString }
+        }
+        for target in gapped.sorted(by: { ($0.conversationId.uuidString, $0.table) < ($1.conversationId.uuidString, $1.table) })
+        where !failed.contains(target.conversationId) {
+            if let note = gapNotes[target] {
+                print("Renumbered \(target.table) of conversation \(target.conversationId.uuidString) to 0..<n at load: \(note) (#501).")
+            }
         }
         return result
+    }
+
+    /// One table's load-time repair: quarantine `group`, renumber the rest to 0..<n in order, and
+    /// rebuild the search index when it is `messages`. An empty `group` is a gap alone (#501).
+    private static func repairTable(_ target: RenumberTarget, quarantining group: [QuarantineCandidate],
+                                    at now: Date, db: Database) throws {
+        let convIdString = target.conversationId.uuidString
+        let table = target.table
+        for candidate in group {
+            try db.execute(sql: """
+                INSERT INTO quarantine (conversationId, sourceTable, ordinal, payload, reason, quarantinedAt)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """, arguments: [convIdString, table, candidate.ordinal, candidate.payload, candidate.reason, now])
+            // A normal candidate is found by its (conversationId, ordinal) primary key;
+            // one whose ordinal is itself unreadable (#189) has no usable ordinal to
+            // match on, so it is found and removed by rowid instead.
+            if let ordinal = candidate.ordinal {
+                try db.execute(sql: "DELETE FROM \(table) WHERE conversationId = ? AND ordinal = ?",
+                               arguments: [convIdString, ordinal])
+            } else if let rowid = candidate.rowid {
+                try db.execute(sql: "DELETE FROM \(table) WHERE rowid = ?", arguments: [rowid])
+            }
+        }
+        // Renumber the survivors to a contiguous 0..<n, preserving relative order.
+        // Shifting by a large, out-of-range offset first avoids colliding with the
+        // (conversationId, ordinal) primary key while rows are retargeted one at a time.
+        try db.execute(sql: "UPDATE \(table) SET ordinal = ordinal + 1000000 WHERE conversationId = ?", arguments: [convIdString])
+        let survivors = try Row.fetchAll(db, sql: "SELECT ordinal FROM \(table) WHERE conversationId = ? ORDER BY ordinal ASC", arguments: [convIdString])
+        for (index, row) in survivors.enumerated() {
+            let shifted: Int = row["ordinal"]
+            try db.execute(sql: "UPDATE \(table) SET ordinal = ? WHERE conversationId = ? AND ordinal = ?", arguments: [index, convIdString, shifted])
+        }
+        // The index row itself is now correctly keyed (rowid is untouched by the plain
+        // UPDATEs above, #201), but it still carries the pre-renumber `ordinal` as a
+        // display column, and some index rows point at messages just quarantined and
+        // deleted. Rebuild from the survivors so both are right (#177).
+        if table == "messages" {
+            try Self.rebuildIndex(conversationId: convIdString, db: db)
+        }
+    }
+
+    /// Whether ascending, unique ordinals are exactly 0..<count. Unique because they are read off
+    /// the `(conversationId, ordinal)` primary key, so the ends decide it.
+    static func isContiguousFromZero(_ ascending: [Int]) -> Bool {
+        guard let first = ascending.first, let last = ascending.last else { return true }
+        return first == 0 && last == ascending.count - 1
+    }
+
+    /// What is wrong with a table's readable ordinals, or nil when they are 0..<n. Lists at most
+    /// ten missing ordinals; a table can be thousands of rows.
+    static func gapNote(_ ascending: [Int]) -> String? {
+        guard !isContiguousFromZero(ascending), let last = ascending.last else { return nil }
+        let present = Set(ascending)
+        let range = 0...max(last, 0)
+        let missingCount = range.count - present.filter { range.contains($0) }.count
+        let missing = range.lazy.filter { !present.contains($0) }.prefix(10).map(String.init)
+        var note = "\(ascending.count) rows, \(missingCount) missing ordinal\(missingCount == 1 ? "" : "s")"
+        if !missing.isEmpty {
+            note += " (" + missing.joined(separator: ", ") + (missingCount > missing.count ? ", …" : "") + ")"
+        }
+        if let first = ascending.first, first < 0 { note += ", first ordinal \(first)" }
+        return note
     }
 
     func counts(for id: UUID) throws -> (messages: Int, history: Int) {

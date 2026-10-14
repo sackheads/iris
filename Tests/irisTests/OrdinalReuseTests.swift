@@ -182,8 +182,134 @@ struct OrdinalReuseTests {
         #expect(try rows(store, gapped.id) == [0: "m0", 1: "m2"])
     }
 
+    @Test("gap shapes heal on load: a gap at 0, several gaps, and gaps in both tables at once", arguments: [
+        GapShape(messageHoles: [0], historyHoles: []),
+        GapShape(messageHoles: [1, 3, 4], historyHoles: []),
+        GapShape(messageHoles: [2], historyHoles: [0, 4]),
+    ])
+    func gapShapesHeal(_ shape: GapShape) throws {
+        let (root, url) = try tempStore()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try ConversationStore.onDisk(at: url)
+        let c = try seed(store, count: 6)
+        for o in shape.messageHoles {
+            try store.rawWrite("DELETE FROM messages WHERE conversationId = ? AND ordinal = ?", arguments: [c.id.uuidString, o])
+        }
+        for o in shape.historyHoles {
+            try store.rawWrite("DELETE FROM history WHERE conversationId = ? AND ordinal = ?", arguments: [c.id.uuidString, o])
+        }
+        let messagesLeft = (0..<6).filter { !shape.messageHoles.contains($0) }.map { "m\($0)" }
+        let historyLeft = (0..<6).filter { !shape.historyHoles.contains($0) }.map { "h\($0)" }
+
+        let loaded = try store.loadAll()
+        let back = try #require(loaded.conversations.first { $0.id == c.id })
+        #expect(loaded.skipped.isEmpty)
+        #expect(back.messages.map(\.content) == messagesLeft)
+        #expect(back.history.map { $0.parts.first?.text } == historyLeft)
+        #expect(try rows(store, c.id) == Dictionary(uniqueKeysWithValues: messagesLeft.enumerated().map { ($0.offset, $0.element) }))
+        #expect(try historyRows(store, c.id) == Dictionary(uniqueKeysWithValues: historyLeft.enumerated().map { ($0.offset, $0.element) }))
+        #expect(try store.ftsRowidsByOrdinal(for: c.id) == store.messageRowidsByOrdinal(for: c.id))
+    }
+
+    @Test("a gap and an undecodable row in one table: the row is quarantined and the rest renumbered once")
+    func gapPlusQuarantine() throws {
+        let (root, url) = try tempStore()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try ConversationStore.onDisk(at: url)
+        let c = try seed(store, count: 6)
+        try store.rawWrite("UPDATE messages SET payload = '{not json' WHERE conversationId = ? AND ordinal = 1", arguments: [c.id.uuidString])
+        try store.rawWrite("DELETE FROM messages WHERE conversationId = ? AND ordinal = 4", arguments: [c.id.uuidString])
+
+        let loaded = try store.loadAll()
+        let back = try #require(loaded.conversations.first { $0.id == c.id })
+        #expect(back.messages.map(\.content) == ["m0", "m2", "m3", "m5"])
+        // Only the bad row is reported; the hole is not damage.
+        #expect(loaded.skipped.map(\.ordinal) == [1])
+        #expect(try store.quarantineCount(for: c.id) == 1)
+        #expect(try rows(store, c.id) == [0: "m0", 1: "m2", 2: "m3", 3: "m5"])
+        #expect(try store.ftsRowidsByOrdinal(for: c.id) == store.messageRowidsByOrdinal(for: c.id))
+    }
+
+    @Test("one gapped conversation's failed repair leaves another gapped conversation healed and loaded")
+    func failedRepairIsPerConversation() throws {
+        let (root, url) = try tempStore()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try ConversationStore.onDisk(at: url)
+        let failing = try seed(store, count: 4)
+        let healing = try seed(store, count: 4)
+        for c in [failing, healing] {
+            try store.rawWrite("DELETE FROM messages WHERE conversationId = ? AND ordinal = 1", arguments: [c.id.uuidString])
+        }
+
+        store.failInjection = { $0 == failing.id }
+        let loaded = try store.loadAll()
+        store.failInjection = nil
+        #expect(loaded.repairFailed == [failing.id])
+        #expect(loaded.conversations.map(\.id) == [healing.id])
+        #expect(try rows(store, healing.id) == [0: "m0", 1: "m2", 2: "m3"])
+        #expect(try rows(store, failing.id) == [0: "m0", 2: "m2", 3: "m3"])
+    }
+
+    @Test("the console note names the missing ordinals, capped at ten, and is nil for 0..<n or a quarantine-only gap")
+    func gapNoteText() {
+        #expect(ConversationStore.gapNote([]) == nil)
+        #expect(ConversationStore.gapNote([0, 1, 2]) == nil)
+        #expect(ConversationStore.gapNote([0, 1, 3]) == "3 rows, 1 missing ordinal (2)")
+        #expect(ConversationStore.gapNote([1, 2]) == "2 rows, 1 missing ordinal (0)")
+        #expect(ConversationStore.gapNote([0, 20]) == "2 rows, 19 missing ordinals (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, …)")
+        #expect(ConversationStore.isContiguousFromZero([0, 1, 2]))
+        #expect(!ConversationStore.isContiguousFromZero([0, 2]))
+        #expect(!ConversationStore.isContiguousFromZero([1]))
+    }
+
+    @Test("a failed repair of Iris moves no pin: no new Iris, cards for it are dropped, and the next good load finds it still pinned")
+    func failedIrisRepairKeepsThePin() async throws {
+        let (root, url) = try tempStore()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try ConversationStore.onDisk(at: url)
+        var other = try seed(store, count: 2)
+        // A stale second pin (a crash mid-rotation leaves one). With Iris loaded, the launch pin
+        // repair keeps Iris and unpins this; with Iris missing it would move the pin here.
+        other.isPinned = true
+        var pinned = ChangeSet(); pinned.add(.metadata)
+        try store.apply([ConversationWrite(id: other.id, snapshot: other, changes: pinned)])
+        var iris = Conversation(id: UUID(), title: AppState.activityConversationTitle, workspacePath: "/tmp/w")
+        iris.isPinned = true
+        iris.messages = (0..<4).map { ChatMessage(role: .user, content: "i\($0)") }
+        var s = ChangeSet(); s.add(.created); s.add(.messagesAppended(from: 0))
+        try store.apply([ConversationWrite(id: iris.id, snapshot: iris, changes: s)])
+        try store.setMetaValue(iris.id.uuidString, forKey: AppState.activityConversationMetaKey)
+        try store.rawWrite("DELETE FROM messages WHERE conversationId = ? AND ordinal = 1", arguments: [iris.id.uuidString])
+
+        // Iris's repair fails this launch.
+        let irisId = iris.id
+        store.failInjection = { $0 == irisId }
+        let state = AppState(store: store, createIfEmpty: false, emitLaunchNotices: false)
+        #expect(state.loadedRepairFailed == [iris.id])
+        #expect(state.repairFailedIrisId == iris.id)
+        #expect(state.activityConversationId() == iris.id)
+        let card = EventCard.reflection(summary: "s", sourceId: other.id, sourceTitle: "t", at: Date())
+        await state.deliverEvent(card, to: state.cardDestination(for: nil))
+        #expect(state.conversations.map(\.id) == [other.id], "no Iris was created")
+        #expect(state.conversations.filter(\.isPinned).map(\.id) == [other.id], "no pin moved")
+        #expect(try store.metaValue(forKey: AppState.activityConversationMetaKey) == iris.id.uuidString)
+        #expect(state.conversations.allSatisfy { $0.messages.allSatisfy { $0.role != .event } }, "the card went nowhere")
+        state.flushSave()
+        store.failInjection = nil
+
+        #expect(try store.metaValue(forKey: AppState.activityConversationMetaKey) == iris.id.uuidString)
+        // The next launch's repair succeeds, and the original Iris is the one pinned.
+        let next = AppState(store: try ConversationStore.onDisk(at: url), createIfEmpty: false, emitLaunchNotices: false)
+        #expect(next.loadedRepairFailed.isEmpty)
+        #expect(next.conversations.filter(\.isPinned).map(\.id) == [iris.id])
+        #expect(next.activityConversationId() == iris.id)
+        #expect(next.conversations.first { $0.id == iris.id }?.messages.map(\.content) == ["i0", "i2", "i3"])
+    }
+
+    /// Documents the pre-#491 race that made the hole. It guards nothing: two writers on one store
+    /// are refused since #491, and this passes with or without the #501 fix.
     @Test("how the hole formed: two writers on one store (pre-#491), one with a stale count, leave a gap")
-    func twoWritersLeaveAHole() throws {
+    func documentsTwoWriterRaceThatLeftTheHole() throws {
         let (root, url) = try tempStore()
         defer { try? FileManager.default.removeItem(at: root) }
         let c = try seed(try ConversationStore.onDisk(at: url), count: 3)
@@ -204,4 +330,10 @@ struct OrdinalReuseTests {
         #expect(r[4] == nil, "the hole")
         #expect(r[5] == "app 3")
     }
+}
+
+struct GapShape: Sendable, CustomTestStringConvertible {
+    let messageHoles: [Int]
+    let historyHoles: [Int]
+    var testDescription: String { "messages \(messageHoles), history \(historyHoles)" }
 }
