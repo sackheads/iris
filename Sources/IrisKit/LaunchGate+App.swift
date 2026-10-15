@@ -28,6 +28,22 @@ final class GatePollTimer {
 final class WaitingNoticePanel {
     private var panel: NSPanel?
 
+    /// While Iris waits every window shows `WaitingView`, so a visible one already says what the
+    /// panel would: it is ordered front instead, and no second waiting surface opens beside it
+    /// (#504). The panel is for when there is no such window, as on a link's cold start.
+    func show(gate: LaunchGate, besides windows: [NSWindow]) {
+        if let window = windows.first(where: { $0 !== panel && Self.showsWaitingView($0) }) {
+            window.orderFrontRegardless()
+            return
+        }
+        show(gate: gate)
+    }
+
+    /// A visible window SwiftUI made for a scene. Not the panel, the status item or an alert.
+    static func showsWaitingView(_ window: NSWindow) -> Bool {
+        window.isVisible && window.canBecomeMain && !(window is NSPanel) && window.alphaValue > 0
+    }
+
     func show(gate: LaunchGate) {
         if panel == nil {
             let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 380, height: 180),
@@ -86,7 +102,7 @@ extension LaunchGate.Seams {
             },
             startPolling: { interval, tick in poll.start(every: interval, tick) },
             stopPolling: { poll.stop() },
-            showWaitingNotice: { notice.show(gate: LaunchGate.shared) },
+            showWaitingNotice: { notice.show(gate: LaunchGate.shared, besides: NSApp.windows) },
             hideWaitingNotice: { notice.hide() },
             activate: { NSApp.activate(ignoringOtherApps: true) },
             // Through the sink's handler on the one delegate, so there is a single path in.

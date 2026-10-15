@@ -102,7 +102,8 @@ final class LaunchGate {
         /// (invariant 4). Called again with a new interval when the poll rate changes.
         var startPolling: @MainActor (_ interval: TimeInterval, _ tick: @escaping @MainActor () -> Void) -> Void
         var stopPolling: @MainActor () -> Void
-        /// Orders the "Iris is waiting" panel front without activating Iris (decision 13).
+        /// Orders the "Iris is waiting" panel front without activating Iris (decision 13), or a
+        /// window already showing the waiting view instead of opening the panel beside it (#504).
         var showWaitingNotice: @MainActor () -> Void
         var hideWaitingNotice: @MainActor () -> Void
         /// `NSApp.activate`, which did-finish did unconditionally before #463. Skipped only for a
