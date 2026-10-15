@@ -151,7 +151,7 @@ final class StoreLockTests {
         #expect(!StoreLock.holds(url))
     }
 
-    @Test("a failed payload write is .failed and closes the descriptor, so the lock is free again")
+    @Test("a failed payload write unlocks and closes the descriptor, so the lock is free again")
     func failedWriteReleases() {
         let url = path()
         var calls = StoreLock.Syscalls.live
@@ -161,6 +161,41 @@ final class StoreLockTests {
         }
         #expect(!StoreLock.holds(url))
         #expect(StoreLock.claim(at: url, kind: .app) == .acquired, "a lock it never advertised was released")
+    }
+
+    /// What a child mid-`posix_spawn` holds until its exec: another reference to the claim's open
+    /// file description. `F_DUPFD_CLOEXEC`, so the copy itself never reaches a child.
+    private func copyingDescriptor(into copies: LockedCell<[Int32]>) -> @Sendable (Int32) -> Void {
+        { fd in copies.value.append(fcntl(fd, F_DUPFD_CLOEXEC, 0)) }
+    }
+
+    @Test("a failed write unlocks, so another reference to the descriptor (a child yet to exec) keeps nothing held")
+    func failedWriteUnlocksDespiteAnotherReference() {
+        let url = path()
+        let copies = LockedCell<[Int32]>([])
+        defer { copies.value.forEach { close($0) } }
+        let copy = copyingDescriptor(into: copies)
+        var calls = StoreLock.Syscalls.live
+        calls.pwrite = { fd, _, _, _ in copy(fd); errno = ENOSPC; return -1 }
+        guard case .failed = StoreLock.claim(at: url, kind: .app, syscalls: calls) else {
+            Issue.record("expected .failed"); return
+        }
+        #expect(copies.value.count == 1)
+        #expect(StoreLock.claim(at: url, kind: .app) == .acquired, "close alone left the copy holding the lock")
+    }
+
+    @Test("a .legacy refusal unlocks, so another reference to the descriptor keeps nothing held")
+    func legacyRefusalUnlocksDespiteAnotherReference() throws {
+        let url = path()
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("\(getppid())\n".utf8).write(to: url)   // as bareLivePidIsLegacy
+        let copies = LockedCell<[Int32]>([])
+        defer { copies.value.forEach { close($0) } }
+        let copy = copyingDescriptor(into: copies)
+        var calls = StoreLock.Syscalls.live
+        calls.flock = { fd, operation in copy(fd); return flock(fd, operation) }
+        #expect(StoreLock.claim(at: url, kind: .app, syscalls: calls) == .legacy(pid: getppid()))
+        #expect(LockStub.tryLock(url) == 0, "close alone left the copy holding the lock")
     }
 
     @Test("a short payload write is .failed, leaves the file empty, and frees the lock")
