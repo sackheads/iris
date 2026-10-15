@@ -542,7 +542,7 @@ struct SandboxTimeoutTests {
         func ensureIsolatedNetwork(named name: String) async throws {}
         func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?) async throws
             -> (stdout: String, stderr: String, exitCode: Int32) { ("ok", "", 0) }
-        func remove(name: String) async { lock.withLock { removed.append(name) } }
+        func remove(name: String) async -> Bool { lock.withLock { removed.append(name) }; return true }
         func list(prefix: String) async -> [String] { [] }
 
         var createdMounts: [[String]] { lock.withLock { created } }

@@ -95,6 +95,7 @@ enum RunJobCLI {
                     lockSyscalls: StoreLock.Syscalls = .live,
                     protectionEnabled: Bool? = nil,
                     gate: (@Sendable (Gate, String?) async -> GateResult)? = nil,
+                    stop: CLIStop? = nil,
                     out: (String) -> Void = { print($0) },
                     err: (String) -> Void = { FileHandle.standardError.write(Data(($0 + "\n").utf8)) })
         async -> Int32 {
@@ -135,9 +136,13 @@ enum RunJobCLI {
             return await dryRun(job: job, ledger: ledger, json: invocation.json, gate: gate,
                                 out: out, err: err)
         }
-        return await fire(job: job, store: store, client: client, runner: injectedRunner,
-                          protectionEnabled: protectionEnabled, json: invocation.json,
-                          out: out, err: err)
+        let code = await fire(job: job, store: store, client: client, runner: injectedRunner,
+                              protectionEnabled: protectionEnabled, json: invocation.json, stop: stop,
+                              out: out, err: err)
+        // A stopped run's host groups get their SIGKILL rung, and its leftover containers a
+        // delete, before the process exits (#463).
+        if let stop, stop.run.wasRequested { await stop.settled() }
+        return code
     }
 
     /// What a claim that did not acquire says, or nil when it did (decision 7). None of these
@@ -210,7 +215,7 @@ enum RunJobCLI {
     @MainActor
     private static func fire(job: Job, store: ConversationStore, client: any LLMClientProtocol,
                              runner injectedRunner: JobRunner?, protectionEnabled: Bool?,
-                             json: Bool, out: (String) -> Void, err: (String) -> Void)
+                             json: Bool, stop: CLIStop?, out: (String) -> Void, err: (String) -> Void)
         async -> Int32 {
         let ledger = store.ledger
         let runner: JobRunner
@@ -224,7 +229,8 @@ enum RunJobCLI {
             let appState = makeState(store: store)
             let irisEngine = IrisEngine(state: appState, client: client,
                                         protectionEnabled: protectionEnabled)
-            guard let built = await irisEngine.jobRunner() else {
+            // An injected runner was built by its test with its own `RunStop`.
+            guard let built = await irisEngine.jobRunner(stop: stop?.run) else {
                 return fail("could not bring up the job runner.", code: Exit.notCompleted,
                             json: json, dryRun: false, out: out, err: err)
             }

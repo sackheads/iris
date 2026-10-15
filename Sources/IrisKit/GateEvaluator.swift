@@ -285,7 +285,9 @@ enum GateEvaluator {
         let name = "\(SandboxSessionManager.namePrefix)gate-\(UUID().uuidString.lowercased())"
         // Registered before the create and taken out again by `sweep`, so a sweep of the leftovers
         // of a previous process cannot delete a container that is mid-evaluation right now.
-        await GateContainerRegistry.shared.register(name)
+        guard await GateContainerRegistry.shared.register(name) else {
+            return .error(LiveContainerNames.exitingError)
+        }
         do {
             try await createWithinCeiling(runtime, name: name, image: image,
                                           mounts: readOnly(mounts), seconds: createCeiling)
@@ -531,9 +533,19 @@ actor GateContainerRegistry {
     static let shared = GateContainerRegistry()
 
     private var names: Set<String> = []
+    /// The same names, readable without an actor hop by an exiting CLI (#463).
+    private let live: LiveContainerNames
 
-    func register(_ name: String) { names.insert(name) }
-    func unregister(_ name: String) { names.remove(name) }
+    init(live: LiveContainerNames = .shared) { self.live = live }
+
+    /// False when the process is exiting (`LiveContainerNames` is closed): the gate must not
+    /// create the container, since nothing would delete it before `_exit` (#463).
+    func register(_ name: String) -> Bool {
+        guard live.add(name) else { return false }
+        names.insert(name)
+        return true
+    }
+    func unregister(_ name: String) { names.remove(name); live.remove(name) }
 
     /// The names in flight at this instant. A snapshot: a gate that starts after it is taken is
     /// not in it, which is why the sweep is a launch-time job and not a periodic one.

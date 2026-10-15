@@ -3238,12 +3238,14 @@ actor IrisEngine {
     /// The runner every fire goes through, built on first use and kept: one per engine, so two
     /// jobs firing in the same tick share it (it is an actor, and `run` holds no cross-run state).
     /// `nil` only for an engine whose `AppState` has gone away.
-    func jobRunner() async -> JobRunner? {
+    /// The first call builds the runner, so the stop it was given is the one it keeps.
+    func jobRunner(stop: RunStop? = nil) async -> JobRunner? {
+        assert(stop == nil || jobRunnerInstance == nil, "a stop is kept only by the call that builds the runner")
         if let jobRunnerInstance { return jobRunnerInstance }
         guard let state else { return nil }
         let ledger = await MainActor.run { state.store.ledger }
         let runner = JobRunner(state: state, engine: self, ledger: ledger,
-                               protectionEnabled: protectionEnabled)
+                               protectionEnabled: protectionEnabled, stop: stop)
         jobRunnerInstance = runner
         return runner
     }

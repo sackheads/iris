@@ -744,7 +744,7 @@ A run ends in one of five statuses:
 | `completed` | the turn finished and said something — or the job's gate found nothing to do, in which case the outcome says `gate: no change` and there was no turn — or a built-in job ran, which never has a turn |
 | `failed` | the model call errored, the loop was cut short, the run's final reply was cut off at the output limit or context window (on any provider: Anthropic `max_tokens` or `model_context_window_exceeded`, Gemini `MAX_TOKENS`, OpenAI `length`), or the turn ended having said nothing at all. A cut in an earlier round or turn that the run went on to finish is a warning, not a failure |
 | `blocked on approval` | the run wanted a tool it is not allowed to use unattended, and stopped (see below) |
-| `interrupted` | nothing finished it: the app quit mid-run and the next launch closed the row out, a cadence came round while the previous run of the same job was still going so this trigger was dropped rather than started twice, a gate could not answer, or a limit refused the fire before it started (the breaker, a budget, or a ledger that could not say what the job has sent) |
+| `interrupted` | nothing finished it: the app (or a `--run-job`) quit mid-run and the next launch closed the row out, a `--run-job` was stopped by a signal, a cadence came round while the previous run of the same job was still going so this trigger was dropped rather than started twice, a gate could not answer, or a limit refused the fire before it started (the breaker, a budget, or a ledger that could not say what the job has sent) |
 
 A run that says nothing is a failure, not a success: "it worked and had nothing to report" and "it
 never got as far as a reply" must not look the same on a card.
@@ -1177,23 +1177,79 @@ so does an app that finds an older build's pid in the file, or a holder that has
 is within a second. An app that cannot lock the store says "Iris could not lock its store" and
 quits.
 
-Ctrl-C (or SIGTERM, or SIGHUP) ends a `--run-job` at once, exactly as it always has: nothing
-catches it, so the run's row is left `running` and no card is delivered. The lock goes with the process, so
-a waiting app opens on its next poll, and the next Iris app to open the store closes that row as
-`interrupted`, "the Iris process running it ended".
-
 | Exit | Meaning |
 | --- | --- |
 | `0` | The run `completed` — or, with `--dry-run`, the gate says something changed |
 | `1` | Usage; no job with that id or name; `--dry-run` on a job that has no gate; a store that would not open; the store's lock held by the app, another `--run-job`, the seeder or an older Iris build; a lock that could not be taken (the path and error are named); or the job being deleted out from under the fire |
-| `2` | The run did not complete: `failed`, `blocked on approval`, `interrupted`, an admission refusal (paused, disabled, overlap, breaker, budget), or a gate that could not answer |
+| `2` | The run did not complete: `failed`, `blocked on approval`, `interrupted` (a first signal's clean stop included), an admission refusal (paused, disabled, overlap, breaker, budget), or a gate that could not answer |
 | `3` | The gate looked and nothing had changed (`--dry-run`) |
+| `129`, `130`, `143` | A second signal (SIGHUP, SIGINT, SIGTERM) exited at once; a row the run had not closed is closed when the app next opens the store |
 
 Without `--json` the row prints one field per line (`job`, `run`, `status`, `trigger`, `started`,
 `duration`, `tokens`, `gate`, then `outcome` / `reason` / `blocked tool` when there is one). With
 `--json` it is a single object with sorted keys, which is what a script or `jq` should read; a
 refusal or an error prints its sentence to stderr and, under `--json`, a `{"error": …,
 "exitCode": …}` object on stdout too, so a pipeline is never handed an empty stdout.
+
+**Stopping a run.** The first Ctrl-C, `kill` (SIGTERM) or closed terminal (SIGHUP) stops a
+`--run-job` cleanly:
+
+- The turn is cancelled, and every host process group the run started (hooks, plugin checks) gets
+  SIGTERM, then SIGKILL 2 seconds later. Both happen as the signal arrives, on the CLI's signal
+  queue, so they do not wait for a free Swift thread (#372). A job's `run_command` runs in its
+  container, not on the host, and the cancelled turn ends it there.
+- The CLI waits for the turn to come back until 15 seconds after the signal. A turn that does not
+  is abandoned.
+- The row is closed `interrupted`, "stopped by a signal (SIGINT)" (or `SIGTERM`, `SIGHUP`), and
+  the card is delivered. A stop that lands before the turn has started (including before the
+  isolated-network check of a `network: false` grant, which it then skips) closes the row and
+  delivers the card the same way.
+- The run's session container gets up to 5 seconds to stop and be deleted. The CLI then starts no
+  new host process, waits up to 3 seconds for the host groups to end, SIGKILLs any still running,
+  and deletes by name every container this process created that is still recorded, in parallel,
+  for at most 5 seconds. It never deletes by the `iris-` prefix (see below).
+- It flushes its output, and exits `2`.
+
+For a stop while the turn is running, the worst case is about 28.5 seconds after the signal: the
+15-second grace, 5 for the container, 3 for the host groups and 5.5 for the deletes. A stop that
+lands during the steps before the turn waits first for the step under way: the prompt guard's
+model load, or the isolated-network check of a `network: false` grant, which can take about 2
+minutes (a `container network ls` and a `network create`, up to 60 seconds each). Writing the row and the card needs a free Swift
+thread, so a process whose threads are all blocked finishes those steps only once one frees; the
+grace still counts from the signal, so that wait is not added to it.
+
+A signal that lands once the run has closed its row does not change the row or the exit code,
+which are the run's own. A built-in job has no turn to cancel and runs in milliseconds, so it finishes as usual: the first
+signal only SIGTERMs the run's registered host process groups, and a built-in starts none. A signal before the run starts (while the CLI claims the store or admits the job), or
+during a `--dry-run`, exits `2` at once and starts no run.
+
+**A second signal exits at once**, with 128 plus its number: `130` for a second Ctrl-C, `143` for
+SIGTERM, `129` for SIGHUP. It first resets SIGINT to its default, so a third Ctrl-C kills the CLI
+outright. It then cancels the turn, SIGKILLs every host process group, deletes every container this
+process created that is still recorded (in parallel, for at most 5 seconds), flushes and exits. A run
+that had not closed its row yet leaves it `running`, with no card. The lock goes with the process,
+so a waiting app opens on its next poll, and the next Iris app to open the store closes that row as
+`interrupted`, "the Iris process running it ended". The same is true of a crash or `kill -9`.
+
+If the CLI starts with SIGHUP or SIGINT already ignored (`nohup`, or a `&` job in a
+non-interactive shell), it keeps that signal ignored, so under `nohup` closing the terminal does
+not stop the run. It can still break a call in flight: the `container` CLI and MCP servers the run
+starts share its process group, so the terminal's SIGHUP reaches them, and a container command or
+MCP tool call under way at that moment can fail (#497). SIGTERM is always caught.
+
+What a stop does not reach:
+
+- A background process a command started with its output redirected (`nohup x >/dev/null 2>&1 &`)
+  is left running, as it is when any command finishes.
+- A container whose delete fails or runs out of time, and any container after a crash or
+  `kill -9`, is left until the Iris app next launches and sweeps the `iris-` containers it does not
+  know. The CLI does no such sweep, because `~/.iris` and `~/.iris-dev` share the prefix and a
+  sweep from one home would delete the other's live containers. So someone who only ever runs
+  `--run-job` keeps that container until they delete it themselves (#492).
+- A container still being created (a cold create pulling its image) when the CLI deletes the
+  recorded containers can be left: its delete can run before the container exists. A second signal
+  does that at once; a clean stop does it when the create outlasts the 15-second grace and the
+  5-second teardown.
 
 A `--run-job` builds one `AppState` of its own, over the store it has locked, and never touches the
 app's. A skill written during the run (`write_file` into a skill folder, `create_skill`,

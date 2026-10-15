@@ -47,15 +47,20 @@ actor SandboxSessionManager {
     /// the retry without spawning `container system start` (#293).
     private let startContainerSystem: @Sendable () async -> Bool
 
+    /// Every container this manager has created and not yet removed, for an exiting CLI (#463).
+    private let live: LiveContainerNames
+
     init(runtime: ContainerRuntime, image: @escaping @Sendable () -> String,
          mountAgreementAttempts: Int = SandboxSessionManager.mountAgreementAttempts,
          startContainerSystem: @escaping @Sendable () async -> Bool = {
              await SandboxingManager.shared.startContainerSystem().success
-         }) {
+         },
+         live: LiveContainerNames = .shared) {
         self.runtime = runtime
         self.image = image
         self.mountAgreementAttempts = mountAgreementAttempts
         self.startContainerSystem = startContainerSystem
+        self.live = live
     }
 
     func hasSession(_ id: UUID) -> Bool { sessions[id] != nil }
@@ -90,7 +95,7 @@ actor SandboxSessionManager {
 
         // Recreate if the workspace, the mount list or the network changed (agent-initiated — not a "loss").
         if let s = sessions[id], s.mountedWorkspace != workspace || s.mounts != mounts || s.network != network {
-            await runtime.remove(name: s.name)
+            await removeContainer(s.name)
             sessions[id] = nil
         }
 
@@ -122,7 +127,7 @@ actor SandboxSessionManager {
                     // is the whole of what it is owed.
                     return Self.mountsContendedError
                 }
-                await runtime.remove(name: s.name)
+                await removeContainer(s.name)
                 sessions[id] = nil
             }
         }
@@ -154,7 +159,7 @@ actor SandboxSessionManager {
             if closed.contains(id) { return Self.closedMidCommandError }
             // Container likely died/was reaped: mark lost, recreate once, retry.
             lostSessions.insert(id)
-            await runtime.remove(name: name(for: id))
+            await removeContainer(name(for: id))
             sessions[id] = nil
             do {
                 try await ensureSession(id, workspace: workspace, mounts: mounts, network: network)
@@ -213,7 +218,7 @@ actor SandboxSessionManager {
         // (no session entry yet), that just-created container won't be torn down here. It's an
         // orphan, but it's swept by `reapOrphans()` on next launch via the `iris-` prefix.
         // `closeSession` does not have this hole: the create checks the mark before it records.
-        if let s = sessions[id] { await runtime.remove(name: s.name) }
+        if let s = sessions[id] { await removeContainer(s.name) }
         sessions[id] = nil
         lostSessions.remove(id)
     }
@@ -266,18 +271,27 @@ actor SandboxSessionManager {
     func reapOrphans(inFlight: @Sendable () async -> Set<String>) async {
         let found = await runtime.list(prefix: Self.namePrefix)
         let spared = Set(sessions.values.map(\.name)).union(await inFlight())
-        for n in found where !spared.contains(n) { await runtime.remove(name: n) }
+        for n in found where !spared.contains(n) { await removeContainer(n) }
     }
 
     func reapIdle(olderThan seconds: TimeInterval, now: Date = Date()) async {
         for (id, s) in sessions where now.timeIntervalSince(s.lastUsed) > seconds {
-            await runtime.remove(name: s.name)
+            await removeContainer(s.name)
             sessions[id] = nil
             lostSessions.insert(id)
         }
     }
 
     // MARK: - Helpers
+
+    /// Removes a container, and drops its name from the exit-now box (#463) only once the delete
+    /// succeeded: a failed delete, or a plain `remove` from a cancelled task (which launches
+    /// nothing), leaves the name for the CLI's exit path to delete.
+    private func removeContainer(_ name: String, ignoringCancellation: Bool = false) async {
+        let removed = ignoringCancellation ? await runtime.removeIgnoringCancellation(name: name)
+            : await runtime.remove(name: name)
+        if removed { live.remove(name) }
+    }
 
     /// Ensures a container exists for `id`, coalescing concurrent first-commands onto a single
     /// create so actor re-entrancy across the suspending `createDetached` can't spawn duplicates.
@@ -316,17 +330,24 @@ actor SandboxSessionManager {
         }
         do {
             try await attemptCreate(id, workspace: workspace, mounts: mounts, network: network)
+        } catch ContainerRuntimeError.createFailed(let message) where message == LiveContainerNames.exitingError {
+            // Refused before anything was created (#463): nothing to sweep, and no delete to spawn.
+            throw ContainerRuntimeError.createFailed(message)
         } catch {
             // Ignoring cancellation on purpose: a cancelled create is one of the two ways this is
             // reached, and the ordinary `remove` would launch nothing at all from a cancelled task
             // — leaving behind the very container this exists to sweep up.
-            await runtime.removeIgnoringCancellation(name: name(for: id))
+            await removeContainer(name(for: id), ignoringCancellation: true)
             throw error
         }
     }
 
     private func attemptCreate(_ id: UUID, workspace: ContainerMount?, mounts: [String], network: NetworkMode) async throws {
         let workdir = Self.workdir(for: workspace)
+        // Before the create, so a signal mid-create still deletes it; `create`'s sweep drops it.
+        guard live.add(name(for: id)) else {
+            throw ContainerRuntimeError.createFailed(LiveContainerNames.exitingError)
+        }
         do {
             try await runtime.createDetached(name: name(for: id), image: image(),
                                              mounts: mounts, workdir: workdir, network: network)
@@ -337,6 +358,11 @@ actor SandboxSessionManager {
                 try refuseIfClosed(id)
                 if await startContainerSystem() {
                     try refuseIfClosed(id)
+                    // The start can take seconds: an exit path that read the box meanwhile has
+                    // already deleted what it held, so this retry must not create (#463).
+                    guard live.add(name(for: id)) else {
+                        throw ContainerRuntimeError.createFailed(LiveContainerNames.exitingError)
+                    }
                     try await runtime.createDetached(name: name(for: id), image: image(),
                                                      mounts: mounts, workdir: workdir, network: network)
                     try refuseIfClosed(id)

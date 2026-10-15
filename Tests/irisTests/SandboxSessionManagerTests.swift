@@ -27,6 +27,7 @@ final class MockRuntime: ContainerRuntime, @unchecked Sendable {
     private var networksPerCreate: [NetworkMode] = []
     private(set) var networksEnsured: [String] = []
     var nextNetworkError: Error?
+    var failRemove = false                       // every delete fails, leaving the container
 
     func createDetached(name: String, image: String, mounts: [String], workdir: String, network: NetworkMode) async throws {
         await Task.yield()
@@ -61,9 +62,11 @@ final class MockRuntime: ContainerRuntime, @unchecked Sendable {
     /// Refuses on a cancelled task, exactly as `CLIProcessRunner.run` does: it will not launch a
     /// child for a caller that has already given up, so a cleanup that goes down the ordinary path
     /// from a cancelled create spawns neither `stop` nor `delete`.
-    func remove(name: String) async {
-        guard !Task.isCancelled else { return }
+    /// `failRemove`: the delete exits non-zero, so the container is still there.
+    func remove(name: String) async -> Bool {
+        guard !Task.isCancelled else { return false }
         lock.withLock { removed.append(name) }
+        return !lock.withLock { failRemove }
     }
     private var listCalls = 0
     func list(prefix: String) async -> [String] {
@@ -259,7 +262,7 @@ struct SandboxSessionManagerTests {
     @Test("a run_command container stays registered through its delete, then is released")
     func ephemeralDeleteReleasesName() async {
         let name = "iris-run-\(UUID().uuidString.lowercased())"
-        await EphemeralContainerRegistry.shared.register(name)
+        #expect(await EphemeralContainerRegistry.shared.register(name))
         #expect(await EphemeralContainerRegistry.shared.current().contains(name))
         EphemeralContainerRegistry.deleteNow(binary: "/usr/bin/true", name: name)
         let deadline = Date().addingTimeInterval(5)
@@ -273,7 +276,7 @@ struct SandboxSessionManagerTests {
     func hookRegistryLifetime() async {
         let registry = EphemeralContainerRegistry()
         let name = "iris-hook-\(UUID().uuidString.lowercased())"
-        await registry.register(name)
+        #expect(await registry.register(name))
         #expect(await registry.current() == [name])
         await registry.unregister(name)
         #expect(await registry.current().isEmpty)
@@ -289,7 +292,7 @@ struct SandboxSessionManagerTests {
         let rt = MockRuntime()
         let call = Task {
             while !Task.isCancelled { try? await Task.sleep(nanoseconds: 5_000_000) }
-            await rt.remove(name: "iris-plain")
+            _ = await rt.remove(name: "iris-plain")
             await rt.removeIgnoringCancellation(name: "iris-cleanup")
         }
         call.cancel()
@@ -413,7 +416,7 @@ struct SandboxSessionManagerTests {
                 throw ContainerRuntimeError.networkFailed("unauthorized request")   // never recovers
             }
             func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?) async throws -> (stdout: String, stderr: String, exitCode: Int32) { ("", "", 0) }
-            func remove(name: String) async {}
+            func remove(name: String) async -> Bool { true }
             func list(prefix: String) async -> [String] { [] }
         }
         let rt = AlwaysFailing()

@@ -30,20 +30,27 @@ public enum IrisMain {
             // no `HeadlessMode`: approvals fail closed exactly as unattended. `store:` is an
             // autoclosure that `run` calls only once it holds the store lock (#463), so a refused
             // run never opens, migrates or repairs it.
+            // #463 decision 16: SIGINT, SIGTERM and SIGHUP stop the run cleanly; a second one exits
+            // at once. Installed before the claim, so a signal there still exits 2 with no row.
+            let lockPath = IrisPaths.default.storeLockFile
+            let stop = CLIStop(vacate: { StoreLock.vacate(at: lockPath) })
+            let signals = CLISignals.install { stop.receive($0) }
             let code = await RunJobCLI.run(invocation,
                                            store: try ConversationStore.onDisk(at: IrisPaths.default.conversationsDB),
-                                           client: LLMClient())
+                                           client: LLMClient(), lockPath: lockPath, stop: stop)
+            withExtendedLifetime(signals) {}
             // `_exit`, the way `AppDelegate` leaves at terminate: a blocked tool call asks Vibecop for a
             // verdict, which on the embedded engine loads ggml, and `exit`'s static destructors then trip
             // llama.cpp's `GGML_ASSERT` — so a script would read 134 for a run whose row says "blocked on
             // approval" and whose documented code is 2. This command's contract *is* its exit code.
             // Nothing is lost by skipping the atexit handlers: the run's save was flushed inside `run`,
-            // and the two streams are flushed here.
-            fflush(stdout)
-            fflush(stderr)
-            // Last: an empty payload under a held lock reads as an unnamed holder (decision 5).
-            StoreLock.vacate(at: IrisPaths.default.storeLockFile)
-            _exit(code)
+            // and `stop.exit` flushes the two streams, then empties the payload last (decision 5).
+            // Through the stop's single-shot exit, so a second signal landing now cannot race this
+            // to a different code: whichever gets there first exits.
+            stop.exit(code: code)
+            // Lost to a second signal's exit, which is under way on the signal queue and ends the
+            // process: returning would run `exit`'s destructors, so wait for it here.
+            while true { pause() }
         } else if CommandLine.arguments.contains("--seed-dev-home") {
             ProcessRole.set(.seed)
             let code = DevHomeSeeder.runCLI()

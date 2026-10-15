@@ -62,6 +62,8 @@ actor JobRunner {
     /// How long the deadline watchdog sleeps between looks at the wall clock. Injected only so a
     /// test can drive the loop round more than once without waiting a minute to do it.
     private let watchdogSlice: TimeInterval
+    /// #463 decision 16: a CLI's stop. nil everywhere but `--run-job`.
+    private let stop: RunStop?
     /// The wall clock the run deadline is set and watched on. Injected only so a test can hold the
     /// deadline off until its turn has reached the point under test, then move it (#335); a real
     /// one-second deadline raced a busy suite to the model call and sometimes won.
@@ -154,7 +156,8 @@ actor JobRunner {
          lastGateSignal: (@Sendable (UUID) throws -> String?)? = nil,
          approvedCallExecutor: (@Sendable (BlockedCall, UUID) async -> String)? = nil,
          watchdogSlice: TimeInterval = JobRunner.defaultWatchdogSlice,
-         deadlineClock: @escaping @Sendable () -> Date = Date.init) {
+         deadlineClock: @escaping @Sendable () -> Date = Date.init,
+         stop: RunStop? = nil) {
         self.state = state
         self.engine = engine
         self.ledger = ledger
@@ -181,6 +184,7 @@ actor JobRunner {
         }
         self.watchdogSlice = watchdogSlice
         self.deadlineClock = deadlineClock
+        self.stop = stop
     }
 
     // MARK: Admission (#187 §4)
@@ -1026,6 +1030,13 @@ actor JobRunner {
     private func run(job: Job, origin: FireOrigin, limits: JobLimits, gate: GateContext? = nil,
                      note: String? = nil, watch: WatchSummary? = nil,
                      afterBegin: (() async -> Void)? = nil) async {
+        // #463: a stop that arrived before this run means it never starts: no row, no
+        // conversation (decision 16, "before admission").
+        if let stop, let reason = stop.arm() {
+            print("[JobRunner] not running \(job.name): \(reason)")
+            return
+        }
+        defer { stop?.disarm() }
         // Before anything that opens a conversation: a built-in has no turn and no transcript.
         if case .builtin(let name) = job.action {
             await runBuiltin(name, job: job, origin: origin, note: note, afterBegin: afterBegin)
@@ -1099,6 +1110,9 @@ actor JobRunner {
         // and an unattended run with the full tool surface on the host is the one outcome this
         // profile exists to prevent. Refused like any other failure, so the card and the retry
         // ladder say so.
+        // #463: a stop that came while the row was being written starts nothing more, and in
+        // particular not the network check below, which can take seconds.
+        if await closedForStop(run: run, job: job, conversationId: conversationId, note: note) { return }
         if job.profile == .mutating, !sandboxAvailable() {
             await closeFailed(run: run, job: job, origin: origin, conversationId: conversationId,
                               reason: Self.sandboxUnavailableReason, at: now(), note: note)
@@ -1115,10 +1129,15 @@ actor JobRunner {
             // §0.7: "network off" is a network that has to exist. This is the check that puts the
             // reason on the row; the session manager asks again at create so a container rebuilt
             // mid-turn is isolated too.
-            if !grant.network, let detail = await checkIsolatedNetwork() {
-                await closeFailed(run: run, job: job, origin: origin, conversationId: conversationId,
-                                  reason: Self.isolatedNetworkUnavailableReason(detail), at: now(), note: note)
-                return
+            if !grant.network {
+                if await closedForStop(run: run, job: job, conversationId: conversationId, note: note) { return }
+                if let detail = await checkIsolatedNetwork() {
+                    // A check a stop cut short (no self-start, below) is the stop's, not a failure.
+                    if await closedForStop(run: run, job: job, conversationId: conversationId, note: note) { return }
+                    await closeFailed(run: run, job: job, origin: origin, conversationId: conversationId,
+                                      reason: Self.isolatedNetworkUnavailableReason(detail), at: now(), note: note)
+                    return
+                }
             }
         }
 
@@ -1138,6 +1157,9 @@ actor JobRunner {
         // Stay awake for this run, and no longer: the watchdog gives the assertion back at the
         // deadline even when the turn overruns it, so a wedged run cannot hold the Mac awake for
         // the rest of the session. `ActivityHolder` ends once, whichever gets there first.
+        // #463: a stop that came before here starts no turn. A stop after this check is the
+        // stop watcher's, below.
+        if await closedForStop(run: run, job: job, conversationId: conversationId, note: note) { return }
         let holder = ActivityHolder(api: activity, reason: "Iris job \(job.name)")
         // One claim, taken by whichever of the two gets there first, because "the turn came back"
         // and "the deadline arrived" are a race and the run has exactly one ending. The watchdog
@@ -1161,7 +1183,7 @@ actor JobRunner {
         if let state {
             await MainActor.run { state.registerRun(conversationId, budget: budget, sink: usageSink) }
         }
-        let turnTask = Task { [weak engine, weak orphanState = state] in
+        let turnTask = Task { [weak engine, weak orphanState = state, stop] in
             await engine?.processInput(prompt, source: "job:\(job.name)",
                                        conversationId: conversationId, turnBudget: budget,
                                        usageSink: usageSink, lifetime: lifetime)
@@ -1169,7 +1191,11 @@ actor JobRunner {
             // this run ended on its own terms and is never an overrun, whatever the watchdog does
             // next. A turn that lost — one the deadline already gave up on — claims nothing and
             // writes nothing: the row it would have written was closed at the deadline.
-            if await ending.claim(deadline: false) { return true }
+            // A stop cancels the turn from the signal queue before its watcher can claim (#463),
+            // so a turn back after a stop was asked for claims it as the stop's: it came back
+            // because it was cancelled.
+            let mine: DeadlineFlag.Ending = stop?.requestedReason.map { .signal($0) } ?? .turn
+            if await ending.claim(mine) { return true }
             // Except this, which is not a record of the run but a bucket in `AppState`: a denial
             // the orphan collected after `readTurn` drained would sit against a conversation
             // nothing will ever read again. Same drain `closeInterrupted` does, same reason.
@@ -1178,6 +1204,9 @@ actor JobRunner {
             }
             return false
         }
+        // So a CLI exiting at once can cancel this turn from its signal queue before it reads the
+        // registries (#463): the clean stop below goes through the claim, that path cannot wait.
+        stop?.attachTurn { turnTask.cancel() }
         let watchdogSlice = self.watchdogSlice
         let watchdog = Task.detached {
             // Sliced, and re-read from the wall clock every time round, because the two clocks
@@ -1198,7 +1227,7 @@ actor JobRunner {
             }
             // Lost the claim: the turn is already over, so ending its assertion and cancelling it
             // are not this task's to do.
-            guard await ending.claim(deadline: true) else { return }
+            guard await ending.claim(.deadline) else { return }
             await holder.end()
             // Cooperative, and that is the whole reason this does not wait for it: a turn parked
             // where nothing checks cancellation never comes back, and `run()` returning on the
@@ -1206,37 +1235,58 @@ actor JobRunner {
             // a bounded cost, against a job that would otherwise never run again.
             turnTask.cancel()
         }
+        // The third claimant (#463 decision 16): a CLI signal. `RunStop.request` has already
+        // cancelled the turn and sent the run's host groups their SIGTERM, on the signal queue;
+        // this claims the ending for the stop, and the run then waits for the turn until the
+        // stop's grace, counted from the request, runs out.
+        let stopWatch = Task { [stop] in
+            guard let stop, let reason = await stop.wait() else { return }
+            guard await ending.claim(.signal(reason)) else { return }
+            await holder.end()
+            turnTask.cancel()
+        }
         // Whichever of them claimed the ending, not `turnTask.value`: awaiting the turn here gave
         // a non-cooperative one the power to hold `fire` open — and with it the job's `inFlight`
         // slot, its `running` row, and a skip row per cadence tick — for as long as it liked.
-        let overran = await ending.wait()
+        let how = await ending.wait()
         watchdog.cancel()
+        stopWatch.cancel()
         await holder.end()
+        let overran = how == .deadline
+        var stoppedBy: String?
+        if case .signal(let reason) = how { stoppedBy = reason }
         // The indicator is the run's while the run is running, and this run is over. A turn that
         // came back released it on its own way out, so this is a no-op then; a turn the deadline
-        // abandoned never will, so this is the only release it gets.
-        if overran { await lifetime.release() }
+        // or the stop's grace abandoned never will, so this is the only release it gets.
+        var abandoned = overran
+        if stoppedBy != nil, let stop {
+            let by = stop.graceDeadline ?? .now() + stop.grace
+            abandoned = !(await Self.returns(by: by) { _ = await turnTask.value })
+        }
+        if abandoned { await lifetime.release() }
         let finishedAt = now()
 
         guard let turn = await readTurn(conversationId: conversationId) else {
-            await closeInterrupted(run: run, conversationId: conversationId, at: finishedAt)
+            await closeInterrupted(run: run, conversationId: conversationId, at: finishedAt,
+                                   reason: stoppedBy ?? Self.releasedReason)
             return
         }
 
         // A cancelled turn leaves a transcript that looks like silence, and `noReplyReason` would
-        // be a true sentence about the wrong thing. The deadline is why this run ended, so the row
-        // says so — this is the only place that knows.
-        let status = overran ? .failed : Self.status(messages: turn.messages, denials: turn.denials,
-                                                     softStopped: Self.softStopped(in: turn.messages))
+        // be a true sentence about the wrong thing. The deadline or the stop is why this run
+        // ended, so the row says so — this is the only place that knows.
+        let status: JobRun.Status = overran ? .failed : stoppedBy != nil ? .interrupted
+            : Self.status(messages: turn.messages, denials: turn.denials,
+                          softStopped: Self.softStopped(in: turn.messages))
         let outcome = Self.outcome(from: turn.messages)
         // The whole call, not just its name: the card renders every argument and "Approve and
         // run" re-dispatches exactly this (§6). Only the first — a run has one ending.
-        let blockedCall = overran ? nil : turn.denials.first
+        let blockedCall = (overran || stoppedBy != nil) ? nil : turn.denials.first
         let blockedTool = blockedCall?.toolName
         let failureReason = overran ? TurnBudget.timeExceeded
-            : Self.failureReason(status: status, messages: turn.messages, blockedTool: blockedTool,
-                                 blockedReason: blockedCall?.reason ?? .approval,
-                                 blockedNearest: blockedCall?.grantNearest)
+            : stoppedBy ?? Self.failureReason(status: status, messages: turn.messages, blockedTool: blockedTool,
+                                              blockedReason: blockedCall?.reason ?? .approval,
+                                              blockedNearest: blockedCall?.grantNearest)
         do {
             // The conversation is fresh, so its accumulated `tokenUsage`, plus what its subagents
             // spent while the run was active (#313), IS this run's cost.
@@ -1287,7 +1337,7 @@ actor JobRunner {
                              catchUpNote: note,
                              network: grant?.network == true,
                              watchSummary: run.watchSummary)
-        await closeSession(conversationId, status: card.statusText)
+        await closeSessionForStop(conversationId, status: card.statusText)
         await deliver(card, for: job)
     }
 
@@ -1744,6 +1794,8 @@ actor JobRunner {
     /// name, …) fails closed with no start attempted, per spec §0.7.
     private func checkIsolatedNetwork() async -> String? {
         guard let detail = await ensureIsolatedNetwork() else { return nil }
+        // No `container system start` for a run a CLI stop is ending (#463): it can take seconds.
+        guard stop?.requestedReason == nil else { return detail }
         guard ToolExecutor.sandboxSetupHint(for: detail) != nil, await startContainerSystem() else { return detail }
         return await ensureIsolatedNetwork()
     }
@@ -1782,10 +1834,39 @@ actor JobRunner {
         await deliver(card, for: job)
     }
 
+    /// #463: closes a run a CLI stop ended before its turn started, and says whether it did. The
+    /// row is `interrupted` with the stop's reason and the card is delivered, as for a stop
+    /// mid-turn. Never retried: a stop is not a failure.
+    private func closedForStop(run: JobRun, job: Job, conversationId: UUID, note: String?) async -> Bool {
+        guard let reason = stop?.requestedReason else { return false }
+        let finishedAt = now()
+        if let state {
+            await MainActor.run { _ = state.takeBackgroundDenials(for: conversationId) }
+        }
+        do {
+            try ledger.finish(runId: run.id, status: .interrupted, outcome: nil, failureReason: reason,
+                              blockedTool: nil, tokens: TokenUsage(), finishedAt: finishedAt)
+        } catch {
+            print("[JobRunner] could not close the stopped run for \(job.name): \(error)")
+        }
+        let grant = job.effectiveGrant
+        let card = EventCard(runId: run.id, jobId: job.id, jobName: job.name, status: .interrupted,
+                             outcome: reason, blockedTool: nil,
+                             startedAt: run.startedAt, finishedAt: finishedAt, totalTokens: 0,
+                             weightedTokens: 0,
+                             transcriptConversationId: conversationId, catchUpNote: note,
+                             network: grant?.network == true,
+                             watchSummary: run.watchSummary)
+        await closeSessionForStop(conversationId, status: card.statusText)
+        await deliver(card, for: job)
+        return true
+    }
+
     /// Closes a run whose app state disappeared under it: the same shape as the sweep at the next
     /// launch, because it is the same situation — nothing will ever finish this turn. No card:
     /// there is nowhere to deliver one to.
-    private func closeInterrupted(run: JobRun, conversationId: UUID, at: Date) async {
+    private func closeInterrupted(run: JobRun, conversationId: UUID, at: Date,
+                                  reason: String = JobRunner.releasedReason) async {
         // The normal path drains through `readTurn`; this one has to drain too, or a denial (and
         // the descendant links behind it) outlives the run that caused it in `AppState`.
         if let state {
@@ -1793,12 +1874,33 @@ actor JobRunner {
         }
         do {
             try ledger.finish(runId: run.id, status: .interrupted, outcome: nil,
-                              failureReason: Self.releasedReason, blockedTool: nil,
+                              failureReason: reason, blockedTool: nil,
                               tokens: TokenUsage(), finishedAt: at)
         } catch {
             print("[JobRunner] could not close the released run for \(run.jobName): \(error)")
         }
-        await closeSession(conversationId, status: "interrupted")
+        await closeSessionForStop(conversationId, status: "interrupted")
+    }
+
+    /// `closeSession`, bounded by `stop.teardown` once a stop is asked for, whoever won the run's
+    /// ending and whenever the stop lands: a SIGINT after the turn or the deadline claimed it
+    /// still answers `.runWillStop`, and the CLI waits on this. A container stop and delete can
+    /// each take 60 s; what this leaves, the CLI's settle deletes by name (Task 14).
+    private func closeSessionForStop(_ conversationId: UUID, status: String) async {
+        guard let stop else { return await closeSession(conversationId, status: status) }
+        let close = Task { await self.closeSession(conversationId, status: status) }
+        // The close races the stop. A stop already asked for (`stoppedBy`, or one that lost the
+        // claim) wins at once; one that lands mid-close bounds the rest of it. The stop watcher
+        // was cancelled with the run's ending, so this is the only waiter.
+        let stopWait = Task { await stop.wait() }
+        let first = FirstBool()
+        let closedFirst = await withCheckedContinuation { continuation in
+            first.install(continuation)
+            Task { await close.value; first.resolve(true) }
+            Task { if await stopWait.value != nil { first.resolve(false) } }
+        }
+        stopWait.cancel()
+        if !closedFirst { _ = await Self.returnsWithin(stop.teardown) { await close.value } }
     }
 
     private func closeSession(_ conversationId: UUID, status: String) async {
@@ -2035,42 +2137,86 @@ private struct LedgerUsageSink: TurnUsageSink {
     }
 }
 
-/// Which of the two racers gets to say how a run ended, and the one place the run waits to hear
-/// it. The turn returning and the deadline arriving are concurrent by construction, so the
-/// decision is a single claim rather than a flag: the winner owns it, and the loser does nothing
-/// at all. An actor because the two are different tasks — and because "read it, then decide"
-/// across a suspension is the race this replaces.
+/// Which of the racers (the turn, the deadline, a CLI stop) gets to say how a run ended, and the
+/// one place the run waits to hear it. The racers are concurrent by construction, so the decision
+/// is a single claim rather than a flag: the winner owns it, and the losers do nothing at all. An
+/// actor because the three are different tasks — and because "read it, then decide" across a
+/// suspension is the race this replaces.
 actor DeadlineFlag {
-    /// How the run ended, once either racer has said so: `true` when it was the deadline. `nil`
-    /// until one of them claims it.
-    private var ending: Bool?
-    /// `run()`, parked in `wait()`. One at a time, by construction: a run has one waiter.
-    private var waiter: CheckedContinuation<Bool, Never>?
+    /// How a run ended: its turn came back, its deadline arrived, or a CLI stop took it (#463).
+    enum Ending: Equatable, Sendable {
+        case turn
+        case deadline
+        case signal(String)
+    }
 
-    /// `true` for exactly one caller, ever. `deadline` says which racer took it, so the waiter is
-    /// told how the run ended rather than having to ask afterwards.
+    private var ending: Ending?
+    /// `run()`, parked in `wait()`. One at a time, by construction: a run has one waiter.
+    private var waiter: CheckedContinuation<Ending, Never>?
+
+    /// `true` for exactly one caller, ever.
     @discardableResult
-    func claim(deadline: Bool) -> Bool {
+    func claim(_ how: Ending) -> Bool {
         guard ending == nil else { return false }
-        ending = deadline
+        ending = how
         if let waiter {
             self.waiter = nil
-            waiter.resume(returning: deadline)
+            waiter.resume(returning: how)
         }
         return true
     }
 
-    /// Returns as soon as either racer has claimed the ending — `true` when it was the deadline.
-    /// This is what lets the deadline win the *wait* and not only the claim: a turn parked
-    /// somewhere that never checks cancellation is left behind rather than kept waited on, and the
-    /// run closes its row and gives the job back.
-    func wait() async -> Bool {
+    /// Returns as soon as any racer has claimed the ending. This is what lets the deadline or a
+    /// stop win the *wait* and not only the claim: a turn parked somewhere that never checks
+    /// cancellation is left behind rather than kept waited on.
+    func wait() async -> Ending {
         if let ending { return ending }
         // One waiter, and enforced where it is relied on: a second would overwrite the first
-        // continuation, which is never resumed again — a silent permanent hang, the exact failure
-        // this whole mechanism exists to remove.
+        // continuation, which is never resumed again — a silent permanent hang.
         precondition(waiter == nil, "DeadlineFlag has one waiter: the run that owns the ending")
         return await withCheckedContinuation { self.waiter = $0 }
+    }
+}
+
+extension JobRunner {
+    /// Whether `operation` came back within `seconds`. Timed on a dispatch queue (invariant 4);
+    /// the operation is never awaited past the bound, since it may never come back.
+    static func returnsWithin(_ seconds: TimeInterval,
+                              _ operation: @escaping @Sendable () async -> Void) async -> Bool {
+        await returns(by: .now() + seconds, operation)
+    }
+
+    /// Whether `operation` came back by `deadline`, which may already have passed: then the
+    /// answer is false unless the operation is already done. Timed on a dispatch queue.
+    static func returns(by deadline: DispatchTime,
+                        _ operation: @escaping @Sendable () async -> Void) async -> Bool {
+        let first = FirstBool()
+        return await withCheckedContinuation { continuation in
+            first.install(continuation)
+            Task { await operation(); first.resolve(true) }
+            // A queue of its own, as `BlockingSpawn.detached` uses: `.global()` does not overcommit.
+            DispatchQueue(label: "iris.jobrunner.bound").asyncAfter(deadline: deadline) { first.resolve(false) }
+        }
+    }
+}
+
+/// One answer, from whichever side gets there first.
+private final class FirstBool: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+    private var answered = false
+
+    func install(_ continuation: CheckedContinuation<Bool, Never>) { lock.withLock { self.continuation = continuation } }
+
+    func resolve(_ value: Bool) {
+        let waiting: CheckedContinuation<Bool, Never>? = lock.withLock {
+            guard !answered else { return nil }
+            answered = true
+            let c = continuation
+            continuation = nil
+            return c
+        }
+        waiting?.resume(returning: value)
     }
 }
 
