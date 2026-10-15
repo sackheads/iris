@@ -49,6 +49,44 @@ final class StoreLockTests {
         #expect(LockStub.tryLock(url) == 3)
     }
 
+    /// #494: a re-claim checks the inode too. A file replaced by rename leaves this process's lock
+    /// on an orphan that protects nothing, so the claim takes the file now at the path instead.
+    @Test("a re-claim after the file was replaced claims the new file, and the payload lands on it")
+    func reclaimAfterReplacement() throws {
+        let url = path()
+        #expect(StoreLock.claim(at: url, kind: .app) == .acquired)
+        let fresh = url.deletingLastPathComponent().appendingPathComponent("fresh")
+        FileManager.default.createFile(atPath: fresh.path, contents: nil)
+        #expect(rename(fresh.path, url.path) == 0)
+
+        #expect(StoreLock.claim(at: url, kind: .runJob, job: "again") == .acquired)
+        let fd = try #require(StoreLock.descriptor(for: url))
+        var mine = stat()
+        var there = stat()
+        #expect(fstat(fd, &mine) == 0)
+        #expect(stat(url.path, &there) == 0)
+        #expect(mine.st_ino == there.st_ino && mine.st_dev == there.st_dev, "the lock is on the file at the path")
+        #expect(StoreLock.readHolder(at: url) == .init(pid: me, kind: .runJob, job: "again"))
+        #expect(LockStub.tryLock(url) == 3, "another process is excluded from the new file")
+    }
+
+    /// #494: a short re-advertise leaves no mixed line. The lock is kept: this process may already
+    /// have the store open, and letting go would let a second writer in.
+    @Test("a short re-claim write is .failed, empties the payload, and keeps the lock")
+    func shortReclaimWrite() throws {
+        let url = path()
+        #expect(StoreLock.claim(at: url, kind: .runJob, job: "a fairly long first job name") == .acquired)
+        var calls = StoreLock.Syscalls.live
+        calls.pwrite = { fd, buffer, count, offset in Darwin.pwrite(fd, buffer, count / 2, offset) }
+        guard case .failed(let detail) = StoreLock.claim(at: url, kind: .app, syscalls: calls) else {
+            Issue.record("expected .failed"); return
+        }
+        #expect(detail.contains("wrote"))
+        #expect(try Data(contentsOf: url).isEmpty, "no half line mixed with the old payload's tail")
+        #expect(StoreLock.holds(url))
+        #expect(LockStub.tryLock(url) == 3, "still held")
+    }
+
     @Test("a dropped claim still excludes another process")
     func droppedClaimStillExcludes() {
         let url = path()
@@ -284,6 +322,22 @@ final class StoreLockTests {
         let (url, claim) = try legacyClaim(started: Date().addingTimeInterval(-3600))
         #expect(claim == .legacy(pid: 1))
         #expect(!StoreLock.holds(url))
+    }
+
+    /// #494: the edges of `clockSlack`, so a change to its value or to the comparison is caught.
+    @Test("a start within the clock slack of the write is the writer; one past it is a reused pid")
+    func clockSlackBoundary() {
+        let written = Date(timeIntervalSince1970: 1_000_000)
+        func reused(_ offset: TimeInterval) -> Bool {
+            var syscalls = StoreLock.Syscalls()
+            syscalls.processStart = { _ in written.addingTimeInterval(offset) }
+            return StoreLock.isReusedPid(1, writtenAt: written, syscalls: syscalls)
+        }
+        #expect(StoreLock.clockSlack == 1)
+        #expect(!reused(0.5), "inside the slack")
+        #expect(!reused(1.0), "exactly at the slack is still the writer")
+        #expect(reused(1.5), "just past the slack")
+        #expect(!reused(-0.5))
     }
 
     @Test("a start time that cannot be read (EPERM) fails open: the file is stale")
