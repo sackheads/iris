@@ -227,6 +227,11 @@ enum RunJobCLI {
             runner = injectedRunner
         } else {
             let appState = makeState(store: store)
+            // Launch notices are off here, so a headless user would never hear that Iris was left
+            // out of this load and that its card will not be saved (#501).
+            if appState.repairFailedIrisId != nil {
+                err("iris --run-job: " + AppState.repairFailedNotice(count: appState.loadedRepairFailed.count))
+            }
             let irisEngine = IrisEngine(state: appState, client: client,
                                         protectionEnabled: protectionEnabled)
             // An injected runner was built by its test with its own `RunStop`.

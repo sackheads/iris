@@ -17,6 +17,11 @@ import Foundation
 /// up at its next model round (`AppState.takePendingEventLines`, drained by `IrisEngine` at the
 /// same boundary it takes steers, and flushed by `endEngineTurn` if the turn ends first).
 extension AppState {
+    /// The one line a card dropped for a repair-failed destination leaves on stderr (#501).
+    nonisolated static func repairFailedCardLine(_ id: UUID) -> String {
+        "A card for conversation \(id.uuidString) was not saved: that conversation's repair failed at load, so it is not loaded this launch.\n"
+    }
+
     /// The one shape an event line takes in history, spelled in one place: a plain `user` entry.
     /// Three sites build it — delivery to an idle conversation, the engine's drain at the steer
     /// boundary, and the flush when a turn ends — and they must agree, because the model reads
@@ -39,7 +44,13 @@ extension AppState {
         // D6 decision 16: every pause, block and failure reaches the owner through here, so the
         // status item re-reads the ledger once the card is in, on every path out.
         defer { refreshLedgerAttention() }
-        guard conversations.contains(where: { $0.id == destinationId }) else { return }
+        guard conversations.contains(where: { $0.id == destinationId }) else {
+            // Not loaded because its load repair failed (#501): say so, since the card is lost.
+            if loadedRepairFailed.contains(destinationId) {
+                FileHandle.standardError.write(Data(Self.repairFailedCardLine(destinationId).utf8))
+            }
+            return
+        }
         let safeLine = await InjectionGuard.sanitize(card.historyLine,
                                                      contextTag: "event_card",
                                                      maxTier: .tier1_structural)

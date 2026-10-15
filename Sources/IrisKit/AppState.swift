@@ -1180,7 +1180,8 @@ class AppState {
     /// Rows `loadConversations()` could not decode on the most recent load (#163). Internal for
     /// the one-time system-line notice below and for tests.
     private(set) var loadedSkippedRows: [SkippedRow] = []
-    /// Conversations whose quarantine repair failed to write on the most recent load (#189).
+    /// Conversations whose quarantine or ordinal-gap repair failed to write on the most recent
+    /// load (#189, #501).
     /// Internal for the launch-notice below and for tests.
     private(set) var loadedRepairFailed: [UUID] = []
 
@@ -1309,15 +1310,28 @@ class AppState {
                 appendLaunchNotice(notice, to: target)
             }
         }
-        // A quarantine repair had rows to write but the write itself failed (#189, e.g. a
-        // read-only database): the conversation is left out of this load entirely, untouched on
-        // disk, rather than returned with its in-memory array compacted past ordinals the disk
-        // still has gaps in.
+        // A quarantine or gap repair had rows to write but the write itself failed (#189, #501,
+        // e.g. a read-only database): the conversation is left out of this load entirely,
+        // untouched on disk, rather than returned with its in-memory array compacted past
+        // ordinals the disk still has gaps in.
         if !loadedRepairFailed.isEmpty, let target = noticeTarget {
-            let n = loadedRepairFailed.count
-            appendLaunchNotice("\(n) conversation\(n == 1 ? "" : "s") need\(n == 1 ? "s" : "") a repair that could not be written to \(IrisPaths.default.conversationsDB.lastPathComponent); \(n == 1 ? "it was" : "they were") left untouched and will be retried at the next launch.",
-                               to: target)
+            appendLaunchNotice(Self.repairFailedNotice(count: loadedRepairFailed.count), to: target)
         }
+    }
+
+    /// The launch notice for `loadedRepairFailed`; the `--run-job` CLI prints it to stderr too.
+    static func repairFailedNotice(count n: Int) -> String {
+        "\(n) conversation\(n == 1 ? "" : "s") need\(n == 1 ? "s" : "") a repair that could not be written to \(IrisPaths.default.conversationsDB.lastPathComponent); \(n == 1 ? "it was" : "they were") left untouched and will be retried at the next launch."
+    }
+
+    /// The id the meta key names for Iris, when that conversation's load repair failed (#501). It
+    /// is absent from `conversations` but still on disk, and comes back at the next launch whose
+    /// repair succeeds, so nothing may move the pin off it or create a second Iris meanwhile.
+    var repairFailedIrisId: UUID? {
+        guard !loadedRepairFailed.isEmpty,
+              let raw = (try? store.metaValue(forKey: Self.activityConversationMetaKey)) ?? nil,
+              let id = UUID(uuidString: raw), loadedRepairFailed.contains(id) else { return nil }
+        return id
     }
 
     var activeConversationIndex: Int? {
@@ -1557,7 +1571,13 @@ class AppState {
     /// in `meta` on first use. Stable across calls and across launches; if the recorded id names a
     /// conversation that no longer exists (deleted by hand) or one that is archived, a fresh one is
     /// created and recorded, and any other pin is cleared so the flags still agree with the key.
+    ///
+    /// One exception (#501): when Iris's own load repair failed, its recorded id is returned
+    /// although it is not loaded, and nothing is created or unpinned. Everything that writes to
+    /// that id (`appendMessage`, `deliverEvent`) is a no-op for an unloaded conversation, so for
+    /// this launch Iris's lines and cards are dropped rather than persisted somewhere else.
     func activityConversationId() -> UUID {
+        if let failed = repairFailedIrisId { return failed }
         if let raw = try? store.metaValue(forKey: Self.activityConversationMetaKey),
            let existing = UUID(uuidString: raw),
            conversations.contains(where: { $0.id == existing && !$0.isArchived }) {
@@ -1579,7 +1599,11 @@ class AppState {
     /// Launch repair (5b §0.4): makes the meta key and the `isPinned` flags agree in both
     /// directions and takes the pinned conversation out of the archive. `PinRepair.decide` says
     /// what to change and why.
+    ///
+    /// Touches nothing when Iris's load repair failed (#501): it is on disk, just not loaded, and
+    /// "the meta key names a missing conversation" would otherwise move the pin to another one.
     func repairPinnedConversation() {
+        guard repairFailedIrisId == nil else { return }
         let raw = (try? store.metaValue(forKey: Self.activityConversationMetaKey)) ?? nil
         let repair = PinRepair.decide(metaValue: raw, rows: conversations.map {
             PinRepair.Row(id: $0.id, isPinned: $0.isPinned, isArchived: $0.isArchived, updatedAt: $0.updatedAt)
