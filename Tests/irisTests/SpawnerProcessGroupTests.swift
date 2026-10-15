@@ -393,3 +393,22 @@ struct TimedOutPreCompressTests {
         #expect(await RunCommandProcessGroupTests.gone("sleep \(nap)", within: 2), "sleep \(nap) outlived the timeout")
     }
 }
+
+/// #497: the `container` CLI clients (`CLIProcessRunner`) and MCP servers (`MCPManager`) are
+/// Foundation `Process` children, and on macOS `Process` makes each one the leader of a group of
+/// its own. So a terminal's SIGHUP or Ctrl-C, sent to the CLI's group, never reaches them, which
+/// docs/jobs.md ("Stopping a run") relies on. This pins that default.
+@Suite("Process children lead their own group")
+struct ProcessChildGroupTests {
+    @Test("a Process child is not in the parent's process group")
+    func ownGroup() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = ["30"]
+        try process.run()
+        defer { process.terminate(); process.waitUntilExit() }
+        let child = process.processIdentifier
+        #expect(getpgid(child) == child)
+        #expect(getpgid(child) != getpgrp())
+    }
+}

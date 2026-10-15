@@ -1233,9 +1233,9 @@ so a waiting app opens on its next poll, and the next Iris app to open the store
 
 If the CLI starts with SIGHUP or SIGINT already ignored (`nohup`, or a `&` job in a
 non-interactive shell), it keeps that signal ignored, so under `nohup` closing the terminal does
-not stop the run. It can still break a call in flight: the `container` CLI and MCP servers the run
-starts share its process group, so the terminal's SIGHUP reaches them, and a container command or
-MCP tool call under way at that moment can fail (#497). SIGTERM is always caught.
+not stop the run. The `container` CLI clients and MCP servers the run starts each lead a process
+group of their own (Foundation's `Process` does this on macOS), so neither the terminal's SIGHUP
+nor a Ctrl-C reaches them. SIGTERM is always caught.
 
 What a stop does not reach:
 
