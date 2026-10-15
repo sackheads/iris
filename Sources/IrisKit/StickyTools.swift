@@ -9,7 +9,7 @@ struct StickyTools: Sendable {
     /// job tools (identity, not state), not `set_workspace` (its gate is fixed per conversation).
     static let eligible: Set<String> = [
         "manage_fact", "list_sessions", "describe_session", "send_to_session", "set_session_card",
-        "amend_goal_contract", "reach_checkpoint", "delegate_milestone", "waive_criterion",
+        "close_request", "amend_goal_contract", "reach_checkpoint", "delegate_milestone", "waive_criterion",
         "goal_complete",
     ]
 

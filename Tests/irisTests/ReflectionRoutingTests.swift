@@ -240,8 +240,12 @@ import Foundation
             guard call == 2 else { return }
             if peer {
                 guard let engine = engineBox.value else { return }
+                // #469 review item 3: no default envelope any more; build one with an 8-hex id.
+                let envelope = PeerEnvelope(msgId: "aaaa0001", contextId: "ctx-aaaa0001", depth: 1,
+                                            expectsReply: false, replyTo: nil)
                 let queued = await engine.deliverPeerMessage("what is 2+2?", from: UUID(),
-                                                             senderName: "peer", to: source)
+                                                             senderName: "peer", to: source,
+                                                             envelope: envelope)
                 #expect(queued, "the target is busy, so the peer message must queue as a steer")
             } else {
                 await MainActor.run { state.sendMessage("what is 2+2?") }

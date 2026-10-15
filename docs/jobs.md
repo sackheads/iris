@@ -870,8 +870,8 @@ outside its mounts, and the `~/.iris` read carve-out does not apply to a granted
 outside its mounts either (see "Grants").
 
 A background run cannot message other sessions either. `list_sessions`, `describe_session`,
-`send_to_session` and `set_session_card` are not offered to it, and all four are refused if called
-anyway: delivering a
+`send_to_session`, `set_session_card` and `close_request` are not offered to it, and all five are
+refused if called anyway: delivering a
 message starts a real turn in an attended conversation — which would run the work under *that*
 conversation's approval path — and the roster is how a sender picks its target. A run reports
 through its card; it does not ask a peer to act for it, and it does not advertise itself to peers

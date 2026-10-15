@@ -793,17 +793,11 @@ class AppState {
     /// the second's.
     private var engineTurnCounts: [UUID: Int] = [:]
 
-    /// #185 §7 — which cascade a conversation's current turn belongs to. Absent means "not in a
-    /// cascade", i.e. a full budget.
-    ///
-    /// Two dictionaries, not one, because the allowance is a property of the CASCADE and the
-    /// membership is a property of the conversation. Holding `(id, remaining)` per conversation
-    /// looked equivalent and was not: every delivery copied the count into both sender and target,
-    /// after which the two drifted independently and each branch effectively got its own budget —
-    /// 2^N - 1 peer-woken turns from one user action at binary fan-out, which is exactly the F^N
-    /// §7 exists to forbid (whole-branch review, C1).
-    private var cascadeOf: [UUID: UUID] = [:]      // conversation -> the cascade it belongs to
-    private var cascadeBudget: [UUID: Int] = [:]   // cascade -> what is left of its allowance
+    /// #469 §6 — each session's hop depth: the depth of the last peer message that reached it, 0
+    /// once the user types into it. A send carries the sender's depth + 1. Follows causation, not
+    /// `contextId`, so a loop cannot escape by starting a new thread on every hop. In memory.
+    private var peerDepths: [UUID: Int] = [:]
+    var peerRateLimiter = PeerRateLimiter()
 
     /// Called from `IrisEngine.processInput`'s own begin/end pair, which brackets every turn the
     /// engine runs — UI-initiated ones included, so a UI turn is counted by both sources.
@@ -1921,7 +1915,16 @@ class AppState {
         if let previous, let p = conversations.firstIndex(where: { $0.id == previous }) {
             setRole(nil, at: p)
             let newName = conversations[idx].sessionCard?.name ?? conversations[idx].title
-            enqueueEventLine("[Event] Role `\(role)` moved to session \(id.uuidString) (\"\(IrisEngine.flattenCardField(newName, cap: IrisEngine.cardNameCap))\"); you no longer hold it, and your skills were cleared.", for: previous)
+            // Routed the way `closeRequestsToGone`/`deliverEvent` route an event line (see their
+            // doc comments): appended to the previous holder's transcript now, then joined to
+            // history immediately if it is idle, or queued for its own running turn otherwise.
+            let safeLine = "[Event] Role `\(role)` moved to session \(id.uuidString) (\"\(IrisEngine.flattenCardField(newName, cap: IrisEngine.cardNameCap))\"); you no longer hold it, and your skills were cleared."
+            appendMessage(role: .system, content: safeLine, to: previous)
+            if hasTurnInFlight(for: previous) {
+                enqueueEventLine(safeLine, for: previous)
+            } else {
+                appendContentToHistory(for: previous, content: Self.eventLineContent(safeLine))
+            }
         }
         setRole(role, at: idx)
         return .assigned(role: role, movedFrom: previous)
@@ -2124,48 +2127,59 @@ class AppState {
         }
     }
 
-    func cascadeRemaining(for conversationId: UUID) -> Int {
-        guard let cascadeId = cascadeOf[conversationId],
-              let remaining = cascadeBudget[cascadeId] else { return ConfigManager.shared.maxSessionCascade }
-        return remaining
+    func peerDepth(for id: UUID) -> Int { peerDepths[id] ?? 0 }
+
+    func notePeerArrival(depth: Int, at id: UUID) {
+        peerDepths[id] = max(peerDepths[id] ?? 0, depth)
     }
 
-    /// Records a peer delivery. Returns false when the sender's cascade is spent, in which case
-    /// nothing is delivered and the sender is told why (§5.3).
-    ///
-    /// The allowance travels with the CASCADE, not the branch: a sender fanning out to three peers
-    /// spends three of ONE budget, and so does a chain that walks away from it. One decrement of
-    /// one counter per delivery, read back through `cascadeOf` by every member — a per-branch
-    /// limit, or a per-conversation copy of a shared number, would still permit F^N turns.
-    @discardableResult
-    func beginPeerCascade(into targetId: UUID, from senderId: UUID) -> Bool {
-        // A sender not yet in a cascade starts one; its first delivery is what mints the id.
-        let cascadeId = cascadeOf[senderId] ?? UUID()
-        let remaining = cascadeBudget[cascadeId] ?? ConfigManager.shared.maxSessionCascade
-        guard remaining > 0 else { return false }
-        cascadeBudget[cascadeId] = remaining - 1
-        // Both ends are now in this cascade, reading the single counter above.
-        cascadeOf[senderId] = cascadeId
-        cascadeOf[targetId] = cascadeId
-        return true
+    func resetPeerDepth(for id: UUID) { peerDepths[id] = nil }
+
+    enum PeerSendDecision: Equatable {
+        case allowed(target: UUID, depth: Int)
+        case refused(String)
     }
 
-    /// A person typing begins a fresh cascade — the budget exists to bound unattended machine
-    /// chatter, not to ration a conversation the user is steering (§7).
-    ///
-    /// Drops this conversation's MEMBERSHIP only. It must not touch the shared counter: sibling
-    /// branches of the same cascade are still unattended machine chatter and keep their remaining
-    /// allowance (§7, "sibling branches keep their own remaining allowance").
-    func clearCascade(for conversationId: UUID) {
-        guard let cascadeId = cascadeOf.removeValue(forKey: conversationId) else { return }
-        // The counter outlives its last member otherwise: nothing else removes budget entries, so
-        // a long session would accumulate one per cascade it ever ran.
-        if !cascadeOf.values.contains(cascadeId) { cascadeBudget[cascadeId] = nil }
+    /// One synchronous decision for a send: resolve the target, check depth, take a token. One
+    /// MainActor step, because every main session shares one engine actor and an `await` between
+    /// a check and its act would let another session's turn run in between (#480 review).
+    func decidePeerSend(to: String, from sender: UUID, replyTarget: UUID?) -> PeerSendDecision {
+        let target: UUID
+        if let replyTarget {
+            guard let c = conversations.first(where: { $0.id == replyTarget }), !c.isArchived, c.isUserFacing
+            else { return .refused("The session that sent that message is no longer active.") }
+            if !to.isEmpty {
+                switch SessionDirectory.resolve(to, in: conversations, excluding: sender) {
+                case .success(let id) where id == replyTarget: break
+                case .success: return .refused("A reply goes to the session that sent the original message; omit `to` or name that session.")
+                case .failure(let e): return .refused(e.message)
+                }
+            }
+            target = replyTarget
+        } else {
+            switch SessionDirectory.resolve(to, in: conversations, excluding: sender) {
+            case .success(let id): target = id
+            case .failure(let e): return .refused(e.message)
+            }
+        }
+        let depth = peerDepth(for: sender) + 1
+        let limit = ConfigManager.shared.maxSessionCascade
+        guard depth <= limit else {
+            return .refused("Not sent: this chain of session messages is \(limit) hops deep, the limit. It resets when the user types into this session.")
+        }
+        if let wait = peerRateLimiter.take(for: sender) {
+            return .refused("Not sent: rate limit — this session has sent \(PeerRateLimiter.capacity) messages in quick succession. The next is allowed in about \(Int(wait.rounded(.up)))s.")
+        }
+        return .allowed(target: target, depth: depth)
     }
 
     func deleteConversation(_ id: UUID) {
         cancelTasks(for: id)
-        clearCascade(for: id)   // a deleted conversation is in no cascade; also prunes a spent budget
+        resetPeerDepth(for: id)   // a deleted conversation carries no hop depth
+        // #469 §5.3: must run before `conversations.removeAll` below — it reads this
+        // conversation's name for the event line it sends to each sender it closes out.
+        closeRequestsToGone(id, verb: "deleted")
+        try? store.peers.deleteMessages(involving: id)
 
         // Its delegates go with it (#291): a background subagent is reached by no cancellation of
         // this conversation's tasks, and would go on working, asking and holding its container.
@@ -2257,6 +2271,7 @@ class AppState {
               !conversations[idx].isArchived else { return nil }
         conversations[idx].isArchived = true
         markChanged(conversationId, .metadata)
+        closeRequestsToGone(conversationId, verb: "archived")   // #469 §5.3
 
         // Archiving your only active conversation would leave nowhere to type. §6.1's refusal is
         // what makes this safe: the replacement can never inherit a running goal, because a
@@ -2477,17 +2492,18 @@ class AppState {
     /// reflection/rename triggers. The user bubble is already in the chat.
     ///
     /// `isPeer` (round 3, #185 §7): true only when `drainPendingUserMessages` is starting a
-    /// drained PEER entry, not a person typing. The comment on `clearCascade` below is "a person
-    /// typing starts a fresh cascade" — a drained peer entry is not that, and clearing here
-    /// unconditionally was a cascade-cap bypass by timing: queue a peer message behind a busy
-    /// target, let the target's turn end, and the drain used to hand the target's cascade a full
-    /// fresh budget regardless of how much the cascade had already spent.
+    /// drained PEER entry, not a person typing. The comment on `resetPeerDepth` below is "a person
+    /// typing resets depth" — a drained peer entry is not that, and resetting here unconditionally
+    /// was a hop-depth bypass by timing: queue a peer message behind a busy target, let the
+    /// target's turn end, and the drain used to hand the target a depth of zero regardless of how
+    /// deep the chain already was.
     private func startTurn(text: String, attachments: [FileAttachment], in convId: UUID, isPeer: Bool = false) {
-        // #185 §7: a person typing starts a fresh cascade. Deliberately here and not in
+        // #469 §6: a person typing resets this session's hop depth. Deliberately here and not in
         // `runThinkingTask`, which also carries the `/goal` draft kickoff and every goal resume —
-        // machine-initiated continuations that would hand a cascade a new budget on each resume.
+        // machine-initiated continuations that would hand a running chain a fresh depth on each
+        // resume.
         if !isPeer {
-            clearCascade(for: convId)
+            resetPeerDepth(for: convId)
         }
 
         if let idx = conversations.firstIndex(where: { $0.id == convId }) {
@@ -4084,9 +4100,57 @@ class AppState {
             if result.skipped.count > logCap {
                 print("… and \(result.skipped.count - logCap) more unreadable row(s).")
             }
+            // #469 §5.3: a closed request has nothing left to tell either side, and a message
+            // that never expected a reply has nothing to wait for — both pruned here, once per
+            // launch, rather than growing the ledger forever. An open request is kept regardless
+            // of age. Best-effort; a failure here must not stop the app from finishing its load.
+            try? store.peers.prune(before: Date().addingTimeInterval(-30 * 86_400))
         } catch {
             print("Failed to load conversations: \(error)")
             loadFailureHeadline = "\(error)"
+        }
+    }
+
+    /// #469 §5.3: a request whose target goes away closes visibly — its sender is told, rather
+    /// than left waiting on a session that will never answer.
+    ///
+    /// Routed the way `deliverEvent`/`deliverStoppedSubagentResult` route an event line: appended
+    /// to the sender's transcript now, then either joined to history immediately (idle sender) or
+    /// queued for the sender's own running turn to pick up (`enqueueEventLine` only drains at the
+    /// destination's next model round — an idle sender would otherwise never see it, and it would
+    /// be lost on quit).
+    func closeRequestsToGone(_ id: UUID, verb: String) {
+        let now = Date()
+        let name = conversations.first { $0.id == id }.map { $0.sessionCard?.name ?? $0.title } ?? id.uuidString
+        guard let closed = try? store.peers.closeOpenRequests(to: id, reason: "target \(verb)", at: now) else { return }
+        for r in closed {
+            let safeLine = "[Event] Session \"\(IrisEngine.flattenCardField(name, cap: IrisEngine.cardNameCap))\" \(verb); msg \(r.msgId) closed unanswered."
+            appendMessage(role: .system, content: safeLine, to: r.fromSession)
+            if hasTurnInFlight(for: r.fromSession) {
+                enqueueEventLine(safeLine, for: r.fromSession)
+            } else {
+                appendContentToHistory(for: r.fromSession, content: Self.eventLineContent(safeLine))
+            }
+        }
+        try? store.peers.closeOpenRequests(from: id, reason: "sender \(verb)", at: now)
+    }
+
+    /// #469 review item 4: `send_to_session` resolves and decides the send in `decidePeerSend`,
+    /// then crosses an `await` (sanitisation) before the record lands in `peers.insert`. The user
+    /// can archive or delete the target in that gap. `closeRequestsToGone` does not catch it — at
+    /// the moment the user archives or deletes, this message's row does not exist yet, so there is
+    /// nothing for it to close. Called right after the insert, so a request that expects a reply
+    /// never sits open against a target that can no longer answer it. A no-op for a message that
+    /// never expected a reply, or whose target is still active.
+    func closeIfTargetGone(_ msgId: String, target: UUID) {
+        guard let record = try? store.peers.message(msgId), record.isOpen else { return }
+        guard let c = conversations.first(where: { $0.id == target }) else {
+            _ = try? store.peers.close(msgId, reason: "target deleted", at: Date())
+            return
+        }
+        guard !c.isArchived else {
+            _ = try? store.peers.close(msgId, reason: "target archived", at: Date())
+            return
         }
     }
 

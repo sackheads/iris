@@ -88,7 +88,7 @@ struct SessionAddressingTests {
         for id in [me, w] { app.createNewConversation(id: id) }
         let call = FunctionCall(name: "send_to_session", args: ["session_id": .string(w.uuidString), "message": .string("hi")], id: "c1")
         let out = await runToolCall(call, on: app, as: me)
-        #expect(out.contains("Accepted"))
+        #expect(out.contains("Sent msg"))
     }
 
     @Test("list_sessions shows role, lane and skills; describe_session shows examples")

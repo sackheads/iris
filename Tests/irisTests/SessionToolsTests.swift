@@ -133,10 +133,10 @@ struct SessionToolsTests {
     }
 
     /// #185 §9: "a subagent attempting a send is refused as 'not a session' ... can neither
-    /// originate nor extend a cascade." Declaration gating (above) only stops a well-behaved
-    /// model from being offered the tool — dispatch reads `functionCall.name` alone, so a forged
-    /// call must be refused where it would otherwise act (#185 review round 2, M2). Scripts the
-    /// call directly rather than relying on the model to emit an undeclared tool.
+    /// originate nor extend a chain of session messages." Declaration gating (above) only stops a
+    /// well-behaved model from being offered the tool — dispatch reads `functionCall.name` alone,
+    /// so a forged call must be refused where it would otherwise act (#185 review round 2, M2).
+    /// Scripts the call directly rather than relying on the model to emit an undeclared tool.
     @Test("a subagent's forged send_to_session call is refused by the handler, not just undeclared")
     func subagentSendIsRefusedByHandler() async {
         let app = AppState(); app.conversations.removeAll()
@@ -155,8 +155,8 @@ struct SessionToolsTests {
         let engine = IrisEngine(state: app, tier: .medium, principal: .subagent, client: client, sessionPeerCount: 1)
         await engine.processInput("go", source: "UI", conversationId: subagentId)
 
-        #expect(app.cascadeRemaining(for: target) == ConfigManager.shared.maxSessionCascade,
-                "a refused send must never debit a cascade budget it is not allowed to extend")
+        #expect(app.peerDepth(for: target) == 0,
+                "a refused send must never raise a hop depth it is not allowed to extend")
         let targetHistory = app.conversations.first { $0.id == target }?.history ?? []
         #expect(targetHistory.isEmpty,
                 "declaration gating is not the only enforcement — a forged call must not deliver")
@@ -331,7 +331,7 @@ struct SessionToolsTests {
         #expect(listing.count < 1_000, "one peer must not be able to become the bulk of a turn")
     }
 
-    // MARK: - send_to_session refusals and acceptances (#185 §5.3, §5.4, §7 — spec §11)
+    // MARK: - send_to_session refusals and acceptances (#469 §5.3, §5.4, §6 — spec §11)
 
     @Test("a self-send is refused")
     func selfSendRefused() async {
@@ -342,29 +342,26 @@ struct SessionToolsTests {
 
         let result = await runToolCall(sendCall(to: me), on: app, as: me)
         #expect(result.contains("That is this session — refused."))
-        #expect(app.cascadeRemaining(for: me) == ConfigManager.shared.maxSessionCascade,
-                "a refused self-send must not debit the budget either")
+        #expect(app.peerDepth(for: me) == 0, "a refused self-send must not raise depth either")
     }
 
-    @Test("a send with the cascade budget spent is refused, with the reason")
-    func budgetExhaustedRefusal() async {
+    @Test("a send past the hop limit is refused, with the reason")
+    func depthLimitRefusal() async {
         let app = AppState(); app.conversations.removeAll()
         let me = UUID(), target = UUID()
         app.createNewConversation(id: me)
         app.createNewConversation(id: target)
 
-        // Spend the cascade the sender belongs to, using the configured default rather than
-        // reaching into `ConfigManager.shared` to shrink it (invariant 7).
-        let scratch = UUID(); app.createNewConversation(id: scratch)
-        for _ in 0..<ConfigManager.shared.maxSessionCascade {
-            _ = app.beginPeerCascade(into: scratch, from: me)
-        }
-        #expect(app.cascadeRemaining(for: me) == 0)
+        // Put the sender already at the limit, as a long causal chain would have, rather than
+        // reaching into `ConfigManager.shared` to shrink the limit (invariant 7).
+        let limit = ConfigManager.shared.maxSessionCascade
+        app.notePeerArrival(depth: limit, at: me)
 
         let result = await runToolCall(sendCall(to: target), on: app, as: me)
-        #expect(result.contains("Message budget for this chain of session messages is exhausted; not sent."))
+        #expect(result.contains("Not sent: this chain of session messages is \(limit) hops deep, the limit."))
         let targetHistory = app.conversations.first { $0.id == target }?.history ?? []
         #expect(targetHistory.isEmpty, "a refused send delivers nothing")
+        #expect(app.peerDepth(for: target) == 0, "a refused send must not raise the target's depth")
     }
 
     @Test("an accepted send to an idle target says it was delivered in the background")
@@ -375,10 +372,10 @@ struct SessionToolsTests {
         app.createNewConversation(id: target)
 
         let result = await runToolCall(sendCall(to: target), on: app, as: me)
-        #expect(result.contains("Accepted — sent to"))
-        #expect(result.contains("delivered in the background. You will not be notified when it completes."))
-        #expect(app.cascadeRemaining(for: me) == ConfigManager.shared.maxSessionCascade - 1,
-                "an accepted send debits exactly one from the shared cascade budget")
+        #expect(result.contains("Sent msg"))
+        #expect(result.contains("delivered in the background. A reply, if any, arrives as a message."))
+        #expect(app.peerDepth(for: target) == 1,
+                "an accepted send carries the sender's depth (0) plus one to the target")
     }
 
     @Test("an accepted send to a busy target says it will be seen at the next turn")
@@ -394,8 +391,8 @@ struct SessionToolsTests {
         #expect(app.hasTurnInFlight(for: target))
 
         let result = await runToolCall(sendCall(to: target), on: app, as: me)
-        #expect(result.contains("Accepted — sent to"))
-        #expect(result.contains("it is busy and will see this at its next turn."))
+        #expect(result.contains("Sent msg"))
+        #expect(result.contains("it is busy and will see it at its next turn."))
         #expect(app.pendingUserMessageCount(for: target) >= 1, "and it is actually in the inbox")
         app.endEngineTurn(for: target)
     }
@@ -485,12 +482,13 @@ struct SessionToolsTests {
     @Test("the second brain pays nothing: a lone, uncarded, roleless session gets no session tools or lines")
     func noTax() async {
         let tools = await toolNames(sessionPeerCount: 0)
-        for name in ["list_sessions", "send_to_session", "set_session_card", "describe_session"] {
+        for name in ["list_sessions", "send_to_session", "set_session_card", "describe_session", "close_request"] {
             #expect(!tools.contains(name))
         }
         let text = await systemPromptText(sessionPeerCount: 0)
         #expect(!text.contains("This Session"))
         #expect(!text.contains("hold role"))
+        #expect(!text.contains("Awaiting replies"))
     }
 
     @Test("set_session_card works with no peer, and echoes what peers will see")
@@ -661,5 +659,110 @@ struct SessionToolsTests {
                                        on: app, as: sub, principal: .subagent)
         #expect(result.contains("Refused — a subagent is not a session."))
         #expect(!result.contains("session_id:"), "a subagent must not learn the peer set either")
+    }
+
+    // MARK: - close_request (#469 §5.3)
+
+    private func openRequest(_ msgId: String, from: UUID, to: UUID) -> PeerMessageRecord {
+        PeerMessageRecord(msgId: msgId, fromSession: from, toSession: to, contextId: "c", inReplyTo: nil,
+                          depth: 1, firstLine: "x", sentAt: Date(), expectsReply: true,
+                          closedAt: nil, closeReason: nil)
+    }
+
+    @Test("close_request is absent when the session has no open requests")
+    func closeRequestAbsentWithNoneOpen() async {
+        let declared = await toolNames(sessionPeerCount: 1) { app, _ in
+            app.createNewConversation(id: UUID())
+        }
+        #expect(!declared.contains("close_request"))
+    }
+
+    @Test("close_request is declared once this session has an open request")
+    func closeRequestPresentWithOneOpen() async throws {
+        let declared = await toolNames(sessionPeerCount: 0) { app, id in
+            try? app.store.peers.insert(openRequest("aaaa0001", from: id, to: UUID()))
+        }
+        #expect(declared.contains("close_request"))
+    }
+
+    @Test("a forged close_request with none open is refused")
+    func closeRequestRefusedWithNoneOpen() async {
+        let app = AppState(); app.conversations.removeAll()
+        let me = UUID(); app.createNewConversation(id: me)
+        let call = FunctionCall(name: "close_request", args: ["msg": .string("aaaa0001")], id: "c1")
+        let result = await runToolCall(call, on: app, as: me)
+        #expect(result.contains("No open request aaaa0001 from this session."))
+    }
+
+    @Test("a close_request on a msg the session did not send is refused")
+    func closeRequestRefusedForSomeoneElsesMessage() async throws {
+        let app = AppState(); app.conversations.removeAll()
+        let me = UUID(), other = UUID(), target = UUID()
+        app.createNewConversation(id: me)
+        try app.store.peers.insert(openRequest("aaaa0002", from: other, to: target))
+        let call = FunctionCall(name: "close_request", args: ["msg": .string("aaaa0002")], id: "c1")
+        let result = await runToolCall(call, on: app, as: me)
+        #expect(result.contains("No open request aaaa0002 from this session."))
+        #expect(try app.store.peers.message("aaaa0002")?.isOpen == true, "someone else's request must not close")
+    }
+
+    @Test("a successful close_request closes it with the given reason, flattened")
+    func closeRequestCloses() async throws {
+        let app = AppState(); app.conversations.removeAll()
+        let me = UUID(), target = UUID()
+        app.createNewConversation(id: me)
+        try app.store.peers.insert(openRequest("aaaa0003", from: me, to: target))
+        let call = FunctionCall(name: "close_request",
+                                args: ["msg": .string("aaaa0003"), "reason": .string("rerouted\nto \"swift-worker\"")],
+                                id: "c1")
+        let result = await runToolCall(call, on: app, as: me)
+        #expect(result == "Closed request aaaa0003.")
+        let record = try app.store.peers.message("aaaa0003")
+        #expect(record?.isOpen == false)
+        #expect(record?.closeReason == "closed by sender: rerouted to 'swift-worker'")
+    }
+
+    @Test("closing an already-closed request is refused")
+    func closeRequestRefusedWhenAlreadyClosed() async throws {
+        let app = AppState(); app.conversations.removeAll()
+        let me = UUID(), target = UUID()
+        app.createNewConversation(id: me)
+        try app.store.peers.insert(openRequest("aaaa0004", from: me, to: target))
+        try app.store.peers.close("aaaa0004", reason: "already done", at: Date())
+        let call = FunctionCall(name: "close_request", args: ["msg": .string("aaaa0004")], id: "c1")
+        let result = await runToolCall(call, on: app, as: me)
+        #expect(result == "Request aaaa0004 is already closed.")
+    }
+
+    /// #469 review item 6: `in_reply_to` is normalised (trimmed, lowercased) because the model
+    /// copies it back from text it read; `msg` is copied the same way and must be normalised the
+    /// same way, or a model that read the id with different case or surrounding whitespace would
+    /// be told its own open request does not exist.
+    @Test("close_request normalises msg the same way in_reply_to is, accepting case and whitespace")
+    func closeRequestNormalisesMsg() async throws {
+        let app = AppState(); app.conversations.removeAll()
+        let me = UUID(), target = UUID()
+        app.createNewConversation(id: me)
+        try app.store.peers.insert(openRequest("aaaa0005", from: me, to: target))
+        let call = FunctionCall(name: "close_request", args: ["msg": .string("  AAAA0005  ")], id: "c1")
+        let result = await runToolCall(call, on: app, as: me)
+        #expect(result == "Closed request aaaa0005.")
+        #expect(try app.store.peers.message("aaaa0005")?.isOpen == false)
+    }
+
+    /// #469 review item 8. Declaration gating already stops a well-behaved model from being
+    /// offered `close_request` as a subagent (it is declared only for `principal == .main`), but
+    /// the dispatcher refuses a forged call too, the same defense-in-depth every other session
+    /// tool here gets — and the open request must survive it untouched.
+    @Test("a subagent's forged close_request is refused by the handler, and closes nothing")
+    func subagentCloseRequestRefused() async throws {
+        let app = AppState(); app.conversations.removeAll()
+        let sub = UUID(), target = UUID()
+        app.createNewConversation(id: sub, isSubagent: true)
+        try app.store.peers.insert(openRequest("aaaa0006", from: sub, to: target))
+        let call = FunctionCall(name: "close_request", args: ["msg": .string("aaaa0006")], id: "c1")
+        let result = await runToolCall(call, on: app, as: sub, principal: .subagent)
+        #expect(result.contains("Refused — a subagent is not a session."))
+        #expect(try app.store.peers.message("aaaa0006")?.isOpen == true, "a forged call must close nothing")
     }
 }

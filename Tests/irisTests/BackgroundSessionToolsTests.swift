@@ -111,4 +111,21 @@ struct BackgroundSessionToolsTests {
         #expect(peer.messages.isEmpty, "no message arrived")
         #expect(peer.history.isEmpty, "and no turn ran in the peer")
     }
+
+    @Test("a forged close_request from a background run is refused, and the request stays open")
+    func closeRequestRefused() async throws {
+        let app = AppState()
+        app.conversations.removeAll()
+        let sender = app.createNewConversation(isBackground: true, select: false)
+        app.createNewConversation(id: UUID())
+        try app.store.peers.insert(PeerMessageRecord(msgId: "aaaa0001", fromSession: sender, toSession: UUID(),
+                                                     contextId: "c", inReplyTo: nil, depth: 1, firstLine: "x",
+                                                     sentAt: Date(), expectsReply: true, closedAt: nil, closeReason: nil))
+
+        let results = await dispatchResult(for: FunctionCall(
+            name: "close_request", args: ["msg": .string("aaaa0001")]),
+                                           in: app, from: sender)
+        #expect(results.contains { $0.contains(IrisEngine.unattendedSessionMessageRefusal) })
+        #expect(try app.store.peers.message("aaaa0001")?.isOpen == true, "a refused close must not close it")
+    }
 }

@@ -198,6 +198,8 @@ final class ConversationStore: Sendable {
 
     /// Scheduled and event-driven jobs (#187), on this store's writer and this store's schema.
     let ledger: JobLedger
+    /// Peer messages ledger for correlation and open requests (#469).
+    let peers: PeerLedger
 
     private init(writer: any DatabaseWriter, path: URL?, alreadyMigrated: Bool = false,
                  openFailure: String? = nil) throws {
@@ -206,6 +208,7 @@ final class ConversationStore: Sendable {
         self.openFailure = openFailure
         if !alreadyMigrated { try Self.migrator.migrate(writer) }
         self.ledger = JobLedger(writer: writer)
+        self.peers = PeerLedger(writer: writer)
     }
 
     static func inMemory() throws -> ConversationStore {
@@ -606,6 +609,26 @@ final class ConversationStore: Sendable {
             try db.alter(table: "conversations") { t in
                 t.add(column: "role", .text)
             }
+        }
+        // #469 §5, §8. No foreign keys to `conversations`: a new conversation's row is written
+        // asynchronously and may not exist when it sends. `PeerLedger.deleteMessages` cleans up.
+        m.registerMigration("v21_peer_messages") { db in
+            try db.create(table: "peer_messages") { t in
+                t.column("msgId", .text).primaryKey()
+                t.column("fromSession", .text).notNull()
+                t.column("toSession", .text).notNull()
+                t.column("contextId", .text).notNull()
+                t.column("inReplyTo", .text)
+                t.column("depth", .integer).notNull()
+                t.column("firstLine", .text).notNull()
+                t.column("sentAt", .datetime).notNull()
+                t.column("expectsReply", .boolean).notNull()
+                t.column("closedAt", .datetime)
+                t.column("closeReason", .text)
+            }
+            try db.create(index: "peer_messages_open_from", on: "peer_messages",
+                          columns: ["fromSession", "expectsReply", "closedAt"])
+            try db.create(index: "peer_messages_to", on: "peer_messages", columns: ["toSession"])
         }
         return m
     }
