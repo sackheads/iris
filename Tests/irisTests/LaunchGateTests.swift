@@ -100,6 +100,7 @@ struct LaunchGateTests {
         var opened = 0
         var finishes: [[URL?]] = []
         var droppedReported: [Int] = []
+        var droppedClicksReported: [Int] = []
         var delivered: [URL?] = []
         var notified: [NotificationResponse] = []
         /// Where each delivery landed relative to `finishLaunch`: the finish count at the time.
@@ -141,6 +142,7 @@ struct LaunchGateTests {
             deliverNotification: { [unowned self] in
                 self.notified.append($0); self.notifiedAfterFinishes.append(self.finishes.count)
             },
+            noteDroppedNotifications: { [unowned self] in self.droppedClicksReported.append($0) },
             now: { [unowned self] in self.clock }))
 
         func advance(_ seconds: TimeInterval) { clock += seconds; tick?() }
@@ -305,6 +307,33 @@ struct LaunchGateTests {
         h.gate.didFinishLaunching()
         h.advance(1)
         #expect(h.notified == (0..<LaunchGate.notificationCapacity).map(Self.click))
+        #expect(h.droppedClicksReported == [2], "the two past the cap are counted, once, at open")
+    }
+
+    /// #493: what the waiting view says is held, so a click while waiting has a visible answer.
+    @Test("the held line counts what is held, and is nil when nothing is")
+    func heldLine() {
+        #expect(LaunchGate.heldLine(links: 0, clicks: 0, dropped: 0) == nil)
+        #expect(LaunchGate.heldLine(links: 1, clicks: 0, dropped: 0) == "Held until then: 1 link.")
+        #expect(LaunchGate.heldLine(links: 0, clicks: 2, dropped: 0) == "Held until then: 2 notification clicks.")
+        #expect(LaunchGate.heldLine(links: 2, clicks: 1, dropped: 0)
+                == "Held until then: 2 links and 1 notification click.")
+        #expect(LaunchGate.heldLine(links: 0, clicks: 16, dropped: 3)
+                == "Held until then: 16 notification clicks (3 more could not be held).")
+    }
+
+    @Test("the gate's held counts follow what it holds, and clear when it opens")
+    func heldCounts() {
+        let h = Harness([.held(Self.cli), .acquired])
+        h.gate.begin()
+        for n in 0..<(LaunchGate.notificationCapacity + 1) { h.gate.receiveNotification(Self.click(n)) }
+        h.gate.receive(nil)
+        #expect(h.gate.heldNotificationCount == LaunchGate.notificationCapacity)
+        #expect(h.gate.heldLinkCount == 1)
+        #expect(h.gate.droppedCount == 1)
+        h.gate.didFinishLaunching()
+        h.advance(1)
+        #expect(h.gate.heldNotificationCount == 0 && h.gate.heldLinkCount == 0 && h.gate.droppedCount == 0)
     }
 
     @Test("a cold start from a link shows the notice without activating, and hides it when Iris opens")

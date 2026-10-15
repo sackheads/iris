@@ -60,6 +60,17 @@ extension AppState {
         }
     }
 
+    /// #493: clicks past the gate's cap while Iris waited, in one line in Iris, like dropped links.
+    func noteNotificationsDroppedWhileWaiting(_ count: Int) {
+        guard count > 0 else { return }
+        appendMessage(role: .system, content: Self.droppedNotificationsLine(count), to: activityConversationId())
+    }
+
+    static func droppedNotificationsLine(_ count: Int) -> String {
+        "\(count) notification click\(count == 1 ? "" : "s") that arrived while Iris waited "
+            + "\(count == 1 ? "was" : "were") dropped, so nothing they asked for was done. The Run Log still shows each run."
+    }
+
     /// Open, Deny and Dismiss (decision 7), and nothing else. Every id is the one the banner
     /// carried: Deny resolves that ask and no other, Dismiss acknowledges that run. An id that is
     /// gone is a no-op, and acknowledging a run twice keeps the first acknowledgement. Returns

@@ -13,6 +13,14 @@ struct WaitingView: View {
             Text(verbatim: gate.sentence)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
+            if let held = LaunchGate.heldLine(links: gate.heldLinkCount, clicks: gate.heldNotificationCount,
+                                              dropped: gate.droppedCount) {
+                Text(verbatim: held)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Button("Quit Iris") { NSApp.terminate(nil) }
         }
         .padding(24)
