@@ -1227,7 +1227,9 @@ during a `--dry-run`, exits `2` at once and starts no run.
 SIGTERM, `129` for SIGHUP. It first resets SIGINT to its default, so a third Ctrl-C kills the CLI
 outright. It then cancels the turn, SIGKILLs every host process group, deletes every container this
 process created that is still recorded (in parallel, for at most 5 seconds), flushes and exits. A run
-that had not closed its row yet leaves it `running`, with no card. The lock goes with the process,
+that had already closed its row has its card too: the card is saved before the run's container is
+torn down, the slow part a second signal usually lands in. A run that had not closed its row yet
+leaves it `running`, with no card. The lock goes with the process,
 so a waiting app opens on its next poll, and the next Iris app to open the store closes that row as
 `interrupted`, "the Iris process running it ended". The same is true of a crash or `kill -9`.
 
