@@ -37,7 +37,8 @@ public enum IrisMain {
             let signals = CLISignals.install { stop.receive($0) }
             let code = await RunJobCLI.run(invocation,
                                            store: try ConversationStore.onDisk(at: IrisPaths.default.conversationsDB),
-                                           client: LLMClient(), lockPath: lockPath, stop: stop)
+                                           client: LLMClient(), lockPath: lockPath, stop: stop,
+                                           startSweep: { Task { await SandboxSessionManager.shared.reapOrphans() } })
             withExtendedLifetime(signals) {}
             // `_exit`, the way `AppDelegate` leaves at terminate: a blocked tool call asks Vibecop for a
             // verdict, which on the embedded engine loads ggml, and `exit`'s static destructors then trip

@@ -205,7 +205,7 @@ enum Starvation {
         }
         // The deadline, the runner's SIGTERM grace, then the delete's own spawn.
         await watch(nap: nap, budget: timeout + ProcessGroupRunner.terminateGraceSeconds + 2,
-                    done: { ((try? String(contentsOfFile: log, encoding: .utf8)) ?? "").contains("delete --force iris-run-") },
+                    done: { ((try? String(contentsOfFile: log, encoding: .utf8)) ?? "").contains("delete --force \(SandboxSessionManager.namePrefix)run-") },
                     what: "the one-off container's delete")
         _ = call
     }

@@ -109,7 +109,7 @@ struct IrisApp: App {
         // clicks still pass through the gate, which keeps their order.
         SurfaceInstall.installNotifications(on: AppState.shared)
         Task {
-            // Only the lock's holder runs this, so every `iris-` container on this home it does
+            // Only the lock's holder runs this, so every container with this home's prefix it does
             // not know about belongs to a process that has ended (#463 decision 11).
             await SandboxSessionManager.shared.reapOrphans()
             while true {

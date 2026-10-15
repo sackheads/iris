@@ -6,8 +6,8 @@ import os
 /// clean stop or at once on a second signal.
 ///
 /// A lock-protected set, not an actor: the signal path reads it synchronously, with no hop onto a
-/// cooperative pool that may be starved (#372). It names only what this process made, never a
-/// sweep by `SandboxSessionManager.namePrefix`, which `~/.iris` and `~/.iris-dev` share.
+/// cooperative pool that may be starved (#372). It names only what this process made; the sweep by
+/// `SandboxSessionManager.namePrefix` is the next launch's job, and spares these names (#492).
 final class LiveContainerNames: @unchecked Sendable {
     static let shared = LiveContainerNames()
 

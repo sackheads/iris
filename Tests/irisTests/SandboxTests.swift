@@ -56,7 +56,7 @@ struct SandboxTests {
         let args = result.split(separator: "\n").filter { $0.hasPrefix("arg:") }.map { String($0.dropFirst(4)) }
         try #require(args.count == 12, "got: \(result)")
         #expect(Array(args[0...2]) == ["run", "--rm", "--name"], "got: \(result)")
-        #expect(args[3].hasPrefix("iris-run-"))
+        #expect(args[3].hasPrefix("\(SandboxSessionManager.namePrefix)run-"))
         #expect(Array(args[4...7]) == ["-v", "\(workspace):\(workspace)", "--workdir", workspace])
         #expect(args[8] == ConfigManager.shared.sandboxImage)
         #expect(Array(args[9...11]) == ["bash", "-c", "echo 'hello'"])
@@ -97,7 +97,7 @@ struct SandboxTests {
             ((try? String(contentsOf: log, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
         }
         let name = try #require(calls().first { $0.hasPrefix("run ") }?.split(separator: " ").dropFirst(3).first.map(String.init))
-        #expect(name.hasPrefix("iris-run-"))
+        #expect(name.hasPrefix("\(SandboxSessionManager.namePrefix)run-"))
         let deadline = Date().addingTimeInterval(1 + ProcessGroupRunner.terminateGraceSeconds + 5)
         while Date() < deadline {
             let registered = await EphemeralContainerRegistry.shared.current().contains(name)

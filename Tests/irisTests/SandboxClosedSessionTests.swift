@@ -70,7 +70,7 @@ struct SandboxClosedSessionTests {
         _ = await m.run(command: "a", conversationId: id, workspace: "/ws")
         #expect(rt.createdCount == 1)
         await m.closeSession(id)
-        #expect(rt.removedNames == ["iris-\(id.uuidString.lowercased())"])
+        #expect(rt.removedNames == ["\(SandboxSessionManager.namePrefix)\(id.uuidString.lowercased())"])
 
         let late = await m.run(command: "b", conversationId: id, workspace: "/ws")
         #expect(late == SandboxSessionManager.closedSessionError)
@@ -85,7 +85,7 @@ struct SandboxClosedSessionTests {
         let rt = GatedRuntime(gateCreate: true)
         let m = mgr(rt)
         let id = UUID()
-        let name = "iris-\(id.uuidString.lowercased())"
+        let name = "\(SandboxSessionManager.namePrefix)\(id.uuidString.lowercased())"
         let first = Task { await m.run(command: "a", conversationId: id, workspace: "/ws") }
         try await waitFor("the create to start") { rt.isInCreate }
         await m.closeSession(id)
@@ -124,7 +124,7 @@ struct SandboxClosedSessionTests {
         #expect(rt.createdCount == 0, "a conversation closed during the start is not retried (#293 rebase)")
         #expect(!(await m.hasSession(id)), "and the closed conversation was not given the session")
         #expect(rt.execCount == 0)
-        #expect(rt.removedNames.contains("iris-\(id.uuidString.lowercased())"), "the failed create was still swept")
+        #expect(rt.removedNames.contains("\(SandboxSessionManager.namePrefix)\(id.uuidString.lowercased())"), "the failed create was still swept")
     }
 
     @Test("a close that lands while the system is started for the isolated network refuses the retry")
@@ -271,7 +271,7 @@ struct SandboxClosedSessionTests {
         let m = SandboxSessionManager(runtime: MockRuntime(), image: { "ubuntu:latest" }, live: live)
         let id = UUID()
         _ = await m.run(command: "a", conversationId: id, workspace: "/ws")
-        #expect(live.names == ["iris-\(id.uuidString.lowercased())"])
+        #expect(live.names == ["\(SandboxSessionManager.namePrefix)\(id.uuidString.lowercased())"])
         await m.closeSession(id)
         #expect(live.names.isEmpty)
     }
@@ -287,8 +287,8 @@ struct SandboxClosedSessionTests {
         _ = await m.run(command: "a", conversationId: id, workspace: "/ws")
         rt.failRemove = true
         await m.closeSession(id)
-        #expect(rt.removedNames == ["iris-\(id.uuidString.lowercased())"], "the delete was tried")
-        #expect(live.names == ["iris-\(id.uuidString.lowercased())"], "left for the exit path to delete")
+        #expect(rt.removedNames == ["\(SandboxSessionManager.namePrefix)\(id.uuidString.lowercased())"], "the delete was tried")
+        #expect(live.names == ["\(SandboxSessionManager.namePrefix)\(id.uuidString.lowercased())"], "left for the exit path to delete")
     }
 
     /// The manager's bookkeeping only: MockRuntime launches nothing, so whether the real `remove`
@@ -304,6 +304,6 @@ struct SandboxClosedSessionTests {
             await m.closeSession(id)
         }
         _ = try await value(of: close, within: 10)
-        #expect(live.names == ["iris-\(id.uuidString.lowercased())"], "left for the exit path to delete")
+        #expect(live.names == ["\(SandboxSessionManager.namePrefix)\(id.uuidString.lowercased())"], "left for the exit path to delete")
     }
 }

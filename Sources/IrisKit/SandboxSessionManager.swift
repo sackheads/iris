@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Owns one long-lived container per conversation. Commands run via `container exec`; disk state
@@ -5,7 +6,33 @@ import Foundation
 /// barrier keyed by conversationId ensures lazy creation happens exactly once even under actor
 /// re-entrancy across the suspending `createDetached`.
 actor SandboxSessionManager {
-    static let namePrefix = "iris-"
+    /// This home's container prefix: every container Iris creates is named with it, and the
+    /// launch sweeps match only it, so `~/.iris` and `~/.iris-dev` never reap each other's (#492).
+    static var namePrefix: String { containerPrefix(for: IrisPaths.default.root) }
+
+    /// `iris-h`, then 8 hex digits of the home's path hash. The `h` keeps it from ever matching
+    /// a legacy `iris-<uuid>` session name, which starts with 8 hex digits and a dash too.
+    static func containerPrefix(for home: URL) -> String {
+        let digest = SHA256.hash(data: Data(home.standardizedFileURL.path.utf8))
+        return "iris-h" + digest.prefix(4).map { String(format: "%02x", $0) }.joined() + "-"
+    }
+
+    /// The names every home shared before #492: `iris-<uuid>`, and `iris-gate-`, `iris-hook-` or
+    /// `iris-run-` followed by a uuid.
+    static func isLegacyName(_ name: String) -> Bool {
+        guard name.hasPrefix(legacyPrefix) else { return false }
+        var rest = name.dropFirst(legacyPrefix.count)
+        for kind in ["gate-", "hook-", "run-"] where rest.hasPrefix(kind) {
+            rest = rest.dropFirst(kind.count)
+            break
+        }
+        return UUID(uuidString: String(rest)) != nil
+    }
+    private static let legacyPrefix = "iris-"
+
+    /// Only the release app sweeps the legacy names. Until a release with #492 ships, the installed
+    /// app still makes them, so a dev build sweeping them would delete its live containers.
+    static func sweepsLegacyNames(_ build: BuildIdentity) -> Bool { build == .release }
 
     struct Session {
         let name: String
@@ -216,7 +243,7 @@ actor SandboxSessionManager {
     func endSession(_ id: UUID) async {
         // If a delete arrives while this conversation's very first `create` is still in flight
         // (no session entry yet), that just-created container won't be torn down here. It's an
-        // orphan, but it's swept by `reapOrphans()` on next launch via the `iris-` prefix.
+        // orphan, but it's swept by `reapOrphans()` at the home's next launch, by its prefix.
         // `closeSession` does not have this hole: the create checks the mark before it records.
         if let s = sessions[id] { await removeContainer(s.name) }
         sessions[id] = nil
@@ -244,20 +271,21 @@ actor SandboxSessionManager {
     private struct SessionClosed: Error {}
 
     /// Deletes the containers a previous process left behind. Launch only, and only in the process
-    /// holding the home's store lock (#463), before anything else can have started one.
+    /// holding the home's store lock (#463): the app's `openStore()`, and `--run-job` beside its
+    /// turn (#492).
     ///
     /// Everything Iris creates carries `namePrefix`, a gate's per-evaluation container included —
     /// that is deliberate, and it is what makes a gate container a crash left behind sweepable at
     /// all. The price is that the prefix alone no longer means "an orphan", so two sets of names
     /// are spared: this manager's live sessions, the gate containers `GateContainerRegistry` says
     /// are mid-evaluation, and the one-off hook and `run_command` containers
-    /// `EphemeralContainerRegistry` says are running. The one caller is `IrisApp.openStore()`;
-    /// the exclusions keep it from killing live work if anything else ever calls it.
+    /// `EphemeralContainerRegistry` says are running. The CLI's sweep runs beside its turn, so the
+    /// exclusions are what keep it from killing that turn's work.
     func reapOrphans() async {
         await reapOrphans(inFlight: {
             await GateContainerRegistry.shared.current()
                 .union(await EphemeralContainerRegistry.shared.current())
-        })
+        }, includingLegacy: Self.sweepsLegacyNames(.current))
     }
 
     /// The sweep with the in-flight names handed in — a test has no way to park a real gate or
@@ -268,9 +296,14 @@ actor SandboxSessionManager {
 
     /// The sweep itself. `inFlight` is asked after the listing, never before: a container
     /// registered and created between the two would otherwise be listed and not spared.
-    func reapOrphans(inFlight: @Sendable () async -> Set<String>) async {
-        let found = await runtime.list(prefix: Self.namePrefix)
-        let spared = Set(sessions.values.map(\.name)).union(await inFlight())
+    /// Everything recorded in `live` is spared too: a session's name is recorded there before its
+    /// create starts but joins `sessions` only once the create returns, so a sweep running beside
+    /// the first command (the CLI's always does) would otherwise take it mid-create.
+    func reapOrphans(inFlight: @Sendable () async -> Set<String>, includingLegacy: Bool = false) async {
+        let own = Self.namePrefix
+        let found = await runtime.list(prefix: includingLegacy ? Self.legacyPrefix : own)
+            .filter { $0.hasPrefix(own) || (includingLegacy && Self.isLegacyName($0)) }
+        let spared = Set(sessions.values.map(\.name)).union(await inFlight()).union(live.names)
         for n in found where !spared.contains(n) { await removeContainer(n) }
     }
 

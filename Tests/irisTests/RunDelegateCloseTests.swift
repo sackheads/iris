@@ -92,7 +92,7 @@ struct RunDelegateCloseTests {
         return condition()
     }
 
-    private func containerName(_ id: UUID) -> String { "iris-\(id.uuidString.lowercased())" }
+    private func containerName(_ id: UUID) -> String { "\(SandboxSessionManager.namePrefix)\(id.uuidString.lowercased())" }
 
     @Test("a closing run closes the sessions of its subagent and grandchild, stops their turns, and lets none start a container")
     func runCloseClosesDescendants() async throws {
