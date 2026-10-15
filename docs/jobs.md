@@ -357,8 +357,9 @@ Which is why the credential stores are refused as mounts by name, in both direct
 is, is under, **or contains** any of `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `~/.docker`, `~/.kube`, `~/.azure`, `~/.cargo`,
 `~/.m2`, `~/.terraform.d`, `~/.oci`, `~/.gem`, `~/.password-store`, `~/Library/Keychains`,
 `~/Library/Cookies`, `~/Library/Application Support/com.apple.container`, `~/Library/Group
-Containers`, `~/Library/Containers` is refused, read-only included, with `that directory holds
-credentials; copy the one key the job needs into a directory made for it` — so `~/.config`,
+Containers`, `~/Library/Containers` is refused, read-only included, with `the mount source <path> is
+or contains a credential store; copy the one key the job needs into a directory made for it`, naming
+the resolved source — so `~/.config`,
 `~/Library` and `~/Library/Application Support` are refused too, the same containment rule that
 keeps `~/.iris` out. A grant is a standing capability written by a model from text it read, and
 `~/.ssh:ro` beside `network: true` would otherwise be a permitted grant. The one key a job needs is

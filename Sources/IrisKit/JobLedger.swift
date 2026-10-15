@@ -549,6 +549,7 @@ extension JobLedger {
                                            arguments: [runId.uuidString])
             guard let json else { return false }
             let call = try? JSONDecoder().decode(BlockedCall.self, from: Data(json.utf8))
+            // docs/jobs.md: a call a read-only job's profile stopped is never offered the button.
             guard let call, call.reason != .profile else { return false }
             try db.execute(sql: """
                 UPDATE job_runs SET approvedAt = ?, acknowledgedAt = COALESCE(acknowledgedAt, ?)

@@ -103,7 +103,10 @@ struct GrantedFileAccess: Sendable {
         guard fstat(fd, &st) == 0 else { throw GrantedFileError.io(call: "fstat", errno: errno) }
         if (st.st_mode & S_IFMT) == S_IFDIR { return try DirectoryListing.list(directory: fd) }
         guard (st.st_mode & S_IFMT) == S_IFREG else { throw GrantedFileError.notARegularFile(component: name) }
-        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) & ~O_NONBLOCK)
+        let flags = fcntl(fd, F_GETFL)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == 0 else {
+            throw GrantedFileError.io(call: "fcntl", errno: errno)
+        }
         var data = Data()
         var buffer = [UInt8](repeating: 0, count: 65_536)
         while true {

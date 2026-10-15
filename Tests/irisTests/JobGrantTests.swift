@@ -216,7 +216,9 @@ struct JobGrantResolveTests {
         #expect(refusal(["/"]) == JobGrant.tooBroad("/"))
         // Refused whether or not such a volume is mounted: absent it is `missing`, mounted it is
         // the lexical `/Volumes/<x>` rule — either way nothing is granted.
-        #expect(refusal(["/Volumes/Data"]) != nil)
+        let data = IrisPaths.canonicalPath("/Volumes/Data")
+        #expect([JobGrant.missing(data), JobGrant.tooBroad(data)].contains(refusal(["/Volumes/Data"]) ?? ""),
+                "missing when no such volume is mounted, too broad when one is; never granted")
         #expect(refusal([f.home]) == JobGrant.tooBroad(IrisPaths.canonicalPath(f.home)))
         let volume = JobGrant.resolve(mounts: [f.creds.path], network: nil, profile: .mutating,
                                       paths: f.paths, home: f.home, isVolume: { _ in true })
@@ -227,13 +229,49 @@ struct JobGrantResolveTests {
         #expect(refusal([f.base.path]) == JobGrant.protected(canonical(f.base)), "a root that contains ~/.iris sees every write into it")
         // 6. a credential store, by name — see credentialStoresRefusedByName for the whole list
         try FileManager.default.createDirectory(atPath: f.home + "/.ssh", withIntermediateDirectories: true)
-        #expect(refusal([f.home + "/.ssh:ro"]) == JobGrant.credentialStoreRefusal)
+        #expect(refusal([f.home + "/.ssh:ro"]) == JobGrant.credentialStoreRefusal(IrisPaths.canonicalPath(f.home + "/.ssh")))
         // 7. read-only first, read-write after — and it outranks a duplicate further down the list
         #expect(refusal(["\(f.creds.path):ro", f.proj.path]) == JobGrant.readOnlyFirst)
         #expect(refusal(["\(f.creds.path):ro", f.proj.path, f.proj.path]) == JobGrant.readOnlyFirst)
         #expect(refusal(["\(f.creds.path):ro"]) == nil, "all read-only is fine: the working directory is /")
         // 8. the same source twice, however spelled
         #expect(refusal([f.proj.path, f.proj.path + "/"]) == JobGrant.duplicate(canonical(f.proj)))
+    }
+
+    /// #296: the order between refusals, where one source trips more than one rule.
+    @Test("refusals that overlap are reported in the spec's order")
+    func overlappingRefusalOrder() throws {
+        let f = try Self.fixture(); defer { f.tearDown() }
+        func refusal(_ mounts: [String], profile: JobProfile = .mutating,
+                     isVolume: @escaping (String) throws -> Bool = { _ in false }) -> String? {
+            if case .failure(let m) = JobGrant.resolve(mounts: mounts, network: nil, profile: profile,
+                                                       paths: f.paths, home: f.home, isVolume: isVolume) { return m.text }
+            return nil
+        }
+        // The profile, before anything about the mounts is looked at.
+        #expect(refusal(["/tmp/\(UUID().uuidString)"], profile: .readOnly) == JobGrant.grantNeedsMutating)
+        // Too broad before protected: `base` is a mount point here and also contains Iris's directory.
+        #expect(refusal([f.base.path], isVolume: { _ in true }) == JobGrant.tooBroad(canonical(f.base)))
+        // Protected before credential store: `base` contains both Iris's directory and `<home>/.ssh`.
+        try FileManager.default.createDirectory(atPath: f.home + "/.ssh", withIntermediateDirectories: true)
+        #expect(refusal([f.base.path]) == JobGrant.protected(canonical(f.base)))
+        // Every refusal is a sentence.
+        for text in [JobGrant.grantNeedsMutating, JobGrant.missing("/x"), JobGrant.notADirectory("/x"),
+                     JobGrant.tooBroad("/x"), JobGrant.protected("/x"), JobGrant.protectedRelease("/x"),
+                     JobGrant.credentialStoreRefusal("/x"), JobGrant.readOnlyFirst, JobGrant.duplicate("/x"),
+                     JobGrant.malformed("x", "a reason")] {
+            #expect(text.hasSuffix("."), Comment(rawValue: text))
+        }
+    }
+
+    @Test("a source through a symlink whose target is gone is missing, not anything else")
+    func danglingIntermediateSymlink() throws {
+        let f = try Self.fixture(); defer { f.tearDown() }
+        let link = f.base.appendingPathComponent("dangle")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: f.base.appendingPathComponent("nowhere"))
+        let spelled = link.appendingPathComponent("sub").path
+        guard case .failure(let m) = resolve(f, [spelled]) else { Issue.record("granted a dangling path"); return }
+        #expect(m.text == JobGrant.missing(IrisPaths.canonicalPath(spelled)))
     }
 
     @Test("every credential store is refused by name — itself, under it, and anything that contains it — read-only included; a sibling is not (§0.12)")
@@ -244,7 +282,7 @@ struct JobGrantResolveTests {
             let store = f.home + String(entry.dropFirst())            // "~/.ssh" → "<home>/.ssh"
             try fm.createDirectory(atPath: store + "/inner", withIntermediateDirectories: true)
             for spelled in [store, store + ":ro", store + "/inner", store + "/inner:/keys:ro"] {
-                #expect(resolve(f, [spelled]) == .failure(ToolMessage(JobGrant.credentialStoreRefusal)), Comment(rawValue: spelled))
+                #expect(resolve(f, [spelled]) == Self.credentialRefusal(spelled), Comment(rawValue: spelled))
             }
         }
         #expect(JobGrant.credentialStores.count == 18, "the list the spec names, no more and no fewer")
@@ -256,7 +294,7 @@ struct JobGrantResolveTests {
         // with everything around it. (The home directory itself is refused earlier, as too broad.)
         for parent in ["/.config", "/Library", "/Library/Application Support"] {
             for spelled in [f.home + parent, f.home + parent + ":ro"] {
-                #expect(resolve(f, [spelled]) == .failure(ToolMessage(JobGrant.credentialStoreRefusal)), Comment(rawValue: spelled))
+                #expect(resolve(f, [spelled]) == Self.credentialRefusal(spelled), Comment(rawValue: spelled))
             }
         }
         try FileManager.default.createDirectory(atPath: f.home + "/Library/Application Support/SomeApp", withIntermediateDirectories: true)
@@ -269,7 +307,13 @@ struct JobGrantResolveTests {
         // Matched on canonical paths: a symlink to a store is the store.
         let link = f.base.appendingPathComponent("keys")
         try fm.createSymbolicLink(at: link, withDestinationURL: URL(fileURLWithPath: f.home + "/.aws"))
-        #expect(resolve(f, [link.path]) == .failure(ToolMessage(JobGrant.credentialStoreRefusal)))
+        #expect(resolve(f, [link.path]) == Self.credentialRefusal(link.path))
+    }
+
+    /// #296: the refusal names the source it refused, as the resolved (canonical) path.
+    private static func credentialRefusal(_ spelled: String) -> Result<JobGrant?, ToolMessage> {
+        let source = String(spelled.split(separator: ":", maxSplits: 1)[0])
+        return .failure(ToolMessage(JobGrant.credentialStoreRefusal(IrisPaths.canonicalPath(source))))
     }
 
     @Test("a leading ~ is expanded before the entry is parsed, so ~/dir is judged as its absolute form; every other relative source is still refused")

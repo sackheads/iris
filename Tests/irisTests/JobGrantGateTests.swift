@@ -52,14 +52,21 @@ struct JobGrantAllowsTests {
         #expect(g.relativeComponents(of: c(t.proj, "new/./dir/out.md"), cwd: nil, under: g.mounts[0]) == ["new", "dir", "out.md"])
     }
 
-    @Test("a differently-cased spelling of a granted directory is allowed (§3): the walk, not the string, proves identity")
+    /// Whether the volume `tree()` builds on folds case. Asked of the temp directory itself, which
+    /// is where every fixture lives.
+    static let tempVolumeFoldsCase: Bool = {
+        let values = try? URL(fileURLWithPath: NSTemporaryDirectory())
+            .resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
+        return values?.volumeSupportsCaseSensitiveNames == false
+    }()
+
+    // The claim is about APFS's default: a case-insensitive volume keeps the caller's spelling. On
+    // a case-sensitive volume `PROJ` is simply another directory and there is nothing to pin, so
+    // the test is skipped there rather than reported as a pass (#296).
+    @Test("a differently-cased spelling of a granted directory is allowed (§3): the walk, not the string, proves identity",
+          .enabled(if: tempVolumeFoldsCase))
     func differentlyCasedSpellingIsAllowed() throws {
         let t = try Self.tree(); defer { t.tearDown() }
-        // The claim is about APFS's default: a case-insensitive volume keeps the caller's spelling.
-        // On a case-sensitive volume `PROJ` is simply another directory and there is nothing to pin.
-        let caseSensitive = try t.base.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
-            .volumeSupportsCaseSensitiveNames ?? false
-        guard !caseSensitive else { return }
         let upper = t.base.appendingPathComponent("PROJ").appendingPathComponent("out.md").path
         let mount = try #require(t.grant.allowedMount(toolName: "write_file", details: upper, cwd: nil))
         #expect(mount.source == c(t.proj), "realpath already spelled the real path as on disk, so the exact comparison finds the entry")
