@@ -68,18 +68,25 @@ extension String {
     /// 1. NFKC first, so a compatibility form (fullwidth, Greek oxia) is judged as what it folds to.
     /// 2. Every `isQuoteLike` scalar becomes a straight `'`.
     /// 3. Every default-ignorable scalar (it draws blank) is dropped, except a variation
-    ///    selector, before marks are judged, so a mark sees the base it really draws on.
+    ///    selector on a base other than a `'`, before marks are judged, so a mark sees the base
+    ///    it really draws on.
     /// 4. A combining mark (Mn, Me) is kept only on a letter (not a modifier letter, Lm) or digit
     ///    base: on a space, a `'`, an Lm such as `ˍ` or another symbol, U+030E or U+030B draws a
     ///    `"` (`" \u{030E}"`, `"ˍ\u{030E}"`). Marks stacked on one base are judged by that base,
-    ///    so Thai and Indic clusters (whose bases are Lo) survive.
+    ///    so Thai and Indic clusters (whose bases are Lo) survive. The price of not counting Lm as
+    ///    a base: an Arabic haraka on a tatweel (U+0640) is dropped (م ـَ ح reads مـح). Accepted;
+    ///    do not restore Lm as a base.
     var quotesNeutralised: String {
         var out = String.UnicodeScalarView()
         var baseIsAlphanumeric = false
+        // No base yet, or the last one was a neutralised quote: a variation selector there has
+        // nothing to pick a look for, and between two `'` it only keeps them apart for the
+        // `'{2,}` collapse while still drawing as `''` (#483).
+        var baseIsQuoteOrNone = true
         for scalar in precomposedStringWithCompatibilityMapping.unicodeScalars {
-            // A variation selector picks how its base draws (text or emoji), so it stays.
+            // A variation selector picks how its base draws (text or emoji), so it stays on one.
             if scalar.properties.isVariationSelector {
-                out.append(scalar)
+                if !baseIsQuoteOrNone { out.append(scalar) }
                 continue
             }
             // Dropped: a default-ignorable scalar draws nothing, and some (the Hangul fillers)
@@ -96,9 +103,11 @@ extension String {
                 if scalar.isQuoteLike {
                     out.append("'")
                     baseIsAlphanumeric = false
+                    baseIsQuoteOrNone = true
                 } else {
                     out.append(scalar)
                     baseIsAlphanumeric = Self.alphanumeric.contains(category)
+                    baseIsQuoteOrNone = scalar == "'"   // a straight one, which is not "quote-like"
                 }
             }
         }

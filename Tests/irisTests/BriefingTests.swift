@@ -306,6 +306,24 @@ import Foundation
         #expect(missed.isEmpty, "\(missed.prefix(20))")
     }
 
+    /// #483: a variation selector between two apostrophes kept them apart for the `'{2,}`
+    /// collapse, and `' VS '` still draws as `''`.
+    @Test("a variation selector between apostrophes does not keep them apart")
+    func variationSelectorBetweenApostrophes() {
+        for raw in ["x'\u{FE0E}'y", "x\u{02C8}\u{FE00}\u{02C8}y", "x'\u{FE0F}\u{FE0E}'y", "x\u{2019}\u{E0100}\u{2019}y"] {
+            let name = Briefing.name(raw)
+            let hex = raw.unicodeScalars.map { String($0.value, radix: 16) }
+            #expect(!name.unicodeScalars.contains { $0.properties.isVariationSelector }, "\(hex) -> \(name)")
+            #expect(name == "x'y", "\(hex) -> \(name.unicodeScalars.map { String($0.value, radix: 16) })")
+        }
+    }
+
+    @Test("a variation selector on a real base is kept")
+    func variationSelectorOnABaseIsKept() {
+        #expect("\u{2764}\u{FE0F}".quotesNeutralised == "\u{2764}\u{FE0F}", "an emoji presentation")
+        #expect("a\u{FE00}".quotesNeutralised == "a\u{FE00}")
+    }
+
     @Test("a compatibility form is judged as what it folds to")
     func compatibilityFormsAreFolded() {
         // ŉ is one letter, and folds to a modifier apostrophe followed by n.
