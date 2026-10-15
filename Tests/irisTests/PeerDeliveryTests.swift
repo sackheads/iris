@@ -136,7 +136,7 @@ struct PeerDeliveryTests {
         let queued = await withTimeout(30_000) {
             await engine.deliverPeerMessage("hi", from: sender, senderName: "peer", to: target, envelope: testEnvelope())
         }
-        #expect(queued == false,
+        #expect(queued == .delivered,
                 "deliverPeerMessage must return promptly for an idle target, not await its whole turn (nil means it timed out still waiting on the gate)")
 
         await gate.release()  // let the detached target turn finish so it doesn't leak past this test
@@ -349,10 +349,10 @@ struct PeerDeliveryTests {
         async let second = engine.deliverPeerMessage("from b", from: b, senderName: "b", to: target, envelope: testEnvelope(id: "aaaa0002"))
         let queued = await [first, second]
 
-        // `true` means "queued to the #172 inbox", `false` means "handed to an idle target".
-        #expect(queued.filter { $0 }.count == 1,
+        // `.queued` means "queued to the #172 inbox", `.delivered` means "handed to an idle target".
+        #expect(queued.filter { $0 == .queued }.count == 1,
                 "exactly one send may take the turn; got \(queued)")
-        #expect(queued.filter { !$0 }.count == 1)
+        #expect(queued.filter { $0 == .delivered }.count == 1)
         // The loser is really in the inbox rather than dropped — a send that is neither delivered
         // nor queued is worse than one that raced. Read while the winner's turn is still parked.
         let parked = await eventually { app.pendingUserMessageCount(for: target) == 1 }
@@ -545,5 +545,49 @@ struct PeerDeliveryTests {
         }
         #expect(sawSchedule, "once a peer's words are injected as a mid-turn steer, job creation for the rest of that turn must ask a human")
         #expect(await eventually { (try? app.store.ledger.jobs().count) == 1 })
+    }
+
+    /// #499: `send_to_session` refuses an archived target when it decides the send, but the
+    /// delivery runs later, after sanitising. A target archived in that gap must stay archived:
+    /// called here with the target already archived, which is that gap's outcome.
+    @Test("a target archived after the send was decided is not reopened, and gets nothing")
+    func archivedAfterDecisionIsRefused() async throws {
+        let app = AppState(); app.conversations.removeAll()
+        let sender = UUID(), target = UUID()
+        app.createNewConversation(id: sender)
+        app.createNewConversation(id: target)
+        #expect(app.archiveConversation(target) == nil)
+        let before = app.conversations.first { $0.id == target }?.messages.count
+        let envelope = PeerEnvelope(msgId: "bbbb0499", contextId: "ctx-bbbb0499", depth: 1, expectsReply: true, replyTo: nil)
+        try app.store.peers.insert(PeerMessageRecord(msgId: "bbbb0499", fromSession: sender, toSession: target,
+                                                     contextId: "ctx-bbbb0499", inReplyTo: nil, depth: 1,
+                                                     firstLine: "do the thing", sentAt: Date(), expectsReply: true,
+                                                     closedAt: nil, closeReason: nil))
+        let engine = IrisEngine(state: app, tier: .medium, client: FakeLLMClient(responses: []),
+                                protectionEnabled: false)
+
+        let outcome = await engine.deliverPeerMessage("do the thing", from: sender, senderName: "peer",
+                                                      to: target, envelope: envelope)
+
+        #expect(outcome == .refused("target archived"))
+        let conv = try #require(app.conversations.first { $0.id == target })
+        #expect(conv.isArchived, "still archived")
+        #expect(conv.messages.count == before, "nothing appended")
+        #expect(conv.history.isEmpty, "no turn ran")
+        #expect(!app.hasTurnInFlight(for: target), "no claim left behind")
+        #expect(try app.store.peers.message("bbbb0499")?.closeReason == "target archived", "the request is closed for the sender")
+    }
+
+    @Test("a target deleted after the send was decided gets nothing, and the request is closed")
+    func deletedAfterDecisionIsRefused() async throws {
+        let app = AppState(); app.conversations.removeAll()
+        let sender = UUID(), target = UUID()
+        app.createNewConversation(id: sender)
+        let engine = IrisEngine(state: app, tier: .medium, client: FakeLLMClient(responses: []),
+                                protectionEnabled: false)
+        let outcome = await engine.deliverPeerMessage("do the thing", from: sender, senderName: "peer",
+                                                      to: target, envelope: testEnvelope(id: "cccc0499"))
+        #expect(outcome == .refused("target deleted"))
+        #expect(!app.conversations.contains { $0.id == target }, "nothing was created for it")
     }
 }

@@ -4143,15 +4143,16 @@ class AppState {
     /// never sits open against a target that can no longer answer it. A no-op for a message that
     /// never expected a reply, or whose target is still active.
     func closeIfTargetGone(_ msgId: String, target: UUID) {
-        guard let record = try? store.peers.message(msgId), record.isOpen else { return }
-        guard let c = conversations.first(where: { $0.id == target }) else {
-            _ = try? store.peers.close(msgId, reason: "target deleted", at: Date())
-            return
-        }
-        guard !c.isArchived else {
-            _ = try? store.peers.close(msgId, reason: "target archived", at: Date())
-            return
-        }
+        guard let record = try? store.peers.message(msgId), record.isOpen,
+              let reason = peerTargetGoneReason(target) else { return }
+        _ = try? store.peers.close(msgId, reason: reason, at: Date())
+    }
+
+    /// Why a peer can no longer reach `target`, or nil while it is active: "target deleted" or
+    /// "target archived", the reasons a request to it is closed with.
+    func peerTargetGoneReason(_ target: UUID) -> String? {
+        guard let c = conversations.first(where: { $0.id == target }) else { return "target deleted" }
+        return c.isArchived ? "target archived" : nil
     }
 
     // MARK: - Slash Command Handlers
