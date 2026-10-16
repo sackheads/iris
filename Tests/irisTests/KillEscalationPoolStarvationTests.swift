@@ -227,7 +227,9 @@ enum Starvation {
                               done: (() -> Bool)? = nil, what: String? = nil) async {
         let started = "^sleep \(nap)"
         let appeared = Date().addingTimeInterval(5)
-        while !exists(started), Date() < appeared { usleep(20_000) }
+        // Awaited, not `usleep`: until the pool is held on purpose below, the call that spawns the
+        // command needs a pool thread, and on a one-thread pool this body is sitting on it (#486).
+        while !exists(started), Date() < appeared { try? await Task.sleep(nanoseconds: 20_000_000) }
         guard exists(started) else { finish(1, nap, "the command never started (gave up at \(elapsed()), \(callBeganText()))") }
         let appearedAt = elapsed()
         let needle = target ?? started
