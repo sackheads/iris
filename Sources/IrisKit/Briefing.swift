@@ -127,12 +127,12 @@ enum Briefing {
         // sanitiser's NFKC pass, so neither a combining mark fused onto a `·` nor a compatibility
         // form that folds into one gets through.
         // Quotes become a straight `'` rather than vanishing ("Bob's", not "Bobs"), by the rule
-        // `String.quotesNeutralised` applies: no scalar left can read as the closing `”`. First,
-        // so nothing its NFKC pass folds into a `·` gets past the delimiter filter.
-        flat = flat.quotesNeutralised
-        flat = String(String.UnicodeScalarView(flat.unicodeScalars.filter { !fieldDelimiters.contains($0) }))
-        // Two `'` in a row draw as a `"` (`ˈˈ`, or a raw `''`), so a run of them becomes one. After
-        // every step that can make two meet: the neutraliser, and the delimiter filter.
+        // `String.quotesNeutralised` applies: no scalar left can read as the closing `”`. The
+        // delimiters go in the same pass, after its NFKC fold, so nothing that folds into a `·`
+        // survives, and a dropped `·` is never the base a variation selector or mark is judged
+        // by: as a separate filter afterwards it left `' VS '`, which draws as `''` (#524).
+        flat = flat.quotesNeutralised(dropping: fieldDelimiters)
+        // Two `'` in a row draw as a `"` (`ˈˈ`, or a raw `''`), so a run of them becomes one.
         flat = flat.replacingOccurrences(of: "'{2,}", with: "'", options: .regularExpression)
         flat = flat.trimmingCharacters(in: .whitespaces)
         // Bytes, not `Character`s: one letter plus 50,000 combining marks is one Character of
@@ -148,7 +148,7 @@ enum Briefing {
     /// point, bullet and dot operators, word-separator middle dot, katakana middle dot (and its
     /// halfwidth form), bullet. The quotes the name is wrapped in, and every shape that reads as
     /// one, are neutralised by `String.quotesNeutralised`.
-    private static let fieldDelimiters: Set<Unicode.Scalar> = [
+    static let fieldDelimiters: Set<Unicode.Scalar> = [
         "\u{00B7}", "\u{0387}", "\u{2027}", "\u{2219}", "\u{22C5}", "\u{2E31}", "\u{30FB}", "\u{FF65}", "\u{2022}",
     ]
 
