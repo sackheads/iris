@@ -1337,8 +1337,7 @@ actor JobRunner {
                              catchUpNote: note,
                              network: grant?.network == true,
                              watchSummary: run.watchSummary)
-        await closeSessionForStop(conversationId, status: card.statusText)
-        await deliver(card, for: job)
+        await deliverThenClose(card, for: job, conversationId: conversationId, forStop: true)
     }
 
     // MARK: The blocked call, on the card (#187 §6)
@@ -1583,8 +1582,7 @@ actor JobRunner {
                              blockedTool: nil, startedAt: startedAt, finishedAt: finishedAt,
                              totalTokens: 0, weightedTokens: 0, transcriptConversationId: conversationId,
                              network: grant?.network == true)
-        await closeSession(conversationId, status: card.statusText)
-        await deliver(card, for: job)
+        await deliverThenClose(card, for: job, conversationId: conversationId, forStop: false)
         return .dispatched(runId: approved.id)
     }
 
@@ -1830,8 +1828,7 @@ actor JobRunner {
                              transcriptConversationId: conversationId, catchUpNote: note,
                              network: grant?.network == true,
                              watchSummary: run.watchSummary)
-        await closeSession(conversationId, status: card.statusText)
-        await deliver(card, for: job)
+        await deliverThenClose(card, for: job, conversationId: conversationId, forStop: false)
     }
 
     /// #463: closes a run a CLI stop ended before its turn started, and says whether it did. The
@@ -1857,8 +1854,7 @@ actor JobRunner {
                              transcriptConversationId: conversationId, catchUpNote: note,
                              network: grant?.network == true,
                              watchSummary: run.watchSummary)
-        await closeSessionForStop(conversationId, status: card.statusText)
-        await deliver(card, for: job)
+        await deliverThenClose(card, for: job, conversationId: conversationId, forStop: true)
         return true
     }
 
@@ -1922,6 +1918,20 @@ actor JobRunner {
             }
         }
         for id in [conversationId] + delegates { await endSandboxSession(id) }
+    }
+
+    /// The card, then the session's teardown (#511). A teardown is a container stop and delete,
+    /// up to the stop's bound, and a CLI's exit-now can land during it: delivered after, the card
+    /// was lost while the row already said how the run ended. In a CLI run (the only one with a
+    /// `stop`) the card is saved here too, since the CLI's own flush comes after the teardown.
+    private func deliverThenClose(_ card: EventCard, for job: Job, conversationId: UUID, forStop: Bool) async {
+        await deliver(card, for: job)
+        if stop != nil, let state { await MainActor.run { state.flushSave() } }
+        if forStop {
+            await closeSessionForStop(conversationId, status: card.statusText)
+        } else {
+            await closeSession(conversationId, status: card.statusText)
+        }
     }
 
     private func deliver(_ card: EventCard, for job: Job) async {

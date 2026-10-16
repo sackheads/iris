@@ -784,6 +784,59 @@ struct JobRetryTests {
         #expect(card(state)?.runId == run.id, "the card was delivered")
     }
 
+    /// #511: an exit-now can land while the session is torn down (a container stop and delete,
+    /// up to the teardown bound). The card has to be saved before that starts, or the row says
+    /// how the run ended and no card ever does.
+    private func cardSavedAtTeardown(store: ConversationStore) -> @Sendable (UUID) async -> Void {
+        let seen = savedAtTeardown
+        return { _ in
+            let saved = (try? store.loadAll().conversations.flatMap(\.messages).contains { $0.role == .event }) ?? false
+            seen.record(saved)
+        }
+    }
+    private let savedAtTeardown = Seen()
+    private final class Seen: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [Bool] = []
+        func record(_ value: Bool) { lock.withLock { values.append(value) } }
+        var first: Bool? { lock.withLock { values.first } }
+    }
+
+    @Test("#511: a stopped CLI run's card is saved before its session is torn down")
+    func stoppedCardSavedBeforeTeardown() async throws {
+        let client = GatedClient(response: textResponse("tick"))
+        let (store, state, engine) = try harness([], client: client)
+        let j = job(timeoutSeconds: Self.heldTimeout)
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let stop = RunStop(grace: 5, terminateGroups: {})
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                               endSandboxSession: cardSavedAtTeardown(store: store), config: config,
+                               activity: RecordingActivity(), stop: stop)
+        let fire = Task { await runner.fire(job: j, origin: .manual) }
+        defer { client.release() }
+        try #require(await client.calls.reach(1), "the turn reached the model")
+        #expect(stop.request(reason: RunStop.reason(for: SIGINT)) == .runWillStop)
+        try #require(await finished(fire) != nil, "the stop ended the run")
+        #expect(savedAtTeardown.first == true, "the card was in the store when the teardown began")
+    }
+
+    @Test("#511: a completed CLI run's card is saved before its session is torn down")
+    func completedCardSavedBeforeTeardown() async throws {
+        let (store, state, engine) = try harness([textResponse("tick")])
+        let j = job()
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                               endSandboxSession: cardSavedAtTeardown(store: store), config: config,
+                               activity: RecordingActivity(), stop: RunStop(grace: 5, terminateGroups: {}))
+        await runner.fire(job: j, origin: .manual)
+        #expect(try store.ledger.runs(jobId: j.id, limit: 1).first?.status == .completed)
+        #expect(savedAtTeardown.first == true, "the card was in the store when the teardown began")
+    }
+
     /// Fix-wave residual (M8): the stop cancels the turn on the signal queue before the watcher
     /// can claim. Here the request is held inside `terminateGroups`, after the cancel and before it
     /// wakes the watcher, so the cancelled turn is back first and claims; it must claim for the stop.
