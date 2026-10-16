@@ -63,4 +63,29 @@ struct GoalResumeOnceTests {
         #expect(state.conversations[idx].messages.allSatisfy { !$0.content.hasPrefix(Self.resumePrefix) })
         #expect(!engine.goalLoopIsLive(for: cid))
     }
+
+    /// #471: `start()` awaits plugins, MCP servers and the Ollama probe before it resumes, which
+    /// can take seconds. Switching conversation in that window must not lose the launch one's goal.
+    @Test("the goal of the conversation selected at launch resumes even after the selection moves")
+    func resumesTheLaunchSelection() async throws {
+        let state = AppState(store: try ConversationStore.inMemory(),
+                             tier2Provisioning: .provisioned, tier3Provisioning: .provisioned,
+                             createIfEmpty: false, emitLaunchNotices: false)
+        let cid = state.createNewConversation()
+        var contract = GoalContract(objective: "ship it", criteria: [Criterion(text: "c", kind: .qualitative)])
+        contract.lock()
+        state.setGoalContract(for: cid, contract)
+        let idx = try #require(state.conversations.firstIndex { $0.id == cid })
+        state.conversations[idx].activeGoal = "ship it"
+        let other = state.createNewConversation()   // the user moved on while start() awaited
+        #expect(state.selectedConversationId == other)
+        let engine = IrisEngine(state: state, client: FakeLLMClient(responses: []),
+                                protectionEnabled: false, sessionPeerCount: 0)
+        defer { engine.goalLoop.cancelReprompt(for: cid) }
+
+        await engine.resumeInterruptedGoal(launchSelection: cid)
+
+        #expect(state.conversations[idx].messages.contains { $0.content.hasPrefix(Self.resumePrefix) })
+        #expect(engine.goalLoopIsLive(for: cid))
+    }
 }

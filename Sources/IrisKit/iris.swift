@@ -1162,6 +1162,11 @@ actor IrisEngine {
     }
 
     func start() async {
+        // #471: the conversation open at launch, read before anything below awaits plugins, MCP
+        // servers or the Ollama probe. Its interrupted goal is the one to resume, even if the
+        // user selects another conversation in the meantime.
+        let startState = state
+        let launchSelection = await MainActor.run { startState?.selectedConversationId }
         let droppedLegacy = JobScheduler.removeLegacyDefaults(from: IrisDefaults.store)
         // The removal logs with `print`, which nobody running a Mac app reads: no importer ships,
         // so this is the user's only notice that records they made are gone. Deduped by wording.
@@ -1217,7 +1222,7 @@ actor IrisEngine {
             }
         }
 
-        await resumeInterruptedGoal()
+        await resumeInterruptedGoal(launchSelection: launchSelection)
     }
 
     /// Whether this engine has already looked for a goal a restart interrupted. Not persisted:
@@ -1233,11 +1238,15 @@ actor IrisEngine {
     /// resuming it again posted a second "interrupted by restart" line and could run a
     /// `processInput` beside the live turn. The flag is set before the first `await`, so two
     /// overlapping starts cannot both pass it.
-    func resumeInterruptedGoal() async {
+    ///
+    /// `launchSelection` is the conversation `start()` found selected before it awaited anything
+    /// (#471); nil reads the selection now.
+    func resumeInterruptedGoal(launchSelection: UUID? = nil) async {
         guard !checkedForInterruptedGoal else { return }
         checkedForInterruptedGoal = true
         let localState = state
-        let localConversationId = await MainActor.run { localState?.selectedConversationId }
+        let current = await MainActor.run { localState?.selectedConversationId }
+        let localConversationId = launchSelection ?? current
         if let convId = localConversationId {
             let shouldResume = await MainActor.run { () -> Bool in
                 guard let conv = localState?.conversations.first(where: { $0.id == convId }),
