@@ -49,5 +49,7 @@ head="${2:-HEAD}"
 # A new branch or a force push has no usable `before`: run everything.
 if [[ -z "$base" || "$base" =~ ^0+$ ]]; then emit true; fi
 
-if ! paths="$(git diff --name-only "$base...$head" 2>/dev/null)"; then emit true; fi
+# --no-renames: a rename lists only its new path, so a resource moved out of Sources/ into docs/
+# would read as docs-only though the tests lost a file they read. Both paths are listed this way.
+if ! paths="$(git diff --name-only --no-renames "$base...$head" 2>/dev/null)"; then emit true; fi
 classify <<< "$paths"

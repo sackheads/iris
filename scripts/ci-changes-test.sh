@@ -34,4 +34,16 @@ if [[ "$zero" == "code=true" ]]; then echo "ok   zero base"; else echo "FAIL zer
 bad="$(GITHUB_OUTPUT= "$here/ci-changes.sh" not-a-commit HEAD)"
 if [[ "$bad" == "code=true" ]]; then echo "ok   git error"; else echo "FAIL git error: got $bad"; fail=1; fi
 
+# A rename out of Sources/ into docs/ is a change to Sources/: both paths must count.
+repo="$(mktemp -d)"
+(
+    cd "$repo" && git init -q && git config user.email t@t && git config user.name t
+    mkdir -p Sources/IrisKit/assets docs
+    printf 'shipped\n' > Sources/IrisKit/assets/x.md && git add -A && git commit -qm one
+    git mv Sources/IrisKit/assets/x.md docs/x.md && git commit -qm two
+) >/dev/null 2>&1
+renamed="$(cd "$repo" && GITHUB_OUTPUT= "$here/ci-changes.sh" HEAD~1 HEAD)"
+rm -rf "$repo"
+if [[ "$renamed" == "code=true" ]]; then echo "ok   a resource renamed into docs/"; else echo "FAIL a resource renamed into docs/: got $renamed"; fail=1; fi
+
 exit $fail
