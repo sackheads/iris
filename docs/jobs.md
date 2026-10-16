@@ -1225,8 +1225,10 @@ signal only SIGTERMs the run's registered host process groups, and a built-in st
 during a `--dry-run`, exits `2` at once and starts no run.
 
 **A second signal exits at once**, with 128 plus its number: `130` for a second Ctrl-C, `143` for
-SIGTERM, `129` for SIGHUP. It first resets SIGINT to its default, so a third Ctrl-C kills the CLI
-outright. It then cancels the turn, SIGKILLs every host process group, deletes every container this
+SIGTERM, `129` for SIGHUP. It first has SIGINT go back to its default, so a third Ctrl-C kills the
+CLI outright. The reset waits until the second signal itself has been delivered: a signal source
+hears a signal before the kernel delivers it, and resetting then let the second Ctrl-C meet the
+default and end the CLI before any of the cleanup below (#510). It then cancels the turn, SIGKILLs every host process group, deletes every container this
 process created that is still recorded (in parallel, for at most 5 seconds), flushes and exits. A run
 that had already closed its row has its card too: the card is saved before the run's container is
 torn down, the slow part a second signal usually lands in. A run that had not closed its row yet

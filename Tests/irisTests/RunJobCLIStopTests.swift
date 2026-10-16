@@ -77,7 +77,7 @@ final class RunJobCLIStopTests {
                 drainGroups: { registry.waitUntilEmpty(within: 3) },
                 killGroups: { events.add("kill"); registry.killAll() },
                 deleteContainers: { events.add("delete") },
-                resetInterrupt: { events.add("reset") },
+                resetInterrupt: { _ in events.add("reset") },
                 flush: { events.add("flush") },
                 vacate: { events.add("vacate") },
                 exitNow: { events.add("exit \($0)") })
@@ -182,7 +182,7 @@ final class RunJobCLIStopTests {
         let events = Events()
         let cliStop = CLIStop(grace: 7, terminateGroups: { events.add("terminate") }, closeGroups: {},
                               drainGroups: { true }, killGroups: { events.add("kill") }, deleteContainers: {},
-                              resetInterrupt: {}, flush: {}, vacate: {}, exitNow: { events.add("exit \($0)") })
+                              resetInterrupt: { _ in }, flush: {}, vacate: {}, exitNow: { events.add("exit \($0)") })
         #expect(cliStop.run.arm() == nil)
         cliStop.run.attachTurn { events.add("cancel") }
         #expect(cliStop.run.graceDeadline == nil)
@@ -243,7 +243,7 @@ final class RunJobCLIStopTests {
         let events = Events()
         let cliStop = CLIStop(terminateGroups: {}, closeGroups: { events.add("close") }, drainGroups: { false },
                               killGroups: { events.add("kill") },
-                              deleteContainers: { events.add("delete") }, resetInterrupt: {},
+                              deleteContainers: { events.add("delete") }, resetInterrupt: { _ in },
                               vacate: {}, exitNow: { _ in })
         cliStop.settle()
         #expect(events.values == ["close", "kill", "delete"])
@@ -255,7 +255,7 @@ final class RunJobCLIStopTests {
         let registry = LiveProcessGroups()
         let cliStop = CLIStop(terminateGroups: {}, closeGroups: { events.add("close"); _ = registry.closeAndSnapshot() },
                               drainGroups: { registry.waitUntilEmpty(within: 3) }, killGroups: { events.add("kill") },
-                              deleteContainers: { events.add("delete") }, resetInterrupt: {},
+                              deleteContainers: { events.add("delete") }, resetInterrupt: { _ in },
                               vacate: {}, exitNow: { _ in })
         cliStop.settle()
         #expect(events.values == ["close", "delete"], "drained, so nothing to kill")
