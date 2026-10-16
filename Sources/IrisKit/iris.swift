@@ -1199,30 +1199,33 @@ actor IrisEngine {
             await startWatching(ledger: ledger)
         }
 
-        // Check whether Ollama is reachable when any auxiliary engine depends on it.
-        // A silent failure here means Vibecop / PromptGuard timeouts with no user-visible cause.
-        let config = ConfigManager.shared
-        let needsOllama = (config.enableVibecop && config.vibecopEngine == "ollama")
-                       || (config.enableAdvancedPromptInjectionProtection && config.promptGuardEngine == "ollama")
-
-        if needsOllama {
-            let reachable = await OllamaEngine.isDaemonReachable()
-            if !reachable {
-                let localState = state
-                let localConversationId = await MainActor.run { localState?.selectedConversationId }
-                if let convId = localConversationId {
-                    var services: [String] = []
-                    if config.enableVibecop, config.vibecopEngine == "ollama" { services.append("Vibecop Guardian") }
-                    if config.enableAdvancedPromptInjectionProtection, config.promptGuardEngine == "ollama" { services.append("Prompt Guard") }
-                    let serviceList = services.joined(separator: " and ")
-                    await pushToUI(role: .system, text: "⚠️ \(serviceList) are configured to use Ollama, but the Ollama daemon is not reachable at http://localhost:11434. Start the Ollama server (`ollama serve`) or switch to a different engine in Settings.", conversationId: convId)
-                } else {
-                    print("[Iris] Ollama daemon unreachable — Vibecop/PromptGuard will silently fail.")
-                }
-            }
-        }
+        await warnIfOllamaUnreachable(config: .shared, isReachable: OllamaEngine.isDaemonReachable)
 
         await resumeInterruptedGoal(launchSelection: launchSelection)
+    }
+
+    /// The Ollama warnings this process has posted, by wording. `start()` runs again from the
+    /// setup wizard's finish, and the same warning should not repeat (#472). Not
+    /// `appendLaunchNotice`: it dedupes against the transcript, which would also hide the warning
+    /// on every later launch into the same conversation.
+    private var postedOllamaWarnings: Set<String> = []
+
+    /// Warns when an auxiliary engine is set to Ollama and the daemon does not answer. Without it,
+    /// Vibecop and Prompt Guard time out with no visible cause.
+    func warnIfOllamaUnreachable(config: ConfigManager, isReachable: @Sendable () async -> Bool) async {
+        var services: [String] = []
+        if config.enableVibecop, config.vibecopEngine == "ollama" { services.append("Vibecop Guardian") }
+        if config.enableAdvancedPromptInjectionProtection, config.promptGuardEngine == "ollama" { services.append("Prompt Guard") }
+        guard !services.isEmpty, await !isReachable() else { return }
+        let text = "⚠️ \(services.joined(separator: " and ")) are configured to use Ollama, but the Ollama daemon is not reachable at http://localhost:11434. Start the Ollama server (`ollama serve`) or switch to a different engine in Settings."
+        let localState = state
+        guard let convId = await MainActor.run(body: { localState?.selectedConversationId }) else {
+            print("[Iris] Ollama daemon unreachable — Vibecop/PromptGuard will silently fail.")
+            return
+        }
+        // Checked and recorded with no await between, so two overlapping starts post it once.
+        guard postedOllamaWarnings.insert(text).inserted else { return }
+        await pushToUI(role: .system, text: text, conversationId: convId)
     }
 
     /// Whether this engine has already looked for a goal a restart interrupted. Not persisted:
