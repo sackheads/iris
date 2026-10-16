@@ -148,14 +148,18 @@ struct PeerDeliveryTests {
         let sender = UUID(), target = UUID()
         app.createNewConversation(id: sender)
         app.createNewConversation(id: target)
-        app.selectedConversationId = target
-        app.sendMessage("start a turn")        // registers in activeTasks synchronously
+        // Held busy by a reservation, not a real turn: `sendMessage` used to start one here, and on
+        // a loaded runner that turn (no model configured, so it fails at once) could end, and
+        // drain the inbox, before the delivery claimed, so the message was delivered, not queued.
+        #expect(app.claimPeerDelivery(for: target))
+        defer { app.releasePeerDelivery(for: target) }
         #expect(app.hasTurnInFlight(for: target))
 
         let engine = IrisEngine(state: app, tier: .medium, client: FakeLLMClient(responses: []),
                                 protectionEnabled: false)
-        await engine.deliverPeerMessage("from a peer", from: sender, senderName: "peer", to: target, envelope: testEnvelope())
+        let outcome = await engine.deliverPeerMessage("from a peer", from: sender, senderName: "peer", to: target, envelope: testEnvelope())
 
+        #expect(outcome == .queued)
         #expect(app.pendingUserMessageCount(for: target) >= 1,
                 "peer messaging must not make the #172 interleaving hazard agent-triggerable")
     }
