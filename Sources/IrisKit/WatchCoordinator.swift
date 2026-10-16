@@ -574,8 +574,11 @@ actor WatchCoordinator {
     private func dispatch(_ id: UUID, job: Job, fire offer: WatchFire, seq: UInt64) {
         let handler = fire
         Task { [self] in
+            // nil (a cancelled stat) fires as before rather than pausing on no answer. Nothing
+            // holds this task to cancel it, so that is a guard for a caller that may come later.
             if case .fsEvent(let watch) = job.trigger,
-               !(await WatcherManager.rootsMissing([watch.path], fileExists: rootExists)).isEmpty {
+               let missing = await WatcherManager.rootsMissing([watch.path], fileExists: rootExists),
+               !missing.isEmpty {
                 // Re-checked after the stat: a `sync` may have moved the job onto another root,
                 // and a pause meant for the old one must not land on it.
                 guard subscribers[id]?.fireSeq == seq else { return }

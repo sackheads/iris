@@ -388,4 +388,70 @@ struct WatcherManagerSyncTests {
             }
         }
     }
+
+    // MARK: The root stat stays off the cooperative pool (#486)
+
+    /// A stat that answers only when released, and records which queue it ran on.
+    final class HungStat: @unchecked Sendable {
+        private let lock = NSCondition()
+        private var released = false
+        private var inside = false
+        private var label = ""
+        var isInside: Bool { lock.withLock { inside } }
+        var queueLabel: String { lock.withLock { label } }
+        func release() { lock.lock(); released = true; lock.broadcast(); lock.unlock() }
+        func exists(_ path: String) -> Bool {
+            let here = String(cString: __dispatch_queue_get_label(nil))
+            lock.lock()
+            defer { lock.unlock() }
+            label = here
+            inside = true
+            let deadline = Date().addingTimeInterval(10)
+            while !released && lock.wait(until: deadline) {}
+            return true
+        }
+    }
+
+    @Test("a hung root stat runs on a dispatch queue, not a cooperative-pool thread")
+    func hungStatIsOffThePool() async throws {
+        let stat = HungStat()
+        defer { stat.release() }
+        let check = Task { await WatcherManager.rootsMissing(["/r"], fileExists: { stat.exists($0) }) }
+        await Self.eventually("the stat to start") { stat.isInside }
+        // A blocking stat on a pool thread is the #372 class: a hung mount holds one of the few
+        // threads a low-core Mac has. The cooperative pool's threads carry that in their label.
+        #expect(!stat.queueLabel.contains("cooperative"), "the stat ran on \(stat.queueLabel)")
+        stat.release()
+        #expect(try await value(of: check, within: 10) == [])
+    }
+
+    @Test("a sync cancelled during a hung stat applies nothing, rather than reading every root as present")
+    func cancelledSyncStandsDown() async throws {
+        let fake = FakeStreams()
+        let stat = SlowStat()
+        let manager = WatcherManager(ledger: nil, streams: fake.factory, fileExists: { stat.exists($0) })
+        await manager.sync(with: [Self.watchJob("a", root: "/r")])
+        #expect(await manager.activeRoots == ["/r"])
+        stat.makeSlow()
+        let moved = Task { await manager.sync(with: [Self.watchJob("a", root: "/s")]) }
+        await Self.eventually("the stat to stall") { stat.isInside }
+        moved.cancel()
+        try await value(of: moved, within: 5)
+        #expect(await manager.activeRoots == ["/r"], "the cancelled sync's table was not applied")
+        stat.release()
+        await manager.stopAll()
+    }
+
+    @Test("cancelling a sync's root check returns at once, with no answer, while the stat is hung")
+    func hungStatCancelReturnsPromptly() async throws {
+        let stat = HungStat()
+        defer { stat.release() }
+        let check = Task { await WatcherManager.rootsMissing(["/r"], fileExists: { stat.exists($0) }) }
+        await Self.eventually("the stat to start") { stat.isInside }
+        let asked = Date()
+        check.cancel()
+        let missing = try await value(of: check, within: 5)
+        #expect(Date().timeIntervalSince(asked) < 2, "the cancel, not the 10 s stat")
+        #expect(missing == nil, "no answer, not \"every root present\"")
+    }
 }

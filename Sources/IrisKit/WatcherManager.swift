@@ -134,7 +134,9 @@ actor WatcherManager {
     func sync(with jobs: [Job]) async {
         syncSeq &+= 1
         let mine = syncSeq
-        let gone = await Self.vanished(in: jobs, fileExists: fileExists)
+        // A sync cancelled during its stat stands down like an overtaken one: with no answer it
+        // cannot tell a vanished root from a present one, so it applies nothing.
+        guard let gone = await Self.vanished(in: jobs, fileExists: fileExists) else { return }
         // With the coalescer (#285) in front of this call, `sync` never overlaps with itself in
         // production — `SyncCoalescer` runs one body at a time. This guard is a safeguard for a
         // future second caller, not a condition this actor currently has to survive.
@@ -216,15 +218,16 @@ actor WatcherManager {
     /// The watches whose directory is not there: deleted, renamed or unmounted. FSEvents does not
     /// stop a stream whose root disappears — it keeps running and delivers nothing further — so
     /// this stat is the only thing that ever notices (§7), and it runs on every job change and
-    /// once a minute besides. Once per watch, on a detached task rather than the caller's actor
-    /// (#285): a root on a stalled network mount still takes the mount's timeout, but it costs the
-    /// sync that asked, not every batch queued behind the actor.
-    static func vanished(in jobs: [Job], fileExists: @escaping @Sendable (String) -> Bool) async -> [Job] {
-        let gone = await rootsMissing(jobs.compactMap { job -> String? in
+    /// once a minute besides. Once per watch, on a dispatch queue rather than the caller's actor
+    /// or the cooperative pool (#285, #486): a root on a stalled network mount still takes the
+    /// mount's timeout, but it costs the sync that asked, not every batch queued behind the actor.
+    /// nil when the stat was cancelled before it answered: nothing is known, so nothing is gone.
+    static func vanished(in jobs: [Job], fileExists: @escaping @Sendable (String) -> Bool) async -> [Job]? {
+        guard let gone = await rootsMissing(jobs.compactMap { job -> String? in
             guard job.enabled, job.pausedReason == nil,
                   case .fsEvent(let watch) = job.trigger else { return nil }
             return watch.path
-        }, fileExists: fileExists)
+        }, fileExists: fileExists) else { return nil }
         return jobs.filter { job in
             guard job.enabled, job.pausedReason == nil,
                   case .fsEvent(let watch) = job.trigger else { return false }
@@ -232,12 +235,22 @@ actor WatcherManager {
         }
     }
 
-    /// Which of `paths` do not exist, stat'd on a detached task so a slow filesystem never holds
-    /// the calling actor. Shared with `WatchCoordinator`'s fire-time check (#281).
+    /// Which of `paths` do not exist, stat'd on a dispatch queue so a slow filesystem never holds
+    /// the calling actor or a cooperative-pool thread. Shared with `WatchCoordinator`'s fire-time
+    /// check (#281). A stat on a hung mount blocks its thread until the mount times out; on a
+    /// detached task that was a pool thread, of which a low-core Mac has few (#486, the #372
+    /// class). A cancel returns nil at once, which no caller may read as "every root present";
+    /// the stat runs on and its answer is dropped.
     static func rootsMissing(_ paths: [String],
-                             fileExists: @escaping @Sendable (String) -> Bool) async -> Set<String> {
+                             fileExists: @escaping @Sendable (String) -> Bool) async -> Set<String>? {
         guard !paths.isEmpty else { return [] }
-        return await Task.detached { Set(paths.filter { !fileExists($0) }) }.value
+        let answer = OneShot<Set<String>?>()
+        return await withTaskCancellationHandler {
+            DispatchQueue.global(qos: .utility).async { answer.resume(Set(paths.filter { !fileExists($0) })) }
+            return await answer.wait()
+        } onCancel: {
+            answer.resume(nil)
+        }
     }
 
     /// One wording for both ways a root can be unusable — gone when it was stat'd, and refused by
