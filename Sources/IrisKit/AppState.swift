@@ -1131,7 +1131,9 @@ class AppState {
               var queue = pendingUserMessages[conversationId], !queue.isEmpty else { return }
         let lead = queue[0].origin
         let owner = queue[0].engine ?? engine
-        if queue[0].isArrival, owner?.goalLoopIsLive(for: conversationId) == true { return }
+        // A pending follow-up, not `goalLoopIsLive`: an ordinary turn is still counted live there
+        // while this drain runs at its end, and holding then left the entry with no drain to come.
+        if queue[0].isArrival, owner?.goalFollowUpPending(for: conversationId) == true { return }
         if case .systemEvent = lead, owner == nil { return }
         var texts: [String] = []
         while let first = queue.first, first.attachments.isEmpty, first.origin == lead {

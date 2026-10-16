@@ -2,6 +2,14 @@ import Testing
 import Foundation
 @testable import IrisKit
 
+/// Set once from the test, polled by a scripted round.
+private final class OpenFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    var isOpen: Bool { lock.withLock { flag } }
+    func open() { lock.withLock { flag = true } }
+}
+
 private func eventually(_ timeoutMs: Int = 5000, _ condition: @MainActor @Sendable () -> Bool) async -> Bool {
     for _ in 0..<(timeoutMs / 10) {
         if await condition() { return true }
@@ -147,6 +155,64 @@ struct ArrivalQueueTests {
         #expect(app.pendingUserMessageCount(for: id) == 0)
         #expect(texts(app, id).contains { $0.contains("Background subagent result: built") })
         expectCallsAnswered(history(app, id))
+    }
+
+    /// From the #527 review: the end-of-turn drain runs while `processInput` still counts the turn
+    /// in its goal loop, so holding arrivals on `isLive` there stranded one that landed during the
+    /// turn's last model call.
+    @Test("an arrival queued during an engine turn's last model call gets a turn when it ends",
+          arguments: [false, true])
+    func arrivalDuringLastRoundOfAnEngineTurn(peer: Bool) async throws {
+        let open = OpenFlag()
+        let client = ScriptedStreamClient([
+            [.block({ while !open.isOpen { try? await Task.sleep(nanoseconds: 10_000_000) } }),
+             .event(.textDelta("done")), .event(.done(finishReason: nil))],
+            [.event(.textDelta("acknowledged")), .event(.done(finishReason: nil))],
+            [.event(.textDelta("spare")), .event(.done(finishReason: nil))],
+        ])
+        let (app, engine, id) = session(client)
+        let sender = UUID()
+        app.createNewConversation(id: sender, select: false)
+        app.selectedConversationId = id
+
+        let turn = Task { await engine.processInput("System Event [Scheduler]: tick", source: "System", conversationId: id) }
+        #expect(await eventually { client.calls == 1 })
+        if peer {
+            let envelope = PeerEnvelope(msgId: "eeee0478", contextId: "ctx-eeee0478", depth: 1, expectsReply: false, replyTo: nil)
+            #expect(await engine.deliverPeerMessage("also this", from: sender, senderName: "peer", to: id, envelope: envelope) == .queued)
+        } else {
+            await engine.handleSystemEvent("Background subagent result: built", source: "SubagentManager", conversationId: id)
+        }
+        #expect(app.pendingUserMessageCount(for: id) == 1, "queued behind the engine turn")
+        open.open()
+        _ = try await value(of: turn)
+
+        #expect(await eventually { client.calls == 2 && !app.hasTurnInFlight(for: id) }, "the queued entry got a turn of its own")
+        #expect(app.pendingUserMessageCount(for: id) == 0, "nothing left in the inbox")
+    }
+
+    /// Planner condition 2: a goal paused at a checkpoint schedules no follow-up, so a post-back
+    /// is delivered at once instead of waiting for a person to act on the checkpoint.
+    @Test("a post-back to a goal paused at a checkpoint is delivered, not held")
+    func postBackToAPausedGoalIsDelivered() async throws {
+        let client = ScriptedStreamClient([
+            [.event(.textDelta("paused")), .event(.done(finishReason: nil))],
+            [.event(.textDelta("acknowledged")), .event(.done(finishReason: nil))],
+            [.event(.textDelta("spare")), .event(.done(finishReason: nil))],
+        ])
+        // A long delay: were a reprompt scheduled, it would still be pending when the post-back lands.
+        let (app, engine, id) = session(client, repromptDelay: 30)
+        let a = Criterion(text: "build", kind: .qualitative, check: nil)
+        app.setGoalContract(for: id, GoalContract(objective: "Ship", criteria: [a]))
+        let idx = try #require(app.conversations.firstIndex { $0.id == id })
+        app.conversations[idx].goalContract?.checkpointStatus = .pausedForReview
+
+        await engine.processInput("go", source: "UI", conversationId: id)
+        #expect(!engine.goalLoopIsLive(for: id), "a paused goal schedules no follow-up")
+        await engine.handleSystemEvent("Background subagent result: built", source: "SubagentManager", conversationId: id)
+        #expect(app.pendingUserMessageCount(for: id) == 0, "delivered, not queued")
+        #expect(client.calls == 2, "its own turn ran")
+        await engine.cancelReprompt(for: id)
     }
 
     /// The taint is read at each tool call (`executeFunctionCall`), so a post-back read mid-turn

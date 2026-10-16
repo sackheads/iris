@@ -1441,6 +1441,10 @@ actor IrisEngine {
     }
 
     /// True while a turn is running on the conversation or its next reprompt is pending.
+    nonisolated func goalFollowUpPending(for conversationId: UUID) -> Bool {
+        goalLoop.hasPendingFollowUp(for: conversationId)
+    }
+
     nonisolated func goalLoopIsLive(for conversationId: UUID) -> Bool {
         goalLoop.isLive(for: conversationId)
     }
