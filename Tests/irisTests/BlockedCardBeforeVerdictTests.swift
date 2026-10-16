@@ -162,6 +162,49 @@ struct BlockedCardBeforeVerdictTests {
         #expect(cards(state).count == 1)
     }
 
+    /// A click's ledger write is the runner's or a detached task's and can come after the verdict
+    /// (review of #526). The click itself is recorded on the main actor as it lands. Here the
+    /// click's runner is another store's, so its ledger write never reaches this one: only that
+    /// record can stop the rewrite.
+    @Test("a verdict that lands after the Approve click, before its ledger write, does not rewrite the card")
+    func approveClickBeforeItsWriteKeepsTheCard() async throws {
+        let (store, state, engine, job) = try harness()
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
+                               config: config, activity: RecordingActivity(), sandboxAvailable: { true })
+        let elsewhere = AppState(store: try ConversationStore.inMemory(), tier2Provisioning: .provisioned,
+                                 tier3Provisioning: .provisioned)
+        let vibecop = HeldVibecop()
+        defer { vibecop.release() }
+
+        let fire = AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": vibecop]) {
+            Task { await runner.fire(job: job, origin: .schedule) }
+        }
+        try #require(await until { vibecop.calls >= 1 }, "the verdict is being taken")
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        let before = try #require(state.conversations.flatMap(\.messages).first { $0.role == .event })
+        state.installEngine(IrisEngine(state: elsewhere, client: FakeLLMClient(responses: []), protectionEnabled: false))
+        state.approveBlockedCall(runId: run.id)
+        #expect(state.runsActedOn.contains(run.id), "recorded at the click, before any hop")
+
+        vibecop.release()
+        _ = try await value(of: fire)
+        #expect(try store.ledger.run(id: run.id)?.acknowledgedAt == nil, "no ledger write reached this store")
+        let after = try #require(state.conversations.flatMap(\.messages).first { $0.id == before.id })
+        #expect(after.content == before.content, "the card the person clicked is left as it was")
+        withExtendedLifetime(elsewhere) {}
+    }
+
+    @Test("Dismiss and Acknowledge record the run at the click, before their ledger write")
+    func dismissRecordsAtTheClick() throws {
+        let state = AppState(store: try ConversationStore.inMemory(), tier2Provisioning: .provisioned,
+                             tier3Provisioning: .provisioned)
+        let id = UUID()
+        _ = state.dismissEventCard(runId: id)
+        #expect(state.runsActedOn.contains(id))
+    }
+
     @Test("a verdict that lands after the run was dismissed does not rewrite its card")
     func dismissedDuringVerdictKeepsTheCard() async throws {
         let (store, state, engine, job) = try harness()

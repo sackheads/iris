@@ -1976,10 +1976,12 @@ actor JobRunner {
     }
 
     /// Rewrites a delivered card as `updated`, the same card with Vibecop's verdict on it (#521).
-    /// Skipped when the run was approved or dismissed while the verdict was taken (both set
-    /// `acknowledgedAt`): the card the person acted on stays the card they saw. Skipped too when
-    /// the card is no longer in the transcript exactly as delivered. The check and the write are
-    /// one main-actor step, so a click cannot land between them. Only the transcript holds the
+    /// Skipped when the run was approved or dismissed while the verdict was taken: the card the
+    /// person acted on stays the card they saw. A click is recorded on the main actor as it lands
+    /// (`runsActedOn`), before its ledger write, which is the runner's or a detached task's and can
+    /// come later; `acknowledgedAt` covers `/jobs ack` and another process. Skipped too when the
+    /// card is no longer in the transcript exactly as delivered. The check and the write are one
+    /// main-actor step, so no click can land between them. Only the transcript holds the
     /// card: the model's history got `historyLine`, which carries no verdict.
     private func attachVerdict(to delivered: EventCard, as updated: EventCard, in destination: UUID) async {
         guard let state, updated.vibecopVerdict != nil else { return }
@@ -1990,6 +1992,7 @@ actor JobRunner {
         let written = await MainActor.run { () -> Bool in
             guard let message = state.conversations.first(where: { $0.id == destination })?
                     .messages.last(where: { $0.role == .event && $0.content == before }),
+                  !state.runsActedOn.contains(runId),
                   let run = try? ledger.run(id: runId), run.acknowledgedAt == nil else { return false }
             state.updateMessageContent(id: message.id, content: after, in: destination, persist: true)
             return true
