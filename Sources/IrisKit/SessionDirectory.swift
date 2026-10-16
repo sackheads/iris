@@ -107,7 +107,7 @@ enum SessionDirectory {
         let byActivityPair: ((Conversation, SessionPeer), (Conversation, SessionPeer)) -> Bool = { byActivity($0.1, $1.1) }
         // #469 §4.6 / #480 review item 7: role-holders AND the pinned Iris (at most one row) are
         // both exempt from the 20-entry cap below, so a large worker pool can never push either
-        // out of view — "Iris last" (the README and this tool's own description) is then always
+        // out of view — "Iris last" (docs/features.md and this tool's own description) is then always
         // true, rather than true only until enough workers pile up. Workers alone keep #418's
         // live-ahead-of-idle cut.
         let roles = all.filter { $0.1.kind == .role }.sorted(by: byActivityPair)
