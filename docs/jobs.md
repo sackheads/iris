@@ -1311,7 +1311,10 @@ If a link launches Iris while `iris --run-job` holds the store, Iris does not op
 has finished: the menu bar shows an hourglass, and a small "Iris is waiting" window names the run,
 without taking focus from what you are doing. Up to 16 links are held this way, in order, and
 checked and fired once Iris has opened, exactly as a link arriving after launch would be. Any
-beyond those are dropped unread, and Iris says how many. If the store is held by another Iris *app* instead (for
+beyond those are dropped unread, and Iris says how many. A notification's Open, Deny or Dismiss
+pressed while Iris waits is held the same way, up to 16, and applied in order once Iris has opened;
+any beyond those are dropped, so nothing they asked for is done, and Iris says how many. The
+waiting window says how many links and clicks it is holding. If the store is held by another Iris *app* instead (for
 example `swift run` beside `Iris Dev.app`), the app the link launched says "Iris is already running
 on this home", says the link was not run, and quits.
 

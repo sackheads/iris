@@ -166,6 +166,17 @@ struct RunJobURLIntakeTests {
         #expect(irisLines(app).filter { $0.contains("dropped unread") }.count == 1, "nothing for zero")
     }
 
+    @Test("#493: notification clicks dropped while Iris waited are counted in one line in Iris")
+    func droppedClicksAreOneLine() throws {
+        let (_, app, _, _) = try makeApp()
+        app.noteNotificationsDroppedWhileWaiting(2)
+        #expect(irisLines(app).contains(AppState.droppedNotificationsLine(2)))
+        #expect(AppState.droppedNotificationsLine(2).hasPrefix("2 notification clicks that arrived while Iris waited"))
+        #expect(AppState.droppedNotificationsLine(1).hasPrefix("1 notification click that arrived while Iris waited was"))
+        app.noteNotificationsDroppedWhileWaiting(0)
+        #expect(irisLines(app).filter { $0.contains("notification click") }.count == 1, "nothing for zero")
+    }
+
     @Test("an event that carried no readable link is refused with a line")
     func unreadableIsRefused() throws {
         let (_, app, _, _) = try makeApp()

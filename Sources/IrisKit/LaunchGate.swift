@@ -111,6 +111,9 @@ final class LaunchGate {
         /// A notification click, once Iris is open: `AppState.shared.handleNotificationResponse`.
         /// Clicks that came while waiting are handed over the same way at `finishLaunch`, in order.
         var deliverNotification: @MainActor (NotificationResponse) -> Void = { _ in }
+        /// The clicks past `notificationCapacity`, counted once after the held ones are delivered
+        /// (#493): `AppState.shared.noteNotificationsDroppedWhileWaiting`.
+        var noteDroppedNotifications: @MainActor (Int) -> Void = { _ in }
         /// Seconds on a monotonic clock. Never `Date()`: a wall clock stepped backwards would
         /// keep the unknown-holder window from ever reaching `unknownGrace`.
         var now: @MainActor () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
@@ -128,6 +131,12 @@ final class LaunchGate {
     @ObservationIgnored private var links: [URL?] = []
     @ObservationIgnored private var responses: [NotificationResponse] = []
     @ObservationIgnored private var dropped = 0
+    @ObservationIgnored private var droppedClicks = 0
+    /// Observed, unlike the queues they count, so the waiting view says what is held (#493).
+    private(set) var heldLinkCount = 0
+    private(set) var heldNotificationCount = 0
+    /// Links and clicks past their caps, together.
+    private(set) var droppedCount = 0
     @ObservationIgnored private var begun = false
     @ObservationIgnored private var didFinish = false
     @ObservationIgnored private var finished = false
@@ -138,8 +147,6 @@ final class LaunchGate {
 
     init(seams: Seams) { self.seams = seams }
 
-    var heldLinkCount: Int { links.count }
-    var heldNotificationCount: Int { responses.count }
 
     /// Clicks held while waiting. Past this they are dropped: each names a run or an ask that the
     /// ledger and the Run Log still show once Iris opens.
@@ -182,8 +189,9 @@ final class LaunchGate {
     /// hands over later. With nothing held, the intake keeps the order itself (D2).
     func receive(_ url: URL?) {
         if isOpen && (finished || links.isEmpty) { return seams.deliver(url) }
-        guard links.count < RunJobURLIntake.capacity else { dropped += 1; return }
+        guard links.count < RunJobURLIntake.capacity else { dropped += 1; droppedCount += 1; return }
         links.append(url)
+        heldLinkCount = links.count
         if didFinish, case .waiting = state { showNoticeNow() }
     }
 
@@ -191,8 +199,9 @@ final class LaunchGate {
     /// will-finish. Held, like a link, until the launch completes, then passed on in order.
     func receiveNotification(_ response: NotificationResponse) {
         if isOpen && (finished || responses.isEmpty) { return seams.deliverNotification(response) }
-        guard responses.count < Self.notificationCapacity else { return }
+        guard responses.count < Self.notificationCapacity else { droppedClicks += 1; droppedCount += 1; return }
         responses.append(response)
+        heldNotificationCount = responses.count
     }
 
     /// `applicationWillTerminate`: only an open app has anything to flush (Review Focus 2).
@@ -213,6 +222,15 @@ final class LaunchGate {
         case .open: "Iris is open."
         case .refused(let refusal): refusal.title + "."
         }
+    }
+
+    /// What the waiting view says is held for when Iris opens, or nil when nothing is (#493).
+    static func heldLine(links: Int, clicks: Int, dropped: Int) -> String? {
+        func count(_ n: Int, _ noun: String) -> String? { n == 0 ? nil : "\(n) \(noun)\(n == 1 ? "" : "s")" }
+        let parts = [count(links, "link"), count(clicks, "notification click")].compactMap { $0 }
+        guard !parts.isEmpty else { return nil }
+        let more = dropped == 0 ? "" : " (\(dropped) more could not be held)"
+        return "Held until then: " + parts.joined(separator: " and ") + more + "."
     }
 
     static func waitingSentence(_ holder: StoreLock.Holder?) -> String {
@@ -303,6 +321,10 @@ final class LaunchGate {
         seams.finishLaunch(held, dropped)
         let clicks = responses
         responses = []
+        heldLinkCount = 0
+        heldNotificationCount = 0
+        droppedCount = 0
         for response in clicks { seams.deliverNotification(response) }
+        seams.noteDroppedNotifications(droppedClicks)
     }
 }
