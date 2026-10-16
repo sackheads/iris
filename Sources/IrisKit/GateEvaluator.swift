@@ -526,9 +526,8 @@ enum GateEvaluator {
 /// A gate's container is named with `SandboxSessionManager.namePrefix` on purpose: that is what
 /// makes one left behind by a crash sweepable at the next launch. The price of sharing the prefix
 /// is that the prefix alone no longer identifies an orphan, so the sweep asks here as well as
-/// asking its own session table. Nothing schedules the sweep today — it runs once, at launch,
-/// before any gate could be mid-evaluation — and this is what keeps it correct if anything ever
-/// does.
+/// asking its own session table. `--run-job` sweeps beside its run (#492), when its gate can be
+/// mid-evaluation, and this is what keeps that sweep from taking the gate's container.
 actor GateContainerRegistry {
     static let shared = GateContainerRegistry()
 

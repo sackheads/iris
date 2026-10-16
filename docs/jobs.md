@@ -1207,7 +1207,7 @@ refusal or an error prints its sentence to stderr and, under `--json`, a `{"erro
 - The run's session container gets up to 5 seconds to stop and be deleted. The CLI then starts no
   new host process, waits up to 3 seconds for the host groups to end, SIGKILLs any still running,
   and deletes by name every container this process created that is still recorded, in parallel,
-  for at most 5 seconds. It never deletes by the `iris-` prefix (see below).
+  for at most 5 seconds. Here it deletes only by name, never by prefix (see below).
 - It flushes its output, and exits `2`.
 
 For a stop while the turn is running, the worst case is about 28.5 seconds after the signal: the
@@ -1242,14 +1242,18 @@ What a stop does not reach:
 - A background process a command started with its output redirected (`nohup x >/dev/null 2>&1 &`)
   is left running, as it is when any command finishes.
 - A container whose delete fails or runs out of time, and any container after a crash or
-  `kill -9`, is left until the Iris app next launches and sweeps the `iris-` containers it does not
-  know. The CLI does no such sweep, because `~/.iris` and `~/.iris-dev` share the prefix and a
-  sweep from one home would delete the other's live containers. So someone who only ever runs
-  `--run-job` keeps that container until they delete it themselves (#492).
+  `kill -9`, is left until the next launch on the same home, of the app or of `--run-job`. Each,
+  once it holds the store lock, deletes the containers with that home's prefix that it did not
+  make; `--run-job` does it alongside the run rather than before it. Each home names its
+  containers `iris-h` plus 8 hex digits of its path's hash (`iris-h1a2b3c4d-…`), so a sweep from
+  `~/.iris` never touches `~/.iris-dev`'s live containers (#492). Containers named the older,
+  shared way (`iris-<uuid>`, `iris-gate-…`, `iris-hook-…`, `iris-run-…`) are swept only by the
+  installed release app, because until a release with per-home names ships, that app is still
+  making them.
 - A container still being created (a cold create pulling its image) when the CLI deletes the
   recorded containers can be left: its delete can run before the container exists. A second signal
   does that at once; a clean stop does it when the create outlasts the 15-second grace and the
-  5-second teardown.
+  5-second teardown. The next launch's sweep deletes it.
 
 A `--run-job` builds one `AppState` of its own, over the store it has locked, and never touches the
 app's. A skill written during the run (`write_file` into a skill folder, `create_skill`,

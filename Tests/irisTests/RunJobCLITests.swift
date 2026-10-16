@@ -721,3 +721,34 @@ final class RunJobCLITests {
         #expect(seen.text == "mtime:earlier")
     }
 }
+
+/// #492: a run sweeps its home's orphaned containers once it holds the lock, alongside the turn.
+/// A dry run, which must change nothing, and a refused run, which holds nothing, never do.
+extension RunJobCLITests {
+    @Test("a run starts the orphan sweep once; a dry run and an unknown job do not")
+    func runStartsTheSweep() async throws {
+        let store = try ConversationStore.inMemory()
+        try store.ledger.upsert(self.job(name: "swept"))
+        let sweeps = LockedCell(0)
+
+        let code = await RunJobCLI.run(RunJobCLI.Invocation(target: "swept"), store: store,
+                                       client: FakeLLMClient(responses: [textResponse("done")]),
+                                       lockPath: lockPath(), protectionEnabled: false,
+                                       startSweep: { sweeps.value += 1 },
+                                       out: { _ in }, err: { _ in })
+        #expect(code == RunJobCLI.Exit.completed)
+        #expect(sweeps.value == 1)
+
+        _ = await RunJobCLI.run(RunJobCLI.Invocation(target: "swept", dryRun: true), store: store,
+                                client: FakeLLMClient(responses: []),
+                                lockPath: lockPath(), protectionEnabled: false,
+                                startSweep: { sweeps.value += 1 },
+                                out: { _ in }, err: { _ in })
+        _ = await RunJobCLI.run(RunJobCLI.Invocation(target: "nobody"), store: store,
+                                client: FakeLLMClient(responses: []),
+                                lockPath: lockPath(), protectionEnabled: false,
+                                startSweep: { sweeps.value += 1 },
+                                out: { _ in }, err: { _ in })
+        #expect(sweeps.value == 1, "neither the dry run nor the unknown job swept")
+    }
+}

@@ -185,16 +185,17 @@ struct SandboxSessionManagerTests {
         #expect(rt.createdCount == 2)
     }
 
-    @Test("reapOrphans removes every iris- prefixed container")
+    @Test("reapOrphans removes every container with this home's prefix")
     func reapOrphans() async {
         let rt = MockRuntime()
-        rt.existing = ["iris-aaa", "iris-bbb", "other-ccc"]
+        let p = SandboxSessionManager.namePrefix
+        rt.existing = ["\(p)aaa", "\(p)bbb", "other-ccc"]
         let m = mgr(rt)
         await m.reapOrphans()
-        #expect(rt.removedNames.sorted() == ["iris-aaa", "iris-bbb"])
+        #expect(rt.removedNames.sorted() == ["\(p)aaa", "\(p)bbb"])
     }
 
-    /// The `iris-` prefix is shared on purpose — a gate's container carries it so that one left by
+    /// The home's prefix is shared on purpose — a gate's container carries it so that one left by
     /// a crash is swept too — which means the prefix alone does not mean "an orphan". A sweep must
     /// leave alone the sessions this manager is holding and the gates that are mid-evaluation.
     @Test("reapOrphans spares a live session and a gate container that is in flight")
@@ -205,15 +206,16 @@ struct SandboxSessionManagerTests {
         _ = await m.run(command: "a", conversationId: id, workspace: "/ws")
         let live = "\(SandboxSessionManager.namePrefix)\(id.uuidString.lowercased())"
         let gate = "\(SandboxSessionManager.namePrefix)gate-\(UUID().uuidString.lowercased())"
-        rt.existing = [live, gate, "iris-orphan"]
+        let orphan = "\(SandboxSessionManager.namePrefix)orphan"
+        rt.existing = [live, gate, orphan]
 
         await m.reapOrphans(inFlightGates: [gate])
 
-        #expect(rt.removedNames == ["iris-orphan"], "only what nobody is using")
+        #expect(rt.removedNames == [orphan], "only what nobody is using")
         #expect(await m.hasSession(id), "the live conversation still has its container")
     }
 
-    /// #364: a sandboxed hook's container carries the `iris-` prefix too, so one in flight is spared
+    /// #364: a sandboxed hook's container carries the home's prefix too, so one in flight is spared
     /// while one a crash left behind (registered by nobody in this process) is still swept.
     @Test("reapOrphans spares an in-flight hook container and sweeps an orphaned one")
     func reapOrphansSparesInFlightHook() async {
@@ -249,11 +251,12 @@ struct SandboxSessionManagerTests {
         let rt = MockRuntime()
         let m = mgr(rt)
         let late = "\(SandboxSessionManager.namePrefix)run-\(UUID().uuidString.lowercased())"
-        rt.existing = [late, "iris-orphan"]
+        let orphan = "\(SandboxSessionManager.namePrefix)orphan"
+        rt.existing = [late, orphan]
 
         await m.reapOrphans(inFlight: { rt.listCount > 0 ? [late] : [] })
 
-        #expect(rt.removedNames == ["iris-orphan"], "the late registration was swept")
+        #expect(rt.removedNames == [orphan], "the late registration was swept")
     }
 
     /// The name stays registered until the delete after a timeout or cancel has run, then is

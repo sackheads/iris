@@ -9,7 +9,7 @@ import Darwin
 /// failed, on a machine without the binary, the services started, or a local copy of the image
 /// (nothing here pulls one).
 ///
-/// Their containers are named `iristest-…`, which `SandboxSessionManager.namePrefix` (`iris-`) does
+/// Their containers are named `iristest-…`, which `SandboxSessionManager.namePrefix` (`iris-h…-`) does
 /// not match, so a running Iris never sweeps one, and each test deletes its own.
 enum RealContainer {
     static let binary = "/usr/local/bin/container"

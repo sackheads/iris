@@ -272,8 +272,8 @@ its turn is cancelled, its row reads "stopped by a signal (SIGINT)", the card is
 stop before the turn started too), the containers it made are deleted by name, and it exits `2`:
 for a stop mid-turn, within about 28.5 seconds; a stop during the checks before the turn first
 waits for the one under way, up to about 2 minutes for a grant's isolated-network check. A second exits at once, and a third Ctrl-C kills it outright. Under
-`nohup`, closing the terminal does not stop it. A container whose delete fails, or one a crash leaves, stays until the app next launches
-(#492). Full detail,
+`nohup`, closing the terminal does not stop it. A container whose delete fails, or one a crash leaves,
+is deleted by the next launch on that home, of the app or of `--run-job`. Full detail,
 including what a dry run does and does not record, what the lock does and does not protect, and
 what a stop does not reach, is in **[docs/jobs.md](docs/jobs.md)** ("Stopping a run").
 

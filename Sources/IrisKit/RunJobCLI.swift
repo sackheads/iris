@@ -96,6 +96,7 @@ enum RunJobCLI {
                     protectionEnabled: Bool? = nil,
                     gate: (@Sendable (Gate, String?) async -> GateResult)? = nil,
                     stop: CLIStop? = nil,
+                    startSweep: (() -> Void)? = nil,
                     out: (String) -> Void = { print($0) },
                     err: (String) -> Void = { FileHandle.standardError.write(Data(($0 + "\n").utf8)) })
         async -> Int32 {
@@ -136,6 +137,10 @@ enum RunJobCLI {
             return await dryRun(job: job, ledger: ledger, json: invocation.json, gate: gate,
                                 out: out, err: err)
         }
+        // #492: the lock is held, so every container with this home's prefix that this process
+        // did not make was left by one that has ended. Swept beside the turn, not before it: a
+        // wedged `container delete` would otherwise hold the job for its whole timeout.
+        startSweep?()
         let code = await fire(job: job, store: store, client: client, runner: injectedRunner,
                               protectionEnabled: protectionEnabled, json: invocation.json, stop: stop,
                               out: out, err: err)

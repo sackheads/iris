@@ -164,7 +164,7 @@ struct HookManager {
             guard let containerPath = SandboxingManager.shared.containerBinaryPath else {
                 return .block(reason: "Sandboxing enabled but container missing for hook execution.")
             }
-            let name = "iris-hook-\(UUID().uuidString.lowercased())"
+            let name = "\(SandboxSessionManager.namePrefix)hook-\(UUID().uuidString.lowercased())"
             ephemeralContainer = (containerPath, name)
             executable = containerPath
             arguments = ["run", "--rm", "--name", name, ConfigManager.shared.sandboxImage, "bash", "-c", hook.command]
@@ -264,8 +264,8 @@ struct HookManager {
     }
 }
 
-/// The one-off containers in flight — a sandboxed hook's `iris-hook-*` and a session-less
-/// `run_command`'s `iris-run-*` — which `SandboxSessionManager.reapOrphans` spares the way it
+/// The one-off containers in flight — a sandboxed hook's `<prefix>hook-*` and a session-less
+/// `run_command`'s `<prefix>run-*` — which `SandboxSessionManager.reapOrphans` spares the way it
 /// spares live sessions and gates (`GateContainerRegistry`). A snapshot, like that one.
 actor EphemeralContainerRegistry {
     static let shared = EphemeralContainerRegistry()
