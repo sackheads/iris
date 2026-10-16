@@ -1312,11 +1312,13 @@ actor JobRunner {
                                        now: finishedAt)
         await apply(retry, job: job, status: status)
 
-        // What the card can offer a person to do about the blocked call, and what Vibecop makes of
-        // it (§6) — taken now, while the card is being written, because it is there to inform the
-        // click and a verdict taken afterwards would be too late to.
-        let approval = await approvalOffer(for: blockedCall, job: job)
-        let card = EventCard(runId: run.id, jobId: job.id, jobName: job.name, status: status,
+        // What the card can offer a person to do about the blocked call (§6). The refusals are
+        // decided here, without a model. Vibecop's verdict is not: a local engine can take seconds,
+        // and a CLI exit-now in that wait left the `blockedOnApproval` row above with no card ever
+        // offering it (#521). So the card is saved without the verdict, and the verdict is written
+        // onto it once it comes, unless the run has been approved or dismissed by then.
+        let decided = await offerWithoutVerdict(for: blockedCall)
+        let makeCard = { (approval: ApprovalOffer) in EventCard(runId: run.id, jobId: job.id, jobName: job.name, status: status,
                              // A card shows one line. With no reply to show, that line is why
                              // there is none (§6.2) — a blank failed card tells nobody anything.
                              outcome: Self.cardOutcome(outcome ?? failureReason, retry: retry,
@@ -1336,8 +1338,14 @@ actor JobRunner {
                              approvalBlockedReason: approval.refusal,
                              catchUpNote: note,
                              network: grant?.network == true,
-                             watchSummary: run.watchSummary)
-        await deliverThenClose(card, for: job, conversationId: conversationId, forStop: true)
+                             watchSummary: run.watchSummary) }
+        let card = makeCard(decided ?? .nothing)
+        let destination = await deliverAndSave(card, for: job)
+        if decided == nil, let blockedCall {
+            let verdict = await verdictOffer(for: blockedCall)
+            await attachVerdict(to: card, as: makeCard(verdict), in: destination)
+        }
+        await close(conversationId, status: card.statusText, forStop: true)
     }
 
     // MARK: The blocked call, on the card (#187 §6)
@@ -1352,10 +1360,11 @@ actor JobRunner {
         static let nothing = ApprovalOffer(refusal: nil, verdict: nil, reason: nil)
     }
 
-    /// Decided when the card is WRITTEN, both halves of it. The refusals because a card is a
-    /// snapshot — it has to read correctly months later, after the job has been renamed or
-    /// deleted, without re-deriving anything. The verdict because it is there to inform the person
-    /// before they click, which is too late if it is only taken afterwards: **Vibecop still runs
+    /// Decided as the card is WRITTEN: the refusals before it is saved, the verdict straight after
+    /// and written onto it (#521). The refusals because a card is a snapshot — it has to read
+    /// correctly months later, after the job has been renamed or deleted, without re-deriving
+    /// anything. The verdict because it is there to inform the person before they click, which is
+    /// too late if it is only taken when they do: **Vibecop still runs
     /// on the persisted call, and a human click overrides a `DENY` rather than skipping the
     /// evaluation** (§6). Nothing is asked about a call no click can authorise — a refusal is
     /// already the answer, and a local model call to decorate it would be spent for nothing.
@@ -1363,6 +1372,14 @@ actor JobRunner {
     /// how the call would run if it were approved. Internal so a test can ask for the offer
     /// without driving a whole turn.
     func approvalOffer(for call: BlockedCall?, job: Job) async -> ApprovalOffer {
+        if let decided = await offerWithoutVerdict(for: call) { return decided }
+        guard let call else { return .nothing }
+        return await verdictOffer(for: call)
+    }
+
+    /// The offer when no model has to be asked: nothing to offer, or a refusal. `nil` means the
+    /// click is offered and Vibecop's verdict is what is left to take.
+    func offerWithoutVerdict(for call: BlockedCall?) async -> ApprovalOffer? {
         guard let call, let state else { return .nothing }
         // R13 is not stored: the card decides it from the call's own reason, so a card written by
         // a build that stored nothing still cannot offer a button for a read-only job's call.
@@ -1377,6 +1394,12 @@ actor JobRunner {
         if call.grantNearest != nil {
             return ApprovalOffer(refusal: EventCard.outsideGrantNotApprovable, verdict: nil, reason: nil)
         }
+        return nil
+    }
+
+    /// Vibecop's verdict on a call the card offers to approve.
+    func verdictOffer(for call: BlockedCall) async -> ApprovalOffer {
+        guard let state else { return .nothing }
         // The verdict is taken about the path the tool actually takes (#282 §3). A `write_file`
         // (or `read_file`) runs on the host at the granted path whatever the profile — a mutating
         // job's host write is not sandboxed — so it is judged as a host call; only a `run_command`
@@ -1925,18 +1948,53 @@ actor JobRunner {
     /// was lost while the row already said how the run ended. In a CLI run (the only one with a
     /// `stop`) the card is saved here too, since the CLI's own flush comes after the teardown.
     private func deliverThenClose(_ card: EventCard, for job: Job, conversationId: UUID, forStop: Bool) async {
-        await deliver(card, for: job)
+        _ = await deliverAndSave(card, for: job)
+        await close(conversationId, status: card.statusText, forStop: forStop)
+    }
+
+    /// Delivers the card and, in a CLI run, saves it now. Returns where it went.
+    private func deliverAndSave(_ card: EventCard, for job: Job) async -> UUID {
+        let destination = await deliver(card, for: job)
         if stop != nil, let state { await MainActor.run { state.flushSave() } }
+        return destination
+    }
+
+    private func close(_ conversationId: UUID, status: String, forStop: Bool) async {
         if forStop {
-            await closeSessionForStop(conversationId, status: card.statusText)
+            await closeSessionForStop(conversationId, status: status)
         } else {
-            await closeSession(conversationId, status: card.statusText)
+            await closeSession(conversationId, status: status)
         }
     }
 
-    private func deliver(_ card: EventCard, for job: Job) async {
-        guard let state else { return }
-        await state.deliverEvent(card, to: await destination(for: job))
+    @discardableResult
+    private func deliver(_ card: EventCard, for job: Job) async -> UUID {
+        let destination = await destination(for: job)
+        guard let state else { return destination }
+        await state.deliverEvent(card, to: destination)
+        return destination
+    }
+
+    /// Rewrites a delivered card as `updated`, the same card with Vibecop's verdict on it (#521).
+    /// Skipped when the run was approved or dismissed while the verdict was taken (both set
+    /// `acknowledgedAt`): the card the person acted on stays the card they saw. Skipped too when
+    /// the card is no longer in the transcript exactly as delivered. The check and the write are
+    /// one main-actor step, so a click cannot land between them. Only the transcript holds the
+    /// card: the model's history got `historyLine`, which carries no verdict.
+    private func attachVerdict(to delivered: EventCard, as updated: EventCard, in destination: UUID) async {
+        guard let state, updated.vibecopVerdict != nil else { return }
+        let before = delivered.encodedContent()
+        let after = updated.encodedContent()
+        let ledger = self.ledger
+        let runId = delivered.runId
+        let written = await MainActor.run { () -> Bool in
+            guard let message = state.conversations.first(where: { $0.id == destination })?
+                    .messages.last(where: { $0.role == .event && $0.content == before }),
+                  let run = try? ledger.run(id: runId), run.acknowledgedAt == nil else { return false }
+            state.updateMessageContent(id: message.id, content: after, in: destination, persist: true)
+            return true
+        }
+        if written, stop != nil { await MainActor.run { state.flushSave() } }
     }
 
     /// Where a job's news goes: `AppState.cardDestination(for:)`, the rule the status item's

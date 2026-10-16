@@ -3474,8 +3474,8 @@ class AppState {
     }
 
     /// What Vibecop makes of a call a person is about to be offered "Approve and run" for (#187
-    /// §6). Asked when the CARD IS BUILT, not when the button is clicked: the verdict is there to
-    /// inform the person deciding, and a click overrides a `DENY` rather than skipping the
+    /// §6). Asked once the card is saved and written onto it (#521), not when the button is clicked:
+    /// the verdict is there to inform the person deciding, and a click overrides a `DENY` rather than skipping the
     /// evaluation. `nil` when Vibecop is off, failed or timed out — the card then shows no verdict
     /// line, which is honest; it does not mean "approved".
     ///

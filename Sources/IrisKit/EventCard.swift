@@ -45,8 +45,8 @@ struct EventCard: Codable, Equatable, Sendable {
     /// the command, the path, a preview of the body — rather than a tool name. An approval given
     /// without sight of the payload is worse than no button.
     let blockedCall: BlockedCall?
-    /// What Vibecop made of `blockedCall`, taken when the card was written and shown beside the
-    /// button. `APPROVE` / `ESCALATE` / `DENY`, or nil when it was not consulted (it is disabled,
+    /// What Vibecop made of `blockedCall`, taken once the card was saved and written onto it then
+    /// (#521), shown beside the button; still nil if the run was approved or dismissed first. `APPROVE` / `ESCALATE` / `DENY`, or nil when it was not consulted (it is disabled,
     /// it failed, or the call is one no click can authorise anyway). Advisory, never a veto: a
     /// person clicking through a `DENY` is the case the verdict exists to inform, not to prevent.
     let vibecopVerdict: String?
