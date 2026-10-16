@@ -76,7 +76,11 @@ extension String {
     ///    so Thai and Indic clusters (whose bases are Lo) survive. The price of not counting Lm as
     ///    a base: an Arabic haraka on a tatweel (U+0640) is dropped (م ـَ ح reads مـح). Accepted;
     ///    do not restore Lm as a base.
-    var quotesNeutralised: String {
+    /// `dropping` is removed in the same pass and is never a base, so what follows a dropped
+    /// scalar is judged by the base before it (#524).
+    var quotesNeutralised: String { quotesNeutralised(dropping: []) }
+
+    func quotesNeutralised(dropping: Set<Unicode.Scalar>) -> String {
         var out = String.UnicodeScalarView()
         var baseIsAlphanumeric = false
         // No base yet, or the last one was a neutralised quote: a variation selector there has
@@ -84,6 +88,7 @@ extension String {
         // `'{2,}` collapse while still drawing as `''` (#483).
         var baseIsQuoteOrNone = true
         for scalar in precomposedStringWithCompatibilityMapping.unicodeScalars {
+            if dropping.contains(scalar) { continue }
             // A variation selector picks how its base draws (text or emoji), so it stays on one.
             if scalar.properties.isVariationSelector {
                 if !baseIsQuoteOrNone { out.append(scalar) }

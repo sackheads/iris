@@ -318,6 +318,26 @@ import Foundation
         }
     }
 
+    /// #524: a field delimiter is a base to the neutraliser, so a selector after one was kept,
+    /// and the delimiter filter then left `' VS '` for the collapse to miss.
+    @Test("a field delimiter between apostrophes does not keep a variation selector alive")
+    func variationSelectorAfterADelimiter() {
+        for delimiter in Briefing.fieldDelimiters {
+            for raw in ["x'\(delimiter)\u{FE0E}'y", "x'\(delimiter)\(delimiter)\u{FE0F}'y",
+                        "x'\u{FE0E}\(delimiter)'y", "x\u{2019}\(delimiter)\u{E0100}\u{2019}y"] {
+                let name = Briefing.name(raw)
+                let hex = raw.unicodeScalars.map { String($0.value, radix: 16) }
+                #expect(name == "x'y", "\(hex) -> \(name.unicodeScalars.map { String($0.value, radix: 16) })")
+            }
+        }
+    }
+
+    @Test("a mark on a letter before a dropped delimiter still draws on the letter")
+    func markAfterADelimiterJudgedByTheLetter() {
+        #expect(Briefing.name("e\u{00B7}\u{0301}") == "e\u{0301}".precomposedStringWithCompatibilityMapping)
+        #expect(Briefing.name("'\u{00B7}\u{030E}") == "'", "a mark after a dropped delimiter on a quote is dropped")
+    }
+
     @Test("a variation selector on a real base is kept")
     func variationSelectorOnABaseIsKept() {
         #expect("\u{2764}\u{FE0F}".quotesNeutralised == "\u{2764}\u{FE0F}", "an emoji presentation")
