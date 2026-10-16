@@ -12,8 +12,8 @@ private func systemFlock(_ fd: Int32, _ operation: Int32) -> Int32 { flock(fd, o
 /// - `flock(2)`, never `fcntl`/`lockf`: a POSIX lock drops when *any* descriptor for the file
 ///   closes, including a read of the payload.
 /// - The descriptor is opened `O_CLOEXEC`, so no child keeps the lock alive past its exec, and
-///   kept in a process-lifetime table: never closed, never `dup`ed (a `dup` loses `FD_CLOEXEC`), never
-///   wrapped in anything that closes on `deinit`. `claim` returns a value with no ownership, so a
+///   kept in a process-lifetime table: never `dup`ed (a `dup` loses `FD_CLOEXEC`), never wrapped in
+///   anything that closes on `deinit`, and closed only when a re-claim finds the file replaced. `claim` returns a value with no ownership, so a
 ///   dropped result releases nothing. The kernel releases it when the process dies, however.
 ///   A lock the claim gives up is unlocked before it is closed (`release`).
 /// - The file is never unlinked or renamed. Others may replace it (a pre-#463 app's atomic write,
@@ -61,7 +61,8 @@ enum StoreLock {
     static let maxAttempts = 3
     static let replacedDetail = "the lock file kept being replaced while it was claimed"
 
-    /// Path to descriptor, for every lock this process holds. Written once per path, never removed.
+    /// Path to descriptor, for every lock this process holds. Removed only when a re-claim finds the
+    /// file replaced, and then the claim runs again on the file at the path (#494).
     private static let descriptors = OSAllocatedUnfairLock<[String: Int32]>(initialState: [:])
 
     private static func key(_ url: URL) -> String { url.standardizedFileURL.path }
@@ -76,9 +77,11 @@ enum StoreLock {
         // This process already holds it (a lock is never released, decision 2): the claim is
         // already won. Re-advertised, so a vacated payload names this process again.
         if let fd = descriptors.withLock({ $0[path] }) {
-            let written = line.withUnsafeBytes { syscalls.pwrite(fd, $0.baseAddress!, $0.count, 0) }
-            if written == line.count { _ = ftruncate(fd, off_t(line.count)) }
-            return .acquired
+            if isStillAtPath(fd, path) { return readvertise(fd, line, path, syscalls) }
+            // Replaced by rename since (#494): the hold is on an orphan and protects nothing, so
+            // let it go and claim the file that is there now, like any first claim.
+            descriptors.withLock { $0[path] = nil }
+            release(fd)
         }
         let directory = url.deletingLastPathComponent()
         do {
@@ -126,6 +129,25 @@ enum StoreLock {
             return .acquired
         }
         return .failed(detail: "\(replacedDetail): \(path)")
+    }
+
+    /// A re-claim's payload. A short or failed write empties the file, so no part of the new line
+    /// sits on the old one's tail, and is `.failed`. The lock is kept: this process may already have
+    /// the store open, and letting go would let a second writer in (#494).
+    private static func readvertise(_ fd: Int32, _ line: Data, _ path: String, _ syscalls: Syscalls) -> Claim {
+        let written = line.withUnsafeBytes { syscalls.pwrite(fd, $0.baseAddress!, $0.count, 0) }
+        guard written == line.count else {
+            let code = errno
+            _ = ftruncate(fd, 0)
+            if written >= 0 { return .failed(detail: "write \(path): wrote \(written) of \(line.count) bytes") }
+            return .failed(detail: errnoDetail("write", path, code))
+        }
+        guard ftruncate(fd, off_t(line.count)) == 0 else {
+            let code = errno
+            _ = ftruncate(fd, 0)
+            return .failed(detail: errnoDetail("truncate", path, code))
+        }
+        return .acquired
     }
 
     /// Allowance between the clock that stamps a process's start and the one that stamps a file.

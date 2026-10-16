@@ -153,7 +153,7 @@ Checked against `main` at `e418b29`. Paths are under `Sources/IrisKit/`.
 
 **Unit tests.** They use Swift Testing and real `flock` on temp files, never `~/.iris` or `~/.iris-dev`. Suites that spawn get `.timeLimit(.minutes(1))` and `value(of:within:)`.
 - **`StoreLock`:**
-  - two claims in one process conflict; (as built: a second claim in the holding process returns `.acquired` and re-advertises, so `PerfCLI` needs no special case; another process is still refused);
+  - a second claim in the holding process returns `.acquired` and re-advertises, so `PerfCLI` needs no special case, and another process is still refused. The re-claim checks the inode like a first claim: a file replaced since is claimed afresh. A short re-advertise empties the payload and is `.failed`, keeping the lock (#494);
   - a dropped claim still excludes;
   - a stub holder (`perl -MFcntl=:flock -e 'open F,">>",shift; flock F,LOCK_EX; print "ok\n"; sleep 60'`) blocks a claim, and SIGKILLing it frees the lock;
   - the fd has `FD_CLOEXEC` from the `open` (`fcntl(F_GETFD)`);
