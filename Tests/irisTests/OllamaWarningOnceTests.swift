@@ -64,6 +64,22 @@ struct OllamaWarningOnceTests {
         #expect(posted.last?.contains("Vibecop Guardian and Prompt Guard") == true)
     }
 
+    @Test("a check with no conversation selected does not use up the warning")
+    func noSelectionThenSelection() async {
+        let (config, suite) = harness()
+        defer { teardown(suite) }
+        let app = AppState()
+        app.selectedConversationId = nil   // AppState() selects a conversation it creates
+        let engine = IrisEngine(state: app, client: CapturingLLMClient(), protectionEnabled: false)
+
+        await engine.warnIfOllamaUnreachable(config: config, isReachable: { false })
+        let id = UUID()
+        app.createNewConversation(id: id)
+        await engine.warnIfOllamaUnreachable(config: config, isReachable: { false })
+
+        #expect(warnings(app, id).count == 1)
+    }
+
     @Test("a reachable daemon posts nothing")
     func reachableIsSilent() async {
         let (config, suite) = harness()

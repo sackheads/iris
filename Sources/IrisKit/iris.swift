@@ -1205,7 +1205,9 @@ actor IrisEngine {
     }
 
     /// The Ollama warnings this process has posted, by wording. `start()` runs again from the
-    /// setup wizard's finish, and the same warning should not repeat (#472).
+    /// setup wizard's finish, and the same warning should not repeat (#472). Not
+    /// `appendLaunchNotice`: it dedupes against the transcript, which would also hide the warning
+    /// on every later launch into the same conversation.
     private var postedOllamaWarnings: Set<String> = []
 
     /// Warns when an auxiliary engine is set to Ollama and the daemon does not answer. Without it,
