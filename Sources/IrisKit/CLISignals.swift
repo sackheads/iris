@@ -1,3 +1,4 @@
+import CIrisSignals
 import Darwin
 import Foundation
 
@@ -18,6 +19,17 @@ import Foundation
 enum CLISignals {
     static let stopping: [Int32] = [SIGINT, SIGTERM, SIGHUP]
     static let keepsInheritedIgnore: Set<Int32> = [SIGINT, SIGHUP]
+
+    /// SIGINT goes to its default once the `count`th stopping signal has been delivered (#510). A
+    /// source hears a signal when it is posted, which can be before the kernel delivers it to a
+    /// thread, so resetting as soon as the source heard it let the very signal that asked for
+    /// exit-now meet the default on delivery and end the CLI before the deletes and the vacate.
+    /// The count is kept by the handler, in C (`CIrisSignals`). Two signals posted before either is
+    /// delivered are delivered once, so the reset then waits for one more, which errs toward
+    /// running the cleanup.
+    static func resetInterrupt(onceDelivered count: Int) {
+        iris_reset_interrupt_once_delivered(count)
+    }
 
     final class Installation: @unchecked Sendable {
         /// The signals this installation caught: `stopping` minus any inherited ignore it kept.
@@ -58,7 +70,7 @@ enum CLISignals {
             source.setEventHandler { for _ in 0..<max(1, Int(source.data)) { onSignal(signal) } }
             source.resume()
             var action = sigaction()
-            action.__sigaction_u.__sa_handler = { _ in }
+            action.__sigaction_u.__sa_handler = iris_stop_signal_handler
             action.sa_flags = SA_RESTART
             sigemptyset(&action.sa_mask)
             sigaction(signal, &action, nil)
@@ -75,8 +87,9 @@ enum CLISignals {
 ///   SIGTERMs the host groups, and the run then closes itself as stopped. With no run armed yet
 ///   (before admission, or a dry run), it exits now instead, with 2.
 /// - A second means exit now, with `128 + signal`.
-/// - Exiting now resets SIGINT to its default first, so a third Ctrl-C ends the CLI at once while
-///   the deletes run. It then cancels the run's turn, so a runner queued but not yet spawned (in
+/// - Exiting now first arranges for SIGINT to go to its default once the signal that asked for it
+///   has been delivered (#510), so a third Ctrl-C ends the CLI at once while the deletes run. It
+///   then cancels the run's turn, so a runner queued but not yet spawned (in
 ///   neither registry) never spawns, and only then SIGKILLs every registered host group, deletes
 ///   every container this process made (bounded at 5 s, in parallel, plan note 15), flushes
 ///   stdout and stderr, empties the lock's payload and `_exit`s, in that order: the payload is
@@ -94,7 +107,7 @@ final class CLIStop: @unchecked Sendable {
     private let drainGroups: @Sendable () -> Bool
     private let killGroups: @Sendable () -> Void
     private let deleteContainers: @Sendable () -> Void
-    private let resetInterrupt: @Sendable () -> Void
+    private let resetInterrupt: @Sendable (Int) -> Void
     private let flush: @Sendable () -> Void
     private let vacate: @Sendable () -> Void
     private let exitNow: @Sendable (Int32) -> Void
@@ -115,12 +128,7 @@ final class CLIStop: @unchecked Sendable {
          drainGroups: @escaping @Sendable () -> Bool = { LiveProcessGroups.shared.waitUntilEmpty(within: 3) },
          killGroups: @escaping @Sendable () -> Void = { LiveProcessGroups.shared.killAll() },
          deleteContainers: @escaping @Sendable () -> Void = { _ = LiveContainerNames.shared.deleteAll(within: 5) },
-         resetInterrupt: @escaping @Sendable () -> Void = {
-             // Only our own catch is reset: an inherited ignore (plan note 16) stays ignored.
-             var now = sigaction()
-             sigaction(SIGINT, nil, &now)
-             if unsafeBitCast(now.__sigaction_u, to: UInt.self) > 1 { _ = signal(SIGINT, SIG_DFL) }
-         },
+         resetInterrupt: @escaping @Sendable (Int) -> Void = { CLISignals.resetInterrupt(onceDelivered: $0) },
          flush: @escaping @Sendable () -> Void = {
              fflush(stdout)
              fflush(stderr)
@@ -146,10 +154,10 @@ final class CLIStop: @unchecked Sendable {
         guard count == 1 else {
             // Exit now. A row this leaves `running` is closed by the next app launch's sweep
             // (decision 11), with "the Iris process running it ended".
-            return exitAtOnce(128 + signal)
+            return exitAtOnce(128 + signal, signals: count)
         }
         if run.request(reason: RunStop.reason(for: signal)) == .exitNow {
-            exitAtOnce(RunJobCLI.Exit.notCompleted)
+            exitAtOnce(RunJobCLI.Exit.notCompleted, signals: count)
         }
     }
 
@@ -175,9 +183,10 @@ final class CLIStop: @unchecked Sendable {
         }
     }
 
-    private func exitAtOnce(_ code: Int32) {
+    /// `signals` is how many stopping signals had arrived, this one included.
+    private func exitAtOnce(_ code: Int32, signals: Int) {
         exit(code: code) {
-            resetInterrupt()
+            resetInterrupt(signals)
             // Before either registry is read: a cancelled turn's queued runner refuses to spawn.
             run.cancelTurn()
             killGroups()

@@ -41,12 +41,15 @@ let package = Package(
                 .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
                 .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager"),
                 .product(name: "Yams", package: "Yams"),
-                .product(name: "Sparkle", package: "Sparkle")
+                .product(name: "Sparkle", package: "Sparkle"),
+                "CIrisSignals"
             ],
             resources: [
                 .process("assets")
             ]
         ),
+        // The CLI's signal handler, in C so it is async-signal-safe by construction (#510).
+        .target(name: "CIrisSignals"),
         .executableTarget(
             name: "iris",
             dependencies: ["IrisKit"]

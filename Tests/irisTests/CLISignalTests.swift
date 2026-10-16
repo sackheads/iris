@@ -107,13 +107,20 @@ struct CLISignalTests {
                 waited += 1
             }
             try? Data("\(runner.processIdentifier)".utf8).write(to: URL(fileURLWithPath: path))
-            let installation = CLISignals.install(onSignal: { _ in })
             let stop = CLIStop(terminateGroups: { registry.terminateAll() }, killGroups: { registry.killAll() },
                                deleteContainers: {}, vacate: {},
-                               exitNow: { code in _exit(CLISignalTests.raw(SIGINT) == 0 ? code : 7) })   // the real reset ran
+                               exitNow: { code in
+                                   // The real reset ran, once the second signal was delivered (#510).
+                                   for _ in 0..<100 where CLISignalTests.raw(SIGINT) != 0 { usleep(10_000) }
+                                   _exit(CLISignalTests.raw(SIGINT) == 0 ? code : 7)
+                               })
             _ = stop.run.arm()
-            stop.receive(SIGINT)
-            stop.receive(SIGINT)   // exits here
+            let installation = CLISignals.install(onSignal: { stop.receive($0) })
+            guard installation.installed.contains(SIGINT) else { exit(5) }   // run `swift test` in the foreground
+            kill(getpid(), SIGINT)
+            for _ in 0..<500 where stop.run.graceDeadline == nil { usleep(10_000) }
+            kill(getpid(), SIGINT)   // exits from the signal queue
+            for _ in 0..<500 { usleep(10_000) }
             withExtendedLifetime((running, installation)) {}
             exit(1)
         }
@@ -151,6 +158,51 @@ struct CLISignalTests {
         }
     }
 
+    /// #510: a signal source hears a signal when it is posted, which can be before the kernel has
+    /// delivered it to a thread (measured: 5 of 40 runs of a two-SIGINT repro). Exit-now used to
+    /// reset SIGINT to its default from the source's handler, so the second SIGINT, the one that
+    /// asked for the exit, could meet that default on its own delivery and end the CLI before the
+    /// deletes and the vacate ran. Here the source's half of the second signal (`receive`) runs
+    /// before its delivery: SIGINT must still be caught, and go to its default only once the
+    /// second has been delivered, so the third is the one that ends the CLI.
+    @Test("exit-now resets SIGINT on the second signal's delivery, not when its source hears it")
+    func exitNowResetsOnDelivery() async {
+        await #expect(processExitsWith: .exitCode(130)) {
+            let deleting = Fired()
+            let delivered = Fired()
+            let stop = CLIStop(terminateGroups: {}, closeGroups: {}, drainGroups: { true }, killGroups: {},
+                               deleteContainers: {
+                                   deleting.set()
+                                   // Longer than every check below, so a failed check exits first.
+                                   for _ in 0..<1500 where !delivered.value { usleep(10_000) }
+                               },
+                               flush: {}, vacate: {}, exitNow: { _exit($0) })
+            guard stop.run.arm() == nil else { exit(2) }
+            // A queue of the test's own for the real signals, so `receive` below can block in the
+            // deletes without holding up the source.
+            let installation = CLISignals.install([SIGINT], queue: DispatchQueue(label: "iris.tests.510"),
+                                                  onSignal: { stop.receive($0) })
+            guard installation.installed == [SIGINT] else { exit(3) }   // run `swift test` in the foreground
+
+            kill(getpid(), SIGINT)   // the clean stop, delivered
+            for _ in 0..<500 where stop.run.graceDeadline == nil { usleep(10_000) }
+            guard stop.run.graceDeadline != nil else { exit(4) }
+
+            // The second signal as its source hears it, ahead of its delivery.
+            DispatchQueue(label: "iris.tests.510.source").async { stop.receive(SIGINT) }
+            for _ in 0..<300 where !deleting.value { usleep(10_000) }
+            guard deleting.value else { exit(5) }
+            guard CLISignalTests.raw(SIGINT) > 1 else { exit(6) }   // reset before the delivery
+            kill(getpid(), SIGINT)   // now its delivery
+            for _ in 0..<300 where CLISignalTests.raw(SIGINT) != 0 { usleep(10_000) }
+            guard CLISignalTests.raw(SIGINT) == 0 else { exit(7) }   // and a third would end the CLI
+            delivered.set()   // the deletes finish and exit-now `_exit`s with 130
+            for _ in 0..<500 { usleep(10_000) }
+            withExtendedLifetime(installation) {}
+            exit(8)
+        }
+    }
+
     /// Blocks the calling thread on `gate`. Synchronous, so a pool thread can be held with it
     /// without the async-context warning.
     static func park(_ gate: DispatchSemaphore) { gate.wait() }
@@ -168,7 +220,7 @@ struct CLISignalTests {
             for _ in 0..<500 where runner.processIdentifier == 0 { try? await Task.sleep(nanoseconds: 10_000_000) }
             guard runner.processIdentifier > 0 else { exit(2) }
             let stop = CLIStop(terminateGroups: { registry.terminateAll() }, closeGroups: {}, drainGroups: { true },
-                               killGroups: {}, deleteContainers: {}, resetInterrupt: {}, flush: {}, vacate: {},
+                               killGroups: {}, deleteContainers: {}, resetInterrupt: { _ in }, flush: {}, vacate: {},
                                exitNow: { _ in _exit(3) })   // a first signal must not exit
             guard stop.run.arm() == nil else { exit(4) }
             let cancelled = Fired()
