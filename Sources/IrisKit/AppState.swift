@@ -215,7 +215,8 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     ///
     /// Set ONLY by `IrisEngine`'s genuine unattended-arrival code paths
     /// (`deliverSanitizedSystemEvent`'s idle branch — which `handleSystemEvent` and `deliverPeerMessage`
-    /// both route through — and `queuePeerArrival`'s busy branch) — never by matching on message
+    /// both route through — and the two busy branches, `queuePeerArrival` and `handleSystemEvent`'s
+    /// queue) — never by matching on message
     /// text — so it cannot be spoofed by a user or a model writing text that merely *looks* like one
     /// of these arrivals (the same framing, the same "System Event [...]" prefix): those still go
     /// through the ordinary `appendMessage(role: .user, ...)` / `appendMessage(role: .agent, ...)`
@@ -763,17 +764,32 @@ class AppState {
     /// running one ends. Starting a second turn instead interleaves two turns on one history,
     /// which the providers answer with empty or rejected responses.
     struct PendingUserMessage: Sendable {
+        /// Who the entry is from, which decides the label it is read under: the consumer must never
+        /// render a peer's or a subagent's words under the user's own (#185 §5).
+        enum Origin: Equatable, Sendable {
+            case user
+            /// A peer delivery queued through `IrisEngine.deliverPeerMessage`'s busy path.
+            case peer
+            /// A background subagent's post-back queued by `IrisEngine.handleSystemEvent` (#478).
+            case systemEvent(source: String)
+        }
         let text: String
         let attachments: [FileAttachment]
-        /// True only for a peer delivery (#185 §5) queued through `IrisEngine.deliverPeerMessage`'s
-        /// busy path. Defaults false so every pre-existing caller — the user's own `sendMessage`,
-        /// and every test that builds one directly — is unaffected. `takePendingSteers` carries
-        /// this through so the consumer never renders a peer entry under the user's own label.
-        let isPeer: Bool
+        let origin: Origin
+        /// The engine that queued a post-back, which runs it if it is drained into a turn of its
+        /// own. nil for the rest: the composer's path and peer deliveries use `AppState.engine`.
+        let engine: IrisEngine?
+        var isPeer: Bool { origin == .peer }
+        /// An arrival rather than something the user typed: it waits for a goal follow-up too.
+        var isArrival: Bool { origin != .user }
         init(text: String, attachments: [FileAttachment], isPeer: Bool = false) {
+            self.init(text: text, attachments: attachments, origin: isPeer ? .peer : .user)
+        }
+        init(text: String, attachments: [FileAttachment], origin: Origin, engine: IrisEngine? = nil) {
             self.text = text
             self.attachments = attachments
-            self.isPeer = isPeer
+            self.origin = origin
+            self.engine = engine
         }
     }
     private var pendingUserMessages: [UUID: [PendingUserMessage]] = [:]
@@ -807,9 +823,9 @@ class AppState {
             mainStartTimeByConversation[conversationId] = Date()
         }
         engineTurnCounts[conversationId, default: 0] += 1
-        // A second turn beside a reflection — a background subagent's post-back, which calls
-        // `processInput` without queueing — appends its own replies inside the capture window, so
-        // it ends the window the way a steer does (5b §0.6).
+        // A second turn beside a reflection appends its own replies inside the capture window, so
+        // it ends the window the way a steer does (5b §0.6). A subagent's post-back no longer
+        // starts one (it queues, #478), but any turn that does is covered here.
         if (engineTurnCounts[conversationId] ?? 0) > 1 { markReflectionBoundary(for: conversationId) }
     }
 
@@ -1069,6 +1085,13 @@ class AppState {
         pendingUserMessages[conversationId, default: []].append(PendingUserMessage(text: text, attachments: attachments, isPeer: isPeer))
     }
 
+    /// A background subagent's post-back, already sanitised, held for the turn in flight or the
+    /// goal follow-up waiting to run (#478).
+    func enqueuePendingSystemEvent(_ text: String, source: String, for conversationId: UUID, engine: IrisEngine) {
+        pendingUserMessages[conversationId, default: []].append(
+            PendingUserMessage(text: text, attachments: [], origin: .systemEvent(source: source), engine: engine))
+    }
+
     func pendingUserMessageCount(for conversationId: UUID) -> Int {
         pendingUserMessages[conversationId]?.count ?? 0
     }
@@ -1077,11 +1100,11 @@ class AppState {
     /// whether each is a peer delivery (#185 §5) rather than something the user typed — the
     /// engine must not present a peer entry under the user's own label. Stops at the first entry
     /// with attachments so order is preserved. The engine calls this at every model round.
-    func takePendingSteers(for conversationId: UUID) -> [(text: String, isPeer: Bool)] {
+    func takePendingSteers(for conversationId: UUID) -> [PendingUserMessage] {
         var queue = pendingUserMessages[conversationId] ?? []
-        var taken: [(text: String, isPeer: Bool)] = []
+        var taken: [PendingUserMessage] = []
         while let first = queue.first, first.attachments.isEmpty {
-            taken.append((text: first.text, isPeer: first.isPeer))
+            taken.append(first)
             queue.removeFirst()
         }
         pendingUserMessages[conversationId] = queue.isEmpty ? nil : queue
@@ -1099,19 +1122,37 @@ class AppState {
     /// Round 3 (#185 §7): the join stops at an origin change, not just at the first attachment —
     /// a peer entry must never merge into one turn with a user entry, since the merged turn would
     /// need to carry one `isPeer` value for text that is not homogeneously one or the other.
-    private func drainPendingUserMessages(for conversationId: UUID) {
+    ///
+    /// #478: an arrival at the head of the inbox also waits while a goal follow-up is pending,
+    /// because that follow-up's turn reads it as a steer before its first model call. When the
+    /// follow-up ends without running a turn, its task calls this again.
+    func drainPendingUserMessages(for conversationId: UUID) {
         guard !hasTurnInFlight(for: conversationId),
               var queue = pendingUserMessages[conversationId], !queue.isEmpty else { return }
-        let leadIsPeer = queue[0].isPeer
+        let lead = queue[0].origin
+        let owner = queue[0].engine ?? engine
+        if queue[0].isArrival, owner?.goalLoopIsLive(for: conversationId) == true { return }
+        if case .systemEvent = lead, owner == nil { return }
         var texts: [String] = []
-        while let first = queue.first, first.attachments.isEmpty, first.isPeer == leadIsPeer {
+        while let first = queue.first, first.attachments.isEmpty, first.origin == lead {
             texts.append(first.text)
             queue.removeFirst()
         }
         let next = texts.isEmpty
             ? queue.removeFirst()
-            : PendingUserMessage(text: texts.joined(separator: "\n\n"), attachments: [], isPeer: leadIsPeer)
+            : PendingUserMessage(text: texts.joined(separator: "\n\n"), attachments: [], origin: lead, engine: owner)
         pendingUserMessages[conversationId] = queue.isEmpty ? nil : queue
+        if case .systemEvent(let source) = next.origin {
+            // Not `startTurn`: that is the composer's path, which runs as a "UI" turn. Reserved
+            // here, synchronously, so a second drain or a user's send sees the conversation busy.
+            let engine = owner!
+            beginEngineTurn(for: conversationId)
+            Task { [weak self] in
+                await engine.processInput(next.text, source: source, conversationId: conversationId)
+                self?.endEngineTurn(for: conversationId)
+            }
+            return
+        }
         startTurn(text: next.text, attachments: next.attachments, in: conversationId, isPeer: next.isPeer)
     }
 
@@ -1512,8 +1553,9 @@ class AppState {
     /// A user or peer message that arrives meanwhile steers this same turn, and the model may
     /// answer it here. The capture window therefore ends where the turn first *took* a steer — not
     /// where the arrival bubble sits, which is appended on arrival and can land before the
-    /// reflection's own reply in the same round. A second engine turn that begins on the
-    /// conversation meanwhile (a background subagent's post-back) ends the window the same way.
+    /// reflection's own reply in the same round. A background subagent's post-back is queued and
+    /// taken the same way (#478), and any second engine turn that begins on the conversation
+    /// meanwhile ends the window too.
     /// If either happened, the card is built from the part before it and the source chat is left
     /// exactly as it is, so the answer stays visible.
     func runReflection(_ prompt: String, in convId: UUID, moveReplyToIris: Bool) async {
@@ -2641,8 +2683,9 @@ class AppState {
     /// sticky taint `executeFunctionCall`'s job-creation gate reads. Called ONLY from `IrisEngine`'s
     /// genuine unattended-arrival code paths — `deliverSanitizedSystemEvent`'s idle branch (which
     /// both `handleSystemEvent`'s background-subagent post-back and `deliverPeerMessage`'s idle
-    /// delivery route through) and `queuePeerArrival`'s busy branch (covers both a later drain into
-    /// its own turn and consumption as a mid-turn steer) — never from anything that matches on
+    /// delivery route through), `queuePeerArrival`'s busy branch, and `handleSystemEvent`'s queue
+    /// (#478) (both busy branches cover a later drain into its own turn and consumption as a
+    /// mid-turn steer) — never from anything that matches on
     /// message text, so a user or a model writing something that merely looks like one of these
     /// arrivals never sets this. A no-op once already set: the taint never clears.
     func markConversationTouchedByUnattendedInput(_ conversationId: UUID) {

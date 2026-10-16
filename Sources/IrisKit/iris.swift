@@ -615,7 +615,32 @@ actor IrisEngine {
         // same sticky taint. An INLINE (non-background) `invoke_subagent` result never reaches here:
         // it returns as ordinary tool output inside the owner's own turn (`executeFunctionCall`'s
         // `invoke_subagent` branch), so it needs none of this — the owner is already there.
+        //
+        // #478: a turn started beside one in flight put its entry between a model's tool calls and
+        // their results (Anthropic 400s on that), and one started while a goal follow-up waited
+        // ran beside it. So it is queued behind both, decided and recorded in one synchronous
+        // step, and read as a steer at the next model round or as a turn of its own at the end.
+        // The transcript line and the taint land now, as they would for an idle delivery.
+        let loop = goalLoop
+        let claimed = await MainActor.run { () -> Bool in
+            guard let localState else { return false }
+            if localState.hasTurnInFlight(for: activeId) || loop.isLive(for: activeId) {
+                let notice = wasArchived ? Self.unarchivedNotice(source) : ""
+                localState.appendMessage(role: .system, content: notice + safeMessage, to: activeId)
+                localState.enqueuePendingSystemEvent(safeMessage, source: source, for: activeId, engine: self)
+                localState.markConversationTouchedByUnattendedInput(activeId)
+                return false
+            }
+            localState.beginEngineTurn(for: activeId)
+            return true
+        }
+        guard claimed else { return }
         await deliverSanitizedSystemEvent(safeMessage, source: source, conversationId: activeId, wasArchived: wasArchived, isUnattendedInput: true)
+        await MainActor.run { localState?.endEngineTurn(for: activeId) }
+    }
+
+    nonisolated static func unarchivedNotice(_ source: String) -> String {
+        "Un-archived: work arrived from \(source).\n\n"
     }
 
     /// The append-notice-and-drive-the-turn tail of `handleSystemEvent`, factored out so a caller
@@ -639,7 +664,7 @@ actor IrisEngine {
             // only on the transcript line: the engine below still sees the event alone.
             // Selection deliberately does not move; resurfacing is not a reason to yank the user
             // out of what they are reading.
-            let notice = wasArchived ? "Un-archived: work arrived from \(source).\n\n" : ""
+            let notice = wasArchived ? Self.unarchivedNotice(source) : ""
             localState?.appendMessage(role: .system, content: notice + safeMessage, to: conversationId)
             if isUnattendedInput { localState?.markConversationTouchedByUnattendedInput(conversationId) }
         }
@@ -736,6 +761,7 @@ actor IrisEngine {
         // is refused, never reopened: unarchiving is for the user's own sends. Once claimed it
         // cannot be archived (a reserved conversation refuses), so the handoff needs no unarchive.
         enum Claim { case claimed, busy, gone(String) }
+        let loop = goalLoop
         let claim: Claim = await MainActor.run {
             guard let localState else { return .busy }
             if let reason = localState.peerTargetGoneReason(targetId) {
@@ -745,6 +771,8 @@ actor IrisEngine {
             // #469 §6: raises the target's depth on either path below: the busy branch queues
             // instead of running a turn, but the message still reached the target causally.
             localState.notePeerArrival(depth: envelope.depth, at: targetId)
+            // #478: a goal follow-up waiting out its delay is busy too; it reads the queued entry.
+            if loop.isLive(for: targetId) { return .busy }
             return localState.claimPeerDelivery(for: targetId) ? .claimed : .busy
         }
         switch claim {
@@ -1567,10 +1595,16 @@ actor IrisEngine {
             // #185 §5.0 (round 2 fix): "User (mid-task):" is the system's highest trust label. A
             // peer delivery queued through the busy path must never wear it — the model must not
             // be told a peer's words are the user's own.
-            let label = steer.isPeer ? Self.peerMidTaskLabel : "User (mid-task)"
+            let line: String
+            switch steer.origin {
+            case .user: line = "User (mid-task): \(steerText)"
+            case .peer: line = "\(Self.peerMidTaskLabel): \(steerText)"
+            // #478: framed as the post-back's own turn would frame it.
+            case .systemEvent(let source): line = "System Event [\(source)] (mid-task): \(steerText)" + Self.systemEventAnalysis
+            }
             // Its own entry, not an extra part: the OpenAI translator would emit a text part
             // before the tool messages.
-            let content = Content(role: "user", parts: [Part(text: "\(label): \(steerText)")])
+            let content = Content(role: "user", parts: [Part(text: line)])
             await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: content) }
             added = true
             // #187 §0.5 structural ruling: no per-turn marking needed here — a peer steer can only
@@ -1908,7 +1942,7 @@ actor IrisEngine {
 
         // Callers that already shaped their prompt as `System Event [X]: …` (rename, reflection,
         // goal draft) keep their own label rather than gaining a second `System Event [System]:`.
-        let eventAnalysis = "\nAnalyze this event. If it requires action based on your directives/skills, take it. Otherwise, briefly acknowledge it."
+        let eventAnalysis = Self.systemEventAnalysis
         let text: String
         if source == "UI" {
             text = input
@@ -3064,6 +3098,8 @@ actor IrisEngine {
         }
     }
 
+    nonisolated static let systemEventAnalysis = "\nAnalyze this event. If it requires action based on your directives/skills, take it. Otherwise, briefly acknowledge it."
+
     /// What a scheduled follow-up turn sends: the goal loop's oracle reprompt, or the reflection
     /// after a completed goal (#474), which has no goal left to re-verify.
     enum FollowUp: Sendable { case goalReprompt, goalCompletionSkillCheck }
@@ -3078,8 +3114,13 @@ actor IrisEngine {
         let goalLoop = self.goalLoop
         let token = UUID()
         let task = Task { [weak self] in
-            // Every way out removes this task's own entry, so the loop reads as over once it is.
-            defer { goalLoop.finishReprompt(token: token, for: conversationId) }
+            // Every way out removes this task's own entry, so the loop reads as over once it is,
+            // then hands anything that queued behind the follow-up (#478) to the drain: a
+            // follow-up that ran no turn has no turn end to do it.
+            defer {
+                goalLoop.finishReprompt(token: token, for: conversationId)
+                Task { @MainActor in localState?.drainPendingUserMessages(for: conversationId) }
+            }
             try? await Task.sleep(nanoseconds: delay)
             if followUp == .goalCompletionSkillCheck {
                 // Claimed on every way out, so a cancelled check leaves nothing a later UI turn
