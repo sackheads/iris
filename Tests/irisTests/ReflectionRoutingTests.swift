@@ -246,7 +246,7 @@ import Foundation
                 let queued = await engine.deliverPeerMessage("what is 2+2?", from: UUID(),
                                                              senderName: "peer", to: source,
                                                              envelope: envelope)
-                #expect(queued, "the target is busy, so the peer message must queue as a steer")
+                #expect(queued == .queued, "the target is busy, so the peer message must queue as a steer")
             } else {
                 await MainActor.run { state.sendMessage("what is 2+2?") }
             }

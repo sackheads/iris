@@ -16,6 +16,16 @@ struct PeerReplyRef: Sendable {
 /// reached the target, whether the sender is waiting on an answer, and — for a reply — what it is
 /// answering. Built once the send is `.allowed` and the id is assigned; never constructed before
 /// that, so a refused send never has one (`newMessageId` is also never spent on a refusal).
+/// What `deliverPeerMessage` did with a peer message.
+enum PeerDeliveryOutcome: Equatable, Sendable {
+    /// Handed to an idle target, whose turn runs in the background.
+    case delivered
+    /// Queued behind a busy target (or a lost claim), for its next turn.
+    case queued
+    /// Not delivered: the target was archived or deleted after the send was decided (#499).
+    case refused(String)
+}
+
 struct PeerEnvelope: Sendable {
     let msgId: String
     let contextId: String
@@ -691,13 +701,12 @@ actor IrisEngine {
     /// between them for a second claimant to occupy. No lock was needed in the end: the turn count
     /// `hasTurnInFlight` already reads is the reservation.
     ///
-    /// Returns `true` when the message was queued behind a busy turn or lost the claim, `false`
-    /// when it was handed to an idle target. Callers that only care about delivery, not which path
-    /// it took (most of `PeerDeliveryTests`), can ignore it.
+    /// Returns which path it took. Callers that only care about delivery (most of
+    /// `PeerDeliveryTests`) can ignore it.
     @discardableResult
     func deliverPeerMessage(_ message: String, from senderId: UUID, senderName: String?,
                              senderRole: String? = nil, to targetId: UUID,
-                             envelope: PeerEnvelope) async -> Bool {
+                             envelope: PeerEnvelope) async -> PeerDeliveryOutcome {
         let localState = state
         let attributed = Self.framePeerMessage(message, senderName: senderName, senderId: senderId, senderRole: senderRole, envelope: envelope)
         // Sanitise before deciding where it goes, because both destinations need it sanitised and
@@ -710,10 +719,6 @@ actor IrisEngine {
         // typed — `takePendingSteers`' consumer renders queued text as `"User (mid-task): …"`, the
         // system's highest trust label. The `isPeer` flag on the queued entry is what stops that.
         let safe = await sanitizeArrival(attributed, source: Self.peerSource)
-        // #469 §6: raises the target's depth regardless of which path below actually delivers —
-        // the busy branch queues instead of running a turn, but the message still reached the
-        // target causally, so its depth must rise either way.
-        await MainActor.run { localState?.notePeerArrival(depth: envelope.depth, at: targetId) }
         // §5.2: a second turn on one history produces empty or rejected provider responses, so a
         // busy target takes the same #172 inbox a user message would. Peer messaging must not make
         // that hazard agent-triggerable.
@@ -725,14 +730,34 @@ actor IrisEngine {
         // reserves in one synchronous MainActor body, so the loser of a race sees the winner's
         // reservation and takes the inbox, which is exactly what it would have done had the
         // winner's turn already been running.
-        let claimed = await MainActor.run { localState?.claimPeerDelivery(for: targetId) ?? false }
-        guard claimed else {
+        //
+        // #499: the send was decided before sanitising, which can take seconds, so the target is
+        // re-checked here, in the claim's own synchronous step. One archived or deleted meanwhile
+        // is refused, never reopened: unarchiving is for the user's own sends. Once claimed it
+        // cannot be archived (a reserved conversation refuses), so the handoff needs no unarchive.
+        enum Claim { case claimed, busy, gone(String) }
+        let claim: Claim = await MainActor.run {
+            guard let localState else { return .busy }
+            if let reason = localState.peerTargetGoneReason(targetId) {
+                localState.closeIfTargetGone(envelope.msgId, target: targetId)
+                return .gone(reason)
+            }
+            // #469 §6: raises the target's depth on either path below: the busy branch queues
+            // instead of running a turn, but the message still reached the target causally.
+            localState.notePeerArrival(depth: envelope.depth, at: targetId)
+            return localState.claimPeerDelivery(for: targetId) ? .claimed : .busy
+        }
+        switch claim {
+        case .gone(let reason):
+            return .refused(reason)
+        case .busy:
             await queuePeerArrival(safe, to: targetId)
-            return true
+            return .queued
+        case .claimed:
+            break
         }
         Task {
-            let wasArchived = await MainActor.run { localState?.unarchiveConversation(targetId) ?? false }
-            await self.deliverSanitizedSystemEvent(safe, source: Self.peerSource, conversationId: targetId, wasArchived: wasArchived, isUnattendedInput: true)
+            await self.deliverSanitizedSystemEvent(safe, source: Self.peerSource, conversationId: targetId, wasArchived: false, isUnattendedInput: true)
             // The claim is given back only once the turn it authorised is over. Releasing at
             // handoff instead would reopen a gap between this function returning and
             // `withEngineTurn` registering the turn — the very gap the claim exists to close.
@@ -743,7 +768,7 @@ actor IrisEngine {
             // someone adds an early exit, which is when it would matter most.
             await MainActor.run { localState?.releasePeerDelivery(for: targetId) }
         }
-        return false
+        return .delivered
     }
 
     /// Queues a peer arrival for a busy target AND puts it in the transcript.
@@ -4105,12 +4130,17 @@ actor IrisEngine {
             if let parent { _ = try? peers.close(parent.msgId, reason: "replied with \(msgId)", at: Date()) }
             let envelope = PeerEnvelope(msgId: msgId, contextId: contextId, depth: depth, expectsReply: expectsReply,
                                         replyTo: parent.map { PeerReplyRef(msgId: $0.msgId, firstLine: $0.firstLine) })
-            let queued = await deliverPeerMessage(message, from: conversationId, senderName: senderName,
-                                                  senderRole: senderRole, to: targetId, envelope: envelope)
+            let outcome = await deliverPeerMessage(message, from: conversationId, senderName: senderName,
+                                                   senderRole: senderRole, to: targetId, envelope: envelope)
             let tracked = expectsReply ? " It shows in your Awaiting replies until answered or closed." : ""
-            result = queued
-                ? "Sent msg \(msgId) to \(targetLabel); it is busy and will see it at its next turn.\(tracked)"
-                : "Sent msg \(msgId) to \(targetLabel); delivered in the background. A reply, if any, arrives as a message.\(tracked)"
+            switch outcome {
+            case .queued:
+                result = "Sent msg \(msgId) to \(targetLabel); it is busy and will see it at its next turn.\(tracked)"
+            case .delivered:
+                result = "Sent msg \(msgId) to \(targetLabel); delivered in the background. A reply, if any, arrives as a message.\(tracked)"
+            case .refused(let reason):
+                result = "Not delivered: msg \(msgId) to \(targetLabel) was refused (\(reason)) after the send was decided. It was not reopened."
+            }
         } else if functionCall.name == "set_session_card",
                   let name = functionCall.args["name"]?.stringValue,
                   let description = functionCall.args["description"]?.stringValue {
