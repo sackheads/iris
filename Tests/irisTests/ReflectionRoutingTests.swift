@@ -227,7 +227,13 @@ import Foundation
     /// Call 1 answers the user's turn. Call 2 is the reflection's first round: its report plus a
     /// tool call, so there is a second round; the steer is enqueued while call 2 is out. Call 3
     /// is that second round, which takes the steer and answers it.
+    enum SteerKind { case user, peer, postBack }
+
     private func runSteeredReflection(peer: Bool) async throws -> Harness {
+        try await runSteeredReflection(peer ? .peer : .user)
+    }
+
+    private func runSteeredReflection(_ kind: SteerKind) async throws -> Harness {
         let h = try harness(replies: [])
         let firstRound = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [
             Part(text: Self.report),
@@ -238,7 +244,13 @@ import Foundation
         let engineBox = OneShotBox<IrisEngine>()
         let client = SteeringClient(fake) { call in
             guard call == 2 else { return }
-            if peer {
+            switch kind {
+            case .postBack:
+                // #478: queued behind the reflection's turn, as a peer's is, not run beside it.
+                guard let engine = engineBox.value else { return }
+                await engine.handleSystemEvent("what is 2+2?", source: "SubagentManager", conversationId: source)
+                #expect(await MainActor.run { state.pendingUserMessageCount(for: source) } == 1)
+            case .peer:
                 guard let engine = engineBox.value else { return }
                 // #469 review item 3: no default envelope any more; build one with an 8-hex id.
                 let envelope = PeerEnvelope(msgId: "aaaa0001", contextId: "ctx-aaaa0001", depth: 1,
@@ -247,7 +259,7 @@ import Foundation
                                                              senderName: "peer", to: source,
                                                              envelope: envelope)
                 #expect(queued == .queued, "the target is busy, so the peer message must queue as a steer")
-            } else {
+            case .user:
                 await MainActor.run { state.sendMessage("what is 2+2?") }
             }
         }
@@ -288,61 +300,12 @@ import Foundation
         try expectSteerHandled(h)
     }
 
-    static let postBackReply = "Noted the subagent's result."
-
-    /// A background subagent's post-back calls `processInput` directly, so its turn runs beside
-    /// the reflection instead of queueing as a steer (final review, item 2). Call 2 is the
-    /// reflection's first round (report + tool call); during call 3, its second round, the
-    /// post-back arrives and its own turn (call 4) answers before call 3 returns.
+    /// A background subagent's post-back used to call `processInput` directly and run its own turn
+    /// beside the reflection. Since #478 it queues like a peer's message and is taken as a steer.
     @Test func subagentPostBackDuringReflectionStaysInChatAndOutOfTheCard() async throws {
-        let h = try harness(replies: [])
-        let firstRound = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [
-            Part(text: Self.report),
-            Part(functionCall: FunctionCall(name: "noop_probe", args: [:])),
-        ]))], usageMetadata: nil)
-        // Fake order: user turn, reflection round 1, the post-back's turn, reflection round 2.
-        let fake = FakeLLMClient(responses: [Self.reply("ok"), firstRound, Self.reply(Self.postBackReply),
-                                             Self.reply("Done.")])
-        let state = h.state, source = h.source
-        let engineBox = OneShotBox<IrisEngine>()
-        let postBack = OneShotBox<TaskBox>()
-        let client = SteeringClient(fake) { call in
-            guard call == 3, let engine = engineBox.value else { return }
-            let task = Task {
-                await engine.handleSystemEvent("Subagent finished: 3 files reviewed.", source: "Subagent",
-                                               conversationId: source)
-            }
-            postBack.value = TaskBox(task)
-            // Hold the reflection's second round until the post-back's reply is in the chat.
-            for _ in 0..<400 {
-                let landed = await MainActor.run {
-                    state.conversations.first { $0.id == source }?.messages
-                        .contains { $0.role == .agent && $0.content == Self.postBackReply } ?? false
-                }
-                if landed { break }
-                try? await Task.sleep(nanoseconds: 25_000_000)
-            }
-        }
-        let engine = IrisEngine(state: state, tier: .medium, principal: .main, client: client,
-                                retryDelays: [], streamResponses: false, protectionEnabled: false,
-                                sessionPeerCount: 0)
-        engineBox.value = engine
-        state.installEngine(engine)
-        try primeForReflection(state, source)
-        state.sendMessage("one more thing")
-        try await waitForTurn(state, source)
-        if let task = postBack.value?.task { try await value(of: task) }
-        #expect(fake.callCount == 4, "the post-back ran its own turn beside the reflection")
-
-        let tail = try afterTrigger(state, source, trigger: "Triggering automatic memory reflection...")
-        #expect(tail.contains { $0.role == .agent && $0.content == Self.postBackReply },
-                "the post-back's reply stays in the source chat")
-        #expect(tail.contains { $0.role == .agent && $0.content == Self.report }, "no swap")
-        #expect(!tail.contains { $0.content == AppState.reflectionReportedNotice }, "no swap")
-        let card = try #require(cards(state, h.iris).first)
-        #expect(cards(state, h.iris).count == 1)
-        #expect(card.outcome == Self.report, "the card holds only what came before the post-back")
-        #expect(!(card.outcome ?? "").contains(Self.postBackReply))
+        let h = try await runSteeredReflection(.postBack)
+        #expect(conv(h.state, h.source).messages.contains { $0.role == .system && $0.content.contains("what is 2+2?") })
+        try expectSteerHandled(h)
     }
 
     @Test func hostileTitleAndReportAreFlattenedAndCapped() async throws {
@@ -374,10 +337,4 @@ final class OneShotBox<T: AnyObject>: @unchecked Sendable {
         get { lock.withLock { stored } }
         set { lock.withLock { stored = newValue } }
     }
-}
-
-/// A `Task` in a class, so a `OneShotBox` can hand it from the hook back to the test.
-final class TaskBox: @unchecked Sendable {
-    let task: Task<Void, Never>
-    init(_ task: Task<Void, Never>) { self.task = task }
 }

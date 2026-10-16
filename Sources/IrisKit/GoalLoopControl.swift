@@ -75,6 +75,13 @@ final class GoalLoopControl: @unchecked Sendable {
         observer?(false, seq)
     }
 
+    /// True while a reprompt or skill check is scheduled and has not yet finished, its own turn
+    /// included. Not true for an ordinary turn: `processInput` holds `turnsInFlight` until after
+    /// its turn's end drain, so the drain asks this, not `isLive` (#478).
+    func hasPendingFollowUp(for id: UUID) -> Bool {
+        lock.withLock { pending[id] != nil }
+    }
+
     /// True while a turn is running on the conversation or a reprompt is pending for it.
     func isLive(for id: UUID) -> Bool {
         lock.withLock { pending[id] != nil || (turnsInFlight[id] ?? 0) > 0 }
