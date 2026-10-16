@@ -779,9 +779,6 @@ actor IrisEngine {
     /// did not get from the composer. So a peer message that happened to land behind a running
     /// turn reached the model and never reached the user, which is precisely the case where a
     /// person most wants to know another session steered this one (whole-branch review).
-    ///
-    /// One helper because both busy branches — the first check and the round-3 late re-check —
-    /// need identical treatment, and two copies of "append then enqueue" is how they drift.
     private func queuePeerArrival(_ safe: String, to targetId: UUID) async {
         let localState = state
         await MainActor.run {
