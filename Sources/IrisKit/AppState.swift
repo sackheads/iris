@@ -3474,8 +3474,8 @@ class AppState {
     }
 
     /// What Vibecop makes of a call a person is about to be offered "Approve and run" for (#187
-    /// §6). Asked when the CARD IS BUILT, not when the button is clicked: the verdict is there to
-    /// inform the person deciding, and a click overrides a `DENY` rather than skipping the
+    /// §6). Asked once the card is saved and written onto it (#521), not when the button is clicked:
+    /// the verdict is there to inform the person deciding, and a click overrides a `DENY` rather than skipping the
     /// evaluation. `nil` when Vibecop is off, failed or timed out — the card then shows no verdict
     /// line, which is honest; it does not mean "approved".
     ///
@@ -3496,6 +3496,7 @@ class AppState {
     /// card went to. Only the case it cannot reach — there is no runner at all — is answered here,
     /// and Iris is the only destination left to answer it in.
     func approveBlockedCall(runId: UUID) {
+        runsActedOn.insert(runId)
         let engine = self.engine
         Task { [weak self] in
             guard let runner = await engine?.jobRunner() else {
@@ -3509,6 +3510,12 @@ class AppState {
         }
     }
 
+    /// Runs whose card was clicked (Approve and run, Dismiss, Acknowledge) in this process,
+    /// recorded on the main actor at the click, before any hop. The ledger write comes later, from
+    /// a detached task or the runner, so a verdict landing in between reads this instead (#521).
+    /// Transient: never persisted.
+    @ObservationIgnored var runsActedOn: Set<UUID> = []
+
     /// Marks a failed or blocked run seen, which takes it out of `/jobs`'s failure list and off
     /// retention's exemption. The card's Dismiss, the run log's Acknowledge and a notification's
     /// Dismiss all land here. The status item's snapshot is refreshed once the row is written
@@ -3518,6 +3525,7 @@ class AppState {
     /// Off the main actor, like every other write to the store.
     @discardableResult
     func acknowledgeRun(_ runId: UUID) -> Task<Void, Never> {
+        runsActedOn.insert(runId)
         let ledger = store.ledger
         return Task { [weak self] in
             let written = await Task.detached { () -> Bool in

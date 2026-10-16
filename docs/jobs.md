@@ -882,9 +882,12 @@ that cannot reach it.
 
 The card for a run that stopped on an approval shows the **whole call** — the tool, every argument,
 and a long body cut to the first 500 characters — because an approval given without sight of the
-payload is worse than no button. Vibecop is asked about that same persisted call when the card is
-written, and its verdict and reason sit beside the button; with Vibecop off there is no verdict
-line, only the button. A verdict is information, not a veto: a
+payload is worse than no button. Vibecop is asked about that same persisted call once the card is
+saved, and its verdict and reason are then written onto the card beside the button. The card does
+not wait for it, because a local model can take seconds and a run stopped in that wait would
+otherwise leave a blocked row with no card at all (#521). A verdict that comes back after you have
+approved or dismissed the run is not added. With Vibecop off there is no verdict line, only the
+button. A verdict is information, not a veto: a
 `DENY` still leaves the button there, and clicking it is you overruling Vibecop, not skipping it.
 
 **Approve and run** dispatches exactly that one call, once, as a tracked run of its own: a fresh
