@@ -1440,11 +1440,13 @@ actor IrisEngine {
         goalIterationCaps[conversationId] = max(1, cap)
     }
 
-    /// True while a turn is running on the conversation or its next reprompt is pending.
+    /// True while a reprompt or skill check is scheduled and has not yet finished (#478). Not true
+    /// for an ordinary turn, which `goalLoopIsLive` also counts.
     nonisolated func goalFollowUpPending(for conversationId: UUID) -> Bool {
         goalLoop.hasPendingFollowUp(for: conversationId)
     }
 
+    /// True while a turn is running on the conversation or its next reprompt is pending.
     nonisolated func goalLoopIsLive(for conversationId: UUID) -> Bool {
         goalLoop.isLive(for: conversationId)
     }
