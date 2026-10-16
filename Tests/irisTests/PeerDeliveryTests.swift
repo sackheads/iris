@@ -582,6 +582,39 @@ struct PeerDeliveryTests {
         #expect(try app.store.peers.message("bbbb0499")?.closeReason == "target archived", "the request is closed for the sender")
     }
 
+    /// #499's gap is the sanitise itself, so this archives the target from inside it: the canary
+    /// tier runs in `sanitizeArrival`. A gone-check placed before sanitising would pass the test
+    /// above and fail this one.
+    @Test("a target archived while the arrival is being sanitised is refused, not reopened")
+    func archivedDuringSanitiseIsRefused() async throws {
+        let app = AppState(); app.conversations.removeAll()
+        let sender = UUID(), target = UUID()
+        app.createNewConversation(id: sender)
+        app.createNewConversation(id: target)
+        let envelope = PeerEnvelope(msgId: "cccc0499", contextId: "ctx-cccc0499", depth: 1, expectsReply: true, replyTo: nil)
+        try app.store.peers.insert(PeerMessageRecord(msgId: "cccc0499", fromSession: sender, toSession: target,
+                                                     contextId: "ctx-cccc0499", inReplyTo: nil, depth: 1,
+                                                     firstLine: "do the thing", sentAt: Date(), expectsReply: true,
+                                                     closedAt: nil, closeReason: nil))
+        let canary = ArchivingCanary { await MainActor.run { _ = app.archiveConversation(target) } }
+        let engine = IrisEngine(state: app, tier: .medium, client: FakeLLMClient(responses: []),
+                                protectionEnabled: true)
+
+        let outcome = await CoreMLEvaluator.$scopedModel.withValue(.init(nil)) {
+            await AuxiliaryModelManager.$scopedEngines.withValue(["canary": canary]) {
+                await engine.deliverPeerMessage("do the thing", from: sender, senderName: "peer",
+                                                to: target, envelope: envelope)
+            }
+        }
+
+        #expect(canary.calls > 0, "the canary ran, so the archive landed mid-sanitise")
+        #expect(outcome == .refused("target archived"))
+        let conv = try #require(app.conversations.first { $0.id == target })
+        #expect(conv.isArchived, "still archived")
+        #expect(conv.history.isEmpty, "no turn ran")
+        #expect(!app.hasTurnInFlight(for: target), "no claim left behind")
+    }
+
     @Test("a target deleted after the send was decided gets nothing, and the request is closed")
     func deletedAfterDecisionIsRefused() async throws {
         let app = AppState(); app.conversations.removeAll()
@@ -593,5 +626,21 @@ struct PeerDeliveryTests {
                                                       to: target, envelope: testEnvelope(id: "cccc0499"))
         #expect(outcome == .refused("target deleted"))
         #expect(!app.conversations.contains { $0.id == target }, "nothing was created for it")
+    }
+}
+
+/// A canary that answers SAFE, running `onGenerate` first: a hook into the middle of a sanitise.
+private final class ArchivingCanary: AuxiliaryInferenceEngine, @unchecked Sendable {
+    private let onGenerate: @Sendable () async -> Void
+    private let lock = NSLock()
+    private var count = 0
+    var calls: Int { lock.withLock { count } }
+    init(onGenerate: @escaping @Sendable () async -> Void) { self.onGenerate = onGenerate }
+    func loadModel(config: AuxiliaryModelConfig) async throws {}
+    func unloadModel() async {}
+    func generate(prompt: String, jsonSchema: String?) async throws -> String {
+        lock.withLock { count += 1 }
+        await onGenerate()
+        return "SAFE"
     }
 }
