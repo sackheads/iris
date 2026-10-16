@@ -1,4 +1,4 @@
-import Atomics
+import CIrisSignals
 import Darwin
 import Foundation
 
@@ -20,36 +20,15 @@ enum CLISignals {
     static let stopping: [Int32] = [SIGINT, SIGTERM, SIGHUP]
     static let keepsInheritedIgnore: Set<Int32> = [SIGINT, SIGHUP]
 
-    /// Stopping signals delivered to this process, counted by the handler itself (#510). A source
-    /// hears a signal when it is posted, which can be before the kernel delivers it to a thread,
-    /// so the count `CLIStop` keeps can run ahead of this one.
-    static let deliveries = ManagedAtomic<Int>(0)
-    /// The delivery count at which SIGINT goes back to its default; 0 until exit-now asks.
-    static let interruptDefaultAt = ManagedAtomic<Int>(0)
-
-    /// The handler's whole body, so async-signal-safe: two lock-free atomics and a `sigaction`.
-    static func noteDelivery() {
-        let delivered = deliveries.wrappingIncrementThenLoad(ordering: .sequentiallyConsistent)
-        let at = interruptDefaultAt.load(ordering: .sequentiallyConsistent)
-        if at > 0, delivered >= at { restoreInterruptDefault() }
-    }
-
-    /// SIGINT goes to its default once the `count`th stopping signal has been delivered: at once
-    /// if it already has been, otherwise from that signal's own handler. Resetting as soon as the
-    /// source heard it let the very signal that asked for exit-now meet the default on delivery
-    /// and end the CLI before the deletes and the vacate (#510). Two signals posted before either
-    /// is delivered are delivered once, so the reset then waits for one more, which errs toward
+    /// SIGINT goes to its default once the `count`th stopping signal has been delivered (#510). A
+    /// source hears a signal when it is posted, which can be before the kernel delivers it to a
+    /// thread, so resetting as soon as the source heard it let the very signal that asked for
+    /// exit-now meet the default on delivery and end the CLI before the deletes and the vacate.
+    /// The count is kept by the handler, in C (`CIrisSignals`). Two signals posted before either is
+    /// delivered are delivered once, so the reset then waits for one more, which errs toward
     /// running the cleanup.
     static func resetInterrupt(onceDelivered count: Int) {
-        interruptDefaultAt.store(count, ordering: .sequentiallyConsistent)
-        if deliveries.load(ordering: .sequentiallyConsistent) >= count { restoreInterruptDefault() }
-    }
-
-    /// Only our own catch is reset: an inherited ignore (plan note 16) stays ignored.
-    private static func restoreInterruptDefault() {
-        var now = sigaction()
-        sigaction(SIGINT, nil, &now)
-        if unsafeBitCast(now.__sigaction_u, to: UInt.self) > 1 { _ = signal(SIGINT, SIG_DFL) }
+        iris_reset_interrupt_once_delivered(count)
     }
 
     final class Installation: @unchecked Sendable {
@@ -80,10 +59,6 @@ enum CLISignals {
         var installed: [Int32] = []
         var sources: [DispatchSourceSignal] = []
         var previous: [(Int32, sigaction)] = []
-        // Initialised here, never first inside the handler: a lazy global's first touch is not
-        // async-signal-safe.
-        _ = deliveries.load(ordering: .relaxed)
-        _ = interruptDefaultAt.load(ordering: .relaxed)
         for signal in signals {
             var old = sigaction()
             sigaction(signal, nil, &old)
@@ -95,7 +70,7 @@ enum CLISignals {
             source.setEventHandler { for _ in 0..<max(1, Int(source.data)) { onSignal(signal) } }
             source.resume()
             var action = sigaction()
-            action.__sigaction_u.__sa_handler = { _ in CLISignals.noteDelivery() }
+            action.__sigaction_u.__sa_handler = iris_stop_signal_handler
             action.sa_flags = SA_RESTART
             sigemptyset(&action.sa_mask)
             sigaction(signal, &action, nil)
