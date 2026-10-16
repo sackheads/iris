@@ -1780,7 +1780,7 @@ actor JobRunner {
     /// The failure reason a `mutating` fire with nowhere to run writes. Read back by `/jobs`.
     static let sandboxUnavailableReason = "sandbox unavailable"
     /// A granted fire whose source moved, or is no longer a directory (§0.8). Read back by `/jobs`.
-    static func grantSourceUnavailableReason(_ path: String) -> String { "grant source unavailable: \(path)" }
+    static func grantSourceUnavailableReason(_ path: String) -> String { JobGrant.sourceUnavailableReason(path) }
     /// A `network: false` fire whose host-only network could not be created (§0.7).
     static func isolatedNetworkUnavailableReason(_ detail: String) -> String { "isolated network unavailable: \(detail)" }
 

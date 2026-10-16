@@ -151,15 +151,7 @@ enum WatchRoot {
     }
 
     /// Why `canonical` may not be watched, or nil when it may. `breadthProblem`'s rule, worded for
-    /// a watch.
-    ///
-    /// - Parameters:
-    ///   - paths: where Iris's own directory is; injected so a test can refuse a temp root.
-    ///   - home: the user's home directory, injected for the same reason.
-    ///   - isVolume: whether a canonical path is a mount point; injected so a test can make a temp
-    ///     directory one without mounting anything. The default asks the file system. A throw is a
-    ///     root we cannot ask about, and a root we cannot ask about is not one we watch: it is
-    ///     refused as too broad rather than let through.
+    /// a watch; the parameters are `breadthProblem`'s.
     static func refusal(for canonical: String, paths: IrisPaths, home: String,
                         isVolume: (String) throws -> Bool = { try isMountPoint($0) },
                         identity: BuildIdentity = .current, release: IrisPaths = .release) -> String? {

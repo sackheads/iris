@@ -71,7 +71,9 @@ extension JobGrant {
                                    "~/.azure", "~/.cargo", "~/.m2", "~/.terraform.d", "~/.oci", "~/.gem", "~/.password-store",
                                    "~/Library/Keychains", "~/Library/Cookies", "~/Library/Application Support/com.apple.container",
                                    "~/Library/Group Containers", "~/Library/Containers"]
-    static let credentialStoreRefusal = "that directory holds credentials; copy the one key the job needs into a directory made for it."
+    static func credentialStoreRefusal(_ source: String) -> String {
+        "the mount source \(source) is or contains a credential store; copy the one key the job needs into a directory made for it."
+    }
 
     static func isCredentialStore(_ canonicalSource: String, home: String) -> Bool {
         let lowered = canonicalSource.lowercased()
@@ -124,7 +126,7 @@ extension JobGrant {
             case .protectedRelease: return .failure(ToolMessage(protectedRelease(source)))
             case nil: break
             }
-            if isCredentialStore(source, home: home) { return .failure(ToolMessage(credentialStoreRefusal)) }
+            if isCredentialStore(source, home: home) { return .failure(ToolMessage(credentialStoreRefusal(source))) }
             // An unnamed target is identity to the *stored* source — what "recorded as the directory
             // each path resolves to" promises — not to the spelling: `/private/tmp/x` would otherwise
             // store as `/tmp/x:/private/tmp/x`, and every command would see a path `write_file`
@@ -176,15 +178,18 @@ extension JobGrant {
     static func drift(_ grant: JobGrant, fileManager: FileManager = .default) -> String? {
         for mount in grant.mounts {
             guard IrisPaths.canonicalPath(mount.source) == mount.source else {
-                return JobRunner.grantSourceUnavailableReason(mount.source)
+                return sourceUnavailableReason(mount.source)
             }
             var isDirectory: ObjCBool = false
             guard fileManager.fileExists(atPath: mount.source, isDirectory: &isDirectory), isDirectory.boolValue else {
-                return JobRunner.grantSourceUnavailableReason(mount.source)
+                return sourceUnavailableReason(mount.source)
             }
         }
         return nil
     }
+
+    /// The run row's reason when `drift` finds a source changed since the grant was given.
+    static func sourceUnavailableReason(_ path: String) -> String { "grant source unavailable: \(path)" }
 }
 
 extension JobGrant {
@@ -227,8 +232,12 @@ extension JobGrant {
     /// outside, has no components to walk from the mount's root) or when any component is `..`
     /// (the walk refuses it again on its own; this is the earlier, cheaper no).
     func relativeComponents(of details: String, cwd: String?, under mount: ContainerMount) -> [String]? {
-        let spelled = IrisEngine.expandTilde(ToolExecutor.resolvePath(details, cwd: cwd))
-        let source = mount.source.hasSuffix("/") ? String(mount.source.dropLast()) : mount.source
+        relativeComponents(spelled: ToolExecutor.resolvePath(details, cwd: cwd), under: mount)
+    }
+
+    /// `relativeComponents` for a path `ToolExecutor.resolvePath` already resolved (it expands `~`).
+    private func relativeComponents(spelled: String, under mount: ContainerMount) -> [String]? {
+        let source = mount.source.count > 1 && mount.source.hasSuffix("/") ? String(mount.source.dropLast()) : mount.source
         guard spelled.lowercased() == source.lowercased() || spelled.lowercased().hasPrefix(source.lowercased() + "/") else { return nil }
         let components = spelled.dropFirst(source.count).split(separator: "/", omittingEmptySubsequences: true)
             .map(String.init).filter { $0 != "." }
@@ -240,10 +249,10 @@ extension JobGrant {
     /// spelled under the mount (`relativeComponents`), its real path is covered by the mount
     /// (`covering` — a link from inside the spelling to outside resolves outside), and the mode fits.
     func allowedMount(toolName: String, details: String, cwd: String?) -> ContainerMount? {
-        guard toolName == "write_file" || toolName == "read_file",
-              let real = IrisPaths.realPathForAllow(ToolExecutor.resolvePath(details, cwd: cwd)),
-              let mount = covering(real),
-              relativeComponents(of: details, cwd: cwd, under: mount) != nil else { return nil }
+        guard toolName == "write_file" || toolName == "read_file" else { return nil }
+        let spelled = ToolExecutor.resolvePath(details, cwd: cwd)
+        guard let real = IrisPaths.realPathForAllow(spelled), let mount = covering(real),
+              relativeComponents(spelled: spelled, under: mount) != nil else { return nil }
         if toolName == "write_file", mount.readOnly { return nil }
         return mount
     }
@@ -269,8 +278,8 @@ extension JobGrant {
         // A relative path with no working directory has nowhere to be placed from: `realPath` would
         // place it under the *process* cwd, and the card's text must not depend on where the
         // daemon was launched. The first mount is the honest answer — it is where the grant is.
-        let resolved = IrisEngine.expandTilde(ToolExecutor.resolvePath(details, cwd: cwd))
-        guard resolved.hasPrefix("/") else { return real.first?.mount.source ?? mounts.first?.source }
+        let resolved = ToolExecutor.resolvePath(details, cwd: cwd)
+        guard resolved.hasPrefix("/") else { return real[0].mount.source }
         let target = URL(fileURLWithPath: IrisPaths.realPath(resolved)).pathComponents
         func shared(_ path: String) -> Int {
             zip(URL(fileURLWithPath: path).pathComponents, target).prefix { $0 == $1 }.count
