@@ -31,7 +31,7 @@ Download the `.dmg` from [GitHub Releases](https://github.com/sackheads/iris/rel
 4. Ask it something.  Then try:
    - `/goal` plus something you actually want done, and look over the contract it drafts before you approve it
    - asking it to schedule a job (from Iris, your main conversation, it asks you to approve the job before it exists)
-   - `/search` across everything you've said in past conversations
+   - `/search` across everything said in your past conversations, Iris's side included
 
 Every slash command is in [docs/slash_commands.md](docs/slash_commands.md).
 

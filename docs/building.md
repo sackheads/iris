@@ -24,7 +24,7 @@ through Xcode's own manual signing instead, with a fixed Developer ID identity i
 A build from source — `swift run`, `scripts/run-dev.sh`, or the Xcode Debug scheme — is a **dev
 build**: it keeps its own conversations and memory under `~/.iris-dev`, not the installed app's
 `~/.iris`, uses its own `.dev`-suffixed Keychain services, and answers to
-`Cmd + Shift + Option + Space` instead of the hotkey below. Its settings are not in `~/.iris-dev`:
+`Cmd + Shift + Option + Space` instead of the installed app's [global hotkey](features.md#global-hotkey). Its settings are not in `~/.iris-dev`:
 every dev build (`swift run`, `scripts/run-dev.sh` and the Xcode Debug build) shares the
 `com.bnaylor.iris.dev` defaults domain, separate from the installed app's `com.bnaylor.iris`. Its
 first launch copies in the settings an older dev build left in the legacy `iris` domain, once.
