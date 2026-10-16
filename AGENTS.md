@@ -243,7 +243,8 @@ project.yml               # XcodeGen spec for the `Iris` app target; generated i
                            #   scripts/gen-xcodeproj.sh — the project is gitignored, never commit it
 
 Tests/irisTests/          # Swift Testing suite; one file per subsystem
-docs/                     # design specs, plans, reviews, roadmaps
+docs/                     # feature pages (features.md, jobs.md, …), install.md, building.md;
+                           #   design specs, plans, reviews, roadmaps
 ```
 
 ## Critical invariants — do not break
@@ -276,7 +277,7 @@ docs/                     # design specs, plans, reviews, roadmaps
 8. **Every chip in the composer's `VStack` must be height-bounded.** `ChatView` stacks the goal chips — `GoalContractPanel`, `LockedContractChip`, `CheckpointPauseChip`, `CompletionReportChip` — directly above the composer. An unbounded subview there can collapse the surrounding layout and blank the entire window the instant the chip appears; the app stays responsive, which makes it read as a state bug rather than a layout one. Wrap the chip in a `ScrollView` and cap it with `.frame(maxHeight:)` (320-340 is the established range). This matters most for chips whose height grows with the contract — anything embedding a `ForEach` over criteria or verdicts. Nothing enforces this at compile time, and it has escaped twice: `aa141d5` capped the three chips that existed then (#62), and `CheckpointPauseChip` was added later without a cap, reintroducing the same bug (#164).
 
 9. **A behaviour change must falsify its own documentation before it lands.** Describing the new thing is the easy half, and not the half that fails. The defects that actually ship are *existing* sentences the change made untrue — and they survive precisely because adding a new paragraph feels like compliance. Two places carry them, and the second matters more:
-   - **`README.md` and `docs/`** — a stale claim misleads a human, who can at least notice it is wrong. Feature detail lives in that feature's page under `docs/`, linked from the README; the README is the front-page pitch and changes only when the pitch does (#531). So the sentence a change made untrue is usually in a `docs/` page, and that is where to look.
+   - **`README.md` and `docs/`** — a stale claim misleads a human, who can at least notice it is wrong. Feature detail lives in that feature's page under `docs/`, linked from the README; the README is the front-page pitch and changes only when the pitch does (#531). So the sentence a change made untrue is usually in a `docs/` page, and that is where to look. The README has a budget: under about 800 words, and at most six "Why it's worth a look" bullets, so a new one replaces one rather than adding a seventh. Feature detail never goes in the README.
    - **Agent-facing strings** — `GoalContract.oracleText` (injected into *every* reprompt), the `description` fields in `ToolExecutor.getTools()` and the tool declarations in `iris.swift` / `SubagentManager.swift`, and the system prompts. A stale one steers the model wrong on every turn, silently, and no UI ever shows it.
 
    Slice D3 is the worked example: it made a cleanly-graded checkpoint advance without pausing, added a correct README bullet saying so — and left the neighbouring bullet still promising "pausing for your review", plus three agent-facing strings telling the model that a checkpoint always pauses. The README was fixed by a docs task; the model kept being lied to until a whole-branch review caught it.
@@ -314,7 +315,7 @@ docs/                     # design specs, plans, reviews, roadmaps
 - [ ] If you added or changed a tool parameter: `getTools()` schema and `execute()` handler are both updated
 - [ ] If you added a test that configures settings: it does not mutate `ConfigManager.shared` directly; uses a `ConfigManager(store:)` over its own suite, or an injectable parameter (Invariant 7; see Build and test)
 - [ ] If you added a view to the composer's `VStack` in `ChatView`: it is wrapped in a `ScrollView` and capped with `.frame(maxHeight:)` (Invariant 8)
-- [ ] If you changed user-facing or agent-visible behaviour: you searched for what it made **untrue** — in `README.md`, `docs/` and agent-facing strings (`oracleText`, tool `description` fields, system prompts) — and fixed what you found. Feature detail goes in its `docs/` page; `README.md` changes only when the front-page pitch does. Finding nothing is fine; not looking is not (Invariant 9)
+- [ ] If you changed user-facing or agent-visible behaviour: you searched for what it made **untrue** — in `README.md`, `docs/` and agent-facing strings (`oracleText`, tool `description` fields, system prompts) — and fixed what you found. Feature detail goes in its `docs/` page; `README.md` changes only when the front-page pitch does. README still within its budget; no duplicate feature sections. Finding nothing is fine; not looking is not (Invariant 9)
 - [ ] No large build artefacts committed (`.build/`, `*.o`, `*.onnx` model weights, etc.)
 - [ ] After the PR merges: its worktree and local branch are removed (see Worktrees, above)
 
@@ -328,6 +329,10 @@ docs/                     # design specs, plans, reviews, roadmaps
 ## Docs layout
 
 - **Feature pages:** `docs/<feature>.md`, or a heading in `docs/features.md` for a short one, linked from the README. Install and build detail is in `docs/install.md` and `docs/building.md`.
+  - One heading per feature, edited in place. Never append a second section for a feature that already has one.
+  - A section that outgrows about a screen (about 300 words) moves to its own `docs/<feature>.md` and leaves a one-line link behind.
+  - Every README `[Details]` link must keep resolving: rename or move a heading, and fix the links to it.
+  - `docs/features.md` does not meet these yet (MCP, Vibecop and file attachments each appear twice, from the word-for-word move out of the README); #534 is the cleanup.
 - **Design specs:** `docs/specs/YYYY-MM-DD-feature-name.md`
 - **Implementation plans:** `docs/plans/YYYY-MM-DD-feature-name.md` (superpowers plans go in `docs/superpowers/plans/`)
 - **Reviews:** `docs/reviews/YYYY-MM-DD-feature-name-review.md`
