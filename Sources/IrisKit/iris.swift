@@ -11,11 +11,6 @@ struct PeerReplyRef: Sendable {
     let firstLine: String
 }
 
-/// Everything `framePeerMessage` needs about a send beyond the message body itself (#469 §5, §6):
-/// the id this message was recorded under, the thread it belongs to, the causal hop depth that
-/// reached the target, whether the sender is waiting on an answer, and — for a reply — what it is
-/// answering. Built once the send is `.allowed` and the id is assigned; never constructed before
-/// that, so a refused send never has one (`newMessageId` is also never spent on a refusal).
 /// What `deliverPeerMessage` did with a peer message.
 enum PeerDeliveryOutcome: Equatable, Sendable {
     /// Handed to an idle target, whose turn runs in the background.
@@ -26,6 +21,11 @@ enum PeerDeliveryOutcome: Equatable, Sendable {
     case refused(String)
 }
 
+/// Everything `framePeerMessage` needs about a send beyond the message body itself (#469 §5, §6):
+/// the id this message was recorded under, the thread it belongs to, the causal hop depth that
+/// reached the target, whether the sender is waiting on an answer, and — for a reply — what it is
+/// answering. Built once the send is `.allowed` and the id is assigned; never constructed before
+/// that, so a refused send never has one (`newMessageId` is also never spent on a refusal).
 struct PeerEnvelope: Sendable {
     let msgId: String
     let contextId: String
@@ -688,10 +688,10 @@ actor IrisEngine {
     /// Delivers one peer message (#185 §5). Attribution is harness-supplied, from the sending
     /// conversation's id — a model-supplied "from" is never trusted and never reaches the label.
     ///
-    /// Unguarded: this is the delivery primitive, not the policy. Callers MUST check archived
-    /// (§5.1), self-send (§5.4), and the hop depth and rate limit (§6) before calling —
-    /// `deliverPeerMessage` itself will happily deliver into an archived target or let a session
-    /// message itself.
+    /// Callers MUST check archived (§5.1), self-send (§5.4), and the hop depth and rate limit (§6)
+    /// before calling. Of those, this re-checks only the target, after sanitising: one archived or
+    /// deleted since the send was decided is refused, never reopened (#499). It will still let a
+    /// session message itself.
     ///
     /// The busy decision and the turn it authorises are atomic (#240). They were not: this took
     /// two reads of `hasTurnInFlight`, and two concurrent sends to one idle target both passed
@@ -779,9 +779,6 @@ actor IrisEngine {
     /// did not get from the composer. So a peer message that happened to land behind a running
     /// turn reached the model and never reached the user, which is precisely the case where a
     /// person most wants to know another session steered this one (whole-branch review).
-    ///
-    /// One helper because both busy branches — the first check and the round-3 late re-check —
-    /// need identical treatment, and two copies of "append then enqueue" is how they drift.
     private func queuePeerArrival(_ safe: String, to targetId: UUID) async {
         let localState = state
         await MainActor.run {

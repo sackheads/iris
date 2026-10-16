@@ -884,7 +884,7 @@ class AppState {
         guard !hasTurnInFlight(for: conversationId) else { return false }
         // Side effect worth naming: going 0→1 also stamps `mainStartTimeByConversation`, so the
         // strip's elapsed time for a peer-delivered turn starts at the claim rather than at the
-        // turn. That is the unarchive hop and the handoff — microseconds — and the alternative is
+        // turn. That is the handoff — microseconds — and the alternative is
         // a second start-time concept for one case.
         beginEngineTurn(for: conversationId)
         return true
