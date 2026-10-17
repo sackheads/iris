@@ -71,9 +71,10 @@ jobs:
         run: scripts/check-warnings.sh
 
       - name: Tests
-        # Serial on purpose. The runner has 3 cores, so Swift's cooperative pool is 3 threads,
-        # and many suites run subprocesses, deadlines and kill ladders whose timing assumes the
-        # pool is not saturated by every other suite at once (AGENTS.md, invariant 4).
+        # Serial on purpose (#486). The runner has 3 cores, so Swift's cooperative pool is 3
+        # threads. Every suite passes alone in parallel mode, but the full suite in parallel
+        # saturates the pool and about 30 deadline suites (stops, kill ladders, timeouts) miss.
+        # No single suite is the hog. See AGENTS.md's CI paragraph for the next step if this slows.
         # `swift test` exits non-zero when either Swift Testing or XCTest fails; the check after
         # it also requires both summary lines, so a run that silently selected nothing fails.
         timeout-minutes: 30
