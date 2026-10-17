@@ -329,20 +329,48 @@ final class LEDDotNSView: AmbientLayerView {
         dot.add(back, forKey: "settle")
     }
 
+    /// How the dot is drawn, apart from its pulse. Under Reduce Motion an active LED stands still
+    /// (#561), and the pulse was all that told it from a ready one: both are the same green with the
+    /// same glow. So it holds a cue instead (#538): a brighter fill, the colour blended toward
+    /// white, and a stronger, fuller glow. With motion on, it is drawn exactly as before.
+    struct Look: Equatable {
+        var brighten: CGFloat
+        var glowRadius: CGFloat
+        var glowOpacity: Float
+
+        static func of(_ state: ModelLED.LEDState, reduceMotion: Bool) -> Look {
+            if reduceMotion && state == .active { return Look(brighten: 0.35, glowRadius: 7, glowOpacity: 1) }
+            return Look(brighten: 0, glowRadius: state.glowRadius, glowOpacity: state.glowRadius > 0 ? 0.7 : 0)
+        }
+    }
+
     /// The state's colours as this view's appearance resolves them: `Color.green` is dynamic, and a
     /// CGColor is not.
     private func applyColors() {
+        let look = Look.of(state, reduceMotion: reduceMotion.isOn)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            let color = NSColor(state.color).cgColor
+            var base = NSColor(state.color)
+            if look.brighten > 0, let rgb = base.usingColorSpace(.sRGB),
+               let lit = rgb.blended(withFraction: look.brighten, of: .white) {
+                base = lit
+            }
+            let color = base.cgColor
             dot.fillColor = color
             dot.strokeColor = color.copy(alpha: color.alpha * 0.3)
             dot.shadowColor = color
         }
-        dot.shadowOpacity = state.glowRadius > 0 ? 0.7 : 0
-        dot.shadowRadius = state.glowRadius
+        dot.shadowOpacity = look.glowOpacity
+        dot.shadowRadius = look.glowRadius
         CATransaction.commit()
+    }
+
+    /// Joining a window, or the Reduce Motion setting changing, starts the animations over; the
+    /// cue follows the setting with them.
+    override func startAnimating() {
+        super.startAnimating()
+        applyColors()
     }
 
     override func viewDidChangeEffectiveAppearance() {
