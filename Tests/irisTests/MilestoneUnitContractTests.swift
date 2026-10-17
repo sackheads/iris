@@ -23,7 +23,8 @@ struct MilestoneUnitContractTests {
     @Test("the unit's criteria are exactly the current milestone's")
     func criteriaComeFromTheLadder() throws {
         let unit = try #require(laddered().currentMilestoneUnitContract())
-        try #require(unit.criteria.count == 2)
+        try #require(unit.criteria.count >= 2)
+        #expect(unit.criteria.count == 2)
         #expect(unit.criteria.map(\.text) == ["parser handles nesting", "parser is tested"])
         #expect(unit.criteria[1].check == "swift test")
     }

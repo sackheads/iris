@@ -93,7 +93,8 @@ struct PerfSuiteFilesTests {
         // The card lands mid-turn only if turn 3 has a second round, so it asks for a command.
         #expect(scenario.turns[2].prompt.contains("shell command"))
         // The fake-lane script gives turn 3 its tool round too: 4 turns, 5 responses.
-        try #require(scenario.scriptedResponses.count == 5)
+        try #require(scenario.scriptedResponses.count >= 5)
+        #expect(scenario.scriptedResponses.count == 5)
         #expect(scenario.scriptedResponses[2].kind == .toolCalls)
         let store = try FactStoreManager(inMemory: true)
         for seed in try #require(scenario.seedFacts) { try store.addFact(content: seed) }

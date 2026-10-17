@@ -126,7 +126,8 @@ struct SubagentUnitContractTests {
         let contract = try #require(GoalContractParsing.unitContract(task: "add a widget", criteriaJSON: criteria))
 
         #expect(contract.objective == "add a widget")
-        try #require(contract.criteria.count == 2)
+        try #require(contract.criteria.count >= 2)
+        #expect(contract.criteria.count == 2)
         #expect(contract.criteria[0].kind == .executable)
         #expect(contract.criteria[0].check == "swift build")
         #expect(contract.criteria[1].kind == .qualitative)

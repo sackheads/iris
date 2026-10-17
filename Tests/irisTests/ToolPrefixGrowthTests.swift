@@ -36,7 +36,8 @@ import Foundation
                                   restrictToGoalComplete: true)                                   // soft stop
 
         let turns = client.requests.map { $0.tools?.first?.functionDeclarations ?? [] }
-        try #require(turns.count == 6)
+        try #require(turns.count >= 6)
+        #expect(turns.count == 6)
         for n in 1..<turns.count {
             let prev = turns[n - 1], next = turns[n]
             let nextByName = Dictionary(next.map { ($0.name, $0) }, uniquingKeysWith: { a, _ in a })

@@ -64,7 +64,8 @@ struct LoopStopEnforcementTests {
         await engine.processInput("You reached a stopping condition. Summarize and stop.",
                                   source: "System", conversationId: convId, restrictToGoalComplete: true)
         let requests = client.requests
-        try #require(requests.count == 2)
+        try #require(requests.count >= 2)
+        #expect(requests.count == 2)
         guard requests.count == 2 else { return }
         let before = Set(requests[0].tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? [])
         let during = Set(requests[1].tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? [])

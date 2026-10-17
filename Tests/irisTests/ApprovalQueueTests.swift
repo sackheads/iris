@@ -33,7 +33,8 @@ struct ApprovalQueueTests {
         await waitForQueue(1)
         let t2 = Task { await app.enqueueUserApproval(toolName: "run_command", details: "b", workspace: nil, conversationId: cid, origin: "Main agent") }
         await waitForQueue(2)
-        try #require(app.pendingApprovals.count == 2)
+        try #require(app.pendingApprovals.count >= 2)
+        #expect(app.pendingApprovals.count == 2)
         #expect(app.pendingApprovals.first?.details == "a", "the head must be the first one queued")
         app.resolveApproval(id: app.pendingApprovals[0].id, .deny)     // head (a) denied
         app.resolveApproval(id: app.pendingApprovals[0].id, .approve)  // next (b) approved
@@ -145,7 +146,8 @@ struct ApprovalQueueTests {
         for _ in 0..<40 where app.pendingApprovals.isEmpty {
             try? await Task.sleep(nanoseconds: 25_000_000)
         }
-        try #require(app.pendingApprovals.count == 1)
+        try #require(app.pendingApprovals.count >= 1)
+        #expect(app.pendingApprovals.count == 1)
         app.resolveApproval(id: app.pendingApprovals[0].id, .alwaysAllowGlobal)
         #expect(await globalResult == true, "the human's click still approves THIS call")
         #expect(!app.permissions.isAllowed(toolName: "schedule_job", details: "sweep", workspace: nil),
@@ -159,7 +161,8 @@ struct ApprovalQueueTests {
         for _ in 0..<40 where app.pendingApprovals.isEmpty {
             try? await Task.sleep(nanoseconds: 25_000_000)
         }
-        try #require(app.pendingApprovals.count == 1)
+        try #require(app.pendingApprovals.count >= 1)
+        #expect(app.pendingApprovals.count == 1)
         app.resolveApproval(id: app.pendingApprovals[0].id, .alwaysAllowProject)
         #expect(await projectResult == true, "the human's click still approves THIS call")
         #expect(!app.permissions.isAllowed(toolName: "schedule_job", details: "sweep", workspace: "/tmp/proj"),

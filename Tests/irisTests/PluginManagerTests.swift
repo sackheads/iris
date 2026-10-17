@@ -47,7 +47,8 @@ struct PluginManagerTests {
         await pm.loadAll()
 
         let plugins = await pm.plugins()
-        try #require(plugins.count == 1)
+        try #require(plugins.count >= 1)
+        #expect(plugins.count == 1)
         #expect(plugins[0].status == .ok)
 
         let configs = await pm.mcpConfigs()

@@ -587,7 +587,8 @@ struct GuardedFileCacheTests {
             }
         }
 
-        try #require(client.requests.count == 2)
+        try #require(client.requests.count >= 2)
+        #expect(client.requests.count == 2)
         #expect(systemText(client.requests[0]).contains(unique))
 
         // Deltas, not fixed totals: every turn also guards USER.md (`guardedUserProfileText`),
