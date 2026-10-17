@@ -288,8 +288,16 @@ struct ChatView: View {
                             scrollAfterUpdate(proxy)
                         }
                         .onChange(of: conv.messages.last?.content) { _, _ in
+                            #if DEBUG
+                            if DebugStreamProbe.noScroll { return }
+                            #endif
                             scrollAfterUpdate(proxy)
                         }
+                        #if DEBUG
+                        .onReceive(NotificationCenter.default.publisher(for: DebugStreamProbe.tick)) { _ in
+                            if !DebugStreamProbe.noScroll { scrollAfterUpdate(proxy) }
+                        }
+                        #endif
                         .onChange(of: state.isThinking(in: conv.id)) { _, isThinking in
                             if isThinking {
                                 DispatchQueue.main.async {
@@ -852,6 +860,14 @@ struct MessageView: View {
     /// event row to the whole conversation array and re-render them on unrelated mutations.
     var transcriptAvailable: Bool = false
 
+    private var displayedContent: String {
+        #if DEBUG
+        DebugStreamProbe.displayed(message)
+        #else
+        message.content
+        #endif
+    }
+
     var body: some View {
         HStack(alignment: .top) {
             if message.role == .user {
@@ -927,7 +943,7 @@ struct MessageView: View {
                     // cycles, Markdown without textSelection = 0, Markdown WITH textSelection = spam.
                     // Trade-off: no drag-to-select of partial text inside an agent bubble; whole-
                     // message copy still works via row selection + Cmd-C.
-                    Markdown(message.content)
+                    Markdown(displayedContent)
                         // Render fenced code blocks WITHOUT MarkdownUI's default horizontal
                         // ScrollView (Theme.basic wraps the label in ScrollView(.horizontal)).
                         // That scroll view swallows trackpad scroll when hovered (#30); wrapping

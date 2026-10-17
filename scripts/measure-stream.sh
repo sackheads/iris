@@ -1,8 +1,12 @@
 #!/bin/zsh
 # #541: idle chat-window CPU with a reply streaming in (DebugStreamProbe) vs the same window idle.
 # usage: measure-stream.sh <Iris Dev.app built from measure/541-probe> <outdir>
-# Needs: the GUI lease, the display awake. One Debug build; the arms differ only in
-# IRIS_STREAM_PROBE (idle | on). The probe makes and selects its own conversation,
+# Needs: the GUI lease, the display awake. One Debug build; the arms differ only in environment:
+# base (streaming as today), noscroll (IRIS_STREAM_NOSCROLL=1: no scroll per token), buffer
+# (IRIS_STREAM_BUFFER=1: the text streams into a side buffer only its row reads, not
+# AppState.conversations), both; 3 interleaved passes at 40 messages, then base and both at 200
+# (IRIS_STREAM_PROBE_MESSAGES=200). Each streaming arm prints the update rate it really ran at.
+# About 18 minutes. The probe makes and selects its own conversation,
 # "#541 stream probe" (fixed id; its title is re-set on every launch, which the window check below
 # relies on), the first time, and deletes probe conversations left by earlier probe builds.
 set -u
@@ -16,9 +20,13 @@ for w in CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as! 
 }
 SWIFT
 swiftc -O -o $out/winlist $out/winlist.swift || exit 1
-one() {   # <label> <idle|on> [sample]
-  local label=$1 mode=$2 dosample=${3:-}
-  open -g -n --env IRIS_STREAM_PROBE=$mode "$app" || return 1
+one() {   # <label> <idle|on> <sample|-> [KEY=VALUE env for the attribution arms...]
+  local label=$1 mode=$2 dosample=${3:-}; [[ $dosample == - ]] && dosample=
+  shift 3 2>/dev/null
+  local rate=$out/$label.rate; rm -f $rate
+  local envs=(--env IRIS_STREAM_PROBE=$mode --env IRIS_STREAM_RATE_FILE=$rate)
+  for kv in "$@"; do envs+=(--env $kv); done
+  open -g -n $envs "$app" || return 1
   sleep 15
   local pid=$(pgrep -f "$app/Contents/MacOS/" | head -1)
   [[ -z $pid ]] && { echo "$label: no pid"; return 1; }
@@ -28,8 +36,14 @@ one() {   # <label> <idle|on> [sample]
   local load=$(sysctl -n vm.loadavg | awk '{print $2}')
   top -pid $(pgrep -x WindowServer) -l 31 -s 1 -stats pid,cpu,command > $out/$label.ws.txt &
   local wspid=$!
+  local r0=$(cat $rate 2>/dev/null)
   top -pid $pid -l 31 -s 1 -stats pid,cpu,command > $out/$label.top.txt
   wait $wspid
+  local r1=$(cat $rate 2>/dev/null)
+  # Ticks per second over the measured window: a slow arm cannot pass for a cheap one.
+  if [[ $mode == on && -n $r0 && -n $r1 ]]; then
+    awk -v a="$r0" -v b="$r1" -v lab=$label 'BEGIN {split(a,x," "); split(b,y," "); if (y[2]>x[2]) printf "%-16s stream rate %.1f updates/s\n", lab, (y[1]-x[1])/(y[2]-x[2]); else print lab " stream rate: n/a"}'
+  fi
   local ws=$(awk '/^[0-9]+ +[0-9.]+/ {n++; if (n>1) {s+=$2; c++}} END {printf "%.1f", s/c}' $out/$label.ws.txt)
   awk -v lab=$label -v l=$load -v ws=$ws '/^[0-9]+ +[0-9.]+/ {n++; if (n>1) {s+=$2; c++}} END {printf "%-14s mean %5.1f%% over %d samples, WindowServer %s%%, load1 %s\n", lab, s/c, c, ws, l}' $out/$label.top.txt
   [[ -n $dosample ]] && sample $pid 10 -file $out/$label.sample.txt >/dev/null 2>&1
@@ -37,10 +51,18 @@ one() {   # <label> <idle|on> [sample]
   kill -0 $pid 2>/dev/null && { kill -TERM $pid; sleep 2; }
   return 0
 }
+# #541 attribution: four arms, interleaved, 40 messages; then base and both at 200 messages.
 for pass in 1 2 3; do
-  s=; [[ $pass == 1 ]] && s=sample
-  one idle-p$pass idle $s
-  one on-p$pass on sample
+  s=-; [[ $pass == 1 ]] && s=sample
+  one base-p$pass on $s
+  one noscroll-p$pass on $s IRIS_STREAM_NOSCROLL=1
+  one buffer-p$pass on $s IRIS_STREAM_BUFFER=1
+  one both-p$pass on $s IRIS_STREAM_NOSCROLL=1 IRIS_STREAM_BUFFER=1
+done
+for pass in 1 2 3; do
+  s=-; [[ $pass == 1 ]] && s=sample
+  one base200-p$pass on $s IRIS_STREAM_PROBE_MESSAGES=200
+  one both200-p$pass on $s IRIS_STREAM_PROBE_MESSAGES=200 IRIS_STREAM_NOSCROLL=1 IRIS_STREAM_BUFFER=1
 done
 echo; echo "RAW per-second %CPU (first sample dropped)"
 for f in $out/*.top.txt; do printf "%-14s " $(basename $f .top.txt); awk '/^[0-9]+ +[0-9.]+/ {n++; if (n>1) printf "%s ", $2} END {print ""}' $f; done
@@ -50,5 +72,5 @@ for f in $out/*.sample.txt; do
   echo "== $(basename $f .sample.txt)"
   for p in $pats; do printf "  %-58s %s\n" "$p" "$(grep -F -m1 -- "$p" $f | grep -oE '^[ +!:|]*[0-9]+' | grep -oE '[0-9]+$')"; done
 done
-echo; echo "HOT FRAMES: top of stack, first streaming sample (on-p1)"
-grep -A30 "Sort by top of stack" $out/on-p1.sample.txt | sed -E 's/\(in [^)]*\)//' | cut -c1-150
+echo; echo "HOT FRAMES: top of stack, first baseline sample (base-p1)"
+grep -A30 "Sort by top of stack" $out/base-p1.sample.txt | sed -E 's/\(in [^)]*\)//' | cut -c1-150
