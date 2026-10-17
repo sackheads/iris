@@ -154,10 +154,10 @@ struct ToolSurfaceTrimTests {
     @Test("rename_conversation is never declared on a rename-trigger turn in the pinned conversation")
     func renameNotDeclaredWhenPinned() async {
         let prompt = IrisEngine.renameTriggerPrefix + ": Evaluate the conversation history and use the `rename_conversation` tool to assign a short, descriptive title."
-        let unpinned = await toolNames(prompt: prompt)
+        let unpinned = await toolNames(prompt: prompt, source: IrisEngine.systemSource)
         #expect(unpinned.contains("rename_conversation"), "control: the declaration is normally offered on this trigger")
 
-        let pinned = await toolNames(prompt: prompt) { app, id in
+        let pinned = await toolNames(prompt: prompt, source: IrisEngine.systemSource) { app, id in
             guard let idx = app.conversations.firstIndex(where: { $0.id == id }) else { return }
             app.conversations[idx].isPinned = true
         }
@@ -282,10 +282,10 @@ struct ToolSurfaceTrimTests {
         })
 
         // rename_conversation needs the rename-trigger prefix on an unpinned conversation.
-        observed.formUnion(await toolNames(prompt: IrisEngine.renameTriggerPrefix + ": title it"))
+        observed.formUnion(await toolNames(prompt: IrisEngine.renameTriggerPrefix + ": title it", source: IrisEngine.systemSource))
 
         // propose_goal_contract needs the goal-draft trigger prefix.
-        observed.formUnion(await toolNames(prompt: IrisEngine.goalDraftTriggerPrefix + ": draft it"))
+        observed.formUnion(await toolNames(prompt: IrisEngine.goalDraftTriggerPrefix + ": draft it", source: IrisEngine.systemSource))
 
         // amend_goal_contract needs a locked contract with no ladder.
         observed.formUnion(await toolNames(prompt: "carry on") { app, id in
@@ -357,6 +357,21 @@ struct ToolSurfaceTrimTests {
         // loudly rather than letting the subset check above pass vacuously.
         #expect(inlineObserved == IrisEngine.inlineDeclaredToolNames,
                 "observed \(inlineObserved.sorted()), expected \(IrisEngine.inlineDeclaredToolNames.sorted())")
+    }
+
+    // MARK: trigger tools only on the harness's own trigger turn (#581)
+
+    @Test("a trigger prefix offers its tool only under the harness's source, never from a job, a peer or a typed line",
+          arguments: [(IrisEngine.renameTriggerPrefix, "rename_conversation"),
+                      (IrisEngine.goalDraftTriggerPrefix, "propose_goal_contract")])
+    func triggerNeedsTheHarnessSource(prefix: String, tool: String) async {
+        let prompt = prefix + ": do the thing"
+        #expect(await toolNames(prompt: prompt, source: IrisEngine.systemSource).contains(tool),
+                "control: the harness's own trigger still offers \(tool)")
+        for source in ["job:forged", IrisEngine.peerSource, "UI", "Scheduler"] {
+            #expect(!(await toolNames(prompt: prompt, source: source)).contains(tool),
+                    "\(tool) must not be offered to source \(source)")
+        }
     }
 
     // MARK: allDeclaredToolNames covers every declaration site (#558)
