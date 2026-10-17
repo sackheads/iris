@@ -402,6 +402,64 @@ struct JobProfileTests {
         #expect(background.messages.contains { $0.content.contains(IrisEngine.budgetStopMarker) })
     }
 
+    /// #550: a name that is no tool at all — invented (`search_files`) or mangled — is not a tool
+    /// the profile denies. It gets the executor's ordinary "Unknown tool" answer and the run goes on,
+    /// as it would in any other conversation; F6's "no other tool would do the same" does not hold
+    /// for something that does not exist.
+    @Test("a name that is no tool gets an error and the run goes on", arguments: ["search_files", "default_api.read_file"])
+    func unknownToolDoesNotEndTheRun(name: String) async throws {
+        let (store, app) = try state()
+        let client = FakeLLMClient(responses: [
+            callResponse(name, ["query": .string("anything")]),
+            textResponse("done without it."),
+        ])
+        let job = self.job(name: "invents-a-tool")
+        try await fire(job, client: client, store: store, state: app)
+
+        #expect(client.callCount == 2, "the model got its error and answered")
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(run.status == .completed, "\(run.status)")
+        #expect(run.blockedCall == nil)
+        let background = try #require(app.conversations.first { $0.isBackground })
+        let results = background.history.flatMap(\.parts).compactMap { $0.functionResponse?.response["result"]?.stringValue }
+        #expect(results.contains { $0.contains("Unknown tool \(name)") }, "\(results)")
+    }
+
+    @Test("an unsandboxed run_command still ends a read-only run as a profile refusal")
+    func deniedRunCommandStillStops() async throws {
+        let (store, app) = try state()
+        let client = FakeLLMClient(responses: [
+            callResponse("run_command", ["command": .string("echo hi")]),
+            textResponse("never reached"),
+        ])
+        let job = self.job(name: "runs-a-command")
+        try await fire(job, client: client, sandboxAvailable: false, store: store, state: app)
+
+        #expect(client.callCount == 1)
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(run.blockedCall?.toolName == "run_command")
+        #expect(run.blockedCall?.reason == .profile)
+    }
+
+    /// The safety half of #550: an unlisted name is never let through to the executor. A real tool
+    /// that `allDeclaredToolNames` forgot (today `submit_evaluation`) is refused without ending the
+    /// run, rather than run unattended.
+    @Test("a name the profile denies is never allowed: a known tool stops the run, any other name is refused and the run goes on")
+    func verdicts() {
+        #expect(IrisEngine.readOnlyVerdict("read_file", denied: false) == .allowed)
+        #expect(IrisEngine.readOnlyVerdict("write_file", denied: true) == .denied)
+        #expect(IrisEngine.readOnlyVerdict("srv___mutate", denied: true) == .denied)
+        #expect(IrisEngine.readOnlyVerdict("search_files", denied: true) == .unknownTool)
+        #expect(IrisEngine.readOnlyVerdict("submit_evaluation", denied: true) == .unknownTool,
+                "a real tool missing from allDeclaredToolNames is still refused, never allowed")
+    }
+
+    @Test("every tool a read-only run may call is a known tool, so the unknown-name check cannot let one skip the profile")
+    func allowlistIsKnown() {
+        #expect(JobProfile.readOnlyAllowed.subtracting(IrisEngine.allDeclaredToolNames).isEmpty,
+                "\(JobProfile.readOnlyAllowed.subtracting(IrisEngine.allDeclaredToolNames))")
+    }
+
     @Test("two denied calls in one batch: the transcript and the row name the same one")
     func oneStoryForABatchOfDenials() async throws {
         let (store, app) = try state()
