@@ -310,10 +310,13 @@ final class LEDDotNSView: AmbientLayerView {
         if state.isPulsing { startAnimating() } else { settle() }
     }
 
-    /// Back to full size from wherever the pulse was, as SwiftUI's default animation took it,
-    /// rather than a jump.
     private func settle() {
-        let scale = dot.presentation()?.value(forKeyPath: "transform.scale") as? Double ?? 1
+        settle(from: dot.presentation()?.value(forKeyPath: "transform.scale") as? Double ?? 1)
+    }
+
+    /// Back to full size from `scale`, where the pulse was, as SwiftUI's default animation took it,
+    /// rather than a jump. Internal so a test can give the scale a headless layer never has.
+    func settle(from scale: Double) {
         stopAnimating()
         guard scale != 1 else { return }
         let back = CABasicAnimation(keyPath: "transform.scale")

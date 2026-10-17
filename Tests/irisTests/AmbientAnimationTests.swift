@@ -152,4 +152,35 @@ struct AmbientAnimationTests {
         #expect(led.dot.shadowOpacity == (state.glowRadius > 0 ? 0.7 : 0))
         #expect(led.dot.shadowPath != nil)
     }
+
+    @Test("leaving active settles back to full size over 0.2 s from where the pulse was, and is a no-op at full size")
+    func ledSettles() throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        let led = LEDDotNSView(state: .active)
+        window.contentView?.addSubview(led)
+        led.settle(from: 1.2)
+        #expect(pulseKeys(led).isEmpty, "the pulse is gone")
+        let back = try #require(led.dot.animation(forKey: "settle") as? CABasicAnimation)
+        #expect(back.keyPath == "transform.scale")
+        #expect(back.fromValue as? Double == 1.2 && back.toValue as? Double == 1.0)
+        #expect(back.duration == 0.2 && !back.autoreverses && back.repeatCount == 0)
+        #expect(back.timingFunction == CAMediaTimingFunction(name: .easeInEaseOut))
+        led.state = .active
+        led.settle(from: 1)
+        #expect((led.dot.animationKeys() ?? []).isEmpty, "already at full size: nothing to settle")
+    }
+
+    // From iris-dev-2's review of #561, probed headless.
+    @Test("the LED re-resolves its colours when the appearance changes")
+    func ledFollowsAppearance() throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        window.appearance = NSAppearance(named: .aqua)
+        let led = LEDDotNSView(state: .ready)
+        window.contentView?.addSubview(led)
+        let light = try #require(led.dot.fillColor)
+        window.appearance = NSAppearance(named: .darkAqua)
+        #expect(try #require(led.dot.fillColor) != light)
+    }
 }
