@@ -91,4 +91,122 @@ struct AmbientAnimationTests {
         dots.removeFromSuperview()
         #expect(dots.animated.allSatisfy { ($0.layer.animationKeys() ?? []).isEmpty })
     }
+
+    // MARK: Model LED (#557)
+
+    @Test("the LED pulse keeps today's timing: 1.0 to 1.35 times its size, 0.6 s each way")
+    func ledTiming() {
+        #expect(LEDDotView.pulse == AmbientPulse(keyPath: "transform.scale", from: 1.0, to: 1.35, duration: 0.6,
+                                                 still: 1.0))
+    }
+
+    private func pulseKeys(_ view: LEDDotNSView) -> [String] {
+        (view.dot.animationKeys() ?? []).filter { $0 != "settle" }
+    }
+
+    @Test("on screen, the LED pulses exactly while it is active, however often the state flips")
+    func ledPulsesWhileActive() {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        let led = LEDDotNSView(state: .ready, reduceMotion: MotionSwitch(false).motion)
+        window.contentView?.addSubview(led)
+        let layers = led.layer?.sublayers?.count
+        #expect(pulseKeys(led).isEmpty, "ready does not pulse")
+        for _ in 0..<100 {
+            led.state = .active
+            #expect(pulseKeys(led) == ["transform.scale"])
+            led.state = .active
+            #expect(pulseKeys(led) == ["transform.scale"], "the same state again adds nothing")
+            led.state = .ready
+            #expect(pulseKeys(led).isEmpty)
+        }
+        led.state = .downloading
+        led.state = .error
+        #expect(pulseKeys(led).isEmpty, "only active pulses")
+        #expect(led.layer?.sublayers?.count == layers, "no layer added by pulsing")
+    }
+
+    @Test("an active LED starts pulsing when it joins a window and stops when it leaves")
+    func ledFollowsTheWindow() {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        let led = LEDDotNSView(state: .active, reduceMotion: MotionSwitch(false).motion)
+        #expect(pulseKeys(led).isEmpty, "nothing runs before it is shown")
+        window.contentView?.addSubview(led)
+        #expect(pulseKeys(led) == ["transform.scale"])
+        led.removeFromSuperview()
+        #expect((led.dot.animationKeys() ?? []).isEmpty, "nothing left running, settle included")
+        led.state = .ready
+        led.state = .active
+        #expect(pulseKeys(led).isEmpty, "a state change off screen starts nothing")
+    }
+
+    @Test("the dot keeps each state's look: its colour, a 0.3 ring, and a glow only when ready, active or downloading",
+          arguments: ModelLED.LEDState.allCases)
+    func ledLooks(state: ModelLED.LEDState) throws {
+        let led = LEDDotNSView(state: state, reduceMotion: MotionSwitch(false).motion)
+        let fill = try #require(led.dot.fillColor)
+        let ring = try #require(led.dot.strokeColor)
+        #expect(abs(ring.alpha - fill.alpha * 0.3) < 0.001)
+        #expect(led.dot.lineWidth == 1)
+        #expect(led.dot.shadowRadius == state.glowRadius)
+        #expect(led.dot.shadowOpacity == (state.glowRadius > 0 ? 0.7 : 0))
+        #expect(led.dot.shadowPath != nil)
+    }
+
+    @Test("leaving active settles back to full size over 0.2 s from where the pulse was, and is a no-op at full size")
+    func ledSettles() throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        let led = LEDDotNSView(state: .active, reduceMotion: MotionSwitch(false).motion)
+        window.contentView?.addSubview(led)
+        led.settle(from: 1.2)
+        #expect(pulseKeys(led).isEmpty, "the pulse is gone")
+        let back = try #require(led.dot.animation(forKey: "settle") as? CABasicAnimation)
+        #expect(back.keyPath == "transform.scale")
+        #expect(back.fromValue as? Double == 1.2 && back.toValue as? Double == 1.0)
+        #expect(back.duration == 0.2 && !back.autoreverses && back.repeatCount == 0)
+        #expect(back.timingFunction == CAMediaTimingFunction(name: .easeInEaseOut))
+        led.state = .active
+        led.settle(from: 1)
+        #expect((led.dot.animationKeys() ?? []).isEmpty, "already at full size: nothing to settle")
+    }
+
+    // From iris-dev-2's review of #561, probed headless.
+    @Test("the LED re-resolves its colours when the appearance changes")
+    func ledFollowsAppearance() throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        window.appearance = NSAppearance(named: .aqua)
+        let led = LEDDotNSView(state: .ready, reduceMotion: MotionSwitch(false).motion)
+        window.contentView?.addSubview(led)
+        let light = try #require(led.dot.fillColor)
+        window.appearance = NSAppearance(named: .darkAqua)
+        #expect(try #require(led.dot.fillColor) != light)
+    }
+
+    @Test("under Reduce Motion an active LED stands still at full size, and going ready snaps nothing (#538)")
+    func ledUnderReduceMotion() async {
+        let motion = MotionSwitch(true)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        let led = LEDDotNSView(state: .active, reduceMotion: motion.motion)
+        window.contentView?.addSubview(led)
+        func scale() -> Double { led.dot.value(forKeyPath: "transform.scale") as? Double ?? 0 }
+        #expect(led.dot.animationKeys() == nil, "no pulse")
+        #expect(abs(scale() - 1.0) < 0.0001, "full size, not the 1.35 peak")
+        led.state = .ready
+        #expect(led.dot.animationKeys() == nil, "no settle: there is nothing to settle from")
+        #expect(abs(scale() - 1.0) < 0.0001)
+        led.state = .active
+        #expect(led.dot.animationKeys() == nil)
+
+        motion.set(false)
+        for _ in 0..<200 where (led.dot.animationKeys() ?? []).isEmpty { try? await Task.sleep(nanoseconds: 10_000_000) }
+        #expect(led.dot.animationKeys() == ["transform.scale"], "Reduce Motion off: an active LED pulses again")
+        motion.set(true)
+        for _ in 0..<200 where !(led.dot.animationKeys() ?? []).isEmpty { try? await Task.sleep(nanoseconds: 10_000_000) }
+        #expect(led.dot.animationKeys() == nil, "and on again: still")
+        #expect(abs(scale() - 1.0) < 0.0001)
+    }
 }
