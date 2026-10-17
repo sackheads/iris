@@ -971,10 +971,19 @@ class AppState {
     /// a closed session; the close's mark refuses any that does.
     @discardableResult
     func stopDelegates(under conversationId: UUID, reason: String) -> [UUID] {
-        let descendants = delegationDescendants(of: conversationId)
+        var descendants = delegationDescendants(of: conversationId)
+        // Plus any the run's drain stopped (#563): one of those can exit, and unlink itself, before
+        // this walk, and is still its run's to close.
+        for id in drainedDelegates.removeValue(forKey: conversationId) ?? [] where !descendants.contains(id) {
+            descendants.append(id)
+        }
         for id in descendants { liveSubagentTasks[id]?.stop(reason) }
         return descendants
     }
+
+    /// What a run's drain stopped, kept for that run's close (#563). Taken before the stop, because
+    /// a stopped delegate unlinks as it exits and the close's walk would no longer find it.
+    @ObservationIgnored private var drainedDelegates: [UUID: [UUID]] = [:]
 
     /// Whether `ancestor` is `id` or delegated it, directly or through other delegates. Bounded
     /// like `delegationRoot`.
@@ -3676,11 +3685,18 @@ class AppState {
         // And nothing it spawned is charged to it any more (#313): a subagent that outlives its
         // run spends against nobody's row. Callers read `runUsage` before draining.
         backgroundRunDelegatedUsage.removeValue(forKey: conversationId)
-        activeRuns.removeValue(forKey: conversationId)
+        let wasActive = activeRuns.removeValue(forKey: conversationId) != nil
         // And nothing it spawned goes on working (#323). Cancelling the run's turn reaches a
         // subagent it is still waiting on through structured cancellation; this is the backstop
-        // for one that cancellation did not reach.
-        for (_, live) in liveSubagentTasks where live.run == conversationId {
+        // for one that cancellation did not reach. Its delegates are noted first, for the close;
+        // only on the run's own drain, since a turn back after its run closed drains again and
+        // nothing would ever take what that one noted.
+        let stopping = liveSubagentTasks.filter { $0.value.run == conversationId }
+        if wasActive {
+            let delegates = delegationDescendants(of: conversationId)
+            if !delegates.isEmpty { drainedDelegates[conversationId, default: []] += delegates }
+        }
+        for (_, live) in stopping {
             live.stop(SubagentManager.runEndedReason)
         }
         return denials
