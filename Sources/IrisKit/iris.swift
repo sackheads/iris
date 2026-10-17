@@ -3859,8 +3859,13 @@ actor IrisEngine {
             : false
         let readOnlyMCP = JobProfile.isMCPTool(functionCall.name)
             ? await MCPManager.shared.readOnlyToolNames() : []
-        guard JobProfile.readOnlyDenies(functionCall.name, sandboxedRunCommand: sandboxed,
-                                        readOnlyMCPTools: readOnlyMCP) else { return nil }
+        let denied = JobProfile.readOnlyDenies(functionCall.name, sandboxedRunCommand: sandboxed,
+                                               readOnlyMCPTools: readOnlyMCP)
+        switch Self.readOnlyVerdict(functionCall.name, denied: denied) {
+        case .allowed: return nil
+        case .unknownTool: return Self.unknownToolResult(functionCall.name)
+        case .denied: break
+        }
         let call = BlockedCall(toolName: functionCall.name, args: functionCall.args,
                                cwd: workspacePath, reason: .profile)
         let localState = state
@@ -3870,6 +3875,23 @@ actor IrisEngine {
         profileDeniedThisTurn.insert(conversationId)
         return Self.profileDeniedToolResult(tool: functionCall.name)
     }
+
+    enum ReadOnlyVerdict: Equatable { case allowed, unknownTool, denied }
+
+    /// What a read-only run does with a call. A name that is no tool Iris has (an invented
+    /// `search_files`, a mangled spelling) is still refused — the allowlist stays default-deny, so a
+    /// real tool missing from the hand-kept `allDeclaredToolNames` is refused too, never run — but
+    /// it does not end the run: the model gets the "Unknown tool" any conversation would, and can do
+    /// the work with a tool that exists. F6's "no other tool would do the same" is false for it
+    /// (#550). Only a denied real tool ends the run.
+    static func readOnlyVerdict(_ name: String, denied: Bool) -> ReadOnlyVerdict {
+        guard denied else { return .allowed }
+        return JobProfile.isMCPTool(name) || allDeclaredToolNames.contains(name) ? .denied : .unknownTool
+    }
+
+    /// The executor's own answer for a name it has no tool for, so a read-only run that is refused
+    /// one reads exactly what any conversation would (#550).
+    static func unknownToolResult(_ name: String) -> String { "Error: Unknown tool \(name)" }
 
     /// What the model is told when a human (or the fail-closed background branch standing in for
     /// one) refused a tool call.

@@ -306,7 +306,7 @@ struct ToolExecutor {
             if name.contains("___") {
                 return await MCPManager.shared.callTool(name: name, args: args)
             }
-            return "Error: Unknown tool \(name)"
+            return IrisEngine.unknownToolResult(name)
         }
     }
     

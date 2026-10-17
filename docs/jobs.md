@@ -183,13 +183,17 @@ instead.`), and a goal locked in a background conversation binds no workspace ei
 `mutating` run therefore has no mount; a granted one has exactly the grant's.
 
 Declaration is only the cheap half. A call that reaches the dispatcher anyway — a stale
-declaration, a forged name — is refused there too, recorded as the whole call (name, arguments,
+declaration, a real tool's name the run was never offered — is refused there too, recorded as the whole call (name, arguments,
 working directory) on the run's ledger row, and the run finishes `blocked on approval` with a card
 naming the tool. The tool result the refusal writes into the transcript says the job is
 read-only and that no other tool will do it either — but the turn ends on the first such refusal
 before another model round can read it, which is the order that matters: no approval is coming and
 nothing else would do the same thing, so a further round could only use up the run's token budget
 arriving at the same answer. The sentence is the record; the ending is the enforcement.
+A name that is no tool at all — an invented `search_files`, a mangled spelling — is refused too,
+before anything runs, but it does not end the run: it gets the same "Unknown tool" error it would in
+any conversation, nothing is recorded on the row, and the run goes on, since another round can do the
+work with a tool that exists (#550).
 
 A `mutating` job keeps the whole tool surface, and its *commands* always run in the
 `apple/container` VM — that is what pays for the wider surface. Commands, precisely: `run_command`
