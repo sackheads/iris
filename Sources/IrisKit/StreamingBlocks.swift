@@ -39,7 +39,9 @@ struct StreamingBlocks {
     mutating func update(_ text: String) -> String {
         var text = text
         return text.withUTF8 { bytes in
-            precondition(bytes.count >= length, "a stream only appends")
+            // A stream only appends. Anything else (never seen; a guard, not a path) starts over,
+            // rather than trap in a release build.
+            if bytes.count < length { self = StreamingBlocks() }
             #if DEBUG
             // A block, once cut, never changes: the most recent one is checked, bounded in cost.
             if let last = lastBlock {

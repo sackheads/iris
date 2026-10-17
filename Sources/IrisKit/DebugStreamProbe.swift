@@ -28,6 +28,9 @@ enum DebugStreamProbe {
     static let animationNil = env["IRIS_STREAM_ANIMNIL"] == "1"
     static let noAnchor = env["IRIS_STREAM_NOANCHOR"] == "1"
     static let thinking = env["IRIS_STREAM_THINKING"] == "1"
+    /// Fix D's arms (#541): the streaming row as completed blocks and a tail, and the reply's length.
+    static let split = env["IRIS_STREAM_SPLIT"] == "1"
+    static let maxChars = Int(env["IRIS_STREAM_MAXCHARS"] ?? "") ?? 4_000
     static let firstQuestion = "Question 1: what does the next step look like?"
 
     static func startIfAsked(state: AppState) {
@@ -77,7 +80,7 @@ enum DebugStreamProbe {
             let messageId = UUID()
             state.appendMessage(role: .agent, content: "", id: messageId, to: conversationId)
             var text = ""
-            while text.count < 4_000, !Task.isCancelled {
+            while text.count < maxChars, !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: MessageStreamer.flushIntervalMs * 1_000_000)
                 for _ in 0..<6 {
                     text += (text.isEmpty ? "" : " ") + words[cursor % words.count]

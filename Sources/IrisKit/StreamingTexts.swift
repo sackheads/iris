@@ -22,10 +22,29 @@ final class StreamingTexts {
     @Observable
     final class Box {
         let conversationId: UUID
-        var text: String
+        private(set) var text: String
+        /// The reply split for the row (#541 fix D): completed blocks, which change only at a cut,
+        /// and the live tail, which changes per token. See `StreamingBlocks`.
+        private(set) var blocks: [String] = []
+        private(set) var tail = ""
+        @ObservationIgnored private var splitter = StreamingBlocks()
+
         init(conversationId: UUID, text: String) {
             self.conversationId = conversationId
             self.text = text
+            split(text)
+        }
+
+        func update(_ text: String) {
+            self.text = text
+            split(text)
+        }
+
+        private func split(_ text: String) {
+            let newTail = splitter.update(text)
+            // Assigned only when they changed: a write to `blocks` re-renders the block list.
+            if splitter.blocks.count != blocks.count { blocks = splitter.blocks }
+            tail = newTail
         }
     }
 
@@ -63,7 +82,7 @@ final class StreamingTexts {
     /// written after that.
     func set(_ messageId: UUID, in conversationId: UUID, text: String) {
         if let box = boxes[messageId] {
-            box.text = text
+            box.update(text)
         } else {
             boxes[messageId] = Box(conversationId: conversationId, text: text)
         }

@@ -947,7 +947,15 @@ struct MessageView: View {
                     // Trade-off: no drag-to-select of partial text inside an agent bubble; whole-
                     // message copy still works via row selection + Cmd-C.
                     // Live: a reply still streaming reads its box (#541); only this row does.
-                    Markdown(state.liveContent(of: message))
+                    // Probe switch IRIS_STREAM_SPLIT (#541 fix D's measurement): while a reply streams, as
+                    // completed blocks and a live tail; otherwise one Markdown, as on main.
+                    Group {
+                        if DebugStreamProbe.split, let box = state.streaming.boxes[message.id] {
+                            StreamingMarkdown(box: box)
+                        } else {
+                            Markdown(state.liveContent(of: message))
+                        }
+                    }
                         .transaction { transaction in
                             #if DEBUG
                             if DebugStreamProbe.animationNil, state.streaming.boxes[message.id] != nil {
