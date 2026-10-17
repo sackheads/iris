@@ -58,6 +58,14 @@ struct StreamingBlocks {
                     return String(decoding: bytes, as: UTF8.self)
                 }
             }
+            // A definition counts as one before its line ends (`[d]: h` already resolves `[d]`
+            // above), so the line still arriving is checked too. Bounded: the check reads the
+            // label, not the line.
+            if fence == nil, scanPos < bytes.count, Self.isLinkDefinition(bytes[scanPos ..< bytes.count]) {
+                disabled = true
+                blocks = []
+                return String(decoding: bytes, as: UTF8.self)
+            }
             return String(decoding: bytes[blockStart...], as: UTF8.self)
         }
     }
