@@ -358,4 +358,30 @@ struct ToolSurfaceTrimTests {
         #expect(inlineObserved == IrisEngine.inlineDeclaredToolNames,
                 "observed \(inlineObserved.sorted()), expected \(IrisEngine.inlineDeclaredToolNames.sorted())")
     }
+
+    // MARK: allDeclaredToolNames covers every declaration site (#558)
+
+    /// A read-only job (#555) takes a name missing from `allDeclaredToolNames` for an unknown
+    /// tool: refused, but nothing recorded and the run goes on. So every site that declares a tool
+    /// must land in the set. The inline declarations are pinned to `inlineDeclaredToolNames` by
+    /// the test above; this one checks the set takes in that and every other site, with every gate on.
+    @Test("allDeclaredToolNames contains every name any site declares")
+    func allDeclaredToolNamesCoversEverySite() async {
+        let executor = await ToolExecutor.shared.getTools(workspaceToolsEnabled: true).map(\.name)
+        let sites: [(String, [String])] = [
+            ("ToolExecutor.getTools", executor),
+            ("jobToolDeclarations", IrisEngine.jobToolDeclarations(isPinned: true).map(\.name)),
+            ("EvaluatorToolset", EvaluatorToolset.restrict(await ToolExecutor.shared
+                .getTools(workspaceToolsEnabled: true)).map(\.name)),
+            ("SubagentManager", [SubagentManager.toolDeclaration().name,
+                                 SubagentManager.milestoneDelegationDeclaration().name]),
+            ("inline (buildRequest)", Array(IrisEngine.inlineDeclaredToolNames)),
+        ]
+        for (site, names) in sites {
+            #expect(!names.isEmpty, "precondition: \(site) declared nothing")
+            let missing = Set(names).subtracting(IrisEngine.allDeclaredToolNames)
+            #expect(missing.isEmpty, "declared by \(site) but missing from allDeclaredToolNames: \(missing.sorted())")
+        }
+        #expect(executor.contains("google_docs_get"), "precondition: the workspace gate was on")
+    }
 }

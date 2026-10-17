@@ -5197,8 +5197,8 @@ actor IrisEngine {
     /// scope for them) — but still real, callable tool names. Paired with those two sets below so
     /// `Briefing` can tell a real tool name a run was blocked calling from a model-chosen,
     /// well-formed but nonexistent one (#187 review). Spelled out rather than derived, same
-    /// tradeoff as `toolsThatWriteNoPath`: a tool added here later and forgotten just makes
-    /// `Briefing` under-report a real block as a plain "blocked", not a security hole.
+    /// tradeoff as `toolsThatWriteNoPath`; `ToolSurfaceTrimTests` drives a turn through each gate
+    /// to catch a name left out. What a missing name costs is on `allDeclaredToolNames`.
     nonisolated static let inlineDeclaredToolNames: Set<String> = [
         "set_workspace", "rename_conversation", "schedule_job", "save_fact", "manage_fact",
         "reflect", "goal_complete", "search_memory", "update_user_profile", "update_soul",
@@ -5207,10 +5207,15 @@ actor IrisEngine {
         "invoke_subagent", "delegate_milestone",
     ]
 
-    /// Every tool name the app can ever declare to any conversation, main-agent or subagent, any
-    /// gate state. Used only to recognise a real tool name — see `Briefing.section`.
+    /// Every tool name the app can ever declare to any conversation (main agent, subagent or
+    /// evaluator, any gate state), used to recognise a real tool name. A real tool missing from it
+    /// is not a security hole, since the call is still refused, but it is refused softly: `Briefing`
+    /// reports the block as a plain "blocked", and a read-only job (#555) takes it for an unknown
+    /// name, so nothing is recorded and the run goes on, where a listed tool's profile denial is
+    /// recorded and ends the run (#558). `ToolSurfaceTrimTests` pins it against every declaration site.
     nonisolated static let allDeclaredToolNames: Set<String> =
         pathWritingTools.union(toolsThatWriteNoPath).union(inlineDeclaredToolNames)
+            .union(EvaluatorToolset.allowedNames)
 
     /// What this call actually wrote, from its arguments and the sentence the tool returned.
     ///
