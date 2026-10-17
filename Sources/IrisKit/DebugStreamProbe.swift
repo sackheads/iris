@@ -54,7 +54,10 @@ enum DebugStreamProbe {
                 && conversation.messages.first(where: { $0.role == .user })?.content == firstQuestion
         }.map(\.id)
         for old in stale { state.deleteConversation(old) }
-        if !state.conversations.contains(where: { $0.id == id }) {
+        // Reseeded on every launch (#583's A/B): a run's streamed replies stay in the conversation,
+        // so without this each arm started longer than the last, and "40 messages" meant 728.
+        if state.conversations.contains(where: { $0.id == id }) { state.deleteConversation(id) }
+        do {
             _ = state.createNewConversation(id: id, title: title)
             for n in 0..<(messageCount / 2) {
                 state.appendMessage(role: .user, content: "Question \(n + 1): what does the next step look like?", to: id)
