@@ -337,7 +337,7 @@ enum JobsCommand: Equatable {
             var rows = ["| Job | Trigger | Policy | Next | Last | Weighted tokens today | Runs/h |",
                         "| --- | --- | --- | --- | --- | --- | --- |"]
             for job in jobs {
-                let last = lastRuns[job.id]?.status.text ?? "never"
+                let last = lastRuns[job.id]?.statusText ?? "never"
                 let figures = usage.perJob[job.id]
                 rows.append("| \(cell(job.name)) | \(cell(job.trigger.summary)) | "
                             + "\(cell(policySummary(for: job))) | "
@@ -534,7 +534,7 @@ enum JobsCommand: Equatable {
     /// itself, named by the same eight characters `/jobs ack` takes back.
     static func failureLine(_ run: JobRun) -> String {
         let shortId = run.id.uuidString.lowercased().prefix(8)
-        var line = "⚠️ \(run.jobName) · \(run.status.text) · \(shortId)"
+        var line = "⚠️ \(run.jobName) · \(run.statusText) · \(shortId)"
         if let detail = run.detailText { line += " · \(flatten(detail))" }
         return line
     }

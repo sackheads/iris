@@ -85,9 +85,12 @@ struct DailyDigest: BuiltinJob {
             // Quoted, as the briefing does: a bare name like `x: 9 completed` could pose as a count.
             var line = "\(Briefing.quoted(job?.name ?? group.first?.jobName ?? "")): "
                 + "\(count(.completed)) completed, \(count(.failed)) failed"
-            // Only when there are any, so the common line keeps its two counts.
-            let blocked = count(.blockedOnApproval), interrupted = count(.interrupted)
+            // Only when there are any, so the common line keeps its two counts. A read-only job's
+            // refusal is counted apart from a wait on approval: no approval lifts it (#553).
+            let refused = group.filter(\.refusedByProfile).count
+            let blocked = count(.blockedOnApproval) - refused, interrupted = count(.interrupted)
             if blocked > 0 { line += ", \(blocked) blocked" }
+            if refused > 0 { line += ", \(refused) \(JobRun.Status.refusedByProfileText)" }
             if interrupted > 0 { line += ", \(interrupted) interrupted" }
             if let job {
                 let budget = JobLimits.resolve(job: job, config: config).dailyTokens

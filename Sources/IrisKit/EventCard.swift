@@ -274,12 +274,12 @@ struct EventCard: Codable, Equatable, Sendable {
         return try? decoder().decode(EventCard.self, from: data)
     }
 
-    /// `completed` / `blocked on approval` / … — the status as a card shows it, with
-    /// `blockedOnApproval` spelled out rather than camel-cased. `/jobs` prints the same words for
-    /// the same run, which is why the spelling lives on the status itself.
-    var statusText: String { status.text }
+    /// `completed` / `blocked on approval` / `refused by profile` / … — the status as a card shows
+    /// it, with `blockedOnApproval` spelled out rather than camel-cased. `/jobs` prints the same
+    /// words for the same run, which is why the spelling lives on the status itself.
+    var statusText: String { status.text(blockedBy: blockedCall?.reason) }
 
-    /// `statusText` plus the tool an approval was wanted for, when there is one.
+    /// `statusText` plus the tool the run stopped on, when there is one.
     var statusDetail: String {
         guard status == .blockedOnApproval, let blockedTool, !blockedTool.isEmpty else { return statusText }
         return "\(statusText): \(blockedTool)"

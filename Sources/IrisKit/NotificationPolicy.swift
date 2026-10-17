@@ -116,9 +116,12 @@ enum NotificationPolicy {
             if card.status == .blockedOnApproval {
                 // Fixed words never sit inside a name's quotes.
                 let tool = card.blockedTool.map(quoted) ?? "a tool call"
+                // No approval lifts a read-only job's refusal (#553), so it does not say "blocked".
+                let refused = card.blockedCall?.reason == .profile
                 return PlannedNotification(
                     identifier: card.runId.uuidString, kind: .jobNeedsYou, title: jobTitle,
-                    body: "Job \(quoted(card.jobName)) is blocked on \(tool).",
+                    body: refused ? "Job \(quoted(card.jobName)) is read-only and was refused \(tool)."
+                                  : "Job \(quoted(card.jobName)) is blocked on \(tool).",
                     categoryId: Category.blockedCard, userInfo: info)
             }
             // Plan note 5: only a card that ended badly on a job a limit has stopped. A completed

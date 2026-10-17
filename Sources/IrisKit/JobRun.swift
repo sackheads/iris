@@ -130,6 +130,23 @@ extension JobRun.Status {
         case .interrupted: return "interrupted"
         }
     }
+
+    /// `text`, except that a run its read-only profile stopped reads `refused by profile` (#553).
+    /// The ledger stores that run as `blockedOnApproval`, which keeps it in front of a person, but
+    /// no approval can lift it: only recreating the job as mutating can. `reason` is the run's
+    /// `blockedCall?.reason`; a run with no call on it (or one that would not decode) keeps `text`.
+    func text(blockedBy reason: BlockedCall.Reason?) -> String {
+        self == .blockedOnApproval && reason == .profile ? Self.refusedByProfileText : text
+    }
+
+    static let refusedByProfileText = "refused by profile"
+}
+
+extension JobRun {
+    /// The status as a person reads it: `status.text`, or `refused by profile` (#553).
+    var statusText: String { status.text(blockedBy: blockedCall?.reason) }
+    /// Whether the read-only profile, not a missing approval, stopped this run.
+    var refusedByProfile: Bool { status == .blockedOnApproval && blockedCall?.reason == .profile }
 }
 
 /// The one tool call a background run failed closed on (#187 deliverable 3, spec §6): stored on the

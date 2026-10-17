@@ -376,7 +376,7 @@ enum RunJobCLI {
         var lines = [
             "job: \(row.jobName)",
             "run: \(row.id.uuidString.lowercased())",
-            "status: \(row.status.text)",
+            "status: \(row.statusText)",
             "trigger: \(row.triggerKind)",
             "started: \(iso(row.startedAt))",
             "duration: \(durationText(row))",
@@ -395,6 +395,9 @@ enum RunJobCLI {
             "jobId": row.jobId.uuidString,
             "runId": row.id.uuidString,
             "status": row.status.rawValue,
+            // Why a blocked run stopped (#553): `profile` is a read-only job's refusal, which no
+            // approval lifts, where `approval` waits on a person. Null on any other run.
+            "blockedReason": row.blockedCall?.reason.rawValue ?? NSNull(),
             "triggerKind": row.triggerKind,
             "startedAt": iso(row.startedAt),
             "finishedAt": row.finishedAt.map { iso($0) } ?? NSNull(),

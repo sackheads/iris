@@ -9,6 +9,8 @@ struct LedgerAttention: Equatable, Sendable {
         let jobId: UUID
         let jobName: String
         let tool: String?
+        /// A read-only job's refusal rather than a wait on approval (#553).
+        var refusedByProfile = false
     }
 
     struct Paused: Equatable, Sendable {
@@ -39,7 +41,7 @@ struct LedgerAttention: Equatable, Sendable {
             switch run.status {
             case .blockedOnApproval:
                 out.blocked.append(Blocked(runId: run.id, jobId: run.jobId, jobName: run.jobName,
-                                           tool: run.blockedTool))
+                                           tool: run.blockedTool, refusedByProfile: run.refusedByProfile))
             case .failed:
                 out.failedCount += 1
             case .running, .completed, .interrupted:
