@@ -92,6 +92,9 @@ actor JobRunner {
     /// without touching `SandboxSessionManager.shared` (invariant 7); `sandboxSessions` instead
     /// keeps the real close and only swaps the manager.
     private let endSandboxSession: @Sendable (UUID) async -> Void
+    /// Test seam: runs as a run's close is about to walk its delegates, so a test can let a
+    /// delegate the drain stopped exit first (#563). Nil in production.
+    private let beforeDelegateWalk: (@Sendable (UUID) async -> Void)?
     /// Makes sure the host-only network a `network: false` grant runs on exists (§0.7), answering
     /// the failure detail or nil. Injected so a test can answer without a runtime; the default
     /// asks the real `CLIContainerRuntime`. Call sites use `checkIsolatedNetwork()`, which wraps
@@ -157,7 +160,9 @@ actor JobRunner {
          approvedCallExecutor: (@Sendable (BlockedCall, UUID) async -> String)? = nil,
          watchdogSlice: TimeInterval = JobRunner.defaultWatchdogSlice,
          deadlineClock: @escaping @Sendable () -> Date = Date.init,
-         stop: RunStop? = nil) {
+         stop: RunStop? = nil,
+         beforeDelegateWalk: (@Sendable (UUID) async -> Void)? = nil) {
+        self.beforeDelegateWalk = beforeDelegateWalk
         self.state = state
         self.engine = engine
         self.ledger = ledger
@@ -1935,6 +1940,7 @@ actor JobRunner {
         // subagent and evaluator under the run, grandchildren included, stopped first so none is
         // left mid-turn against a closed session.
         var delegates: [UUID] = []
+        await beforeDelegateWalk?(conversationId)
         if let state {
             delegates = await MainActor.run {
                 state.stopDelegates(under: conversationId, reason: SubagentManager.runEndedReason)

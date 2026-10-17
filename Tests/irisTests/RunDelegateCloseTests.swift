@@ -13,7 +13,8 @@ struct RunDelegateCloseTests {
 
     /// PARENT (no subagent role) parks until cancelled. A subagent role parks too, but ignores
     /// its cancellation — noting that it arrived — until the test releases it: the turn that
-    /// outlives its stop, and the one whose engine task keeps the subagent registered and linked.
+    /// outlives its stop. Its engine task does not wait for it: a cancelled turn returns without
+    /// the model call, so a stopped subagent can unregister, and unlink, while this call is parked.
     final class StubbornClient: LLMClientProtocol, @unchecked Sendable {
         private let lock = NSLock()
         private var entered: [String: Int] = [:]
@@ -94,8 +95,12 @@ struct RunDelegateCloseTests {
 
     private func containerName(_ id: UUID) -> String { "\(SandboxSessionManager.namePrefix)\(id.uuidString.lowercased())" }
 
-    @Test("a closing run closes the sessions of its subagent and grandchild, stops their turns, and lets none start a container")
-    func runCloseClosesDescendants() async throws {
+    /// `delegatesExitFirst`: the run's drain stops its subagents before the close walks the tree,
+    /// and one that exits in between unlinks itself. The seam holds the walk until both have, the
+    /// order that lost about 1 in 40 runs (#563).
+    @Test("a closing run closes the sessions of its subagent and grandchild, stops their turns, and lets none start a container",
+          arguments: [false, true])
+    func runCloseClosesDescendants(delegatesExitFirst: Bool) async throws {
         let client = StubbornClient()
         let store = try ConversationStore.inMemory()
         let state = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
@@ -115,7 +120,12 @@ struct RunDelegateCloseTests {
         // app's runner closes through the shared one.
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, sandboxSessions: sessions,
                                ensureIsolatedNetwork: { nil }, config: config, activity: RecordingActivity(),
-                               sandboxAvailable: { true }, watchdogSlice: 0.01, deadlineClock: clock.now)
+                               sandboxAvailable: { true }, watchdogSlice: 0.01, deadlineClock: clock.now,
+                               beforeDelegateWalk: { run in
+                                   guard delegatesExitFirst else { return }
+                                   let exited = await self.eventually { state.liveSubagents(ofRun: run).isEmpty }
+                                   #expect(exited, "precondition: the drained subagents exited before the walk")
+                               })
 
         let fire = Task { _ = await runner.fire(job: job, origin: .schedule) }
         #expect(await eventually { client.parked("PARENT") == 1 })
@@ -165,6 +175,33 @@ struct RunDelegateCloseTests {
         client.release()
         #expect(await child.value.status == .cancelled)
         #expect(await grandchild.value.status == .cancelled)
+    }
+
+    @Test("the close still gets a delegate the drain stopped after it unlinks, once, and a drain after the close notes nothing")
+    func drainedDelegatesReachTheClose() throws {
+        let state = AppState(store: try ConversationStore.inMemory(), tier2Provisioning: .provisioned,
+                             tier3Provisioning: .provisioned)
+        let run = state.createNewConversation(isBackground: true, select: false)
+        state.registerRun(run, budget: TurnBudget(maxTokens: 100, deadline: Date().addingTimeInterval(600)),
+                          sink: DelegatedSpendTests.RecordingSink())
+        func live(_ id: UUID) {
+            state.linkBackgroundDescendant(id, of: run)
+            state.registerLiveSubagent(id, parent: run, background: true, stop: { _ in })
+        }
+        let sub = UUID()
+        live(sub)
+        _ = state.takeBackgroundDenials(for: run)   // the run's drain stops it
+        state.unregisterLiveSubagent(sub)            // and it exits, unlinking, before the close
+        #expect(state.delegationDescendants(of: run).isEmpty, "precondition: the walk alone would miss it")
+        #expect(state.stopDelegates(under: run, reason: "closed") == [sub])
+        #expect(state.stopDelegates(under: run, reason: "closed").isEmpty, "taken once")
+
+        // A turn back after its run closed drains again: nothing is noted for a close that is over.
+        let late = UUID()
+        live(late)
+        _ = state.takeBackgroundDenials(for: run)
+        state.unregisterLiveSubagent(late)
+        #expect(state.stopDelegates(under: run, reason: "closed").isEmpty)
     }
 
     @Test("deleting a conversation stops its delegates, denies their queued asks and closes their sessions")
