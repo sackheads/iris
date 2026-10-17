@@ -708,9 +708,24 @@ struct CLIContainerRuntime: ContainerRuntime {
     /// it the leader of — runs the command as `bash -c` always ran it, and passes its status on.
     /// Not `exec`, so the note can be removed on the way out. If `/tmp` is not writable the command
     /// runs all the same; only the kill on timeout is lost.
+    ///
+    /// A wrapper that starts after the ladder's last kill fired would find no killer left to come
+    /// (#572), so it checks the cancel marker and runs nothing if a killer has been. The note is
+    /// written FIRST and the marker read after, the reverse of the killer, which writes the marker
+    /// and then reads the note. With both writes ahead of both reads, at least one side sees the
+    /// other: the killer finds the note, or the wrapper finds the marker. Checking first and noting
+    /// after would let a wrapper check, find nothing, and note after the last kill: the old hole.
     static func recordingWrapper(_ pidFile: String) -> String {
-        "printf %s \"$$\" > \(pidFile) 2>/dev/null; bash -c \"$1\"; s=$?; rm -f \(pidFile); exit $s"
+        let marker = cancelMarker(pidFile)
+        return "printf %s \"$$\" > \(pidFile) 2>/dev/null; "
+            + "if [ -e \(marker) ]; then rm -f \(pidFile) \(marker); exit 143; fi; "
+            + "bash -c \"$1\"; s=$?; rm -f \(pidFile) \(marker); exit $s"
     }
+
+    /// The call's cancel marker (#572): written by a killer, checked by the wrapper. Beside the
+    /// note and keyed by the same per-call token, so no other call, in a recycled session
+    /// container too, can ever read it.
+    static func cancelMarker(_ pidFile: String) -> String { pidFile + ".cancel" }
 
     /// SIGTERM to the recorded group, a grace, then SIGKILL. A group that already finished removed
     /// its note, so there is nothing to signal.
@@ -720,8 +735,15 @@ struct CLIContainerRuntime: ContainerRuntime {
     /// note still there, the second would signal a group the first had already ended, and in a
     /// shared session container that id may by then be somebody else's (#377). Only the killer
     /// that took the note signals it.
+    ///
+    /// The cancel marker goes down first, before the note is read (#572; see `recordingWrapper`
+    /// for why that order). The killer that takes the note removes it again, since that wrapper is
+    /// past its check. One that finds no note leaves it, for a wrapper still to come; a call whose
+    /// wrapper never starts leaves an empty file, keyed to that call alone, in the container's /tmp.
     static func groupKiller(_ pidFile: String) -> String {
-        "[ -s \(pidFile) ] || exit 0; p=$(cat \(pidFile)); rm -f \(pidFile); [ -n \"$p\" ] || exit 0; "
+        let marker = cancelMarker(pidFile)
+        return ": > \(marker) 2>/dev/null; "
+            + "[ -s \(pidFile) ] || exit 0; p=$(cat \(pidFile)); rm -f \(pidFile) \(marker); [ -n \"$p\" ] || exit 0; "
             + "kill -TERM -- -\"$p\" 2>/dev/null; "
             + "sleep \(Int(CLIProcessRunner.killGraceSeconds)); kill -KILL -- -\"$p\" 2>/dev/null; exit 0"
     }
