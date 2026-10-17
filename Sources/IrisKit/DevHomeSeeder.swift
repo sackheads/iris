@@ -266,6 +266,19 @@ enum DevHomeSeeder {
         }
     }
 
+    /// What a successful seed prints. The `.dev` Keychain items it made trust only this binary,
+    /// so Iris Dev.app asks once to read them; the line says how to answer, because an app quit
+    /// before the answer reached the item asks again at every launch (#578).
+    static func successLine(_ report: Report, displayRoot: String) -> String {
+        var line = "seeded \(displayRoot) from ~/.iris (\(report.keychainServicesCopied) Keychain services)"
+        if report.keychainServicesCopied > 0 {
+            line += ". Iris Dev.app will ask once for your login password to read them (the prompt names "
+                + "\(KeychainManager.legacyService)\(BuildIdentity.dev.keychainServiceSuffix)): keep the app open and choose "
+                + "Always Allow. Deny, or quitting before you answer, means it asks again at the next launch."
+        }
+        return line
+    }
+
     static func runCLI() -> Int32 {
         let result: Result<Report, Error>
         do {
@@ -278,7 +291,7 @@ enum DevHomeSeeder {
         }
         switch result {
         case .success(let report):
-            print("seeded \(IrisPaths.standard.displayRoot) from ~/.iris (\(report.keychainServicesCopied) Keychain services)")
+            print(successLine(report, displayRoot: IrisPaths.standard.displayRoot))
         case .failure(let error):
             if case Failure.sourceMissing = error {
                 print("iris --seed-dev-home: \(error)")

@@ -36,6 +36,12 @@ they do not fire in both apps. Any dev launch creates `~/.iris-dev`, so a first 
 `scripts/run-dev.sh` leaves a home that is never seeded (`run-dev.sh` says so when it sees one). To
 reseed, quit the dev build and run `rm -rf ~/.iris-dev && scripts/run-dev.sh`.
 
+The seeded Keychain items trust only the binary that made them, the bare `iris` that `run-dev.sh`
+runs, so the first launch of Iris Dev.app asks once for your login password, naming
+`com.iris.secrets.dev`. Keep the app open and choose **Always Allow**: that adds the app to the
+item's access list for good, rebuilds included. **Deny**, or quitting the app before you answer,
+means it asks again at the next launch. The seeder prints the same reminder (#578).
+
 To build a real `.app` bundle from the command line instead of Xcode, run
 `scripts/build-app.sh Debug` (needs `brew install xcodegen` and the Metal Toolchain). Either way,
 building the app needs the team's Developer ID Application certificate in your keychain —

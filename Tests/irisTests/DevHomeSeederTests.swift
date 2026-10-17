@@ -360,4 +360,19 @@ struct DevHomeSeederTests {
         try Data().write(to: dst.seedMarker)
         #expect(DevHomeSeeder.unseededCopyWarning(standard: dst, release: src) == nil)
     }
+
+    /// #578: the seeded `.dev` items trust only the bare `iris`, so Iris Dev.app asks once. The
+    /// success line says what that prompt names and how to answer it; a quit app asks again.
+    @Test("the success line tells how to answer Iris Dev.app's one Keychain prompt, only when items were copied")
+    func successLineNamesThePrompt() {
+        let line = DevHomeSeeder.successLine(DevHomeSeeder.Report(keychainServicesCopied: 2), displayRoot: "~/.iris-dev")
+        #expect(line.hasPrefix("seeded ~/.iris-dev from ~/.iris (2 Keychain services)"))
+        #expect(line.contains("com.iris.secrets.dev"), "the service the prompt names")
+        #expect(line.contains("Always Allow"))
+        #expect(line.contains("keep the app open"))
+        #expect(line.contains("asks again at the next launch"))
+
+        let none = DevHomeSeeder.successLine(DevHomeSeeder.Report(keychainServicesCopied: 0), displayRoot: "~/.iris-dev")
+        #expect(none == "seeded ~/.iris-dev from ~/.iris (0 Keychain services)", "no prompt to explain")
+    }
 }
