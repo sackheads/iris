@@ -25,7 +25,47 @@ struct WaitingView: View {
         }
         .padding(24)
         .frame(minWidth: 360, minHeight: 160)
+        .background(WaitingWindowMarker())
     }
+}
+
+/// The windows showing `WaitingView` right now, which is what the waiting notice's raise needs
+/// to know (#520). Recorded by the view itself rather than guessed from a window's traits: any
+/// main-capable window used to count, so a state-restored Diagnostics window took the raise and
+/// the notice never showed.
+@MainActor
+enum WaitingWindows {
+    private static let windows = NSHashTable<NSWindow>.weakObjects()
+    /// Told each time a window starts showing `WaitingView`. A cold start's notice can run before
+    /// SwiftUI has put `WaitingView` in its window, so the panel goes up first and the window
+    /// appears beside it; the app wires this to put the panel away (#520). Unconditionally, unlike
+    /// a raise, which checks the window is visible: SwiftUI puts the view in its window before it
+    /// orders the window in, and a gated window that gets a `WaitingView` is always then shown.
+    static var onJoin: (@MainActor (NSWindow) -> Void)?
+    static func contains(_ window: NSWindow) -> Bool { windows.contains(window) }
+    fileprivate static func add(_ window: NSWindow) {
+        windows.add(window)
+        onJoin?(window)
+    }
+    /// Once the gate opens, `WaitingView` leaves the window and it stops counting.
+    fileprivate static func remove(_ window: NSWindow) { windows.remove(window) }
+}
+
+/// Puts its window in `WaitingWindows` while it is in one. Internal for tests.
+final class WaitingWindowMarkerView: NSView {
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        if let window { WaitingWindows.remove(window) }
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let window { WaitingWindows.add(window) }
+    }
+}
+
+private struct WaitingWindowMarker: NSViewRepresentable {
+    func makeNSView(context: Context) -> WaitingWindowMarkerView { WaitingWindowMarkerView() }
+    func updateNSView(_ view: WaitingWindowMarkerView, context: Context) {}
 }
 
 /// A scene's content, or the waiting view until the store is open. `content` is built only in
