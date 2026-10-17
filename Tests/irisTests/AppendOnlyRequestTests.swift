@@ -88,6 +88,7 @@ struct AppendOnlyRequestTests {
         let sent = try h.sentSignatures()
         #expect(sent == [[], ["sig-1"], ["sig-1", "sig-2"], ["sig-1", "sig-2", "sig-3"]])
         #expect(!sent.joined().contains("sig-0"), "the earlier turn's reply never sends its block")
+        try #require(h.client.requests.count > 1, "the turn made \(h.client.requests.count) requests")
         #expect(try ThinkingFixtures.bodyText(h.client.requests[1]).contains(#"{"query": "Seattle 1"}"#))
         ThinkingFixtures.expectFrontDroppedWindows(sent, produced: Self.produced)
         try expectPrefixChain(h)
@@ -152,6 +153,7 @@ struct AppendOnlyRequestTests {
     func uiDeletion() async throws {
         let h = try await run("delete", roundStart: { edit in
             { round in if round == 1 { await edit.remove(at: 0) } } })
+        try #require(h.client.requests.count > 2, "the turn made \(h.client.requests.count) requests")
         #expect(h.client.requests[2].contents.count == h.client.requests[1].contents.count + 1,
                 "precondition: request three lost one message and gained two")
         let sent = try h.sentSignatures()
@@ -171,6 +173,7 @@ struct AppendOnlyRequestTests {
     func preCompressPrependSendsNoOldBlocks() async throws {
         let prepend = #"sed '1s/^\[/[{"role":"user","parts":[{"text":"s1"}]},{"role":"model","parts":[{"text":"s2"}]},/'"#
         let h = try await run("prepend", hooks: ["PreCompress": { _ in prepend }])
+        try #require(h.client.requests.count > 0, "the turn made \(h.client.requests.count) requests")
         #expect(try ThinkingFixtures.signatures(ThinkingFixtures.body(h.client.requests[0])).isEmpty)
         #expect(h.client.requests[0].contents.count == 5, "precondition: the hook's list reached round one")
     }
@@ -180,6 +183,7 @@ struct AppendOnlyRequestTests {
         let h = try await run("beforemodel-once", hooks: ["BeforeModel": { dir in
             ThinkingFixtures.onCall(2, sed: "s/Tell me about Seattle/TELL me about Seattle/", counter: dir.appendingPathComponent("n")) }])
         let sent = try h.sentSignatures()
+        try #require(h.client.requests.count > 2, "the turn made \(h.client.requests.count) requests")
         #expect(try ThinkingFixtures.bodyText(h.client.requests[1]).contains("TELL me about Seattle"),
                 "precondition: request two is the hook's output")
         #expect(try !ThinkingFixtures.bodyText(h.client.requests[2]).contains("TELL me"),
@@ -195,6 +199,7 @@ struct AppendOnlyRequestTests {
         let h = try await run("beforemodel-arg", hooks: ["BeforeModel": { dir in
             ThinkingFixtures.onCall(3, sed: #"s/"query":"Seattle 2"/"query":"Seattle TWO"/"#,
                                     counter: dir.appendingPathComponent("n")) }])
+        try #require(h.client.requests.count > 2, "the turn made \(h.client.requests.count) requests")
         let text = try ThinkingFixtures.bodyText(h.client.requests[2])
         #expect(text.contains(#""input":{"query":"Seattle TWO"}"#), "the hook's edit goes out")
         #expect(!text.contains(#"{"query": "Seattle 2"}"#), "reply two's stored bytes stay out")
@@ -209,6 +214,7 @@ struct AppendOnlyRequestTests {
     func beforeModelDropsBlocks() async throws {
         let h = try await run("beforemodel-strip", hooks: ["BeforeModel": { dir in
             ThinkingFixtures.onCall(2, sed: Self.stripBlocksExpr, counter: dir.appendingPathComponent("n")) }])
+        try #require(h.client.requests.count > 1, "the turn made \(h.client.requests.count) requests")
         #expect(h.client.requests[1].contents.allSatisfy { $0.anthropicBlocks == nil },
                 "precondition: request two is the hook's blockless output")
         let sent = try h.sentSignatures()
@@ -225,6 +231,7 @@ struct AppendOnlyRequestTests {
     func beforeModelSystemOnce() async throws {
         let h = try await run("system-once", hooks: ["BeforeModel": { dir in
             ThinkingFixtures.onCall(3, sed: Self.systemExpr, counter: dir.appendingPathComponent("n")) }])
+        try #require(h.client.requests.count > 3, "the turn made \(h.client.requests.count) requests")
         #expect(try ThinkingFixtures.bodyText(h.client.requests[2]).contains("HOOKED "), "precondition: request three's system is the hook's")
         #expect(try !ThinkingFixtures.bodyText(h.client.requests[3]).contains("HOOKED "), "precondition: request four's is not")
         let sent = try h.sentSignatures()
@@ -236,6 +243,7 @@ struct AppendOnlyRequestTests {
     func beforeModelToolsOnce() async throws {
         let h = try await run("tools-once", hooks: ["BeforeModel": { dir in
             ThinkingFixtures.onCall(3, sed: Self.toolsExpr, counter: dir.appendingPathComponent("n")) }])
+        try #require(h.client.requests.count > 3, "the turn made \(h.client.requests.count) requests")
         #expect(try ThinkingFixtures.bodyText(h.client.requests[2]).contains("hook_added"), "precondition: request three's tools are the hook's")
         #expect(try !ThinkingFixtures.bodyText(h.client.requests[3]).contains("hook_added"))
         #expect(try h.sentSignatures() == [[], ["sig-1"], [], []])
@@ -278,6 +286,7 @@ struct AppendOnlyRequestTests {
         // the config default rather than touching `ConfigManager.shared`).
         let h = try await run("setting-off", replayThinking: false)
         #expect(h.history.filter { $0.anthropicBlocks != nil }.count == 5, "precondition: sig-0 to sig-4 are stored")
+        try #require(h.client.requests.count > 1, "the turn made \(h.client.requests.count) requests")
         #expect(h.client.requests[1].contents.allSatisfy { $0.anthropicBlocks == nil },
                 "round 2 sends no block while the setting is off")
         #expect(h.client.requests.allSatisfy { $0.contents.allSatisfy { $0.anthropicBlocks == nil } },
@@ -288,6 +297,7 @@ struct AppendOnlyRequestTests {
     func settingOffWithEditSendsNoBlocks() async throws {
         let h = try await run("setting-off-edit", replayThinking: false, roundStart: { edit in
             { round in if round == 1 { await edit.replaceText(of: 0, with: "earlier question, edited") } } })
+        try #require(h.client.requests.count > 2, "the turn made \(h.client.requests.count) requests")
         #expect(h.client.requests[2].contents.first?.parts.first?.text == "earlier question, edited",
                 "precondition: the edit reached request three")
         #expect(h.client.requests.allSatisfy { $0.contents.allSatisfy { $0.anthropicBlocks == nil } })
@@ -297,6 +307,7 @@ struct AppendOnlyRequestTests {
     func otherProviderWithEdit() async throws {
         let h = try await run("other-edit", provider: LLMProvider.gemini.rawValue, roundStart: { edit in
             { round in if round == 1 { await edit.replaceText(of: 0, with: "earlier question, edited") } } })
+        try #require(h.client.requests.count > 2, "the turn made \(h.client.requests.count) requests")
         #expect(h.client.requests[2].contents.first?.parts.first?.text == "earlier question, edited",
                 "precondition: the edit reached request three")
         #expect(h.client.requests.allSatisfy { $0.contents.allSatisfy { $0.anthropicBlocks == nil } })
