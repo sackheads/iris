@@ -75,6 +75,24 @@ struct ContainerPrefixTests {
         #expect(Set(rt.removedNames) == Set([mine] + legacy))
     }
 
+    /// #522: the legacy names are the release app's launch to sweep, never a `--run-job`'s, which
+    /// fires on a schedule and could take a pre-#506 dev build's live session.
+    @Test("the release app's launch sweep takes the old names; a --run-job's never does (#522)")
+    func runJobNeverSweepsLegacy() async {
+        let mine = "\(own)\(uuid())"
+        let legacy = "iris-\(uuid())"
+
+        let launch = MockRuntime()
+        launch.existing = [mine, legacy]
+        await mgr(launch).reapOrphans(build: .release)
+        #expect(Set(launch.removedNames) == [mine, legacy])
+
+        let runJob = MockRuntime()
+        runJob.existing = [mine, legacy]
+        await mgr(runJob).runJobSweep()
+        #expect(runJob.removedNames == [mine], "a --run-job leaves the old shared names alone")
+    }
+
     @Test("only the release build sweeps the old names")
     func legacyIsReleaseOnly() {
         #expect(SandboxSessionManager.sweepsLegacyNames(.release))

@@ -139,7 +139,9 @@ enum RunJobCLI {
         }
         // #492: the lock is held, so every container with this home's prefix that this process
         // did not make was left by one that has ended. Swept beside the turn, not before it: a
-        // wedged `container delete` would otherwise hold the job for its whole timeout.
+        // wedged `container delete` would otherwise hold the job for its whole timeout. It also
+        // runs when admission then refuses the fire (the breaker, a budget): harmless, since the
+        // lock is held either way and the sweep takes only this home's leftovers (#522).
         startSweep?()
         let code = await fire(job: job, store: store, client: client, runner: injectedRunner,
                               protectionEnabled: protectionEnabled, json: invocation.json, stop: stop,

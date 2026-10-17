@@ -75,13 +75,24 @@ enum StoreLock {
         let me = getpid()
         let line = Payload.encode(Holder(pid: me, kind: kind, job: job))
         // This process already holds it (a lock is never released, decision 2): the claim is
-        // already won. Re-advertised, so a vacated payload names this process again.
-        if let fd = descriptors.withLock({ $0[path] }) {
-            if isStillAtPath(fd, path) { return readvertise(fd, line, path, syscalls) }
+        // already won. Re-advertised, so a vacated payload names this process again. The lookup
+        // and every use of the descriptor happen under the table's lock (#522): since #494 a
+        // re-claim closes a replaced file's descriptor, and a number read here and used after the
+        // lock was let go could by then name a different file.
+        enum Held { case readvertised(Claim), replaced(Int32), none }
+        let held: Held = descriptors.withLock { table in
+            guard let fd = table[path] else { return .none }
+            if isStillAtPath(fd, path) { return .readvertised(readvertise(fd, line, path, syscalls)) }
             // Replaced by rename since (#494): the hold is on an orphan and protects nothing, so
             // let it go and claim the file that is there now, like any first claim.
-            descriptors.withLock { $0[path] = nil }
-            release(fd)
+            table[path] = nil
+            return .replaced(fd)
+        }
+        switch held {
+        case .readvertised(let result): return result
+        // Out of the table first, so no `vacate` or re-claim can reach the number once it closes.
+        case .replaced(let fd): release(fd)
+        case .none: break
         }
         let directory = url.deletingLastPathComponent()
         do {
@@ -206,11 +217,16 @@ enum StoreLock {
 
     /// Empties this process's payload on a clean exit. The lock stays held until the process
     /// ends. A no-op for a path this process does not hold: a refused or waiting process must
-    /// never erase the holder's payload.
-    static func vacate(at url: URL) {
+    /// never erase the holder's payload. Truncated under the table's lock (#522), so a re-claim
+    /// cannot close this descriptor, and its number cannot be reused, between the lookup and the
+    /// `ftruncate`. `beforeTruncate` is a test seam at exactly that point.
+    static func vacate(at url: URL, beforeTruncate: @Sendable () -> Void = {}) {
         let path = key(url)
-        guard let fd = descriptors.withLock({ $0[path] }) else { return }
-        _ = ftruncate(fd, 0)
+        descriptors.withLock { table in
+            guard let fd = table[path] else { return }
+            beforeTruncate()
+            _ = ftruncate(fd, 0)
+        }
     }
 
     static func descriptor(for url: URL) -> Int32? {

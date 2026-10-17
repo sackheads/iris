@@ -110,8 +110,9 @@ enum PerfCLI {
     ///
     /// The lock is `StoreLock`'s, as kind `perf`: a live holder is refused rather than raced, and
     /// a crashed one's lock is gone with it. It is held for this process's life (#463 decision 2),
-    /// so a second claim here gets `.acquired` from `StoreLock.claim`, which reuses this process's
-    /// hold (plan note 4) instead of conflicting with it.
+    /// so a second claim here reuses this process's hold (plan note 4) and gets `.acquired`, unless
+    /// the lock file was replaced since: then it claims the file now at the path like a first
+    /// claim, and can get `.held` or `.failed` (#494, #522).
     static func claimScratchWorkspace(base: URL = FileManager.default.temporaryDirectory) throws -> URL {
         let url = scratchWorkspaceURL(base: base)
         let lockURL = scratchLockURL(base: base)
