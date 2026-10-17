@@ -66,8 +66,8 @@ struct AmbientAnimationTests {
 
     @Test("shown and hidden 100 times, the dots and the glow leave no animation and no extra layer")
     func lifecycleLeavesNothing() {
-        let dots = TypingDotsNSView()
-        let glow = WelcomeGlowNSView()
+        let dots = TypingDotsNSView(reduceMotion: MotionSwitch(false).motion)
+        let glow = WelcomeGlowNSView(reduceMotion: MotionSwitch(false).motion)
         for view in [dots, glow] as [AmbientLayerView] {
             let layers = view.layer?.sublayers?.count
             for _ in 0..<100 {
@@ -85,7 +85,7 @@ struct AmbientAnimationTests {
     func windowDrivesTheAnimations() {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
                               styleMask: [.borderless], backing: .buffered, defer: true)
-        let dots = TypingDotsNSView()
+        let dots = TypingDotsNSView(reduceMotion: MotionSwitch(false).motion)
         window.contentView?.addSubview(dots)
         #expect(dots.animated.allSatisfy { ($0.layer.animationKeys() ?? []).count == 2 })
         dots.removeFromSuperview()
