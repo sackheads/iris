@@ -14,6 +14,8 @@ enum GrantedFileError: Error, Equatable {
     case missing(component: String)
     case stagingExists(String)
     case io(call: String, errno: Int32)
+    /// The call was cancelled before the rename that would have committed it (#532).
+    case cancelled
 
     /// Who is walking: a granted job run (#282), the goal grader reading its approved workspace
     /// (#339), or any other approved by-path call, walked from `/` along its decided real path
@@ -40,6 +42,7 @@ enum GrantedFileError: Error, Equatable {
         case .missing(let component): return "no such file or directory: `\(component)`"
         case .stagingExists(let name): return "a staging file `\(name)` already exists; try again"
         case .io(let call, let code): return "\(call) failed: \(String(cString: strerror(code)))"
+        case .cancelled: return "cancelled; the file was not changed"
         }
     }
 
@@ -119,7 +122,7 @@ struct GrantedFileAccess: Sendable {
         return text
     }
 
-    func write(relative: [String], content: String) throws {
+    func write(relative: [String], content: String, shouldCommit: () -> Bool = { true }) throws {
         guard let name = relative.last else { throw GrantedFileError.emptyPath }
         try Self.validate(relative)
         let rootFD = try openRoot()
@@ -157,6 +160,9 @@ struct GrantedFileAccess: Sendable {
             written += n
         }
         guard fsync(fd) == 0 else { throw GrantedFileError.io(call: "fsync", errno: errno) }
+        // The commit gate (#532): a call cancelled while its bytes were being written commits
+        // nothing, and the staging file goes with the `defer` above.
+        guard shouldCommit() else { throw GrantedFileError.cancelled }
         guard renameat(dirFD, staging, dirFD, name) == 0 else { throw GrantedFileError.io(call: "renameat", errno: errno) }
         renamed = true
     }

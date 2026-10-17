@@ -652,7 +652,7 @@ struct ToolExecutor {
 
     private func readFile(_ path: String, cwd: String? = nil) async -> String {
         let expandedPath = Self.resolvePath(path, cwd: cwd)
-        return await Task.detached {
+        return await OffPool.run(cancelled: Self.readCancelled) { _ in
             // A directory gets its listing (#337). `O_NONBLOCK` so a FIFO is not opened blocking
             // here; it fails `O_DIRECTORY` and falls through to the read, as before.
             let dirFD = open(expandedPath, O_RDONLY | O_DIRECTORY | O_NONBLOCK | O_CLOEXEC)
@@ -667,7 +667,7 @@ struct ToolExecutor {
             } catch {
                 return "Error reading file: \(error.localizedDescription)"
             }
-        }.value
+        }
     }
 
     /// `paths` is read only to decide whether this write lands on a skill's own `SKILL.md`
@@ -675,15 +675,18 @@ struct ToolExecutor {
     /// (anywhere else) it changes nothing.
     private func writeFile(_ path: String, content: String, cwd: String? = nil, paths: IrisPaths = .default) async -> String {
         let expandedPath = Self.resolvePath(path, cwd: cwd)
-        let targetedSkillFolder = Self.skillFileTarget(expandedPath, paths: paths)
-        let result = await Task.detached {
+        // The skill-folder check stats and lists directories too, so it goes off the pool with the write.
+        let (result, targetedSkillFolder) = await OffPool.run(cancelled: (Self.writeCancelled, String?.none)) { cancel in
+            let folder = Self.skillFileTarget(expandedPath, paths: paths)
             do {
-                try content.write(toFile: expandedPath, atomically: true, encoding: .utf8)
-                return "Successfully wrote to \(expandedPath)"
+                try StagedFileWrite.write(content, to: expandedPath, shouldCommit: { !cancel.isCancelled })
+                return ("Successfully wrote to \(expandedPath)", folder)
+            } catch is CancellationError {
+                return ("Error writing file: cancelled; the file was not changed", folder)
             } catch {
-                return "Error writing file: \(error.localizedDescription)"
+                return ("Error writing file: \(error.localizedDescription)", folder)
             }
-        }.value
+        }
         return await afterSkillFileWrite(result, targetedSkillFolder: targetedSkillFolder, content: content)
     }
 
@@ -774,34 +777,35 @@ struct ToolExecutor {
 
     /// A granted run's read (#282 §0.13): the same walk the write takes, from the covering mount's root.
     func readFile(grantRoot: String, relative: [String]) async -> String {
-        await Task.detached {
+        await OffPool.run(cancelled: Self.readCancelled) { _ in
             do { return try GrantedFileAccess(root: grantRoot).read(relative: relative) }
             catch let error as GrantedFileError { return "Error reading file: \(error.message)" }
             catch { return "Error reading file: \(error.localizedDescription)" }
-        }.value
+        }
     }
 
     /// A grader's pre-approved read in its approved workspace (#339): the granted-run walk, from
     /// the approved root.
     func readFile(approvedWorkspace root: String, relative: [String]) async -> String {
-        await Task.detached {
+        await OffPool.run(cancelled: Self.readCancelled) { _ in
             do { return try GrantedFileAccess(root: root).read(relative: relative) }
             catch let error as GrantedFileError { return "Error reading file: \(error.message(for: .approvedWorkspace))" }
             catch { return "Error reading file: \(error.localizedDescription)" }
-        }.value
+        }
     }
 
     /// A granted run's write (#282 §0.13). The success sentence is the one `IrisEngine.writtenPaths`
     /// reads, so the self-write filter is fed exactly as for a Foundation write.
     func writeFile(grantRoot: String, relative: [String], content: String) async -> String {
         let path = ([grantRoot] + relative).joined(separator: "/")
-        return await Task.detached {
+        return await OffPool.run(cancelled: Self.writeCancelled) { cancel in
             do {
-                try GrantedFileAccess(root: grantRoot).write(relative: relative, content: content)
+                try GrantedFileAccess(root: grantRoot).write(relative: relative, content: content,
+                                                            shouldCommit: { !cancel.isCancelled })
                 return "Successfully wrote to \(path)"
             } catch let error as GrantedFileError { return "Error writing file: \(error.message)" }
             catch { return "Error writing file: \(error.localizedDescription)" }
-        }.value
+        }
     }
 
     /// The components the walk descends for a granted file-tool call, or nil. `path` is the
@@ -843,11 +847,11 @@ struct ToolExecutor {
         guard let relative = Self.decidedComponents(decided) else {
             return "Error reading file: the path is not the one that was approved; nothing was done"
         }
-        return await Task.detached {
+        return await OffPool.run(cancelled: Self.readCancelled) { _ in
             do { return try GrantedFileAccess(root: "/").read(relative: relative) }
             catch let error as GrantedFileError { return "Error reading file: \(error.message(for: .approvedPath))" }
             catch { return "Error reading file: \(error.localizedDescription)" }
-        }.value
+        }
     }
 
     /// An approved write, the same walk (#256): staged in the final directory's descriptor and
@@ -857,16 +861,23 @@ struct ToolExecutor {
         guard let relative = Self.decidedComponents(decided) else {
             return "Error writing file: the path is not the one that was approved; nothing was done"
         }
-        let targetedSkillFolder = Self.skillFileTarget(decided, paths: paths)
-        let result = await Task.detached {
+        let (result, targetedSkillFolder) = await OffPool.run(cancelled: (Self.writeCancelled, String?.none)) { cancel in
+            let folder = Self.skillFileTarget(decided, paths: paths)
             do {
-                try GrantedFileAccess(root: "/").write(relative: relative, content: content)
-                return "Successfully wrote to \(decided)"
-            } catch let error as GrantedFileError { return "Error writing file: \(error.message(for: .approvedPath))" }
-            catch { return "Error writing file: \(error.localizedDescription)" }
-        }.value
+                try GrantedFileAccess(root: "/").write(relative: relative, content: content,
+                                                      shouldCommit: { !cancel.isCancelled })
+                return ("Successfully wrote to \(decided)", folder)
+            } catch let error as GrantedFileError { return ("Error writing file: \(error.message(for: .approvedPath))", folder) }
+            catch { return ("Error writing file: \(error.localizedDescription)", folder) }
+        }
         return await afterSkillFileWrite(result, targetedSkillFolder: targetedSkillFolder, content: content)
     }
+
+    /// What a cancelled file-tool call answers (#532): never empty content, never a claim of a write.
+    static let readCancelled = "Error reading file: cancelled"
+    /// The caller returns at once, so it cannot know whether the write had already passed its
+    /// commit gate; the write itself never renames once it sees the cancel.
+    static let writeCancelled = "Error writing file: cancelled; the file was not changed unless the write was already committing"
 
     static func nulPathRefusal(_ tool: String) -> String {
         "Error: `\(tool)` was given a path containing a NUL character, which cannot name a file; nothing was done."
