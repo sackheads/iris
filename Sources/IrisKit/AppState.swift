@@ -4500,6 +4500,32 @@ class AppState {
         Task { await engine.start() }
     }
 
+    /// `/jobs enable` and `/jobs disable` (#590): the `enabled` flag through the ledger, by the
+    /// same exact-name lookup as `pause` and `resume`.
+    private func setJobEnabled(named name: String, _ enabling: Bool, ledger: JobLedger, to convId: UUID) {
+        do {
+            guard let job = try ledger.job(named: name) else {
+                emitCommandOutput("No job named '\(name)'.", format: .markdown, to: convId)
+                return
+            }
+            guard job.enabled != enabling else {
+                emitCommandOutput("**\(job.name)** is already \(enabling ? "enabled" : "disabled").",
+                                  format: .markdown, to: convId)
+                return
+            }
+            var updated = job
+            updated.enabled = enabling
+            if enabling { updated.nextFireAt = JobScheduler.nextFire(for: job.trigger, after: Date()) }
+            try ledger.setEnabled(jobId: job.id, enabled: enabling, nextFireAt: updated.nextFireAt)
+            refreshLedgerAttention()
+            emitCommandOutput(enabling ? JobsCommand.enabledText(updated, now: Date()) : JobsCommand.disabledText(updated),
+                              format: .markdown, to: convId)
+        } catch {
+            emitCommandOutput("Could not \(enabling ? "enable" : "disable") that job: \(error).",
+                              format: .markdown, to: convId)
+        }
+    }
+
     private func handleJobsCommand(_ trimmed: String, convId: UUID) {
         let ledger = store.ledger
         switch JobsCommand.parse(trimmed) {
@@ -4569,6 +4595,12 @@ class AppState {
             } catch {
                 emitCommandOutput("Could not resume that job: \(error).", format: .markdown, to: convId)
             }
+
+        case .enable(let name):
+            setJobEnabled(named: name, true, ledger: ledger, to: convId)
+
+        case .disable(let name):
+            setJobEnabled(named: name, false, ledger: ledger, to: convId)
 
         case .run(let name):
             do {

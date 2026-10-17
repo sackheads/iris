@@ -190,6 +190,22 @@ final class JobLedger: JobUsageReading, Sendable {
 
     /// Sets (or clears, with `nil`) the human-readable reason this job is not firing. Throws
     /// `JobLedgerError.unknownJob` for an id that is not in the table.
+    /// Turns a job on or off (#590), and, turning it on, sets when it next fires: the scheduler
+    /// would otherwise fire at once on a time that went by while it was off. `nextFireAt` is
+    /// written only when enabling, and nil there means a job with no cadence (a watch).
+    func setEnabled(jobId: UUID, enabled: Bool, nextFireAt: Date? = nil) throws {
+        try writer.write { db in
+            if enabled {
+                try db.execute(sql: "UPDATE jobs SET enabled = 1, nextFireAt = ? WHERE id = ?",
+                               arguments: [nextFireAt, jobId.uuidString])
+            } else {
+                try db.execute(sql: "UPDATE jobs SET enabled = 0 WHERE id = ?", arguments: [jobId.uuidString])
+            }
+            guard db.changesCount > 0 else { throw JobLedgerError.unknownJob(jobId) }
+        }
+        notifyJobsChanged()
+    }
+
     func setPaused(jobId: UUID, reason: String?) throws {
         try writer.write { db in
             try db.execute(sql: "UPDATE jobs SET pausedReason = ? WHERE id = ?",
