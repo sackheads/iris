@@ -142,4 +142,55 @@ struct ReduceMotionTests {
         #expect(view.fader.opacity == 1)
         #expect(view.fader.animation(forKey: SpectrumNSView.fadeKey) == nil)
     }
+
+    // MARK: The LED's cue (#538)
+
+    /// sRGB relative luminance of a CGColor.
+    private func luminance(_ color: CGColor?) -> Double {
+        guard let c = color, let rgb = NSColor(cgColor: c)?.usingColorSpace(.sRGB) else { return -1 }
+        func lin(_ v: CGFloat) -> Double { let v = Double(v); return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+        return 0.2126 * lin(rgb.redComponent) + 0.7152 * lin(rgb.greenComponent) + 0.0722 * lin(rgb.blueComponent)
+    }
+
+    @Test("under Reduce Motion an active LED holds a brighter fill and a stronger glow; with motion on it is drawn as before")
+    func ledCueValues() {
+        typealias Look = LEDDotNSView.Look
+        #expect(Look.of(.active, reduceMotion: false) == Look.of(.ready, reduceMotion: false), "motion on: the pulse is the cue")
+        #expect(Look.of(.ready, reduceMotion: true) == Look.of(.ready, reduceMotion: false), "ready is unchanged")
+        let cue = Look.of(.active, reduceMotion: true)
+        let ready = Look.of(.ready, reduceMotion: true)
+        #expect(cue.brighten > 0)
+        #expect(cue.glowRadius > ready.glowRadius && cue.glowOpacity > ready.glowOpacity)
+        for state in [ModelLED.LEDState.off, .configured, .downloading, .unprovisioned, .error] {
+            #expect(Look.of(state, reduceMotion: true) == Look.of(state, reduceMotion: false), "\(state) has no cue")
+        }
+    }
+
+    @Test("at the LED's real size, an active dot under Reduce Motion is clearly brighter than a ready one")
+    func ledCueIsVisible() {
+        let window = window()
+        window.appearance = NSAppearance(named: .aqua)
+        let motion = MotionSwitch(true)
+        let active = LEDDotNSView(state: .active, reduceMotion: motion.motion)
+        let ready = LEDDotNSView(state: .ready, reduceMotion: motion.motion)
+        window.contentView?.addSubview(active)
+        window.contentView?.addSubview(ready)
+        let lit = luminance(active.dot.fillColor), plain = luminance(ready.dot.fillColor)
+        #expect(lit > plain * 1.2, "active \(lit) against ready \(plain): want at least 20% brighter")
+        #expect(active.dot.shadowRadius > ready.dot.shadowRadius)
+        #expect(active.dot.animationKeys() == nil, "still: no pulse")
+    }
+
+    @Test("the cue follows the setting live, both ways")
+    func ledCueFollowsTheSetting() async {
+        let window = window()
+        let motion = MotionSwitch(false)
+        let led = LEDDotNSView(state: .active, reduceMotion: motion.motion)
+        window.contentView?.addSubview(led)
+        let moving = luminance(led.dot.fillColor)
+        motion.set(true)
+        #expect(await eventually { luminance(led.dot.fillColor) > moving * 1.2 }, "on: the cue appears")
+        motion.set(false)
+        #expect(await eventually { abs(luminance(led.dot.fillColor) - moving) < 0.0001 }, "off: back to the pulse")
+    }
 }
