@@ -22,6 +22,8 @@ struct LiteralTextEditor: NSViewRepresentable {
         tv.font = font
         tv.string = text
         tv.applyComposerSubstitutionPolicy()
+        // Nor a space added or dropped around a pasted word, inside a JSON string value too.
+        tv.smartInsertDeleteEnabled = false
         return scroll
     }
 
