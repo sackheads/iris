@@ -36,6 +36,7 @@ struct LiteralTextEditorTests {
         #expect(!editor.isAutomaticTextReplacementEnabled, "a user's text replacement must not fire")
         #expect(!editor.isAutomaticSpellingCorrectionEnabled, "a key must not be autocorrected")
         #expect(!editor.isRichText, "a paste keeps no formatting")
+        #expect(!editor.smartInsertDeleteEnabled, "a paste gains or loses no space around a word")
     }
 
     @Test("what is typed reaches the binding as typed, and a new value reaches the editor")
