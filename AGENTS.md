@@ -31,9 +31,14 @@ runner, unless the change touches only documentation. A first `changes` job runs
 (Markdown outside `Sources/`, `Tests/`, `App/`, `scripts/` and `.github/`; `docs/`; the README's
 images under `assets/`), and runs them for anything else, anything it cannot classify, or a push
 with no usable base (#535). A skipped `test` job reports as skipped, so it would still satisfy a
-required check. Change the rules in that script and its test, `scripts/ci-changes-test.sh`. The runner has 3 cores, so Swift's cooperative pool is 3 threads; in parallel about 25 suites miss
-their deadlines there (subprocess timeouts, kill ladders, subagent stops, tests that park a pool
-thread on a semaphore), while serial is green. It does not build the Xcode app target (needs the
+required check. Change the rules in that script and its test, `scripts/ci-changes-test.sh`. Serial on purpose
+(#486): the runner has 3 cores, so Swift's cooperative pool is 3 threads. Every suite passes
+*alone* in parallel mode there, but the full suite run in parallel misses deadlines in about 30
+suites (subagent stops, per-turn deadlines, kill ladders, timeouts): about 400 suites saturate the
+3 threads at once, and the result of a deadline that fired on time waits for a free one (Invariant
+4). No single suite is the hog; skipping the likeliest ones does not make it green. Serial is green
+in about 7 minutes. If CI time ever hurts, the known next step is a parallel pass over everything
+else plus a short serial pass over the deadline suites. It does not build the Xcode app target (needs the
 Metal toolchain and signing) or run any GUI check, and the opt-in tests (`IRIS_REAL_VM`,
 `IRIS_ONNX_TEST_BUNDLE`) skip there. The pre-commit checklist below still applies locally.
 
