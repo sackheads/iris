@@ -218,6 +218,7 @@ struct OffPoolTests {
         }
         await Self.eventually("the write to pass its commit gate") { hang.isInside }
         task.cancel()
+        try await Task.sleep(nanoseconds: 200_000_000)
         hang.release()
         let answer = try await value(of: task, within: 5)
         #expect(answer.hasPrefix("Successfully wrote to"), "\(answer)")

@@ -3,10 +3,11 @@ import Foundation
 /// Blocking work kept off the cooperative pool (#532, the #372 class): a read, write or walk on a
 /// hung or slow mount blocks its thread until the mount answers, and the model drives the file
 /// tools in parallel (Invariant 3), so a few such calls on pool threads could take every one a
-/// low-core Mac has, stalling every turn. `run` does the work on a dispatch queue instead and
-/// returns `cancelled` at once if its task is cancelled. The work runs on regardless — a blocked
-/// syscall cannot be stopped — and its late answer is dropped; it can read `OffPool.Cancel` to
-/// avoid committing anything once nobody is waiting for it.
+/// low-core Mac has, stalling every turn. `run` does the work on a dispatch queue instead. A
+/// cancel before a write's commit gate returns `cancelled` at once; the work runs on regardless —
+/// a blocked syscall cannot be stopped — its late answer is dropped, and `OffPool.Cancel` keeps it
+/// from committing. A cancel after the gate waits for the rename and returns the write's own
+/// answer, so a rename stuck on a hung mount keeps the cancelled caller waiting.
 enum OffPool {
     /// The call's state, moved in one step each way so a cancel and a commit racing have exactly
     /// one outcome (#548 review): `running`, then either `cancelled` (the caller answers
