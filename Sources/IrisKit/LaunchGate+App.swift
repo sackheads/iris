@@ -30,20 +30,49 @@ final class WaitingNoticePanel {
     private var panel: NSPanel?
     private var gate: LaunchGate?
 
-    /// While Iris waits every window shows `WaitingView`, so a visible one already says what the
-    /// panel would: it is ordered front instead, and no second waiting surface opens beside it
-    /// (#504). The panel is for when there is no such window, as on a link's cold start.
+    /// A visible window already showing `WaitingView` says what the panel would: it is ordered
+    /// front instead, and the panel, if a cold start put it up first, is put away, so two waiting
+    /// surfaces never stand side by side (#504, #520). The panel is for when there is no such
+    /// window, as on a link's cold start.
     func show(gate: LaunchGate, besides windows: [NSWindow]) {
-        if let window = windows.first(where: { $0 !== panel && Self.showsWaitingView($0) }) {
-            window.orderFrontRegardless()
-            return
-        }
-        show(gate: gate)
+        Self.respond(to: Self.action(for: windows.map(Self.facts)),
+                     raise: { windows[$0].orderFrontRegardless() },
+                     showPanel: { self.show(gate: gate) },
+                     hidePanel: { self.hide() })
     }
 
-    /// A visible window SwiftUI made for a scene. Not the panel, the status item or an alert.
-    static func showsWaitingView(_ window: NSWindow) -> Bool {
-        window.isVisible && window.canBecomeMain && !(window is NSPanel) && window.alphaValue > 0
+    /// What `show(gate:besides:)` needs to know about a window, without AppKit.
+    struct WindowFacts: Equatable {
+        var isVisible: Bool
+        var isOpaque: Bool          // alpha above 0: a refused launch's window is visible at alpha 0
+        var isPanel: Bool
+        var showsWaitingView: Bool  // `WaitingWindows`: the view says so itself (#520)
+    }
+
+    enum Action: Equatable { case raise(Int), showPanel }
+
+    static func facts(_ window: NSWindow) -> WindowFacts {
+        WindowFacts(isVisible: window.isVisible, isOpaque: window.alphaValue > 0,
+                    isPanel: window is NSPanel, showsWaitingView: WaitingWindows.contains(window))
+    }
+
+    /// The first visible window showing `WaitingView`, else the panel. A window that only looks
+    /// like a scene's — Diagnostics, restored at launch and never gated — does not count (#520).
+    static func action(for windows: [WindowFacts]) -> Action {
+        if let index = windows.firstIndex(where: { $0.isVisible && $0.isOpaque && !$0.isPanel && $0.showsWaitingView }) {
+            return .raise(index)
+        }
+        return .showPanel
+    }
+
+    static func respond(to action: Action, raise: (Int) -> Void, showPanel: () -> Void, hidePanel: () -> Void) {
+        switch action {
+        case .raise(let index):
+            raise(index)
+            hidePanel()
+        case .showPanel:
+            showPanel()
+        }
     }
 
     func show(gate: LaunchGate) {
@@ -112,6 +141,9 @@ extension LaunchGate.Seams {
     static func app() -> LaunchGate.Seams {
         let poll = GatePollTimer()
         let notice = WaitingNoticePanel()
+        // A window that starts showing `WaitingView` after the panel went up says the same thing:
+        // put the panel away (#520).
+        WaitingWindows.onJoin = { _ in notice.hide() }
         let lock = IrisPaths.default.storeLockFile
         return LaunchGate.Seams(
             claim: { StoreLock.claim(at: lock, kind: .app) },
