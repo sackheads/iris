@@ -554,9 +554,12 @@ actor IrisEngine {
     /// one turn (invariant 6). The prefix alone is text: a job's prompt, a peer's message or a
     /// typed line could start with it, and an unattended run would then be offered
     /// `rename_conversation` or `propose_goal_contract` (#581). So it counts only under the
-    /// harness's source, which no job, peer or person can send.
-    nonisolated static func isTrigger(_ prefix: String, input: String, source: String) -> Bool {
-        source == systemSource && input.hasPrefix(prefix)
+    /// harness's source, which no job, peer or person can send, and only for the main agent:
+    /// a subagent's first turn arrives under "System" too, but its text is the task the parent
+    /// model wrote, and neither flow ever runs in a subagent.
+    nonisolated static func isTrigger(_ prefix: String, input: String, source: String,
+                                      principal: Principal) -> Bool {
+        principal == .main && source == systemSource && input.hasPrefix(prefix)
     }
     /// Prefix of the history entry left behind when a turn ends before the model replied (Stop,
     /// provider error, empty content). The chat shows a pill for those; the model never sees it,
@@ -2155,7 +2158,7 @@ actor IrisEngine {
         // messages, the only tool eagerness the perf suite measured (#132). 5b: never on the
         // pinned conversation — it is exempt from rename on all four paths (spec §0.2), so the
         // declaration would be dead weight the model could still be tempted to reach for.
-        if Self.isTrigger(Self.renameTriggerPrefix, input: input, source: source) && !isPinned {
+        if Self.isTrigger(Self.renameTriggerPrefix, input: input, source: source, principal: principal) && !isPinned {
             toolsList.append(FunctionDeclaration(
                 name: "rename_conversation",
                 description: "Rename the current conversation to a short, descriptive title as instructed by the System Event.",
@@ -2329,7 +2332,7 @@ actor IrisEngine {
         ))
         // Only the /goal command's draft turn wants a contract proposal; on plain turns the
         // declaration was prompt weight and an invitation to start goals nobody asked for (#133).
-        if Self.isTrigger(Self.goalDraftTriggerPrefix, input: input, source: source) {
+        if Self.isTrigger(Self.goalDraftTriggerPrefix, input: input, source: source, principal: principal) {
             toolsList.append(FunctionDeclaration(
                 name: "propose_goal_contract",
                 description: "Draft a structured contract for a goal the user is starting. Produce concrete criteria for 'done'. Honesty rules: never invent an `executable` check you cannot actually run; prefer a `qualitative` criterion over a fabricated number; flag taste/direction as `humanJudged`. Optionally group criteria into ordered checkpoints via a per-criterion 'milestone' label; at each checkpoint an independent evaluator grades the work so far — a clean grade advances the ladder on its own, anything contested pauses for the user. This proposes a DRAFT for the user to edit and approve — it does not start the loop.",
@@ -3506,7 +3509,10 @@ actor IrisEngine {
 
     /// 5c §1: never declared to a subagent or evaluator, whatever a sticky set says.
     nonisolated static let mainOnlyDeclared: Set<String> =
-        jobCreationTools.union(["amend_goal_contract", "reach_checkpoint", "delegate_milestone",
+        // The /rename and /goal trigger tools too (#581): neither flow runs in a subagent, and
+        // `isTrigger` already requires the main agent; this is the backstop for a sticky set.
+        jobCreationTools.union(["rename_conversation", "propose_goal_contract",
+                                "amend_goal_contract", "reach_checkpoint", "delegate_milestone",
                                 "waive_criterion", "list_sessions", "describe_session", "send_to_session",
                                 "set_session_card", "close_request"])
 

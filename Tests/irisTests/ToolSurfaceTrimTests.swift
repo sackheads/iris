@@ -374,6 +374,26 @@ struct ToolSurfaceTrimTests {
         }
     }
 
+    /// A subagent's first turn arrives under "System" with the task its parent model wrote, so a
+    /// task that starts with a trigger prefix must not be taken for the harness's trigger.
+    @Test("a subagent's task that starts with a trigger prefix is offered neither trigger tool")
+    func subagentTaskIsNotATrigger() async {
+        let app = AppState()
+        let id = UUID()
+        app.createNewConversation(id: id, isSubagent: true)
+        let client = CapturingLLMClient(reply: "ok")
+        let engine = IrisEngine(state: app, tier: .medium, principal: .subagent, client: client, retryDelays: [],
+                                sessionPeerCount: 0)
+        await engine.processInput(IrisEngine.renameTriggerPrefix + ": title it", source: IrisEngine.systemSource,
+                                  conversationId: id)
+        await engine.processInput(IrisEngine.goalDraftTriggerPrefix + ": draft it", source: IrisEngine.systemSource,
+                                  conversationId: id)
+        let names = Set(client.requests.flatMap { $0.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? [] })
+        #expect(client.requests.count >= 2, "precondition: both turns reached the model")
+        #expect(!names.contains("rename_conversation"))
+        #expect(!names.contains("propose_goal_contract"))
+    }
+
     // MARK: allDeclaredToolNames covers every declaration site (#558)
 
     /// A read-only job (#555) takes a name missing from `allDeclaredToolNames` for an unknown
