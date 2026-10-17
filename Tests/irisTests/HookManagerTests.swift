@@ -197,7 +197,7 @@ import Foundation
     if case .proceed(let modifiedData) = decision {
         #expect(modifiedData != nil)
         let modifiedHistory = try JSONDecoder().decode([Content].self, from: modifiedData!)
-        #expect(modifiedHistory.count == 1)
+        try #require(modifiedHistory.count == 1)
         #expect(modifiedHistory[0].role == "system")
         #expect(modifiedHistory[0].parts.first?.text == "compressed")
     } else {

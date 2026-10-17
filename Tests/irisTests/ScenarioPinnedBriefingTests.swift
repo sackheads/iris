@@ -141,6 +141,7 @@ struct ScenarioPinnedBriefingTests {
         let requests = client.all
         try #require(!requests.isEmpty)
         #expect(requests.allSatisfy { !Self.allText($0).contains("Recent Activity") })
+        try #require(requests.count > 0, "the turn made \(requests.count) requests")
         let declared = Set(requests[0].tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? [])
         #expect(!declared.contains("search_conversations"))
     }

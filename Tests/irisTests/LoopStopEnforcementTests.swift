@@ -53,7 +53,7 @@ struct LoopStopEnforcementTests {
     /// 5c §0.3: the soft-stop turn keeps every declaration (stripping them was a removal flap on
     /// the longest history) and says in its turn context that only goal_complete will run.
     @Test("a restricted turn keeps the previous turn's declarations and says goal_complete only")
-    func restrictedTurnKeepsDeclarations() async {
+    func restrictedTurnKeepsDeclarations() async throws {
         let appState = AppState()
         let convId = UUID()
         appState.createNewConversation(id: convId)
@@ -64,7 +64,7 @@ struct LoopStopEnforcementTests {
         await engine.processInput("You reached a stopping condition. Summarize and stop.",
                                   source: "System", conversationId: convId, restrictToGoalComplete: true)
         let requests = client.requests
-        #expect(requests.count == 2)
+        try #require(requests.count == 2)
         guard requests.count == 2 else { return }
         let before = Set(requests[0].tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? [])
         let during = Set(requests[1].tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? [])

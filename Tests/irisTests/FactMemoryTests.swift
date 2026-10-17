@@ -609,7 +609,15 @@ struct GoalRunFactTests {
         let facts: FactStoreManager
         let engine: IrisEngine
         /// Request `i`'s turn-context block; it rides that turn's own entry, the last user one.
-        func lead(_ i: Int) -> String { turnContextBlock(client.requests[i]) }
+        func lead(_ i: Int) -> String {
+            // Bounded: a turn cut short on a busy pool made fewer requests, and an index past the
+            // end crashed the whole test process (#486).
+            guard i < client.requests.count else {
+                Issue.record("request \(i) was never made: \(client.requests.count) were")
+                return ""
+            }
+            return turnContextBlock(client.requests[i])
+        }
         func fact(_ content: String) throws -> Fact {
             try #require(try facts.listFacts(includeInactive: true, limit: 50).first { $0.content == content })
         }

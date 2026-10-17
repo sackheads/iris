@@ -148,10 +148,12 @@ struct SandboxTimeoutTests {
         let call = Task {
             try await runner.run(["-c", "while :; do sleep \(nap); done   # \(marker)"], timeoutSeconds: 60)
         }
+        // Cancelled from this queue the moment the launch begins, not after hopping back: the launch
+        // holds a pool thread for its whole second, and on a narrow pool the test body could not
+        // run again until it was over, so its cancel landed after the launch instead (#486).
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
-            DispatchQueue.global().async { launching.wait(); c.resume() }
+            DispatchQueue.global().async { launching.wait(); call.cancel(); c.resume() }
         }
-        call.cancel()
         var thrown: Error?
         do { _ = try await value(of: call) } catch { thrown = error }
         #expect(thrown is CancellationError)

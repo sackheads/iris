@@ -33,7 +33,7 @@ struct ApprovalQueueTests {
         await waitForQueue(1)
         let t2 = Task { await app.enqueueUserApproval(toolName: "run_command", details: "b", workspace: nil, conversationId: cid, origin: "Main agent") }
         await waitForQueue(2)
-        #expect(app.pendingApprovals.count == 2)
+        try #require(app.pendingApprovals.count == 2)
         #expect(app.pendingApprovals.first?.details == "a", "the head must be the first one queued")
         app.resolveApproval(id: app.pendingApprovals[0].id, .deny)     // head (a) denied
         app.resolveApproval(id: app.pendingApprovals[0].id, .approve)  // next (b) approved
@@ -50,14 +50,18 @@ struct ApprovalQueueTests {
         let a = UUID(); let b = UUID()
         async let ra = app.enqueueUserApproval(toolName: "t", details: "a", workspace: nil, conversationId: a, origin: "Subagent (x)")
         async let rb = app.enqueueUserApproval(toolName: "t", details: "b", workspace: nil, conversationId: b, origin: "Main agent")
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        // Waited for, not slept: the two children need a pool thread to queue, and a busy pool
+        // (#486) left both unqueued after a fixed 50 ms. Indexing the empty queue then crashed
+        // the whole test process.
+        for _ in 0..<1000 where app.pendingApprovals.count < 2 { try? await Task.sleep(nanoseconds: 5_000_000) }
         #expect(app.pendingApprovals.count == 2)
         app.denyPendingApprovals(for: a)
         let va = await ra
         #expect(va == false)
         #expect(app.pendingApprovals.count == 1)
         #expect(app.pendingApprovals.first?.conversationId == b)
-        app.resolveApproval(id: app.pendingApprovals[0].id, .approve)
+        if let remaining = app.pendingApprovals.first { app.resolveApproval(id: remaining.id, .approve) }
+        else { app.denyPendingApprovals(for: b) }   // so `rb` returns and the failure above stands alone
         let vb = await rb
         #expect(vb == true)
     }
@@ -141,7 +145,7 @@ struct ApprovalQueueTests {
         for _ in 0..<40 where app.pendingApprovals.isEmpty {
             try? await Task.sleep(nanoseconds: 25_000_000)
         }
-        #expect(app.pendingApprovals.count == 1)
+        try #require(app.pendingApprovals.count == 1)
         app.resolveApproval(id: app.pendingApprovals[0].id, .alwaysAllowGlobal)
         #expect(await globalResult == true, "the human's click still approves THIS call")
         #expect(!app.permissions.isAllowed(toolName: "schedule_job", details: "sweep", workspace: nil),
@@ -155,7 +159,7 @@ struct ApprovalQueueTests {
         for _ in 0..<40 where app.pendingApprovals.isEmpty {
             try? await Task.sleep(nanoseconds: 25_000_000)
         }
-        #expect(app.pendingApprovals.count == 1)
+        try #require(app.pendingApprovals.count == 1)
         app.resolveApproval(id: app.pendingApprovals[0].id, .alwaysAllowProject)
         #expect(await projectResult == true, "the human's click still approves THIS call")
         #expect(!app.permissions.isAllowed(toolName: "schedule_job", details: "sweep", workspace: "/tmp/proj"),

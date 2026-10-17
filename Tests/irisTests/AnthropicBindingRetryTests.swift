@@ -96,7 +96,7 @@ struct AnthropicBindingRetryTests {
         let response = try await AnthropicClient.generateContent(request: Self.request(), model: "claude-opus-5-5",
                                                                  transport: Self.direct, session: session)
         #expect(response.anthropicBindingFallback)
-        #expect(rec.all.count == 2)
+        try #require(rec.all.count == 2)
         #expect(!rec.bodies[0].contains("block_binding"))
         #expect(rec.all[0].value(forHTTPHeaderField: "anthropic-beta") == AnthropicCapabilities.bindingBeta)
         #expect(rec.bodies[1].contains(#""prefix_mismatch_behavior":"drop_block""#))
@@ -174,7 +174,7 @@ struct AnthropicBindingRetryTests {
         let response = try await AnthropicClient.generateContent(request: Self.oneHourRequest(), model: "claude-opus-5-5",
                                                                  transport: Self.direct, session: session)
         #expect(response.anthropicBindingFallback)
-        #expect(rec.all.count == 3)
+        try #require(rec.all.count == 3)
         #expect(rec.bodies[0].contains(#""ttl":"1h""#), "precondition: the first request has the 1-hour TTL")
         #expect(!rec.bodies[1].contains(#""ttl""#) && !rec.bodies[1].contains("drop_block"))
         #expect(!rec.bodies[2].contains(#""ttl""#))

@@ -447,7 +447,7 @@ struct JobGrantToolTests {
 
         let second = await schedule(["mounts": .array([.string(f.proj.path), .string("\(f.creds.path):ro")]), "network": .bool(true)])
         let jobs = try store.ledger.jobs()
-        #expect(jobs.count == 1, "replaced, not suffixed to deploy-2")
+        try #require(jobs.count == 1, "replaced, not suffixed to deploy-2")
         #expect(jobs[0].id == original.id && jobs[0].createdAt == original.createdAt)
         #expect(jobs[0].policy.grants == JobGrant(mounts: [ContainerMount(source: canonical(f.proj)),
                                                            ContainerMount(source: canonical(f.creds), readOnly: true)], network: true))
