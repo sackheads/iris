@@ -29,7 +29,7 @@ private func eventually(_ timeoutMs: Int = 2000, _ condition: @Sendable () async
 struct MessageStreamerTests {
     private func make(_ recorder: Recorder, gate: Gate) -> MessageStreamer {
         MessageStreamer(open: { await recorder.open($0, $1) },
-                        update: { await recorder.update($0, $1, $2) },
+                        update: { id, text, isFinal, _ in await recorder.update(id, text, isFinal) },
                         sleep: { _ in await gate.wait() })
     }
 

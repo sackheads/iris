@@ -5540,15 +5540,18 @@ actor IrisEngine {
                 let localState = await self.state
                 await MainActor.run { localState?.updateSessionPhase(conversationId, .responding) }
             },
-            update: { [weak self] id, text, isFinal in
-                await self?.updateStreamedMessage(id: id, content: text, isFinal: isFinal, conversationId: conversationId)
+            update: { [weak self] id, text, isFinal, sequence in
+                await self?.updateStreamedMessage(id: id, content: text, isFinal: isFinal, sequence: sequence,
+                                                  conversationId: conversationId)
             })
     }
 
-    func updateStreamedMessage(id: UUID, content: String, isFinal: Bool, conversationId: UUID) async {
+    func updateStreamedMessage(id: UUID, content: String, isFinal: Bool, sequence: Int? = nil,
+                               conversationId: UUID) async {
         let localState = state
         await MainActor.run {
-            localState?.updateMessageContent(id: id, content: content, in: conversationId, persist: isFinal)
+            localState?.updateMessageContent(id: id, content: content, in: conversationId, persist: isFinal,
+                                             sequence: sequence)
         }
     }
 

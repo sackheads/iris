@@ -5,8 +5,11 @@ import Foundation
 /// opens the row on the first delta, and writes the final text exactly once.
 actor MessageStreamer {
     typealias Open = @Sendable (UUID, String) async -> Void
-    /// (message id, whole text so far, isFinal). `isFinal` is the caller's cue to persist.
-    typealias Update = @Sendable (UUID, String, Bool) async -> Void
+    /// (message id, whole text so far, isFinal, sequence). `isFinal` is the caller's cue to
+    /// persist. `sequence` rises with every update of this message, the final one included, so a
+    /// receiver can drop one that arrives out of order or after the final (#583 review): a flush
+    /// already past its sleep when `finish` runs reaches the main actor by its own hop.
+    typealias Update = @Sendable (UUID, String, Bool, Int) async -> Void
     typealias Sleep = @Sendable (UInt64) async -> Void
 
     /// 20 writes per second: well under what MarkdownUI re-parses comfortably for a few-KB
@@ -17,6 +20,7 @@ actor MessageStreamer {
     private(set) var text = ""
     private(set) var opened = false
     private var lastSent = ""
+    private var sequence = 0
     private var finished = false
     private var flushTask: Task<Void, Never>?
     private let open: Open
@@ -52,7 +56,8 @@ actor MessageStreamer {
         flushTask = nil
         guard text != lastSent else { return }
         lastSent = text
-        await update(messageId, text, false)
+        sequence += 1
+        await update(messageId, text, false, sequence)
     }
 
     /// Writes the final content once and asks for it to be persisted. Opens the row first when
@@ -68,7 +73,8 @@ actor MessageStreamer {
             await open(messageId, finalText)
         }
         lastSent = finalText
-        await update(messageId, finalText, true)
+        sequence += 1
+        await update(messageId, finalText, true, sequence)
     }
 
     /// Ends the stream with whatever has been shown (error, hook block, Stop) and returns it.
