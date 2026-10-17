@@ -15,8 +15,23 @@ struct AmbientAnimationTests {
         #expect(pulse.value(at: 0.2) == 0.3)
         #expect(abs(pulse.value(at: 0.8) - 1.0) < 1e-9)
         #expect(abs(pulse.value(at: 1.4) - 0.3) < 1e-9)
-        #expect(abs(pulse.value(at: 0.5) - pulse.value(at: 1.1)) < 1e-9, "the way back mirrors the way up")
-        #expect(abs(pulse.value(at: 0.5) - 0.65) < 1e-9, "halfway up is halfway in value")
+        #expect(abs(pulse.value(at: 0.35) - pulse.value(at: 1.25)) < 1e-9, "the way back mirrors the way up")
+        // A quarter of the way up, where CA's curve and a smoothstep differ (0.129 against 0.156).
+        #expect(abs(pulse.progress(at: 0.35) - AmbientPulse.eased(0.25)) < 1e-12)
+        #expect(abs(pulse.progress(at: 0.35) - 0.129) < 0.001)
+    }
+
+    /// The model's curve is CA's ease-in-ease-out, not an approximation of it (#546 review): checked
+    /// off the symmetric points, against a dense sampling of the Bézier with the CSS control points.
+    @Test("the pulse's easing is CA's easeInEaseOut curve", arguments: [0.1, 0.25, 0.4, 0.6, 0.75, 0.9])
+    func easingIsTheTimingFunction(x: Double) {
+        func bez(_ t: Double, _ p1: Double, _ p2: Double) -> Double {
+            let u = 1 - t; return 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t
+        }
+        // (0.42, 0, 0.58, 1): sample the parameter finely and take the point whose x is nearest.
+        let samples = (0...200_000).map { Double($0) / 200_000 }
+        let t = samples.min { abs(bez($0, 0.42, 0.58) - x) < abs(bez($1, 0.42, 0.58) - x) }!
+        #expect(abs(AmbientPulse.eased(x) - bez(t, 0, 1)) < 1e-4, "at x = \(x)")
     }
 
     @Test("the typing dots keep today's timing: 0.6 s each way, 0.0 / 0.2 / 0.4 s apart, half size and 0.3 opacity up to full")

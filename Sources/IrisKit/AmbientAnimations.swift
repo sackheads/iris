@@ -13,14 +13,52 @@ struct AmbientPulse: Equatable {
     var duration: CFTimeInterval
     var delay: CFTimeInterval = 0
 
-    /// 0 at `from`, 1 at `to`: up over `duration`, back over the next, from `delay` on, eased in
-    /// and out. Before `delay` it holds at `from`, as the animation's backwards fill does.
+    /// The curve the animation is eased with. `progress(at:)` evaluates the same one, from its
+    /// own control points, so the pure model and the shipped animation cannot drift apart.
+    static var timing: CAMediaTimingFunction { CAMediaTimingFunction(name: .easeInEaseOut) }
+
+    /// 0 at `from`, 1 at `to`: up over `duration`, back over the next, from `delay` on, on
+    /// `timing`'s curve. Before `delay` it holds at `from`, as the animation's backwards fill does.
     func progress(at elapsed: CFTimeInterval) -> Double {
         let t = elapsed - delay
         guard t > 0 else { return 0 }
         let cycle = t.truncatingRemainder(dividingBy: 2 * duration)
         let linear = cycle <= duration ? cycle / duration : 2 - cycle / duration
-        return linear * linear * (3 - 2 * linear)
+        return Self.eased(linear)
+    }
+
+    /// `timing` at `x` (0...1): the cubic Bézier through (0,0), c1, c2, (1,1), solved for the
+    /// parameter whose x is `x` (Newton, then bisection if it stalls), then its y.
+    static func eased(_ x: Double) -> Double {
+        var c1: [Float] = [0, 0], c2: [Float] = [0, 0]
+        timing.getControlPoint(at: 1, values: &c1)
+        timing.getControlPoint(at: 2, values: &c2)
+        let (x1, y1, x2, y2) = (Double(c1[0]), Double(c1[1]), Double(c2[0]), Double(c2[1]))
+        func bez(_ t: Double, _ p1: Double, _ p2: Double) -> Double {
+            let u = 1 - t
+            return 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t
+        }
+        func dbez(_ t: Double, _ p1: Double, _ p2: Double) -> Double {
+            let u = 1 - t
+            return 3 * u * u * p1 + 6 * u * t * (p2 - p1) + 3 * t * t * (1 - p2)
+        }
+        let x = min(max(x, 0), 1)
+        var t = x
+        for _ in 0..<8 {
+            let err = bez(t, x1, x2) - x
+            if abs(err) < 1e-12 { break }
+            let slope = dbez(t, x1, x2)
+            if abs(slope) < 1e-9 { break }
+            t -= err / slope
+        }
+        if abs(bez(t, x1, x2) - x) > 1e-9 || t < 0 || t > 1 {
+            var lo = 0.0, hi = 1.0
+            for _ in 0..<60 {
+                t = (lo + hi) / 2
+                if bez(t, x1, x2) < x { lo = t } else { hi = t }
+            }
+        }
+        return bez(t, y1, y2)
     }
 
     func value(at elapsed: CFTimeInterval) -> Double { from + (to - from) * progress(at: elapsed) }
@@ -35,7 +73,7 @@ struct AmbientPulse: Equatable {
         animation.autoreverses = true
         animation.repeatCount = .infinity
         animation.fillMode = .backwards
-        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        animation.timingFunction = Self.timing
         animation.isRemovedOnCompletion = false
         return animation
     }
@@ -155,12 +193,20 @@ final class WelcomeGlowNSView: AmbientLayerView {
         icon.shadowOpacity = 0.5
         icon.shadowRadius = 18
         icon.shadowOffset = .zero
+        // Rasterized: a shadow with no path is redrawn by the render server on every frame of the
+        // icon's scale animation. A 3% scale of a cached bitmap reads the same.
+        icon.shouldRasterize = true
         layer?.addSublayer(glow)
         layer?.addSublayer(icon)
         animated = [(glow, WelcomeGlowView.glowPulses), (icon, WelcomeGlowView.iconPulses)]
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        icon.rasterizationScale = window?.backingScaleFactor ?? 2
+    }
 
     override func layout() {
         super.layout()
