@@ -862,6 +862,10 @@ class AppState {
     func beginEngineTurn(for conversationId: UUID) {
         if (engineTurnCounts[conversationId] ?? 0) == 0 {
             mainStartTimeByConversation[conversationId] = Date()
+            // No turn is running here, so a box left in this conversation belongs to a round
+            // nothing will finish (one a watchdog abandoned outside a bracketed turn): keep what it
+            // showed before this turn starts (#583 review).
+            commitStreams(in: conversationId)
         }
         engineTurnCounts[conversationId, default: 0] += 1
         // A second turn beside a reflection appends its own replies inside the capture window, so
@@ -2799,18 +2803,23 @@ class AppState {
     /// `persist: false` is a streamed reply's update (#541): it goes to the message's box in
     /// `streaming`, which only that row reads, not to `conversations`. `persist: true` is a final
     /// write: `conversations` gets the text, the box goes, and the change is saved.
-    func updateMessageContent(id: UUID, content: String, in conversationId: UUID, persist: Bool = false) {
+    ///
+    /// `sequence` (the streamer's numbering) drops a partial that is out of order or arrives after
+    /// the final write, which closes the message (#583 review).
+    func updateMessageContent(id: UUID, content: String, in conversationId: UUID, persist: Bool = false,
+                              sequence: Int? = nil) {
         guard let c = conversations.firstIndex(where: { $0.id == conversationId }),
               let m = conversations[c].messages.firstIndex(where: { $0.id == id }) else {
             streaming.remove(id)
             return
         }
         guard persist else {
+            guard streaming.accepts(id, sequence: sequence) else { return }
             streaming.set(id, in: conversationId, text: content)
             streamTicks.send(conversationId)
             return
         }
-        streaming.remove(id)
+        streaming.close(id)
         conversations[c].messages[m].content = content
         markChanged(conversationId, .messageUpdated(id: id))
     }
