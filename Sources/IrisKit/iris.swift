@@ -3919,9 +3919,10 @@ actor IrisEngine {
     /// or offering to reach the same end through `run_command`. True in every unattended
     /// conversation, a job run and anything it delegates to, so it says nothing about where the
     /// refusal is recorded: a run that then fails or is interrupted keeps no blocked call. It
-    /// forbids only routing around the refusal; the rest of the task is still the run's to finish.
+    /// forbids only routing to the refused target (that path or that action by other means); the
+    /// rest of the task, and a different way to do it that the reply then reports, stay open.
     static func unattendedDeniedToolResult(tool: String) -> String {
-        "Not run: nobody is here to approve `\(tool)` in this background run. Do not ask a question, and do not try to get the same effect another way (another tool, a shell command). Finish the rest of the task if you can, then report what you did and what was refused."
+        "Not run: nobody is here to approve `\(tool)` in this background run. Do not ask a question, and do not try to reach the same target another way (another tool, a shell command). Finish the rest of the task if you can, then report what you did and what was refused."
     }
 
     /// What the model is told when the RUN's profile refused it. Deliberately not the sentence
