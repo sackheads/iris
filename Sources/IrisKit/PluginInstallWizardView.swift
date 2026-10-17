@@ -85,8 +85,8 @@ struct PluginInstallWizardView: View {
                 }
             case .snippet:
                 Text("Paste a standard `mcpServers` JSON snippet:")
-                TextEditor(text: $snippetText)
-                    .font(.system(.caption, design: .monospaced))
+                // Not `TextEditor`: it would curl the snippet's quotes before it is parsed (#566).
+                LiteralTextEditor(text: $snippetText)
                     .frame(height: 180)
                     .border(Color.gray.opacity(0.3))
                 Button("Parse Snippet") { parseSnippet() }
