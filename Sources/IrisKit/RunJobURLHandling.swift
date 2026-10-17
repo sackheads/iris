@@ -92,7 +92,7 @@ extension AppState {
             await MainActor.run { self?.urlFireDecided(ticket, jobId: jobId, sent: now, decision) }
         }
         guard let fire = runJobByHand(job: job, origin: .url, announceTo: iris, onDecided: onDecided) else { return nil }
-        var batch = urlFireBatches[job.id] ?? URLFireBatch(since: now)
+        var batch = urlFireBatches[job.id] ?? URLFireBatch(since: Self.urlBatchStart(after: now))
         batch.dispatched.append(now)
         batch.pending += 1
         urlFireBatches[job.id] = batch
@@ -105,6 +105,17 @@ extension AppState {
         }
         urlFireTask = task
         return task
+    }
+
+    /// Where a new batch starts counting its own fires (#575): two milliseconds past `now`'s
+    /// millisecond. The ledger keeps `startedAt` rounded to the nearest millisecond, so a row that
+    /// began just before `now` can read back as late as the next millisecond, and the earlier
+    /// `startedAt < since` check missed it: a link opened in the same millisecond as the previous
+    /// fire's row got one fire past the limit. From here every earlier row is counted. The cost,
+    /// in that same window only: a batch fire whose own row lands before this start is counted
+    /// twice, as a row and as a dispatch, and refuses one fire early. A limit fails closed.
+    nonisolated static func urlBatchStart(after now: Date) -> Date {
+        Date(timeIntervalSince1970: ((now.timeIntervalSince1970 * 1000).rounded(.down) + 2) / 1000)
     }
 
     /// One URL fire's answer, once. A run's row is begun by now and every refusal's row written,

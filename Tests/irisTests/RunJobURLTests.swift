@@ -305,6 +305,48 @@ struct RunJobURLTests {
         _ = try await settle(tasks)
     }
 
+    /// #575: the settled first fire's row and the next batch's start in the same millisecond, as
+    /// the store compares them (it keeps `startedAt` to the millisecond). The flaky
+    /// `settledFiresFallBackToRows` met this only when two fires happened to share a millisecond;
+    /// the clock pinned to the row's own stamp makes it every time.
+    @Test("a batch that starts in the settled row's millisecond still counts that row")
+    func sameMillisecondRowIsCounted() async throws {
+        let job = digest()
+        let (store, app, _) = try makeApp([job])
+        let minted = try optIn(job, store)
+        var tasks: [Task<JobRunner.Admission?, Never>] = []
+        #expect(open(app, minted, into: &tasks) == .fired(job.id))
+        _ = try await settle(tasks)
+        #expect(app.urlFireBatches[job.id] == nil)
+        let first = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        // Pin the clock inside the first row's own millisecond: the next batch's `since` then
+        // equals its startedAt as the store compares them.
+        let stamp = first.startedAt
+        app.urlClock = { stamp }
+        tasks = []
+        #expect(open(app, minted, into: &tasks) == .fired(job.id))
+        #expect(open(app, minted, into: &tasks) == .fired(job.id))
+        #expect(open(app, minted, into: &tasks) == .refused, "the first fire's row must still count")
+        _ = try await settle(tasks)
+    }
+
+    /// The store rounds `startedAt` to the nearest millisecond, so a row begun a fraction before
+    /// `now` can read back a millisecond later than `now`'s own: the batch has to start past that.
+    @Test("a new batch starts after anything a row begun before it can read back as")
+    func batchStartClearsARoundedRow() throws {
+        let job = digest()
+        let (store, _, _) = try makeApp([job])
+        for fraction in [0.0004, 0.4996, 0.9996, 0.9999] {
+            let now = Date(timeIntervalSince1970: 1_792_274_733 + fraction)
+            let run = JobRun(jobId: job.id, jobName: job.name, triggerKind: "url",
+                             startedAt: now.addingTimeInterval(-0.0001))
+            try store.ledger.begin(run: run)
+            let stored = try #require(try store.ledger.run(id: run.id)).startedAt
+            #expect(stored < AppState.urlBatchStart(after: now),
+                    "fraction \(fraction): stored \(stored.timeIntervalSince1970)")
+        }
+    }
+
     @Test("once every fire has settled, the rows alone are counted")
     func settledFiresFallBackToRows() async throws {
         let job = digest()
