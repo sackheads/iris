@@ -659,6 +659,11 @@ holds the same way and is offered again once per ceiling until a run lets it thr
 writes a skip row: a single save can deliver a dozen filesystem events, and a row apiece would
 bury the ledger. See "Watches".
 
+While a run is working, the Mac is kept awake for the run's own duration and no longer: the run
+holds an idle-sleep assertion (`.idleSystemSleepDisabled`) from its start to its end, so it is not
+idled out mid-turn, but a lid close or a sleep you ask for still happens, and the run's deadline
+caps how long the assertion can be held (`SleepAssertion.swift`).
+
 ## Job creation is never unattended
 
 Only a conversation with a person in it can create a job. `schedule_job` and
