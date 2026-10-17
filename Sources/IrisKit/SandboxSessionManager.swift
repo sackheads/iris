@@ -281,11 +281,24 @@ actor SandboxSessionManager {
     /// are mid-evaluation, and the one-off hook and `run_command` containers
     /// `EphemeralContainerRegistry` says are running. The CLI's sweep runs beside its turn, so the
     /// exclusions are what keep it from killing that turn's work.
-    func reapOrphans() async {
-        await reapOrphans(inFlight: {
-            await GateContainerRegistry.shared.current()
-                .union(await EphemeralContainerRegistry.shared.current())
-        }, includingLegacy: Self.sweepsLegacyNames(.current))
+    ///
+    /// This is the app's launch sweep: the release app also takes the legacy shared names. `build`
+    /// is a parameter only so a test can ask as the release app.
+    func reapOrphans(build: BuildIdentity = .current) async {
+        await reapOrphans(inFlight: Self.inFlightNow, includingLegacy: Self.sweepsLegacyNames(build))
+    }
+
+    /// `--run-job`'s sweep: this home's own prefix only, never the legacy names (#522). A release
+    /// `--run-job` fires on a schedule, so sweeping them there could take a live session from a
+    /// pre-#506 dev build still using the shared names. That was only ever the release app's
+    /// launch to do, as it was before #506.
+    func runJobSweep() async {
+        await reapOrphans(inFlight: Self.inFlightNow, includingLegacy: false)
+    }
+
+    private static let inFlightNow: @Sendable () async -> Set<String> = {
+        await GateContainerRegistry.shared.current()
+            .union(await EphemeralContainerRegistry.shared.current())
     }
 
     /// The sweep with the in-flight names handed in — a test has no way to park a real gate or

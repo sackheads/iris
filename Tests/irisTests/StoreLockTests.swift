@@ -70,6 +70,44 @@ final class StoreLockTests {
         #expect(LockStub.tryLock(url) == 3, "another process is excluded from the new file")
     }
 
+    /// #522: `vacate` looked the descriptor up, let the table's lock go, then truncated it. Since
+    /// #494 a re-claim closes a replaced file's descriptor, and the next `open` reuses the lowest
+    /// free number, so a re-claim landing in that gap left `vacate` truncating the *new* holder's
+    /// payload. Here the re-claim is started from inside `vacate`, at the gap: with the fix it
+    /// blocks on the table until `vacate` is done with the old file, and the new payload survives.
+    /// Each round takes a path of its own; ten of them make the number reuse all but certain if
+    /// the gap were still open. Run off the pool, so the waits park a dispatch thread, not a
+    /// cooperative one (#486).
+    @Test("a re-claim racing vacate never lets vacate empty the new holder's payload (#522)")
+    func vacateRacingReclaimKeepsTheNewPayload() async throws {
+        for _ in 0..<10 {
+            let url = path()
+            #expect(StoreLock.claim(at: url, kind: .app) == .acquired)
+            let fresh = url.deletingLastPathComponent().appendingPathComponent("fresh")
+            FileManager.default.createFile(atPath: fresh.path, contents: nil)
+            #expect(rename(fresh.path, url.path) == 0)
+
+            let reclaimed = await withCheckedContinuation { (c: CheckedContinuation<StoreLock.Claim?, Never>) in
+                DispatchQueue.global().async {
+                    let done = DispatchSemaphore(value: 0)
+                    let result = Locked<StoreLock.Claim?>(nil)
+                    StoreLock.vacate(at: url, beforeTruncate: {
+                        DispatchQueue.global().async {
+                            result.mutate { $0 = StoreLock.claim(at: url, kind: .runJob, job: "again") }
+                            done.signal()
+                        }
+                        _ = done.wait(timeout: .now() + 0.2)   // a gap left open would let it finish here
+                    })
+                    _ = done.wait(timeout: .now() + 5)
+                    c.resume(returning: result.value)
+                }
+            }
+            #expect(reclaimed == .acquired)
+            #expect(StoreLock.readHolder(at: url) == .init(pid: me, kind: .runJob, job: "again"),
+                    "vacate emptied the payload of the file claimed after it looked the descriptor up")
+        }
+    }
+
     /// #494: a short re-advertise leaves no mixed line. The lock is kept: this process may already
     /// have the store open, and letting go would let a second writer in.
     @Test("a short re-claim write is .failed, empties the payload, and keeps the lock")
