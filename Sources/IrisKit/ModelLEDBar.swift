@@ -123,6 +123,9 @@ struct ModelLEDBar: View {
     /// Injected so a test can assert on a broken tier without writing the process-global one
     /// (#237's lesson applied ahead of time). Production reads `shared`.
     var health: GuardTierHealth = .shared
+    /// `IRIS_FORCE_ANIM=led` (Debug only): the primary LED goes active a second after the bar
+    /// appears. Its pulse animates a change of state, so forcing it on from the start ran nothing.
+    @State private var debugPulse = false
 
     var body: some View {
         HStack(spacing: 16) {
@@ -144,6 +147,11 @@ struct ModelLEDBar: View {
                         .stroke(Color.white.opacity(0.10), lineWidth: 0.5)
                 )
         )
+        .task {
+            guard DebugForceAnimation.isOn(.led) else { return }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            debugPulse = true
+        }
     }
 
     // MARK: - State derivation
@@ -157,7 +165,7 @@ struct ModelLEDBar: View {
 
     func primaryState() -> ModelLED.LEDState {
         guard config.isConfigured else { return .off }
-        return isThinking ? .active : .ready
+        return isThinking || debugPulse ? .active : .ready
     }
 
     func vibecopState() -> ModelLED.LEDState {

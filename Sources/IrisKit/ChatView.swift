@@ -223,7 +223,7 @@ struct ChatView: View {
                                 }
                             }
                             
-                            if state.isThinking(in: conv.id) {
+                            if state.isThinking(in: conv.id) || DebugForceAnimation.isOn(.dots) {
                                 HStack(spacing: 8) {
                                     TypingIndicator()
                                     Text("Iris is thinking...")
@@ -252,7 +252,7 @@ struct ChatView: View {
                         .listStyle(.plain)
                         .defaultScrollAnchor(.bottom)
                         .overlay {
-                            if conv.messages.isEmpty {
+                            if conv.messages.isEmpty || DebugForceAnimation.isOn(.welcome) {
                                 IrisWelcomeView()
                                     .id(conv.id)
                             }
@@ -1340,35 +1340,10 @@ struct RectCorner: OptionSet {
     static let allCorners: RectCorner = [.topLeft, .topRight, .bottomLeft, .bottomRight]
 }
 
+/// The dots beside "Iris is thinking...", animated by Core Animation (#540).
 struct TypingIndicator: View {
-    @State private var scale: CGFloat = 0.5
-    @State private var opacity: Double = 0.3
-    
     var body: some View {
-        HStack(spacing: 4) {
-            Circle()
-                .fill(Color.irisIndigo)
-                .frame(width: 6, height: 6)
-                .scaleEffect(scale)
-                .opacity(opacity)
-                .animation(.easeInOut(duration: 0.6).repeatForever().delay(0.0), value: scale)
-            Circle()
-                .fill(Color.irisBlue)
-                .frame(width: 6, height: 6)
-                .scaleEffect(scale)
-                .opacity(opacity)
-                .animation(.easeInOut(duration: 0.6).repeatForever().delay(0.2), value: scale)
-            Circle()
-                .fill(Color.irisTeal)
-                .frame(width: 6, height: 6)
-                .scaleEffect(scale)
-                .opacity(opacity)
-                .animation(.easeInOut(duration: 0.6).repeatForever().delay(0.4), value: scale)
-        }
-        .onAppear {
-            scale = 1.0
-            opacity = 1.0
-        }
+        TypingDotsView().frame(width: TypingDotsView.width, height: TypingDotsView.dotSize)
     }
 }
 
