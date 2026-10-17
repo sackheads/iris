@@ -936,7 +936,16 @@ struct MessageView: View {
                     // Trade-off: no drag-to-select of partial text inside an agent bubble; whole-
                     // message copy still works via row selection + Cmd-C.
                     // Live: a reply still streaming reads its box (#541); only this row does.
-                    Markdown(state.liveContent(of: message))
+                    // While it streams, as completed blocks and a live tail (`StreamingMarkdown`),
+                    // so a token re-lays out only the tail; at the final write, one Markdown again.
+                    // The styles below reach every Markdown inside through the environment.
+                    Group {
+                        if let box = state.streaming.boxes[message.id] {
+                            StreamingMarkdown(box: box)
+                        } else {
+                            Markdown(state.liveContent(of: message))
+                        }
+                    }
                         // Render fenced code blocks WITHOUT MarkdownUI's default horizontal
                         // ScrollView (Theme.basic wraps the label in ScrollView(.horizontal)).
                         // That scroll view swallows trackpad scroll when hovered (#30); wrapping
