@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SwiftUI
 
@@ -433,6 +434,46 @@ class AppState {
     /// a temp `IrisPaths` instead of the machine's real `~/.iris/config/permissions.json`.
     var permissions: PermissionManager = .shared
     var commandStartTimes: [UUID: Date] = [:]
+
+    /// Agent replies still streaming in (#541): see `StreamingTexts`. A `let`, so reading the
+    /// property subscribes to nothing; a view subscribes only to what it reads off it.
+    let streaming = StreamingTexts()
+    /// Fires with the conversation's id on each streamed update, for the transcript to follow the
+    /// reply down. A subject rather than observable state: the chat window's root listens with
+    /// `onReceive`, so a token never re-evaluates it.
+    @ObservationIgnored let streamTicks = PassthroughSubject<UUID, Never>()
+
+    /// What a message says right now: a streaming reply's latest text, else its content. For
+    /// leaf rows and non-view readers only (copy, export, another session reading this one,
+    /// persistence) — never in the chat window's root, the sidebar, the session strip's list or
+    /// the message grouping, which would then re-evaluate on every token (#541).
+    func liveContent(of message: ChatMessage) -> String {
+        streaming.boxes[message.id]?.text ?? message.content
+    }
+
+    /// `message` with its live content (`liveContent(of:)`), under the same rule.
+    func liveMessage(_ message: ChatMessage) -> ChatMessage {
+        guard let box = streaming.boxes[message.id] else { return message }
+        var live = message
+        live.content = box.text
+        return live
+    }
+
+    /// `messages` with their live content (`liveContent(of:)`), under the same rule.
+    func liveMessages(_ messages: [ChatMessage]) -> [ChatMessage] {
+        streaming.boxes.isEmpty ? messages : messages.map(liveMessage)
+    }
+
+    /// Writes what is still streaming into `conversationId` into its messages and drops the boxes:
+    /// for a stream that ends without its final write (a cancelled task, an archive). Persisted.
+    func commitStreams(in conversationId: UUID) {
+        let open = streaming.boxes(in: conversationId)
+        guard !open.isEmpty else { return }
+        for (messageId, box) in open {
+            streaming.remove(messageId)
+            updateMessageContent(id: messageId, content: box.text, in: conversationId, persist: true)
+        }
+    }
     var commandDurations: [UUID: TimeInterval] = [:]
     /// Subagent/evaluator sessions only — the main session is synthesised by `visibleSessions`,
     /// not stored here. A finished entry lingers (see `finishSession`) instead of disappearing so
@@ -852,6 +893,9 @@ class AppState {
         // Clamped at zero rather than going negative: an unpaired end must not make the next
         // real turn invisible.
         engineTurnCounts[conversationId] = count > 1 ? count - 1 : nil
+        // A stream whose turn ended without its final write (a cancelled or abandoned task) keeps
+        // what it showed, and leaves no box behind (#541).
+        if engineTurnCounts[conversationId] == nil { commitStreams(in: conversationId) }
         // An arrival turn — scheduler, watcher, subagent post-back — never passes through
         // `runThinkingTask`, so without this the message a user typed while one was running is
         // enqueued by `sendMessage` and then waits for some unrelated later UI turn to end
@@ -2235,6 +2279,7 @@ class AppState {
     }
 
     func deleteConversation(_ id: UUID) {
+        for (messageId, _) in streaming.boxes(in: id) { streaming.remove(messageId) }   // #541
         cancelTasks(for: id)
         resetPeerDepth(for: id)   // a deleted conversation carries no hop depth
         // #469 §5.3: must run before `conversations.removeAll` below — it reads this
@@ -2330,6 +2375,7 @@ class AppState {
         if let refusal = archiveRefusal(for: conversationId) { return refusal }
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
               !conversations[idx].isArchived else { return nil }
+        commitStreams(in: conversationId)   // #541: what was streaming is kept, not left in a box
         conversations[idx].isArchived = true
         markChanged(conversationId, .metadata)
         closeRequestsToGone(conversationId, verb: "archived")   // #469 §5.3
@@ -2760,11 +2806,23 @@ class AppState {
     
     /// Replaces one message's content in place (a streamed reply growing). No title generation;
     /// the caller asks for a save only when the message is final.
+    /// `persist: false` is a streamed reply's update (#541): it goes to the message's box in
+    /// `streaming`, which only that row reads, not to `conversations`. `persist: true` is a final
+    /// write: `conversations` gets the text, the box goes, and the change is saved.
     func updateMessageContent(id: UUID, content: String, in conversationId: UUID, persist: Bool = false) {
         guard let c = conversations.firstIndex(where: { $0.id == conversationId }),
-              let m = conversations[c].messages.firstIndex(where: { $0.id == id }) else { return }
+              let m = conversations[c].messages.firstIndex(where: { $0.id == id }) else {
+            streaming.remove(id)
+            return
+        }
+        guard persist else {
+            streaming.set(id, in: conversationId, text: content)
+            streamTicks.send(conversationId)
+            return
+        }
+        streaming.remove(id)
         conversations[c].messages[m].content = content
-        if persist { markChanged(conversationId, .messageUpdated(id: id)) }
+        markChanged(conversationId, .messageUpdated(id: id))
     }
 
     func updateHistory(for conversationId: UUID, history: [Content]) {
@@ -4028,13 +4086,24 @@ class AppState {
             // Deleted and re-created inside one window (the same id came back): the conversation
             // is live, so write the current snapshot rather than deleting the row out from under it.
             if live != nil { changes.deleted = false }
-            return ConversationWrite(id: id, snapshot: changes.deleted ? nil : live, changes: changes)
+            return ConversationWrite(id: id, snapshot: changes.deleted ? nil : live.map(overlayingStreams),
+                                     changes: changes)
         }
         pendingChanges = [:]
         return batch.sorted { lhs, rhs in
             let l = order[lhs.id] ?? Int.max, r = order[rhs.id] ?? Int.max
             return l == r ? lhs.id.uuidString < rhs.id.uuidString : l < r
         }
+    }
+
+    /// The snapshot as it reads right now: a streaming message's latest text over its content, so a
+    /// save mid-reply writes what was shown, as it did when the stream wrote `conversations`
+    /// (#541). Main actor, like `takeBatch`.
+    private func overlayingStreams(_ conversation: Conversation) -> Conversation {
+        guard !streaming.boxes(in: conversation.id).isEmpty else { return conversation }
+        var snapshot = conversation
+        snapshot.messages = liveMessages(conversation.messages)
+        return snapshot
     }
 
     /// Re-queues a failed write's changes behind whatever arrived since (spec §3 retry-by-merge).

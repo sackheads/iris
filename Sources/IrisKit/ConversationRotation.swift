@@ -86,7 +86,7 @@ extension AppState {
         }
         rotationConversationIds.insert(newId)
 
-        let oldMessages = conversations.first { $0.id == oldId }?.messages ?? []
+        let oldMessages = liveMessages(conversations.first { $0.id == oldId }?.messages ?? [])   // #541
         let outcome = await Self.unlessCancelled { await engine.summarizeForRotation(messages: oldMessages) }
         let stopped = Task.isCancelled
 

@@ -4449,7 +4449,8 @@ actor IrisEngine {
                                   let conv = localState?.conversations.first(where: { $0.id == transcriptId }),
                                   let last = conv.messages.last(where: { $0.role == .agent })
                             else { return nil }
-                            return String(last.content.prefix(Self.jobRunTranscriptExcerpt))
+                            return String((localState?.liveContent(of: last) ?? last.content)   // #541
+                                .prefix(Self.jobRunTranscriptExcerpt))
                         }
                         // Everything a model wrote goes through the guard. This branch returns
                         // directly, so it never passes through `executeToolWithHooks`'s guard
@@ -4591,7 +4592,7 @@ actor IrisEngine {
             let target = await MainActor.run {
                 () -> (messages: [ChatMessage], isBackground: Bool, isSubagent: Bool)? in
                 guard let c = localState?.conversations.first(where: { $0.id == targetId }) else { return nil }
-                return (c.messages, c.isBackground, c.isSubagent)
+                return (localState?.liveMessages(c.messages) ?? c.messages, c.isBackground, c.isSubagent)   // #541
             }
             guard let target else {
                 result = "No conversation with that id."

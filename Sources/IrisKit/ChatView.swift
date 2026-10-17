@@ -273,7 +273,7 @@ struct ChatView: View {
                             let format: ChatMessage.ExportFormat =
                                 ConfigManager.shared.copyChatsAsMarkdown ? .markdown : .plainText
                             let text = selectedMessages
-                                .map { $0.exportLine(format: format) }
+                                .map { state.liveMessage($0).exportLine(format: format) }
                                 .joined(separator: "\n\n") + "\n\n"
                             return [NSItemProvider(object: text as NSString)]
                         }
@@ -289,6 +289,12 @@ struct ChatView: View {
                         }
                         .onChange(of: conv.messages.last?.content) { _, _ in
                             scrollAfterUpdate(proxy)
+                        }
+                        // A streamed reply's tokens no longer change `conversations` (#541): they
+                        // arrive here, by subject, so the transcript follows without the root
+                        // re-evaluating per token.
+                        .onReceive(state.streamTicks) { id in
+                            if id == conv.id { scrollAfterUpdate(proxy) }
                         }
                         .onChange(of: state.isThinking(in: conv.id)) { _, isThinking in
                             if isThinking {
@@ -675,7 +681,7 @@ struct ChatView: View {
         // inline, plus the `.event` card's transcript line; see `ChatMessage.exportText`.
         var markdown = "# \(conv.title)\n\n"
         for msg in conv.messages {
-            markdown += msg.exportLine(format: .markdown) + "\n\n"
+            markdown += state.liveMessage(msg).exportLine(format: .markdown) + "\n\n"
         }
         
         let panel = NSSavePanel()
@@ -714,7 +720,7 @@ struct ChatView: View {
         
         let format: ChatMessage.ExportFormat = asMarkdown ? .markdown : .plainText
         let text = selectedMessages
-            .map { $0.exportLine(format: format) }
+            .map { state.liveMessage($0).exportLine(format: format) }
             .joined(separator: "\n\n") + "\n\n"
         
         let pasteboard = NSPasteboard.general
@@ -842,10 +848,12 @@ struct ChatView: View {
 
 struct MessageView: View {
     let message: ChatMessage
-    /// Only *written* through by the `.event` branch, to open the transcript sheet. Every call
-    /// site has an `AppState` in scope; it is a stored property rather than an environment value
-    /// because `AppState` is passed explicitly everywhere else in this file. Nothing here reads
-    /// observable state off it — see `transcriptAvailable`.
+    /// Written through by the `.event` branch, to open the transcript sheet. Every call site has an
+    /// `AppState` in scope; it is a stored property rather than an environment value because
+    /// `AppState` is passed explicitly everywhere else in this file. The one observable read off it
+    /// is an agent reply's live text (`liveContent(of:)`, #541), which subscribes this row to its
+    /// own stream and to streams starting or ending, never to `conversations` — see
+    /// `transcriptAvailable` for why that matters.
     var state: AppState
     /// Whether this message's event card has a transcript to open, resolved by the list that owns
     /// the message. Read from `state.conversations` in `body` instead, it would subscribe every
@@ -927,7 +935,8 @@ struct MessageView: View {
                     // cycles, Markdown without textSelection = 0, Markdown WITH textSelection = spam.
                     // Trade-off: no drag-to-select of partial text inside an agent bubble; whole-
                     // message copy still works via row selection + Cmd-C.
-                    Markdown(message.content)
+                    // Live: a reply still streaming reads its box (#541); only this row does.
+                    Markdown(state.liveContent(of: message))
                         // Render fenced code blocks WITHOUT MarkdownUI's default horizontal
                         // ScrollView (Theme.basic wraps the label in ScrollView(.horizontal)).
                         // That scroll view swallows trackpad scroll when hovered (#30); wrapping
