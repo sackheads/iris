@@ -31,6 +31,9 @@ struct CheckCommandSubstitutionTests {
         let editor = try #require(field.currentEditor() as? NSTextView)
         #expect(!editor.isAutomaticDashSubstitutionEnabled, "-- must not become an em dash")
         #expect(!editor.isAutomaticQuoteSubstitutionEnabled, "straight quotes must stay straight")
+        // Only a guard where the Mac's own NSAutomaticSpellingCorrectionEnabled is on (the default):
+        // with it off, the field editor never corrects and this passes without the modifier.
+        // Forcing it on here would mean writing the process-global defaults (invariant 7).
         #expect(!editor.isAutomaticSpellingCorrectionEnabled, "a flag must not be autocorrected")
     }
 }
