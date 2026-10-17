@@ -91,4 +91,65 @@ struct AmbientAnimationTests {
         dots.removeFromSuperview()
         #expect(dots.animated.allSatisfy { ($0.layer.animationKeys() ?? []).isEmpty })
     }
+
+    // MARK: Model LED (#557)
+
+    @Test("the LED pulse keeps today's timing: 1.0 to 1.35 times its size, 0.6 s each way")
+    func ledTiming() {
+        #expect(LEDDotView.pulse == AmbientPulse(keyPath: "transform.scale", from: 1.0, to: 1.35, duration: 0.6))
+    }
+
+    private func pulseKeys(_ view: LEDDotNSView) -> [String] {
+        (view.dot.animationKeys() ?? []).filter { $0 != "settle" }
+    }
+
+    @Test("on screen, the LED pulses exactly while it is active, however often the state flips")
+    func ledPulsesWhileActive() {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        let led = LEDDotNSView(state: .ready)
+        window.contentView?.addSubview(led)
+        let layers = led.layer?.sublayers?.count
+        #expect(pulseKeys(led).isEmpty, "ready does not pulse")
+        for _ in 0..<100 {
+            led.state = .active
+            #expect(pulseKeys(led) == ["transform.scale"])
+            led.state = .active
+            #expect(pulseKeys(led) == ["transform.scale"], "the same state again adds nothing")
+            led.state = .ready
+            #expect(pulseKeys(led).isEmpty)
+        }
+        led.state = .downloading
+        led.state = .error
+        #expect(pulseKeys(led).isEmpty, "only active pulses")
+        #expect(led.layer?.sublayers?.count == layers, "no layer added by pulsing")
+    }
+
+    @Test("an active LED starts pulsing when it joins a window and stops when it leaves")
+    func ledFollowsTheWindow() {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        let led = LEDDotNSView(state: .active)
+        #expect(pulseKeys(led).isEmpty, "nothing runs before it is shown")
+        window.contentView?.addSubview(led)
+        #expect(pulseKeys(led) == ["transform.scale"])
+        led.removeFromSuperview()
+        #expect((led.dot.animationKeys() ?? []).isEmpty, "nothing left running, settle included")
+        led.state = .ready
+        led.state = .active
+        #expect(pulseKeys(led).isEmpty, "a state change off screen starts nothing")
+    }
+
+    @Test("the dot keeps each state's look: its colour, a 0.3 ring, and a glow only when ready, active or downloading",
+          arguments: ModelLED.LEDState.allCases)
+    func ledLooks(state: ModelLED.LEDState) throws {
+        let led = LEDDotNSView(state: state)
+        let fill = try #require(led.dot.fillColor)
+        let ring = try #require(led.dot.strokeColor)
+        #expect(abs(ring.alpha - fill.alpha * 0.3) < 0.001)
+        #expect(led.dot.lineWidth == 1)
+        #expect(led.dot.shadowRadius == state.glowRadius)
+        #expect(led.dot.shadowOpacity == (state.glowRadius > 0 ? 0.7 : 0))
+        #expect(led.dot.shadowPath != nil)
+    }
 }

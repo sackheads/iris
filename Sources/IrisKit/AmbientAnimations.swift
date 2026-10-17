@@ -261,3 +261,96 @@ final class WelcomeGlowNSView: AmbientLayerView {
         return renderer.cgImage
     }()
 }
+
+// MARK: - Model LED
+
+/// A model LED's dot (#557): its colour, a 1 pt ring of that colour at 0.3, and its glow, growing
+/// to 1.35 times its size over 0.6 s and back for as long as the LED is active.
+struct LEDDotView: NSViewRepresentable {
+    static let side: CGFloat = 10
+    static let pulse = AmbientPulse(keyPath: "transform.scale", from: 1.0, to: 1.35, duration: 0.6)
+    let state: ModelLED.LEDState
+
+    func makeNSView(context: Context) -> LEDDotNSView { LEDDotNSView(state: state) }
+    func updateNSView(_ view: LEDDotNSView, context: Context) { view.state = state }
+}
+
+/// Unlike the dots and the glow, this view stays on screen while its animation comes and goes: the
+/// primary LED goes active for every turn and back to ready after it.
+final class LEDDotNSView: AmbientLayerView {
+    let dot = CAShapeLayer()
+    var state: ModelLED.LEDState {
+        didSet {
+            guard state != oldValue else { return }
+            applyColors()
+            pulse(wasPulsing: oldValue.isPulsing)
+        }
+    }
+
+    init(state: ModelLED.LEDState) {
+        self.state = state
+        super.init(frame: NSRect(x: 0, y: 0, width: LEDDotView.side, height: LEDDotView.side))
+        let circle = CGPath(ellipseIn: CGRect(x: 0, y: 0, width: LEDDotView.side, height: LEDDotView.side),
+                            transform: nil)
+        dot.path = circle
+        // The glow's shape given, so the render server doesn't derive it from the pixels each frame.
+        dot.shadowPath = circle
+        dot.shadowOffset = .zero
+        dot.lineWidth = 1
+        layer?.addSublayer(dot)
+        applyColors()
+        animated = [(dot, state.isPulsing ? [LEDDotView.pulse] : [])]
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    private func pulse(wasPulsing: Bool) {
+        animated = [(dot, state.isPulsing ? [LEDDotView.pulse] : [])]
+        guard state.isPulsing != wasPulsing, window != nil else { return }
+        if state.isPulsing { startAnimating() } else { settle() }
+    }
+
+    /// Back to full size from wherever the pulse was, as SwiftUI's default animation took it,
+    /// rather than a jump.
+    private func settle() {
+        let scale = dot.presentation()?.value(forKeyPath: "transform.scale") as? Double ?? 1
+        stopAnimating()
+        guard scale != 1 else { return }
+        let back = CABasicAnimation(keyPath: "transform.scale")
+        back.fromValue = scale
+        back.toValue = 1.0
+        back.duration = 0.2
+        back.timingFunction = AmbientPulse.timing
+        dot.add(back, forKey: "settle")
+    }
+
+    /// The state's colours as this view's appearance resolves them: `Color.green` is dynamic, and a
+    /// CGColor is not.
+    private func applyColors() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let color = NSColor(state.color).cgColor
+            dot.fillColor = color
+            dot.strokeColor = color.copy(alpha: color.alpha * 0.3)
+            dot.shadowColor = color
+        }
+        dot.shadowOpacity = state.glowRadius > 0 ? 0.7 : 0
+        dot.shadowRadius = state.glowRadius
+        CATransaction.commit()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyColors()
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        dot.bounds = CGRect(x: 0, y: 0, width: LEDDotView.side, height: LEDDotView.side)
+        dot.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        CATransaction.commit()
+    }
+}
