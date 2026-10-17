@@ -858,6 +858,14 @@ struct ChatView: View {
 }
 
 struct MessageView: View {
+    /// #541 fix D's probe arm (IRIS_STREAM_SPLIT); always false in a Release build.
+    static var probeSplit: Bool {
+        #if DEBUG
+        DebugStreamProbe.split
+        #else
+        false
+        #endif
+    }
     let message: ChatMessage
     /// Written through by the `.event` branch, to open the transcript sheet. Every call site has an
     /// `AppState` in scope; it is a stored property rather than an environment value because
@@ -950,7 +958,7 @@ struct MessageView: View {
                     // Probe switch IRIS_STREAM_SPLIT (#541 fix D's measurement): while a reply streams, as
                     // completed blocks and a live tail; otherwise one Markdown, as on main.
                     Group {
-                        if DebugStreamProbe.split, let box = state.streaming.boxes[message.id] {
+                        if Self.probeSplit, let box = state.streaming.boxes[message.id] {
                             StreamingMarkdown(box: box)
                         } else {
                             Markdown(state.liveContent(of: message))

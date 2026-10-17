@@ -14,8 +14,9 @@
 # (IRIS_STREAM_PLAIN=1). About 9 minutes.
 # `next` as a third argument (on fix A, #583): both = fix A plus no per-token scroll; then with
 # the streaming row's implicit animation off (IRIS_STREAM_ANIMNIL=1), without the bottom scroll
-# anchor (IRIS_STREAM_NOANCHOR=1), and with a real turn's thinking state (IRIS_STREAM_THINKING=1).
-# About 12 minutes.
+# anchor (IRIS_STREAM_NOANCHOR=1), with a real turn's thinking state (IRIS_STREAM_THINKING=1), and
+# fix D's split row (IRIS_STREAM_SPLIT=1) against both, at 4,000 and at 12,000-char replies
+# (IRIS_STREAM_MAXCHARS=12000). About 21 minutes.
 # `pair` mode, for a fix's A/B against main (#541): measure-stream.sh pair <before.app>
 # <after.app> <outdir>. Both apps are built from a branch carrying this probe; the arms alternate
 # before/after, 3 passes at 40 messages and 3 at 200. About 12 minutes.
@@ -70,6 +71,9 @@ for pass in 1 2 3; do
   one animnil-p$pass on $s IRIS_STREAM_NOSCROLL=1 IRIS_STREAM_ANIMNIL=1
   one noanchor-p$pass on $s IRIS_STREAM_NOSCROLL=1 IRIS_STREAM_NOANCHOR=1
   one thinking-p$pass on $s IRIS_STREAM_NOSCROLL=1 IRIS_STREAM_THINKING=1
+  one split-p$pass on $s IRIS_STREAM_NOSCROLL=1 IRIS_STREAM_SPLIT=1
+  one both12k-p$pass on $s IRIS_STREAM_NOSCROLL=1 IRIS_STREAM_MAXCHARS=12000
+  one split12k-p$pass on $s IRIS_STREAM_NOSCROLL=1 IRIS_STREAM_SPLIT=1 IRIS_STREAM_MAXCHARS=12000
 done
 elif [[ $which == pair ]]; then
 for n in 40 200; do
