@@ -32,8 +32,10 @@ enum IrisAsset {
 /// Drawn by Core Animation, not by SwiftUI (#476). A `TimelineView` ticking every frame made each
 /// frame a SwiftUI update, and every SwiftUI update in the chat window lays out the whole window
 /// (#530), so an idle window cost 12-16% CPU. The render server runs this animation with no work
-/// on the main thread. Like the SwiftUI version, it ignores Reduce Motion, and its colours are
-/// fixed RGB, so an appearance change has nothing to redraw.
+/// on the main thread. Its colours are fixed RGB, so an appearance change has nothing to redraw.
+///
+/// With Reduce Motion on it stands still, the gradient still shown, and working is told by a
+/// one-shot 0.3 s fade to a brighter line and back rather than by speed (#538).
 struct SpectrumLine: View {
     var active: Bool
 
@@ -80,7 +82,7 @@ struct SpectrumClock: Equatable {
 struct SpectrumLayerView: NSViewRepresentable {
     var rate: Double
 
-    func makeNSView(context: Context) -> SpectrumNSView { SpectrumNSView(rate: rate) }
+    func makeNSView(context: Context) -> SpectrumNSView { SpectrumNSView(rate: rate, reduceMotion: .system) }
     func updateNSView(_ view: SpectrumNSView, context: Context) { view.setRate(rate) }
 }
 
@@ -91,12 +93,23 @@ final class SpectrumNSView: NSView {
     // Symmetric so the doubled bar loops seamlessly (first == last) and stays in the cool zone.
     static let colors: [Color] = [.irisIndigo, .irisBlue, .irisAzure, .irisTeal, .irisAzure, .irisBlue, .irisIndigo]
     static let animationKey = "drift"
+    static let fadeKey = "brightness"
+    /// The still line's opacity under Reduce Motion: dimmer at rest, full while Iris works.
+    static let stillIdleOpacity: Float = 0.6
+    static let stillActiveOpacity: Float = 1
+    static let fadeDuration: CFTimeInterval = 0.3
 
     let drift = CALayer()
+    /// Holds the drift and carries the still line's brightness: the drift runs on its own clock
+    /// (its `speed` is the drift rate), so a fade on it would not take 0.3 s.
+    let fader = CALayer()
     private(set) var clock: SpectrumClock
+    let reduceMotion: ReduceMotion
+    private var motionObserver: NSObjectProtocol?
 
-    init(rate: Double) {
+    init(rate: Double, reduceMotion: ReduceMotion) {
         clock = .starting(at: CACurrentMediaTime(), speed: rate)
+        self.reduceMotion = reduceMotion
         super.init(frame: .zero)
         wantsLayer = true
         layer?.masksToBounds = true
@@ -104,15 +117,58 @@ final class SpectrumNSView: NSView {
         drift.contents = Self.doubledBar
         drift.contentsGravity = .resize
         drift.actions = ["bounds": NSNull(), "position": NSNull(), "contents": NSNull()]
-        layer?.addSublayer(drift)
+        drift.contentsRect = CGRect(x: 0, y: 0, width: 0.5, height: 1)
+        fader.actions = ["bounds": NSNull(), "position": NSNull()]
+        fader.addSublayer(drift)
+        layer?.addSublayer(fader)
         apply(clock)
-        let animation = CABasicAnimation(keyPath: "contentsRect")
-        animation.fromValue = CGRect(x: 0, y: 0, width: 0.5, height: 1)
-        animation.toValue = CGRect(x: 0.5, y: 0, width: 0.5, height: 1)
-        animation.duration = 1
-        animation.repeatCount = .infinity
-        animation.isRemovedOnCompletion = false
-        drift.add(animation, forKey: Self.animationKey)
+        applyMotion(fading: false)
+    }
+
+    var isActive: Bool { clock.speed == SpectrumClock.activeRate }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let motionObserver { reduceMotion.stopObserving(motionObserver) }
+        motionObserver = nil
+        guard window != nil else { return }
+        motionObserver = reduceMotion.observe { [weak self] in self?.applyMotion(fading: false) }
+        applyMotion(fading: false)
+    }
+
+    /// Drifting, or, with Reduce Motion on, still at the bar's first half with its brightness
+    /// saying whether Iris is working. A change of the setting takes the running animations off
+    /// at once, not at the next state change.
+    private func applyMotion(fading: Bool) {
+        if reduceMotion.isOn {
+            drift.removeAnimation(forKey: Self.animationKey)
+            setStillOpacity(isActive ? Self.stillActiveOpacity : Self.stillIdleOpacity, fading: fading)
+        } else {
+            setStillOpacity(1, fading: false)
+            guard drift.animation(forKey: Self.animationKey) == nil else { return }
+            let animation = CABasicAnimation(keyPath: "contentsRect")
+            animation.fromValue = CGRect(x: 0, y: 0, width: 0.5, height: 1)
+            animation.toValue = CGRect(x: 0.5, y: 0, width: 0.5, height: 1)
+            animation.duration = 1
+            animation.repeatCount = .infinity
+            animation.isRemovedOnCompletion = false
+            drift.add(animation, forKey: Self.animationKey)
+        }
+    }
+
+    private func setStillOpacity(_ opacity: Float, fading: Bool) {
+        let from = fader.presentation()?.opacity ?? fader.opacity
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        fader.opacity = opacity
+        CATransaction.commit()
+        guard fading, from != opacity else { fader.removeAnimation(forKey: Self.fadeKey); return }
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = from
+        fade.toValue = opacity
+        fade.duration = Self.fadeDuration
+        fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        fader.add(fade, forKey: Self.fadeKey)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
@@ -121,7 +177,8 @@ final class SpectrumNSView: NSView {
         super.layout()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        drift.frame = bounds
+        fader.frame = bounds
+        drift.frame = fader.bounds
         CATransaction.commit()
     }
 
@@ -129,6 +186,7 @@ final class SpectrumNSView: NSView {
         guard rate != clock.speed else { return }
         clock = clock.switching(to: rate, at: CACurrentMediaTime())
         apply(clock)
+        if reduceMotion.isOn { applyMotion(fading: true) }
     }
 
     private func apply(_ clock: SpectrumClock) {

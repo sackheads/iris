@@ -30,7 +30,7 @@ struct SpectrumClockTests {
     @Test("the layer gets the clock and the animation, and a rate change keeps the animation")
     @MainActor
     func viewKeepsItsAnimationAcrossRateAndSize() throws {
-        let view = SpectrumNSView(rate: SpectrumClock.idleRate)
+        let view = SpectrumNSView(rate: SpectrumClock.idleRate, reduceMotion: MotionSwitch(false).motion)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 2)
         view.layout()
         let animation = try #require(view.drift.animation(forKey: SpectrumNSView.animationKey))

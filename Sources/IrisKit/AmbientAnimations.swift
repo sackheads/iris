@@ -12,6 +12,9 @@ struct AmbientPulse: Equatable {
     var to: Double
     var duration: CFTimeInterval
     var delay: CFTimeInterval = 0
+    /// Where the layer stands under Reduce Motion (#538): `to`, the peak, unless a pulse whose
+    /// peak is the moving state (the LED's 1.35) says otherwise.
+    var still: Double? = nil
 
     /// The curve the animation is eased with. `progress(at:)` evaluates the same one, from its
     /// own control points, so the pure model and the shipped animation cannot drift apart.
@@ -80,12 +83,17 @@ struct AmbientPulse: Equatable {
 }
 
 /// An NSView whose layers animate only while it is in a window: shown, they start; removed with
-/// the view (the turn ended, the conversation got a message), nothing is left running.
+/// the view (the turn ended, the conversation got a message), nothing is left running. With
+/// Reduce Motion on they stand still at each pulse's peak instead (#538), and a change of the
+/// setting while shown takes effect at once.
 class AmbientLayerView: NSView {
     /// Each animated layer with its pulses.
     var animated: [(layer: CALayer, pulses: [AmbientPulse])] = []
+    let reduceMotion: ReduceMotion
+    private var motionObserver: NSObjectProtocol?
 
-    override init(frame: NSRect) {
+    init(frame: NSRect, reduceMotion: ReduceMotion = .system) {
+        self.reduceMotion = reduceMotion
         super.init(frame: frame)
         wantsLayer = true
     }
@@ -94,11 +102,19 @@ class AmbientLayerView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window == nil { stopAnimating() } else { startAnimating() }
+        if let motionObserver { reduceMotion.stopObserving(motionObserver) }
+        motionObserver = nil
+        if window == nil { stopAnimating(); return }
+        motionObserver = reduceMotion.observe { [weak self] in
+            guard let self, self.window != nil else { return }
+            self.startAnimating()
+        }
+        startAnimating()
     }
 
     func startAnimating() {
         stopAnimating()
+        if reduceMotion.isOn { holdStill(); return }
         let now = CACurrentMediaTime()
         for (layer, pulses) in animated {
             let start = layer.convertTime(now, from: nil)
@@ -108,6 +124,17 @@ class AmbientLayerView: NSView {
 
     func stopAnimating() {
         for (layer, _) in animated { layer.removeAllAnimations() }
+    }
+
+    /// Each layer at its pulse's `still`: by default its peak, so the dots at full size and the
+    /// glow at its fullest.
+    private func holdStill() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for (layer, pulses) in animated {
+            for pulse in pulses { layer.setValue(pulse.still ?? pulse.to, forKeyPath: pulse.keyPath) }
+        }
+        CATransaction.commit()
     }
 }
 
@@ -125,7 +152,7 @@ struct TypingDotsView: NSViewRepresentable {
          AmbientPulse(keyPath: "opacity", from: 0.3, to: 1.0, duration: 0.6, delay: delay)]
     }
 
-    func makeNSView(context: Context) -> TypingDotsNSView { TypingDotsNSView() }
+    func makeNSView(context: Context) -> TypingDotsNSView { TypingDotsNSView(reduceMotion: .system) }
     func updateNSView(_ view: TypingDotsNSView, context: Context) {}
 }
 
@@ -133,8 +160,9 @@ final class TypingDotsNSView: AmbientLayerView {
     static let colors: [Color] = [.irisIndigo, .irisBlue, .irisTeal]
     static let delays: [CFTimeInterval] = [0.0, 0.2, 0.4]
 
-    init() {
-        super.init(frame: NSRect(x: 0, y: 0, width: TypingDotsView.width, height: TypingDotsView.dotSize))
+    init(reduceMotion: ReduceMotion) {
+        super.init(frame: NSRect(x: 0, y: 0, width: TypingDotsView.width, height: TypingDotsView.dotSize),
+                   reduceMotion: reduceMotion)
         animated = zip(Self.colors, Self.delays).map { color, delay in
             let dot = CALayer()
             dot.backgroundColor = NSColor(color).cgColor
@@ -173,7 +201,7 @@ struct WelcomeGlowView: NSViewRepresentable {
                              AmbientPulse(keyPath: "opacity", from: 0.5, to: 0.9, duration: 2.6)]
     static let iconPulses = [AmbientPulse(keyPath: "transform.scale", from: 1.0, to: 1.03, duration: 2.6)]
 
-    func makeNSView(context: Context) -> WelcomeGlowNSView { WelcomeGlowNSView() }
+    func makeNSView(context: Context) -> WelcomeGlowNSView { WelcomeGlowNSView(reduceMotion: .system) }
     func updateNSView(_ view: WelcomeGlowNSView, context: Context) {}
 }
 
@@ -181,8 +209,9 @@ final class WelcomeGlowNSView: AmbientLayerView {
     let glow = CALayer()
     let icon = CALayer()
 
-    init() {
-        super.init(frame: NSRect(x: 0, y: 0, width: WelcomeGlowView.side, height: WelcomeGlowView.side))
+    init(reduceMotion: ReduceMotion) {
+        super.init(frame: NSRect(x: 0, y: 0, width: WelcomeGlowView.side, height: WelcomeGlowView.side),
+                   reduceMotion: reduceMotion)
         glow.contents = Self.glowImage
         glow.contentsGravity = .resize
         glow.opacity = 0.5
