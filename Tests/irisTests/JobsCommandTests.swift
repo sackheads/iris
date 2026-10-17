@@ -57,6 +57,10 @@ struct JobsCommandTests {
     func parsePauseResumeRun() {
         #expect(JobsCommand.parse("/jobs pause pr-sweep") == .pause(name: "pr-sweep"))
         #expect(JobsCommand.parse("/jobs resume pr-sweep") == .resume(name: "pr-sweep"))
+        #expect(JobsCommand.parse("/jobs enable Daily digest") == .enable(name: "Daily digest"))
+        #expect(JobsCommand.parse("/jobs disable pr-sweep") == .disable(name: "pr-sweep"))
+        #expect(JobsCommand.parse("/jobs enable") == .usage)
+        #expect(JobsCommand.parse("/jobs disable  ") == .usage)
         #expect(JobsCommand.parse("/jobs run pr-sweep") == .run(name: "pr-sweep"))
         #expect(JobsCommand.parse("/jobs run  nightly digest ") == .run(name: "nightly digest"))
         #expect(JobsCommand.parse("/jobs pause") == .usage)
@@ -79,8 +83,8 @@ struct JobsCommandTests {
     @Test("the usage text names every form")
     func usageTextSpellsEveryForm() {
         #expect(JobsCommand.usageText == "Usage: /jobs · /jobs ack <run id> · /jobs pause <name> · "
-                + "/jobs resume <name> · /jobs run <name> · /jobs delete <name> · "
-                + "/jobs reschedule <name> <cron> [timezone] · /jobs url <name> [on|off]")
+                + "/jobs resume <name> · /jobs enable <name> · /jobs disable <name> · /jobs run <name> · "
+                + "/jobs delete <name> · /jobs reschedule <name> <cron> [timezone] · /jobs url <name> [on|off]")
     }
 
     // MARK: reschedule
@@ -647,7 +651,8 @@ struct JobsCommandTests {
 
     @Test("the usage line names every form the command takes")
     func usageTextNamesEveryForm() {
-        for form in ["/jobs ack", "/jobs pause", "/jobs resume", "/jobs run", "/jobs delete", "/jobs reschedule", "/jobs url"] {
+        for form in ["/jobs ack", "/jobs pause", "/jobs resume", "/jobs enable", "/jobs disable", "/jobs run",
+                     "/jobs delete", "/jobs reschedule", "/jobs url"] {
             #expect(JobsCommand.usageText.contains(form), "usage text is missing \(form)")
         }
     }
@@ -682,6 +687,65 @@ struct JobsCommandTests {
         #expect(output(app, id).contains("pr-sweep"))
         #expect(app.conversations.first { $0.id == id }?.history.isEmpty == true,
                 "a deterministic command never enters the model's history")
+    }
+
+    // MARK: enable / disable (#590)
+
+    @Test("/jobs disable turns a job off in the ledger, takes it out of the due set, and says a run in flight goes on")
+    func disableCommand() throws {
+        let j = job(nextFireAt: Date().addingTimeInterval(-60))
+        let (app, id) = makeApp(with: [j])
+        let ledger = app.store.ledger
+        #expect(try ledger.dueJobs(at: Date()).map(\.id) == [j.id], "precondition: due")
+
+        app.sendMessage("/jobs disable pr-sweep")
+
+        #expect(try ledger.job(named: "pr-sweep")?.enabled == false)
+        #expect(try ledger.dueJobs(at: Date()).isEmpty, "a disabled job never fires on its schedule")
+        #expect(output(app, id).contains("Disabled **pr-sweep**"))
+        #expect(output(app, id).contains("A run already in progress is not stopped"))
+
+        app.sendMessage("/jobs disable pr-sweep")
+        #expect(output(app, id).contains("**pr-sweep** is already disabled."))
+    }
+
+    @Test("/jobs enable turns a job back on with its next fire computed from now, not the time it missed")
+    func enableCommand() throws {
+        let stale = Date().addingTimeInterval(-86_400)
+        let j = job(nextFireAt: stale, enabled: false)
+        let (app, id) = makeApp(with: [j])
+        let ledger = app.store.ledger
+
+        app.sendMessage("/jobs enable pr-sweep")
+
+        let after = try #require(try ledger.job(named: "pr-sweep"))
+        #expect(after.enabled)
+        let next = try #require(after.nextFireAt)
+        #expect(next > Date(), "not the stale time, which would fire at once")
+        #expect(next <= Date().addingTimeInterval(61), "its own cadence from now")
+        #expect(output(app, id).contains("Enabled **pr-sweep** · next"))
+
+        app.sendMessage("/jobs enable pr-sweep")
+        #expect(output(app, id).contains("**pr-sweep** is already enabled."))
+    }
+
+    @Test("/jobs enable leaves a pause alone and says so, and a watch keeps having no next fire")
+    func enableKeepsPauseAndWatch() throws {
+        let paused = job("paused-one", enabled: false, pausedReason: JobsCommand.pausedByUserReason)
+        let watch = job("a-watch", trigger: .fsEvent(FSWatch(path: "/tmp/w")), enabled: false)
+        let (app, id) = makeApp(with: [paused, watch])
+        let ledger = app.store.ledger
+
+        app.sendMessage("/jobs enable paused-one")
+        #expect(try ledger.job(named: "paused-one")?.pausedReason == JobsCommand.pausedByUserReason)
+        #expect(output(app, id).contains("still paused (paused by user): `/jobs resume paused-one`"))
+
+        app.sendMessage("/jobs enable a-watch")
+        let w = try #require(try ledger.job(named: "a-watch"))
+        #expect(w.enabled && w.nextFireAt == nil)
+
+        app.sendMessage("/jobs enable nobody")
+        #expect(output(app, id).contains("No job named 'nobody'."))
     }
 
     @Test("/jobs ack clears the failure from the unacknowledged list")

@@ -16,6 +16,10 @@ enum JobsCommand: Equatable {
     case resume(name: String)
     case run(name: String)
     case delete(name: String)
+    /// Turns a job's `enabled` flag on or off (#590). Separate from a pause: a pause is a reason
+    /// the table shows and `resume` clears; a disabled job is simply off until enabled.
+    case enable(name: String)
+    case disable(name: String)
     /// A new cron for a scheduled or polled job; `timeZone` nil keeps the job's own.
     case reschedule(name: String, cron: String, timeZone: String?)
     /// `setting` nil asks whether the job's URL trigger is on; true turns it on (minting a new
@@ -24,8 +28,22 @@ enum JobsCommand: Equatable {
     case usage
 
     static let usageText = "Usage: /jobs · /jobs ack <run id> · /jobs pause <name> · "
-        + "/jobs resume <name> · /jobs run <name> · /jobs delete <name> · "
+        + "/jobs resume <name> · /jobs enable <name> · /jobs disable <name> · /jobs run <name> · /jobs delete <name> · "
         + "/jobs reschedule <name> <cron> [timezone] · /jobs url <name> [on|off]"
+
+    /// What `/jobs enable` answers (#590). Enabling does not lift a pause: that is `/jobs resume`'s.
+    static func enabledText(_ job: Job, now: Date) -> String {
+        if let reason = job.pausedReason {
+            return "Enabled **\(job.name)**, but it is still paused (\(reason)): `/jobs resume \(job.name)` lets it fire."
+        }
+        return "Enabled **\(job.name)** · next \(nextText(for: job, now: now))."
+    }
+
+    /// What `/jobs disable` answers (#590). A run already going is the runner's, not the flag's.
+    static func disabledText(_ job: Job) -> String {
+        "Disabled **\(job.name)**: it will not fire on its schedule, a watch, a link or `/jobs run` until "
+            + "`/jobs enable \(job.name)`. A run already in progress is not stopped."
+    }
 
     /// What `/jobs pause` writes, and what `/jobs` then prints in the Next column. Spelled once so
     /// the command that clears it and the table that shows it cannot drift.
@@ -39,7 +57,7 @@ enum JobsCommand: Equatable {
 
     // MARK: Parsing
 
-    /// `/jobs`, `/jobs ack <run id>`, `/jobs pause|resume|run|delete <name>`; anything else is
+    /// `/jobs`, `/jobs ack <run id>`, `/jobs pause|resume|enable|disable|run|delete <name>`; anything else is
     /// `.usage`. A run id is exactly one token — a second word means the user meant something the
     /// command cannot do, and acting on the first token alone would be a guess. A job name, by
     /// contrast, is the rest of the line: names come from `schedule_job` and may contain spaces.
@@ -252,6 +270,8 @@ enum JobsCommand: Equatable {
     private static let named: [(String, @Sendable (String) -> JobsCommand)] = [
         ("pause", { .pause(name: $0) }),
         ("resume", { .resume(name: $0) }),
+        ("enable", { .enable(name: $0) }),
+        ("disable", { .disable(name: $0) }),
         ("run", { .run(name: $0) }),
         ("delete", { .delete(name: $0) }),
     ]
