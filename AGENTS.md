@@ -337,7 +337,6 @@ docs/                     # feature pages (features.md, jobs.md, …), install.m
   - One heading per feature, edited in place. Never append a second section for a feature that already has one.
   - A section that outgrows about a screen (about 300 words) moves to its own `docs/<feature>.md` and leaves a one-line link behind.
   - Every README `[Details]` link must keep resolving: rename or move a heading, and fix the links to it.
-  - `docs/features.md` does not meet these yet, from the word-for-word move out of the README: MCP, Vibecop and file attachments each appear twice, and eight sections are over the 300-word line (Jobs, at about 1,800, already has `docs/jobs.md`). #534 is the cleanup.
 - **Design specs:** `docs/specs/YYYY-MM-DD-feature-name.md`
 - **Implementation plans:** `docs/plans/YYYY-MM-DD-feature-name.md` (superpowers plans go in `docs/superpowers/plans/`)
 - **Reviews:** `docs/reviews/YYYY-MM-DD-feature-name-review.md`
