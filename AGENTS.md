@@ -96,7 +96,14 @@ bundled `~/.iris` spelling to `~/.iris-dev` in the copied `.md`/`.json` files un
 copied `conversations.sqlite` it re-points absolute paths under the release home (each
 conversation's `workspacePath`, and the goal contract, sandbox, job trigger/policy and blocked-call
 JSON columns; transcripts are left alone), pauses every copied job ("copied into the dev home;
-unpause to run it here"), and writes `.seeded-from-release` at the new home's root. It
+unpause to run it here"), and writes `.seeded-from-release` at the new home's root. The `.dev`
+Keychain items it creates trust only the binary that made them (the bare `iris`), so Iris Dev.app's
+first launch asks once for the login password, naming `com.iris.secrets.dev`: Always Allow with the
+app still open adds it for good; Deny, or quitting before answering, means it asks again next
+launch (#578). Creating the items with an access list that also trusts the app was considered and
+rejected: it needs `SecAccessCreate` and `SecTrustedApplicationCreateFromPath`, deprecated since
+macOS 10.10 (warnings in our own code, which the zero-warnings rule forbids suppressing), and those
+build a trusted app only from a built app's path, which the seeder does not have. It
 refuses outright if another Iris process holds the release store's lock (the installed app or a
 `--run-job`: quit it and retry), if that lock cannot be taken at all, or if the
 dev home already has content (remove it first to reseed). While it copies it holds that lock, so
@@ -189,6 +196,12 @@ $L release                                                             # as soon
 Exit 1 means another session has the screen: message the holder named in the output, or wait with
 `--wait SECS`. Never start GUI work without the lease, and never edit or delete the lease file by
 hand. If the skill isn't installed, ask the user rather than skipping this.
+
+**Never quit the app while a SecurityAgent prompt for it is open.** A Keychain "Always Allow" reaches
+the item's access list only while the app that asked is still running; a harness that quits it
+first (a measurement watcher, a timeout) leaves the item untouched, and every later launch asks
+again (#578). The first launch on a freshly seeded dev home asks once for `com.iris.secrets.dev`:
+wait for that prompt to be answered before measuring or quitting.
 
 ### Worktrees: remove them when their PR merges
 
