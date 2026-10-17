@@ -268,10 +268,11 @@ final class WelcomeGlowNSView: AmbientLayerView {
 /// to 1.35 times its size over 0.6 s and back for as long as the LED is active.
 struct LEDDotView: NSViewRepresentable {
     static let side: CGFloat = 10
-    static let pulse = AmbientPulse(keyPath: "transform.scale", from: 1.0, to: 1.35, duration: 0.6)
+    /// Stands still at full size under Reduce Motion, not at its 1.35 peak, which is the moving state.
+    static let pulse = AmbientPulse(keyPath: "transform.scale", from: 1.0, to: 1.35, duration: 0.6, still: 1.0)
     let state: ModelLED.LEDState
 
-    func makeNSView(context: Context) -> LEDDotNSView { LEDDotNSView(state: state) }
+    func makeNSView(context: Context) -> LEDDotNSView { LEDDotNSView(state: state, reduceMotion: .system) }
     func updateNSView(_ view: LEDDotNSView, context: Context) { view.state = state }
 }
 
@@ -287,9 +288,10 @@ final class LEDDotNSView: AmbientLayerView {
         }
     }
 
-    init(state: ModelLED.LEDState) {
+    init(state: ModelLED.LEDState, reduceMotion: ReduceMotion) {
         self.state = state
-        super.init(frame: NSRect(x: 0, y: 0, width: LEDDotView.side, height: LEDDotView.side))
+        super.init(frame: NSRect(x: 0, y: 0, width: LEDDotView.side, height: LEDDotView.side),
+                   reduceMotion: reduceMotion)
         let circle = CGPath(ellipseIn: CGRect(x: 0, y: 0, width: LEDDotView.side, height: LEDDotView.side),
                             transform: nil)
         dot.path = circle
