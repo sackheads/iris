@@ -97,10 +97,12 @@ copied `conversations.sqlite` it re-points absolute paths under the release home
 conversation's `workspacePath`, and the goal contract, sandbox, job trigger/policy and blocked-call
 JSON columns; transcripts are left alone), pauses every copied job ("copied into the dev home;
 unpause to run it here"), and writes `.seeded-from-release` at the new home's root. The `.dev`
-Keychain items it creates trust only the binary that made them (the bare `iris`), so Iris Dev.app's
-first launch asks once for the login password, naming `com.iris.secrets.dev`: Always Allow with the
-app still open adds it for good; Deny, or quitting before answering, means it asks again next
-launch (#578). Creating the items with an access list that also trusts the app was considered and
+Keychain items it creates trust only the binary that made them (the bare `iris`), so Iris Dev.app
+asks for the login password once per copied item, the first time it reads it
+(`com.iris.secrets.dev` at launch, `iris.mcp.dev` and each `iris.plugin.<id>.dev` when first used;
+the seeder's success line lists them): Always Allow with the app still open adds it for good, for
+every Developer ID–signed rebuild; Deny, or quitting before answering, means that item asks again
+next launch (#578). Creating the items with an access list that also trusts the app was considered and
 rejected: it needs `SecAccessCreate` and `SecTrustedApplicationCreateFromPath`, deprecated since
 macOS 10.10 (warnings in our own code, which the zero-warnings rule forbids suppressing), and those
 build a trusted app only from a built app's path, which the seeder does not have. It
@@ -200,8 +202,9 @@ hand. If the skill isn't installed, ask the user rather than skipping this.
 **Never quit the app while a SecurityAgent prompt for it is open.** A Keychain "Always Allow" reaches
 the item's access list only while the app that asked is still running; a harness that quits it
 first (a measurement watcher, a timeout) leaves the item untouched, and every later launch asks
-again (#578). The first launch on a freshly seeded dev home asks once for `com.iris.secrets.dev`:
-wait for that prompt to be answered before measuring or quitting.
+again (#578). The first launch on a freshly seeded dev home asks for `com.iris.secrets.dev`, and
+later reads ask for each other seeded item: wait for each prompt to be answered before measuring
+or quitting.
 
 ### Worktrees: remove them when their PR merges
 

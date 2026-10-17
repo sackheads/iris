@@ -32,6 +32,11 @@ struct DevHomeSeederTests {
         #expect(dstKC.loadSecrets() == ["ANTHROPIC_API_KEY": "sk"])
         #expect(dstKC.secrets(service: KeychainManager.pluginService("p")) == ["t": "1"])
         #expect(report.keychainServicesCopied == 2)
+        // Each copied item is its own prompt in Iris Dev.app, so the line names every one (#578).
+        #expect(report.keychainServices == [dstKC.resolvedService(KeychainManager.legacyService),
+                                            dstKC.resolvedService(KeychainManager.pluginService("p"))])
+        #expect(DevHomeSeeder.successLine(report, displayRoot: dst.displayRoot)
+            .contains(dstKC.resolvedService(KeychainManager.pluginService("p"))))
     }
 
     @Test("refuses under the release identity")
@@ -365,14 +370,17 @@ struct DevHomeSeederTests {
     /// success line says what that prompt names and how to answer it; a quit app asks again.
     @Test("the success line tells how to answer Iris Dev.app's one Keychain prompt, only when items were copied")
     func successLineNamesThePrompt() {
-        let line = DevHomeSeeder.successLine(DevHomeSeeder.Report(keychainServicesCopied: 2), displayRoot: "~/.iris-dev")
-        #expect(line.hasPrefix("seeded ~/.iris-dev from ~/.iris (2 Keychain services)"))
-        #expect(line.contains("com.iris.secrets.dev"), "the service the prompt names")
-        #expect(line.contains("Always Allow"))
-        #expect(line.contains("keep the app open"))
+        let services = ["com.iris.secrets.dev", "iris.mcp.dev", "iris.plugin.github.dev"]
+        let line = DevHomeSeeder.successLine(DevHomeSeeder.Report(keychainServicesCopied: 3, keychainServices: services),
+                                             displayRoot: "~/.iris-dev")
+        #expect(line.hasPrefix("seeded ~/.iris-dev from ~/.iris (3 Keychain services)"))
+        for service in services { #expect(line.contains(service), "every item gets its own prompt: \(service)") }
+        #expect(line.contains("once for each of these"))
+        #expect(line.contains("Always Allow each time"))
+        #expect(line.contains("Keep the app open"))
         #expect(line.contains("asks again at the next launch"))
 
-        let none = DevHomeSeeder.successLine(DevHomeSeeder.Report(keychainServicesCopied: 0), displayRoot: "~/.iris-dev")
+        let none = DevHomeSeeder.successLine(DevHomeSeeder.Report(), displayRoot: "~/.iris-dev")
         #expect(none == "seeded ~/.iris-dev from ~/.iris (0 Keychain services)", "no prompt to explain")
     }
 }
