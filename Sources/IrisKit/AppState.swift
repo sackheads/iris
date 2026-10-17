@@ -3694,7 +3694,6 @@ class AppState {
         let stopping = liveSubagentTasks.filter { $0.value.run == conversationId }
         if wasActive {
             let delegates = delegationDescendants(of: conversationId)
-                + stopping.keys.filter { !isDelegated($0, under: conversationId) }
             if !delegates.isEmpty { drainedDelegates[conversationId, default: []] += delegates }
         }
         for (_, live) in stopping {
