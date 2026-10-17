@@ -104,7 +104,9 @@ struct ContainerExecGroupKillTests {
 
     /// The ladder fires the killer twice (#377). `late`: the cancel lands before the command has
     /// recorded its group, so the first kill finds no note and the second must still reach the
-    /// group. Not `late`: the group is recorded first, the first kill takes the note and ends it,
+    /// group. "Late" is forced by order, not by a clock: the stub's wrapper waits for a `go` file
+    /// the test writes only once the first killer has fired (#571; a `sleep 1` here starved past
+    /// the test's windows under load). Not `late`: the group is recorded first, the first kill takes the note and ends it,
     /// and the second must find no note, so it signals nothing — the id may be reused by then.
     ///
     /// A stub `container` stands in for the CLI: for the command's `exec` it starts the wrapper
@@ -122,12 +124,13 @@ struct ContainerExecGroupKillTests {
         defer { RunCommandProcessGroupTests.killAll(nap); RunCommandProcessGroupTests.killAll(clientNap) }
         let stub = dir.appendingPathComponent("container").path
         let log = dir.appendingPathComponent("killers").path
+        let go = dir.appendingPathComponent("go").path
         try """
         #!/bin/bash
         [ "$1" = exec ] || exit 0
         shift; [ "$1" = -w ] && shift 2; shift
         if [ "$4" = iris-exec ]; then
-            ( ( trap '' TERM; sleep \(late ? 1 : 0); trap - TERM; set -m; "$@" & ) & ) </dev/null >/dev/null 2>&1
+            ( ( trap '' TERM; \(late ? "while [ ! -e '\(go)' ]; do sleep 0.02; done; " : "")trap - TERM; set -m; "$@" & ) & ) </dev/null >/dev/null 2>&1
             sleep \(clientNap)
         else
             pf=$(printf %s "$3" | grep -o '/tmp/[.]iris-exec-[A-Za-z0-9-]*[.]pid' | head -1)
@@ -154,8 +157,14 @@ struct ContainerExecGroupKillTests {
         if !late { #expect(await RunCommandProcessGroupTests.appears("^sleep \(nap)", within: 5)) }
         call.cancel()
         _ = try? await value(of: call)
-        // Late, the wrapper records its group about a second after the launch, after the first kill.
-        if late { #expect(await RunCommandProcessGroupTests.appears("^sleep \(nap)", within: 5), "the late group never started") }
+        // Late, the wrapper starts, and records its group, only after the first kill has fired.
+        if late {
+            let fired = Date().addingTimeInterval(10)
+            while fires.lock.withLock({ fires.count }) < 1, Date() < fired { try await Task.sleep(nanoseconds: 20_000_000) }
+            #expect(fires.lock.withLock { fires.count } >= 1, "precondition: the first kill fired")
+            #expect(FileManager.default.createFile(atPath: go, contents: nil))
+            #expect(await RunCommandProcessGroupTests.appears("^sleep \(nap)", within: 5), "the late group never started")
+        }
         let deadline = Date().addingTimeInterval(CLIProcessRunner.killGraceSeconds * 2 + 3)
         while RunCommandProcessGroupTests.exists("^sleep \(nap)"), Date() < deadline {
             try await Task.sleep(nanoseconds: 50_000_000)
