@@ -460,23 +460,50 @@ struct JobProfileTests {
         #expect(run.blockedCall?.reason == .profile)
     }
 
-    /// The safety half of #550: an unlisted name is never let through to the executor. A real tool
-    /// that `allDeclaredToolNames` forgot (today `submit_evaluation`) is refused without ending the
-    /// run, rather than run unattended.
-    @Test("a name the profile denies is never allowed: a known tool stops the run, any other name is refused and the run goes on")
+    /// The safety half of #550: an unlisted name is never let through to the executor. Only a tool
+    /// a mutating job could run ends the run; any other name, a real tool no job is ever offered
+    /// included, is refused while the run goes on, since "the job would have to be mutating" would
+    /// be false for it.
+    @Test("a name the profile denies is never allowed: a tool a mutating job could run stops the run, any other name is refused and the run goes on")
     func verdicts() {
         #expect(IrisEngine.readOnlyVerdict("read_file", denied: false) == .allowed)
         #expect(IrisEngine.readOnlyVerdict("write_file", denied: true) == .denied)
         #expect(IrisEngine.readOnlyVerdict("srv___mutate", denied: true) == .denied)
         #expect(IrisEngine.readOnlyVerdict("search_files", denied: true) == .unknownTool)
+        // A real tool (#558 put it in allDeclaredToolNames), but the evaluator's alone: no job of
+        // either profile is offered it, so it is unknown to a job.
+        #expect(IrisEngine.allDeclaredToolNames.contains("submit_evaluation"))
         #expect(IrisEngine.readOnlyVerdict("submit_evaluation", denied: true) == .unknownTool,
-                "a real tool missing from allDeclaredToolNames is still refused, never allowed")
+                "a tool no job is ever offered is refused, never allowed, and does not end the run")
+        #expect(IrisEngine.readOnlyVerdict("rename_conversation", denied: true) == .unknownTool)
     }
 
     @Test("every tool a read-only run may call is a known tool, so the unknown-name check cannot let one skip the profile")
     func allowlistIsKnown() {
         #expect(JobProfile.readOnlyAllowed.subtracting(IrisEngine.allDeclaredToolNames).isEmpty,
                 "\(JobProfile.readOnlyAllowed.subtracting(IrisEngine.allDeclaredToolNames))")
+    }
+
+    /// `jobRunToolNames` is derived by subtraction from the hand-kept sets, so it is pinned here
+    /// against what a mutating job's turn is really offered. A tool that turn gets but the set
+    /// lacks would be refused softly to a read-only job; a name in the set that no job gets would
+    /// end a run claiming the job "would have to be mutating". The only names allowed to differ
+    /// are the Google Workspace tools, which need credentials this test does not have.
+    @Test("jobRunToolNames is exactly what a mutating job's turn is offered, every gate on")
+    func jobRunToolNamesMatchAMutatingRun() async throws {
+        let (store, app) = try state()
+        let client = CapturingLLMClient(reply: "done")
+        try await fire(job(profile: .mutating), client: client, sandboxAvailable: true, store: store, state: app)
+
+        let offered = Set(client.requests.first?.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? [])
+            .filter { !JobProfile.isMCPTool($0) }
+        #expect(offered.contains("write_file"), "precondition: the mutating surface was read")
+        #expect(offered.subtracting(IrisEngine.jobRunToolNames).isEmpty,
+                "offered to a job but missing from jobRunToolNames: \(offered.subtracting(IrisEngine.jobRunToolNames).sorted())")
+        let workspace = Set(await ToolExecutor.shared.getTools(workspaceToolsEnabled: true).map(\.name))
+            .subtracting(await ToolExecutor.shared.getTools(workspaceToolsEnabled: false).map(\.name))
+        let extra = IrisEngine.jobRunToolNames.subtracting(offered).subtracting(workspace)
+        #expect(extra.isEmpty, "in jobRunToolNames but offered to no job: \(extra.sorted())")
     }
 
     @Test("two denied calls in one batch: the transcript and the row name the same one")

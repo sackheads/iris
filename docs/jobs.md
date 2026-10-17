@@ -190,7 +190,8 @@ read-only and that no other tool will do it either — but the turn ends on the 
 before another model round can read it, which is the order that matters: no approval is coming and
 nothing else would do the same thing, so a further round could only use up the run's token budget
 arriving at the same answer. The sentence is the record; the ending is the enforcement.
-A name that is no tool at all — an invented `search_files`, a mangled spelling — is refused too,
+A name that is no tool a job can be offered — an invented `search_files`, a mangled spelling, or a
+tool only another kind of conversation gets, such as the goal grader's `submit_evaluation` — is refused too,
 before anything runs, but it does not end the run: it gets the same "Unknown tool" error it would in
 any conversation, nothing is recorded on the row, and the run goes on, since another round can do the
 work with a tool that exists (#550).
