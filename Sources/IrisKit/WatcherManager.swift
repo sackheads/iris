@@ -235,22 +235,19 @@ actor WatcherManager {
         }
     }
 
-    /// Which of `paths` do not exist, stat'd on a dispatch queue so a slow filesystem never holds
-    /// the calling actor or a cooperative-pool thread. Shared with `WatchCoordinator`'s fire-time
-    /// check (#281). A stat on a hung mount blocks its thread until the mount times out; on a
-    /// detached task that was a pool thread, of which a low-core Mac has few (#486, the #372
-    /// class). A cancel returns nil at once, which no caller may read as "every root present";
-    /// the stat runs on and its answer is dropped.
+    /// Which of `paths` do not exist, stat'd off the calling actor and the cooperative pool
+    /// (`OffPool`) so a slow filesystem never holds either. Shared with `WatchCoordinator`'s
+    /// fire-time check (#281). A stat on a hung mount blocks its thread until the mount times out;
+    /// on a detached task that was a pool thread, of which a low-core Mac has few (#486, the #372
+    /// class). A cancel returns nil at once: no answer, which is not "every root present". Each
+    /// caller says what no answer means for it: `sync` stands down and applies nothing;
+    /// `WatchCoordinator.dispatch` fires as it would without the check, since a fire is not to be
+    /// dropped for want of a stat (nothing cancels that task today). The stat runs on and its
+    /// answer is dropped.
     static func rootsMissing(_ paths: [String],
                              fileExists: @escaping @Sendable (String) -> Bool) async -> Set<String>? {
         guard !paths.isEmpty else { return [] }
-        let answer = OneShot<Set<String>?>()
-        return await withTaskCancellationHandler {
-            DispatchQueue.global(qos: .utility).async { answer.resume(Set(paths.filter { !fileExists($0) })) }
-            return await answer.wait()
-        } onCancel: {
-            answer.resume(nil)
-        }
+        return await OffPool.run(cancelled: nil) { _ in Set(paths.filter { !fileExists($0) }) }
     }
 
     /// One wording for both ways a root can be unusable — gone when it was stat'd, and refused by

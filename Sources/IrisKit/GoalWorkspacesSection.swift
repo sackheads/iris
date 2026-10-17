@@ -113,14 +113,20 @@ struct GoalWorkspacesSection: View {
         }
     }
 
-    /// Runs the filesystem walk off the main actor via `Task.detached`, then hops back to publish
-    /// the result — `scan` itself never computes size, exactly so this can stay off the render path.
+    /// Runs the filesystem walk off the main actor and the cooperative pool (`OffPool`, #532), then
+    /// hops back to publish the result — `scan` itself never computes size, exactly so this can
+    /// stay off the render path.
     private func loadSize(for url: URL) {
         guard sizesByURL[url] == nil else { return }
         Task {
-            let size = await Task.detached { WorkspaceInventory.directorySize(url) }.value
+            guard let size = await Self.size(of: url) else { return }
             sizesByURL[url] = size
         }
+    }
+
+    /// The walk off the pool; nil when cancelled.
+    static func size(of url: URL) async -> Int64? {
+        await OffPool.run(cancelled: nil) { _ in WorkspaceInventory.directorySize(url) }
     }
 
     private func delete(_ entry: WorkspaceEntry) {
