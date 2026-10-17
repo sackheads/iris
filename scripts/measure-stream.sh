@@ -3,7 +3,8 @@
 # usage: measure-stream.sh <Iris Dev.app built from measure/541-probe> <outdir>
 # Needs: the GUI lease, the display awake. One Debug build; the arms differ only in
 # IRIS_STREAM_PROBE (idle | on). The probe makes and selects its own conversation,
-# "#541 stream probe", the first time (delete it afterwards if you like).
+# "#541 stream probe" (fixed id; its title is re-set on every launch, which the window check below
+# relies on), the first time, and deletes probe conversations left by earlier probe builds.
 set -u
 app=$1; out=$2; mkdir -p $out
 cat > $out/winlist.swift <<'SWIFT'

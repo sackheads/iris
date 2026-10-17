@@ -7,11 +7,17 @@ import Foundation
 /// - `on`: selects it, then every `MessageStreamer.flushIntervalMs` appends a few words to a
 ///   new agent message through `updateMessageContent`, the path the real streamer takes,
 ///   starting a fresh message once one passes about 4,000 characters.
-/// The probe's conversation is created once, seeded with 40 messages so the list is a realistic
-/// length, and found by title on later launches. Measurement branch only; not for merging.
+/// The probe's conversation is created once, under a fixed id, seeded with 40 messages so the list
+/// is a realistic length, and found by that id on later launches. Its title is set after seeding
+/// and again on every launch: the first user message names an untitled-looking conversation after
+/// itself (AppState.appendMessage), which renamed the seeded one, and `measure-stream.sh` finds the
+/// window by this title. Earlier probe conversations, seeded before the id was fixed, are deleted
+/// through `deleteConversation`. Measurement branch only; not for merging.
 @MainActor
 enum DebugStreamProbe {
     static let title = "#541 stream probe"
+    static let id = UUID(uuidString: "541541A0-0000-4000-8000-000000000541")!
+    static let firstQuestion = "Question 1: what does the next step look like?"
 
     static func startIfAsked(state: AppState) {
         guard let mode = ProcessInfo.processInfo.environment["IRIS_STREAM_PROBE"] else { return }
@@ -24,13 +30,21 @@ enum DebugStreamProbe {
         }
     }
 
-    private static func conversation(in state: AppState) -> UUID {
-        if let existing = state.conversations.first(where: { $0.title == title && !$0.isArchived }) { return existing.id }
-        let id = state.createNewConversation(title: title)
-        for n in 0..<20 {
-            state.appendMessage(role: .user, content: "Question \(n + 1): what does the next step look like?", to: id)
-            state.appendMessage(role: .agent, content: sample(paragraphs: 3), to: id)
+    static func conversation(in state: AppState) -> UUID {
+        // Seeded by an earlier probe build: its first user message is the seeder's own.
+        let stale = state.conversations.filter { conversation in
+            conversation.id != id
+                && conversation.messages.first(where: { $0.role == .user })?.content == firstQuestion
+        }.map(\.id)
+        for old in stale { state.deleteConversation(old) }
+        if !state.conversations.contains(where: { $0.id == id }) {
+            _ = state.createNewConversation(id: id, title: title)
+            for n in 0..<20 {
+                state.appendMessage(role: .user, content: "Question \(n + 1): what does the next step look like?", to: id)
+                state.appendMessage(role: .agent, content: sample(paragraphs: 3), to: id)
+            }
         }
+        state.updateConversationTitle(id: id, title: title)
         return id
     }
 
