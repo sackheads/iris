@@ -1952,6 +1952,8 @@ actor IrisEngine {
         let text: String
         if source == "UI" {
             text = input
+        } else if source.hasPrefix(Self.jobSourcePrefix) {
+            text = Self.jobRunFraming(name: String(source.dropFirst(Self.jobSourcePrefix.count)), input: input)
         } else if input.hasPrefix("System Event [") {
             text = input + eventAnalysis
         } else if source == Self.peerSource {
@@ -3102,6 +3104,20 @@ actor IrisEngine {
                 skillCheckScheduled.insert(conversationId)
             }
         }
+    }
+
+    /// The source a job run's turn arrives under: `job:<name>` (`JobRunner`).
+    nonisolated static let jobSourcePrefix = "job:"
+
+    /// How a job run's prompt reaches the model (#475): as the task the job exists to do. It used
+    /// to arrive as `System Event [job:<name>]:` plus `systemEventAnalysis`, and models took that
+    /// suffix's "briefly acknowledge it" exit, reading the job's own prompt as an injected event.
+    /// Neutral on purpose: it says nothing of who wrote the job, because not every job is the
+    /// owner's own (a model can schedule one). What a run was given from outside, changed paths
+    /// and gate output, is wrapped as untrusted by `JobRunner` before it gets here. The name is
+    /// flattened as the briefing flattens one, so it cannot carry a line of its own.
+    nonisolated static func jobRunFraming(name: String, input: String) -> String {
+        "Scheduled job \"\(Briefing.name(name))\" is running. Carry out its task: \(input)"
     }
 
     nonisolated static let systemEventAnalysis = "\nAnalyze this event. If it requires action based on your directives/skills, take it. Otherwise, briefly acknowledge it."
