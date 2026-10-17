@@ -102,6 +102,85 @@ struct ContainerExecGroupKillTests {
         #expect(hooks.lock.withLock { hooks.seen } == [false, false, false, false, true])
     }
 
+    /// The stub `container` for the ladder tests (see `twoKillsOneNote`). Every note path it sees,
+    /// the command's and each killer's, goes to `log.notes`, so a test removes them however it ends.
+    private static func writeStub(at stub: String, log: String, go: String, status: String, clientNap: String,
+                                  late: Bool) throws {
+        try """
+        #!/bin/bash
+        [ "$1" = exec ] || exit 0
+        shift; [ "$1" = -w ] && shift 2; shift
+        if [ "$4" = iris-exec ]; then
+            # The wrapper's note lands in the host's /tmp too: list it for the test's cleanup even
+            # when no killer ever runs (#577).
+            printf '%s\\n' "$(printf %s "$3" | grep -o '/tmp/[.]iris-exec-[A-Za-z0-9-]*[.]pid' | head -1)" >> '\(log).notes'
+            ( ( trap '' TERM; \(late ? "for i in $(seq 1 500); do [ -e '\(go)' ] && break; sleep 0.02; done; [ -e '\(go)' ] || exit 0; " : "")trap - TERM; set -m; "$@" & wait $!; echo $? > '\(status)' ) & ) </dev/null >/dev/null 2>&1
+            sleep \(clientNap)
+        else
+            pf=$(printf %s "$3" | grep -o '/tmp/[.]iris-exec-[A-Za-z0-9-]*[.]pid' | head -1)
+            echo "$pf" >> '\(log).notes'
+            if [ -s "$pf" ]; then echo note >> '\(log)'; else echo none >> '\(log)'; fi
+            "$@"; echo done >> '\(log).done'
+        fi
+        """.write(toFile: stub, atomically: true, encoding: .utf8)
+    }
+
+    /// Removes the host-side notes and cancel markers a stubbed run listed (#574 review, #577):
+    /// the stub runs the wrapper and killer on the host, so they land in the host's /tmp.
+    static func removeHostNotes(listedIn log: String) {
+        let notes = (try? String(contentsOfFile: log + ".notes", encoding: .utf8)) ?? ""
+        for note in Set(notes.split(separator: "\n").map(String.init)) where note.hasPrefix("/tmp/.iris-exec-") {
+            try? FileManager.default.removeItem(atPath: note)
+            try? FileManager.default.removeItem(atPath: CLIContainerRuntime.cancelMarker(note))
+        }
+    }
+
+    /// One stubbed command cancelled with the kill path broken: `fire` spawns no killer, so the
+    /// wrapper's note is never taken and the group is only ended by the test's `killAll`. Returns
+    /// the note path, evaluated before this function's cleanup runs.
+    private func runWithNoKiller() async throws -> String? {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-577-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let nap = "30.\(Int.random(in: 100_000...999_999))"
+        let clientNap = "30.\(Int.random(in: 100_000...999_999))"
+        let stub = dir.appendingPathComponent("container").path
+        let log = dir.appendingPathComponent("killers").path
+        defer { Self.removeHostNotes(listedIn: log) }
+        defer { RunCommandProcessGroupTests.killAll(nap); RunCommandProcessGroupTests.killAll(clientNap) }
+        try Self.writeStub(at: stub, log: log, go: dir.appendingPathComponent("go").path,
+                           status: dir.appendingPathComponent("wrapper-status").path, clientNap: clientNap, late: false)
+        #expect(chmod(stub, 0o755) == 0)
+        let rt = CLIContainerRuntime(
+            launch: { args, timeout, onKill in
+                try await CLIProcessRunner(executable: stub).run(args, timeoutSeconds: timeout, onKill: onKill)
+            },
+            fire: { _, _ in })
+        let call = Task { try await rt.exec(name: "iris-a", workdir: "/", command: "sleep \(nap); true", timeoutSeconds: 60) }
+        #expect(await RunCommandProcessGroupTests.appears("^sleep \(nap)", within: 5), "precondition: the group started")
+        call.cancel()
+        _ = try? await value(of: call)
+        let note = ((try? String(contentsOfFile: log + ".notes", encoding: .utf8)) ?? "")
+            .split(separator: "\n").map(String.init).first { $0.hasPrefix("/tmp/.iris-exec-") }
+        // The wrapper, not just its command, dies with no chance to remove its own note: the way
+        // #577's 41 notes were left, by runs whose kill path was broken.
+        if let note, let text = try? String(contentsOfFile: note, encoding: .utf8),
+           let group = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            _ = kill(-group, SIGKILL)
+        }
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        #expect(note.map { FileManager.default.fileExists(atPath: $0) } == true,
+                "precondition: the killed wrapper left its note for the cleanup to find")
+        return note
+    }
+
+    @Test("a run whose kill never fires leaves no note behind in the host's /tmp (#577)", .timeLimit(.minutes(1)))
+    func noKillerLeavesNoNote() async throws {
+        let note = try #require(try await runWithNoKiller(), "the stub listed the command's note")
+        #expect(!FileManager.default.fileExists(atPath: note))
+        #expect(!FileManager.default.fileExists(atPath: CLIContainerRuntime.cancelMarker(note)))
+    }
+
     /// The ladder fires the killer twice (#377). Not `late`: the group is recorded first, the first
     /// kill takes the note and ends it, and the second must find no note, so it signals nothing —
     /// the id may be reused by then. `late`: the wrapper starts only after the first kill has
@@ -126,30 +205,11 @@ struct ContainerExecGroupKillTests {
         let log = dir.appendingPathComponent("killers").path
         // The stub runs the killer on the host, so the call's note and cancel marker land in the
         // host's /tmp: take them away with the test (#574 review).
-        defer {
-            let notes = (try? String(contentsOfFile: log + ".notes", encoding: .utf8)) ?? ""
-            for note in Set(notes.split(separator: "\n").map(String.init)) where note.hasPrefix("/tmp/.iris-exec-") {
-                try? FileManager.default.removeItem(atPath: note)
-                try? FileManager.default.removeItem(atPath: CLIContainerRuntime.cancelMarker(note))
-            }
-        }
+        defer { Self.removeHostNotes(listedIn: log) }
         let go = dir.appendingPathComponent("go").path
         let status = dir.appendingPathComponent("wrapper-status").path
         let ran = dir.appendingPathComponent("ran").path
-        try """
-        #!/bin/bash
-        [ "$1" = exec ] || exit 0
-        shift; [ "$1" = -w ] && shift 2; shift
-        if [ "$4" = iris-exec ]; then
-            ( ( trap '' TERM; \(late ? "for i in $(seq 1 500); do [ -e '\(go)' ] && break; sleep 0.02; done; [ -e '\(go)' ] || exit 0; " : "")trap - TERM; set -m; "$@" & wait $!; echo $? > '\(status)' ) & ) </dev/null >/dev/null 2>&1
-            sleep \(clientNap)
-        else
-            pf=$(printf %s "$3" | grep -o '/tmp/[.]iris-exec-[A-Za-z0-9-]*[.]pid' | head -1)
-            echo "$pf" >> '\(log).notes'
-            if [ -s "$pf" ]; then echo note >> '\(log)'; else echo none >> '\(log)'; fi
-            "$@"; echo done >> '\(log).done'
-        fi
-        """.write(toFile: stub, atomically: true, encoding: .utf8)
+        try Self.writeStub(at: stub, log: log, go: go, status: status, clientNap: clientNap, late: late)
         #expect(chmod(stub, 0o755) == 0)
 
         final class Fires: @unchecked Sendable {
