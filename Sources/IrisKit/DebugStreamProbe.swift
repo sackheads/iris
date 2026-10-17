@@ -25,6 +25,15 @@ enum DebugStreamProbe {
     static let noScroll = env["IRIS_STREAM_NOSCROLL"] == "1"
     static let useBuffer = env["IRIS_STREAM_BUFFER"] == "1"
     static let messageCount = Int(env["IRIS_STREAM_PROBE_MESSAGES"] ?? "") ?? 40
+    /// Residual analysis (#541): how long a streamed message grows before the next one starts,
+    /// and whether the streaming row renders as plain `Text` instead of Markdown.
+    static let maxChars = Int(env["IRIS_STREAM_MAXCHARS"] ?? "") ?? 4_000
+    static let plain = env["IRIS_STREAM_PLAIN"] == "1"
+
+    /// Whether `message` is the one streaming into the buffer right now.
+    static func isStreaming(_ message: ChatMessage) -> Bool {
+        useBuffer && DebugStreamBuffer.shared.messageId == message.id
+    }
     static let tick = Notification.Name("iris.debug.streamTick")
 
     /// What the agent row shows: the buffer's text for the message streaming into it.
@@ -74,7 +83,7 @@ enum DebugStreamProbe {
             state.appendMessage(role: .agent, content: "", id: messageId, to: conversationId)
             if useBuffer { DebugStreamBuffer.shared.messageId = messageId; DebugStreamBuffer.shared.text = "" }
             var text = ""
-            while text.count < 4_000, !Task.isCancelled {
+            while text.count < maxChars, !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: MessageStreamer.flushIntervalMs * 1_000_000)
                 for _ in 0..<6 {
                     text += (text.isEmpty ? "" : " ") + words[cursor % words.count]

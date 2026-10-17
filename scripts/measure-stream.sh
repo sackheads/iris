@@ -9,8 +9,11 @@
 # About 18 minutes. The probe makes and selects its own conversation,
 # "#541 stream probe" (fixed id; its title is re-set on every launch, which the window check below
 # relies on), the first time, and deletes probe conversations left by earlier probe builds.
+# `residual` as a third argument runs the residual analysis instead: the both arm (buffer +
+# noscroll) at 4,000 and at 400 characters a message, and with the streaming row as plain Text
+# (IRIS_STREAM_PLAIN=1). About 9 minutes.
 set -u
-app=$1; out=$2; mkdir -p $out
+app=$1; out=$2; which=${3:-attribution}; mkdir -p $out
 cat > $out/winlist.swift <<'SWIFT'
 import CoreGraphics
 let pid = Int(CommandLine.arguments[1])!
@@ -51,6 +54,15 @@ one() {   # <label> <idle|on> <sample|-> [KEY=VALUE env for the attribution arms
   kill -0 $pid 2>/dev/null && { kill -TERM $pid; sleep 2; }
   return 0
 }
+if [[ $which == residual ]]; then
+B=(IRIS_STREAM_NOSCROLL=1 IRIS_STREAM_BUFFER=1)
+for pass in 1 2 3; do
+  s=-; [[ $pass == 1 ]] && s=sample
+  one long-p$pass on $s $B
+  one short-p$pass on $s $B IRIS_STREAM_MAXCHARS=400
+  one plain-p$pass on $s $B IRIS_STREAM_PLAIN=1
+done
+else
 # #541 attribution: four arms, interleaved, 40 messages; then base and both at 200 messages.
 for pass in 1 2 3; do
   s=-; [[ $pass == 1 ]] && s=sample
@@ -64,6 +76,7 @@ for pass in 1 2 3; do
   one base200-p$pass on $s IRIS_STREAM_PROBE_MESSAGES=200
   one both200-p$pass on $s IRIS_STREAM_PROBE_MESSAGES=200 IRIS_STREAM_NOSCROLL=1 IRIS_STREAM_BUFFER=1
 done
+fi
 echo; echo "RAW per-second %CPU (first sample dropped)"
 for f in $out/*.top.txt; do printf "%-14s " $(basename $f .top.txt); awk '/^[0-9]+ +[0-9.]+/ {n++; if (n>1) printf "%s ", $2} END {print ""}' $f; done
 echo; echo "FRAME COUNTS per 10 s sample (main thread and all threads; a frame's sample count where it first appears)"
@@ -73,4 +86,4 @@ for f in $out/*.sample.txt; do
   for p in $pats; do printf "  %-58s %s\n" "$p" "$(grep -F -m1 -- "$p" $f | grep -oE '^[ +!:|]*[0-9]+' | grep -oE '[0-9]+$')"; done
 done
 echo; echo "HOT FRAMES: top of stack, first baseline sample (base-p1)"
-grep -A30 "Sort by top of stack" $out/base-p1.sample.txt | sed -E 's/\(in [^)]*\)//' | cut -c1-150
+grep -A30 "Sort by top of stack" $out/$([[ $which == residual ]] && echo long || echo base)-p1.sample.txt | sed -E 's/\(in [^)]*\)//' | cut -c1-150
