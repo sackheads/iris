@@ -52,7 +52,8 @@ struct CheckpointHistoryTests {
         let data = try JSONEncoder().encode(conversation)
         let back = try JSONDecoder().decode(Conversation.self, from: data)
 
-        try #require(back.checkpointHistory.count == 1)
+        try #require(back.checkpointHistory.count >= 1)
+        #expect(back.checkpointHistory.count == 1)
         #expect(back.checkpointHistory[0].resolution == .autoAdvanced)
         #expect(back.checkpointHistory[0].milestoneTitle == "Parser")
         #expect(back.checkpointHistory[0].evaluation?.criteria.first?.verdict == .met)

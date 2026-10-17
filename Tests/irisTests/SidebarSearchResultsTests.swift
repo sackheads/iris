@@ -25,7 +25,8 @@ struct SidebarSearchResultsTests {
         let a = UUID()
         let hits = (0..<5).map { hit(a, ordinal: $0) }
         let groups = SidebarSearchResults.group(hits, perConversation: 3)
-        try #require(groups.count == 1)
+        try #require(groups.count >= 1)
+        #expect(groups.count == 1)
         #expect(groups[0].hits.map(\.ordinal) == [0, 1, 2])
     }
 

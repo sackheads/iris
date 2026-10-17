@@ -40,7 +40,8 @@ struct ThinkingStorageEngineTests {
         #expect(modelEntries(h).map { $0.anthropicBlocks != nil } == [true, false, true, true])
         // Required, not indexed blind: a turn cut short (a hook that timed out on a busy pool,
         // #486) has fewer entries, and an out-of-range index crashes the whole test process.
-        try #require(modelEntries(h).count == 4)
+        try #require(modelEntries(h).count >= 4)
+        #expect(modelEntries(h).count == 4)
         #expect(modelEntries(h)[1].parts.first?.functionCall?.args["query"] == .string("Seattle two"),
                 "precondition: the hook really rewrote round two")
     }
@@ -60,7 +61,8 @@ struct ThinkingStorageEngineTests {
         let h = try ThinkingHarness.make(rounds, hooks: try ThinkingFixtures.hooks(in: dir, ["AfterModel": script]))
         await h.run()
         #expect(modelEntries(h).map { $0.anthropicBlocks != nil } == [true, true, true, false])
-        try #require(modelEntries(h).count == 4)
+        try #require(modelEntries(h).count >= 4)
+        #expect(modelEntries(h).count == 4)
         #expect(modelEntries(h)[3].parts.first?.text == "done four", "precondition: the hook rewrote the text")
         let hooked = try JSONDecoder().decode(GeminiResponse.self, from: Data(contentsOf: out))
         #expect(hooked.candidates?.first?.content?.anthropicBlocks == rounds[3].candidates?.first?.content?.anthropicBlocks,

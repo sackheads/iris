@@ -80,7 +80,8 @@ struct GoalEvaluationParsingTests {
         let h = Criterion(text: "looks right", kind: .humanJudged, check: nil)
         let out = GoalEvaluationParsing.verdicts(from: [:], criteria: [h],
                                                  judgements: [h.id: true])
-        try #require(out.count == 1)
+        try #require(out.count >= 1)
+        #expect(out.count == 1)
         #expect(out[0].verdict == .met)
         #expect(out[0].method == .human)
     }

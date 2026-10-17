@@ -316,7 +316,8 @@ struct GraderWorkspaceReadTests {
         try await value(of: watcher)
         #expect(asked.value == 0, "a read of the approved workspace asked")
         let results = grader.results
-        try #require(results.count == 3, "\(results)")
+        try #require(results.count >= 3, "\(results)")
+        #expect(results.count == 3, "\(results)")
         guard results.count == 3 else { return }
         #expect(results[0].contains("Directory listing: 4 entries") && results[0].contains(".hidden"), "\(results[0])")
         #expect(results[1].contains("notes"))
@@ -341,7 +342,8 @@ struct GraderWorkspaceReadTests {
         _ = await GoalEvaluator.shared.evaluate(contract: contract, workspace: f.proj.path,
                                                 originatingConversationId: originId, app: state, client: grader)
         let results = grader.results
-        try #require(results.count == 3, "\(results)")
+        try #require(results.count >= 3, "\(results)")
+        #expect(results.count == 3, "\(results)")
         guard results.count == 3 else { return }
         #expect(results[0].contains("Directory listing: 3 entries"), "\(results[0])")
         #expect(results[1].contains("notes"))

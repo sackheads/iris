@@ -358,7 +358,8 @@ struct ModelCatalogTests {
     @Test("probeTargets de-duplicates a model shared across tiers, joining labels in tier order")
     func probeTargetsDedup() throws {
         let targets = ModelCatalog.probeTargets(easy: "gemini-3.1-flash-lite", medium: "gemini-3.5-flash", hard: "gemini-3.1-flash-lite", vision: nil)
-        try #require(targets.count == 2)
+        try #require(targets.count >= 2)
+        #expect(targets.count == 2)
         #expect(targets[0].label == "Easy, Hard")
         #expect(targets[0].model == "gemini-3.1-flash-lite")
         #expect(targets[1].label == "Primary/Medium")

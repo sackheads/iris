@@ -105,7 +105,8 @@ struct GuardLEDErrorStateTests {
         health.recordTier3Failure("tier 3 is broken", engine: "llama_cpp")
         #expect(health.tier2Failure == nil)
         #expect(health.tier3Failure != nil)
-        try #require(said.count == 2, "each tier gets its own notice")
+        try #require(said.count >= 2, "each tier gets its own notice")
+        #expect(said.count == 2, "each tier gets its own notice")
         #expect(said[0].contains("tier-2"))
         #expect(said[1].contains("tier-3"))
     }
