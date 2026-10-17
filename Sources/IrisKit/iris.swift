@@ -3910,9 +3910,19 @@ actor IrisEngine {
     /// one reads exactly what any conversation would (#550).
     static func unknownToolResult(_ name: String) -> String { "Error: Unknown tool \(name)" }
 
-    /// What the model is told when a human (or the fail-closed background branch standing in for
-    /// one) refused a tool call.
+    /// What the model is told when a human refused a tool call in an attended conversation.
     static let deniedToolResult = "User denied permission to execute this tool. You must ask the user for clarification or suggest an alternative."
+
+    /// What an unattended turn is told when a call needed an approval nobody was there to give
+    /// (#549). Not `deniedToolResult`: no user denied it, and "ask the user" and "suggest an
+    /// alternative" are exactly what such a run then did, ending on a question nobody would read
+    /// or offering to reach the same end through `run_command`. True in every unattended
+    /// conversation, a job run and anything it delegates to, so it says nothing about where the
+    /// refusal is recorded: a run that then fails or is interrupted keeps no blocked call. It
+    /// forbids only routing around the refusal; the rest of the task is still the run's to finish.
+    static func unattendedDeniedToolResult(tool: String) -> String {
+        "Not run: nobody is here to approve `\(tool)` in this background run. Do not ask a question, and do not try to get the same effect another way (another tool, a shell command). Finish the rest of the task if you can, then report what you did and what was refused."
+    }
 
     /// What the model is told when the RUN's profile refused it. Deliberately not the sentence
     /// above: "ask the user for clarification" is advice an unattended run cannot take, and
@@ -5060,7 +5070,8 @@ actor IrisEngine {
                 if approved {
                     result = await executeToolWithHooks(name: functionCall.name, args: callArgs, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath)
                 } else {
-                    result = Self.deniedToolResult
+                    result = isUnattended ? Self.unattendedDeniedToolResult(tool: functionCall.name)
+                                          : Self.deniedToolResult
                 }
             } else {
                 result = await executeToolWithHooks(name: functionCall.name, args: callArgs, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath)
