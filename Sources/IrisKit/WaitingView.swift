@@ -38,7 +38,9 @@ enum WaitingWindows {
     private static let windows = NSHashTable<NSWindow>.weakObjects()
     /// Told each time a window starts showing `WaitingView`. A cold start's notice can run before
     /// SwiftUI has put `WaitingView` in its window, so the panel goes up first and the window
-    /// appears beside it; the app wires this to put the panel away (#520).
+    /// appears beside it; the app wires this to put the panel away (#520). Unconditionally, unlike
+    /// a raise, which checks the window is visible: SwiftUI puts the view in its window before it
+    /// orders the window in, and a gated window that gets a `WaitingView` is always then shown.
     static var onJoin: (@MainActor (NSWindow) -> Void)?
     static func contains(_ window: NSWindow) -> Bool { windows.contains(window) }
     fileprivate static func add(_ window: NSWindow) {
