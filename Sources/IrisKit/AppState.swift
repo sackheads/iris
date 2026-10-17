@@ -154,6 +154,14 @@ struct SessionCard: Codable, Equatable, Sendable {
 }
 
 struct Conversation: Identifiable, Codable, Hashable, Sendable {
+    /// The title a conversation has before anyone names it: what `createNewConversation` gives a
+    /// new one, and what the store reads back for a row with none. Only a conversation still on
+    /// one of these takes its first message as its title, so a name it was given, by a rename or
+    /// at creation, is never overwritten by the first send (#579).
+    static let defaultTitle = "New Conversation"
+    static let untitledTitle = "Untitled"
+    var hasDefaultTitle: Bool { title == Self.defaultTitle || title == Self.untitledTitle }
+
     var id = UUID()
     var title: String
     var messages: [ChatMessage] = []
@@ -1516,7 +1524,7 @@ class AppState {
     @discardableResult
     func createNewConversation(id: UUID = UUID(), isSubagent: Bool = false, isBackground: Bool = false,
                                title: String? = nil, select: Bool? = nil) -> UUID {
-        var newConv = Conversation(id: id, title: title ?? "New Conversation")
+        var newConv = Conversation(id: id, title: title ?? Conversation.defaultTitle)
         newConv.isSubagent = isSubagent
         newConv.isBackground = isBackground
         conversations.append(newConv)
@@ -2680,7 +2688,9 @@ class AppState {
 
             // Auto-title generation based on first message. 5b: not for the pinned conversation —
             // it keeps the name "Iris" even right after a rotation's fresh first message (spec §0.2).
-            if role == .user && !conversations[idx].isPinned && conversations[idx].messages.filter({ $0.role == .user }).count == 1 {
+            // Nor for one that already has a name of its own (#579).
+            if role == .user && !conversations[idx].isPinned && conversations[idx].hasDefaultTitle
+                && conversations[idx].messages.filter({ $0.role == .user }).count == 1 {
                 let displayTitle = content.isEmpty ? (attachments.first?.filename ?? "Attachment") : content
                 conversations[idx].title = String(displayTitle.prefix(30)) + (displayTitle.count > 30 ? "..." : "")
                 markChanged(conversationId, .metadata)

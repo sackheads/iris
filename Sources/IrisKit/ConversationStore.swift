@@ -1069,7 +1069,7 @@ final class ConversationStore: Sendable {
 
                 var c: Conversation
                 do {
-                    c = Conversation(id: id, title: title ?? "Untitled", workspacePath: workspacePath)
+                    c = Conversation(id: id, title: title ?? Conversation.untitledTitle, workspacePath: workspacePath)
                     c.activeGoal = activeGoal
                     // Losing a whole conversation over a counter is disproportionate: NULL already
                     // means 0 here, and a garbled value gets the same default plus a console
