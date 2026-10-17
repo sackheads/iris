@@ -1133,7 +1133,8 @@ private struct CompletionReportItemRow: View {
 
 // MARK: - Subviews
 
-private struct CriterionRow: View {
+/// Internal, not private, so a test can host it and read its check field's editor (#397).
+struct CriterionRow: View {
     @Binding var criterion: Criterion
 
     /// Current milestones from the draft panel — used for the checkpoint picker.
@@ -1194,6 +1195,10 @@ private struct CriterionRow: View {
                 // of sight. The panel's ScrollView and its maxHeight cap bound the height (inv. 8).
                 TextField("Check command (e.g. swift test)", text: $checkText, axis: .vertical)
                     .textFieldStyle(.plain)
+                    // A shell command, kept byte for byte (#397). AppKit's field editor already
+                    // leaves dashes and quotes alone; this stops it autocorrecting a word. Text
+                    // replacement stays on: only a field editor of our own can turn it off (#565).
+                    .autocorrectionDisabled()
                     .font(.system(.caption, design: .monospaced))
                     .lineLimit(nil)
                     .fixedSize(horizontal: false, vertical: true)
