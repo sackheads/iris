@@ -179,9 +179,12 @@ struct ContainerExecGroupKillTests {
             while done() < 2, Date() < end { try await Task.sleep(nanoseconds: 50_000_000) }
         }
         if late {
+            // The first killer finished, not merely fired: its marker is down before the wrapper
+            // starts (`fire` returns as the killer process is spawned, before it has run).
+            func done() -> Int { ((try? String(contentsOfFile: log + ".done", encoding: .utf8)) ?? "").split(separator: "\n").count }
             let fired = Date().addingTimeInterval(10)
-            while fires.lock.withLock({ fires.count }) < 1, Date() < fired { try await Task.sleep(nanoseconds: 20_000_000) }
-            #expect(fires.lock.withLock { fires.count } >= 1, "precondition: the first kill fired")
+            while done() < 1, Date() < fired { try await Task.sleep(nanoseconds: 20_000_000) }
+            #expect(done() >= 1, "precondition: the first kill ran")
             #expect(FileManager.default.createFile(atPath: go, contents: nil))
             let ended = Date().addingTimeInterval(10)
             while !FileManager.default.fileExists(atPath: status), Date() < ended { try await Task.sleep(nanoseconds: 20_000_000) }
@@ -285,6 +288,16 @@ struct ContainerExecGroupKillTests {
 
     // MARK: The cancel marker (#572)
 
+    /// `BlockingSpawn.run`, off the cooperative pool: the suite's tests run in parallel, and a pool
+    /// thread parked on a blocking spawn can keep the wrapper's own task from starting (#574 review).
+    private func spawnOffPool(_ path: String, _ arguments: [String], timeoutSeconds: Double) async -> Int32? {
+        await withCheckedContinuation { done in
+            DispatchQueue(label: "iris.test.spawn").async {
+                done.resume(returning: BlockingSpawn.run(path, arguments, timeoutSeconds: timeoutSeconds))
+            }
+        }
+    }
+
     private func scratch() throws -> (dir: URL, pidFile: String, ran: String) {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-572-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -296,7 +309,7 @@ struct ContainerExecGroupKillTests {
         let (dir, pidFile, ran) = try scratch()
         defer { try? FileManager.default.removeItem(at: dir) }
         // Every kill fired before the command's wrapper started: each found no note.
-        #expect(BlockingSpawn.run("/bin/bash", ["-c", CLIContainerRuntime.groupKiller(pidFile)], timeoutSeconds: 10) == 0)
+        #expect(await spawnOffPool("/bin/bash", ["-c", CLIContainerRuntime.groupKiller(pidFile)], timeoutSeconds: 10) == 0)
         #expect(FileManager.default.fileExists(atPath: CLIContainerRuntime.cancelMarker(pidFile)))
         let wrapper = await ProcessGroupRunner().run(
             executable: "/bin/bash",
@@ -324,14 +337,16 @@ struct ContainerExecGroupKillTests {
                 arguments: ["-c", CLIContainerRuntime.recordingWrapper(pidFile), "iris-exec", "touch '\(ran)'"],
                 environment: nil, currentDirectory: nil)
         }
-        // Long enough for bash to reach its first statement and block opening the FIFO. Starved
-        // past it, the killer runs first and both orders pass: never a false red.
+        // The wrapper is running (its argument names this test's own directory), then a moment for
+        // bash to reach its first statement and block opening the FIFO. Starved past that, the
+        // killer runs first and both orders pass: never a false red.
+        #expect(await RunCommandProcessGroupTests.appears(dir.lastPathComponent, within: 10), "precondition: the wrapper started")
         try await Task.sleep(nanoseconds: 500_000_000)
-        #expect(BlockingSpawn.run("/bin/bash", ["-c", CLIContainerRuntime.groupKiller(pidFile)], timeoutSeconds: 10) == 0,
+        #expect(await spawnOffPool("/bin/bash", ["-c", CLIContainerRuntime.groupKiller(pidFile)], timeoutSeconds: 10) == 0,
                 "the killer finds no note in a FIFO and leaves its marker")
         // Lets the note's write finish. Bounded: a wrapper that never reaches it would hold an
         // open(2) of the FIFO for good (#574 review).
-        #expect(BlockingSpawn.run("/bin/cat", [pidFile], timeoutSeconds: 10) == 0)
+        #expect(await spawnOffPool("/bin/cat", [pidFile], timeoutSeconds: 10) == 0)
         let result = try await value(of: wrapper)
         #expect((try? result.get().status) == 143)
         #expect(!FileManager.default.fileExists(atPath: ran), "the command never ran")
