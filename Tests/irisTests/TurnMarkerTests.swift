@@ -34,7 +34,7 @@ struct TurnMarkerTests {
         turn.cancel()
         try await value(of: turn)
         let h = history(app, id)
-        #expect(h.count == 3)
+        try #require(h.count == 3)
         #expect(h[1].role == "model" && h[1].parts.first?.text == "part")
         let marker = try #require(h.last?.parts.first?.text)
         #expect(h.last?.role == "user")
@@ -43,7 +43,7 @@ struct TurnMarkerTests {
 
         await engine.processInput("next", source: "UI", conversationId: id)
         let contents = try #require(client.requests.last?.contents)
-        #expect(contents.count >= 2)
+        try #require(contents.count >= 2)
         #expect(contents[contents.count - 2].parts.first?.text?.hasPrefix(IrisEngine.turnEndedEarlyPrefix) == true)
         // `.last`, not `.first`: the turn entry may lead with its `<turn_context>` part (5a).
         #expect(contents.last?.parts.last?.text == "next")

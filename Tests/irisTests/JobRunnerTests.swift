@@ -202,7 +202,7 @@ struct JobRunnerTests {
         let activityId = state.activityConversationId()
         let activity = try #require(state.conversations.first { $0.id == activityId })
         let cards = activity.messages.filter { $0.role == .event }
-        #expect(cards.count == 1)
+        try #require(cards.count == 1)
         let card = try #require(EventCard.decode(cards[0].content))
         #expect(card.runId == run.id)
         #expect(card.jobId == job.id)
@@ -474,7 +474,7 @@ struct JobRunnerTests {
         #expect(runs.first?.triggerKind == "fsEvent", "the filesystem is still what this job is")
         let activity = try #require(state.conversations.first { $0.id == state.activityConversationId() })
         let cards = activity.messages.filter { $0.role == .event }
-        #expect(cards.count == 1)
+        try #require(cards.count == 1)
         #expect(EventCard.decode(cards[0].content)?.outcome == reason)
         #expect(client.callCount == 0, "a paused job runs nothing")
     }

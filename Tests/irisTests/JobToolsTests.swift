@@ -172,7 +172,7 @@ struct JobToolsTests {
         let body = try #require(JSONSerialization.jsonObject(with: Data(result.utf8)) as? [String: Any])
         #expect(body["unreadableJobs"] as? Int == 0)
         let rows = try #require(body["jobs"] as? [[String: Any]])
-        #expect(rows.count == 1)
+        try #require(rows.count == 1)
         #expect(rows[0]["name"] as? String == "pr-sweep")
         #expect(rows[0]["trigger"] as? String == "every 60 s")
         #expect(rows[0]["enabled"] as? Bool == true)
@@ -892,7 +892,7 @@ struct JobToolsTests {
 
         let line = try #require(result.components(separatedBy: "\n").first { $0.contains(c.id.uuidString) })
         let fields = line.components(separatedBy: " · ")
-        #expect(fields.count >= 3)
+        try #require(fields.count >= 3)
         #expect(fields[1].utf8.count <= IrisEngine.hitTitleMaxBytes, "title field")
         // The id, title and date fields, the "#0 owner: " head, and a capped snippet.
         #expect(line.utf8.count <= 36 + IrisEngine.hitTitleMaxBytes + IrisEngine.hitSnippetMaxBytes + 64,
@@ -992,7 +992,7 @@ struct JobToolsTests {
         let call = FunctionCall(name: "search_conversations", args: ["query": .string("kestrel")], id: "c1")
         let results = await runGuardedToolCalls([call, call], on: app, as: id)
 
-        #expect(results.count == 2, "got: \(results)")
+        try #require(results.count == 2, "got: \(results)")
         #expect(results[0].contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"))
         #expect(!results[0].contains("withheld"), "one block is not yet a pattern")
         #expect(results[1].contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"))
@@ -1259,7 +1259,7 @@ struct JobToolsTests {
         let call = FunctionCall(name: "read_conversation", args: ["id": .string(other.id.uuidString)], id: "c1")
         let results = await runGuardedToolCalls([call, call], on: app, as: id)
 
-        #expect(results.count == 2, "got: \(results)")
+        try #require(results.count == 2, "got: \(results)")
         #expect(results[0].contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"))
         #expect(!results[0].contains("withheld"), "one block is not yet a pattern")
         #expect(results[1].contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"))
@@ -1283,7 +1283,7 @@ struct JobToolsTests {
         let read = FunctionCall(name: "read_conversation", args: ["id": .string(other.id.uuidString)], id: "c2")
         let results = await runGuardedToolCalls([search, read], on: app, as: id)
 
-        #expect(results.count == 2, "got: \(results)")
+        try #require(results.count == 2, "got: \(results)")
         #expect(!results[0].contains("withheld"))
         #expect(results[1].contains("the injection guard has withheld 2 consecutive results from read_conversation"))
     }
@@ -1305,7 +1305,7 @@ struct JobToolsTests {
         let call = FunctionCall(name: "read_conversation", args: ["id": .string(other.id.uuidString)], id: "c1")
         let results = await runGuardedToolCalls([call, call], on: app, as: id, hijack: false)
 
-        #expect(results.count == 2, "got: \(results)")
+        try #require(results.count == 2, "got: \(results)")
         #expect(results[0].contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"), "the quoted marker passes through untouched")
         #expect(!results[0].contains("withheld"))
         #expect(results[1].contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"))
@@ -1326,7 +1326,7 @@ struct JobToolsTests {
         let call = FunctionCall(name: "search_conversations", args: ["query": .string("kestrel")], id: "c1")
         let results = await runGuardedToolCalls([call, call], on: app, as: id, hijack: false)
 
-        #expect(results.count == 2, "got: \(results)")
+        try #require(results.count == 2, "got: \(results)")
         #expect(results[0].contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"), "the quoted marker passes through untouched")
         #expect(!results[0].contains("withheld"))
         #expect(results[1].contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"))

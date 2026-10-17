@@ -23,7 +23,7 @@ struct SkillManagerPluginTests {
         defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
 
         let skills = await SkillManager.shared.listSkills(paths: paths, extraRoots: [root])
-        #expect(skills.count == 1)
+        try #require(skills.count == 1)
         #expect(skills[0].name == "notebook-research")
         #expect(skills[0].skillFilePath == root.appendingPathComponent("notebook-research/SKILL.md").path)
     }
