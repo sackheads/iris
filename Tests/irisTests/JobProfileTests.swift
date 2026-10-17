@@ -425,6 +425,25 @@ struct JobProfileTests {
         #expect(results.contains { $0.contains("Unknown tool \(name)") }, "\(results)")
     }
 
+    /// Work's #475 run 1, the call as it was recorded: `search_files` with a glob `pattern`.
+    @Test("#475 run 1's own call gets Unknown tool and the run completes")
+    func run1SearchFiles() async throws {
+        let (store, app) = try state()
+        let client = FakeLLMClient(responses: [
+            callResponse("search_files", ["pattern": .string("*job*")]),
+            textResponse("done."),
+        ])
+        let job = self.job(name: "run-1")
+        try await fire(job, client: client, store: store, state: app)
+
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(run.status == .completed, "\(run.status)")
+        #expect(run.blockedCall == nil)
+        let background = try #require(app.conversations.first { $0.isBackground })
+        let results = background.history.flatMap(\.parts).compactMap { $0.functionResponse?.response["result"]?.stringValue }
+        #expect(results.contains(IrisEngine.unknownToolResult("search_files")), "\(results)")
+    }
+
     @Test("an unsandboxed run_command still ends a read-only run as a profile refusal")
     func deniedRunCommandStillStops() async throws {
         let (store, app) = try state()
