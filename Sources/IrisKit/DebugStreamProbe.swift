@@ -21,6 +21,7 @@ enum DebugStreamProbe {
     static let longId = UUID(uuidString: "541541A0-0000-4000-8000-000000000200")!
     static let env = ProcessInfo.processInfo.environment
     static let messageCount = Int(env["IRIS_STREAM_PROBE_MESSAGES"] ?? "") ?? 40
+    static let firstQuestion = "Question 1: what does the next step look like?"
 
     static func startIfAsked(state: AppState) {
         guard let mode = ProcessInfo.processInfo.environment["IRIS_STREAM_PROBE"] else { return }
