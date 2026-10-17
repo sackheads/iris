@@ -142,10 +142,12 @@ extension SurfaceAttention {
     }
 
     /// `pr-sweep blocked: run_command (×4)`. A single run has no count, and runs blocked on
-    /// different tools never name just one of them.
+    /// different tools never name just one of them. `refused by profile` only when every run is a
+    /// read-only refusal (#553): one wait on approval among them is still a block.
     private static func blockedRow(_ first: LedgerAttention.Blocked,
                                    runs: [LedgerAttention.Blocked]) -> StatusMenuRow {
-        var text = "\(field(first.jobName)) blocked: \(field(first.tool ?? "a tool"))"
+        let word = runs.allSatisfy(\.refusedByProfile) ? JobRun.Status.refusedByProfileText : "blocked"
+        var text = "\(field(first.jobName)) \(word): \(field(first.tool ?? "a tool"))"
         if Set(runs.map(\.tool)).count > 1 { text += " and others" }
         if runs.count > 1 { text += " (×\(runs.count))" }
         return StatusMenuRow(id: "blocked-\(first.jobId)", text: text,

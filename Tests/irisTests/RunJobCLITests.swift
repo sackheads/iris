@@ -509,7 +509,9 @@ final class RunJobCLITests {
         #expect(!IrisPaths.isVolatileCopy)
     }
 
-    @Test("a run blocked on an approval nobody gave exits 2")
+    /// The job is read-only (the default), so this is a profile refusal: stored `blockedOnApproval`,
+    /// printed `refused by profile`, since no approval could run it (#553).
+    @Test("a run its read-only profile refused exits 2")
     func blockedRunExitsTwo() async throws {
         let store = try ConversationStore.inMemory()
         let job = self.job(name: "wants-to-write")
@@ -530,7 +532,8 @@ final class RunJobCLITests {
         #expect(!FileManager.default.fileExists(atPath: path), "the denied call must not have run")
         let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(run.status == .blockedOnApproval)
-        #expect(out.text.contains("status: blocked on approval"))
+        #expect(run.blockedCall?.reason == .profile)
+        #expect(out.text.contains("status: refused by profile"))
         #expect(out.text.contains("write_file"))
     }
 

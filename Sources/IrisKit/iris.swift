@@ -5683,6 +5683,9 @@ extension IrisEngine {
             "outcome": outcome ?? NSNull(),
             "failureReason": failureReason ?? NSNull(),
             "blockedTool": run.blockedTool ?? NSNull(),
+            // `profile`: the job is read-only and no approval can run this tool (#553);
+            // `approval`: the call waits on a person. Null when nothing was blocked.
+            "blockedReason": run.blockedCall?.reason.rawValue ?? NSNull(),
             "promptTokens": run.promptTokens,
             "candidateTokens": run.candidateTokens,
             "totalTokens": run.totalTokens,

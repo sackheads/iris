@@ -9,7 +9,7 @@ import Foundation
 /// text itself (fix round 1, review): each is compared against a closed set of harness-written
 /// constants — exact match, or a prefix match for the ones a number is folded into — and only the
 /// matched *word* is emitted. Anything unrecognised — free text, an LLM error headline, a tool
-/// name a blocked call carried — falls back to `status.text`, never to the string itself.
+/// name a blocked call carried — falls back to the run's `statusText`, never to the string itself.
 enum Briefing {
     static let heading = "Recent Activity"
     static let recentCap = 5
@@ -54,10 +54,10 @@ enum Briefing {
     /// harness-owned words, so a card and the briefing cannot describe one run differently.
     static func reason(_ run: JobRun, knownTools: Set<String> = IrisEngine.allDeclaredToolNames) -> String {
         if run.status == .blockedOnApproval, let tool = run.blockedTool, knownTools.contains(tool) {
-            return "blocked: \(tool)"
+            return run.refusedByProfile ? "\(JobRun.Status.refusedByProfileText): \(tool)" : "blocked: \(tool)"
         }
         if let word = reasonWord(run.failureReason) { return word }
-        return run.status.text
+        return run.statusText
     }
 
     /// Maps a run's `failureReason` to the fixed vocabulary by exact or prefix match on a known

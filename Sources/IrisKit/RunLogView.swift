@@ -54,7 +54,7 @@ struct RunLogView: View {
                     .width(min: 60, ideal: 120)
                 TableColumn("Trigger") { row in Text(verbatim: row.triggerKind) }
                     .width(min: 45, ideal: 70)
-                TableColumn("Status") { row in Text(verbatim: row.status.text) }
+                TableColumn("Status") { row in Text(verbatim: row.statusText) }
                     .width(min: 60, ideal: 120)
                 TableColumn("Tokens") { row in Text(verbatim: "\(row.weightedTokens)") }
                     .width(min: 40, ideal: 60)

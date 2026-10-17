@@ -184,8 +184,8 @@ instead.`), and a goal locked in a background conversation binds no workspace ei
 
 Declaration is only the cheap half. A call that reaches the dispatcher anyway — a stale
 declaration, a real tool's name the run was never offered — is refused there too, recorded as the whole call (name, arguments,
-working directory) on the run's ledger row, and the run finishes `blocked on approval` with a card
-naming the tool. The tool result the refusal writes into the transcript says the job is
+working directory) on the run's ledger row, and the run finishes `refused by profile` with a card
+naming the tool and no "Approve and run" button, since no approval widens a profile. The tool result the refusal writes into the transcript says the job is
 read-only and that no other tool will do it either — but the turn ends on the first such refusal
 before another model round can read it, which is the order that matters: no approval is coming and
 nothing else would do the same thing, so a further round could only use up the run's token budget
@@ -746,7 +746,7 @@ make also stores the whole call (name, every argument, working directory, and wh
 which is what "Approve and run" re-dispatches. The row is written *before* the turn, so a run the
 app died inside leaves evidence behind.
 
-A run ends in one of five statuses:
+A run ends in one of five statuses, one of which reads two ways:
 
 | Status | Meaning |
 | --- | --- |
@@ -754,6 +754,7 @@ A run ends in one of five statuses:
 | `completed` | the turn finished and said something — or the job's gate found nothing to do, in which case the outcome says `gate: no change` and there was no turn — or a built-in job ran, which never has a turn |
 | `failed` | the model call errored, the loop was cut short, the run's final reply was cut off at the output limit or context window (on any provider: Anthropic `max_tokens` or `model_context_window_exceeded`, Gemini `MAX_TOKENS`, OpenAI `length`), or the turn ended having said nothing at all. A cut in an earlier round or turn that the run went on to finish is a warning, not a failure |
 | `blocked on approval` | the run wanted a tool it is not allowed to use unattended, and stopped (see below) |
+| `refused by profile` | a read-only job called a tool its profile does not allow, and stopped. No approval can run it; recreate the job as `mutating` if it should. Stored as `blockedOnApproval`, so it waits to be acknowledged like a block, and the Run Log's status filter lists it under `blocked on approval` |
 | `interrupted` | nothing finished it: the app (or a `--run-job`) quit mid-run and the next launch closed the row out, a `--run-job` was stopped by a signal, a cadence came round while the previous run of the same job was still going so this trigger was dropped rather than started twice, a gate could not answer, or a limit refused the fire before it started (the breaker, a budget, or a ledger that could not say what the job has sent) |
 
 A run that says nothing is a failure, not a success: "it worked and had nothing to report" and "it
@@ -1147,7 +1148,7 @@ run row, no card and no stored signal.
 
 Approvals fail closed exactly as they do at 3 a.m.: no auto-approve, no headless mode, no volatile
 settings copy. A tool call a read-only profile denies, or one that would need a human, is recorded
-as a `blocked on approval` run with the call on it — the same row and the same card a scheduled
+as a `refused by profile` or `blocked on approval` run with the call on it — the same row and the same card a scheduled
 fire would leave, so the card is in Iris, the pinned conversation, the next time you open the app.
 
 Apart from the run's own two conversations — its hidden transcript and the pinned conversation
@@ -1194,7 +1195,7 @@ quits.
 | --- | --- |
 | `0` | The run `completed` — or, with `--dry-run`, the gate says something changed |
 | `1` | Usage; no job with that id or name; `--dry-run` on a job that has no gate; a store that would not open; the store's lock held by the app, another `--run-job`, the seeder or an older Iris build; a lock that could not be taken (the path and error are named); or the job being deleted out from under the fire |
-| `2` | The run did not complete: `failed`, `blocked on approval`, `interrupted` (a first signal's clean stop included), an admission refusal (paused, disabled, overlap, breaker, budget), or a gate that could not answer |
+| `2` | The run did not complete: `failed`, `blocked on approval`, `refused by profile`, `interrupted` (a first signal's clean stop included), an admission refusal (paused, disabled, overlap, breaker, budget), or a gate that could not answer |
 | `3` | The gate looked and nothing had changed (`--dry-run`) |
 | `129`, `130`, `143` | A second signal (SIGHUP, SIGINT, SIGTERM) exited at once; a row the run had not closed is closed when the app next opens the store |
 
@@ -1354,7 +1355,7 @@ Run history is pruned at launch and once a day after that:
 
 - ledger rows older than **90 days** are deleted;
 - for each job, background transcripts beyond its **20 most recent runs** are deleted;
-- both are overridden by the same exemption: a `failed` or `blocked on approval` run that nobody
+- both are overridden by the same exemption: a `failed`, `blocked on approval` or `refused by profile` run that nobody
   has acknowledged keeps its row *and* its transcript, however old. Acknowledging it gives it up:
   `/jobs ack`, the card's **Dismiss**, a banner's **Dismiss**, or the Run Log's **Acknowledge**.
 

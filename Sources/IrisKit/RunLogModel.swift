@@ -19,6 +19,8 @@ struct RunLogRow: Identifiable, Equatable, Sendable {
     let jobName: String
     let triggerKind: String
     let status: JobRun.Status
+    /// What the Status column shows: `refused by profile` for a read-only job's refusal (#553).
+    let statusText: String
     let weightedTokens: Int
     /// The outcome, or the failure reason when there is none (`JobRun.detailText`).
     /// Shown as plain text in the window, and never sent to a model or a notification: it is the
@@ -42,6 +44,7 @@ struct RunLogRow: Identifiable, Equatable, Sendable {
             id: run.id, jobId: run.jobId, started: run.startedAt,
             duration: run.finishedAt.map { $0.timeIntervalSince(run.startedAt) },
             jobName: run.jobName, triggerKind: run.triggerKind, status: run.status,
+            statusText: run.statusText,
             weightedTokens: CostWeights.weighted(run.components, provider: run.provider, model: run.model),
             outcome: run.detailText, canAcknowledge: waits && run.acknowledgedAt == nil,
             opensCard: run.status == .blockedOnApproval, transcript: transcript)
