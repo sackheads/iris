@@ -12,6 +12,10 @@
 # `residual` as a third argument runs the residual analysis instead: the both arm (buffer +
 # noscroll) at 4,000 and at 400 characters a message, and with the streaming row as plain Text
 # (IRIS_STREAM_PLAIN=1). About 9 minutes.
+# `next` as a third argument (on fix A, #583): both = fix A plus no per-token scroll; then with
+# the streaming row's implicit animation off (IRIS_STREAM_ANIMNIL=1), without the bottom scroll
+# anchor (IRIS_STREAM_NOANCHOR=1), and with a real turn's thinking state (IRIS_STREAM_THINKING=1).
+# About 12 minutes.
 # `pair` mode, for a fix's A/B against main (#541): measure-stream.sh pair <before.app>
 # <after.app> <outdir>. Both apps are built from a branch carrying this probe; the arms alternate
 # before/after, 3 passes at 40 messages and 3 at 200. About 12 minutes.
@@ -59,7 +63,15 @@ one() {   # <label> <idle|on> <sample|-> [KEY=VALUE env for the attribution arms
   kill -0 $pid 2>/dev/null && { kill -TERM $pid; sleep 2; }
   return 0
 }
-if [[ $which == pair ]]; then
+if [[ $which == next ]]; then
+for pass in 1 2 3; do
+  s=-; [[ $pass == 1 ]] && s=sample
+  one both-p$pass on $s IRIS_STREAM_NOSCROLL=1
+  one animnil-p$pass on $s IRIS_STREAM_NOSCROLL=1 IRIS_STREAM_ANIMNIL=1
+  one noanchor-p$pass on $s IRIS_STREAM_NOSCROLL=1 IRIS_STREAM_NOANCHOR=1
+  one thinking-p$pass on $s IRIS_STREAM_NOSCROLL=1 IRIS_STREAM_THINKING=1
+done
+elif [[ $which == pair ]]; then
 for n in 40 200; do
   for pass in 1 2 3; do
     s=-; [[ $pass == 1 ]] && s=sample
@@ -99,4 +111,4 @@ for f in $out/*.sample.txt; do
   for p in $pats; do printf "  %-58s %s\n" "$p" "$(grep -F -m1 -- "$p" $f | grep -oE '^[ +!:|]*[0-9]+' | grep -oE '[0-9]+$')"; done
 done
 echo; echo "HOT FRAMES: top of stack, first baseline sample (base-p1)"
-grep -A30 "Sort by top of stack" $out/$([[ $which == pair ]] && echo before40 || ([[ $which == residual ]] && echo long || echo base))-p1.sample.txt | sed -E 's/\(in [^)]*\)//' | cut -c1-150
+grep -A30 "Sort by top of stack" $out/$(case $which in pair) echo before40;; residual) echo long;; floor|next) echo both;; *) echo base;; esac)-p1.sample.txt | sed -E 's/\(in [^)]*\)//' | cut -c1-150

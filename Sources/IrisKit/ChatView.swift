@@ -3,6 +3,14 @@ import MarkdownUI
 import UniformTypeIdentifiers
 
 struct ChatView: View {
+    /// The transcript's scroll anchor: the bottom, or none for #541's no-anchor probe arm.
+    static var scrollAnchor: UnitPoint? {
+        #if DEBUG
+        if DebugStreamProbe.noAnchor { return nil }
+        #endif
+        return .bottom
+    }
+
     @State var state = AppState.shared
     @State private var inputText = ""
     @State private var composerHeight: CGFloat = 24
@@ -250,7 +258,7 @@ struct ChatView: View {
                                 .listRowBackground(Color.clear)
                         }
                         .listStyle(.plain)
-                        .defaultScrollAnchor(.bottom)
+                        .defaultScrollAnchor(Self.scrollAnchor)
                         .overlay {
                             if conv.messages.isEmpty || DebugForceAnimation.isOn(.welcome) {
                                 IrisWelcomeView()
@@ -294,6 +302,9 @@ struct ChatView: View {
                         // arrive here, by subject, so the transcript follows without the root
                         // re-evaluating per token.
                         .onReceive(state.streamTicks) { id in
+                            #if DEBUG
+                            if DebugStreamProbe.noScroll { return }
+                            #endif
                             if id == conv.id { scrollAfterUpdate(proxy) }
                         }
                         .onChange(of: state.isThinking(in: conv.id)) { _, isThinking in
@@ -937,6 +948,13 @@ struct MessageView: View {
                     // message copy still works via row selection + Cmd-C.
                     // Live: a reply still streaming reads its box (#541); only this row does.
                     Markdown(state.liveContent(of: message))
+                        .transaction { transaction in
+                            #if DEBUG
+                            if DebugStreamProbe.animationNil, state.streaming.boxes[message.id] != nil {
+                                transaction.animation = nil
+                            }
+                            #endif
+                        }
                         // Render fenced code blocks WITHOUT MarkdownUI's default horizontal
                         // ScrollView (Theme.basic wraps the label in ScrollView(.horizontal)).
                         // That scroll view swallows trackpad scroll when hovered (#30); wrapping

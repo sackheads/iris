@@ -21,6 +21,13 @@ enum DebugStreamProbe {
     static let longId = UUID(uuidString: "541541A0-0000-4000-8000-000000000200")!
     static let env = ProcessInfo.processInfo.environment
     static let messageCount = Int(env["IRIS_STREAM_PROBE_MESSAGES"] ?? "") ?? 40
+    /// Floor arms on fix A (#541): no per-token scroll; no implicit animation on the streaming
+    /// row; no bottom scroll anchor; and a thinking state, as a real turn has (the LED pulses, the
+    /// spectrum line runs at its working speed), so the arm costs what a user really pays.
+    static let noScroll = env["IRIS_STREAM_NOSCROLL"] == "1"
+    static let animationNil = env["IRIS_STREAM_ANIMNIL"] == "1"
+    static let noAnchor = env["IRIS_STREAM_NOANCHOR"] == "1"
+    static let thinking = env["IRIS_STREAM_THINKING"] == "1"
     static let firstQuestion = "Question 1: what does the next step look like?"
 
     static func startIfAsked(state: AppState) {
@@ -30,6 +37,11 @@ enum DebugStreamProbe {
             let id = conversation(in: state)
             state.selectedConversationId = id
             guard mode == "on" else { return }
+            if thinking {
+                state.beginThinking()
+                state.beginEngineTurn(for: id)
+                state.updateSessionPhase(id, .responding)
+            }
             await stream(into: id, state: state)
         }
     }
