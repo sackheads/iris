@@ -10,7 +10,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    # Whether this run needs the build and tests at all (#535): a change that touches only
+    # documentation (Markdown outside Sources/ and Tests/, docs/, the README's images) skips them.
+    # A job, not `paths-ignore`, on purpose: a workflow that paths-ignore skips never reports, so a
+    # required "test" check would sit pending forever on a docs PR; a job skipped by `if:` reports
+    # as skipped, which satisfies one. Anything the script cannot classify runs the tests.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Test the classifier
+        run: scripts/ci-changes-test.sh
+
+      - name: Classify the change
+        id: classify
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: scripts/ci-changes.sh "$BASE" HEAD
+
   test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     # SwiftPM package only (IrisKit + the `iris` executable + irisTests). The Xcode app target is
     # not built here: it needs the Metal toolchain for MLX's shaders and Developer ID signing,
     # neither of which the runner has. GUI checks (the app, hotkeys, real windows) are not covered.

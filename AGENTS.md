@@ -26,7 +26,12 @@ the code that warns. Do not suppress it (#286).
 
 **CI.** `.github/workflows/test.yml` runs `scripts/check-warnings.sh` (which builds the package
 and tests) and `swift test --no-parallel` on every PR and push to main, on GitHub's `macos-26`
-runner. The runner has 3 cores, so Swift's cooperative pool is 3 threads; in parallel about 25 suites miss
+runner, unless the change touches only documentation. A first `changes` job runs
+`scripts/ci-changes.sh`, which skips the build and tests only when every changed path is docs
+(Markdown outside `Sources/`, `Tests/`, `App/`, `scripts/` and `.github/`; `docs/`; the README's
+images under `assets/`), and runs them for anything else, anything it cannot classify, or a push
+with no usable base (#535). A skipped `test` job reports as skipped, so it would still satisfy a
+required check. Change the rules in that script and its test, `scripts/ci-changes-test.sh`. The runner has 3 cores, so Swift's cooperative pool is 3 threads; in parallel about 25 suites miss
 their deadlines there (subprocess timeouts, kill ladders, subagent stops, tests that park a pool
 thread on a semaphore), while serial is green. It does not build the Xcode app target (needs the
 Metal toolchain and signing) or run any GUI check, and the opt-in tests (`IRIS_REAL_VM`,
