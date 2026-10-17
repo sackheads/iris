@@ -3878,15 +3878,16 @@ actor IrisEngine {
 
     enum ReadOnlyVerdict: Equatable { case allowed, unknownTool, denied }
 
-    /// What a read-only run does with a call. A name that is no tool Iris has (an invented
-    /// `search_files`, a mangled spelling) is still refused — the allowlist stays default-deny, so a
-    /// real tool missing from the hand-kept `allDeclaredToolNames` is refused too, never run — but
-    /// it does not end the run: the model gets the "Unknown tool" any conversation would, and can do
-    /// the work with a tool that exists. F6's "no other tool would do the same" is false for it
-    /// (#550). Only a denied real tool ends the run.
+    /// What a read-only run does with a call. A name that is no tool a job could be offered (an
+    /// invented `search_files`, a mangled spelling, or the evaluator's `submit_evaluation`) is still
+    /// refused — the allowlist stays default-deny, so nothing unlisted ever runs — but it does not
+    /// end the run: the model gets the "Unknown tool" any conversation would, and can do the work
+    /// with a tool that exists. F6's "no other tool would do the same" is false for it (#550). Only
+    /// a tool a mutating job could run ends the run, because only for that is "the job would have
+    /// to be mutating" true.
     static func readOnlyVerdict(_ name: String, denied: Bool) -> ReadOnlyVerdict {
         guard denied else { return .allowed }
-        return JobProfile.isMCPTool(name) || allDeclaredToolNames.contains(name) ? .denied : .unknownTool
+        return JobProfile.isMCPTool(name) || jobRunToolNames.contains(name) ? .denied : .unknownTool
     }
 
     /// The executor's own answer for a name it has no tool for, so a read-only run that is refused
@@ -5208,14 +5209,28 @@ actor IrisEngine {
     ]
 
     /// Every tool name the app can ever declare to any conversation (main agent, subagent or
-    /// evaluator, any gate state), used to recognise a real tool name. A real tool missing from it
-    /// is not a security hole, since the call is still refused, but it is refused softly: `Briefing`
-    /// reports the block as a plain "blocked", and a read-only job (#555) takes it for an unknown
-    /// name, so nothing is recorded and the run goes on, where a listed tool's profile denial is
-    /// recorded and ends the run (#558). `ToolSurfaceTrimTests` pins it against every declaration site.
+    /// evaluator, any gate state), used to recognise a real tool name: `Briefing` and the daily
+    /// digest name a blocked call's tool only when it is one, and report a plain "blocked"
+    /// otherwise. `ToolSurfaceTrimTests` pins it against every declaration site (#558). What a
+    /// read-only job's refusal means is decided by `jobRunToolNames` instead.
     nonisolated static let allDeclaredToolNames: Set<String> =
         pathWritingTools.union(toolsThatWriteNoPath).union(inlineDeclaredToolNames)
             .union(EvaluatorToolset.allowedNames)
+
+    /// Every tool a job run can be offered, as a mutating job with every gate on: what decides
+    /// whether a read-only run's refused call is a profile denial, which ends the run saying the
+    /// job would have to be mutating, or a name that is no tool there, refused as "Unknown tool"
+    /// while the run goes on (#550). Not `allDeclaredToolNames`: the evaluator's `submit_evaluation`,
+    /// the /rename and /goal trigger tools, the goal-state tools, the pinned conversation's job
+    /// tools and what an unattended turn never gets are declared somewhere, but never to a job, so
+    /// "would have to be mutating" would be false for them. MCP tools are decided by name in
+    /// `readOnlyVerdict`. `JobProfileTests` pins this against a mutating job turn's declarations.
+    nonisolated static let jobRunToolNames: Set<String> =
+        pathWritingTools.union(toolsThatWriteNoPath).union(inlineDeclaredToolNames)
+            .subtracting(unattendedNeverDeclared)
+            .subtracting(jobToolDeclarations(isPinned: true).map(\.name))
+            .subtracting(["rename_conversation", "propose_goal_contract", "goal_complete",
+                          "amend_goal_contract", "reach_checkpoint", "waive_criterion", "delegate_milestone"])
 
     /// What this call actually wrote, from its arguments and the sentence the tool returned.
     ///
