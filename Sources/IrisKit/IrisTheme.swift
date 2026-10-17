@@ -159,9 +159,8 @@ final class SpectrumNSView: NSView {
 // MARK: - Empty-conversation welcome
 
 /// Shown when a conversation has no messages: the Iris icon over a soft indigo glow that
-/// gently breathes, with a randomly chosen greeting.
+/// gently breathes (`WelcomeGlowView`), with a randomly chosen greeting.
 struct IrisWelcomeView: View {
-    @State private var breathe = false
     @State private var greeting = IrisWelcomeView.pickGreeting()
 
     private static let greetings = [
@@ -184,34 +183,15 @@ struct IrisWelcomeView: View {
 
     var body: some View {
         VStack(spacing: 18) {
-            ZStack {
-                Circle()
-                    .fill(RadialGradient(
-                        gradient: Gradient(colors: [Color.irisIndigo.opacity(0.45), .clear]),
-                        center: .center, startRadius: 2, endRadius: 140))
-                    .frame(width: 320, height: 320)
-                    .blur(radius: 14)
-                    .scaleEffect(breathe ? 1.06 : 0.9)
-                    .opacity(breathe ? 0.9 : 0.5)
-
-                if let icon = IrisAsset.icon {
-                    Image(nsImage: icon)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 120, height: 120)
-                        .scaleEffect(breathe ? 1.03 : 1.0)
-                        .shadow(color: Color.irisIndigo.opacity(0.5), radius: 18)
-                }
-            }
+            // Core Animation, not `.repeatForever`: a SwiftUI animation here re-laid out the whole
+            // window every frame (#540).
+            WelcomeGlowView().frame(width: WelcomeGlowView.side, height: WelcomeGlowView.side)
             Text(greeting)
                 .font(.callout)
                 .foregroundColor(.secondary)
         }
         .onAppear {
             greeting = IrisWelcomeView.pickGreeting()
-            withAnimation(.easeInOut(duration: 2.6).repeatForever(autoreverses: true)) {
-                breathe = true
-            }
         }
     }
 }
