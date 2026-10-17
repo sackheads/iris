@@ -37,7 +37,11 @@ enum DevHomeSeeder {
         }
     }
 
-    struct Report: Equatable { var keychainServicesCopied = 0 }
+    struct Report: Equatable {
+        var keychainServicesCopied = 0
+        /// The `.dev` services written, in copy order: Iris Dev.app asks once for each (#578).
+        var keychainServices: [String] = []
+    }
 
     /// Every copied job is paused with this, so a job does not fire in both apps once dev and
     /// release run side by side.
@@ -86,6 +90,7 @@ enum DevHomeSeeder {
                 guard !secrets.isEmpty else { continue }
                 try destKeychain.saveSecretsOrThrow(secrets, service: service)
                 report.keychainServicesCopied += 1
+                report.keychainServices.append(destKeychain.resolvedService(service))
             }
 
             // `dest.root` may already exist as the empty directory `destinationNotEmpty` just
@@ -266,15 +271,17 @@ enum DevHomeSeeder {
         }
     }
 
-    /// What a successful seed prints. The `.dev` Keychain items it made trust only this binary,
-    /// so Iris Dev.app asks once to read them; the line says how to answer, because an app quit
-    /// before the answer reached the item asks again at every launch (#578).
+    /// What a successful seed prints. Each `.dev` Keychain item it made trusts only this binary,
+    /// so Iris Dev.app asks once per item, the first time it reads that one; the line names them
+    /// and says how to answer, because an app quit before the answer reached an item asks again at
+    /// every launch (#578).
     static func successLine(_ report: Report, displayRoot: String) -> String {
         var line = "seeded \(displayRoot) from ~/.iris (\(report.keychainServicesCopied) Keychain services)"
-        if report.keychainServicesCopied > 0 {
-            line += ". Iris Dev.app will ask once for your login password to read them (the prompt names "
-                + "\(KeychainManager.legacyService)\(BuildIdentity.dev.keychainServiceSuffix)): keep the app open and choose "
-                + "Always Allow. Deny, or quitting before you answer, means it asks again at the next launch."
+        if !report.keychainServices.isEmpty {
+            let names = report.keychainServices.joined(separator: ", ")
+            line += ". Iris Dev.app will ask for your login password once for each of these, the first time it "
+                + "reads it: \(names). Keep the app open and choose Always Allow each time. Deny, or quitting "
+                + "before you answer, means that one asks again at the next launch."
         }
         return line
     }
