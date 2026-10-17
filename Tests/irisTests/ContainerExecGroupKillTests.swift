@@ -124,6 +124,15 @@ struct ContainerExecGroupKillTests {
         defer { RunCommandProcessGroupTests.killAll(nap); RunCommandProcessGroupTests.killAll(clientNap) }
         let stub = dir.appendingPathComponent("container").path
         let log = dir.appendingPathComponent("killers").path
+        // The stub runs the killer on the host, so the call's note and cancel marker land in the
+        // host's /tmp: take them away with the test (#574 review).
+        defer {
+            let notes = (try? String(contentsOfFile: log + ".notes", encoding: .utf8)) ?? ""
+            for note in Set(notes.split(separator: "\n").map(String.init)) where note.hasPrefix("/tmp/.iris-exec-") {
+                try? FileManager.default.removeItem(atPath: note)
+                try? FileManager.default.removeItem(atPath: CLIContainerRuntime.cancelMarker(note))
+            }
+        }
         let go = dir.appendingPathComponent("go").path
         let status = dir.appendingPathComponent("wrapper-status").path
         let ran = dir.appendingPathComponent("ran").path
@@ -136,8 +145,9 @@ struct ContainerExecGroupKillTests {
             sleep \(clientNap)
         else
             pf=$(printf %s "$3" | grep -o '/tmp/[.]iris-exec-[A-Za-z0-9-]*[.]pid' | head -1)
+            echo "$pf" >> '\(log).notes'
             if [ -s "$pf" ]; then echo note >> '\(log)'; else echo none >> '\(log)'; fi
-            exec "$@"
+            "$@"; echo done >> '\(log).done'
         fi
         """.write(toFile: stub, atomically: true, encoding: .utf8)
         #expect(chmod(stub, 0o755) == 0)
@@ -162,6 +172,12 @@ struct ContainerExecGroupKillTests {
         func killers() -> [String] {
             ((try? String(contentsOfFile: log, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
         }
+        /// Both killers finished, so neither writes its marker after the cleanup above.
+        func killersDone() async throws {
+            let end = Date().addingTimeInterval(CLIProcessRunner.killGraceSeconds * 2 + 5)
+            func done() -> Int { ((try? String(contentsOfFile: log + ".done", encoding: .utf8)) ?? "").split(separator: "\n").count }
+            while done() < 2, Date() < end { try await Task.sleep(nanoseconds: 50_000_000) }
+        }
         if late {
             let fired = Date().addingTimeInterval(10)
             while fires.lock.withLock({ fires.count }) < 1, Date() < fired { try await Task.sleep(nanoseconds: 20_000_000) }
@@ -177,6 +193,7 @@ struct ContainerExecGroupKillTests {
             let both = Date().addingTimeInterval(CLIProcessRunner.killGraceSeconds + 3)
             while fires.lock.withLock({ fires.count }) < 2, Date() < both { try await Task.sleep(nanoseconds: 50_000_000) }
             #expect(fires.lock.withLock { fires.count } == 2, "the ladder still fires twice")
+            try await killersDone()
             return
         }
         let deadline = Date().addingTimeInterval(CLIProcessRunner.killGraceSeconds * 2 + 3)
@@ -189,6 +206,7 @@ struct ContainerExecGroupKillTests {
         while killers().count < 2, Date() < killersDeadline { try await Task.sleep(nanoseconds: 50_000_000) }
         #expect(fires.lock.withLock { fires.count } == 2)
         #expect(killers() == ["note", "none"])
+        try await killersDone()
     }
 
     /// The pgid-reuse half of #377, without the race of the two fires: a killer in its grace has
@@ -311,9 +329,9 @@ struct ContainerExecGroupKillTests {
         try await Task.sleep(nanoseconds: 500_000_000)
         #expect(BlockingSpawn.run("/bin/bash", ["-c", CLIContainerRuntime.groupKiller(pidFile)], timeoutSeconds: 10) == 0,
                 "the killer finds no note in a FIFO and leaves its marker")
-        let reader = try #require(FileHandle(forReadingAtPath: pidFile))   // lets the note's write finish
-        _ = reader.readDataToEndOfFile()
-        try reader.close()
+        // Lets the note's write finish. Bounded: a wrapper that never reaches it would hold an
+        // open(2) of the FIFO for good (#574 review).
+        #expect(BlockingSpawn.run("/bin/cat", [pidFile], timeoutSeconds: 10) == 0)
         let result = try await value(of: wrapper)
         #expect((try? result.get().status) == 143)
         #expect(!FileManager.default.fileExists(atPath: ran), "the command never ran")

@@ -737,9 +737,12 @@ struct CLIContainerRuntime: ContainerRuntime {
     /// that took the note signals it.
     ///
     /// The cancel marker goes down first, before the note is read (#572; see `recordingWrapper`
-    /// for why that order). The killer that takes the note removes it again, since that wrapper is
-    /// past its check. One that finds no note leaves it, for a wrapper still to come; a call whose
-    /// wrapper never starts leaves an empty file, keyed to that call alone, in the container's /tmp.
+    /// for why that order). The killer that takes the note removes it again: that wrapper is past
+    /// its note, and whether or not it has checked yet, this killer signals its group. One that
+    /// finds no note leaves it, for a wrapper that may still come, and cannot know it never will:
+    /// the ladder's second fire re-writes it after the first took the note. So every cancelled or
+    /// timed-out call leaves one empty marker in the container's /tmp, keyed to that call alone,
+    /// and gone with the container.
     static func groupKiller(_ pidFile: String) -> String {
         let marker = cancelMarker(pidFile)
         return ": > \(marker) 2>/dev/null; "
