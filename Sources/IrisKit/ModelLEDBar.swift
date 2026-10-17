@@ -58,26 +58,12 @@ struct ModelLED: View {
         var isPulsing: Bool { self == .active }
     }
 
-    private let dotSize: CGFloat = 10
-
     var body: some View {
         HStack(spacing: 5) {
-            Circle()
-                .fill(state.color)
-                .frame(width: dotSize, height: dotSize)
-                .shadow(color: state.color.opacity(state.glowRadius > 0 ? 0.7 : 0),
-                        radius: state.glowRadius)
-                .overlay(
-                    Circle()
-                        .stroke(state.color.opacity(0.3), lineWidth: 1)
-                )
-                .scaleEffect(state.isPulsing ? 1.35 : 1.0)
-                .animation(
-                    state.isPulsing
-                        ? Animation.easeInOut(duration: 0.6).repeatForever(autoreverses: true)
-                        : .default,
-                    value: state.isPulsing
-                )
+            // Core Animation, not `.repeatForever`: that re-laid out the whole window every frame
+            // a model worked, about 11% CPU (#557).
+            LEDDotView(state: state)
+                .frame(width: LEDDotView.side, height: LEDDotView.side)
 
             Text(label)
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
