@@ -75,5 +75,8 @@ extension AppState {
     func startOnce() {
         guard !engineStarted else { return }
         start()
+        #if DEBUG
+        DebugStreamProbe.startIfAsked(state: self)   // #541's measurement branch only
+        #endif
     }
 }
