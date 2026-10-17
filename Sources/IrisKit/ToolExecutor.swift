@@ -679,10 +679,10 @@ struct ToolExecutor {
         let (result, targetedSkillFolder) = await OffPool.run(cancelled: (Self.writeCancelled, String?.none)) { cancel in
             let folder = Self.skillFileTarget(expandedPath, paths: paths)
             do {
-                try StagedFileWrite.write(content, to: expandedPath, shouldCommit: { !cancel.isCancelled })
+                try StagedFileWrite.write(content, to: expandedPath, shouldCommit: { cancel.beginCommit() })
                 return ("Successfully wrote to \(expandedPath)", folder)
             } catch is CancellationError {
-                return ("Error writing file: cancelled; the file was not changed", folder)
+                return (Self.writeCancelled, folder)
             } catch {
                 return ("Error writing file: \(error.localizedDescription)", folder)
             }
@@ -801,7 +801,7 @@ struct ToolExecutor {
         return await OffPool.run(cancelled: Self.writeCancelled) { cancel in
             do {
                 try GrantedFileAccess(root: grantRoot).write(relative: relative, content: content,
-                                                            shouldCommit: { !cancel.isCancelled })
+                                                            shouldCommit: { cancel.beginCommit() })
                 return "Successfully wrote to \(path)"
             } catch let error as GrantedFileError { return "Error writing file: \(error.message)" }
             catch { return "Error writing file: \(error.localizedDescription)" }
@@ -865,7 +865,7 @@ struct ToolExecutor {
             let folder = Self.skillFileTarget(decided, paths: paths)
             do {
                 try GrantedFileAccess(root: "/").write(relative: relative, content: content,
-                                                      shouldCommit: { !cancel.isCancelled })
+                                                      shouldCommit: { cancel.beginCommit() })
                 return ("Successfully wrote to \(decided)", folder)
             } catch let error as GrantedFileError { return ("Error writing file: \(error.message(for: .approvedPath))", folder) }
             catch { return ("Error writing file: \(error.localizedDescription)", folder) }
@@ -875,9 +875,9 @@ struct ToolExecutor {
 
     /// What a cancelled file-tool call answers (#532): never empty content, never a claim of a write.
     static let readCancelled = "Error reading file: cancelled"
-    /// The caller returns at once, so it cannot know whether the write had already passed its
-    /// commit gate; the write itself never renames once it sees the cancel.
-    static let writeCancelled = "Error writing file: cancelled; the file was not changed unless the write was already committing"
+    /// Exact: a cancel that lands before the commit gate answers this and nothing is renamed; one
+    /// that lands after it waits for the write's own answer (#548 review).
+    static let writeCancelled = "Error writing file: cancelled; the file was not changed"
 
     static func nulPathRefusal(_ tool: String) -> String {
         "Error: `\(tool)` was given a path containing a NUL character, which cannot name a file; nothing was done."

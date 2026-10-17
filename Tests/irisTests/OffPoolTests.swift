@@ -30,6 +30,11 @@ struct OffPoolTests {
         #expect(condition(), "timed out waiting for \(what)")
     }
 
+    /// A `OneShot` that is never resumed fails the test at the bound instead of hanging the run.
+    private static func answer<T: Sendable>(of shot: OneShot<T>, within seconds: Double = 5) async throws -> T {
+        try await value(of: Task { await shot.wait() }, within: seconds)
+    }
+
     /// Runs `call` with the hook hung, cancels it once the work is inside, and returns what it
     /// answered, how long the cancel took, and the queue the work ran on.
     private func cancelWhileHung(_ call: @escaping @Sendable () async -> String) async throws
@@ -77,7 +82,36 @@ struct OffPoolTests {
             await OffPool.run(cancelled: "cancelled") { cancel in saw.resume(cancel.isCancelled); return "done" }
         }
         hang.release()
-        #expect(await saw.wait() == true)
+        #expect(try await Self.answer(of: saw) == true)
+    }
+
+    @Test("a call that is already cancelled when it starts answers cancelled at once")
+    func alreadyCancelledEntry() async throws {
+        let task = Task {
+            while !Task.isCancelled { await Task.yield() }
+            return await OffPool.run(cancelled: "cancelled") { _ in
+                Thread.sleep(forTimeInterval: 5)
+                return "late"
+            }
+        }
+        task.cancel()
+        let asked = Date()
+        #expect(try await value(of: task, within: 3) == "cancelled")
+        #expect(Date().timeIntervalSince(asked) < 2)
+    }
+
+    @Test("the first answer wins: a second resume changes nothing")
+    func firstAnswerWins() async throws {
+        let shot = OneShot<String>()
+        shot.resume("first")
+        shot.resume("second")
+        #expect(try await Self.answer(of: shot) == "first")
+        let late = OneShot<String>()
+        let waiter = Task { await late.wait() }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        late.resume("first")
+        late.resume("second")
+        #expect(try await value(of: waiter, within: 5) == "first")
     }
 
     // MARK: Every site
@@ -134,6 +168,60 @@ struct OffPoolTests {
         try await Task.sleep(nanoseconds: 300_000_000)
         #expect(try String(contentsOf: target, encoding: .utf8) == "old", "nothing was committed")
         #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == ["f.txt"], "no temp file left")
+    }
+
+    /// The other order (#548 review): a cancel that lands after the commit gate does not answer
+    /// early. The write renames and its own success sentence is the answer, so the engine records
+    /// the path and a SKILL.md write still invalidates the skill cache.
+    @Test("a write cancelled after its commit gate lands, and answers success", arguments: [false, true])
+    func cancelAfterTheGateLands(granted: Bool) async throws {
+        let dir = try scratch(); defer { try? FileManager.default.removeItem(at: dir) }
+        let target = dir.appendingPathComponent("f.txt")
+        try "old".write(to: target, atomically: false, encoding: .utf8)
+        let executor = ToolExecutor()
+        let hang = Hang()
+        let task = Task {
+            await OffPool.$afterCommitGateHook.withValue({ hang.block() }) {
+                granted
+                    ? await executor.writeFile(grantRoot: dir.path, relative: ["f.txt"], content: "new")
+                    : await executor.execute(name: "write_file", args: ["path": .string(target.path), "content": .string("new")])
+            }
+        }
+        await Self.eventually("the write to pass its commit gate") { hang.isInside }
+        task.cancel()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        hang.release()
+        let answer = try await value(of: task, within: 5)
+        #expect(answer == "Successfully wrote to \(target.path)", "\(answer)")
+        #expect(try String(contentsOf: target, encoding: .utf8) == "new")
+        #expect(IrisEngine.writtenPaths(tool: "write_file", args: ["path": .string(target.path)], cwd: nil,
+                                        result: answer) == [target.path])
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == ["f.txt"])
+    }
+
+    @Test("a SKILL.md write cancelled after its gate still invalidates the skill cache")
+    func cancelAfterTheGateInvalidatesSkills() async throws {
+        let folder = IrisPaths.default.skillsDir.appendingPathComponent("probe-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let skill = folder.appendingPathComponent("SKILL.md")
+        let invalidated = OneShot<Bool>()
+        var executor = ToolExecutor()
+        executor.onSkillsChanged = { invalidated.resume(true) }
+        let hang = Hang()
+        let call = executor
+        let task = Task {
+            await OffPool.$afterCommitGateHook.withValue({ hang.block() }) {
+                await call.execute(name: "write_file", args: ["path": .string(skill.path),
+                                                               "content": .string("---\nname: x\n---\nbody")])
+            }
+        }
+        await Self.eventually("the write to pass its commit gate") { hang.isInside }
+        task.cancel()
+        hang.release()
+        let answer = try await value(of: task, within: 5)
+        #expect(answer.hasPrefix("Successfully wrote to"), "\(answer)")
+        #expect(try await Self.answer(of: invalidated) == true)
     }
 
     @Test("an uncancelled write still lands, keeping an existing file's mode", arguments: [false, true])
