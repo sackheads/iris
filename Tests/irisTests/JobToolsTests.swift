@@ -181,6 +181,33 @@ struct JobToolsTests {
         #expect(rows[0]["lastStatus"] as? String == "completed")
     }
 
+    @Test("list_jobs says why the last run was blocked: a read-only refusal is not an approval wait (#553)")
+    func listJobsBlockedReason() async throws {
+        let (app, id) = pinnedApp()
+        let refused = job("reader"), waiting = job("writer"), fine = job("sweeper")
+        for (j, status, reason) in [(refused, JobRun.Status.blockedOnApproval, BlockedCall.Reason.profile),
+                                    (waiting, .blockedOnApproval, .approval),
+                                    (fine, .completed, nil)] as [(Job, JobRun.Status, BlockedCall.Reason?)] {
+            try app.store.ledger.upsert(j)
+            let r = JobRun(jobId: j.id, jobName: j.name, triggerKind: j.trigger.kind, startedAt: Date())
+            try app.store.ledger.begin(run: r)
+            try app.store.ledger.finish(runId: r.id, status: status, outcome: nil, failureReason: nil,
+                                        blockedTool: reason == nil ? nil : "write_file", tokens: TokenUsage(),
+                                        finishedAt: Date())
+            if let reason { try app.store.ledger.setBlockedCall(runId: r.id, BlockedCall(toolName: "write_file", reason: reason)) }
+        }
+
+        let result = await runToolCall(FunctionCall(name: "list_jobs", args: [:], id: "c1"), on: app, as: id)
+
+        let body = try #require(JSONSerialization.jsonObject(with: Data(result.utf8)) as? [String: Any])
+        let rows = try #require(body["jobs"] as? [[String: Any]])
+        let byName = Dictionary(uniqueKeysWithValues: rows.compactMap { row in (row["name"] as? String).map { ($0, row) } })
+        #expect(byName["reader"]?["lastStatus"] as? String == "blockedOnApproval")
+        #expect(byName["reader"]?["lastBlockedReason"] as? String == "profile")
+        #expect(byName["writer"]?["lastBlockedReason"] as? String == "approval")
+        #expect(byName["sweeper"]?["lastBlockedReason"] is NSNull)
+    }
+
     @Test("list_jobs carries the figures /jobs prints, as fields")
     func listJobsFigures() throws {
         var j = job()

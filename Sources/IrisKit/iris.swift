@@ -4354,9 +4354,12 @@ actor IrisEngine {
                     // is the ledger's only newest-first-per-job read, and a jobs list is tens of
                     // rows, not thousands.
                     var lastStatuses: [UUID: String] = [:]
+                    var lastBlockedReasons: [UUID: String] = [:]
                     var lastBursts: [UUID: WatchSummary] = [:]
                     for job in jobs {
-                        lastStatuses[job.id] = try ledger.runs(jobId: job.id, limit: 1).first?.status.rawValue
+                        let last = try ledger.runs(jobId: job.id, limit: 1).first
+                        lastStatuses[job.id] = last?.status.rawValue
+                        lastBlockedReasons[job.id] = last?.blockedCall?.reason.rawValue
                         if case .fsEvent = job.trigger {
                             lastBursts[job.id] = try ledger.lastWatchSummary(jobId: job.id)
                         }
@@ -4371,7 +4374,8 @@ actor IrisEngine {
                     // Read after `jobs()` — that call is what publishes the skipped-row count —
                     // and reported, so the model's account of what is scheduled matches `/jobs`'s
                     // rather than silently omitting the same rows.
-                    result = Self.jobsListJSON(jobs, lastStatuses: lastStatuses, usage: usage,
+                    result = Self.jobsListJSON(jobs, lastStatuses: lastStatuses,
+                                               lastBlockedReasons: lastBlockedReasons, usage: usage,
                                                unreadableJobs: ledger.unreadableJobCount,
                                                lastBursts: lastBursts, absorbed: absorbed)
                 } catch {
@@ -5604,6 +5608,7 @@ extension IrisEngine {
     /// anything but a watch, and `absorbedSinceLaunch` is `null` too when there is no live
     /// coordinator — a zero there would claim the watch absorbed nothing, which is not known.
     nonisolated static func jobsListJSON(_ jobs: [Job], lastStatuses: [UUID: String],
+                                         lastBlockedReasons: [UUID: String] = [:],
                                          usage: JobsCommand.UsageSnapshot,
                                          unreadableJobs: Int,
                                          lastBursts: [UUID: WatchSummary] = [:],
@@ -5622,6 +5627,9 @@ extension IrisEngine {
                 "enabled": job.enabled,
                 "nextFireAt": job.nextFireAt.map { iso.string(from: $0) } ?? NSNull(),
                 "lastStatus": lastStatuses[job.id] ?? NSNull(),
+                // As `get_job_run`'s `blockedReason` (#553): `profile` is a read-only job's
+                // refusal, which no approval lifts. Null unless the last run was blocked.
+                "lastBlockedReason": lastBlockedReasons[job.id] ?? NSNull(),
                 "pausedReason": job.pausedReason ?? NSNull(),
                 "profile": job.profile.rawValue,
                 // The same sentence the table's policy column shows, so a person reading `/jobs`
