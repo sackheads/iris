@@ -9,6 +9,9 @@
 # About 18 minutes. The probe makes and selects its own conversation,
 # "#541 stream probe" (fixed id; its title is re-set on every launch, which the window check below
 # relies on), the first time, and deletes probe conversations left by earlier probe builds.
+# `floor` as a third argument runs the per-update floor analysis: the both arm, then with the
+# streaming row at a fixed height (IRIS_STREAM_FIXED=1), then at 10 Hz (IRIS_STREAM_INTERVAL_MS=100).
+# About 9 minutes.
 # `residual` as a third argument runs the residual analysis instead: the both arm (buffer +
 # noscroll) at 4,000 and at 400 characters a message, and with the streaming row as plain Text
 # (IRIS_STREAM_PLAIN=1). About 9 minutes.
@@ -54,7 +57,15 @@ one() {   # <label> <idle|on> <sample|-> [KEY=VALUE env for the attribution arms
   kill -0 $pid 2>/dev/null && { kill -TERM $pid; sleep 2; }
   return 0
 }
-if [[ $which == residual ]]; then
+if [[ $which == floor ]]; then
+B=(IRIS_STREAM_NOSCROLL=1 IRIS_STREAM_BUFFER=1)
+for pass in 1 2 3; do
+  s=-; [[ $pass == 1 ]] && s=sample
+  one both-p$pass on $s $B
+  one fixed-p$pass on $s $B IRIS_STREAM_FIXED=1
+  one rate10-p$pass on $s $B IRIS_STREAM_INTERVAL_MS=100
+done
+elif [[ $which == residual ]]; then
 B=(IRIS_STREAM_NOSCROLL=1 IRIS_STREAM_BUFFER=1)
 for pass in 1 2 3; do
   s=-; [[ $pass == 1 ]] && s=sample
@@ -86,4 +97,4 @@ for f in $out/*.sample.txt; do
   for p in $pats; do printf "  %-58s %s\n" "$p" "$(grep -F -m1 -- "$p" $f | grep -oE '^[ +!:|]*[0-9]+' | grep -oE '[0-9]+$')"; done
 done
 echo; echo "HOT FRAMES: top of stack, first baseline sample (base-p1)"
-grep -A30 "Sort by top of stack" $out/$([[ $which == residual ]] && echo long || echo base)-p1.sample.txt | sed -E 's/\(in [^)]*\)//' | cut -c1-150
+grep -A30 "Sort by top of stack" $out/$(case $which in residual) echo long;; floor) echo both;; *) echo base;; esac)-p1.sample.txt | sed -E 's/\(in [^)]*\)//' | cut -c1-150

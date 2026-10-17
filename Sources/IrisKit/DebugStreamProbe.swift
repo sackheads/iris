@@ -29,6 +29,9 @@ enum DebugStreamProbe {
     /// and whether the streaming row renders as plain `Text` instead of Markdown.
     static let maxChars = Int(env["IRIS_STREAM_MAXCHARS"] ?? "") ?? 4_000
     static let plain = env["IRIS_STREAM_PLAIN"] == "1"
+    /// Floor analysis (#541): a streaming row that never changes size, and the update interval.
+    static let fixedRow = env["IRIS_STREAM_FIXED"] == "1"
+    static let intervalMs = UInt64(env["IRIS_STREAM_INTERVAL_MS"] ?? "") ?? MessageStreamer.flushIntervalMs
 
     /// Whether `message` is the one streaming into the buffer right now.
     static func isStreaming(_ message: ChatMessage) -> Bool {
@@ -84,7 +87,7 @@ enum DebugStreamProbe {
             if useBuffer { DebugStreamBuffer.shared.messageId = messageId; DebugStreamBuffer.shared.text = "" }
             var text = ""
             while text.count < maxChars, !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: MessageStreamer.flushIntervalMs * 1_000_000)
+                try? await Task.sleep(nanoseconds: intervalMs * 1_000_000)
                 for _ in 0..<6 {
                     text += (text.isEmpty ? "" : " ") + words[cursor % words.count]
                     cursor += 1

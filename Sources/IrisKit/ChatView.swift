@@ -866,6 +866,9 @@ struct MessageView: View {
         #if DEBUG
         if DebugStreamProbe.plain && DebugStreamProbe.isStreaming(message) {
             Text(displayedContent).padding(.vertical, 4)
+        } else if DebugStreamProbe.fixedRow && DebugStreamProbe.isStreaming(message) {
+            // A size that never changes mid-stream: does the row's growth reach the window?
+            markdownBody.frame(height: 2400, alignment: .topLeading).clipped()
         } else {
             markdownBody
         }
