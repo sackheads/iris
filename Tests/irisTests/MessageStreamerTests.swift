@@ -125,7 +125,7 @@ struct MessageStreamerTests {
 @MainActor
 @Suite("AppState in-place message update", .timeLimit(.minutes(1)))
 struct UpdateMessageContentTests {
-    @Test("content is replaced without adding a message; persist is opt-in")
+    @Test("content is replaced without adding a message: live while streaming, stored at the final write")
     func updateInPlace() {
         let app = AppState()
         let conv = UUID()
@@ -134,10 +134,16 @@ struct UpdateMessageContentTests {
         app.appendMessage(role: .agent, content: "a", id: id, to: conv)
         let count = app.conversations.first { $0.id == conv }!.messages.count
         app.updateMessageContent(id: id, content: "ab", in: conv)
-        let messages = app.conversations.first { $0.id == conv }!.messages
+        var messages = app.conversations.first { $0.id == conv }!.messages
+        #expect(messages.count == count)
+        let message = messages.first { $0.id == id }!
+        #expect(app.liveContent(of: message) == "ab", "what the row shows")
+        #expect(message.content == "a", "conversations waits for the final write (#541)")
+        #expect(message.role == .agent)
+        app.updateMessageContent(id: id, content: "ab", in: conv, persist: true)
+        messages = app.conversations.first { $0.id == conv }!.messages
         #expect(messages.count == count)
         #expect(messages.first { $0.id == id }?.content == "ab")
-        #expect(messages.first { $0.id == id }?.role == .agent)
     }
 
     @Test("an unknown message id is a no-op")

@@ -349,7 +349,7 @@ struct TranscriptSheet: View {
     private func copyTranscript() {
         guard let conversation else { return }
         let text = conversation.messages
-            .map { $0.exportLine(format: .plainText) }
+            .map { state.liveMessage($0).exportLine(format: .plainText) }
             .joined(separator: "\n\n")
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
