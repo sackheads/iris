@@ -1272,9 +1272,14 @@ actor JobRunner {
         // The soft stop leaves a line saying why the turn ended; a turn the deadline abandoned
         // never gets to, so without this its transcript just stops (#263). A job run's engine is
         // always the main agent.
+        // A turn whose own soft stop wrote the line just before the deadline claimed the run is
+        // not told twice.
         if overran, let state {
             let line = IrisEngine.budgetStopLine(origin: "Main agent", reason: TurnBudget.timeExceeded)
-            await MainActor.run { state.appendMessage(role: .system, content: line, to: conversationId) }
+            await MainActor.run {
+                let last = state.conversations.first { $0.id == conversationId }?.messages.last { $0.role == .system }
+                if last?.content != line { state.appendMessage(role: .system, content: line, to: conversationId) }
+            }
         }
         let finishedAt = now()
 
