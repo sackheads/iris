@@ -1162,8 +1162,8 @@ actor JobRunner {
         // Stay awake for this run, and no longer: the watchdog gives the assertion back at the
         // deadline even when the turn overruns it, so a wedged run cannot hold the Mac awake for
         // the rest of the session. `ActivityHolder` ends once, whichever gets there first.
-        // #463: a stop that came before here starts no turn. A stop after this check is the
-        // stop watcher's, below.
+        // #463: a stop that came before here starts no turn. A stop after this check claims the
+        // ending from the signal queue (`attachEnding`, below).
         if await closedForStop(run: run, job: job, conversationId: conversationId, note: note) { return }
         let holder = ActivityHolder(api: activity, reason: "Iris job \(job.name)")
         // One claim, taken by whichever of the two gets there first, because "the turn came back"
@@ -1211,6 +1211,11 @@ actor JobRunner {
         }
         // So a CLI exiting at once can cancel this turn from its signal queue before it reads the
         // registries (#463): the clean stop below goes through the claim, that path cannot wait.
+        // The stop's claim on the ending, then the turn, both on the signal queue (#615), as the
+        // deadline's are on its own: a stop is never left waiting for a pool thread to say so.
+        stop?.attachEnding { reason in
+            if ending.claim(.signal(reason)) { holder.end() }
+        }
         stop?.attachTurn { turnTask.cancel() }
         // On a dispatch queue, not the cooperative pool (invariant 4, #603): a pool held by
         // blocking work used to hold this deadline with it, so the run, its sleep assertion and
@@ -1229,22 +1234,11 @@ actor JobRunner {
             // bounded cost, against a job that would otherwise never run again.
             turnTask.cancel()
         }
-        // The third claimant (#463 decision 16): a CLI signal. `RunStop.request` has already
-        // cancelled the turn and sent the run's host groups their SIGTERM, on the signal queue;
-        // this claims the ending for the stop, and the run then waits for the turn until the
-        // stop's grace, counted from the request, runs out.
-        let stopWatch = Task { [stop] in
-            guard let stop, let reason = await stop.wait() else { return }
-            guard ending.claim(.signal(reason)) else { return }
-            holder.end()
-            turnTask.cancel()
-        }
         // Whichever of them claimed the ending, not `turnTask.value`: awaiting the turn here gave
         // a non-cooperative one the power to hold `fire` open — and with it the job's `inFlight`
         // slot, its `running` row, and a skip row per cadence tick — for as long as it liked.
         let how = await ending.wait()
         watchdog.cancel()
-        stopWatch.cancel()
         holder.end()
         let overran = how == .deadline
         var stoppedBy: String?
@@ -1915,8 +1909,8 @@ actor JobRunner {
         guard let stop else { return await closeSession(conversationId, status: status) }
         let close = Task { await self.closeSession(conversationId, status: status) }
         // The close races the stop. A stop already asked for (`stoppedBy`, or one that lost the
-        // claim) wins at once; one that lands mid-close bounds the rest of it. The stop watcher
-        // was cancelled with the run's ending, so this is the only waiter.
+        // claim) wins at once; one that lands mid-close bounds the rest of it. This is the only
+        // waiter: the stop claims the run's ending without one (#615).
         let stopWait = Task { await stop.wait() }
         let first = FirstBool()
         let closedFirst = await withCheckedContinuation { continuation in
