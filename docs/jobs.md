@@ -1031,7 +1031,7 @@ stopped part-way, so the run can end slightly over its budget, by at most one ro
 running at the time. A run cannot start a subagent in the background (`invoke_subagent` with
 `background`): it is refused, because the subagent would outlive the run's budget and its result
 would start a turn nobody budgeted; delegating synchronously is allowed. The deadline does not wait
-for a round, and does not wait for the turn either. At the deadline the run is closed `failed`, the
+for a round, and does not wait for the turn either, nor for a free thread: it is timed on a dispatch queue, so app work that is holding Swift's task threads cannot delay it (#603). At the deadline the run is closed `failed`, the
 Mac is let go back to sleep and the job is free to fire again; the turn is asked to stop, and if it is parked somewhere that never
 checks — a blocking subprocess, a stream with no timeout — it is abandoned rather than waited on.
 The run's subagents stop with it (#323). Cancelling the run's turn at the deadline cancels the

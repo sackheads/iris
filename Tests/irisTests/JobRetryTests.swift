@@ -705,9 +705,9 @@ struct JobRetryTests {
     @Test("the turn, the deadline and a stop race for one claim, and exactly one of them wins it")
     func theEndingIsClaimedOnce() async {
         let ending = DeadlineFlag()
-        #expect(await ending.claim(.turn) == true)
-        #expect(await ending.claim(.deadline) == false, "the loser gets no say in how the run ended")
-        #expect(await ending.claim(.signal("stopped by a signal (SIGINT)")) == false)
+        #expect(ending.claim(.turn) == true)
+        #expect(ending.claim(.deadline) == false, "the loser gets no say in how the run ended")
+        #expect(ending.claim(.signal("stopped by a signal (SIGINT)")) == false)
         #expect(await ending.wait() == .turn, "and the run hears the winner's answer, not the loser's")
     }
 
@@ -715,7 +715,7 @@ struct JobRetryTests {
     func theRunWaitsForWhicheverClaimsTheEnding() async throws {
         let ending = DeadlineFlag()
         let waiting = Task { await ending.wait() }
-        #expect(await ending.claim(.signal("stopped by a signal (SIGTERM)")) == true)
+        #expect(ending.claim(.signal("stopped by a signal (SIGTERM)")) == true)
         #expect(try await value(of: waiting) == .signal("stopped by a signal (SIGTERM)"))
     }
 

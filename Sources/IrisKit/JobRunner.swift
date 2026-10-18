@@ -1200,7 +1200,7 @@ actor JobRunner {
             // so a turn back after a stop was asked for claims it as the stop's: it came back
             // because it was cancelled.
             let mine: DeadlineFlag.Ending = stop?.requestedReason.map { .signal($0) } ?? .turn
-            if await ending.claim(mine) { return true }
+            if ending.claim(mine) { return true }
             // Except this, which is not a record of the run but a bucket in `AppState`: a denial
             // the orphan collected after `readTurn` drained would sit against a conversation
             // nothing will ever read again. Same drain `closeInterrupted` does, same reason.
@@ -1212,32 +1212,21 @@ actor JobRunner {
         // So a CLI exiting at once can cancel this turn from its signal queue before it reads the
         // registries (#463): the clean stop below goes through the claim, that path cannot wait.
         stop?.attachTurn { turnTask.cancel() }
-        let watchdogSlice = self.watchdogSlice
-        let watchdog = Task.detached {
-            // Sliced, and re-read from the wall clock every time round, because the two clocks
-            // are not the same one: `Task.sleep` suspends on the machine's *suspending* clock,
-            // which does not advance while the Mac is asleep, and `deadline` is a wall-clock
-            // instant. One long sleep across a lid close wakes up however long the Mac slept past
-            // the deadline it exists to enforce — holding the assertion, and the run, open for
-            // all of it. A slice is at most a minute, so that overshoot is at most a minute.
-            while true {
-                let seconds = deadline.timeIntervalSince(deadlineClock())
-                if seconds <= 0 { break }
-                // Not `try?`: a cancelled sleep means the run finished first, and the two things
-                // below are the deadline's alone to do.
-                do {
-                    let slice = min(seconds, watchdogSlice)
-                    try await Task.sleep(nanoseconds: UInt64(slice * 1_000_000_000))
-                } catch { return }
-            }
+        // On a dispatch queue, not the cooperative pool (invariant 4, #603): a pool held by
+        // blocking work used to hold this deadline with it, so the run, its sleep assertion and
+        // whatever its commands were doing outlived the timeout for as long as the pool was held.
+        // Everything the deadline does is synchronous here: the claim, giving the assertion back,
+        // and `cancel()`, whose cancellation handlers (the commands' kill ladders) run on this
+        // thread.
+        let watchdog = RunDeadlineWatchdog(deadline: deadline, slice: watchdogSlice, clock: deadlineClock) {
             // Lost the claim: the turn is already over, so ending its assertion and cancelling it
-            // are not this task's to do.
-            guard await ending.claim(.deadline) else { return }
-            await holder.end()
+            // are not the deadline's to do.
+            guard ending.claim(.deadline) else { return }
+            holder.end()
             // Cooperative, and that is the whole reason this does not wait for it: a turn parked
             // where nothing checks cancellation never comes back, and `run()` returning on the
-            // claim below is what stops that wedging the job forever. The orphaned task leaks —
-            // a bounded cost, against a job that would otherwise never run again.
+            // claim is what stops that wedging the job forever. The orphaned task leaks — a
+            // bounded cost, against a job that would otherwise never run again.
             turnTask.cancel()
         }
         // The third claimant (#463 decision 16): a CLI signal. `RunStop.request` has already
@@ -1246,8 +1235,8 @@ actor JobRunner {
         // stop's grace, counted from the request, runs out.
         let stopWatch = Task { [stop] in
             guard let stop, let reason = await stop.wait() else { return }
-            guard await ending.claim(.signal(reason)) else { return }
-            await holder.end()
+            guard ending.claim(.signal(reason)) else { return }
+            holder.end()
             turnTask.cancel()
         }
         // Whichever of them claimed the ending, not `turnTask.value`: awaiting the turn here gave
@@ -1256,7 +1245,7 @@ actor JobRunner {
         let how = await ending.wait()
         watchdog.cancel()
         stopWatch.cancel()
-        await holder.end()
+        holder.end()
         let overran = how == .deadline
         var stoppedBy: String?
         if case .signal(let reason) = how { stoppedBy = reason }
@@ -2231,7 +2220,7 @@ private struct LedgerUsageSink: TurnUsageSink {
 /// is a single claim rather than a flag: the winner owns it, and the losers do nothing at all. An
 /// actor because the three are different tasks — and because "read it, then decide" across a
 /// suspension is the race this replaces.
-actor DeadlineFlag {
+final class DeadlineFlag: @unchecked Sendable {
     /// How a run ended: its turn came back, its deadline arrived, or a CLI stop took it (#463).
     enum Ending: Equatable, Sendable {
         case turn
@@ -2239,31 +2228,108 @@ actor DeadlineFlag {
         case signal(String)
     }
 
+    /// A lock rather than an actor (#603): the deadline claims from a dispatch queue, and an actor
+    /// hop would put the claim back on the cooperative pool the deadline has to stay off.
+    private let lock = NSLock()
     private var ending: Ending?
     /// `run()`, parked in `wait()`. One at a time, by construction: a run has one waiter.
     private var waiter: CheckedContinuation<Ending, Never>?
 
-    /// `true` for exactly one caller, ever.
+    /// `true` for exactly one caller, ever. Resumes the waiter outside the lock.
     @discardableResult
     func claim(_ how: Ending) -> Bool {
-        guard ending == nil else { return false }
-        ending = how
-        if let waiter {
-            self.waiter = nil
-            waiter.resume(returning: how)
+        let (won, waiter): (Bool, CheckedContinuation<Ending, Never>?) = lock.withLock {
+            guard ending == nil else { return (false, nil) }
+            ending = how
+            defer { self.waiter = nil }
+            return (true, self.waiter)
         }
-        return true
+        waiter?.resume(returning: how)
+        return won
     }
 
     /// Returns as soon as any racer has claimed the ending. This is what lets the deadline or a
     /// stop win the *wait* and not only the claim: a turn parked somewhere that never checks
     /// cancellation is left behind rather than kept waited on.
     func wait() async -> Ending {
-        if let ending { return ending }
-        // One waiter, and enforced where it is relied on: a second would overwrite the first
-        // continuation, which is never resumed again — a silent permanent hang.
-        precondition(waiter == nil, "DeadlineFlag has one waiter: the run that owns the ending")
-        return await withCheckedContinuation { self.waiter = $0 }
+        await withCheckedContinuation { continuation in
+            let ready: Ending? = lock.withLock {
+                if let ending { return ending }
+                // One waiter, and enforced where it is relied on: a second would overwrite the
+                // first continuation, which is never resumed again — a silent permanent hang.
+                precondition(waiter == nil, "DeadlineFlag has one waiter: the run that owns the ending")
+                waiter = continuation
+                return nil
+            }
+            if let ready { continuation.resume(returning: ready) }
+        }
+    }
+}
+
+/// A job run's hard deadline (#603), timed on a dispatch queue so a held cooperative pool cannot
+/// hold it (invariant 4, #372). Calls `fire` once, on its own queue, the first time `clock` reads
+/// at or past `deadline`, unless `cancel()` came first.
+///
+/// Sliced, and `clock` re-read every slice, because a dispatch timer's monotonic clock does not
+/// advance while the Mac is asleep and `deadline` is a wall-clock instant: one long wait across a
+/// lid close would wake however long the Mac slept past the deadline it exists to enforce. Each
+/// slice is scheduled on the wall clock and is at most `slice` long, so that overshoot is at most
+/// one slice.
+final class RunDeadlineWatchdog: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "iris.job-run.deadline")
+    private let lock = NSLock()
+    private let deadline: Date
+    private let slice: TimeInterval
+    private let clock: @Sendable () -> Date
+    private let fire: @Sendable () -> Void
+    private var timer: DispatchSourceTimer?
+    private var done = false
+
+    init(deadline: Date, slice: TimeInterval, clock: @escaping @Sendable () -> Date,
+         fire: @escaping @Sendable () -> Void) {
+        self.deadline = deadline
+        self.slice = slice
+        self.clock = clock
+        self.fire = fire
+        queue.async { self.check() }
+    }
+
+    /// The run ended first. A check already running finishes, but `fire` is never called after
+    /// this returns unless it had already begun.
+    func cancel() {
+        let pending: DispatchSourceTimer? = lock.withLock {
+            done = true
+            defer { timer = nil }
+            return timer
+        }
+        pending?.cancel()
+    }
+
+    private func check() {
+        guard !lock.withLock({ done }) else { return }
+        let remaining = deadline.timeIntervalSince(clock())
+        if remaining <= 0 {
+            let first = lock.withLock { () -> Bool in
+                guard !done else { return false }
+                done = true
+                timer = nil
+                return true
+            }
+            if first { fire() }
+            return
+        }
+        let next = DispatchSource.makeTimerSource(queue: queue)
+        next.schedule(wallDeadline: .now() + min(remaining, slice))
+        next.setEventHandler { [weak self] in self?.check() }
+        let armed = lock.withLock { () -> Bool in
+            guard !done else { return false }
+            timer = next
+            return true
+        }
+        // Cancelled in between: a never-activated source must not be released, so it is
+        // cancelled and activated, which runs no handler.
+        if !armed { next.cancel() }
+        next.resume()
     }
 }
 

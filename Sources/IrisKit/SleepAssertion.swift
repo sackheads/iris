@@ -62,12 +62,14 @@ final class RecordingActivity: ActivityAPI, @unchecked Sendable {
     }
 }
 
-/// One activity, endable exactly once, from either of the two places that race to end it: the run
-/// finishing and the deadline watchdog. An actor because those two are different tasks, and a
-/// second `endActivity` for an assertion already given back is the kind of imbalance that leaves a
-/// Mac awake for the rest of the session.
-actor ActivityHolder {
+/// One activity, endable exactly once, from any of the places that race to end it: the run
+/// finishing, the deadline watchdog and a CLI stop. Lock-protected rather than an actor (#603):
+/// the deadline ends it from a dispatch queue, off the cooperative pool. A second `endActivity`
+/// for an assertion already given back is the kind of imbalance that leaves a Mac awake for the
+/// rest of the session.
+final class ActivityHolder: @unchecked Sendable {
     private let api: any ActivityAPI
+    private let lock = NSLock()
     private var token: ActivityToken?
 
     init(api: any ActivityAPI, reason: String) {
@@ -76,8 +78,10 @@ actor ActivityHolder {
     }
 
     func end() {
-        guard let token else { return }
-        self.token = nil
-        api.end(token)
+        let taken: ActivityToken? = lock.withLock {
+            defer { token = nil }
+            return token
+        }
+        if let taken { api.end(taken) }
     }
 }
