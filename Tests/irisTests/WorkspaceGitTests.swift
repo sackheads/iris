@@ -151,7 +151,7 @@ private final class WritingRuntime: ContainerRuntime, @unchecked Sendable {
     func list(prefix: String) async -> [String] { [] }
 }
 
-@Suite("Sandboxed repositories: hooks mounted read-only, config put back (#623)", .timeLimit(.minutes(1)))
+@Suite("Sandboxed repositories: hooks mounted read-only, config put back (#623)", .serialized, .timeLimit(.minutes(1)))
 struct GitConfigGuardTests {
     @Test("a repository at a mount's root gets its .git as a mountpoint and its hooks read-only; none, nothing")
     func protectedMounts() async throws {
@@ -295,7 +295,276 @@ struct GitConfigGuardTests {
         try (String(decoding: before, as: UTF8.self) + "[diff]\n\texternal = ./x\n").write(toFile: config, atomically: false, encoding: .utf8)
         guardian.end(owner: "c")
         #expect(GitFixture.read(config) == before)
-        #expect(guardian.check(owner: "other")?.contains("diff.external") == true)
+        #expect(guardian.check(owner: "other") == nil, "said to its own conversation, not whichever runs next")
+        #expect(guardian.check(owner: "c")?.contains("diff.external") == true)
+    }
+
+    @Test("a config over 1 MiB is kept and still checked; an unreadable one is never written over")
+    func largeAndUnreadable() async throws {
+        let (dir, _) = try await GitFixture.repo()
+        defer {
+            chmod(dir + "/ws/.git/config", 0o644)
+            try? FileManager.default.removeItem(atPath: dir)
+        }
+        let config = dir + "/ws/.git/config"
+        let big = String(decoding: try #require(GitFixture.read(config)), as: UTF8.self)
+            + "[alias]\n" + (0..<40_000).map { "\ta\($0) = log --oneline -n \($0)\n" }.joined()
+        try big.write(toFile: config, atomically: false, encoding: .utf8)
+        #expect(try #require(GitFixture.read(config)).count > 1 << 20)
+        let guardian = GitConfigGuard()
+        guardian.watch(owner: "c", sources: [dir + "/ws"])
+        #expect(guardian.check(owner: "c") == nil)
+        #expect(GitFixture.read(config) == Data(big.utf8), "a large config is not lost")
+        try (big + "[core]\n\tfsmonitor = x\n").write(toFile: config, atomically: false, encoding: .utf8)
+        #expect(guardian.check(owner: "c")?.contains("core.fsmonitor") == true)
+        #expect(GitFixture.read(config) == Data(big.utf8))
+
+        // Unreadable when watched: recorded as there-but-unknown, so nothing is unlinked or written.
+        chmod(config, 0o000)
+        let other = GitConfigGuard()
+        other.watch(owner: "c", sources: [dir + "/ws"])
+        #expect(other.check(owner: "c") == nil)
+        chmod(config, 0o644)
+        try (big + "[core]\n\tfsmonitor = y\n").write(toFile: config, atomically: false, encoding: .utf8)
+        let changed = try #require(GitFixture.read(config))
+        let notice = try #require(other.check(owner: "c"))
+        #expect(notice.contains("cannot check it"))
+        #expect(GitFixture.read(config) == changed, "left alone and said so")
+    }
+
+    @Test("a .git/worktrees/<x> swapped for a link to a folder outside is not written through")
+    func linkedWorktreeFolder() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try await GitFixture.sh("git worktree add -q ../wt", in: dir + "/ws", env: env)
+        let guardian = GitConfigGuard()
+        guardian.watch(owner: "c", sources: [dir + "/ws"])
+        let entry = dir + "/ws/.git/worktrees/wt"
+        try FileManager.default.moveItem(atPath: entry, toPath: dir + "/moved")
+        try FileManager.default.createDirectory(atPath: dir + "/outside", withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(atPath: entry, withDestinationPath: dir + "/outside")
+        let notice = try #require(guardian.check(owner: "c"))
+        #expect(notice.contains("did not write through"))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir + "/outside").isEmpty, "nothing restored into the link's target")
+    }
+
+    @Test("a restore refuses a link at any folder on the way, even one swapped in after the check")
+    func restoreRefusesLinkedFolder() throws {
+        let dir = try GitFixture.temp("restore")
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try FileManager.default.createDirectory(atPath: dir + "/root/.git", withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: dir + "/outside", withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(atPath: dir + "/root/.git/worktrees", withDestinationPath: dir + "/outside")
+        #expect(!GitConfigGuard.restore(root: dir + "/root", relative: ".git/worktrees/commondir", to: Data("x".utf8)))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir + "/outside").isEmpty)
+        #expect(GitConfigGuard.restore(root: dir + "/root", relative: ".git/config", to: Data("y".utf8)))
+        #expect(GitFixture.read(dir + "/root/.git/config") == Data("y".utf8))
+    }
+
+    @Test("an existing submodule's config is watched and its hooks are read-only")
+    func submodules() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try await GitFixture.sh("git init -q ../sub && git -C ../sub commit -q --allow-empty -m s", in: dir + "/ws", env: env)
+        let add = try await GitFixture.sh("git -c protocol.file.allow=always submodule add -q ../sub lib/sub", in: dir + "/ws", env: env)
+        #expect(add.status == 0, "\(add.out)")
+        let items = WorkspaceGit.protected(for: dir + "/ws").map(\.relative)
+        #expect(items == [".git", ".git/hooks", ".git/modules/lib/sub/hooks"])
+        let module = dir + "/ws/.git/modules/lib/sub/config"
+        #expect(WorkspaceGit.watchedFiles(for: dir + "/ws")[module] == .config)
+        let before = try #require(GitFixture.read(module))
+        let guardian = GitConfigGuard()
+        guardian.watch(owner: "c", sources: [dir + "/ws"])
+        try await GitFixture.sh("git config core.fsmonitor ./x", in: dir + "/ws/lib/sub", env: env)
+        #expect(guardian.check(owner: "c")?.contains("core.fsmonitor") == true)
+        #expect(GitFixture.read(module) == before)
+    }
+
+    @Test("after a restart the mounted folders are remembered, and a repository the VM made is judged, never adopted or written")
+    func restart() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let store = URL(fileURLWithPath: dir + "/home/sandbox-workspaces.json")
+        let plain = dir + "/plain"
+        try FileManager.default.createDirectory(atPath: plain, withIntermediateDirectories: true)
+        let first = GitConfigGuard(store: store)
+        first.watch(owner: "c", sources: [dir + "/ws", plain])
+        first.end(owner: "c")
+
+        // The VM makes a repository in the folder that had none, with a filter driver.
+        try await GitFixture.sh("git init -q && git config filter.x.clean \(dir)/evil", in: plain, env: env)
+        let config = plain + "/.git/config"
+        let made = try #require(GitFixture.read(config))
+
+        let second = GitConfigGuard(store: store)
+        #expect(second.hostOverrides(cwd: dir + "/ws") == .some(dir + "/ws/.git/hooks"), "overrides before any sandboxed command")
+        #expect(second.hostOverrides(cwd: plain) == .some(nil), "no hooks for a repository the VM made")
+        second.watch(owner: "d", sources: [plain])
+        let notice = try #require(second.check(owner: "d"))
+        #expect(notice.contains("filter.x.clean"))
+        #expect(GitFixture.read(config) == made, "nothing of the person's to put back: left as it is")
+        #expect(second.hostRefusal(cwd: plain, command: "git status") != nil)
+        #expect(second.check(owner: "d") == nil, "said once per change")
+        #expect(second.hostRefusal(cwd: plain, command: "") != nil, "still refused while it stands")
+        try await GitFixture.sh("git config --unset filter.x.clean", in: plain, env: env)
+        _ = second.check(owner: "d")
+        #expect(second.hostRefusal(cwd: plain, command: "") == nil, "a clean check clears it")
+    }
+
+    @Test("a change Iris cannot put back refuses host commands that would read it until a check finds it clean")
+    func failsClosed() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try await GitFixture.sh("git worktree add -q ../wt", in: dir + "/ws", env: env)
+        let wt = dir + "/wt"
+        let dotGit = try #require(GitFixture.read(wt + "/.git"))
+        let guardian = GitConfigGuard()
+        let id = UUID()
+        guardian.watch(owner: SandboxSessionManager.containerName(for: id), sources: [wt])
+        try FileManager.default.removeItem(atPath: wt + "/.git")
+        try FileManager.default.createDirectory(atPath: wt + "/.git", withIntermediateDirectories: true)
+        try "x".write(toFile: wt + "/.git/keep", atomically: false, encoding: .utf8)
+
+        var executor = ToolExecutor()
+        executor.gitGuard = guardian
+        let refused = await executor.runCommand("echo ran", cwd: wt, conversationId: id, timeoutSeconds: 30)
+        #expect(refused.contains("could not put it back"), "\(refused)")
+        #expect(refused.contains("Not run"), "\(refused)")
+        #expect(!refused.contains("ran\n"))
+        let named = await executor.runCommand("git -C \(wt) status; echo ran", cwd: dir, timeoutSeconds: 30)
+        #expect(named.contains("Not run"), "\(named)")
+
+        try FileManager.default.removeItem(atPath: wt + "/.git")
+        try dotGit.write(to: URL(fileURLWithPath: wt + "/.git"))
+        let clean = await executor.runCommand("echo ran", cwd: wt, conversationId: id, timeoutSeconds: 30)
+        #expect(clean.hasPrefix("ran"), "\(clean)")
+    }
+
+    /// A repo with an `evil` script and a submodule `lib/sub` already in place.
+    private func repoWithSubmodule() async throws -> (dir: String, env: [String: String], marker: String) {
+        let (dir, env) = try await GitFixture.repo()
+        let marker = dir + "/RAN"
+        try "#!/bin/sh\ntouch \(marker)\nexit 0\n".write(toFile: dir + "/evil", atomically: false, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir + "/evil")
+        try await GitFixture.sh("git init -q ../sub && git -C ../sub commit -q --allow-empty -m s && git -c protocol.file.allow=always submodule add -q ../sub lib/sub && git commit -qm sub",
+                                in: dir + "/ws", env: env)
+        return (dir, env, marker)
+    }
+
+    /// What dev-1's repro plants: a repository with a poisoned fsmonitor, a gitlink for `path` and a
+    /// `.git` pointer to that repository, all without touching `.git/config`.
+    private func plantSubmodule(_ path: String, in ws: String, dir: String, env: [String: String]) async throws {
+        try await GitFixture.sh("""
+            git init -q \(dir)/evilrepo && git -C \(dir)/evilrepo commit -q --allow-empty -m e && git -C \(dir)/evilrepo config core.fsmonitor \(dir)/evil
+            mkdir -p \(path) && echo "gitdir: \(dir)/evilrepo/.git" > \(path)/.git && echo y > \(path)/f
+            git update-index --add --cacheinfo 160000,$(git -C \(dir)/evilrepo rev-parse HEAD),\(path)
+            """, in: ws, env: env)
+    }
+
+    @Test("the index parser finds gitlinks in versions 2, 3 and 4")
+    func indexVersions() async throws {
+        let (dir, env, _) = try await repoWithSubmodule()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        for version in [2, 3, 4] {
+            // Intent-to-add sets the extended flag, which needs version 3 or later.
+            let add = version >= 3 ? "echo n > new\(version) && git add -N new\(version) && " : ""
+            try await GitFixture.sh(add + "git update-index --index-version \(version)", in: ws, env: env)
+            let header = try #require(GitFixture.read(ws + "/.git/index"))
+            #expect(header[7] == UInt8(version))
+            #expect(WorkspaceGit.gitlinks(index: ws + "/.git/index", sha256: false) == ["lib/sub"], "version \(version)")
+        }
+        try Data("DIRC garbage".utf8).write(to: URL(fileURLWithPath: dir + "/bad-index"))
+        #expect(WorkspaceGit.gitlinks(index: dir + "/bad-index", sha256: false) == nil)
+        #expect(WorkspaceGit.gitlinks(index: dir + "/no-index", sha256: false) == [])
+    }
+
+    @Test("a submodule planted in the VM is moved aside, and git status on the Mac no longer runs its program")
+    func plantedSubmodule() async throws {
+        let (dir, env, marker) = try await repoWithSubmodule()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let guardian = GitConfigGuard()
+        guardian.watch(owner: "c", sources: [ws])
+        try await plantSubmodule("planted", in: ws, dir: dir, env: env)
+        try await GitFixture.sh("git status", in: ws, env: env)
+        #expect(FileManager.default.fileExists(atPath: marker), "control: before the check, a plain git status runs it")
+        try FileManager.default.removeItem(atPath: marker)
+
+        let notice = try #require(guardian.check(owner: "c"))
+        #expect(notice.contains("planted/.git") && notice.contains("moved it aside"))
+        #expect(!FileManager.default.fileExists(atPath: ws + "/planted/.git"))
+        #expect(FileManager.default.fileExists(atPath: ws + "/planted/.git.iris-quarantine"), "renamed, not deleted")
+        try await GitFixture.sh("git status", in: ws, env: env)
+        #expect(!FileManager.default.fileExists(atPath: marker))
+        // The submodule that was there is untouched.
+        #expect(FileManager.default.fileExists(atPath: ws + "/lib/sub/.git"))
+        #expect(FileManager.default.fileExists(atPath: ws + "/.git/modules/lib/sub"))
+        // Planted again: moved again, beside the first.
+        try "gitdir: \(dir)/evilrepo/.git\n".write(toFile: ws + "/planted/.git", atomically: false, encoding: .utf8)
+        #expect(guardian.check(owner: "c")?.contains(".git.iris-quarantine-2") == true)
+    }
+
+    @Test("a baseline submodule whose pointer the VM redirects is moved aside")
+    func redirectedSubmodule() async throws {
+        let (dir, _, _) = try await repoWithSubmodule()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let guardian = GitConfigGuard()
+        guardian.watch(owner: "c", sources: [ws])
+        #expect(guardian.check(owner: "c") == nil, "an existing submodule left alone stays untouched")
+        try "gitdir: \(dir)/elsewhere/.git\n".write(toFile: ws + "/lib/sub/.git", atomically: false, encoding: .utf8)
+        #expect(guardian.check(owner: "c")?.contains("lib/sub/.git") == true)
+        #expect(FileManager.default.fileExists(atPath: ws + "/lib/sub/.git.iris-quarantine"))
+    }
+
+    @Test("a git submodule add in the VM has its pointer and its module repository moved aside")
+    func submoduleAddInVM() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        try await GitFixture.sh("git init -q ../sub && git -C ../sub commit -q --allow-empty -m s", in: ws, env: env)
+        let guardian = GitConfigGuard()
+        guardian.watch(owner: "c", sources: [ws])
+        try await GitFixture.sh("git -c protocol.file.allow=always submodule add -q ../sub added", in: ws, env: env)
+        let notice = try #require(guardian.check(owner: "c"))
+        #expect(notice.contains("added/.git"))
+        #expect(notice.contains("submodule repository"))
+        #expect(notice.contains("submodule.added.url"), "its keys in the root config are put back too")
+        #expect(FileManager.default.fileExists(atPath: ws + "/added/.git.iris-quarantine"))
+        #expect(FileManager.default.fileExists(atPath: ws + "/.git/modules/added.iris-quarantine/HEAD"))
+        #expect(!FileManager.default.fileExists(atPath: ws + "/.git/modules/added"))
+        #expect(guardian.check(owner: "c") == nil, "said once")
+    }
+
+    @Test("a plain nested clone with no index entry is left alone")
+    func nestedClone() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let guardian = GitConfigGuard()
+        guardian.watch(owner: "c", sources: [ws])
+        try await GitFixture.sh("git init -q vendor/lib && git -C vendor/lib commit -q --allow-empty -m v", in: ws, env: env)
+        #expect(guardian.check(owner: "c") == nil)
+        #expect(FileManager.default.fileExists(atPath: ws + "/vendor/lib/.git/HEAD"))
+    }
+
+    @Test("an index Iris cannot read fails closed: nothing moved or deleted, host commands refused until it reads")
+    func malformedIndex() async throws {
+        let (dir, _, _) = try await repoWithSubmodule()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let guardian = GitConfigGuard()
+        guardian.watch(owner: "c", sources: [ws])
+        let index = try #require(GitFixture.read(ws + "/.git/index"))
+        try Data(index.prefix(40)).write(to: URL(fileURLWithPath: ws + "/.git/index"))
+        #expect(guardian.check(owner: "c")?.contains("too large or malformed") == true)
+        #expect(guardian.hostRefusal(cwd: ws, command: "git status") != nil)
+        #expect(FileManager.default.fileExists(atPath: ws + "/lib/sub/.git"), "nothing moved")
+        #expect(GitFixture.read(ws + "/.git/index")?.count == 40, "nothing rewritten")
+        try index.write(to: URL(fileURLWithPath: ws + "/.git/index"))
+        #expect(guardian.check(owner: "c") == nil)
+        #expect(guardian.hostRefusal(cwd: ws, command: "git status") == nil)
     }
 
     @Test("the session path checks around each in-VM command and says what it put back")
@@ -321,10 +590,12 @@ struct GitConfigGuardTests {
     }
 }
 
+/// Serialized, like the suite above: each test starts dozens of real git processes, and run all at
+/// once they held the pool long enough for other suites' 5 s Vibecop bound to miss.
 /// The host side: git run by a host `run_command` in a sandboxed workspace with the keys that run
 /// programs overridden. Each poisons the repository's own config, runs the real git with the
 /// overrides, and checks the poisoned program never ran.
-@Suite("Host git in a sandboxed workspace runs with overrides (#623)", .timeLimit(.minutes(1)))
+@Suite("Host git in a sandboxed workspace runs with overrides (#623)", .serialized, .timeLimit(.minutes(1)))
 struct GitHostOverrideTests {
     /// A repo, an `evil` script that leaves a marker when run, and the override environment.
     private func setUp() async throws -> (dir: String, ws: String, env: [String: String], marker: String) {
@@ -439,6 +710,29 @@ struct GitHostOverrideTests {
         }
     }
 
+    @Test("gpg.ssh.defaultKeyCommand, interactive.diffFilter and core.gitProxy from the repository do not run")
+    func moreKeys() async throws {
+        let (dir, ws, env, marker) = try await setUp()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try await GitFixture.sh("git config gpg.ssh.defaultKeyCommand \(dir)/evil && echo k > f && git -c gpg.format=ssh commit -S -qam s",
+                                in: ws, env: env)
+        #expect(!ran(marker), "defaultKeyCommand")
+        try await GitFixture.sh("git config --unset gpg.ssh.defaultKeyCommand; git config interactive.diffFilter \(dir)/evil && echo d > f && printf 'q\\n' | git -c color.ui=always add -p",
+                                in: ws, env: env)
+        #expect(!ran(marker), "diffFilter")
+        try await GitFixture.sh("git config --unset interactive.diffFilter; git config core.gitProxy \(dir)/evil && git ls-remote git://127.0.0.1:1/x",
+                                in: ws, env: env)
+        #expect(!ran(marker), "gitProxy")
+        // Controls: each one runs without the overrides, so the checks above prove something.
+        let bare = env.filter { !$0.key.hasPrefix("GIT_CONFIG_") && $0.key != "GIT_PROXY_COMMAND" }
+        try await GitFixture.sh("git ls-remote git://127.0.0.1:1/x", in: ws, env: bare)
+        #expect(ran(marker), "control: gitProxy runs without the overrides")
+        try FileManager.default.removeItem(atPath: marker)
+        try await GitFixture.sh("git config --unset core.gitProxy; git config interactive.diffFilter \(dir)/evil && printf 'q\\n' | git -c color.ui=always add -p",
+                                in: ws, env: bare)
+        #expect(ran(marker), "control: diffFilter runs without the overrides")
+    }
+
     @Test("the pager and editors are the overrides, whatever the repository says")
     func pagerAndEditors() async throws {
         let (dir, ws, env, _) = try await setUp()
@@ -491,6 +785,34 @@ struct GitHostOverrideTests {
         defer { try? FileManager.default.removeItem(atPath: other.dir) }
         let plain = await executor.runCommand("echo ${GIT_CONFIG_COUNT:-none}", cwd: other.dir + "/ws", timeoutSeconds: 30)
         #expect(plain.hasPrefix("none"), "\(plain)")
+    }
+
+    @Test("the overrides follow the conversation, a linked worktree and a named folder, not only the working directory")
+    func coverage() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try await GitFixture.sh("git worktree add -q ../wt", in: dir + "/ws", env: env)
+        let ws = dir + "/ws"
+        let owner = SandboxSessionManager.containerName(for: UUID())
+        let guardian = GitConfigGuard()
+        guardian.watch(owner: owner, sources: [ws])
+        #expect(guardian.hostOverrides(cwd: dir + "/wt") == .some(ws + "/.git/hooks"), "a worktree reading the same config")
+        #expect(guardian.hostOverrides(cwd: "/", command: "git -C \(ws) status") == .some(ws + "/.git/hooks"))
+        #expect(guardian.hostOverrides(cwd: "/", owner: owner) == .some(ws + "/.git/hooks"), "the conversation's own watch")
+        #expect(guardian.hostOverrides(cwd: "/", owner: "other") == nil)
+
+        // End to end: `git -C <ws>` from another folder, in the conversation, runs with them.
+        let marker = dir + "/RAN"
+        try "#!/bin/sh\ntouch \(marker)\n".write(toFile: dir + "/evil", atomically: false, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir + "/evil")
+        var executor = ToolExecutor()
+        executor.gitGuard = guardian
+        let id = UUID()
+        guardian.watch(owner: SandboxSessionManager.containerName(for: id), sources: [ws])
+        let result = await executor.runCommand("git -C ws config core.fsmonitor \(dir)/evil && git -C ws status --short; echo done",
+                                               cwd: dir, conversationId: id, timeoutSeconds: 30)
+        #expect(result.contains("done"), "\(result)")
+        #expect(!FileManager.default.fileExists(atPath: marker))
     }
 
     @Test("a repository the VM made itself gets no trusted hooks folder")

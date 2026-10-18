@@ -66,8 +66,11 @@ enum WorkspaceGit {
             return [.init(relative: ".git", createIfMissing: false, readOnly: false, holds: "the repository")]
         case .layout(let layout):
             guard let relative = relative(layout.commonDir, inside: source) else { return [] }
-            return [.init(relative: relative, createIfMissing: false, readOnly: false, holds: "the repository"),
-                    .init(relative: (relative as NSString).appendingPathComponent("hooks"), holds: "the repository's hooks")]
+            let hooks = ([layout.commonDir] + modules(commonDir: layout.commonDir)).compactMap { dir -> WorkspaceIrisDir.Protected? in
+                guard let r = self.relative(dir, inside: source) else { return nil }
+                return .init(relative: (r as NSString).appendingPathComponent("hooks"), holds: "the repository's hooks")
+            }
+            return [.init(relative: relative, createIfMissing: false, readOnly: false, holds: "the repository")] + hooks
         }
     }
 
@@ -93,6 +96,10 @@ enum WorkspaceGit {
             add((layout.gitDir as NSString).appendingPathComponent("config.worktree"), .config)
             add((layout.gitDir as NSString).appendingPathComponent("commondir"), .pointer)
         }
+        // Submodules' repositories, each with a config and hooks of its own, nested to any depth.
+        for module in modules(commonDir: layout.commonDir) {
+            add((module as NSString).appendingPathComponent("config"), .config)
+        }
         let worktrees = common.appendingPathComponent("worktrees")
         for name in (try? FileManager.default.contentsOfDirectory(atPath: worktrees)) ?? [] {
             let dir = (worktrees as NSString).appendingPathComponent(name) as NSString
@@ -100,6 +107,124 @@ enum WorkspaceGit {
             add(dir.appendingPathComponent("commondir"), .pointer, ifPresent: true)
         }
         return files
+    }
+
+    /// The git dirs of the submodules under `commonDir/modules` that exist now: each folder there
+    /// holding a `HEAD`, searched to a bounded depth (a module's path may have several parts, and
+    /// a submodule its own `modules/`).
+    static func modules(commonDir: String) -> [String] {
+        var found: [String] = []
+        func walk(_ dir: String, depth: Int) {
+            guard depth < 8, let names = try? FileManager.default.contentsOfDirectory(atPath: dir) else { return }
+            for name in names.sorted() {
+                let path = (dir as NSString).appendingPathComponent(name)
+                var info = stat()
+                guard !name.contains(quarantineSuffix), lstat(path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR else { continue }
+                if FileManager.default.fileExists(atPath: (path as NSString).appendingPathComponent("HEAD")) {
+                    found.append(path)
+                    walk((path as NSString).appendingPathComponent("modules"), depth: depth + 1)
+                } else {
+                    walk(path, depth: depth + 1)
+                }
+            }
+        }
+        walk((commonDir as NSString).appendingPathComponent("modules"), depth: 0)
+        return found
+    }
+
+    /// The folders of the worktrees linked to `commonDir`, read from each `worktrees/<n>/gitdir`.
+    /// Their git reads the common config too, wherever they are.
+    static func linkedWorktrees(commonDir: String) -> [String] {
+        let worktrees = (commonDir as NSString).appendingPathComponent("worktrees")
+        return ((try? FileManager.default.contentsOfDirectory(atPath: worktrees)) ?? []).compactMap { name in
+            guard let text = readSmall((worktrees as NSString).appendingPathComponent(name + "/gitdir"))
+                .flatMap({ String(data: $0, encoding: .utf8) })?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  text.hasPrefix("/") else { return nil }
+            return (text as NSString).deletingLastPathComponent
+        }
+    }
+
+    // MARK: Submodules
+
+    /// What a submodule moved aside is renamed with (#623 2b): never deleted, so a person who
+    /// trusts it can rename it back.
+    static let quarantineSuffix = ".iris-quarantine"
+
+    /// The index is read only up to this; a larger one fails the check closed.
+    static let indexLimit = 128 << 20
+
+    /// The submodule paths (gitlinks) in the index at `path`, read without running git: versions
+    /// 2 to 4, SHA-1 or SHA-256 object names. `[]` when there is no index; nil when it is too
+    /// large or does not parse, which the caller treats as a failed check.
+    static func gitlinks(index path: String, sha256: Bool) -> [String]? {
+        var info = stat()
+        if lstat(path, &info) != 0 { return errno == ENOENT ? [] : nil }
+        guard let data = readSmall(path, limit: indexLimit) else { return nil }
+        let b = [UInt8](data)
+        func u32(_ at: Int) -> UInt32? {
+            guard at >= 0, at + 4 <= b.count else { return nil }
+            return UInt32(b[at]) << 24 | UInt32(b[at + 1]) << 16 | UInt32(b[at + 2]) << 8 | UInt32(b[at + 3])
+        }
+        guard b.count >= 12, b[0] == 0x44, b[1] == 0x49, b[2] == 0x52, b[3] == 0x43,
+              let version = u32(4), (2...4).contains(version), let count = u32(8) else { return nil }
+        let oid = sha256 ? 32 : 20
+        var at = 12
+        var previous: [UInt8] = []
+        var links: [String] = []
+        for _ in 0..<count {
+            guard let mode = u32(at + 24), at + 40 + oid + 2 <= b.count else { return nil }
+            let flags = Int(b[at + 40 + oid]) << 8 | Int(b[at + 40 + oid + 1])
+            var fixed = 40 + oid + 2
+            if flags & 0x4000 != 0 { guard version >= 3 else { return nil }; fixed += 2 }
+            var p = at + fixed
+            var name: [UInt8]
+            if version == 4 {
+                // Prefix-compressed: how many bytes of the previous name to drop, then the rest.
+                guard p < b.count else { return nil }
+                var c = b[p]; p += 1
+                var strip = Int(c & 0x7f)
+                while c & 0x80 != 0 {
+                    guard p < b.count, strip < 1 << 24 else { return nil }
+                    c = b[p]; p += 1
+                    strip = ((strip + 1) << 7) | Int(c & 0x7f)
+                }
+                guard strip <= previous.count, let end = b[p...].firstIndex(of: 0) else { return nil }
+                name = Array(previous.dropLast(strip)) + b[p..<end]
+                at = end + 1
+            } else {
+                guard p <= b.count, let end = b[p...].firstIndex(of: 0) else { return nil }
+                name = Array(b[p..<end])
+                // Padded with 1 to 8 NULs to a multiple of 8.
+                at += (fixed + name.count + 8) & ~7
+                guard at <= b.count else { return nil }
+            }
+            previous = name
+            if mode & 0o170000 == 0o160000 {
+                guard let text = String(bytes: name, encoding: .utf8) else { return nil }
+                links.append(text)
+            }
+        }
+        return links
+    }
+
+    /// A repository-relative path that stays inside it: no `..`, no empty part, no `.git`.
+    static func isPlainRelative(_ path: String) -> Bool {
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+        return !path.hasPrefix("/") && !parts.isEmpty
+            && parts.allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." && $0.lowercased() != ".git" }
+    }
+
+    /// What `<source>/<link>/.git` is now, compared between checks: missing, a pointer file's
+    /// text, a folder's identity, or a link's target.
+    static func pointerSignature(source: String, link: String) -> String {
+        let path = (source as NSString).appendingPathComponent(link + "/.git")
+        var info = stat()
+        guard lstat(path, &info) == 0 else { return "absent" }
+        switch info.st_mode & S_IFMT {
+        case S_IFREG: return "file:" + (readSmall(path, limit: 4096).map { String(decoding: $0, as: UTF8.self) } ?? "\(info.st_size)-\(info.st_mtimespec.tv_nsec)")
+        case S_IFDIR: return "dir:\(info.st_dev)-\(info.st_ino)"
+        default: return "other:\(info.st_mode)-\(info.st_ino)-\(info.st_mtimespec.tv_nsec)"
+        }
     }
 
     // MARK: Host overrides
@@ -126,6 +251,9 @@ enum WorkspaceGit {
          // Not empty: git runs an empty one and fails. This is git's own diff of the two files.
          ("diff.external", #"f() { git diff --no-index --no-ext-diff -- "$2" "$5"; true; }; f"#),
          ("core.alternateRefsCommand", ""),
+         // Empty: git fails to run "" and signs with no default key rather than run the repo's.
+         ("gpg.ssh.defaultKeyCommand", ""),
+         ("interactive.diffFilter", "cat"),
          ("protocol.ext.allow", "never"),
          ("protocol.file.allow", "user")]
     }
@@ -135,8 +263,8 @@ enum WorkspaceGit {
     /// The environment additions for a host command: each override, except that a key the person
     /// set in their own global or system config keeps their value, so their signing program,
     /// credential helper or editor still work. `personal` maps a lowercased key to its values in
-    /// the order git read them.
-    static func hostEnvironment(hooks: String, personal: [String: [String]]) -> [String: String] {
+    /// the order git read them. `proxyCommand` is the person's own `GIT_PROXY_COMMAND`, kept.
+    static func hostEnvironment(hooks: String, personal: [String: [String]], proxyCommand: String? = nil) -> [String: String] {
         var pairs: [(String, String)] = []
         for (key, value) in overrides(hooks: hooks) {
             let mine = personal[key.lowercased()] ?? []
@@ -147,7 +275,10 @@ enum WorkspaceGit {
                 pairs.append((key, mine.last ?? value))
             }
         }
-        var env: [String: String] = ["GIT_CONFIG_COUNT": String(pairs.count), "GIT_PAGER": "cat"]
+        // `core.gitProxy` set on the command line does not win over the repository's (probed, git
+        // 2.54); the environment variable does, and empty connects directly.
+        var env: [String: String] = ["GIT_CONFIG_COUNT": String(pairs.count), "GIT_PAGER": "cat",
+                                     "GIT_PROXY_COMMAND": proxyCommand ?? ""]
         for (i, pair) in pairs.enumerated() {
             env["GIT_CONFIG_KEY_\(i)"] = pair.0
             env["GIT_CONFIG_VALUE_\(i)"] = pair.1

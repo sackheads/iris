@@ -580,9 +580,13 @@ struct ToolExecutor {
             directory = cwd.map { IrisEngine.expandTilde($0) }   // #275: never `expandingTildeInPath` on a decider
             // #623: host git reads repositories a VM may have written; check them first, and in one
             // a VM can write, run git with the keys that run programs overridden.
-            gitBefore = gitGuard.checkAll()
+            gitBefore = gitGuard.checkAll(owner: conversationId.map(SandboxSessionManager.containerName(for:)))
+            if let refusal = gitGuard.hostRefusal(cwd: directory, command: command) {
+                return GitConfigGuard.withNotices(refusal, before: gitBefore, after: nil)
+            }
             var base = ProcessInfo.processInfo.environment
-            if let hooks = gitGuard.hostOverrides(cwd: directory) {
+            if let hooks = gitGuard.hostOverrides(cwd: directory, command: command,
+                                                  owner: conversationId.map(SandboxSessionManager.containerName(for:))) {
                 base.merge(await Self.gitOverrideEnvironment(hooks: hooks ?? "/dev/null", base: base,
                                                              vmWritable: gitGuard.watchedSources())) { $1 }
             }
@@ -656,10 +660,7 @@ struct ToolExecutor {
             result = Self.commandTimedOutMessage(seconds: timeoutSeconds)
         }
         var gitAfter: String? = nil
-        if let ephemeralName {
-            gitAfter = gitGuard.check(owner: ephemeralName)
-            gitGuard.end(owner: ephemeralName)
-        }
+        if let ephemeralName { gitAfter = gitGuard.finish(owner: ephemeralName) }
         return GitConfigGuard.withNotices(result, before: gitBefore, after: gitAfter)
     }
 
@@ -694,7 +695,8 @@ struct ToolExecutor {
         let globalReachable = WorkspaceGit.globalConfigFiles(base: base).contains { file in
             vmWritable.contains { WorkspaceGit.relative(file, inside: $0) != nil }
         }
-        return WorkspaceGit.hostEnvironment(hooks: hooks, personal: WorkspaceGit.personalValues(listing: listing, trustGlobal: !globalReachable))
+        return WorkspaceGit.hostEnvironment(hooks: hooks, personal: WorkspaceGit.personalValues(listing: listing, trustGlobal: !globalReachable),
+                                            proxyCommand: base["GIT_PROXY_COMMAND"])
     }
 
     /// What a command that outlived its deadline reports. One sentence for both routes: a command
