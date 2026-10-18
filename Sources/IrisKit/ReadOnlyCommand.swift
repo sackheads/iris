@@ -10,8 +10,8 @@ import Foundation
 /// if no file it reads can make it run another one. The sandbox VM writes the conversation's
 /// workspace with no prompt, so a file there is planted as easily as a command: that rules out git
 /// altogether (a repository's config runs programs on reads: `core.fsmonitor`, `diff.external`,
-/// textconv and clean filters) and is why `hostLookupIsSafe` checks where the program and the
-/// shell's startup files come from.
+/// textconv and clean filters) and is why a read this approves runs restricted
+/// (`restrictedPath`): the run is the one judged.
 enum ReadOnlyCommand {
     static func isReadOnly(_ command: String) -> Bool {
         guard let words = words(command), let program = words.first else { return false }
@@ -122,18 +122,21 @@ enum ReadOnlyCommand {
         return true
     }
 
-    /// Where a host command would run from, as the shell will see it: its `PATH`, its working
-    /// directory, the home folder and how to test for an executable. `live` is this process's;
-    /// a test builds its own.
+    /// Where a host command would run from: its `PATH`, its working directory, the home folder,
+    /// every folder a sandbox mount can write (each conversation's workspace, each grant's
+    /// read-write mount), and how to test for an executable. `live` is this process's; a test
+    /// builds its own.
     struct HostLookup: Sendable {
         var path: String
         var cwd: String
         var home: String
+        var writableRoots: [String] = []
         var isExecutable: @Sendable (String) -> Bool
 
-        static var live: HostLookup {
+        static func live(writableRoots: [String]) -> HostLookup {
             HostLookup(path: BinaryResolver.commandEnvironment(base: ProcessInfo.processInfo.environment)["PATH"] ?? "",
                        cwd: FileManager.default.currentDirectoryPath, home: NSHomeDirectory(),
+                       writableRoots: writableRoots,
                        isExecutable: { FileManager.default.isExecutableFile(atPath: $0) })
         }
     }
@@ -141,42 +144,64 @@ enum ReadOnlyCommand {
     /// zsh runs these itself, never from `PATH`.
     private static let zshBuiltins: Set<String> = ["echo", "pwd", "which"]
 
-    /// Whether the shell would run `program` from a place nothing unprompted can write, in a
-    /// directory whose startup files nothing unprompted can write (#606 review). The VM writes its
-    /// workspace, and an agent's file writes ask, so "unprompted" means inside a workspace, and a
-    /// workspace is somewhere under home in practice. So: the working directory must not be home
-    /// or above it (`zsh -c` reads `~/.zshenv`), and every `PATH` entry searched up to the one the
-    /// program is found in must be absolute and outside both home and the working directory.
-    /// Symlinks are resolved first. A `PATH` with `~/bin` ahead of `/bin` therefore asks.
-    static func hostLookupIsSafe(program: String, cwd: String?, lookup: HostLookup) -> Bool {
+    /// The `PATH` a silent host read runs with, or nil when it may not run silently (#612).
+    ///
+    /// The gate judges a string, so the run must be the one judged: a read this approves runs as
+    /// `/bin/zsh -f -c` with exactly this `PATH` and `restrictedEnvironment`. `-f` skips the
+    /// user's startup files (`~/.zshenv` could reorder `PATH` or run anything); zsh still reads
+    /// `/etc/zshenv`, which is root-owned. The `PATH` keeps only absolute entries outside home,
+    /// the working directory and every folder a sandbox mount can write, symlinks resolved. A
+    /// Homebrew prefix qualifies only because no sandbox mounts it; a mount covering one drops it.
+    /// The program must be found on that `PATH` (a zsh builtin needs none), and the working
+    /// directory must not be home or above it.
+    static func restrictedPath(program: String, cwd: String?, lookup: HostLookup) -> [String]? {
         let home = real(lookup.home)
         let dir = real(cwd ?? lookup.cwd)
-        guard !inside(home, dir) else { return false }
-        if zshBuiltins.contains(program) { return true }
-        for entry in lookup.path.split(separator: ":", omittingEmptySubsequences: false).map(String.init) {
-            guard entry.hasPrefix("/") else { return false }
+        guard !inside(home, dir) else { return nil }
+        let unsafe = [home, dir] + lookup.writableRoots.map(real)
+        var path: [String] = []
+        for entry in lookup.path.split(separator: ":").map(String.init)
+        where entry.hasPrefix("/") && !path.contains(entry) {
             let resolved = real(entry)
-            guard !inside(resolved, home), !inside(resolved, dir) else { return false }
-            if lookup.isExecutable(entry + "/" + program) { return true }
+            if !unsafe.contains(where: { inside(resolved, $0) }) { path.append(entry) }
         }
-        return false
+        if zshBuiltins.contains(program) { return path }
+        return path.contains { lookup.isExecutable($0 + "/" + program) } ? path : nil
     }
 
-    /// Whether a Vibecop APPROVE may stand in for the person (#600). In the VM, any command: the
-    /// in-VM rules are unchanged. On the host, only a read-only command run from a safe place, or
-    /// a file read. A file write is a write wherever it lands.
-    static func vibecopMayApprove(toolName: String, details: String, inSandbox: Bool,
-                                  cwd: String? = nil, lookup: HostLookup = .live) -> Bool {
+    /// The whole environment of a silent host read: the judged `PATH` and the few basics a read
+    /// needs, from `base`. Nothing else is inherited, so no `DYLD_*`, `ZDOTDIR`, `ENV`, `GIT_*`,
+    /// `RIPGREP_CONFIG_PATH` or `GREP_OPTIONS` can change what runs.
+    static func restrictedEnvironment(path: [String], base: [String: String]) -> [String: String] {
+        var env = base.filter { key, _ in ["HOME", "USER", "LOGNAME", "TERM", "LANG"].contains(key) || key.hasPrefix("LC_") }
+        env["PATH"] = path.joined(separator: ":")
+        return env
+    }
+
+    /// What a Vibecop APPROVE may do (#600, #612).
+    enum VibecopGate: Equatable {
+        /// Ask the person.
+        case ask
+        /// Run as usual: any command in the VM, or a file read.
+        case run
+        /// Run restricted, with this `PATH` (see `restrictedPath`).
+        case runRestricted(path: [String])
+    }
+
+    /// In the VM, any command: the in-VM rules are unchanged. On the host, a read-only command,
+    /// restricted, or a file read. A file write is a write wherever it lands.
+    static func vibecopGate(toolName: String, details: String, inSandbox: Bool,
+                            cwd: String? = nil, lookup: @autoclosure () -> HostLookup) -> VibecopGate {
         switch toolName {
         case "run_command":
-            if inSandbox { return true }
-            guard isReadOnly(details), let program = words(details)?.first else { return false }
-            return hostLookupIsSafe(program: program, cwd: cwd, lookup: lookup)
-        case "read_file": return true
-        default: return false
+            if inSandbox { return .run }
+            guard isReadOnly(details), let program = words(details)?.first,
+                  let path = restrictedPath(program: program, cwd: cwd, lookup: lookup()) else { return .ask }
+            return .runRestricted(path: path)
+        case "read_file": return .run
+        default: return .ask
         }
     }
-
 
     private static func real(_ path: String) -> String {
         URL(fileURLWithPath: IrisEngine.expandTilde(path)).resolvingSymlinksInPath().standardizedFileURL.path

@@ -3498,6 +3498,18 @@ class AppState {
     /// answer) and after `autoApproveTools` (set only by `ScenarioRunner` for a headless or scenario
     /// run, never by a person — there is no human in that run to ask, so a human-only gate cannot be
     /// a stronger claim than the switch already means).
+    /// Which layer approved a call, or nil when it is not to run (#612, and #599's data). Only
+    /// `.vibecopRestricted` changes how the call runs; every other source runs it as usual.
+    enum ApprovalSource: Equatable, Sendable {
+        case person, allowlist, autoApprove, grant, graderCheck
+        /// A Vibecop APPROVE that runs the call as usual: in the VM, or a file read.
+        case vibecop
+        /// A Vibecop APPROVE of a host read: it runs only as `ReadOnlyCommand` judged it,
+        /// `zsh -f` with this `PATH` and nothing else from the environment.
+        case vibecopRestricted(path: [String])
+    }
+
+    /// `requestApprovalSource`, for callers that only need yes or no.
     func requestApproval(toolName: String, details: String, args: [String: JSONValue] = [:],
                          workspace: String? = nil,
                          conversationId: UUID? = nil, origin: String = "Main agent",
@@ -3505,6 +3517,20 @@ class AppState {
                          allowedCommands: [String] = [], vibecopEnabled: Bool? = nil,
                          grantedMount: ContainerMount? = nil, humanOnly: Bool = false,
                          graderReadWalked: Bool = false) async -> Bool {
+        await requestApprovalSource(toolName: toolName, details: details, args: args, workspace: workspace,
+                                    conversationId: conversationId, origin: origin, inSandbox: inSandbox,
+                                    callerRole: callerRole, allowedCommands: allowedCommands,
+                                    vibecopEnabled: vibecopEnabled, grantedMount: grantedMount,
+                                    humanOnly: humanOnly, graderReadWalked: graderReadWalked) != nil
+    }
+
+    func requestApprovalSource(toolName: String, details: String, args: [String: JSONValue] = [:],
+                         workspace: String? = nil,
+                         conversationId: UUID? = nil, origin: String = "Main agent",
+                         inSandbox: Bool = false, callerRole: VibecopCallerRole = .agent,
+                         allowedCommands: [String] = [], vibecopEnabled: Bool? = nil,
+                         grantedMount: ContainerMount? = nil, humanOnly: Bool = false,
+                         graderReadWalked: Bool = false) async -> ApprovalSource? {
         // No pre-granted-approval branch here, deliberately (#187 R21, 2026-09-21): a call a
         // person clicked "Approve and run" on is dispatched by `IrisEngine.executeApprovedCall`,
         // which runs the tool through the hook layer directly and never enters this function. The
@@ -3526,7 +3552,7 @@ class AppState {
             let resolvedPath = ToolExecutor.resolvePath(details, cwd: workspace)
             if permissions.isProtectedWrite(toolName: toolName, path: resolvedPath) {
                 recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval), in: id)
-                return false
+                return nil
             }
             // §0.4, §0.5: inside the grant, no human is needed. A `run_command` reaching here has
             // already passed the R20 check in the dispatcher, so "yes" is a sandboxed yes.
@@ -3540,20 +3566,20 @@ class AppState {
             let grant = conversation.sandboxGrant
             let isGrantedFileTool = grant != nil && (toolName == "write_file" || toolName == "read_file")
             if isGrantedFileTool {
-                if grantedMount != nil { return true }
+                if grantedMount != nil { return .grant }
             } else if let grant, grant.allows(toolName: toolName, details: details, cwd: workspace, sandboxed: inSandbox) {
                 // `inSandbox` is `resolveUseSandbox`'s answer for this call (IrisEngine's dispatcher):
                 // the conversation's resolution for a `run_command` — the parameter §0.4 asks for.
-                return true
+                return .grant
             }
             if !isGrantedFileTool,
                permissions.isAllowed(toolName: toolName, details: details, workspace: workspace, isBackground: true) {
-                return true
+                return .allowlist
             }
             recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval,
                                                      grantNearest: isGrantedFileTool ? grant?.nearest(to: details, cwd: workspace) : nil),
                                    in: id)
-            return false
+            return nil
         }
         // Headless drivers auto-approve so a scenario run never blocks on a human or a local model.
         if autoApproveTools {
@@ -3561,7 +3587,7 @@ class AppState {
                 _ = await consultVibecop(toolName: toolName, details: details, workspace: workspace, inSandbox: inSandbox,
                                          callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: vibecopEnabled)
             }
-            return true
+            return .autoApprove
         }
         // `humanOnly`: straight to the prompt, bypassing the allowlist below (a standing "yes"
         // from some earlier, different call). Vibecop needs no bypass of its own any more — `#336`
@@ -3569,11 +3595,11 @@ class AppState {
         // through to this same prompt for an ordinary call too.
         if humanOnly {
             return await enqueueUserApproval(toolName: toolName, details: details, workspace: workspace,
-                                             conversationId: conversationId, origin: origin, humanOnly: true)
+                                             conversationId: conversationId, origin: origin, humanOnly: true) ? .person : nil
         }
         // Fast path: deterministic permissions.
         if permissions.isAllowed(toolName: toolName, details: details, workspace: workspace) {
-            return true
+            return .allowlist
         }
         // Deterministic too, and only for the grader, never the agent or subagents: exactly a check
         // the human approved when locking this contract, run where they approved it (#334), and a
@@ -3581,7 +3607,7 @@ class AppState {
         if callerRole == .evaluator, let id = conversationId,
            let contract = conversations.first(where: { $0.id == id })?.goalContract {
             if toolName == "run_command", contract.isHumanApprovedCheck(details, workingDirectory: workspace) {
-                return true
+                return .graderCheck
             }
             // `graderReadWalked` is the dispatcher's word that the executor walks this read from
             // the approved root (#339). It decided that on the model's spelling, which `details`
@@ -3589,7 +3615,7 @@ class AppState {
             // workspace must still ask, and must never be opened by path on this pre-approval.
             if toolName == "read_file", graderReadWalked,
                contract.isHumanApprovedRead(ToolExecutor.resolvePath(details, cwd: workspace)) {
-                return true
+                return .graderCheck
             }
         }
 
@@ -3597,19 +3623,21 @@ class AppState {
                                                callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: vibecopEnabled) {
             // On the host, an APPROVE stands in for the person only on a read (#600), and not at all
             // for a command once the person has denied one in this conversation.
-            if decision.decision == "APPROVE",
-               ReadOnlyCommand.vibecopMayApprove(toolName: toolName, details: details, inSandbox: inSandbox,
-                                                 cwd: workspace, lookup: hostLookup()),
-               !(toolName == "run_command" && commandDenied(in: conversationId)) {
-                return true
+            if decision.decision == "APPROVE", !(toolName == "run_command" && commandDenied(in: conversationId)) {
+                switch ReadOnlyCommand.vibecopGate(toolName: toolName, details: details, inSandbox: inSandbox,
+                                                   cwd: workspace, lookup: hostLookup()) {
+                case .run: return .vibecop
+                case .runRestricted(let path): return .vibecopRestricted(path: path)
+                case .ask: break
+                }
             }
-            if decision.decision == "DENY" { return false }
+            if decision.decision == "DENY" { return nil }
             // ESCALATE → fall through to the user prompt.
         }
         // nil — Vibecop off, failed or timed out — decides nothing: the user prompt does (#334).
 
         return await enqueueUserApproval(toolName: toolName, details: details, workspace: workspace,
-                                         conversationId: conversationId, origin: origin)
+                                         conversationId: conversationId, origin: origin) ? .person : nil
     }
 
     /// Vibecop, bounded by a timeout so a wedged local model can't hang the turn. nil means
@@ -3618,7 +3646,8 @@ class AppState {
     private func consultVibecop(toolName: String, details: String, workspace: String?, inSandbox: Bool,
                                 callerRole: VibecopCallerRole, allowedCommands: [String], vibecopEnabled: Bool?) async -> VibecopDecision? {
         // Off is checked before the Ollama warm-up probe below, which would otherwise build an engine for nothing.
-        guard vibecopEnabled ?? ConfigManager.shared.enableVibecop else { return nil }
+        let enabled = vibecopEnabled ?? vibecopEnabledOverride ?? ConfigManager.shared.enableVibecop
+        guard enabled else { return nil }
         let configuredTimeout = Double(ConfigManager.shared.vibecopTimeoutSeconds)
         let engineType = AuxiliaryEngineType(rawValue: ConfigManager.shared.vibecopEngine) ?? .llamaCPP
         var timeout = configuredTimeout
@@ -3636,7 +3665,7 @@ class AppState {
 
         return await Self.boundedVibecopVerdict(seconds: timeout) {
             try await VibecopService.shared.evaluateAction(toolName: toolName, details: details, workspace: workspace, inSandbox: inSandbox,
-                                                           callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: vibecopEnabled)
+                                                           callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: enabled)
         }
     }
 
@@ -3999,7 +4028,22 @@ class AppState {
     @ObservationIgnored private var commandDeniedRoots: Set<UUID?> = []
 
     /// Where a host command runs from, for the read-only gate (#606 review); a test injects its own.
-    @ObservationIgnored var hostLookup: @MainActor () -> ReadOnlyCommand.HostLookup = { .live }
+    @ObservationIgnored var hostLookupOverride: (@MainActor () -> ReadOnlyCommand.HostLookup)?
+    /// Vibecop on or off for this state's own calls, so an engine test need not touch the global
+    /// setting (Invariant 7). nil follows `ConfigManager.shared`.
+    @ObservationIgnored var vibecopEnabledOverride: Bool?
+
+    func hostLookup() -> ReadOnlyCommand.HostLookup {
+        hostLookupOverride?() ?? .live(writableRoots: sandboxWritableRoots())
+    }
+
+    /// Every folder a sandbox mount can write (#612): each conversation's workspace, whether or
+    /// not it is sandboxed now (that can change), and each grant's read-write mounts.
+    func sandboxWritableRoots() -> [String] {
+        conversations.flatMap { c in
+            [c.workspacePath].compactMap { $0 } + (c.sandboxGrant?.mounts.filter { !$0.readOnly }.map(\.source) ?? [])
+        }
+    }
 
     func commandDenied(in conversationId: UUID?) -> Bool {
         commandDeniedRoots.contains(conversationId.map(delegationRoot(of:)))

@@ -5099,15 +5099,15 @@ actor IrisEngine {
             // waves through is ever opened by path — a link swapped in after the gate is met by the
             // walk, not followed.
             if needsApproval {
-                let approved = await localState?.requestApproval(
+                let source = await localState?.requestApprovalSource(
                     toolName: functionCall.name, details: details, args: callArgs,
                     workspace: workspacePath,
                     conversationId: conversationId, origin: approvalOrigin, inSandbox: useSandbox,
                     callerRole: principal == .evaluator ? .evaluator : .agent,
                     allowedCommands: evaluatorChecks, grantedMount: grantedMount,
-                    graderReadWalked: approvedWorkspaceRoot != nil) ?? false
-                if approved {
-                    result = await executeToolWithHooks(name: functionCall.name, args: callArgs, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath)
+                    graderReadWalked: approvedWorkspaceRoot != nil)
+                if let source {
+                    result = await executeToolWithHooks(name: functionCall.name, args: callArgs, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath, restrictedPath: Self.restrictedPath(for: source, tool: functionCall.name))
                 } else {
                     result = isUnattended ? Self.unattendedDeniedToolResult(tool: functionCall.name)
                                           : Self.deniedToolResult
@@ -5363,7 +5363,14 @@ actor IrisEngine {
         return sanitizedResult + "\n[Iris: the injection guard has withheld \(consecutive) consecutive results from \(name). Do not retry the same approach — use a different source or report what you have.]"
     }
 
-    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil, approvedWorkspaceRoot: String? = nil, decidedPath: String? = nil) async -> String {
+    /// The `PATH` a call runs restricted with (#612): only a host `run_command` whose approval was
+    /// the read-only gate's. A person's, the allowlist's or any other approval runs it as usual.
+    nonisolated static func restrictedPath(for source: AppState.ApprovalSource, tool: String) -> [String]? {
+        guard tool == "run_command", case .vibecopRestricted(let path) = source else { return nil }
+        return path
+    }
+
+    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil, approvedWorkspaceRoot: String? = nil, decidedPath: String? = nil, restrictedPath: [String]? = nil) async -> String {
         var execArgs: [String: JSONValue] = args
 
         // Session strip activity (#217/#19): the detail is derived from the tool's own arguments
@@ -5415,7 +5422,7 @@ actor IrisEngine {
         }
 
         var result = await executor.execute(name: name, args: execArgs, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox, grant: grant, grantedMount: grantedMount,
-                                              approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath)
+                                              approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath, restrictedPath: restrictedPath)
 
         if name == "write_file", result.hasPrefix("Successfully wrote to "),
            let cid = conversationId, let path = execArgs["path"]?.stringValue {

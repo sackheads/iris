@@ -205,7 +205,8 @@ struct ToolExecutor {
     /// no symlink followed, whatever approved it — never opened by path.
     func execute(name: String, args: [String: JSONValue], cwd: String? = nil, conversationId: UUID? = nil,
                  useSandbox: Bool = false, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil,
-                 approvedWorkspaceRoot: String? = nil, decidedPath: String? = nil) async -> String {
+                 approvedWorkspaceRoot: String? = nil, decidedPath: String? = nil,
+                 restrictedPath: [String]? = nil) async -> String {
         // A NUL ends the C string the kernel is handed, so the file opened is not the one named
         // (#256). The dispatcher refuses it before approval; this covers a hook's rewrite.
         if ["read_file", "write_file", "register_directory_watcher"].contains(name),
@@ -222,7 +223,7 @@ struct ToolExecutor {
             }
             let timeoutSeconds = min(max(rawTimeout, 10), 3600)
             return await runCommand(command, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox,
-                                    timeoutSeconds: timeoutSeconds, grant: grant)
+                                    timeoutSeconds: timeoutSeconds, grant: grant, restrictedPath: restrictedPath)
         case "read_file":
             guard let path = args["path"]?.stringValue else { return "Error: Missing path" }
             if let grant {
@@ -467,8 +468,20 @@ struct ToolExecutor {
     }
 
     /// Internal, not private, so a test can drive a deadline below `execute`'s 10 s floor.
+    /// How a host command is spawned. A read the gate approved (`restrictedPath`, #612) runs as
+    /// judged: `zsh -f` (no user startup files) with that `PATH` and `restrictedEnvironment`.
+    /// Anything else runs as it always has, with the user's environment and startup files.
+    nonisolated static func hostSpawn(_ command: String, restrictedPath: [String]?,
+                                      base: [String: String]) -> (executable: String, arguments: [String], environment: [String: String]) {
+        if let restrictedPath {
+            return ("/bin/zsh", ["-f", "-c", command],
+                    ReadOnlyCommand.restrictedEnvironment(path: restrictedPath, base: base))
+        }
+        return ("/bin/zsh", ["-c", command], BinaryResolver.commandEnvironment(base: base))
+    }
+
     func runCommand(_ command: String, cwd: String?, conversationId: UUID? = nil, useSandbox: Bool = false,
-                    timeoutSeconds: Double = 600, grant: JobGrant? = nil) async -> String {
+                    timeoutSeconds: Double = 600, grant: JobGrant? = nil, restrictedPath: [String]? = nil) async -> String {
         // A grant is a promise about a container (#282). Off the sandboxed branch — sandboxing
         // resolved off, or no conversation to own a session — there is no container to keep it
         // in, and the host with `cwd` is not a fallback. The dispatcher refuses this upstream
@@ -529,10 +542,9 @@ struct ToolExecutor {
             directory = nil
             environment = nil
         } else {
-            executable = "/bin/zsh"
-            arguments = ["-c", command]
+            (executable, arguments, environment) = Self.hostSpawn(command, restrictedPath: restrictedPath,
+                                                                  base: ProcessInfo.processInfo.environment)
             directory = cwd.map { IrisEngine.expandTilde($0) }   // #275: never `expandingTildeInPath` on a decider
-            environment = BinaryResolver.commandEnvironment(base: ProcessInfo.processInfo.environment)
         }
 
         // Its own process group, killed whole on timeout and on Stop: SIGTERM, then SIGKILL (#353).

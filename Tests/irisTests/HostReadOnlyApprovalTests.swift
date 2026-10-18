@@ -34,7 +34,7 @@ struct HostReadOnlyApprovalTests {
                              createIfEmpty: false, emitLaunchNotices: false)
         state.permissions = PermissionManager(paths: IrisPaths(root: home))
         // A fixed host, so the developer's own PATH decides nothing here.
-        state.hostLookup = {
+        state.hostLookupOverride = {
             ReadOnlyCommand.HostLookup(path: "/bin:/usr/bin", cwd: "/tmp", home: home.path,
                                        isExecutable: { FileManager.default.isExecutableFile(atPath: $0) })
         }
@@ -184,5 +184,93 @@ struct HostReadOnlyApprovalTests {
         #expect(try await value(of: task) == false)
         #expect(!state.commandDenied(in: cid))
         #expect(try await call(state, "ls", in: cid, engine: vibecop) == .silent(true))
+    }
+
+    @Test("the approval names its source: a host read is restricted to the judged PATH, the person's click is the person's")
+    func sources() async throws {
+        let (state, home) = try app()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let cid = state.createNewConversation(isBackground: false, select: false)
+        let vibecop = Approver()
+        let read = await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": vibecop]) {
+            await state.requestApprovalSource(toolName: "run_command", details: "ls -la", workspace: nil,
+                                              conversationId: cid, vibecopEnabled: true)
+        }
+        #expect(read == .vibecopRestricted(path: ["/bin", "/usr/bin"]))
+        let inVM = await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": vibecop]) {
+            await state.requestApprovalSource(toolName: "run_command", details: "make", workspace: nil,
+                                              conversationId: cid, inSandbox: true, vibecopEnabled: true)
+        }
+        #expect(inVM == .vibecop)
+        let command = "make --allowed-\(UUID().uuidString)"
+        state.permissions.allowGlobally(toolName: "run_command", details: command)
+        let allowed = await state.requestApprovalSource(toolName: "run_command", details: command, workspace: nil,
+                                                        conversationId: cid, vibecopEnabled: true)
+        #expect(allowed == .allowlist)
+        let task = Task { @MainActor in
+            await state.requestApprovalSource(toolName: "run_command", details: "make", workspace: nil,
+                                              conversationId: cid, vibecopEnabled: false)
+        }
+        for _ in 0..<400 where !state.pendingApprovals.contains(where: { $0.conversationId == cid }) {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        if let request = state.pendingApprovals.first { state.resolveApproval(id: request.id, .approve) }
+        #expect(try await value(of: task) == .person)
+    }
+
+    @Test("every conversation's workspace and every grant's read-write mount count as sandbox-writable")
+    func writableRoots() throws {
+        let (state, home) = try app()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let a = state.createNewConversation(isBackground: false, select: false)
+        state.setWorkspace(for: a, path: "/tmp/ws-a")
+        let b = state.createNewConversation(isBackground: true, select: false)
+        let index = try #require(state.conversations.firstIndex { $0.id == b })
+        state.conversations[index].sandboxGrant = JobGrant(mounts: [ContainerMount(source: "/tmp/rw"),
+                                                                    ContainerMount(source: "/tmp/ro", readOnly: true)],
+                                                           network: false)
+        let roots = Set(state.sandboxWritableRoots())
+        #expect(roots.isSuperset(of: ["/tmp/ws-a", "/tmp/rw"]))
+        #expect(!roots.contains("/tmp/ro"))
+    }
+
+    @Test("through the engine: a read Vibecop approves runs with the judged PATH, and a person's approval runs as usual")
+    func restrictedThroughTheEngine() async throws {
+        // The judged PATH is /usr/bin alone, so a restricted `which ls` (a zsh builtin) cannot find
+        // /bin/ls, and a usual run can. Only the dispatcher and executor carrying the PATH tell them apart.
+        func run(vibecop: Bool) async throws -> String {
+            let (state, home) = try app()
+            defer { try? FileManager.default.removeItem(at: home) }
+            state.hostLookupOverride = {
+                ReadOnlyCommand.HostLookup(path: "/usr/bin", cwd: "/tmp", home: home.path,
+                                           isExecutable: { FileManager.default.isExecutableFile(atPath: $0) })
+            }
+            state.vibecopEnabledOverride = vibecop
+            let cid = state.createNewConversation(isBackground: false, select: false)
+            let call = FunctionCall(name: "run_command", args: ["command": .string("which ls")], id: "c1")
+            let client = ScriptedStreamClient([[.event(.functionCall(call)), .event(.done(finishReason: "tool_use"))],
+                                               [.event(.textDelta("done")), .event(.done(finishReason: "STOP"))]])
+            let engine = IrisEngine(state: state, tier: .medium, principal: .main, client: client, streamResponses: true)
+            let turn = Task { @MainActor in
+                await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": Approver()]) {
+                    await engine.processInput("run it", source: "User", conversationId: cid)
+                }
+            }
+            if !vibecop {
+                for _ in 0..<400 where !state.pendingApprovals.contains(where: { $0.conversationId == cid }) {
+                    try? await Task.sleep(nanoseconds: 5_000_000)
+                }
+                if let request = state.pendingApprovals.first { state.resolveApproval(id: request.id, .approve) }
+            }
+            _ = try await value(of: turn, within: 30)
+            let sent = try #require(client.requests.last)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .withoutEscapingSlashes
+            return String(decoding: try encoder.encode(sent), as: UTF8.self)
+        }
+        let restricted = try await run(vibecop: true)
+        #expect(restricted.contains("ls not found"), "the gate's approval ran unrestricted")
+        let usual = try await run(vibecop: false)
+        #expect(usual.contains("/bin/ls"), "a person's approval ran restricted")
     }
 }
