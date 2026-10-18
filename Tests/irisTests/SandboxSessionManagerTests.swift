@@ -458,6 +458,7 @@ struct SandboxSessionManagerTests {
             ["network", "create", "--internal", "iris-isolated"],
             ["run", "-d", "--init", "--name", "\(SandboxSessionManager.namePrefix)\(id.uuidString.lowercased())",
              "--mount", "type=virtiofs,source=/ws,target=/ws",
+             "--mount", "type=virtiofs,source=/ws/.iris,target=/ws/.iris,readonly",
              "--network", "iris-isolated", "--no-dns",
              "-w", "/ws", "img", "sleep", "infinity"],
         ])
@@ -473,7 +474,8 @@ struct SandboxSessionManagerTests {
                                       ContainerMount(source: "/ref", readOnly: true)])
         _ = await m.run(command: "a", conversationId: UUID(), workspace: grant.workspaceMount,
                         extraMounts: grant.extraMountEntries())
-        #expect(rt.createdMounts == [["/host/dir:/work", "/ref:ro"]], "no identity mount of /host/dir beside it")
+        #expect(rt.createdMounts == [["/host/dir:/work", "/host/dir/.iris:/work/.iris:ro", "/ref:ro"]],
+                "no identity mount of /host/dir beside it; its .iris/ read-only at the target (#617)")
         #expect(try ContainerMount.argument(for: "/host/dir:/work") == "type=virtiofs,source=/host/dir,target=/work")
         #expect(rt.createdWorkdirs == ["/work"])
         #expect(rt.execedWorkdirs == ["/work"])

@@ -390,7 +390,7 @@ struct SandboxTimeoutTests {
         let m = SandboxSessionManager(runtime: rt, image: { "ubuntu:latest" })
         _ = await m.run(command: "a", conversationId: UUID(), workspace: "/ws",
                         extraMounts: ["/data:/data:ro"], timeoutSeconds: 10)
-        #expect(rt.createdMounts == [["/ws:/ws", "/data:/data:ro"]])
+        #expect(rt.createdMounts == [["/ws:/ws", "/ws/.iris:/ws/.iris:ro", "/data:/data:ro"]])
         #expect(rt.lastExecTimeout == 10)
     }
 
@@ -427,8 +427,8 @@ struct SandboxTimeoutTests {
         rt.release()
         _ = await (first, second)
 
-        #expect(rt.createdMounts.contains(["/ws:/ws", "/a:/a:ro"]))
-        #expect(rt.createdMounts.contains(["/ws:/ws", "/b:/b:ro"]))
+        #expect(rt.createdMounts.contains(["/ws:/ws", "/ws/.iris:/ws/.iris:ro", "/a:/a:ro"]))
+        #expect(rt.createdMounts.contains(["/ws:/ws", "/ws/.iris:/ws/.iris:ro", "/b:/b:ro"]))
     }
 
     /// L1: the reset notice is written once, by the call that recreated the container. A timeout
@@ -478,7 +478,7 @@ struct SandboxTimeoutTests {
         }
         // And every container that was built was built for one of the three, never a blend.
         for built in rt.createdMounts {
-            #expect(sets.contains { built == ["/ws:/ws", $0] })
+            #expect(sets.contains { built == ["/ws:/ws", "/ws/.iris:/ws/.iris:ro", $0] })   // #617: .iris read-only
         }
     }
 
@@ -577,7 +577,7 @@ struct SandboxTimeoutTests {
         #expect(outcomes.0 == "ok")
         #expect(outcomes.1 == SandboxSessionManager.mountsContendedError,
                 "the loser ran nothing rather than running in the winner's mounts")
-        #expect(rt.createdMounts == [["/ws:/ws", "/a:/a:ro"]], "and no second container was built")
+        #expect(rt.createdMounts == [["/ws:/ws", "/ws/.iris:/ws/.iris:ro", "/a:/a:ro"]], "and no second container was built")
         #expect(rt.removedNames.isEmpty, "the winner's container is still standing")
         #expect(await m.hasSession(id), "and its session with it")
     }

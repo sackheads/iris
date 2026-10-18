@@ -54,12 +54,15 @@ struct SandboxTests {
                                             cwd: workspace, useSandbox: true)
 
         let args = result.split(separator: "\n").filter { $0.hasPrefix("arg:") }.map { String($0.dropFirst(4)) }
-        try #require(args.count == 12, "got: \(result)")
+        try #require(args.count == 14, "got: \(result)")
         #expect(Array(args[0...2]) == ["run", "--rm", "--name"], "got: \(result)")
         #expect(args[3].hasPrefix("\(SandboxSessionManager.namePrefix)run-"))
-        #expect(Array(args[4...7]) == ["-v", "\(workspace):\(workspace)", "--workdir", workspace])
-        #expect(args[8] == ConfigManager.shared.sandboxImage)
-        #expect(Array(args[9...11]) == ["bash", "-c", "echo 'hello'"])
+        #expect(Array(args[4...5]) == ["-v", "\(workspace):\(workspace)"])
+        // #617: the workspace's .iris/ read-only over it, created first if missing.
+        #expect(Array(args[6...7]) == ["--mount", "type=virtiofs,source=\(workspace)/.iris,target=\(workspace)/.iris,readonly"])
+        #expect(Array(args[8...9]) == ["--workdir", workspace])
+        #expect(args[10] == ConfigManager.shared.sandboxImage)
+        #expect(Array(args[11...13]) == ["bash", "-c", "echo 'hello'"])
     }
 
     @Test("with no container runtime the sandbox branch says so instead of running on the host")
