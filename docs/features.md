@@ -60,6 +60,16 @@ Transparently routes terminal execution through `apple/container` lightweight Li
 
 So a sandboxed command refuses to run when that workspace is your home folder or a folder above it, or is or holds a place your Mac runs programs or settings from (`~/Library/LaunchAgents`, `~/.config`, `~/bin`, `~/.local/bin`), a credential store (`~/.ssh`, `~/.aws`, the Keychains folder and the like), or Iris's own settings. Code left in any of those could run on your Mac later, even in a command you approve yourself. Nothing runs and nothing falls back to the host; the reply says why. If you do want it for one conversation, right-click it in the sidebar and choose **Let the Sandbox Write This Folder…**. After a confirmation naming what becomes writable, that conversation (and its subagents and grader) may mount exactly that folder, the row shows **home writable by the sandbox**, and Vibecop then lets only read-only commands run in its sandbox without asking. The same menu stops it. Only you can turn it on: no tool, job or message can, and a dev home seeded from the installed app does not carry it over.
 
+### Repositories in the Sandbox
+
+Git on your Mac runs programs a repository names, in its hooks and in its config (`core.hooksPath`, `core.fsmonitor`, `diff.external`, filter drivers). So when a sandboxed workspace is a git repository, Iris keeps the VM from choosing what your next `git commit` runs (#623):
+
+- In the VM, the repository's `.git` is a mount of its own, so it can't be renamed or replaced, and `.git/hooks` is read-only (created first if it is missing). Commits, branches and checkouts in the VM still work. A `.git` or `hooks` that is a symbolic link refuses sandboxed commands.
+- Before and after every sandboxed command, and before every host one, Iris compares the repository's config files (and a worktree's `.git` file) with the copy it kept. The VM may add or change remotes, upstream branches and `user.*`. Any other change, including `include.path`, a submodule's or Git LFS's settings, or an `ext::` URL, is put back byte for byte, and the reply says so. This includes a change you make yourself while the sandbox session is open.
+- A host `run_command` in a folder a sandbox has mounted runs git with the fixed-name keys that start programs overridden. Your own global and system values for those keys still apply. Git started this way never opens an editor (`core.editor` is `true`), and runs only the repository's read-only `.git/hooks`. A `core.hooksPath` that points into the worktree, such as husky's `.husky`, is not run.
+
+What this does not cover: git run from your own terminal in the moment between a write in the VM and Iris putting it back; keys with a name of the repository's choosing (`filter.<x>.clean`, `diff.<x>.textconv`, `merge.<x>.driver`, `remote.<x>.uploadpack`) in that same moment; the config of a repository nested inside the workspace, or of one the VM creates; and a host command that sets `GIT_CONFIG_COUNT` itself.
+
 ### Workspace Binding
 
 Link chat sessions to local filesystem directories. Iris will automatically load the project's `AGENTS.md` instructions and execute terminal commands from within that project context.

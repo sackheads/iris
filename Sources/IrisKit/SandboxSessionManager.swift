@@ -67,7 +67,8 @@ actor SandboxSessionManager {
     private var closed: Set<UUID> = []
 
     static let shared = SandboxSessionManager(runtime: CLIContainerRuntime(),
-                                              image: { ConfigManager.shared.sandboxImage })
+                                              image: { ConfigManager.shared.sandboxImage },
+                                              gitGuard: .shared)
 
     /// Starts the container system when a create, or the isolated-network check ahead of it,
     /// says the system is not ready — answering whether that worked. Injected so a test can drive
@@ -77,12 +78,17 @@ actor SandboxSessionManager {
     /// Every container this manager has created and not yet removed, for an exiting CLI (#463).
     private let live: LiveContainerNames
 
+    /// Watches each container's read-write repositories for config changes (#623). The process's
+    /// one guard for `shared`, which host commands consult; a manager a test builds gets its own.
+    private let gitGuard: GitConfigGuard
+
     init(runtime: ContainerRuntime, image: @escaping @Sendable () -> String,
          mountAgreementAttempts: Int = SandboxSessionManager.mountAgreementAttempts,
          startContainerSystem: @escaping @Sendable () async -> Bool = {
              await SandboxingManager.shared.startContainerSystem().success
          },
-         live: LiveContainerNames = .shared) {
+         live: LiveContainerNames = .shared, gitGuard: GitConfigGuard = GitConfigGuard()) {
+        self.gitGuard = gitGuard
         self.runtime = runtime
         self.image = image
         self.mountAgreementAttempts = mountAgreementAttempts
@@ -174,11 +180,20 @@ actor SandboxSessionManager {
         }
 
         let workdir = Self.workdir(for: workspace)
+        // #623: the repositories it mounts read-write, recorded before its first command and
+        // checked on both sides of each one; a disallowed change is put back and reported.
+        let sources = Self.readWriteMounts(workspace: workspace, extra: extraMounts).map(\.source)
+        let owner = name(for: id)
+        gitGuard.watch(owner: owner, sources: sources)
+        let gitBefore = gitGuard.check(owner: owner)
+        func noted(_ result: String) -> String {
+            GitConfigGuard.withNotices(result, before: gitBefore, after: gitGuard.check(owner: owner))
+        }
         do {
             let r = try await runtime.exec(name: name(for: id), workdir: workdir, command: command,
                                            timeoutSeconds: timeoutSeconds)
             sessions[id]?.lastUsed = Date()
-            return decorate(format(r), notice: wasLost && created, for: id)
+            return noted(decorate(format(r), notice: wasLost && created, for: id))
         } catch {
             // A deadline is the command's answer, not a dead container. The session is intact and
             // re-running would spend the same wall clock over again, so this one does not go down
@@ -188,13 +203,13 @@ actor SandboxSessionManager {
                 // Decorated like any other outcome: the reset notice is written by the call that
                 // recreated the container and by no other, so a timeout on that very call would
                 // otherwise be the thing that loses it for good.
-                return decorate(ToolExecutor.commandTimedOutMessage(seconds: timeoutSeconds.map(Double.init) ?? elapsed),
-                                notice: wasLost && created, for: id)
+                return noted(decorate(ToolExecutor.commandTimedOutMessage(seconds: timeoutSeconds.map(Double.init) ?? elapsed),
+                                      notice: wasLost && created, for: id))
             }
             // Nor is a cancelled turn a dead container. Tearing the session down and building a
             // new one to retry a command nobody is waiting for is work for its own sake.
             if error is CancellationError {
-                return decorate("Error: the command was cancelled.", notice: wasLost && created, for: id)
+                return noted(decorate("Error: the command was cancelled.", notice: wasLost && created, for: id))
             }
             // Closed under the running command: the run is over, so there is nothing to heal.
             if closed.contains(id) { return Self.closedMidCommandError }
@@ -204,15 +219,16 @@ actor SandboxSessionManager {
             sessions[id] = nil
             do {
                 try await ensureSession(id, workspace: workspace, mounts: mounts, network: network)
+                gitGuard.watch(owner: owner, sources: sources)
                 let r = try await runtime.exec(name: name(for: id), workdir: workdir, command: command,
                                                timeoutSeconds: timeoutSeconds)
                 sessions[id]?.lastUsed = Date()
-                return decorate(format(r), notice: true, for: id)
+                return noted(decorate(format(r), notice: true, for: id))
             } catch {
                 if case ContainerRuntimeError.timedOut(let elapsed) = error {
                     sessions[id]?.lastUsed = Date()
-                    return decorate(ToolExecutor.commandTimedOutMessage(seconds: timeoutSeconds.map(Double.init) ?? elapsed),
-                                    notice: true, for: id)
+                    return noted(decorate(ToolExecutor.commandTimedOutMessage(seconds: timeoutSeconds.map(Double.init) ?? elapsed),
+                                          notice: true, for: id))
                 }
                 return creationError(error)
             }
@@ -251,7 +267,7 @@ actor SandboxSessionManager {
                           include: (String, String) -> Bool = { _, _ in true }) -> [String] {
         func protecting(_ source: String, _ target: String) -> [String] {
             WorkspaceIrisDir.protected(for: source).filter { include(source, $0.relative) }
-                .map { WorkspaceIrisDir.mountEntry(source: source, target: target, relative: $0.relative) }
+                .map { WorkspaceIrisDir.mountEntry(source: source, target: target, relative: $0.relative, readOnly: $0.readOnly) }
         }
         var list: [String] = []
         if let workspace {
@@ -381,7 +397,8 @@ actor SandboxSessionManager {
     private func removeContainer(_ name: String, ignoringCancellation: Bool = false) async {
         let removed = ignoringCancellation ? await runtime.removeIgnoringCancellation(name: name)
             : await runtime.remove(name: name)
-        if removed { live.remove(name) }
+        // Only once it is gone: a container still running could write after the last check.
+        if removed { live.remove(name); gitGuard.end(owner: name) }
     }
 
     /// Ensures a container exists for `id`, coalescing concurrent first-commands onto a single

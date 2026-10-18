@@ -68,6 +68,10 @@ struct ToolExecutor {
     /// Injectable so a test can read only its own names.
     var ephemeralRegistry: EphemeralContainerRegistry = .shared
 
+    /// Keeps a sandboxed repository's git config from making host git run a program (#623).
+    /// Injectable so a test reads only its own watches.
+    var gitGuard: GitConfigGuard = .shared
+
     /// `workspaceToolsEnabled` defaults to "a Google refresh token is configured". Without one every
     /// Google Tasks / Workspace call fails, so the ten declarations were pure prompt weight (#133).
     /// Injectable so tests never mutate `ConfigManager.shared`.
@@ -527,6 +531,7 @@ struct ToolExecutor {
         let arguments: [String]
         let directory: String?
         let environment: [String: String]?
+        let gitBefore: String?
         // Named, so a timeout or a cancel can delete it: killing the `container run` client does
         // not stop the container, and the command ran on in the VM (#353).
         var ephemeralContainer: (binary: String, name: String)? = nil
@@ -558,8 +563,8 @@ struct ToolExecutor {
                     case .absent: continue
                     case .ready:
                         guard let mount = try? ContainerMount.argument(for: WorkspaceIrisDir.mountEntry(
-                            source: expandedPath, target: expandedPath, relative: item.relative)) else {
-                            return "Not run: \(item.relative) in the workspace could not be mounted read-only."
+                            source: expandedPath, target: expandedPath, relative: item.relative, readOnly: item.readOnly)) else {
+                            return "Not run: \(item.relative) in the workspace could not be mounted for the sandbox."
                         }
                         containerArgs.insert(contentsOf: ["--mount", mount], at: at)
                         at += 2
@@ -569,10 +574,19 @@ struct ToolExecutor {
             arguments = containerArgs
             directory = nil
             environment = nil
+            if let cwd { gitGuard.watch(owner: name, sources: [IrisEngine.expandTilde(cwd)]) }
+            gitBefore = gitGuard.check(owner: name)
         } else {
-            (executable, arguments, environment) = Self.hostSpawn(command, restrictedPath: restrictedPath,
-                                                                  base: ProcessInfo.processInfo.environment)
             directory = cwd.map { IrisEngine.expandTilde($0) }   // #275: never `expandingTildeInPath` on a decider
+            // #623: host git reads repositories a VM may have written; check them first, and in one
+            // a VM can write, run git with the keys that run programs overridden.
+            gitBefore = gitGuard.checkAll()
+            var base = ProcessInfo.processInfo.environment
+            if let hooks = gitGuard.hostOverrides(cwd: directory) {
+                base.merge(await Self.gitOverrideEnvironment(hooks: hooks ?? "/dev/null", base: base,
+                                                             vmWritable: gitGuard.watchedSources())) { $1 }
+            }
+            (executable, arguments, environment) = Self.hostSpawn(command, restrictedPath: restrictedPath, base: base)
         }
 
         // Its own process group, killed whole on timeout and on Stop: SIGTERM, then SIGKILL (#353).
@@ -592,8 +606,9 @@ struct ToolExecutor {
         } else {
             onKilled = nil
         }
+        let result: String
         do {
-            return try await withTimeout(seconds: timeoutSeconds) {
+            result = try await withTimeout(seconds: timeoutSeconds) {
                 await withTaskCancellationHandler {
                     // Its name carries `SandboxSessionManager.namePrefix`: registered for its whole
                     // life so the launch sweep does not take it for an orphan (#364). Here, inside
@@ -638,8 +653,48 @@ struct ToolExecutor {
                 }
             }
         } catch {
-            return Self.commandTimedOutMessage(seconds: timeoutSeconds)
+            result = Self.commandTimedOutMessage(seconds: timeoutSeconds)
         }
+        var gitAfter: String? = nil
+        if let ephemeralName {
+            gitAfter = gitGuard.check(owner: ephemeralName)
+            gitGuard.end(owner: ephemeralName)
+        }
+        return GitConfigGuard.withNotices(result, before: gitBefore, after: gitAfter)
+    }
+
+    /// Whether the `git` on `env`'s `PATH` is real: anything but Apple's `/usr/bin/git` shim, or
+    /// the shim with developer tools selected (`xcode-select -p`, which never prompts).
+    static func gitIsInstalled(env: [String: String]) async -> Bool {
+        let dirs = (env["PATH"] ?? "").split(separator: ":").map(String.init)
+        guard let git = dirs.map({ ($0 as NSString).appendingPathComponent("git") })
+            .first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return false }
+        guard git == "/usr/bin/git" else { return true }
+        if case .success(let out) = await ProcessGroupRunner.capture(executable: "/usr/bin/xcode-select", arguments: ["-p"],
+                                                                     environment: env, timeoutSeconds: 10) {
+            return out.status == 0
+        }
+        return false
+    }
+
+    /// `WorkspaceGit.hostEnvironment` with the person's own global and system values, read with
+    /// the git and `PATH` the command will use, from `/` so no repository's config is read. Their
+    /// global config is left out when it sits in a folder a VM can write (`vmWritable`).
+    static func gitOverrideEnvironment(hooks: String, base: [String: String], vmWritable: [String]) async -> [String: String] {
+        var env = BinaryResolver.commandEnvironment(base: base)
+        for key in env.keys where key.hasPrefix("GIT_") { env[key] = nil }
+        var listing = ""
+        // `/usr/bin/git` with no developer tools installed opens Apple's install dialog; then no
+        // git can run, and the defaults are all it needs.
+        if await gitIsInstalled(env: env), case .success(let out) = await ProcessGroupRunner.capture(
+            executable: "/usr/bin/env", arguments: ["git", "config", "--list", "--show-scope"],
+            environment: env, currentDirectory: "/", timeoutSeconds: 10), out.status == 0 {
+            listing = String(data: out.stdout, encoding: .utf8) ?? ""
+        }
+        let globalReachable = WorkspaceGit.globalConfigFiles(base: base).contains { file in
+            vmWritable.contains { WorkspaceGit.relative(file, inside: $0) != nil }
+        }
+        return WorkspaceGit.hostEnvironment(hooks: hooks, personal: WorkspaceGit.personalValues(listing: listing, trustGlobal: !globalReachable))
     }
 
     /// What a command that outlived its deadline reports. One sentence for both routes: a command
