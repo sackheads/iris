@@ -104,6 +104,33 @@ struct HomeMountTests {
         #expect(refused.hasPrefix("Not run: the sandbox would mount"), "\(refused)")
     }
 
+    private final class Ended: @unchecked Sendable {
+        private let lock = NSLock(); private var ids: [UUID] = []
+        func add(_ id: UUID) { lock.withLock { ids.append(id) } }
+        var all: Set<UUID> { lock.withLock { Set(ids) } }
+    }
+
+    @Test("withdrawing the opt-in ends the sessions made under it, the conversation's and its delegates'")
+    func withdrawalEndsSessions() async throws {
+        let (state, dir) = try app()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let ended = Ended()
+        state.endSandboxSession = { ended.add($0) }
+        let root = state.createNewConversation(isBackground: false, select: false)
+        let child = state.createNewConversation(isSubagent: true, select: false)
+        let other = state.createNewConversation(isBackground: false, select: false)
+        state.linkDelegate(child, of: root)
+        #expect(state.setHomeWritableOptIn(for: root, path: "/Users/me") == nil, "turning it on ends nothing")
+        let withdrawal = try #require(state.setHomeWritableOptIn(for: root, path: nil))
+        _ = try await value(of: withdrawal)
+        #expect(ended.all == [root, child])
+        #expect(!ended.all.contains(other))
+        // Moving it to another folder ends them too; setting the same folder again does not.
+        state.setHomeWritableOptIn(for: root, path: "/Users/me")
+        #expect(state.setHomeWritableOptIn(for: root, path: "/Users/me") == nil)
+        #expect(state.setHomeWritableOptIn(for: root, path: "/Users/other") != nil)
+    }
+
     @Test("the engine hands the executor its delegation root's opt-in")
     func rootOptIn() async throws {
         let (state, dir) = try app()
