@@ -97,14 +97,21 @@ final class VibecopService: @unchecked Sendable {
             prompt += Self.hostLayerText
         }
 
+        // The VM is thrown away; its mounts are not (#611). The model must not be told otherwise.
         if inSandbox {
             prompt += """
 
 
-            EXECUTION CONTEXT: This command runs inside a disposable, network-capable Linux VM
-            fully isolated from the macOS host filesystem. Auto-APPROVE routine in-VM work
-            (building, testing, inspecting files, installing packages). Reserve ESCALATE/DENY for
-            genuinely risky actions: outbound network connections to new/unknown hosts, attempts
+            EXECUTION CONTEXT: This command runs inside a disposable, network-capable Linux VM,
+            but the folders mounted into it are the user's real Mac folders: the conversation's
+            workspace (the working directory) and any paths a job grants, read-write unless marked
+            read-only. A write there is a write on the user's Mac, and outlives the VM.
+            Auto-APPROVE routine work on the project's own files and inside the VM (building,
+            testing, inspecting files, installing packages into the VM). ESCALATE a write to
+            anything a Mac program reads as configuration or runs: shell startup files (.zshenv,
+            .zshrc, .bashrc, .profile), .git/config and .gitconfig, .ssh, Library/LaunchAgents and
+            other dotfiles. DENY an obvious attempt to leave code behind for the Mac to run. Also
+            reserve ESCALATE/DENY for outbound network connections to new/unknown hosts, attempts
             to escape the container or escalate privilege, or reaching host-bridged resources.
             """
         }
