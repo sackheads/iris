@@ -57,7 +57,7 @@ listing locally, and `scripts/agent-strings-test.sh` pins it on a fixture the wa
 Both were in a file the PR touched, though outside its changed lines, which is section 1's case.
 Section 2 covers a stale sentence in a file the change did not touch, but only when it shares two or
 more words with the change; the template's question and the reviewer's grep remain the answer
-beyond that. Not built yet; the numbers above are from the diffs, by hand.
+beyond that. Not built yet (tracked in #629); the numbers above are from the diffs, by hand.
 
 ## Not doing
 
