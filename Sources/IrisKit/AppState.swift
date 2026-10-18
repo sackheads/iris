@@ -2633,7 +2633,7 @@ class AppState {
             return
         } else if trimmed.hasPrefix("/vibecop init") {
             appendMessage(role: .system, content: "Initializing Vibecop Guardian mode...", to: convId)
-            let initPrompt = "System Event [Vibecop Init]: Analyze the current workspace directory to understand the project structure, language, framework, and tooling. Generate a custom Guardian prompt that defines what terminal commands and file operations are 'routine' for this specific workspace, and what should be escalated to the user. Write this prompt to a new file at `.iris/vibecop.md` inside the workspace using the `write_file` tool. Output a transparent summary of the generated rules for the user."
+            let initPrompt = "System Event [Vibecop Init]: Analyze the current workspace directory to understand the project structure, language, framework, and tooling. Generate a custom Guardian prompt that defines what terminal commands and file operations are 'routine' for this specific workspace, and what should be escalated to the user. Write this prompt to a new file at `.iris/vibecop.md` inside the workspace using the `write_file` tool; the user approves that write themselves, since rules in `.iris/` are theirs to accept. Output a transparent summary of the generated rules for the user."
             runThinkingTask(conversationId: convId) { [self] in
                 await engine.processInput(initPrompt, source: "System", conversationId: convId)
             }
@@ -3586,7 +3586,14 @@ class AppState {
         // (a call it already permits never needed a human, so it runs) — except to a granted run's
         // two file tools, which the grant alone decides (#282 §0.13, below); everything else is
         // denied and recorded for Task 6's ledger, without ever consulting Vibecop or a human.
+        // #617: a write to a workspace's `.iris/` is a person's alone, whatever else would approve it.
+        let irisWrite = permissions.writesWorkspaceIris(toolName: toolName, details: details, workspace: workspace,
+                                                        inSandbox: inSandbox)
         if let id = conversationId, let conversation = conversations.first(where: { $0.id == id }), conversation.isBackground {
+            if irisWrite {
+                recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval), in: id)
+                return nil
+            }
             // R10 first and on its own (#282 §3): a write into a protected directory is refused
             // before any grant is consulted, whatever a stored grant happens to say. The path is
             // resolved against the run's directory; `isProtectedWrite` judges it by real path (§0.9).
@@ -3634,7 +3641,7 @@ class AppState {
         // from some earlier, different call). Vibecop needs no bypass of its own any more — `#336`
         // made its disabled state "no verdict" rather than an outright APPROVE, so it already falls
         // through to this same prompt for an ordinary call too.
-        if humanOnly {
+        if humanOnly || irisWrite {
             return await enqueueUserApproval(toolName: toolName, details: details, workspace: workspace,
                                              conversationId: conversationId, origin: origin, humanOnly: true) ? .person : nil
         }

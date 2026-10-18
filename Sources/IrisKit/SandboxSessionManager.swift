@@ -118,6 +118,11 @@ actor SandboxSessionManager {
     func run(command: String, conversationId id: UUID, workspace: ContainerMount?, extraMounts: [String] = [],
              network: NetworkMode = .default, timeoutSeconds: Int? = nil) async -> String {
         let wasLost = lostSessions.contains(id)
+        // #617: every read-write mount's `.iris/` goes in read-only, so a real directory must be
+        // there to mount before the container is made; one that cannot be protected refuses.
+        for (source, _) in Self.readWriteMounts(workspace: workspace, extra: extraMounts) {
+            if case .refused(let why) = WorkspaceIrisDir.prepareForMount(source) { return why }
+        }
         let mounts = Self.mountList(workspace: workspace, extra: extraMounts)
 
         // Recreate if the workspace, the mount list or the network changed (agent-initiated — not a "loss").
@@ -228,8 +233,32 @@ actor SandboxSessionManager {
     /// stable, which is what makes comparing two mount lists a reliable "same container" test.
     /// Always spelled `source:target` — an identity mount of `/ws` is `/ws:/ws`, exactly the entry
     /// an ungranted workspace has always produced, so the runtime reads (and refuses) it as before.
+    ///
+    /// Each read-write mount is followed by its `.iris/` read-only (#617), which shadows it: in the
+    /// VM, Vibecop's rules and the project allowlist cannot be written, renamed or linked over.
     static func mountList(workspace: ContainerMount?, extra: [String]) -> [String] {
-        (workspace.map { ["\($0.source):\($0.target)"] } ?? []) + extra
+        var list: [String] = []
+        if let workspace {
+            list.append("\(workspace.source):\(workspace.target)")
+            list.append(WorkspaceIrisDir.mountEntry(source: workspace.source, target: workspace.target))
+        }
+        for entry in extra {
+            list.append(entry)
+            if let rw = readWrite(entry) { list.append(WorkspaceIrisDir.mountEntry(source: rw.source, target: rw.target)) }
+        }
+        return list
+    }
+
+    /// The read-write mounts among the workspace and `extra`, as (source, target).
+    static func readWriteMounts(workspace: ContainerMount?, extra: [String]) -> [(source: String, target: String)] {
+        (workspace.map { [($0.source, $0.target)] } ?? []) + extra.compactMap(readWrite)
+    }
+
+    private static func readWrite(_ entry: String) -> (source: String, target: String)? {
+        guard !ContainerMount.hasReadOnlyFlag(entry) else { return nil }
+        let parts = entry.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 1 || parts.count == 2 else { return nil }
+        return (parts[0], parts.count == 2 ? parts[1] : parts[0])
     }
 
     /// The container's working directory: the workspace mount's TARGET — which is the source

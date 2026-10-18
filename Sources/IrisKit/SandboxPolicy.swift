@@ -77,7 +77,7 @@ public enum SandboxPolicy {
 
     public static func perWorkspaceOverride(workspace: String?) -> SandboxPref? {
         guard let workspace,
-              let data = try? Data(contentsOf: url(for: workspace)),
+              let data = WorkspaceIrisDir.read("sandbox.json", workspace: workspace),   // #617
               let cfg = try? JSONDecoder().decode(WorkspaceConfig.self, from: data) else {
             return nil
         }
@@ -93,9 +93,10 @@ public enum SandboxPolicy {
             return !FileManager.default.fileExists(atPath: fileURL.path)
         }
         do {
-            try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            // A real `.iris/` only, written by rename (#617): see `PermissionManager.saveRules`.
+            guard case .ready = WorkspaceIrisDir.prepareForMount(IrisEngine.expandTilde(workspace)) else { return false }
             let data = try JSONEncoder().encode(WorkspaceConfig(mainAgent: pref))
-            try data.write(to: fileURL)
+            try data.write(to: fileURL, options: .atomic)
             return true
         } catch {
             return false

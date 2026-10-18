@@ -62,8 +62,7 @@ struct PermissionManager: Sendable {
         
         // Check project
         if let workspace = workspace {
-            let projectURL = projectPermissionsURL(for: workspace)
-            if let projectRules = loadRules(from: projectURL),
+            if let projectRules = loadProjectRules(workspace: workspace),
                projectRules.contains(where: { Self.rule($0, matches: toolName, details, base: workspace) }) {
                 return true
             }
@@ -101,6 +100,26 @@ struct PermissionManager: Sendable {
         return identity == .dev && release.isUnderProtectedWriteDir(path)
     }
 
+    /// Whether a model or tool call writes a workspace's `.iris/` (#617), which always asks a
+    /// person: Vibecop's rules and the project allowlist there decide what later runs unasked, so
+    /// neither Vibecop nor an allowlist rule may approve a change to them. A file write by its
+    /// resolved path; a host command when it names one (best effort, see
+    /// `WorkspaceIrisDir.commandNamesWorkspaceIris`) or runs inside one. In the VM a command needs
+    /// no such check: `.iris/` is mounted read-only there.
+    func writesWorkspaceIris(toolName: String, details: String, workspace: String?, inSandbox: Bool) -> Bool {
+        let homes = [paths.root.path, release.root.path].flatMap { [$0, IrisPaths.realPath($0)] }
+        switch toolName {
+        case "write_file":
+            return WorkspaceIrisDir.isWorkspaceIrisPath(details, homes: homes)
+        case "run_command":
+            guard !inSandbox else { return false }
+            if WorkspaceIrisDir.commandNamesWorkspaceIris(details) { return true }
+            return workspace.map { WorkspaceIrisDir.isWorkspaceIrisPath($0, homes: homes) } ?? false
+        default:
+            return false
+        }
+    }
+
     /// The same question about a persisted call, asked of the path it would actually write (which
     /// is resolved against the run's directory, not the spelling the model sent).
     func isProtectedWrite(_ call: BlockedCall) -> Bool {
@@ -119,16 +138,15 @@ struct PermissionManager: Sendable {
     
     func allowInProject(toolName: String, details: String, workspace: String) {
         let projectURL = projectPermissionsURL(for: workspace)
-        let projectDir = projectURL.deletingLastPathComponent()
-        if !FileManager.default.fileExists(atPath: projectDir.path) {
-            try? FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        }
-        
+        // A real `.iris/` only (#617): one that is a link would put the rule where the sandbox
+        // can write it, and the reader would refuse it anyway.
+        guard case .ready = WorkspaceIrisDir.prepareForMount(IrisEngine.expandTilde(workspace)) else { return }
+
         let rule = PermissionRule(toolName: toolName, details: details)
-        var rules = loadRules(from: projectURL) ?? []
+        var rules = loadProjectRules(workspace: workspace) ?? []
         if !rules.contains(rule) {
             rules.append(rule)
-            saveRules(rules, to: projectURL)
+            saveRules(rules, to: projectURL, atomically: true)
         }
     }
     
@@ -137,9 +155,18 @@ struct PermissionManager: Sendable {
         return try? JSONDecoder().decode([PermissionRule].self, from: data)
     }
     
-    private func saveRules(_ rules: [PermissionRule], to url: URL) {
+    /// Through `WorkspaceIrisDir.read` (#617): a project allowlist that is a link, or a file with
+    /// a second hard link, is one the sandbox could have written, so it grants nothing.
+    private func loadProjectRules(workspace: String) -> [PermissionRule]? {
+        guard let data = WorkspaceIrisDir.read("permissions.json", workspace: workspace) else { return nil }
+        return try? JSONDecoder().decode([PermissionRule].self, from: data)
+    }
+
+    /// `atomically` for a project file: the rename replaces a link left in its place, not the
+    /// file it points to, and leaves one link to a new file.
+    private func saveRules(_ rules: [PermissionRule], to url: URL, atomically: Bool = false) {
         if let data = try? JSONEncoder().encode(rules) {
-            try? data.write(to: url)
+            try? data.write(to: url, options: atomically ? .atomic : [])
         }
     }
 }
