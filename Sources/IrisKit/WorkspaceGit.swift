@@ -156,7 +156,7 @@ enum WorkspaceGit {
     /// The submodule paths (gitlinks) in the index at `path`, read without running git: versions
     /// 2 to 4, SHA-1 or SHA-256 object names. `[]` when there is no index; nil when it is too
     /// large or does not parse, which the caller treats as a failed check.
-    static func gitlinks(index path: String, sha256: Bool) -> [String]? {
+    static func gitlinks(index path: String, sha256: Bool, followLink: Bool = true) -> [String]? {
         var info = stat()
         if lstat(path, &info) != 0 { return errno == ENOENT ? [] : nil }
         guard let data = readSmall(path, limit: indexLimit) else { return nil }
@@ -204,7 +204,35 @@ enum WorkspaceGit {
                 links.append(text)
             }
         }
+        // Extensions, up to the trailing checksum. A split index (`link`) keeps most entries in
+        // `sharedindex.<oid>` beside it, so its gitlinks are read too; one that cannot be is a
+        // failed read (#632 review: a split index hid a planted submodule).
+        while at + 8 <= b.count - oid {
+            guard let size = u32(at + 4), at + 8 + Int(size) <= b.count - oid else { return nil }
+            if b[at] == 0x6c, b[at + 1] == 0x69, b[at + 2] == 0x6e, b[at + 3] == 0x6b {   // "link"
+                guard followLink, size >= oid else { return nil }
+                let hex = b[(at + 8)..<(at + 8 + oid)].map { String(format: "%02x", $0) }.joined()
+                let shared = ((path as NSString).deletingLastPathComponent as NSString).appendingPathComponent("sharedindex." + hex)
+                var info = stat()
+                guard lstat(shared, &info) == 0, let more = gitlinks(index: shared, sha256: sha256, followLink: false) else { return nil }
+                links += more.filter { !links.contains($0) }
+            }
+            at += 8 + Int(size)
+        }
         return links
+    }
+
+    /// Whether `command` names `path` as a whole path: followed by its end, `/`, or a character
+    /// that cannot continue a file name in a shell word, so `/x/iris` is not `/x/iris-overseer`.
+    static func commandNames(_ command: String, _ path: String) -> Bool {
+        guard !path.isEmpty else { return false }
+        var rest = command[...]
+        while let range = rest.range(of: path) {
+            let next = rest[range.upperBound...].first
+            if next.map({ !($0.isLetter || $0.isNumber || "-_.~+@".contains($0)) }) ?? true { return true }
+            rest = rest[range.upperBound...]
+        }
+        return false
     }
 
     /// A repository-relative path that stays inside it: no `..`, no empty part, no `.git`.

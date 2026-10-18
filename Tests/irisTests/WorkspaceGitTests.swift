@@ -330,6 +330,9 @@ struct GitConfigGuardTests {
         let notice = try #require(other.check(owner: "c"))
         #expect(notice.contains("cannot check it"))
         #expect(GitFixture.read(config) == changed, "left alone and said so")
+        #expect(other.hostRefusal(cwd: dir + "/ws", command: "") != nil, "and host commands there refused")
+        #expect(other.check(owner: "c") == nil, "said once")
+        #expect(other.hostRefusal(cwd: dir + "/ws", command: "") != nil, "still refused while it differs")
     }
 
     @Test("a .git/worktrees/<x> swapped for a link to a folder outside is not written through")
@@ -505,6 +508,38 @@ struct GitConfigGuardTests {
         #expect(guardian.check(owner: "c")?.contains(".git.iris-quarantine-2") == true)
     }
 
+    @Test("a submodule planted under a split index is still found and moved aside")
+    func splitIndex() async throws {
+        let (dir, env, marker) = try await repoWithSubmodule()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let guardian = GitConfigGuard()
+        guardian.watch(owner: "c", sources: [ws])
+        try await plantSubmodule("planted", in: ws, dir: dir, env: env)
+        try await GitFixture.sh("git update-index --split-index", in: ws, env: env)
+        let shared = try FileManager.default.contentsOfDirectory(atPath: ws + "/.git").filter { $0.hasPrefix("sharedindex.") }
+        #expect(!shared.isEmpty, "the index really is split")
+        #expect(WorkspaceGit.gitlinks(index: ws + "/.git/index", sha256: false, followLink: false) == nil,
+                "a link extension is not readable without its shared index")
+        #expect(Set(WorkspaceGit.gitlinks(index: ws + "/.git/index", sha256: false) ?? []) == ["lib/sub", "planted"])
+        #expect(guardian.check(owner: "c")?.contains("planted/.git") == true)
+        try await GitFixture.sh("git status", in: ws, env: env)
+        #expect(!FileManager.default.fileExists(atPath: marker))
+        // A shared index that is gone fails closed.
+        for name in shared { try FileManager.default.removeItem(atPath: ws + "/.git/" + name) }
+        #expect(guardian.check(owner: "c")?.contains("too large or malformed") == true)
+        #expect(guardian.hostRefusal(cwd: ws, command: "") != nil)
+    }
+
+    @Test("a command names a folder only as a whole path")
+    func namesWholePath() {
+        #expect(WorkspaceGit.commandNames("git -C /x/iris status", "/x/iris"))
+        #expect(WorkspaceGit.commandNames("cd /x/iris/sub && git status", "/x/iris"))
+        #expect(WorkspaceGit.commandNames("git -C '/x/iris' log", "/x/iris"))
+        #expect(!WorkspaceGit.commandNames("git -C /x/iris-overseer status", "/x/iris"))
+        #expect(!WorkspaceGit.commandNames("ls /x/iris2", "/x/iris"))
+    }
+
     @Test("a baseline submodule whose pointer the VM redirects is moved aside")
     func redirectedSubmodule() async throws {
         let (dir, _, _) = try await repoWithSubmodule()
@@ -565,6 +600,43 @@ struct GitConfigGuardTests {
         try index.write(to: URL(fileURLWithPath: ws + "/.git/index"))
         #expect(guardian.check(owner: "c") == nil)
         #expect(guardian.hostRefusal(cwd: ws, command: "git status") == nil)
+    }
+
+    @Test("a second watch of a folder keeps the first one's record, so a background write is never its baseline")
+    func secondWatchSharesRecord() async throws {
+        let (dir, _) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let config = ws + "/.git/config"
+        let before = try #require(GitFixture.read(config))
+        let bad = String(decoding: before, as: UTF8.self) + "[core]\n\tfsmonitor = x\n"
+        let guardian = GitConfigGuard()
+        guardian.watch(owner: "a", sources: [ws])
+        try bad.write(toFile: config, atomically: false, encoding: .utf8)
+        guardian.watch(owner: "b", sources: [ws])    // another conversation, while the write stands
+        #expect(guardian.check(owner: "b")?.contains("core.fsmonitor") == true)
+        #expect(GitFixture.read(config) == before)
+        #expect(guardian.check(owner: "a") == nil, "already clean for both")
+        // One ending leaves the folder watched for the other.
+        guardian.end(owner: "a")
+        try bad.write(toFile: config, atomically: false, encoding: .utf8)
+        #expect(guardian.check(owner: "b")?.contains("core.fsmonitor") == true)
+        #expect(GitFixture.read(config) == before)
+    }
+
+    @Test("a repository the VM makes mid-session is judged at the next check")
+    func repoMadeMidSession() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let plain = dir + "/plain"
+        try FileManager.default.createDirectory(atPath: plain, withIntermediateDirectories: true)
+        let guardian = GitConfigGuard()
+        guardian.watch(owner: "c", sources: [plain])
+        #expect(guardian.check(owner: "c") == nil)
+        try await GitFixture.sh("git init -q && git config filter.x.clean \(dir)/evil", in: plain, env: env)
+        guardian.watch(owner: "c", sources: [plain])
+        #expect(guardian.check(owner: "c")?.contains("filter.x.clean") == true)
+        #expect(guardian.hostRefusal(cwd: plain, command: "") != nil)
     }
 
     @Test("the session path checks around each in-VM command and says what it put back")
