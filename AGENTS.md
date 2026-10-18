@@ -353,6 +353,14 @@ docs/                     # feature pages (features.md, jobs.md, …), install.m
 - [ ] No large build artefacts committed (`.build/`, `*.o`, `*.onnx` model weights, etc.)
 - [ ] After the PR merges: its worktree and local branch are removed (see Worktrees, above)
 
+## Reviewing a PR
+
+- **Check the "What does this change make untrue?" answer** (the PR template, Invariant 9). Grep for
+  the behaviour the PR changed yourself, in `README.md`, `docs/` and the agent-facing strings
+  (`oracleText`, tool `description` fields, system prompts), and treat a stale sentence you find as a
+  finding like any other. An agent-facing one is the more serious: the model reads it on every turn
+  and no UI ever shows it (#198).
+
 ## House style
 
 - Short comments only — for non-obvious *why*, not *what*.
