@@ -1,8 +1,9 @@
 import SwiftUI
 
 /// The app's SwiftUI transitions under Reduce Motion (#562). Apple's guidance: replace motion with
-/// a dissolve or with nothing. So, with Reduce Motion on, a slide-in becomes a dissolve in place,
-/// and an expand/collapse or a spring becomes instant (a height change cannot be dissolved without
+/// a dissolve or with nothing. So, with Reduce Motion on, a slide-in becomes a fade in place: a
+/// dissolve when an `appearance` animation drives it, otherwise it simply appears. An
+/// expand/collapse or a spring becomes instant (a height change cannot be dissolved without
 /// motion). With it off, everything is as it was.
 ///
 /// The setting comes from #538's `ReduceMotion` provider, not SwiftUI's read-only
@@ -16,6 +17,14 @@ enum Motion {
     static func animation(_ base: Animation?, _ reduceMotion: ReduceMotion = .system) -> Animation? {
         reduceMotion.isOn ? nil : base
     }
+
+    /// For an animation that only brings a view in or out (its transition is `slide`): `base`, or
+    /// under Reduce Motion a short ease, so the fade that replaces the slide is a dissolve rather
+    /// than a cut. Never for a layout change, which would then move.
+    static func appearance(_ base: Animation?, _ reduceMotion: ReduceMotion = .system) -> Animation? {
+        reduceMotion.isOn ? dissolve : base
+    }
+    static let dissolve = Animation.easeInOut(duration: 0.2)
 
     /// A view sliding in from the bottom as it fades, or only the fade under Reduce Motion.
     static func slide(_ reduceMotion: ReduceMotion = .system) -> AnyTransition {
