@@ -11,6 +11,8 @@ struct LedgerAttention: Equatable, Sendable {
         let tool: String?
         /// A read-only job's refusal rather than a wait on approval (#553).
         var refusedByProfile = false
+        /// The job's card destination, nil for the pinned Iris conversation (#466).
+        var destinationConversationId: UUID? = nil
     }
 
     struct Paused: Equatable, Sendable {
@@ -35,13 +37,14 @@ struct LedgerAttention: Equatable, Sendable {
     /// which a model may not lift without turning the URL trigger off.
     static var ownerPauseReasons: Set<String> { JobLedger.ownerPauseReasons }
 
-    static func make(unacknowledged: [JobRun], paused: [Job]) -> LedgerAttention {
+    static func make(unacknowledged: [JobRun], paused: [Job], destinations: [UUID: UUID] = [:]) -> LedgerAttention {
         var out = LedgerAttention()
         for run in unacknowledged {
             switch run.status {
             case .blockedOnApproval:
                 out.blocked.append(Blocked(runId: run.id, jobId: run.jobId, jobName: run.jobName,
-                                           tool: run.blockedTool, refusedByProfile: run.refusedByProfile))
+                                           tool: run.blockedTool, refusedByProfile: run.refusedByProfile,
+                                           destinationConversationId: destinations[run.jobId]))
             case .failed:
                 out.failedCount += 1
             case .running, .completed, .interrupted:
@@ -60,6 +63,12 @@ struct LedgerAttention: Equatable, Sendable {
     }
 
     static func read(_ ledger: JobLedger) throws -> LedgerAttention {
-        make(unacknowledged: try ledger.unacknowledgedFailures(), paused: try ledger.pausedJobs())
+        // Each job's card destination, so the sidebar marks the conversation its blocked card is in
+        // (#466). Read here, off the main actor, with the rest of the snapshot.
+        let destinations = Dictionary(try ledger.jobs().compactMap { job in
+            job.destinationConversationId.map { (job.id, $0) }
+        }, uniquingKeysWith: { first, _ in first })
+        return make(unacknowledged: try ledger.unacknowledgedFailures(), paused: try ledger.pausedJobs(),
+                    destinations: destinations)
     }
 }

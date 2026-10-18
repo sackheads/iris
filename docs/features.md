@@ -38,6 +38,8 @@ Scheduled and folder-watching jobs, their profiles, grants, gates, limits and ca
 
 The menu bar item (a sparkle, or a hammer for a dev build) shows a count while background jobs run, and `!` with a count when something is waiting on you: an approval, a goal draft, checkpoint or judgement to review, a run blocked on a call, or a job paused and needing `/jobs resume`. Its menu lists each one and opens it. Failed runs and jobs you paused yourself are listed but never change the icon.
 
+**Needs you.** The same waits put a small red dot at the end of the conversation's row in the sidebar: an approval (one a subagent or grader asked counts for the conversation it works for), a goal draft, checkpoint or judgement to review, or a run blocked on a call, shown on the conversation its card went to (the pinned Iris). Hover it to see what it is waiting on. The dot goes the moment you answer: approve or deny, approve or send back, accept or reject, or dismiss or approve the blocked card. Opening the conversation does not clear it. With no pinned Iris, a blocked run shows in the menu bar only. A question at the end of a reply does not light it (#592).
+
 ### Run Log
 
 a window listing every background run, with its transcript one click away and Acknowledge for failures.
