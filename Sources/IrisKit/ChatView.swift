@@ -531,9 +531,9 @@ struct ChatView: View {
             }
             Spacer()
         }
-        // Waiting on the person (#466): the reason comes from `needsHuman`, which changes only
-        // when an approval, a goal wait or a blocked run does, never per streamed token.
-        .needsHumanMark(state.needsHuman[conv.id])
+        // Waiting on the person (#466), else an unread reply (#592). Both change only when that
+        // state does (an approval, a goal wait, a blocked run, a turn's end), never per token.
+        .conversationMark(needsHuman: state.needsHuman[conv.id], unread: state.unreadReplies.contains(conv.id))
         .padding(.vertical, 2)
         .tag(conv.id)
         .contextMenu {

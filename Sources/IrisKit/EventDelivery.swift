@@ -57,6 +57,7 @@ extension AppState {
         // Re-checked after the await: the destination could have been deleted while the guard ran.
         guard conversations.contains(where: { $0.id == destinationId }) else { return }
         appendMessage(role: .event, content: card.encodedContent(), to: destinationId)
+        markUnread(destinationId)   // #592: a card is a reply too, e.g. a job's in the pinned Iris
         notifyForCard(card, destination: destinationId)
         if hasTurnInFlight(for: destinationId) {
             enqueueEventLine(safeLine, for: destinationId)

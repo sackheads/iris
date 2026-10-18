@@ -405,7 +405,18 @@ class AppState {
     /// Assigned only when it changes, on the main actor, from `conversations`, `pendingApprovals`
     /// and `ledgerAttention`. A streamed token changes none of them (#583).
     private(set) var needsHuman: [UUID: String] = [:]
-    var selectedConversationId: UUID?
+    var selectedConversationId: UUID? {
+        // Opening a conversation reads its reply (#592).
+        didSet { if let selectedConversationId { clearUnread(selectedConversationId) } }
+    }
+    /// User-facing conversations whose reply landed while the person was not looking (#592):
+    /// a blue dot on the row. Transient: no field, no column, so a relaunch clears it. Changed only
+    /// at a turn's end and a card's delivery, never per streamed token, and assigned only when it
+    /// changes.
+    private(set) var unreadReplies: Set<UUID> = []
+    /// Each running conversation's message count when its first turn began, so its end can tell
+    /// whether the turn added an agent reply.
+    @ObservationIgnored private var turnStartMessageCounts: [UUID: Int] = [:]
     /// Set by `reveal(hit:)` when a sidebar search hit is tapped (#183): the id of the
     /// `ChatMessage` the transcript's `ScrollViewReader` should scroll to on its next pass.
     /// `ChatView` clears it once it has acted on it, so it never re-fires on later re-renders.
@@ -882,6 +893,7 @@ class AppState {
     func beginEngineTurn(for conversationId: UUID) {
         if (engineTurnCounts[conversationId] ?? 0) == 0 {
             mainStartTimeByConversation[conversationId] = Date()
+            turnStartMessageCounts[conversationId] = conversations.first { $0.id == conversationId }?.messages.count
             // No turn is running here, so a box left in this conversation belongs to a round
             // nothing will finish (one a watchdog abandoned outside a bracketed turn): keep what it
             // showed before this turn starts (#583 review).
@@ -911,7 +923,10 @@ class AppState {
         engineTurnCounts[conversationId] = count > 1 ? count - 1 : nil
         // A stream whose turn ended without its final write (a cancelled or abandoned task) keeps
         // what it showed, and leaves no box behind (#541).
-        if engineTurnCounts[conversationId] == nil { commitStreams(in: conversationId) }
+        if engineTurnCounts[conversationId] == nil {
+            commitStreams(in: conversationId)
+            markUnreadIfReplied(conversationId)
+        }
         // An arrival turn — scheduler, watcher, subagent post-back — never passes through
         // `runThinkingTask`, so without this the message a user typed while one was running is
         // enqueued by `sendMessage` and then waits for some unrelated later UI turn to end
@@ -1092,6 +1107,40 @@ class AppState {
         let marks = NeedsHuman.derive(asks: asks, conversations: conversations,
                                       blocked: ledgerAttention.blocked, pinnedId: pinned)
         if marks != needsHuman { needsHuman = marks }
+    }
+
+    // MARK: Unread replies (#592)
+
+    /// Whether the person is looking at `conversationId` now: the app active, the chat window on
+    /// screen and this conversation selected. The notification policy's own context, so a banner
+    /// and the dot agree on what "looking" means.
+    func isLooking(at conversationId: UUID) -> Bool {
+        let context = notificationContext()
+        return context.appActive && context.mainWindowVisible && context.selectedConversationId == conversationId
+    }
+
+    /// Marks a visible conversation unread unless the person is looking at it.
+    func markUnread(_ conversationId: UUID) {
+        guard let c = conversations.first(where: { $0.id == conversationId }), c.isUserFacing, !c.isArchived,
+              !isLooking(at: conversationId), !unreadReplies.contains(conversationId) else { return }
+        unreadReplies.insert(conversationId)
+    }
+
+    func clearUnread(_ conversationId: UUID) {
+        if unreadReplies.contains(conversationId) { unreadReplies.remove(conversationId) }
+    }
+
+    /// The app became active or the window key: the selected conversation is read if it is looked at.
+    func clearUnreadIfLooking() {
+        if let selected = selectedConversationId, isLooking(at: selected) { clearUnread(selected) }
+    }
+
+    /// At a conversation's last turn end: unread if that turn added an agent reply.
+    private func markUnreadIfReplied(_ conversationId: UUID) {
+        let start = turnStartMessageCounts.removeValue(forKey: conversationId) ?? 0
+        guard let messages = conversations.first(where: { $0.id == conversationId })?.messages,
+              messages.count > start, messages[start...].contains(where: { $0.role == .agent }) else { return }
+        markUnread(conversationId)
     }
 
     func sessionStatus(for conversation: Conversation) -> SessionStatus {
@@ -2300,6 +2349,7 @@ class AppState {
 
     func deleteConversation(_ id: UUID) {
         for (messageId, _) in streaming.boxes(in: id) { streaming.remove(messageId) }   // #541
+        clearUnread(id)   // #592
         cancelTasks(for: id)
         resetPeerDepth(for: id)   // a deleted conversation carries no hop depth
         // #469 §5.3: must run before `conversations.removeAll` below — it reads this
@@ -2396,6 +2446,7 @@ class AppState {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
               !conversations[idx].isArchived else { return nil }
         commitStreams(in: conversationId)   // #541: what was streaming is kept, not left in a box
+        clearUnread(conversationId)   // #592: an archived conversation has no row in the list
         conversations[idx].isArchived = true
         markChanged(conversationId, .metadata)
         closeRequestsToGone(conversationId, verb: "archived")   // #469 §5.3
