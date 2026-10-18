@@ -100,7 +100,10 @@ actor SandboxSessionManager {
 
     func isClosed(_ id: UUID) -> Bool { closed.contains(id) }
 
-    private func name(for id: UUID) -> String { "\(Self.namePrefix)\(id.uuidString.lowercased())" }
+    private func name(for id: UUID) -> String { Self.containerName(for: id) }
+
+    /// A conversation's session container name, which is also its `GitConfigGuard` owner.
+    static func containerName(for id: UUID) -> String { "\(namePrefix)\(id.uuidString.lowercased())" }
 
     private static let resetNotice = """
     [sandbox] This session's container was reclaimed after being idle; previously installed \

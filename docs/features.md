@@ -62,13 +62,7 @@ So a sandboxed command refuses to run when that workspace is your home folder or
 
 ### Repositories in the Sandbox
 
-Git on your Mac runs programs a repository names, in its hooks and in its config (`core.hooksPath`, `core.fsmonitor`, `diff.external`, filter drivers). So when a sandboxed workspace is a git repository, Iris keeps the VM from choosing what your next `git commit` runs (#623):
-
-- In the VM, the repository's `.git` is a mount of its own, so it can't be renamed or replaced, and `.git/hooks` is read-only (created first if it is missing). Commits, branches and checkouts in the VM still work. A `.git` or `hooks` that is a symbolic link refuses sandboxed commands.
-- Before and after every sandboxed command, and before every host one, Iris compares the repository's config files (and a worktree's `.git` file) with the copy it kept. The VM may add or change remotes, upstream branches and `user.*`. Any other change, including `include.path`, a submodule's or Git LFS's settings, or an `ext::` URL, is put back byte for byte, and the reply says so. This includes a change you make yourself while the sandbox session is open.
-- A host `run_command` in a folder a sandbox has mounted runs git with the fixed-name keys that start programs overridden. Your own global and system values for those keys still apply. Git started this way never opens an editor (`core.editor` is `true`), and runs only the repository's read-only `.git/hooks`. A `core.hooksPath` that points into the worktree, such as husky's `.husky`, is not run.
-
-What this does not cover: git run from your own terminal in the moment between a write in the VM and Iris putting it back; keys with a name of the repository's choosing (`filter.<x>.clean`, `diff.<x>.textconv`, `merge.<x>.driver`, `remote.<x>.uploadpack`) in that same moment; the config of a repository nested inside the workspace, or of one the VM creates; and a host command that sets `GIT_CONFIG_COUNT` itself.
+When a sandboxed workspace is a git repository, the VM can't choose what git on your Mac runs: its hooks are read-only in the VM, config changes that could run a program are put back, submodules the VM adds are moved aside, and Iris's own host git runs with the risky settings overridden (#623). [Details](sandbox_repositories.md)
 
 ### Workspace Binding
 
