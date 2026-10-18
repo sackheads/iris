@@ -28,6 +28,9 @@ struct WorkspaceIrisDirTests {
         #expect(WorkspaceIrisDir.read("sym.md", workspace: ws) == nil, "a symlink is never followed")
         #expect(WorkspaceIrisDir.read("hard.md", workspace: ws) == nil, "a second hard link is refused")
         #expect(WorkspaceIrisDir.read("missing.md", workspace: ws) == nil)
+        // A FIFO is refused rather than blocking the open (#625 review).
+        #expect(mkfifo(iris + "/fifo.md", 0o644) == 0)
+        #expect(WorkspaceIrisDir.read("fifo.md", workspace: ws) == nil)
     }
 
     @Test("a .iris that is itself a symlink is read from not at all, and refused for a mount")
@@ -85,6 +88,9 @@ struct WorkspaceIrisDirTests {
         let homes = ["/Users/u/.iris-dev", "/Users/u/.iris"]
         #expect(WorkspaceIrisDir.isWorkspaceIrisPath("/Users/u/proj/.iris/vibecop.md", homes: homes))
         #expect(WorkspaceIrisDir.isWorkspaceIrisPath("/Users/u/proj/.iris", homes: homes))
+        #expect(WorkspaceIrisDir.isWorkspaceIrisPath("/Users/u/proj/.IRIS/vibecop.md", homes: homes), "APFS ignores case")
+        #expect(WorkspaceIrisDir.commandNamesWorkspaceIris("echo x > .IRIS/vibecop.md"))
+        #expect(!WorkspaceIrisDir.commandNamesWorkspaceIris("cat $HOME/.iris/memory.md"))
         #expect(!WorkspaceIrisDir.isWorkspaceIrisPath("/Users/u/.iris/memory/notes.md", homes: homes))
         #expect(!WorkspaceIrisDir.isWorkspaceIrisPath("/Users/u/proj/.iris-notes/a", homes: homes))
         #expect(WorkspaceIrisDir.commandNamesWorkspaceIris("echo x > .iris/vibecop.md"))

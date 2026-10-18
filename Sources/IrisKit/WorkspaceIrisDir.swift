@@ -22,7 +22,9 @@ enum WorkspaceIrisDir {
         let dirFD = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard dirFD >= 0 else { return nil }
         defer { close(dirFD) }
-        let fd = openat(dirFD, file, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        // `O_NONBLOCK`: a FIFO planted while the VM could still write here would block the open,
+        // on the approval path, for good (#625 review). The fstat below refuses it.
+        let fd = openat(dirFD, file, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard fd >= 0 else { return nil }
         let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         var info = stat()
@@ -66,19 +68,20 @@ enum WorkspaceIrisDir {
     static func isWorkspaceIrisPath(_ path: String, homes: [String]) -> Bool {
         let resolved = IrisEngine.expandTilde(path)
         if homes.contains(where: { resolved == $0 || resolved.hasPrefix($0.hasSuffix("/") ? $0 : $0 + "/") }) { return false }
-        return resolved.split(separator: "/").contains { $0 == Substring(name) }
+        // Case-insensitively: APFS is, so `.IRIS` is the same folder (#625 review).
+        return resolved.split(separator: "/").contains { $0.lowercased() == name }
     }
 
     /// Whether a host command names a `.iris` other than Iris's own home, after removing the quotes
     /// and backslashes the shell would. Best effort: a command can reach a path it does not spell
     /// (a glob, a script), which is why the VM's side is a mount and not this.
     static func commandNamesWorkspaceIris(_ command: String) -> Bool {
-        let plain = command.filter { $0 != "'" && $0 != "\"" && $0 != "\\" }
+        let plain = command.filter { $0 != "'" && $0 != "\"" && $0 != "\\" }.lowercased()
         var rest = Substring(plain)
         while let range = rest.range(of: name) {
             let before = rest[..<range.lowerBound]
             let after = rest[range.upperBound...]
-            let homeSpelling = before.hasSuffix("~/") || before.hasSuffix("HOME/") || before.hasSuffix("HOME}/")
+            let homeSpelling = before.hasSuffix("~/") || before.hasSuffix("home/") || before.hasSuffix("home}/")
             let isWord = after.first.map { !($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") } ?? true
             if !homeSpelling && isWord { return true }
             rest = after
