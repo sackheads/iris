@@ -2320,7 +2320,9 @@ final class RunDeadlineWatchdog: @unchecked Sendable {
         }
         let next = DispatchSource.makeTimerSource(queue: queue)
         next.schedule(wallDeadline: .now() + min(remaining, slice))
-        next.setEventHandler { [weak self] in self?.check() }
+        // Strong on purpose: the armed timer keeps the watchdog alive, so it fires even if its
+        // owner lets go early. The cycle ends when the deadline fires or `cancel()` drops the timer.
+        next.setEventHandler { self.check() }
         let armed = lock.withLock { () -> Bool in
             guard !done else { return false }
             timer = next
