@@ -1,6 +1,6 @@
 # Agency: Runtime (deliverable 3 of #187) — Design
 
-**Status:** IMPLEMENTED 2026-09-22, with one deferral. Approved in principle 2026-09-21 (morning review; §0 records the decisions). Everything here is built except `schedule_job`'s per-job `timeout_seconds` argument (§3), deferred by R37 — the global `JOB_RUN_TIMEOUT_SECONDS` stepper moves the timeout for every job that has not overridden one. The amendments in §11 record where the implementation changed the design, R37 among them. User-facing documentation: `docs/jobs.md`.
+**Status:** IMPLEMENTED 2026-09-22, with one deferral since built (#263). Approved in principle 2026-09-21 (morning review; §0 records the decisions). Everything here is built; `schedule_job`'s per-job `timeout_seconds` argument (§3), deferred by R37, landed later in #263 (60-3600 s, stored as `runTimeoutOverride`). The amendments in §11 record where the implementation changed the design, R37 among them. User-facing documentation: `docs/jobs.md`.
 **Issue:** #187 (`docs/agency/agency.md` deliverable 3)
 **Builds on:** #249 (job model and ledger spec), #252 (deliverable 1), #253 (deliverable 2). Facts about the code as it stands after #253: `.superpowers/briefs/agency-d3-facts.md` in the main checkout.
 **Does not touch:** the quiet window and self-write filter (D4), the pinned main conversation's briefing and read tools (D5), native surfaces (D6).
@@ -46,7 +46,7 @@ var retryAttempt: Int = 0                       // 0 = not retrying; reset on a 
 var queuedFire: Date? = nil                     // overlap .queue: one pending trigger, never more
 ```
 
-Stored as one `policy TEXT` JSON column plus `retryAttempt INTEGER NOT NULL DEFAULT 0` and `queuedFire DATETIME` on `jobs`, migration `v10_job_policy` (additive; NULL policy decodes as the default). `schedule_job` gains optional `overlap`, `catch_up` (`coalesce|skip|replay:N`), `timeout_seconds` (deferred — see amendment 17), `profile` (now accepting `mutating`); `/jobs` shows the policy when it is not the default (in a column of its own rather than the trigger column — amendment 17).
+Stored as one `policy TEXT` JSON column plus `retryAttempt INTEGER NOT NULL DEFAULT 0` and `queuedFire DATETIME` on `jobs`, migration `v10_job_policy` (additive; NULL policy decodes as the default). `schedule_job` gains optional `overlap`, `catch_up` (`coalesce|skip|replay:N`), `timeout_seconds` (deferred — see amendment 17; built in #263), `profile` (now accepting `mutating`); `/jobs` shows the policy when it is not the default (in a column of its own rather than the trigger column — amendment 17).
 
 ## 4. The runner enforces the policy
 

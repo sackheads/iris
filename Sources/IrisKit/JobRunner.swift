@@ -1269,6 +1269,13 @@ actor JobRunner {
             abandoned = !(await Self.returns(by: by) { _ = await turnTask.value })
         }
         if abandoned { await lifetime.release() }
+        // The soft stop leaves a line saying why the turn ended; a turn the deadline abandoned
+        // never gets to, so without this its transcript just stops (#263). A job run's engine is
+        // always the main agent.
+        if overran, let state {
+            let line = IrisEngine.budgetStopLine(origin: "Main agent", reason: TurnBudget.timeExceeded)
+            await MainActor.run { state.appendMessage(role: .system, content: line, to: conversationId) }
+        }
         let finishedAt = now()
 
         guard let turn = await readTurn(conversationId: conversationId) else {
@@ -2438,7 +2445,7 @@ struct JobLimits: Equatable, Sendable {
 
     static func resolve(job: Job, config: ConfigManager) -> JobLimits {
         let policy = job.policy
-        // `runTimeoutSeconds` is the one non-optional override on `JobPolicy`, so "the job set it"
+        // The legacy `runTimeoutSeconds` is non-optional, so "the job set it"
         // has to be read as "it is not the struct's own default" — which is what lets the global
         // stepper still move every job that never asked for a timeout of its own.
         //
@@ -2447,10 +2454,12 @@ struct JobLimits: Equatable, Sendable {
         // person may reasonably want that unbounded, while this bounds a turn that has stopped responding — and a run nothing
         // can end is the failure the whole deliverable is about. Nothing configurable writes one;
         // a hand-edited policy can.
+        // #263: `runTimeoutOverride`, which the tool writes, wins outright, so a job can pin 600
+        // too. The legacy key keeps the rule above for hand-edited policies.
         let overridden = policy.runTimeoutSeconds > 0
             && policy.runTimeoutSeconds != JobPolicy().runTimeoutSeconds
-        let timeout = overridden ? policy.runTimeoutSeconds
-            : global(config.jobRunTimeoutSeconds, default: ConfigManager.JobDefaults.runTimeoutSeconds)
+        let timeout = policy.runTimeoutOverride ?? (overridden ? policy.runTimeoutSeconds
+            : global(config.jobRunTimeoutSeconds, default: ConfigManager.JobDefaults.runTimeoutSeconds))
         // #283: the breaker is per *kind*. A watch fires once per save-burst, so the scheduled
         // figure of six paused a watch inside twenty minutes of ordinary editing; a watch reads its
         // own global instead. Per kind rather than written into each new watch's policy, which was
