@@ -146,9 +146,10 @@ struct PermissionManager: Sendable {
         var rules = loadProjectRules(workspace: workspace) ?? []
         if !rules.contains(rule) {
             rules.append(rule)
-            saveRules(rules, to: projectURL, atomically: true)
-            // Iris wrote it, so Iris trusts it (#625): the person's click is the consent.
-            if let written = try? JSONEncoder().encode(rules) {
+            // Iris wrote it, so Iris trusts it (#625): the person's click is the consent. The bytes
+            // written, not a second encode: JSONEncoder's key order is not stable across calls, so a
+            // re-encode can differ from the file and leave the click untrusted.
+            if let written = saveRules(rules, to: projectURL, atomically: true) {
                 WorkspaceIrisTrust(paths: paths).recordWritten("permissions.json", workspace: workspace, written: written)
             }
         }
@@ -169,9 +170,11 @@ struct PermissionManager: Sendable {
 
     /// `atomically` for a project file: the rename replaces a link left in its place, not the
     /// file it points to, and leaves one link to a new file.
-    private func saveRules(_ rules: [PermissionRule], to url: URL, atomically: Bool = false) {
-        if let data = try? JSONEncoder().encode(rules) {
-            try? data.write(to: url, options: atomically ? .atomic : [])
-        }
+    /// The bytes it wrote, or nil.
+    @discardableResult
+    private func saveRules(_ rules: [PermissionRule], to url: URL, atomically: Bool = false) -> Data? {
+        guard let data = try? JSONEncoder().encode(rules),
+              (try? data.write(to: url, options: atomically ? .atomic : [])) != nil else { return nil }
+        return data
     }
 }
