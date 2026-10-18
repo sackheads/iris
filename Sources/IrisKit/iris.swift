@@ -2943,9 +2943,9 @@ actor IrisEngine {
                                         await self.recordCommandStart(id: id)
                                     }
 
-                                    let cmdStart = Date()
+                                    let cmdStart = UptimeClock.live.now()   // uptime: a sleep is not time spent (#608)
                                     let result = await self.executeFunctionCall(call, conversationId: conversationId, workspacePath: workspacePath, restrictToGoalComplete: restrictToGoalComplete)
-                                    let elapsed = Date().timeIntervalSince(cmdStart)
+                                    let elapsed = UptimeClock.live.seconds(since: cmdStart)
                                     if let id = timingId {
                                         await self.recordCommandDuration(id: id, elapsed: elapsed)
                                     }

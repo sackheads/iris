@@ -480,7 +480,7 @@ struct CLIProcessRunner: Sendable {
         let box = Box(process)
         let collector = Collector(stdout: out, stderr: err, queue: ladder)
         let deadline = Deadline()
-        let started = Date()
+        let started = UptimeClock.live.now()   // uptime: a sleep is not time spent (#608)
         let child = Child(pid: { box.process.processIdentifier },
                           isRunning: { box.process.isRunning },
                           terminate: { box.process.terminate() },
@@ -503,7 +503,7 @@ struct CLIProcessRunner: Sendable {
                     // condition that means "nobody has been told yet" is the collector's own.
                     guard !collector.hasAnswered else { return }
                     deadline.fire()
-                    Self.enforce({ ContainerRuntimeError.timedOut(elapsedSeconds: Date().timeIntervalSince(started)) },
+                    Self.enforce({ ContainerRuntimeError.timedOut(elapsedSeconds: UptimeClock.live.seconds(since: started)) },
                                  on: child, hasAnswered: { collector.hasAnswered },
                                  fail: { collector.fail($0) }, onKill: onKill)
                 }
@@ -566,7 +566,7 @@ struct CLIProcessRunner: Sendable {
         }
 
         if deadline.didFire {
-            throw ContainerRuntimeError.timedOut(elapsedSeconds: Date().timeIntervalSince(started))
+            throw ContainerRuntimeError.timedOut(elapsedSeconds: UptimeClock.live.seconds(since: started))
         }
         // No `Task.checkCancellation()` here on purpose: a cancelled call whose child exited
         // anyway has a real result, and the host route returns that result too. Cancellation only
