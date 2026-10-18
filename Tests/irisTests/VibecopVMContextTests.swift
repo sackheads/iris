@@ -19,10 +19,10 @@ struct VibecopVMContextTests {
         }
     }
 
-    private func prompt(inSandbox: Bool) async throws -> String {
+    private func prompt(inSandbox: Bool, workspace: String? = nil) async throws -> String {
         let engine = Recorder()
         _ = try await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": engine]) {
-            try await VibecopService.shared.evaluateAction(toolName: "run_command", details: "make", workspace: nil,
+            try await VibecopService.shared.evaluateAction(toolName: "run_command", details: "make", workspace: workspace,
                                                            inSandbox: inSandbox, vibecopEnabled: true)
         }
         return engine.prompt
@@ -35,7 +35,16 @@ struct VibecopVMContextTests {
         #expect(!text.localizedCaseInsensitiveContains("isolated"))
         #expect(text.contains("the user's real Mac folders"))
         #expect(text.contains("read-write unless marked"))
-        #expect(text.contains("Library/LaunchAgents"))
+        #expect(text.contains("Library/LaunchAgents/"))
+        #expect(text.contains(".git/hooks/"))
+        #expect(!text.contains("other dotfiles"), "an open-ended list escalates routine project edits")
+    }
+
+    @Test("in the VM the prompt names the mounted workspace, so a VM-only dotfile can be told from a host one")
+    func vmPromptNamesTheMount() async throws {
+        let text = try await prompt(inSandbox: true, workspace: "/Users/me/src/p")
+        #expect(text.contains("the workspace /Users/me/src/p (the working directory)"))
+        #expect(text.contains("thrown away with it"))
     }
 
     @Test("on the host the VM paragraph is absent")
