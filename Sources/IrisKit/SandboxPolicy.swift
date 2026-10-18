@@ -102,8 +102,7 @@ public enum SandboxPolicy {
             let data = try JSONEncoder().encode(WorkspaceConfig(mainAgent: pref))
             try data.write(to: fileURL, options: .atomic)
             // Iris wrote it, so Iris trusts it (#625).
-            trust.record("sandbox.json", workspace: workspace,
-                         data: WorkspaceIrisDir.readUnverified("sandbox.json", workspace: workspace))
+            trust.recordWritten("sandbox.json", workspace: workspace, written: data)
             return true
         } catch {
             return false

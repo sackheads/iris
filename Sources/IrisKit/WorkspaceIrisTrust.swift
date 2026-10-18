@@ -55,11 +55,25 @@ struct WorkspaceIrisTrust: Sendable {
         }
     }
 
-    /// The person's "Trust These Rules": every rule file as it is now. Called only from the UI.
-    func trustAll(workspace: String) {
-        for file in Self.files {
-            record(file, workspace: workspace, data: WorkspaceIrisDir.readUnverified(file, workspace: workspace))
+    /// The person's "Trust These Rules": exactly the files and content the sheet showed, and only
+    /// while each still reads that way (#625 review). Recording what is on disk at the click would
+    /// trust whatever a VM swapped in after the person looked, or a file the sheet never showed.
+    /// False, with nothing recorded, when any of them changed. Called only from the UI.
+    @discardableResult
+    func trustReviewed(_ reviewed: [(file: String, data: Data)], workspace: String) -> Bool {
+        guard reviewed.allSatisfy({ WorkspaceIrisDir.readUnverified($0.file, workspace: workspace) == $0.data }) else {
+            return false
         }
+        for entry in reviewed { record(entry.file, workspace: workspace, data: entry.data) }
+        return true
+    }
+
+    /// Records `written` for a file Iris just wrote, only if the file still holds exactly that.
+    @discardableResult
+    func recordWritten(_ file: String, workspace: String, written: Data) -> Bool {
+        guard WorkspaceIrisDir.readUnverified(file, workspace: workspace) == written else { return false }
+        record(file, workspace: workspace, data: written)
+        return true
     }
 
     // Process-wide: two writers updating different entries must not lose one.

@@ -277,7 +277,8 @@ struct JobGrantApprovalTests {
                                   PermissionRule(toolName: "run_command", details: "make lint")])
             .write(to: rules.appendingPathComponent("permissions.json"))
         // The person's own rules, as an "Always allow in project" click records them (#625).
-        WorkspaceIrisTrust(paths: IrisPaths(root: t.home.appendingPathComponent(".iris"))).trustAll(workspace: c(t.proj))
+        let trust = WorkspaceIrisTrust(paths: IrisPaths(root: t.home.appendingPathComponent(".iris")))
+        trust.trustReviewed(trust.untrusted(workspace: c(t.proj)), workspace: c(t.proj))
         // H1's invariant: a granted run's write reaches Foundation on no branch, so the allowlist
         // cannot widen the two file tools — the decision (nil here) is the whole answer.
         #expect(!(await app.requestApproval(toolName: "write_file", details: outside, args: ["path": .string(outside)],

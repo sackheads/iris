@@ -565,7 +565,10 @@ struct ChatView: View {
         )) {
             if let wp = rulesReviewTarget?.workspacePath {
                 WorkspaceRulesReview(files: state.untrustedWorkspaceRules(for: wp), workspace: wp,
-                                     trust: { state.trustWorkspaceRules(for: wp); rulesReviewTarget = nil },
+                                     trust: { shown in
+                                         // Changed since it was shown: keep the sheet open on the new text.
+                                         if state.trustWorkspaceRules(for: wp, reviewed: shown) { rulesReviewTarget = nil }
+                                     },
                                      dismiss: { rulesReviewTarget = nil })
             }
         }
@@ -1476,7 +1479,8 @@ func formatDuration(_ t: TimeInterval) -> String {
 struct WorkspaceRulesReview: View {
     let files: [(file: String, data: Data)]
     let workspace: String
-    let trust: () -> Void
+    /// Called with exactly the files and content shown.
+    let trust: ([(file: String, data: Data)]) -> Void
     let dismiss: () -> Void
 
     var body: some View {
@@ -1500,7 +1504,7 @@ struct WorkspaceRulesReview: View {
             HStack {
                 Spacer()
                 Button("Not Now", role: .cancel, action: dismiss)
-                Button("Trust These Rules", action: trust).keyboardShortcut(.defaultAction)
+                Button("Trust These Rules") { trust(files) }.keyboardShortcut(.defaultAction)
             }
         }
         .padding(20)

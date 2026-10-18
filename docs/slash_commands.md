@@ -62,5 +62,5 @@ The full reference follows.
 |---|---|---|
 | `/goal` | `/goal <description>` | Activate an autonomous goal-driven loop. Iris executes tools until complete. |
 | `/reflect` | `/reflect` | Trigger manual memory reflection, fact consolidation, and OKF frontmatter grooming. |
-| `/vibecop init` | `/vibecop init` | Analyze active workspace and generate `.iris/vibecop.md` security rules; writing it asks you once (#617). |
+| `/vibecop init` | `/vibecop init` | Analyze active workspace and generate `.iris/vibecop.md` security rules; writing it asks you, and its rules take effect once you trust them under Review Workspace Rules (#617, #625). |
 | `/rename` | `/rename` | Automatically analyze conversation history and assign a 1–4 word title. Refused on Iris itself, which keeps its name. |
