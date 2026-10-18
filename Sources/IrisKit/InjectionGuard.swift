@@ -483,10 +483,10 @@ public struct InjectionGuard {
             return .error
         }
 
-        let startTime = Date()
+        let startTime = UptimeClock.live.now()   // uptime: a sleep is not time spent (#608)
         do {
             let probability = try await CoreMLEvaluator.shared.evaluate(text: input)
-            let durationMs = Date().timeIntervalSince(startTime) * 1000
+            let durationMs = UptimeClock.live.seconds(since: startTime) * 1000
             // A tier that reached a verdict is working, whatever the verdict says about the
             // content (#218). Cleared here rather than on `.safe` alone: `.malicious` is the tier
             // doing its job, and leaving the LED red for it would be a lie about the model.
@@ -502,7 +502,7 @@ public struct InjectionGuard {
             }
             return .safe
         } catch {
-            let durationMs = Date().timeIntervalSince(startTime) * 1000
+            let durationMs = UptimeClock.live.seconds(since: startTime) * 1000
             await MetricsManager.shared.trackLatency(operation: .promptGuardTier2, modelName: "CoreML", durationMs: durationMs, success: false)
             print("[InjectionGuard] Tier 2 CoreML error: \(error). Failing closed.")
             await MainActor.run { GuardTierHealth.current.recordTier2Failure("\(error)") }
@@ -548,7 +548,7 @@ public struct InjectionGuard {
             modelPathOrName: modelName
         )
         
-        let startTime = Date()
+        let startTime = UptimeClock.live.now()   // uptime: a sleep is not time spent (#608)
         do {
             let engine = try await AuxiliaryModelManager.shared.getEngine(for: "canary", config: config)
             let tag = UUID().uuidString.prefix(8)
@@ -564,7 +564,7 @@ public struct InjectionGuard {
             """
             
             let response = try await engine.generate(prompt: prompt, jsonSchema: nil)
-            let durationMs = Date().timeIntervalSince(startTime) * 1000
+            let durationMs = UptimeClock.live.seconds(since: startTime) * 1000
             // As tier 2 above: the canary answered, so the model is fine — what it answered is a
             // statement about the content, not about the model (#218). Taken after `durationMs`
             // for the same reason.
@@ -572,7 +572,7 @@ public struct InjectionGuard {
             await MetricsManager.shared.trackLatency(operation: .promptGuardTier3, modelName: modelName, durationMs: durationMs, success: true)
             return (response.contains("SAFE") && !response.contains("MALICIOUS")) ? .safe : .malicious
         } catch {
-            let durationMs = Date().timeIntervalSince(startTime) * 1000
+            let durationMs = UptimeClock.live.seconds(since: startTime) * 1000
             await MetricsManager.shared.trackLatency(operation: .promptGuardTier3, modelName: modelName, durationMs: durationMs, success: false)
             print("[InjectionGuard] Canary execution failed: \(error). Failing closed for canary.")
             await MainActor.run { GuardTierHealth.current.recordTier3Failure("\(error)", engine: engineTypeString) }
