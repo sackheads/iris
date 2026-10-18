@@ -630,6 +630,12 @@ final class ConversationStore: Sendable {
                           columns: ["fromSession", "expectsReply", "closedAt"])
             try db.create(index: "peer_messages_to", on: "peer_messages", columns: ["toSession"])
         }
+        // #611: nullable; NULL is no opt-in.
+        m.registerMigration("v22_home_writable_opt_in") { db in
+            try db.alter(table: "conversations") { t in
+                t.add(column: "homeWritableOptIn", .text)
+            }
+        }
         return m
     }
 
@@ -848,13 +854,13 @@ final class ConversationStore: Sendable {
                     tokenUsage = ?, goalContract = ?, subagentResult = ?, checkpointHistory = ?,
                     lastGoalEvaluation = ?, lastGoalCompletionReport = ?, isArchived = ?,
                     isBackground = ?, isPinned = ?, sessionCard = ?, jobProfile = ?, sandboxGrant = ?,
-                    hasUnattendedInput = ?, prefixMismatchBehavior = ?, role = ?
+                    hasUnattendedInput = ?, prefixMismatchBehavior = ?, role = ?, homeWritableOptIn = ?
                 WHERE id = ?
                 """, arguments: [c.title, touched, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
                                  history, evaluation, report, c.isArchived, c.isBackground, c.isPinned, card,
                                  c.jobProfile?.rawValue, grant, c.hasUnattendedInput, c.prefixMismatchBehavior?.rawValue,
-                                 c.role, c.id.uuidString])
+                                 c.role, c.homeWritableOptIn, c.id.uuidString])
         } else {
             let position = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(position), 0) FROM conversations") ?? 0) + 1
             try db.execute(sql: """
@@ -862,13 +868,13 @@ final class ConversationStore: Sendable {
                     messageCountSinceReflection, goalIterationCount, mainAgentSandbox, tokenUsage, goalContract,
                     subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived,
                     isBackground, isPinned, sessionCard, jobProfile, sandboxGrant, hasUnattendedInput,
-                    prefixMismatchBehavior, role)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    prefixMismatchBehavior, role, homeWritableOptIn)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [c.id.uuidString, position, c.title, now, touched, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
                                  tokenUsage, contract, result, history, evaluation, report, c.isArchived,
                                  c.isBackground, c.isPinned, card, c.jobProfile?.rawValue, grant, c.hasUnattendedInput,
-                                 c.prefixMismatchBehavior?.rawValue, c.role])
+                                 c.prefixMismatchBehavior?.rawValue, c.role, c.homeWritableOptIn])
         }
     }
 
@@ -1228,6 +1234,12 @@ final class ConversationStore: Sendable {
                 case .null: break
                 case .invalid: localSoftLosses.append(("role", "invalid text encoding"))
                 case .text(let s): c.role = s
+                }
+                // #611: an unreadable opt-in degrades to none (the safe side) plus a reported loss.
+                switch Self.readTextValue(row, "homeWritableOptIn") {
+                case .null: break
+                case .invalid: localSoftLosses.append(("homeWritableOptIn", "invalid text encoding"))
+                case .text(let s): c.homeWritableOptIn = s
                 }
 
                 // Per-conversation, so the bulk breaker below can throw the lot away.

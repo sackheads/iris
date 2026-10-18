@@ -5370,6 +5370,18 @@ actor IrisEngine {
         return path
     }
 
+    /// The #611 opt-in a call's sandbox may use: its delegation root's, so a subagent or grader
+    /// of an opted-in conversation shares it. The executor refuses without it (fail closed).
+    func homeWritableOptIn(for conversationId: UUID?) async -> String? {
+        guard let conversationId else { return nil }
+        let localState = state
+        return await MainActor.run { () -> String? in
+            guard let state = localState else { return nil }
+            let root = state.delegationRoot(of: conversationId)
+            return state.conversations.first { $0.id == root }?.homeWritableOptIn
+        }
+    }
+
     private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil, approvedWorkspaceRoot: String? = nil, decidedPath: String? = nil, restrictedPath: [String]? = nil) async -> String {
         var execArgs: [String: JSONValue] = args
 
@@ -5422,7 +5434,8 @@ actor IrisEngine {
         }
 
         var result = await executor.execute(name: name, args: execArgs, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox, grant: grant, grantedMount: grantedMount,
-                                              approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath, restrictedPath: restrictedPath)
+                                              approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath, restrictedPath: restrictedPath,
+                                              homeWritableOptIn: await homeWritableOptIn(for: conversationId))
 
         if name == "write_file", result.hasPrefix("Successfully wrote to "),
            let cid = conversationId, let path = execArgs["path"]?.stringValue {
