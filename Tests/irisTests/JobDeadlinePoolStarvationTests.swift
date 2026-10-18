@@ -85,8 +85,8 @@ enum DeadlineStarvation {
         guard let (job, runner, store, state, engine) = started else { finish(log, 1, "could not build the harness") }
         let fire = Task.detached { await runner.fire(job: job, origin: .schedule) }
         // Awaited, not `usleep`: until the hold below, the run needs a pool thread to get here.
-        let reachBy = Date().addingTimeInterval(10)
-        while !client.reached, Date() < reachBy { try? await Task.sleep(nanoseconds: 20_000_000) }
+        let reachBy = TestClock.deadline(10)
+        while !client.reached, TestClock.now() < reachBy { try? await Task.sleep(nanoseconds: 20_000_000) }
         guard client.reached else {
             let runs = (try? store.ledger.runs(jobId: job.id, limit: 3)) ?? []
             finish(log, 1, "the turn never reached the model (runs: \(runs.map { "\($0.status) \($0.failureReason ?? "-")" }))")
@@ -100,9 +100,9 @@ enum DeadlineStarvation {
         }
         clock.advance(by: 3_001)
         // One slice to notice, plus generous slack; polled from this blocked thread.
-        let until = Date().addingTimeInterval(3)
+        let until = TestClock.deadline(3)
         func landed() -> Bool { client.cancelled && activity.events.last == .end }
-        while !landed(), Date() < until { usleep(20_000) }
+        while !landed(), TestClock.now() < until { usleep(20_000) }
         let ok = landed()
         let detail = "cancelled: \(client.cancelled), activity: \(activity.events)"
         hold.release()
