@@ -481,7 +481,7 @@ struct ChatView: View {
                 .transition(Motion.slide())
             }
         }
-        .animation(Motion.animation(.spring(response: 0.4, dampingFraction: 0.8)), value: state.pendingApprovals.count)
+        .animation(Motion.appearance(.spring(response: 0.4, dampingFraction: 0.8)), value: state.pendingApprovals.count)
         .frame(minWidth: 600, idealWidth: 800, minHeight: 400, idealHeight: 600)
         .preferredColorScheme(config.appearanceTheme == "light" ? .light : (config.appearanceTheme == "dark" ? .dark : nil))
         .sheet(isPresented: $showSetupWizard) {

@@ -17,6 +17,9 @@ struct MotionTests {
         let spring = Animation.spring(response: 0.3, dampingFraction: 0.7)
         #expect(Motion.animation(spring, on) == nil)
         #expect(Motion.animation(spring, off) == spring)
+        // An appearance (the banner coming in) dissolves rather than cutting; off, its spring.
+        #expect(Motion.appearance(spring, on) == Motion.dissolve)
+        #expect(Motion.appearance(spring, off) == spring)
     }
 
     /// Every SwiftUI animation and transition goes through `Motion`, so a new one that does not
@@ -26,15 +29,20 @@ struct MotionTests {
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources/IrisKit")
         let raw = [
-            try NSRegularExpression(pattern: #"(?<![\w.])withAnimation\s*[({]"#),
+            try NSRegularExpression(pattern: #"(?<!Motion\.)\bwithAnimation\s*[({]"#),
+            try NSRegularExpression(pattern: #"\bwithTransaction\s*[({]"#),
+            try NSRegularExpression(pattern: #"\.transaction\s*[({]"#),
             try NSRegularExpression(pattern: #"(?<!Motion)\.animation\((?!Motion\.|forKey|startingAt)"#),
             try NSRegularExpression(pattern: #"\.transition\((?!Motion\.)"#),
         ]
         /// file: count of sites deliberately left raw, each with a reason. None today.
         let allowed: [String: Int] = [:]
         var found: [String: [String]] = [:]
-        for file in try FileManager.default.contentsOfDirectory(atPath: sources.path)
-        where file.hasSuffix(".swift") && file != "Motion.swift" {
+        // Recursive, so a future subfolder of Sources is scanned too.
+        let files = (FileManager.default.enumerator(atPath: sources.path)?.allObjects as? [String] ?? [])
+            .filter { $0.hasSuffix(".swift") && !$0.hasSuffix("Motion.swift") }
+        #expect(files.count > 50, "precondition: the scan found the sources")
+        for file in files {
             let text = try String(contentsOf: sources.appendingPathComponent(file), encoding: .utf8)
             for line in text.components(separatedBy: "\n") {
                 let code = line.components(separatedBy: "//").first ?? ""
