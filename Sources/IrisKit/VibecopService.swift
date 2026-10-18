@@ -30,6 +30,19 @@ final class VibecopService: @unchecked Sendable {
     }
     """
     
+    /// On the host your APPROVE alone never runs a write (#600): Iris honours it only for a call
+    /// that can only read, and sends everything else to the person. Said to the model so its
+    /// reasons are about what it is actually deciding.
+    static let hostLayerText = """
+
+
+        HOST CONTEXT: This runs on the user's own Mac. Your APPROVE takes effect only for a
+        call that can only read (listing, reading, searching, git status/log/diff); a command that
+        writes, deletes, installs, builds or changes anything goes to the user whatever you answer.
+        So judge reads on their merits (ESCALATE a read of sensitive files), and use DENY for
+        anything obviously malicious or destructive.
+        """
+
     static func evaluatorLayerText(allowedCommands: [String]) -> String {
         let allow = allowedCommands.isEmpty ? "(none declared)" : allowedCommands.map { "`\($0)`" }.joined(separator: ", ")
         return """
@@ -80,6 +93,10 @@ final class VibecopService: @unchecked Sendable {
             }
         }
         
+        if !inSandbox {
+            prompt += Self.hostLayerText
+        }
+
         if inSandbox {
             prompt += """
 

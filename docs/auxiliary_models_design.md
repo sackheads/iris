@@ -65,5 +65,5 @@ A new **Local Models** tab will be added to `SettingsView`:
 
 ## Integration Hooks
 
-*   **Vibecop**: Hooked into `AppState.requestApproval`. Before popping the UI dialog, Iris queries the Vibecop auxiliary model with the proposed command and system context. If the model replies `APPROVE`, it bypasses the UI entirely.
+*   **Vibecop**: Hooked into `AppState.requestApproval`. Before popping the UI dialog, Iris queries the Vibecop auxiliary model with the proposed command and system context. If the model replies `APPROVE`, it bypasses the UI, but on the host only for a read (`ReadOnlyCommand.vibecopMayApprove`), and never for a command once the person has denied one in that conversation (#600).
 *   **PromptGuard**: Hooked into `HookManager.fireBeforeAgent`. The PromptGuard model scans incoming text. If it classifies it as malicious, it returns `.block` before the primary LLM even sees the request.
