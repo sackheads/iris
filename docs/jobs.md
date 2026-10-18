@@ -49,17 +49,18 @@ id, destination and run history are kept (the result says so). A watch is never 
 other collision — and neither is a job another conversation created. Omitting `mounts` and
 `network` on a replacing call removes the grant (see "Grants").
 
-Two of the job's policies can be set at creation, and both default to the quieter answer:
+Three of the job's policies can be set at creation, and each defaults to the quieter answer:
 
 | `schedule_job` argument | Values | What it decides |
 | --- | --- | --- |
 | `overlap` | `skip` (default), `queue` | What a fire does when the previous run is still going: drop it and record the drop, or hold exactly one and take it when that run ends |
 | `catch_up` | `coalesce` (default), `skip`, `replay`, `replay:N` | What a wake does with occurrences missed while the Mac slept (see "What happens on sleep"). A bare `replay` uses the cap of 5; a negative cap is read as the typo it is and takes that default. The object form the policy itself stores, `{"kind": "replay", "cap": N}`, is also accepted, but the argument is declared a string, so prefer `replay:N` |
+| `timeout_seconds` | 60-3600 (whole seconds) | How long one run may take before the deadline stops it (see "Limits"). Omitted, the job takes the global run timeout (10 minutes by default); given, it overrides the global for this job, up or down, and the tool's answer says so beside the global figure ("Run timeout: 30 min (global 10 min)"), as does `/jobs` (`timeout 30 min`) and, in Iris or a tainted conversation, the approval dialog. A figure outside the range is clamped and the answer says what it got; zero or less takes the global; a fraction or a word is refused. A re-schedule without it returns the job to the global |
 
-A value neither field recognizes is refused with a sentence naming the ones that work, rather than
+An `overlap` or `catch_up` value neither field recognizes is refused with a sentence naming the ones that work, rather than
 quietly creating a job that behaves differently from the one that was asked for. The rest of a job's
-policy is not settable from the tool, with one exception: the budgets and the run timeout are
-global settings with a per-job override in the stored `policy` column, `retry` is per job and on
+policy is not settable from the tool, with one exception: the budgets are
+global settings with a per-job override in the stored `policy` column (the run timeout's override is `timeout_seconds`, above), `retry` is per job and on
 (see "Limits"), and the breaker has a setting per trigger kind — one for scheduled jobs, one for
 watches — plus `max_runs_per_hour` on `register_directory_watcher` for a watch that wants its own
 (see "Limits" and "Watches"). A `mutating` job can also be created with a **grant** — `mounts` and `network` — which
@@ -1022,7 +1023,7 @@ then an overlap (skipped or queued by `policy.overlap`), then the breaker, then 
 - A refused fire writes a zero-length `interrupted` row and one card naming the figure that tripped
   it, so a pause is never silent.
 
-**During a run**, the turn itself is bounded: **200,000 weighted tokens** and **10 minutes**. The token
+**During a run**, the turn itself is bounded: **200,000 weighted tokens** and **10 minutes** (or the job's own `timeout_seconds`). The token
 budget is checked before every model round — the run's own, and those of every subagent and
 evaluator working for it — against the run's tokens so far, its subagents' included, so whichever
 of them would spend past the budget is refused its next round. A round already under way is not
@@ -1043,7 +1044,7 @@ a subagent's work for the run (#464): its model call is cancelled and its grade 
 iteration cap (10 by default), and each reprompt is a round like any other: charged to the run and
 checked against its budget first. Each of its turns also has a time limit of its own (#402),
 restarted every turn: 15 minutes by default (Settings → Agent Limits → Subagent turn timeout),
-past which the subagent ends `timed out`. That is longer than the run's own 10 minutes, so in a run
+past which the subagent ends `timed out`. That is longer than the run's own 10 minutes by default, so in a run
 the run's deadline is what stops a subagent that takes too long. A subagent whose next round the run's
 budget refuses ends there and then, with no further model call, and the run reads `status: failed`
 and `Stopped by the background run's budget (…)` for it, not a generic stop.
@@ -1065,7 +1066,7 @@ deadline is the command's answer and not a sign of a dead container: the session
 packages and its files are all still there for the next command. Stopping a run mid-command reads
 differently — `Error: the command was cancelled.` — and leaves the session alone for the same
 reason. This is a bound on a command, not on the run: a turn that spends its ten
-minutes on six timed-out commands still ends on the run's own deadline, above.
+minutes (by default) on six timed-out commands still ends on the run's own deadline, above.
 
 **After a run**, a failure climbs the retry ladder: **1 minute, 5 minutes, 25 minutes**, and the
 fourth consecutive failure pauses the job ("failed 3 times; paused"). A run that finally works
@@ -1084,12 +1085,14 @@ stepper wound down to zero reads as "default": the figure above is what the runn
 the row says so rather than claiming a budget of nothing. Each stepper moves from the figure its
 row is showing, so one click up from "default (6)" is 7 and one click down is 5 — and winding one
 back down to zero is how you give that number to the default again. A job's own `policy` column
-overrides any of them except the global daily budget.
+overrides any of them except the global daily budget; the run timeout's override is the
+`runTimeoutOverride` key `timeout_seconds` writes.
 
 **What zero means depends on which number it is.** An unset settings key — which is how a `0` reads
 — is simply the default above. In a job's own `JobPolicy`, `0` is an answer rather than a gap, and
 it means two different things: for the token budgets and the breaker it means **unlimited**, and for
-`runTimeoutSeconds` it means **take the global default**. The reason for the split is what each
+the run timeout (`runTimeoutOverride`, or the legacy `runTimeoutSeconds`, whose stored `600` also
+reads as "take the global") it means **take the global default**. The reason for the split is what each
 number bounds: since 5c a budget bounds weighted tokens, which a person may reasonably want
 unbounded, while the timeout bounds a turn that has
 stopped responding, and a run nothing can end is the failure this whole section exists to prevent. A

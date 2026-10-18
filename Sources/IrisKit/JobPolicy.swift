@@ -33,7 +33,13 @@ struct JobPolicy: Codable, Equatable, Sendable {
     /// What the scheduler does with occurrences that came due while the Mac was asleep, applied by
     /// `JobScheduler.tick()` when a job is more than one cadence behind (spec §5).
     var catchUp: CatchUp = .coalesce
+    /// Legacy: always written as 600, so 600 means "the global default" (`JobLimits.resolve`).
+    /// The tool writes `runTimeoutOverride` instead.
     var runTimeoutSeconds: Int = 600
+    /// A run timeout this job asked for (#263), or `nil` for the global default. A key of its own
+    /// because every stored policy already holds `runTimeoutSeconds: 600`, so that key cannot tell
+    /// "pinned to ten minutes" from "never asked".
+    var runTimeoutOverride: Int?
     /// `nil` = the global default from `ConfigManager`, not "unlimited".
     var perRunTokenBudget: Int?
     /// Per job per day; `nil` = the global default.
@@ -48,6 +54,25 @@ struct JobPolicy: Codable, Equatable, Sendable {
     /// rather than a column of its own so an older build ignores it (and, re-saving, drops it —
     /// the fate of every unknown policy key, and documented).
     var grants: JobGrant?
+
+    /// What `schedule_job`'s `timeout_seconds` may ask for (#263). Under a minute a run cannot finish
+    /// a model round and a tool; above an hour a single `run_command` (capped at 3600) no longer
+    /// bounds the run, and a run nothing can end is what the timeout exists to prevent.
+    static let toolRunTimeoutRange = 60...3600
+
+    /// "30 min", or "90 s" when it is not whole minutes.
+    static func durationText(_ seconds: Int) -> String {
+        seconds % 60 == 0 ? "\(seconds / 60) min" : "\(seconds) s"
+    }
+
+    /// What the tool's answer and the approval dialog say about a job's own run timeout (#263):
+    /// nothing without one, and the global figure beside it whenever the two differ, since the
+    /// global is what the person set and the job's is what the model asked for.
+    static func runTimeoutLine(override: Int?, global: Int) -> String? {
+        guard let override else { return nil }
+        let own = durationText(override)
+        return override == global ? "Run timeout: \(own)." : "Run timeout: \(own) (global \(durationText(global)))."
+    }
 
     /// The cap a `replay` written without one takes (spec §0.1).
     static let defaultReplayCap = 5
@@ -72,7 +97,7 @@ struct JobPolicy: Codable, Equatable, Sendable {
 
     init(overlap: Overlap = .skip, catchUp: CatchUp = .coalesce, runTimeoutSeconds: Int = 600,
          perRunTokenBudget: Int? = nil, dailyTokenBudget: Int? = nil, maxRunsPerHour: Int? = nil,
-         retry: Bool = true, grants: JobGrant? = nil) {
+         retry: Bool = true, grants: JobGrant? = nil, runTimeoutOverride: Int? = nil) {
         self.overlap = overlap
         self.catchUp = catchUp
         self.runTimeoutSeconds = runTimeoutSeconds
@@ -81,11 +106,12 @@ struct JobPolicy: Codable, Equatable, Sendable {
         self.maxRunsPerHour = maxRunsPerHour
         self.retry = retry
         self.grants = grants
+        self.runTimeoutOverride = runTimeoutOverride
     }
 
     private enum CodingKeys: String, CodingKey {
         case overlap, catchUp, runTimeoutSeconds, perRunTokenBudget, dailyTokenBudget
-        case maxRunsPerHour, retry, grants
+        case maxRunsPerHour, retry, grants, runTimeoutOverride
     }
 
     /// Invariant 1, and one step further: every key is optional *and* an unrecognized `overlap`
@@ -104,6 +130,9 @@ struct JobPolicy: Codable, Equatable, Sendable {
         retry = try c.decodeIfPresent(Bool.self, forKey: .retry) ?? true
         // `try?`, not `try`: a grant this build cannot read is no grant, and the job still loads.
         grants = try? c.decodeIfPresent(JobGrant.self, forKey: .grants)
+        // Zero or less is no override: a turn nothing can end is never what a stored figure means.
+        runTimeoutOverride = (try? c.decodeIfPresent(Int.self, forKey: .runTimeoutOverride))
+            .flatMap { $0 > 0 ? $0 : nil }
     }
 
     /// A stored figure, or `nil` — absent, which is "take the default" — when it is below zero.

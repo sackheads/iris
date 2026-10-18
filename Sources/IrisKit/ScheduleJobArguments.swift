@@ -39,6 +39,9 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// a later change to that default reaches every job that never had an opinion.
     let overlap: JobPolicy.Overlap?
     let catchUp: JobPolicy.CatchUp?
+    /// #263: the run timeout asked for, already clamped to `JobPolicy.toolRunTimeoutRange`; `nil`
+    /// is the global default. Unlike `overlap`, a re-schedule that omits it resets it.
+    var runTimeoutSeconds: Int? = nil
     /// The grant (#282 §0.1): `nil` is "none asked for". Not the same rule as the policy fields
     /// above — on a re-schedule an absent grant *removes* the stored one.
     let mounts: [String]?
@@ -101,6 +104,13 @@ struct ScheduleJobArguments: Equatable, Sendable {
             catchUp = parsed.value
             if let note = parsed.note { notes.append(note) }
         }
+        var runTimeout: Int?
+        if let asked = given(args["timeout_seconds"]) {
+            guard let seconds = exactInteger(asked) else { return .failure(Self.timeoutShape) }
+            let parsed = Self.runTimeout(asked: seconds)
+            runTimeout = parsed.value
+            if let note = parsed.note { notes.append(note) }
+        }
         let mounts: [String]?
         switch stringList(args["mounts"], shape: Self.mountsShape) {
         case .failure(let message): return .failure(message)
@@ -116,7 +126,22 @@ struct ScheduleJobArguments: Equatable, Sendable {
             gateURL: text(args["gate_url"]), gatePath: text(args["gate_path"]),
             gateScript: text(args["gate_script"]), gateMounts: gateMounts,
             gateTimeoutSeconds: integer(args["gate_timeout_seconds"]),
-            overlap: overlap, catchUp: catchUp, mounts: mounts, network: network, notes: notes))
+            overlap: overlap, catchUp: catchUp, runTimeoutSeconds: runTimeout, mounts: mounts,
+            network: network, notes: notes))
+    }
+
+    /// A requested run timeout, clamped into `JobPolicy.toolRunTimeoutRange`, with the sentence for
+    /// what was changed. Zero or less is no timeout of its own: a run nothing can end is never
+    /// what was meant, so it takes the global default, and says so.
+    static func runTimeout(asked seconds: Int) -> (value: Int?, note: String?) {
+        let range = JobPolicy.toolRunTimeoutRange
+        if seconds <= 0 {
+            return (nil, "timeout_seconds must be positive, so this job uses the global run timeout.")
+        }
+        let stored = min(max(seconds, range.lowerBound), range.upperBound)
+        guard stored != seconds else { return (stored, nil) }
+        return (stored, "The run timeout was set to \(stored) seconds rather than the \(seconds) asked for; "
+            + "a job's own timeout must be \(range.lowerBound)-\(range.upperBound) seconds.")
     }
 
     /// Builds the job to store, or the sentence explaining why there is none. `existingNames` is
@@ -170,6 +195,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
             var policy = JobPolicy()
             if let overlap { policy.overlap = overlap }
             if let catchUp { policy.catchUp = catchUp }
+            policy.runTimeoutOverride = runTimeoutSeconds
             policy.grants = grant
             return .success(Job(
                 name: Self.uniqueName(Job.slug(from: name ?? prompt), existing: existingNames),
@@ -328,6 +354,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
 
     static let gateOptionsNeedAScript = "gate_mounts and gate_timeout_seconds only apply to gate_script."
 
+    static let timeoutShape: ToolMessage = "timeout_seconds must be a whole number of seconds, 60-3600."
     static let gateMountsShape: ToolMessage = "gate_mounts must be a directory path, or a list of them."
 
     /// `base`, or `base-2`, `base-3`, … — the first form not already taken.
@@ -368,7 +395,9 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// the one that never will — are testable without a scheduler or a database.
     /// `notes` is anything the parse changed about what was asked for — a clamped replay cap,
     /// today — appended so the answer describes the job that exists rather than the one requested.
-    static func resultSentence(for stored: Job, notes: [String] = []) -> String {
+    /// `globalRunTimeoutSeconds` is the global job setting, said beside a job's own timeout.
+    static func resultSentence(for stored: Job, notes: [String] = [],
+                               globalRunTimeoutSeconds: Int = ConfigManager.JobDefaults.runTimeoutSeconds) -> String {
         let sentence: String
         if let next = stored.nextFireAt, stored.pausedReason == nil {
             // A gated job's cadence is how often its gate is *looked at*, not how often it runs:
@@ -378,7 +407,10 @@ struct ScheduleJobArguments: Equatable, Sendable {
         } else {
             sentence = "Saved '\(stored.name)' but it will never fire: \(stored.pausedReason ?? JobScheduler.unmatchableReason)."
         }
-        return ([sentence] + notes + [stored.policy.grants?.sentence].compactMap { $0 }).joined(separator: " ")
+        let timeout = JobPolicy.runTimeoutLine(override: stored.policy.runTimeoutOverride,
+                                               global: globalRunTimeoutSeconds)
+        return ([sentence] + notes + [timeout, stored.policy.grants?.sentence].compactMap { $0 })
+            .joined(separator: " ")
     }
 
     /// Said when a same-conversation `schedule_job` re-used an explicit name (§0.1).

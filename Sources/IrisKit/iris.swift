@@ -1514,6 +1514,11 @@ actor IrisEngine {
     /// line that promises one is a line the transcript never keeps. `JobRunner` matches either
     /// marker, so a run cut off by its budget still finishes `failed`.
     static let budgetStopMarker = "Stopping without a summary."
+    /// The line a budget stop leaves in the transcript; `JobRunner` writes the same one when the
+    /// run's hard deadline ends a turn that never reached another round (#263).
+    nonisolated static func budgetStopLine(origin: String, reason: String) -> String {
+        "[\(origin)] \(reason). \(budgetStopMarker)"
+    }
     /// A middle round cut off at the output limit: a warning, not an `[LLM_ERROR]`, so a job
     /// run whose turn recovered is not marked failed.
     nonisolated static let outputLimitWarningPrefix = "[output limit]"
@@ -1660,7 +1665,7 @@ actor IrisEngine {
         // No goal on a job run, but an attended turn given a budget must not be reprompted into
         // spending past it either.
         let localState = state
-        await pushToUI(role: .system, text: "[\(approvalOrigin)] \(reason). \(Self.budgetStopMarker)",
+        await pushToUI(role: .system, text: Self.budgetStopLine(origin: approvalOrigin, reason: reason),
                        conversationId: conversationId)
         // A subagent's manager is told why, here and at once (#323): left to notice the loop had
         // ended, it reported a generic "stopped without calling goal_complete", and the parent
@@ -2201,6 +2206,7 @@ actor IrisEngine {
                     "gate_script": Schema(type: "STRING", description: "Only run the job when this shell script says so. It runs inside the sandbox VM on every tick, and its LAST line of stdout must be exactly CHANGED or UNCHANGED (the exit code is not the verdict; a non-zero exit is a gate failure). Everything it printed before that line is handed to the run as untrusted context. Requires the container runtime and sandboxing; reviewed once before the job is created when Vibecop is on."),
                     "gate_mounts": Schema(type: "ARRAY", description: "Directories the gate script can read, as '/host/dir' or '/host/dir:/path/in/container'. Always mounted read-only, and recorded as the directory the path resolves to. A single file cannot be mounted — give its directory. The whole filesystem and Iris's own configuration cannot be mounted at all, so name the narrowest directory the check needs.", items: Schema(type: "STRING")),
                     "gate_timeout_seconds": Schema(type: "INTEGER", description: "How long the gate script may take before it is killed and counted as a failure (default 60, clamped to 5-600)."),
+                    "timeout_seconds": Schema(type: "INTEGER", description: "Wall-clock limit for one run of this job, in seconds, 60-3600 (clamped). Overrides the global job run timeout (default 10 minutes) for this job only, and is reported in the answer. A run that reaches it is stopped and recorded as failed. Omit it unless the work needs longer, or should be held shorter; re-scheduling without it returns the job to the global setting. It does not lengthen one run_command past that command's own timeout_seconds."),
                     "overlap": Schema(type: "STRING", description: "What a fire does when the previous run has not finished: 'skip' (default — the fire is dropped and recorded) or 'queue' (one fire is held and taken as soon as that run ends; never more than one)."),
                     "catch_up": Schema(type: "STRING", description: "What a wake does with occurrences missed while the Mac slept: 'coalesce' (default — one fire now), 'skip' (none; jump to the next occurrence), or 'replay' to run the most recent missed ones one at a time, up to a cap (default 5, at most 100) — write a cap as 'replay:3'. A replayed fire is an ordinary one, so it asks the gate and counts against the breaker and the budgets, and the burst stops at the first fire that is refused or fails."),
                     "mounts": Schema(type: "ARRAY", description: "Directories the job may use, as '/host/dir', '/host/dir:ro' or '/host/dir:/path/in/container'. Read-write unless ':ro'. The first read-write one is the job's working directory. Mutating jobs only. Recorded as the directory each path resolves to; the whole filesystem, the home directory, volume roots and Iris's own directory cannot be mounted.", items: Schema(type: "STRING")),
@@ -3234,7 +3240,8 @@ actor IrisEngine {
     func scheduleJob(_ parsed: Result<ScheduleJobArguments, ToolMessage>, conversationId: UUID?,
                      review: GateScriptReview? = nil,
                      sandboxAvailable: Bool = SandboxPolicy.mutatingJobCanRun(),
-                     paths: IrisPaths = .default, home: String = NSHomeDirectory()) async -> String {
+                     paths: IrisPaths = .default, home: String = NSHomeDirectory(),
+                     globalRunTimeoutSeconds: Int = ConfigManager.shared.jobRunTimeoutSeconds) async -> String {
         let args: ScheduleJobArguments
         switch parsed {
         case .failure(let message): return message.text
@@ -3311,7 +3318,8 @@ actor IrisEngine {
                         let id = scheduled.job.id, name = scheduled.job.name
                         await MainActor.run { localState?.announceURLTriggerCleared(jobId: id, jobName: name) }
                     }
-                    return ScheduleJobArguments.resultSentence(for: scheduled.job, notes: said)
+                    return ScheduleJobArguments.resultSentence(for: scheduled.job, notes: said,
+                                                               globalRunTimeoutSeconds: globalRunTimeoutSeconds)
                 } catch {
                     taken.insert(job.name)
                 }
@@ -3531,15 +3539,19 @@ actor IrisEngine {
     /// (the approval happens before `ScheduleJobArguments.parse`/`RegisterWatcherArguments.parse`
     /// run), so a malformed call still shows what was asked for rather than failing to build a
     /// dialog at all. Pure and `nonisolated` so it is unit-testable without an engine or a turn.
-    nonisolated static func pinnedJobApprovalDetails(toolName: String, args: [String: JSONValue]) -> String {
+    nonisolated static func pinnedJobApprovalDetails(
+        toolName: String, args: [String: JSONValue],
+        globalRunTimeoutSeconds: Int = ConfigManager.shared.jobRunTimeoutSeconds
+    ) -> String {
         switch toolName {
-        case "schedule_job": return scheduleJobApprovalDetails(args)
+        case "schedule_job": return scheduleJobApprovalDetails(args, globalRunTimeoutSeconds: globalRunTimeoutSeconds)
         case "register_directory_watcher": return registerWatcherApprovalDetails(args)
         default: return toolName
         }
     }
 
-    private nonisolated static func scheduleJobApprovalDetails(_ args: [String: JSONValue]) -> String {
+    private nonisolated static func scheduleJobApprovalDetails(_ args: [String: JSONValue],
+                                                               globalRunTimeoutSeconds: Int) -> String {
         let name = ScheduleJobArguments.text(args["name"]) ?? "(unnamed)"
         var lines = ["name: \(name)", "trigger: \(scheduleTriggerSummary(args))"]
         if let profile = ScheduleJobArguments.text(args["profile"]) { lines.append("profile: \(profile)") }
@@ -3572,6 +3584,12 @@ actor IrisEngine {
         }
         if let gateTimeout = ScheduleJobArguments.integer(args["gate_timeout_seconds"]) {
             lines.append("gate_timeout_seconds: \(gateTimeout)")
+        }
+        // #263: the timeout the job will get, clamped as the parse clamps it, not the raw ask.
+        if let asked = ScheduleJobArguments.exactInteger(args["timeout_seconds"]),
+           let line = JobPolicy.runTimeoutLine(override: ScheduleJobArguments.runTimeout(asked: asked).value,
+                                               global: globalRunTimeoutSeconds) {
+            lines.append(line)
         }
         return lines.joined(separator: "\n")
     }

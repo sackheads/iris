@@ -234,10 +234,8 @@ struct JobAdmissionTests {
         let negativeTimeout = job(policy: JobPolicy(runTimeoutSeconds: -1))
         #expect(JobLimits.resolve(job: negativeTimeout, config: config).runTimeoutSeconds == 120)
 
-        // The known cost of reading "the job set it" as "it is not the struct's default":
-        // a policy that deliberately pins 600 s is indistinguishable from one that never asked,
-        // so the global stepper moves it anyway. The alternative — an optional column — is a
-        // migration, and nothing yet lets a person pin a per-job timeout at all.
+        // The legacy key's rule: a stored 600 is indistinguishable from one that never asked, so
+        // the global stepper moves it. `runTimeoutOverride` (#263) is how a job pins 600.
         let pinnedToTheDefault = job(policy: JobPolicy(runTimeoutSeconds: JobPolicy().runTimeoutSeconds))
         #expect(JobLimits.resolve(job: pinnedToTheDefault, config: config).runTimeoutSeconds == 120,
                 "an explicit 600 reads as unset")

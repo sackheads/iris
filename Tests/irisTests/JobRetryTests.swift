@@ -587,6 +587,10 @@ struct JobRetryTests {
                 "the assertion went back at the deadline, exactly once")
         let card = try #require(self.card(state))
         #expect(card.outcome?.contains(TurnBudget.timeExceeded) == true)
+        // #263: the transcript says why it stopped, as the soft stop's does.
+        let line = IrisEngine.budgetStopLine(origin: "Main agent", reason: TurnBudget.timeExceeded)
+        let messages = await MainActor.run { state.conversations.flatMap(\.messages) }
+        #expect(messages.contains { $0.role == .system && $0.content == line })
     }
 
     @Test("a turn that ignores cancellation is left behind at the deadline, not waited on")
