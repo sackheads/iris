@@ -396,7 +396,15 @@ class AppState {
     }
     private static let sharedInstance = AppState()
 
-    var conversations: [Conversation] = []
+    var conversations: [Conversation] = [] {
+        // A goal wait lives on a conversation's contract (#466). Recomputed on every change, but
+        // assigned only when the marks differ, so a write that changes no wait re-renders no row.
+        didSet { recomputeNeedsHuman() }
+    }
+    /// The visible conversations waiting on the person, with what on (#466): see `NeedsHuman`.
+    /// Assigned only when it changes, on the main actor, from `conversations`, `pendingApprovals`
+    /// and `ledgerAttention`. A streamed token changes none of them (#583).
+    private(set) var needsHuman: [UUID: String] = [:]
     var selectedConversationId: UUID?
     /// Set by `reveal(hit:)` when a sidebar search hit is tapped (#183): the id of the
     /// `ChatMessage` the transcript's `ScrollViewReader` should scroll to on its next pass.
@@ -518,7 +526,9 @@ class AppState {
 
     /// D6 decision 16: what the ledger says is waiting on the owner, cached for the status item
     /// and the run log. Assigned only by `refreshLedgerAttention`. Never polled.
-    private(set) var ledgerAttention = LedgerAttention.empty
+    private(set) var ledgerAttention = LedgerAttention.empty {
+        didSet { recomputeNeedsHuman() }   // a blocked run marks its card's conversation (#466)
+    }
     /// How the snapshot is read. A seam so a test can hold one read back and count the reads a
     /// burst of refreshes costs.
     @ObservationIgnored var ledgerAttentionReader: @Sendable (JobLedger) async throws -> LedgerAttention = {
@@ -562,7 +572,9 @@ class AppState {
                     return nil
                 }
             }.value
-            if let snapshot { self.ledgerAttention = snapshot }
+            // Only a changed snapshot is assigned: every reader of `ledgerAttention` re-renders on
+            // an assignment, equal or not (#466).
+            if let snapshot, snapshot != self.ledgerAttention { self.ledgerAttention = snapshot }
         }
         ledgerAttentionWaiting = task
         ledgerAttentionTail = task
@@ -683,7 +695,7 @@ class AppState {
     var pendingApprovals: [ToolApprovalRequest] = [] {
         // D6 decision 7: every mutation passes through here, so a new ask meets the notification
         // policy and a gone one's banner is withdrawn without any site having to remember to.
-        didSet { approvalsChanged(from: oldValue) }
+        didSet { approvalsChanged(from: oldValue); recomputeNeedsHuman() }
     }
     /// Where notifications go: nil unless `IrisApp.init` installed one in a real `.app` bundle
     /// (D6 decision 8). Never set by `init`, which every test runs.
@@ -1069,6 +1081,19 @@ class AppState {
     /// session wrote about itself (#419 point 2). An approval outranks a running turn: the turn is
     /// parked on the dialog, so "busy" would say it is working when it is waiting on the user. A
     /// goal decision ranks below a running turn, since a turn in flight is not waiting on anyone.
+    /// Recomputes `needsHuman` and assigns it only if it changed (#466). Main actor, from the three
+    /// inputs' observers. The pinned conversation is found by a plain lookup, never through
+    /// `activityConversationId()`, which can unpin or create one.
+    func recomputeNeedsHuman() {
+        let asks = pendingApprovals.map {
+            NeedsHuman.Ask(root: $0.conversationId.map { delegationRoot(of: $0) }, toolName: $0.toolName)
+        }
+        let pinned = conversations.first { $0.isPinned && !$0.isArchived }?.id
+        let marks = NeedsHuman.derive(asks: asks, conversations: conversations,
+                                      blocked: ledgerAttention.blocked, pinnedId: pinned)
+        if marks != needsHuman { needsHuman = marks }
+    }
+
     func sessionStatus(for conversation: Conversation) -> SessionStatus {
         let asks = pendingApprovals.filter {
             guard let owner = $0.conversationId else { return false }
@@ -1085,19 +1110,10 @@ class AppState {
             return .waiting(on: phrase, since: first.requestedAt)
         }
         if hasTurnInFlight(for: conversation.id) { return .busy }
-        if let contract = conversation.goalContract {
+        if let contract = conversation.goalContract, let wait = NeedsHuman.goalWait(contract) {
             // When the decision was raised (#425), not the last write: a peer's message or an event
             // card moves `updatedAt`. A contract from before the stamp falls back to it.
-            let since = contract.waitingSince ?? conversation.updatedAt
-            if contract.state == .draft {
-                return .waiting(on: "goal contract to review", since: since)
-            }
-            if contract.checkpointStatus == .pausedForReview {
-                return .waiting(on: "checkpoint review", since: since)
-            }
-            if contract.awaitingHumanJudgement {
-                return .waiting(on: "goal judgement", since: since)
-            }
+            return .waiting(on: wait, since: contract.waitingSince ?? conversation.updatedAt)
         }
         return .idle
     }
