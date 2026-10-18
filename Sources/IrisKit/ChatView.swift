@@ -328,30 +328,30 @@ struct ChatView: View {
                     
                     if emojiModel.isShowing {
                         EmojiAutoCompleteView(model: emojiModel)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                            .transition(Motion.slide())
                     }
 
                     if slashModel.isShowing {
                         SlashCommandAutoCompleteView(model: slashModel)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                            .transition(Motion.slide())
                     }
 
                     if conv.goalContract?.state == .draft {
                         GoalContractPanel(state: state, conversation: conv)
                             .id(conv.goalContract?.id)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                            .transition(Motion.slide())
                     }
 
                     if conv.goalContract?.state == .locked {
                         LockedContractChip(state: state, conversationId: conv.id)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                            .transition(Motion.slide())
                     }
 
                     // Top-level pause panel (resume controls). Gated here in ChatView — the same
                     // pattern as CompletionReportChip below, which re-renders reliably on state change.
                     if conv.goalContract?.checkpointStatus == .pausedForReview {
                         CheckpointPauseChip(state: state, conversationId: conv.id)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                            .transition(Motion.slide())
                     }
 
                     // While paused at a checkpoint, the LockedContractChip's pause section already
@@ -360,7 +360,7 @@ struct ChatView: View {
                     if (conv.lastGoalCompletionReport != nil || conv.lastGoalEvaluation != nil),
                        conv.goalContract?.checkpointStatus != .pausedForReview {
                         CompletionReportChip(state: state, conversationId: conv.id)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                            .transition(Motion.slide())
                     }
 
                     SpectrumLine(active: state.isThinking(in: conv.id))
@@ -448,7 +448,7 @@ struct ChatView: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 Button(action: {
-                    withAnimation { sessionStripExpanded.toggle() }
+                    Motion.withAnimation { sessionStripExpanded.toggle() }
                 }) {
                     ZStack {
                         Image(systemName: "cpu")
@@ -473,15 +473,15 @@ struct ChatView: View {
                 ApprovalBannerView(request: request,
                                    queueDepth: state.pendingApprovals.count,
                                    onResolve: { resolution in
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                    Motion.withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                         state.resolveApproval(id: request.id, resolution)
                     }
                 })
                 .padding()
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .transition(Motion.slide())
             }
         }
-        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: state.pendingApprovals.count)
+        .animation(Motion.animation(.spring(response: 0.4, dampingFraction: 0.8)), value: state.pendingApprovals.count)
         .frame(minWidth: 600, idealWidth: 800, minHeight: 400, idealHeight: 600)
         .preferredColorScheme(config.appearanceTheme == "light" ? .light : (config.appearanceTheme == "dark" ? .dark : nil))
         .sheet(isPresented: $showSetupWizard) {
@@ -1040,7 +1040,7 @@ struct SystemGroupView: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     if messages.count > 1 {
-                        Button(action: { withAnimation { isExpanded.toggle() } }) {
+                        Button(action: { Motion.withAnimation { isExpanded.toggle() } }) {
                             Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                                 .foregroundColor(.secondary).frame(width: 14)
                         }
@@ -1108,7 +1108,7 @@ struct SystemMessageContent: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
                 if error.detail != nil {
-                    Button(action: { withAnimation { isDetailExpanded.toggle() } }) {
+                    Button(action: { Motion.withAnimation { isDetailExpanded.toggle() } }) {
                         Image(systemName: isDetailExpanded ? "chevron.down" : "chevron.right")
                             .foregroundColor(.secondary).frame(width: 14)
                     }
