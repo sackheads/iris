@@ -2217,9 +2217,9 @@ private struct LedgerUsageSink: TurnUsageSink {
 
 /// Which of the racers (the turn, the deadline, a CLI stop) gets to say how a run ended, and the
 /// one place the run waits to hear it. The racers are concurrent by construction, so the decision
-/// is a single claim rather than a flag: the winner owns it, and the losers do nothing at all. An
-/// actor because the three are different tasks — and because "read it, then decide" across a
-/// suspension is the race this replaces.
+/// is a single claim rather than a flag: the winner owns it, and the losers do nothing at all. The
+/// claim is one locked check-and-set, because "read it, then decide" across a suspension is the
+/// race this replaces.
 final class DeadlineFlag: @unchecked Sendable {
     /// How a run ended: its turn came back, its deadline arrived, or a CLI stop took it (#463).
     enum Ending: Equatable, Sendable {
