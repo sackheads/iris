@@ -54,10 +54,11 @@ final class LiveProcessGroups: @unchecked Sendable {
     /// Blocks until every group has been reaped, or `seconds` pass: what a stopping CLI waits on
     /// before `_exit`, so a group the SIGTERM did not end gets its SIGKILL rung first. Polls with
     /// `usleep` on the caller's thread, never the cooperative pool (invariant 4). True when drained.
-    func waitUntilEmpty(within seconds: TimeInterval) -> Bool {
-        let deadline = Date().addingTimeInterval(seconds)
+    /// On uptime (#608), so a sleep mid-wait is not counted against the groups.
+    func waitUntilEmpty(within seconds: TimeInterval, clock: UptimeClock = .live) -> Bool {
+        let deadline = clock.now() + seconds
         while count > 0 {
-            if Date() >= deadline { return false }
+            if clock.now() >= deadline { return false }
             usleep(10_000)
         }
         return true

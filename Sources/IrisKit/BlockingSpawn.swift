@@ -22,7 +22,7 @@ enum BlockingSpawn {
     /// to the caller's foreground group) does not end the helper the caller is waiting on (#463).
     @discardableResult
     static func run(_ path: String, _ arguments: [String], timeoutSeconds: Double? = nil,
-                    newGroup: Bool = false) -> Int32? {
+                    newGroup: Bool = false, clock: UptimeClock = .live) -> Int32? {
         var actions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&actions)
         defer { posix_spawn_file_actions_destroy(&actions) }
@@ -50,12 +50,14 @@ enum BlockingSpawn {
 
         var raw: Int32 = 0
         if let timeoutSeconds {
-            let deadline = Date().addingTimeInterval(timeoutSeconds)
+            // Uptime, not `Date()` (#608): a Mac that slept mid-wait would otherwise kill the
+            // helper on wake, its timeout spent while nothing ran.
+            let deadline = clock.now() + timeoutSeconds
             while true {
                 let r = waitpid(pid, &raw, WNOHANG)
                 if r == pid { return status(raw) }
                 if r == -1, errno != EINTR { return nil }
-                if Date() >= deadline { break }
+                if clock.now() >= deadline { break }
                 usleep(pollInterval)
             }
             // With `newGroup` the child leads its group, so the kill takes what it forked with it
