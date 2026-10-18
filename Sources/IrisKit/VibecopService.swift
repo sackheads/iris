@@ -37,7 +37,7 @@ final class VibecopService: @unchecked Sendable {
 
 
         HOST CONTEXT: This runs on the user's own Mac. Your APPROVE takes effect only for a
-        call that can only read (listing, reading, searching, git status/log/diff); a command that
+        call that can only read (listing, reading, searching files); a command that
         writes, deletes, installs, builds or changes anything goes to the user whatever you answer.
         So judge reads on their merits (ESCALATE a read of sensitive files), and use DENY for
         anything obviously malicious or destructive.
