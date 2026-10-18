@@ -44,7 +44,9 @@ struct OffPoolTests {
         await Self.eventually("the work to start") { hang.isInside }
         let asked = Date()
         task.cancel()
-        let answer = try await value(of: task, within: 5)
+        // Above every site's `cancelBound` (a main-actor hop can be slow, #594) and below the
+        // 20 s hang, so a cancel that waited the hang out still fails here.
+        let answer = try await value(of: task, within: 15)
         return (answer, Date().timeIntervalSince(asked), hang.queueLabel, hang)
     }
 
@@ -118,7 +120,15 @@ struct OffPoolTests {
 
     enum Site: String, CaseIterable { case read, write, grantRead, grantWrite, approvedRead, decidedRead, decidedWrite, directorySize }
 
-    @Test("each blocking site runs off the pool and a cancel answers within 2 s, never as success or empty",
+    /// How soon a cancel must answer. `Hang` holds the syscall for 20 s, so any bound well under that
+    /// proves the cancel did not wait it out. 2 s for the nonisolated sites. `directorySize` is
+    /// `GoalWorkspacesSection.size(of:)`, a main-actor view helper: its cancel answers off the pool at
+    /// once, but handing the answer back needs the main actor, and under a starved main actor (load
+    /// 48-97 with the disk full) that hop alone took over 2 s (#594). That hop is inherent and
+    /// harmless, so the bound there allows for it.
+    static func cancelBound(_ site: Site) -> Double { site == .directorySize ? 10 : 2 }
+
+    @Test("each blocking site runs off the pool and a cancel answers well within the 20 s hang, never as success or empty",
           arguments: Site.allCases)
     func everySite(site: Site) async throws {
         let dir = try scratch(); defer { try? FileManager.default.removeItem(at: dir) }
@@ -139,7 +149,7 @@ struct OffPoolTests {
         let (answer, seconds, queue, hang) = try await cancelWhileHung(call)
         defer { hang.release() }
         #expect(!queue.contains("cooperative"), "\(site) ran on \(queue)")
-        #expect(seconds < 2, "\(site): the cancel took \(seconds) s")
+        #expect(seconds < Self.cancelBound(site), "\(site): the cancel took \(seconds) s")
         switch site {
         case .read, .grantRead, .approvedRead, .decidedRead: #expect(answer == ToolExecutor.readCancelled)
         case .write, .grantWrite, .decidedWrite: #expect(answer == ToolExecutor.writeCancelled)
