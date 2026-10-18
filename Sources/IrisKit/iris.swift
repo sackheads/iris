@@ -40,9 +40,9 @@ struct PeerEnvelope: Sendable {
 ///
 /// Both figures are absolute, not remaining: the tokens are the run's accumulated total
 /// (`AppState.runUsage`: its fresh conversation plus what its subagents spent while it was
-/// active, #313) and the deadline is a wall
-/// clock instant, so nothing has to be decremented as the turn goes and a check that never runs
-/// cannot leave a stale allowance behind.
+/// active, #313) and the deadline is an instant on the run's uptime clock (#608), so nothing has
+/// to be decremented as the turn goes and a check that never runs cannot leave a stale allowance
+/// behind.
 struct TurnBudget: Sendable, Equatable {
     /// Non-positive means no token limit, matching `JobRunner.admit`'s reading of the daily ones:
     /// nothing configurable produces one, but a hand-written policy can, and "this job may never
