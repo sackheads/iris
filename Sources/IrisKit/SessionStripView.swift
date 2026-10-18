@@ -80,7 +80,7 @@ struct SessionStripView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
                 .background(.regularMaterial)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .transition(Motion.slide())
             } else {
                 // A zero-height placeholder, not nothing: the `.sheet` below hangs off this
                 // `Group`, and a presentation modifier whose content resolves to `EmptyView` has
