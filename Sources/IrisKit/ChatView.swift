@@ -1503,11 +1503,16 @@ struct WorkspaceRulesReview: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Review Workspace Rules").font(.headline)
+                .fixedSize(horizontal: false, vertical: true)
             Text("These files in \(workspace)/.iris came with the folder or changed outside Iris. They decide what Iris runs without asking you (the project allowlist), whether this workspace's commands are sandboxed, and what Vibecop treats as routine. None of them is in effect until you trust it.")
                 .font(.callout).foregroundStyle(.secondary)
+                // A sheet short of room squeezes a bare Text to one truncated line (#625 on
+                // screen); these keep their wrapped height and the file list below gives way.
+                .fixedSize(horizontal: false, vertical: true)
             if changedWhileOpen {
                 Text("These files changed since you opened this, so nothing was trusted. This is their text now.")
                     .font(.callout.bold()).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
@@ -1521,7 +1526,7 @@ struct WorkspaceRulesReview: View {
                     }
                 }
             }
-            .frame(maxHeight: 360)
+            .frame(minHeight: 120, maxHeight: 360)
             HStack {
                 Spacer()
                 Button("Not Now", role: .cancel, action: dismiss)
