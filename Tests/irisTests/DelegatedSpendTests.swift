@@ -411,7 +411,7 @@ struct DelegatedSpendTests {
         let (_, state, _) = try harness(client: client)
         let run = state.createNewConversation(isBackground: true, select: false)
         let sink = RecordingSink()
-        state.registerRun(run, budget: TurnBudget(maxTokens: 100, deadline: Date().addingTimeInterval(600)),
+        state.registerRun(run, budget: TurnBudget(maxTokens: 100, seconds: 600),
                           sink: sink)
         let straggler = state.createNewConversation(isSubagent: true, isBackground: true, select: false)
         state.linkBackgroundDescendant(straggler, of: run)
@@ -435,7 +435,7 @@ struct DelegatedSpendTests {
     func orphanedGrandchildAccruesNowhere() throws {
         let (_, state, _) = try harness(client: RoutingClient([:]))
         let run = state.createNewConversation(isBackground: true, select: false)
-        state.registerRun(run, budget: TurnBudget(maxTokens: 0, deadline: Date().addingTimeInterval(600)),
+        state.registerRun(run, budget: TurnBudget(maxTokens: 0, seconds: 600),
                           sink: RecordingSink())
         let child = state.createNewConversation(isSubagent: true, isBackground: true, select: false)
         state.linkBackgroundDescendant(child, of: run)

@@ -51,7 +51,13 @@ struct TurnBudget: Sendable, Equatable {
     /// No such escape hatch here: there is always a deadline, because it is the only thing that
     /// can end a turn that has stopped responding. `JobLimits.resolve` reads a zero timeout as the
     /// global default rather than as "unbounded" for exactly that reason.
-    let deadline: Date
+    ///
+    /// Seconds on `clock`, which pauses while the Mac sleeps (#608): time asleep does not count
+    /// toward a run's timeout, and the run's hard watchdog reads the same clock.
+    let deadline: Double
+    /// What `stopReason` reads `deadline` against: the run's own clock, so the round check and the
+    /// watchdog agree. Not part of equality.
+    let clock: UptimeClock
     /// Whose prices the spend is weighed at (5c §0.5): the run's own provider, stamped on its
     /// row. nil prices at the plain total, as a pre-5c row is.
     let provider: String?
@@ -59,11 +65,25 @@ struct TurnBudget: Sendable, Equatable {
     /// price at its ratio. nil reads at the provider's.
     let model: String?
 
-    init(maxTokens: Int, deadline: Date, provider: String? = nil, model: String? = nil) {
+    init(maxTokens: Int, deadline: Double, clock: UptimeClock = .live, provider: String? = nil,
+         model: String? = nil) {
         self.maxTokens = maxTokens
         self.deadline = deadline
+        self.clock = clock
         self.provider = provider
         self.model = model
+    }
+
+    /// A budget whose deadline is `seconds` from now on `clock`.
+    init(maxTokens: Int, seconds: TimeInterval, clock: UptimeClock = .live, provider: String? = nil,
+         model: String? = nil) {
+        self.init(maxTokens: maxTokens, deadline: clock.now() + seconds, clock: clock, provider: provider,
+                  model: model)
+    }
+
+    static func == (lhs: TurnBudget, rhs: TurnBudget) -> Bool {
+        lhs.maxTokens == rhs.maxTokens && lhs.deadline == rhs.deadline && lhs.provider == rhs.provider
+            && lhs.model == rhs.model
     }
 
     static let weightedTokensExceeded = "budget: weighted tokens exceeded"
@@ -73,9 +93,9 @@ struct TurnBudget: Sendable, Equatable {
 
     /// Why the turn must not make another model call, or `nil` to go ahead. Tokens are named
     /// first when both are gone: a person can act on the figure that was spent.
-    func stopReason(weightedTokens: Int, now: Date) -> String? {
+    func stopReason(weightedTokens: Int) -> String? {
         if maxTokens > 0, weightedTokens >= maxTokens { return Self.weightedTokensExceeded }
-        if now >= deadline { return Self.timeExceeded }
+        if clock.now() >= deadline { return Self.timeExceeded }
         return nil
     }
 
@@ -2668,7 +2688,7 @@ actor IrisEngine {
                 let spent = CostWeights.weighted(usage.components, provider: budget.provider,
                                                  model: budget.model)
                 outputTokenCap = budget.outputTokenCap(weightedTokens: spent)
-                if let reason = budget.stopReason(weightedTokens: spent, now: Date()) {
+                if let reason = budget.stopReason(weightedTokens: spent) {
                     turnFinished = true
                     // The drain consumes queued steers into history and no follow-up turn starts
                     // (R8). Both halves are deliberate. Leaving them queued would be worse than

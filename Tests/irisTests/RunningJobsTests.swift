@@ -252,6 +252,8 @@ struct RunningJobsTests {
         private var current = Date()
         func now() -> Date { lock.withLock { current } }
         func advance(by seconds: TimeInterval) { lock.withLock { current += seconds } }
+        /// The same clock as the run deadline reads it (#608).
+        var uptime: UptimeClock { UptimeClock { self.now().timeIntervalSinceReferenceDate } }
     }
 
     /// Parks inside the model call until cancelled, so only the deadline can end the run.
@@ -280,7 +282,7 @@ struct RunningJobsTests {
         let clock = ManualClock()
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
                                endSandboxSession: { _ in }, config: config,
-                               watchdogSlice: 0.01, deadlineClock: clock.now)
+                               watchdogSlice: 0.01, deadlineClock: clock.uptime)
         let seen = watch(state, job.id)
 
         let fire = Task { await runner.fire(job: job, origin: .schedule) }

@@ -75,35 +75,47 @@ struct TurnBudgetTests {
 
     @Test("tokens are compared at the budget, not past it; a zero budget is no budget")
     func stopReasonOnTokens() {
-        let budget = TurnBudget(maxTokens: 100, deadline: Date().addingTimeInterval(600))
-        #expect(budget.stopReason(weightedTokens: 99, now: Date()) == nil)
-        #expect(budget.stopReason(weightedTokens: 100, now: Date()) == TurnBudget.weightedTokensExceeded)
-        #expect(budget.stopReason(weightedTokens: 4_000, now: Date()) == TurnBudget.weightedTokensExceeded)
+        let budget = TurnBudget(maxTokens: 100, seconds: 600)
+        #expect(budget.stopReason(weightedTokens: 99) == nil)
+        #expect(budget.stopReason(weightedTokens: 100) == TurnBudget.weightedTokensExceeded)
+        #expect(budget.stopReason(weightedTokens: 4_000) == TurnBudget.weightedTokensExceeded)
 
-        let unlimited = TurnBudget(maxTokens: 0, deadline: Date().addingTimeInterval(600))
-        #expect(unlimited.stopReason(weightedTokens: 10_000_000, now: Date()) == nil)
+        let unlimited = TurnBudget(maxTokens: 0, seconds: 600)
+        #expect(unlimited.stopReason(weightedTokens: 10_000_000) == nil)
     }
 
     @Test func stopsOnWeightedTokens() {
-        let budget = TurnBudget(maxTokens: 100, deadline: .distantFuture, provider: "Anthropic")
-        #expect(budget.stopReason(weightedTokens: 99, now: Date()) == nil)
-        #expect(budget.stopReason(weightedTokens: 100, now: Date()) == TurnBudget.weightedTokensExceeded)
+        let budget = TurnBudget(maxTokens: 100, seconds: 86_400 * 365, provider: "Anthropic")
+        #expect(budget.stopReason(weightedTokens: 99) == nil)
+        #expect(budget.stopReason(weightedTokens: 100) == TurnBudget.weightedTokensExceeded)
     }
 
-    @Test("the deadline stops the turn at the instant it arrives")
+    @Test("the deadline stops the turn at the instant it arrives, on the budget's own clock")
     func stopReasonOnTime() {
-        let deadline = Date(timeIntervalSince1970: 1_700_000_000)
-        let budget = TurnBudget(maxTokens: 0, deadline: deadline)
-        #expect(budget.stopReason(weightedTokens: 0, now: deadline.addingTimeInterval(-1)) == nil)
-        #expect(budget.stopReason(weightedTokens: 0, now: deadline) == TurnBudget.timeExceeded)
-        #expect(budget.stopReason(weightedTokens: 0, now: deadline.addingTimeInterval(1)) == TurnBudget.timeExceeded)
+        let clock = Stepped(100)
+        let budget = TurnBudget(maxTokens: 0, deadline: 200, clock: clock.clock)
+        #expect(budget.stopReason(weightedTokens: 0) == nil)
+        clock.set(199)
+        #expect(budget.stopReason(weightedTokens: 0) == nil)
+        clock.set(200)
+        #expect(budget.stopReason(weightedTokens: 0) == TurnBudget.timeExceeded)
+        clock.set(201)
+        #expect(budget.stopReason(weightedTokens: 0) == TurnBudget.timeExceeded)
     }
 
     @Test("an exhausted token budget outranks a passed deadline: it is the figure that was spent")
     func tokensOutrankTime() {
-        let past = Date(timeIntervalSince1970: 1)
-        let budget = TurnBudget(maxTokens: 10, deadline: past)
-        #expect(budget.stopReason(weightedTokens: 10, now: Date()) == TurnBudget.weightedTokensExceeded)
+        let budget = TurnBudget(maxTokens: 10, seconds: -1)
+        #expect(budget.stopReason(weightedTokens: 10) == TurnBudget.weightedTokensExceeded)
+    }
+
+    /// A clock a test sets by hand.
+    final class Stepped: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Double
+        init(_ value: Double) { self.value = value }
+        func set(_ v: Double) { lock.withLock { value = v } }
+        var clock: UptimeClock { UptimeClock { self.lock.withLock { self.value } } }
     }
 
     // MARK: The turn's claim on the indicator
@@ -154,7 +166,7 @@ struct TurnBudgetTests {
 
         await engine.processInput("do the thing", source: "job:test", conversationId: conversation,
                                   turnBudget: TurnBudget(maxTokens: 100_000,
-                                                         deadline: Date().addingTimeInterval(-1)))
+                                                         seconds: -1))
 
         #expect(client.callCount == 0, "the budget is read before the call, not after it")
         let line = try #require(systemLines(state, conversation).last)
@@ -171,7 +183,7 @@ struct TurnBudgetTests {
 
         await engine.processInput("do the thing", source: "job:test", conversationId: conversation,
                                   turnBudget: TurnBudget(maxTokens: 30,
-                                                         deadline: Date().addingTimeInterval(600)))
+                                                         seconds: 600))
 
         #expect(client.callCount == 1, "round two is never asked for")
         let line = try #require(systemLines(state, conversation).last)
@@ -188,7 +200,7 @@ struct TurnBudgetTests {
 
         await engine.processInput("do the thing", source: "job:test", conversationId: conversation,
                                   turnBudget: TurnBudget(maxTokens: 10_000,
-                                                         deadline: Date().addingTimeInterval(600)))
+                                                         seconds: 600))
 
         #expect(client.callCount == 2)
         #expect(systemLines(state, conversation).allSatisfy { !$0.contains(TurnBudget.weightedTokensExceeded) })
@@ -207,7 +219,7 @@ struct TurnBudgetTests {
         // round-boundary drain never runs at all.
         await engine.processInput("do the thing", source: "job:test", conversationId: conversation,
                                   turnBudget: TurnBudget(maxTokens: 0,
-                                                         deadline: Date().addingTimeInterval(-1)))
+                                                         seconds: -1))
 
         // Taken from the inbox AND written to history: taken and dropped is how a mid-task message
         // disappears without a trace.

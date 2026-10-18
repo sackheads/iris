@@ -37,9 +37,8 @@ actor JobRunner {
     static let noReplyReason = "run produced no reply"
     /// The app quit (or `AppState` was otherwise released) with the run still open.
     static let releasedReason = "app state released"
-    /// The longest the deadline watchdog sleeps before looking at the wall clock again. See the
-    /// loop in `run()`: the sleep and the deadline are on different clocks, so the bound on how
-    /// far a sleeping Mac can push a run past its timeout is this, not the timeout itself.
+    /// The longest the deadline watchdog waits before reading its clock again
+    /// (`RunDeadlineWatchdog`).
     static let defaultWatchdogSlice: TimeInterval = 60
 
     /// Weak, both of them: `AppState` owns the engine, the engine owns this runner for the life of
@@ -59,15 +58,16 @@ actor JobRunner {
     private let calendar: Calendar
     private let config: ConfigManager
     private let protectionEnabled: Bool?
-    /// How long the deadline watchdog sleeps between looks at the wall clock. Injected only so a
+    /// How long the deadline watchdog waits between looks at its clock. Injected only so a
     /// test can drive the loop round more than once without waiting a minute to do it.
     private let watchdogSlice: TimeInterval
     /// #463 decision 16: a CLI's stop. nil everywhere but `--run-job`.
     private let stop: RunStop?
-    /// The wall clock the run deadline is set and watched on. Injected only so a test can hold the
-    /// deadline off until its turn has reached the point under test, then move it (#335); a real
-    /// one-second deadline raced a busy suite to the model call and sometimes won.
-    private let deadlineClock: @Sendable () -> Date
+    /// The clock the run deadline is set and watched on: uptime, which pauses while the Mac sleeps,
+    /// so time asleep does not count toward a run's timeout (#608). Injected only so a test can
+    /// hold the deadline off until its turn has reached the point under test, then move it (#335);
+    /// a real one-second deadline raced a busy suite to the model call and sometimes won.
+    private let deadlineClock: UptimeClock
     /// How a run keeps the Mac awake for its own duration (§4). Injected so a test can watch the
     /// begin/end pair instead of asserting on the machine's real power state.
     private let activity: any ActivityAPI
@@ -159,7 +159,7 @@ actor JobRunner {
          lastGateSignal: (@Sendable (UUID) throws -> String?)? = nil,
          approvedCallExecutor: (@Sendable (BlockedCall, UUID) async -> String)? = nil,
          watchdogSlice: TimeInterval = JobRunner.defaultWatchdogSlice,
-         deadlineClock: @escaping @Sendable () -> Date = Date.init,
+         deadlineClock: UptimeClock = .live,
          stop: RunStop? = nil,
          beforeDelegateWalk: (@Sendable (UUID) async -> Void)? = nil) {
         self.beforeDelegateWalk = beforeDelegateWalk
@@ -1152,13 +1152,15 @@ actor JobRunner {
         }
         let prompt = promptBuild.text
 
-        // The wall clock (`deadlineClock`), not the injected `now`: this deadline bounds a turn
-        // that is happening right now, so a test (or a replayed occurrence) that pins the ledger's
-        // clock to another instant must not make every run time out before its first model call.
+        // `deadlineClock`, not the injected `now`: this deadline bounds a turn that is happening
+        // right now, so a test (or a replayed occurrence) that pins the ledger's clock to another
+        // instant must not make every run time out before its first model call. Uptime, not the
+        // wall clock (#608): a lid close mid-run does not spend the run's time, so the run carries
+        // on with what it had left on wake. The round check (`TurnBudget`) reads the same clock.
         let deadlineClock = self.deadlineClock
-        let deadline = deadlineClock().addingTimeInterval(TimeInterval(limits.runTimeoutSeconds))
-        let budget = TurnBudget(maxTokens: limits.perRunTokens, deadline: deadline, provider: run.provider,
-                                model: run.model)
+        let deadline = deadlineClock.now() + TimeInterval(limits.runTimeoutSeconds)
+        let budget = TurnBudget(maxTokens: limits.perRunTokens, deadline: deadline, clock: deadlineClock,
+                                provider: run.provider, model: run.model)
         // Stay awake for this run, and no longer: the watchdog gives the assertion back at the
         // deadline even when the turn overruns it, so a wedged run cannot hold the Mac awake for
         // the rest of the session. `ActivityHolder` ends once, whichever gets there first.
@@ -2264,22 +2266,20 @@ final class DeadlineFlag: @unchecked Sendable {
 /// hold it (invariant 4, #372). Calls `fire` once, on its own queue, the first time `clock` reads
 /// at or past `deadline`, unless `cancel()` came first.
 ///
-/// Sliced, and `clock` re-read every slice, because a dispatch timer's monotonic clock does not
-/// advance while the Mac is asleep and `deadline` is a wall-clock instant: one long wait across a
-/// lid close would wake however long the Mac slept past the deadline it exists to enforce. Each
-/// slice is scheduled on the wall clock and is at most `slice` long, so that overshoot is at most
-/// one slice.
+/// `deadline` is on `clock`, uptime in the app, which pauses while the Mac sleeps as the dispatch
+/// timer does (#608), so time asleep is not counted. Sliced, and `clock` re-read every slice, so a
+/// test's injected clock can move the deadline without a real wait.
 final class RunDeadlineWatchdog: @unchecked Sendable {
     private let queue = DispatchQueue(label: "iris.job-run.deadline")
     private let lock = NSLock()
-    private let deadline: Date
+    private let deadline: Double
     private let slice: TimeInterval
-    private let clock: @Sendable () -> Date
+    private let clock: UptimeClock
     private let fire: @Sendable () -> Void
     private var timer: DispatchSourceTimer?
     private var done = false
 
-    init(deadline: Date, slice: TimeInterval, clock: @escaping @Sendable () -> Date,
+    init(deadline: Double, slice: TimeInterval, clock: UptimeClock,
          fire: @escaping @Sendable () -> Void) {
         self.deadline = deadline
         self.slice = slice
@@ -2301,7 +2301,7 @@ final class RunDeadlineWatchdog: @unchecked Sendable {
 
     private func check() {
         guard !lock.withLock({ done }) else { return }
-        let remaining = deadline.timeIntervalSince(clock())
+        let remaining = deadline - clock.now()
         if remaining <= 0 {
             let first = lock.withLock { () -> Bool in
                 guard !done else { return false }
@@ -2313,7 +2313,7 @@ final class RunDeadlineWatchdog: @unchecked Sendable {
             return
         }
         let next = DispatchSource.makeTimerSource(queue: queue)
-        next.schedule(wallDeadline: .now() + min(remaining, slice))
+        next.schedule(deadline: .now() + min(remaining, slice))
         // Strong on purpose: the armed timer keeps the watchdog alive, so it fires even if its
         // owner lets go early. The cycle ends when the deadline fires or `cancel()` drops the timer.
         next.setEventHandler { self.check() }
