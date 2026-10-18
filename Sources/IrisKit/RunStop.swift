@@ -33,6 +33,10 @@ final class RunStop: @unchecked Sendable {
     private var nextToken: UInt64 = 0
     /// Cancels the armed run's turn. Set by the run once its turn exists, dropped at `disarm`.
     private var turn: (@Sendable () -> Void)?
+    /// Claims the armed run's ending for a stop, with its reason (#615). Set by the run beside
+    /// `turn`, dropped at `disarm`. Called before `turn`, so the claim is the stop's even when
+    /// the cancelled turn returns at once.
+    private var ending: (@Sendable (String) -> Void)?
     /// Set by the armed `request`: see `graceDeadline`.
     private var graceEnd: DispatchTime?
 
@@ -67,31 +71,36 @@ final class RunStop: @unchecked Sendable {
     }
 
     /// On an armed run, the first stop acts here, on the caller's queue (the CLI's signal queue),
-    /// not in the run's stop watcher: under a held cooperative pool (#372) the watcher never runs,
-    /// and a stop that waited for it would do nothing. So this cancels the attached turn, sends the
-    /// host groups their SIGTERM and starts the grace, all before it returns. The claim on the
-    /// run's ending and the row stay the run's, on its actor. Losing that claim (the turn came back
-    /// first) makes this harmless: cancelling a finished turn is a no-op, and the CLI's settle
-    /// ends whatever group is left.
+    /// never in a pool task: under a held cooperative pool (#372) a task never runs, and a stop
+    /// that waited for one would do nothing. So this claims the run's ending for the stop (#615),
+    /// cancels the attached turn, sends the host groups their SIGTERM and starts the grace, all
+    /// before it returns. The row stays the run's, written on its actor. Losing the claim (the
+    /// turn came back first, or the deadline did) makes the rest harmless: cancelling a finished
+    /// turn is a no-op, and the CLI's settle ends whatever group is left.
     func request(reason: String) -> Answer {
-        let (answer, waiting, cancel): (Answer, CheckedContinuation<String?, Never>?, (@Sendable () -> Void)?) = lock.withLock {
+        typealias Taken = (Answer, CheckedContinuation<String?, Never>?, (@Sendable () -> Void)?,
+                           (@Sendable (String) -> Void)?)
+        let (answer, waiting, cancel, claim): Taken = lock.withLock {
             switch phase {
             case .idle:
                 phase = .requested(reason)
-                return (.exitNow, nil, nil)
+                return (.exitNow, nil, nil, nil)
             case .armed:
                 phase = .requested(reason)
                 graceEnd = .now() + grace
                 let w = waiter?.continuation
                 waiter = nil
-                return (.runWillStop, w, turn)
+                return (.runWillStop, w, turn, ending)
             case .requested, .done:
-                return (.ignored, nil, nil)
+                return (.ignored, nil, nil, nil)
             }
         }
         if answer == .runWillStop {
-            // Outside the lock: cancellation handlers run inline. The turn first, so a runner
-            // queued but not yet spawned (in no registry) refuses to spawn.
+            // Outside the lock: cancellation handlers run inline. The claim on the run's ending
+            // first, here on the signal queue (#615): left to a task, a held pool let the deadline
+            // claim a run that was stopped first. Then the turn, so a runner queued but not yet
+            // spawned (in no registry) refuses to spawn.
+            claim?(reason)
             cancel?()
             terminateGroups()
         }
@@ -126,6 +135,7 @@ final class RunStop: @unchecked Sendable {
         let waiting: CheckedContinuation<String?, Never>? = lock.withLock {
             if case .armed = phase { phase = .done }
             turn = nil
+            ending = nil
             let w = waiter?.continuation
             waiter = nil
             return w
@@ -145,6 +155,18 @@ final class RunStop: @unchecked Sendable {
             return false
         }
         if late { cancel() }
+    }
+
+    /// How the armed run claims its ending for a stop, called with the stop's reason on the
+    /// caller's queue, never a pool task (#615). A stop that came first is claimed here, at once.
+    /// Attach it before `attachTurn`, so a late stop claims before it cancels.
+    func attachEnding(_ claim: @escaping @Sendable (String) -> Void) {
+        let late: String? = lock.withLock {
+            ending = claim
+            if case .requested(let reason) = phase { return reason }
+            return nil
+        }
+        if let late { claim(late) }
     }
 
     /// Cancels the attached turn, if any. Outside the lock: cancellation handlers run inline.
@@ -168,7 +190,7 @@ final class RunStop: @unchecked Sendable {
                     if case .requested(let reason) = phase { return continuation.resume(returning: reason) }
                     if case .done = phase { return continuation.resume(returning: nil) }
                     if Task.isCancelled { return continuation.resume(returning: nil) }
-                    // One waiter at a time: the armed run's stop watcher, then its teardown's.
+                    // One waiter at a time: the armed run's teardown's.
                     precondition(waiter == nil, "RunStop has one waiter: the armed run")
                     waiter = (token, continuation)
                 }

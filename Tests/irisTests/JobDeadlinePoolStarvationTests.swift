@@ -19,6 +19,18 @@ struct JobDeadlinePoolStarvationTests {
         }
         Starvation.report(log)
     }
+
+    /// #615: a stop asked for while the pool is held is the run's ending, even when the deadline
+    /// passes before a pool thread frees. The claim used to be a pool task's, so the off-pool
+    /// deadline won it and the row read "time exceeded" for a run that was stopped first.
+    @Test("a stop asked for while the pool is held claims the run before the deadline can")
+    func stopClaimsOffPool() async {
+        let log: String = Starvation.messageFile()
+        await #expect(processExitsWith: .success) { [log = log as String] in
+            await DeadlineStarvation.run(log: log, stopFirst: true)
+        }
+        Starvation.report(log)
+    }
 }
 
 /// Inside the exit-test child: 0 when the deadline landed on time, 1 when it did not, 2 when the
@@ -52,13 +64,14 @@ enum DeadlineStarvation {
         func advance(by seconds: TimeInterval) { lock.withLock { current += seconds } }
     }
 
-    static func run(log: String) async {
+    static func run(log: String, stopFirst: Bool = false) async {
         let client = ParkedClient()
         let clock = Clock()
         let activity = RecordingActivity()
         let name = "iris-603-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!
         let config = ConfigManager(store: defaults)
+        let stop = stopFirst ? RunStop(grace: 1, terminateGroups: {}) : nil
         // The runner holds the state and engine weakly, so they are returned to be kept alive.
         let started: (Job, JobRunner, ConversationStore, AppState, IrisEngine)? = await MainActor.run {
             guard let store = try? ConversationStore.inMemory() else { return nil }
@@ -79,7 +92,7 @@ enum DeadlineStarvation {
             guard (try? store.ledger.upsert(job)) != nil else { return nil }
             let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                    config: config, activity: activity, watchdogSlice: 0.05,
-                                   deadlineClock: clock.now)
+                                   deadlineClock: clock.now, stop: stop)
             return (job, runner, store, state, engine)
         }
         guard let (job, runner, store, state, engine) = started else { finish(log, 1, "could not build the harness") }
@@ -97,6 +110,27 @@ enum DeadlineStarvation {
         guard hold.isHeld() else {
             hold.release()
             finish(log, 2, "could not hold the cooperative pool")
+        }
+        if let stop {
+            let reason = RunStop.reason(for: SIGTERM)
+            _ = stop.request(reason: reason)
+            // The deadline passes too, before any pool thread is free: whichever claimed first
+            // decides the row, and the stop came first.
+            clock.advance(by: 3_001)
+            usleep(500_000)
+            hold.release()
+            let doneBy = TestClock.deadline(10)
+            var row: JobRun?
+            while TestClock.now() < doneBy {
+                row = (try? store.ledger.runs(jobId: job.id, limit: 1))?.first
+                if let row, row.status != .running { break }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            _ = (fire, state, engine)
+            defaults.removePersistentDomain(forName: name)
+            IrisDefaults.removeSuiteFile(named: name, in: IrisDefaults.preferencesDirectory)
+            let ok = row?.status == .interrupted && row?.failureReason == reason
+            finish(log, ok ? 0 : 1, ok ? "" : "the stop did not claim the run (row: \(row.map { "\($0.status) \($0.failureReason ?? "-")" } ?? "none"))")
         }
         clock.advance(by: 3_001)
         // One slice to notice, plus generous slack; polled from this blocked thread.
