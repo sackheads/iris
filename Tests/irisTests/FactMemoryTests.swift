@@ -425,8 +425,8 @@ struct FactEntityLineTests {
                                   goalFacts: .start(objective: "plan the Seattle move"))
         #expect(await engine.goalRunFactIDsForTesting(id)?.count == 1)
         app.clearGoal(for: id)
-        let deadline = Date().addingTimeInterval(30)
-        while await engine.goalRunFactIDsForTesting(id) != nil, Date() < deadline {
+        let deadline = TestClock.deadline(30)
+        while await engine.goalRunFactIDsForTesting(id) != nil, TestClock.now() < deadline {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
         #expect(await engine.goalRunFactIDsForTesting(id) == nil)
@@ -726,8 +726,8 @@ struct GoalRunFactTests {
         h.app.setGoal(for: h.id, goal: "plan the Seattle move")
         h.app.sendGoalKickoff(for: h.id)
         // Generous: it returns the moment both requests exist; a loaded host once took over 10 s.
-        let deadline = Date().addingTimeInterval(60)
-        while h.client.requests.count < 2, Date() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
+        let deadline = TestClock.deadline(60)
+        while h.client.requests.count < 2, TestClock.now() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
         h.app.clearGoal(for: h.id)
         try #require(h.client.requests.count >= 2)
         #expect(h.lead(0).contains("The Seattle office moves in March"), "kickoff")

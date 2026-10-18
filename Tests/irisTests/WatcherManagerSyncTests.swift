@@ -448,10 +448,10 @@ struct WatcherManagerSyncTests {
         defer { stat.release() }
         let check = Task { await WatcherManager.rootsMissing(["/r"], fileExists: { stat.exists($0) }) }
         await Self.eventually("the stat to start") { stat.isInside }
-        let asked = Date()
+        let asked = TestClock.now()
         check.cancel()
         let missing = try await value(of: check, within: 5)
-        #expect(Date().timeIntervalSince(asked) < 2, "the cancel, not the 10 s stat")
+        #expect(TestClock.seconds(since: asked) < 2, "the cancel, not the 10 s stat")
         #expect(missing == nil, "no answer, not \"every root present\"")
     }
 }

@@ -309,8 +309,8 @@ final class SubagentManagerTests: XCTestCase {
 
     private func waitFor(_ description: String, timeout: TimeInterval = 10,
                          _ condition: () -> Bool) async {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
+        let deadline = TestClock.deadline(timeout)
+        while TestClock.now() < deadline {
             if condition() { return }
             try? await Task.sleep(nanoseconds: 20_000_000)
         }

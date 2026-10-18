@@ -42,12 +42,12 @@ struct OffPoolTests {
         let hang = Hang()
         let task = Task { await OffPool.$testHook.withValue({ hang.block() }) { await call() } }
         await Self.eventually("the work to start") { hang.isInside }
-        let asked = Date()
+        let asked = TestClock.now()
         task.cancel()
         // Above every site's `cancelBound` (a main-actor hop can be slow, #594) and below the
         // 20 s hang, so a cancel that waited the hang out still fails here.
         let answer = try await value(of: task, within: 15)
-        return (answer, Date().timeIntervalSince(asked), hang.queueLabel, hang)
+        return (answer, TestClock.seconds(since: asked), hang.queueLabel, hang)
     }
 
     private func scratch() throws -> URL {
@@ -97,9 +97,9 @@ struct OffPoolTests {
             }
         }
         task.cancel()
-        let asked = Date()
+        let asked = TestClock.now()
         #expect(try await value(of: task, within: 3) == "cancelled")
-        #expect(Date().timeIntervalSince(asked) < 2)
+        #expect(TestClock.seconds(since: asked) < 2)
     }
 
     @Test("the first answer wins: a second resume changes nothing")

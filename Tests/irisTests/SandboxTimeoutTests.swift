@@ -20,14 +20,14 @@ struct SandboxTimeoutTests {
         // only match this test's own child.
         let marker = "31.\(Int.random(in: 100_000...999_999))"
         let runner = CLIProcessRunner(executable: "/bin/sh")
-        let started = Date()
+        let started = TestClock.now()
         var thrown: Error?
         do {
             _ = try await runner.run(["-c", "sleep \(marker)"], timeoutSeconds: 1)
         } catch {
             thrown = error
         }
-        let wall = Date().timeIntervalSince(started)
+        let wall = TestClock.seconds(since: started)
 
         let error = try #require(thrown as? ContainerRuntimeError)
         guard case .timedOut(let elapsed) = error else {
@@ -69,14 +69,15 @@ struct SandboxTimeoutTests {
             Self.killAll(matching: "sleep \(nap)")
             Self.killAll(matching: marker)
         }
-        let started = Date()
+        let started = TestClock.now()
+        let startedWall = Date()   // only for the trap file's mtime, a wall-clock timestamp
         var thrown: Error?
         do {
             _ = try await CLIProcessRunner(executable: "/bin/sh").run(["-c", script], timeoutSeconds: 1)
         } catch {
             thrown = error
         }
-        let wall = Date().timeIntervalSince(started)
+        let wall = TestClock.seconds(since: started)
 
         let error = try #require(thrown as? ContainerRuntimeError)
         guard case .timedOut = error else {
@@ -95,7 +96,7 @@ struct SandboxTimeoutTests {
         }
         // SIGTERM was ignored, so it took the grace period plus SIGKILL — but not the full sleep.
         #expect(wall >= 1 + CLIProcessRunner.killGraceSeconds,
-                "trap in place \(String(format: "%.3f", trapped.timeIntervalSince(started))) s after the call")
+                "trap in place \(String(format: "%.3f", trapped.timeIntervalSince(startedWall))) s after the call")
         #expect(wall < 9)
     }
 
@@ -112,14 +113,14 @@ struct SandboxTimeoutTests {
         }
         let launchDelay = 1.5
         let runner = CLIProcessRunner(executable: "/bin/sh", beforeLaunch: { usleep(UInt32(launchDelay * 1_000_000)) })
-        let started = Date()
+        let started = TestClock.now()
         var thrown: Error?
         do {
             _ = try await runner.run(["-c", "while :; do sleep \(nap); done   # \(marker)"], timeoutSeconds: 1)
         } catch {
             thrown = error
         }
-        let wall = Date().timeIntervalSince(started)
+        let wall = TestClock.seconds(since: started)
         let error = try #require(thrown as? ContainerRuntimeError)
         guard case .timedOut = error else {
             Issue.record("expected .timedOut, got \(error)")
@@ -158,8 +159,8 @@ struct SandboxTimeoutTests {
         do { _ = try await value(of: call) } catch { thrown = error }
         #expect(thrown is CancellationError)
         // The shell does not trap SIGTERM, so the ladder's first rung ends it.
-        let until = Date().addingTimeInterval(CLIProcessRunner.killGraceSeconds + 3)
-        while Self.processExists(matching: marker), Date() < until { try await Task.sleep(nanoseconds: 50_000_000) }
+        let until = TestClock.deadline(CLIProcessRunner.killGraceSeconds + 3)
+        while Self.processExists(matching: marker), TestClock.now() < until { try await Task.sleep(nanoseconds: 50_000_000) }
         #expect(!Self.processExists(matching: marker), "the cancel killed the child it launched late")
     }
 
@@ -174,14 +175,14 @@ struct SandboxTimeoutTests {
         let script = "(sleep \(marker) &) ; sleep \(marker)"
         defer { Self.killAll(matching: "sleep \(marker)") }
 
-        let started = Date()
+        let started = TestClock.now()
         var thrown: Error?
         do {
             _ = try await CLIProcessRunner(executable: "/bin/sh").run(["-c", script], timeoutSeconds: 1)
         } catch {
             thrown = error
         }
-        let wall = Date().timeIntervalSince(started)
+        let wall = TestClock.seconds(since: started)
 
         let error = try #require(thrown as? ContainerRuntimeError)
         guard case .timedOut = error else {
@@ -200,14 +201,14 @@ struct SandboxTimeoutTests {
         let script = "(sleep \(marker) &) ; echo done"
         defer { Self.killAll(matching: "sleep \(marker)") }
 
-        let started = Date()
+        let started = TestClock.now()
         var thrown: Error?
         do {
             _ = try await CLIProcessRunner(executable: "/bin/sh").run(["-c", script], timeoutSeconds: 1)
         } catch {
             thrown = error
         }
-        let wall = Date().timeIntervalSince(started)
+        let wall = TestClock.seconds(since: started)
 
         let error = try #require(thrown as? ContainerRuntimeError)
         guard case .timedOut = error else {
@@ -226,10 +227,10 @@ struct SandboxTimeoutTests {
         let script = "(sleep \(marker) &) ; echo created"
         defer { Self.killAll(matching: "sleep \(marker)") }
 
-        let started = Date()
+        let started = TestClock.now()
         let r = try await CLIProcessRunner(executable: "/bin/sh").run(["-c", script], timeoutSeconds: nil)
         #expect(r.stdout.contains("created"))
-        #expect(Date().timeIntervalSince(started) < 10)
+        #expect(TestClock.seconds(since: started) < 10)
     }
 
     /// H1: a call entered on a task that was *already* cancelled. Swift runs a cancellation
@@ -249,12 +250,12 @@ struct SandboxTimeoutTests {
         }
         task.cancel()
 
-        let started = Date()
+        let started = TestClock.now()
         var thrown: Error?
         do { _ = try await value(of: task) } catch { thrown = error }
 
         #expect(thrown is CancellationError)
-        #expect(Date().timeIntervalSince(started) < 10, "and it says so promptly")
+        #expect(TestClock.seconds(since: started) < 10, "and it says so promptly")
         #expect(!Self.processExists(matching: "sleep \(marker)"),
                 "the child was never launched, so there is nothing to outlive the call")
     }

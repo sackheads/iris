@@ -55,9 +55,9 @@ struct SandboxClosedSessionTests {
     }
 
     private func waitFor(_ description: String, _ condition: () -> Bool) async throws {
-        let deadline = Date().addingTimeInterval(10)
+        let deadline = TestClock.deadline(10)
         while !condition() {
-            guard Date() < deadline else { Issue.record("timed out waiting for \(description)"); return }
+            guard TestClock.now() < deadline else { Issue.record("timed out waiting for \(description)"); return }
             try await Task.sleep(nanoseconds: 1_000_000)
         }
     }

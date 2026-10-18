@@ -85,8 +85,8 @@ struct RunDelegateCloseTests {
     }
 
     private func eventually(_ seconds: Double = 10, _ condition: @MainActor () -> Bool) async -> Bool {
-        let end = Date().addingTimeInterval(seconds)
-        while Date() < end {
+        let end = TestClock.deadline(seconds)
+        while TestClock.now() < end {
             if condition() { return true }
             try? await Task.sleep(nanoseconds: 20_000_000)
         }

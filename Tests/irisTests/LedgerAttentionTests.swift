@@ -273,8 +273,8 @@ struct LedgerAttentionTests {
         // Not through `/jobs` or the runner, which refresh on their own: only the hook can see it.
         try store.ledger.setPaused(jobId: thrasher.id, reason: JobRunner.breakerReason(count: 6))
 
-        let deadline = Date().addingTimeInterval(10)
-        while app.ledgerAttention.attentionPaused.isEmpty, Date() < deadline {
+        let deadline = TestClock.deadline(10)
+        while app.ledgerAttention.attentionPaused.isEmpty, TestClock.now() < deadline {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         #expect(app.ledgerAttention.attentionPaused.map(\.name) == ["thrasher"])

@@ -18,11 +18,11 @@ struct ToolExecutorSearchWebTimeoutTests {
         let irisDir = Self.scratchDir()
         defer { try? FileManager.default.removeItem(at: irisDir) }
 
-        let start = Date()
+        let start = TestClock.now()
         let result = await ToolExecutor.runSearchWeb(
             query: "test", targetURL: server.url,
             networkTimeoutSeconds: 1, processTimeoutSeconds: 10, irisDir: irisDir)
-        let elapsed = Date().timeIntervalSince(start)
+        let elapsed = TestClock.seconds(since: start)
 
         #expect(elapsed < 8, "should fail on the script's own 1s network timeout, not the 10s process bound")
         #expect(result.lowercased().contains("timed out"), "got: \(result)")
@@ -38,11 +38,11 @@ struct ToolExecutorSearchWebTimeoutTests {
         // The script's own network timeout is longer than the process bound, so this exercises
         // `ProcessGroupRunner.capture(timeoutSeconds:)` killing the group on schedule rather than
         // the script's own `except` firing first.
-        let start = Date()
+        let start = TestClock.now()
         let result = await ToolExecutor.runSearchWeb(
             query: "test", targetURL: server.url,
             networkTimeoutSeconds: 30, processTimeoutSeconds: 2, irisDir: irisDir)
-        let elapsed = Date().timeIntervalSince(start)
+        let elapsed = TestClock.seconds(since: start)
 
         #expect(elapsed < 10, "the process bound (2s) plus the kill ladder's grace should end this well under 10s")
         #expect(result == ToolExecutor.searchWebTimedOutMessage(seconds: 2), "got: \(result)")

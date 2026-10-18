@@ -123,8 +123,8 @@ struct SubagentGoalLoopTests {
 
     // Time bounds here are seconds against a cap of 30 s or more.
     private func eventually(_ seconds: Double = 10, _ condition: @MainActor () -> Bool) async -> Bool {
-        let end = Date().addingTimeInterval(seconds)
-        while Date() < end {
+        let end = TestClock.deadline(seconds)
+        while TestClock.now() < end {
             if condition() { return true }
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
@@ -207,12 +207,12 @@ struct SubagentGoalLoopTests {
         #expect(await eventually { client.parked == 1 }, "turn 2 is under way")
         #expect(client.calls == 2)
         #expect(state.liveSubagents(ofRun: run).count == 1, "registered while it works")
-        let cancelledAt = Date()
+        let cancelledAt = TestClock.now()
         task.cancel()
         let outcome = try await value(of: task)
 
         // Only shows the subagent stopped well before its turn deadline, not how fast; the full parallel suite runs it at ~4 s.
-        #expect(Date().timeIntervalSince(cancelledAt) < 10, "seconds, not the 300 s turn deadline")
+        #expect(TestClock.seconds(since: cancelledAt) < 10, "seconds, not the 300 s turn deadline")
         #expect(outcome.status == .cancelled)
         #expect(await eventually(10) { client.cancelled == 1 }, "turn 2's model call was cancelled")
         #expect(await eventually { state.liveSubagents(ofRun: run).isEmpty })
@@ -287,13 +287,13 @@ struct SubagentGoalLoopTests {
         let run = run(in: state, maxTokens: 100)
         let (config, teardown) = config(cap: 5); defer { teardown() }
 
-        let started = Date()
+        let started = TestClock.now()
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: run,
             turnTimeout: 30, client: client, appState: state, config: config, repromptDelay: Self.delay, endSandboxSession: { _ in })
 
         // Only shows the subagent stopped well before its turn deadline, not how fast; the full parallel suite runs it at ~4 s.
-        #expect(Date().timeIntervalSince(started) < 10, "seconds, not the 30 s turn deadline")
+        #expect(TestClock.seconds(since: started) < 10, "seconds, not the 30 s turn deadline")
         #expect(outcome.status == .failed)
         #expect(outcome.rendered.contains("Stopped by the background run's budget"))
         #expect(client.calls == 1, "turn 2's round was refused, not made")
@@ -320,7 +320,7 @@ struct SubagentGoalLoopTests {
         let parent = UUID(); state.createNewConversation(id: parent)
         let (config, teardown) = config(cap: 5); defer { teardown() }
 
-        let started = Date()
+        let started = TestClock.now()
         // A 30 s turn deadline: were the blocked turn waited on, the result would read `timed out`.
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
@@ -328,7 +328,7 @@ struct SubagentGoalLoopTests {
             endSandboxSession: { _ in })
 
         // Only shows the subagent stopped well before its turn deadline, not how fast; the full parallel suite runs it at ~4 s.
-        #expect(Date().timeIntervalSince(started) < 10, "seconds, not the 30 s turn deadline")
+        #expect(TestClock.seconds(since: started) < 10, "seconds, not the 30 s turn deadline")
         #expect(outcome.status == .failed)
         #expect(client.calls == 1, "turn 2 was blocked before its model call")
         let sub = state.conversations.first { $0.isSubagent }
@@ -384,9 +384,9 @@ struct SubagentGoalLoopTests {
         #expect(state.liveSubagents(ofRun: sub).count == 1, "still running its command")
 
         // What a run's drain does to every subagent still registered under it.
-        let stoppedAt = Date()
+        let stoppedAt = TestClock.now()
         _ = state.takeBackgroundDenials(for: sub)
         #expect(await eventually(30) { state.liveSubagents(ofRun: sub).isEmpty })
-        #expect(Date().timeIntervalSince(stoppedAt) < 30, "the command was killed, not waited out")
+        #expect(TestClock.seconds(since: stoppedAt) < 30, "the command was killed, not waited out")
     }
 }

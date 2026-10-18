@@ -102,8 +102,8 @@ struct SubagentRunStopTests {
 
     /// Polls `condition` for up to `seconds`; false if it never held.
     private func eventually(_ seconds: Double = 10, _ condition: @MainActor () -> Bool) async -> Bool {
-        let end = Date().addingTimeInterval(seconds)
-        while Date() < end {
+        let end = TestClock.deadline(seconds)
+        while TestClock.now() < end {
             if condition() { return true }
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
@@ -118,7 +118,7 @@ struct SubagentRunStopTests {
         let state = try state()
         let run = run(in: state, maxTokens: 100)
 
-        let started = Date()
+        let started = TestClock.now()
         // A 30 s turn deadline: were the refusal not terminal the subagent would run into it and read
         // `timed out`, rather than spending the 15-minute default.
         let outcome = await SubagentManager.shared.runSubagent(
@@ -126,7 +126,7 @@ struct SubagentRunStopTests {
             turnTimeout: 30, client: client, appState: state, endSandboxSession: { _ in })
 
         // Only shows the subagent stopped well before its turn deadline, not how fast; the full parallel suite runs it at ~4 s.
-        #expect(Date().timeIntervalSince(started) < 10, "seconds, not the turn deadline")
+        #expect(TestClock.seconds(since: started) < 10, "seconds, not the turn deadline")
         #expect(client.callCount("WORKER") == 1, "the second round was refused, not made")
         #expect(outcome.status == .failed)
         #expect(outcome.rendered.contains("status: failed"))
@@ -157,10 +157,10 @@ struct SubagentRunStopTests {
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                config: config, activity: RecordingActivity(), sandboxAvailable: { true })
 
-        let started = Date()
+        let started = TestClock.now()
         await runner.fire(job: job, origin: .schedule)
 
-        #expect(Date().timeIntervalSince(started) < 10)
+        #expect(TestClock.seconds(since: started) < 10)
         let row = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(row.status == .failed)
         let transcript = try #require(state.conversations.first { $0.id == row.transcriptConversationId })
@@ -191,11 +191,11 @@ struct SubagentRunStopTests {
         #expect(await eventually { client.parkedCalls == 1 }, "the subagent is inside its model call")
         let subagent = try #require(state.liveSubagents(ofRun: run).first)
 
-        let cancelledAt = Date()
+        let cancelledAt = TestClock.now()
         waiting.cancel()
         let outcome = try await value(of: waiting)
 
-        #expect(Date().timeIntervalSince(cancelledAt) < 5, "the turn deadline is ten seconds: this is the cancel")
+        #expect(TestClock.seconds(since: cancelledAt) < 5, "the turn deadline is ten seconds: this is the cancel")
         #expect(outcome.status == .cancelled)
         #expect(outcome.rendered.contains("status: cancelled"))
         #expect(outcome.rendered.contains(SubagentManager.cancelledReason))

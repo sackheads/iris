@@ -167,9 +167,9 @@ final class StoreLockTests {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let stub = try LockStub.start(holding: url)
         defer { stub.kill() }
-        let started = Date()
+        let started = TestClock.now()
         #expect(StoreLock.claimSettling(at: url, kind: .runJob, settle: 0.3) == .held(nil))
-        #expect(Date().timeIntervalSince(started) >= 0.3)
+        #expect(TestClock.seconds(since: started) >= 0.3)
     }
 
     @Test("a path replaced between the open and the flock is detected, and the claim reopens")

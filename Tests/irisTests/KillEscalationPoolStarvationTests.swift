@@ -86,11 +86,11 @@ enum Starvation {
     /// Where `finish` writes its message, and when the scenario began. Set once, first thing, in
     /// the exit-test child, which runs nothing but this one scenario.
     nonisolated(unsafe) private static var messagePath: String?
-    nonisolated(unsafe) private static var began = Date()
+    nonisolated(unsafe) private static var began = TestClock.now()
 
     private static func begin(_ log: String) {
         messagePath = log
-        began = Date()
+        began = TestClock.now()
     }
 
     /// A file for the child's `finish` message. The message names which way a scenario failed —
@@ -112,14 +112,14 @@ enum Starvation {
     /// from. Measured from before `Task.detached` instead, it also charged the product for the
     /// pool scheduling the test's own task late: under load the call began 2.5 s in, and a kill
     /// that came on time by the product's clock was reported as outliving its deadline (#421).
-    private static let callBegan = OSAllocatedUnfairLock<Date?>(initialState: nil)
-    static func noteCallBegan() { callBegan.withLock { $0 = Date() } }
+    private static let callBegan = OSAllocatedUnfairLock<TestClock.Instant?>(initialState: nil)
+    static func noteCallBegan() { callBegan.withLock { $0 = TestClock.now() } }
     private static func callBeganText() -> String {
-        callBegan.withLock { $0 }.map { String(format: "call began at %.2f s", $0.timeIntervalSince(began)) }
+        callBegan.withLock { $0 }.map { String(format: "call began at %.2f s", TestClock.seconds(from: began, to: $0)) }
             ?? "call not begun"
     }
 
-    private static func elapsed() -> String { String(format: "%.2f s", Date().timeIntervalSince(began)) }
+    private static func elapsed() -> String { String(format: "%.2f s", TestClock.seconds(since: began)) }
 
     static func runCommandTimeout(log: String) async {
         begin(log)
@@ -142,7 +142,7 @@ enum Starvation {
         }
         await watch(nap: nap, budget: nil) {
             runner.terminate()
-            return Date().addingTimeInterval(ProcessGroupRunner.terminateGraceSeconds + 2)
+            return TestClock.deadline(ProcessGroupRunner.terminateGraceSeconds + 2)
         }
         _ = call
     }
@@ -170,7 +170,7 @@ enum Starvation {
             // Cancelled from the blocked thread: `onCancel` runs here, synchronously, and anything
             // it hands to the pool will not run until the hold is released.
             call.cancel()
-            return Date().addingTimeInterval(CLIProcessRunner.killGraceSeconds + 2)
+            return TestClock.deadline(CLIProcessRunner.killGraceSeconds + 2)
         }
     }
 
@@ -223,13 +223,13 @@ enum Starvation {
     /// (`noteCallBegan`); nil leaves it to `act`.
     /// With `done`, polls for that to hold instead of for `target` to be gone.
     private static func watch(nap: String, target: String? = nil, budget: Double?,
-                              act: () -> Date = { .distantFuture },
+                              act: () -> TestClock.Instant = { TestClock.deadline(86_400) },
                               done: (() -> Bool)? = nil, what: String? = nil) async {
         let started = "^sleep \(nap)"
-        let appeared = Date().addingTimeInterval(5)
+        let appeared = TestClock.deadline(5)
         // Awaited, not `usleep`: until the pool is held on purpose below, the call that spawns the
         // command needs a pool thread, and on a one-thread pool this body is sitting on it (#486).
-        while !exists(started), Date() < appeared { try? await Task.sleep(nanoseconds: 20_000_000) }
+        while !exists(started), TestClock.now() < appeared { try? await Task.sleep(nanoseconds: 20_000_000) }
         guard exists(started) else { finish(1, nap, "the command never started (gave up at \(elapsed()), \(callBeganText()))") }
         let appearedAt = elapsed()
         let needle = target ?? started
@@ -242,9 +242,9 @@ enum Starvation {
         }
         let acted = act()
         // The command was seen, so the call that spawned it has begun and noted when.
-        let until = budget.map { (callBegan.withLock { $0 } ?? began).addingTimeInterval($0) } ?? acted
+        let until = budget.map { TestClock.instant(callBegan.withLock { $0 } ?? began, plus: $0) } ?? acted
         let pending = done.map { d in { !d() } } ?? { exists(needle) }
-        while pending(), Date() < until { usleep(50_000) }
+        while pending(), TestClock.now() < until { usleep(50_000) }
         let survived = pending()
         hold.release()
         finish(survived ? 1 : 0, nap, survived
@@ -298,9 +298,9 @@ final class PoolHold: @unchecked Sendable {
     /// True when the pool's threads are all taken: a fresh task does not get to run.
     func isHeld() -> Bool {
         // Let the holders take their threads first.
-        let settle = Date().addingTimeInterval(2)
+        let settle = TestClock.deadline(2)
         var last = -1
-        while Date() < settle {
+        while TestClock.now() < settle {
             let now = lock.withLock { running }
             if now == last, now > 0 { break }
             last = now

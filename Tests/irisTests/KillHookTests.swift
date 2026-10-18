@@ -23,8 +23,8 @@ struct KillHookTests {
 
         /// Waits out the second, end-of-ladder call, and checks both calls and their queues.
         func refired() async -> Bool {
-            let deadline = Date().addingTimeInterval(CLIProcessRunner.killGraceSeconds + 2)
-            while all.count < 2, Date() < deadline { try? await Task.sleep(nanoseconds: 50_000_000) }
+            let deadline = TestClock.deadline(CLIProcessRunner.killGraceSeconds + 2)
+            while all.count < 2, TestClock.now() < deadline { try? await Task.sleep(nanoseconds: 50_000_000) }
             return all == ["iris.cli-process.ladder", "iris.cli-process.refire"]
         }
     }

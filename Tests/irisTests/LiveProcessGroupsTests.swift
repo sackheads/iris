@@ -61,9 +61,9 @@ struct LiveProcessGroupsTests {
         let registry = LiveProcessGroups()
         #expect(await drained(registry, within: 0.1), "an empty registry is already drained")
         let (runner, task) = try await spawnIgnoringTerm(registry)
-        let started = Date()
+        let started = TestClock.now()
         #expect(await drained(registry, within: 0.3) == false)
-        #expect(Date().timeIntervalSince(started) >= 0.3)
+        #expect(TestClock.seconds(since: started) >= 0.3)
         runner.terminate()   // SIGTERM is ignored, so this drains at the SIGKILL rung, 2 s on
         #expect(await drained(registry, within: 5))
         _ = try await value(of: task, within: 10)
