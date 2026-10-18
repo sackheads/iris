@@ -4,5 +4,5 @@
 
 <!-- Invariant 9 (AGENTS.md). Search, do not compose: grep for the behaviour you changed and read
 what comes back in README.md, docs/, GoalContract.oracleText, tool `description` fields, and
-system prompts (VibecopService, EVALUATOR.md and the rest). Name each sentence you fixed, or say
+system prompts (SYSTEM.md, EVALUATOR.md and the skills in Sources/IrisKit/assets/, VibecopService). Name each sentence you fixed, or say
 what you searched. "Nothing" is a fine answer; not looking is not. The reviewer checks this. -->

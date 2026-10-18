@@ -355,11 +355,10 @@ docs/                     # feature pages (features.md, jobs.md, …), install.m
 
 ## Reviewing a PR
 
-- **Check the "What does this change make untrue?" answer** (the PR template, Invariant 9). Grep for
-  the behaviour the PR changed yourself, in `README.md`, `docs/` and the agent-facing strings
-  (`oracleText`, tool `description` fields, system prompts), and treat a stale sentence you find as a
-  finding like any other. An agent-facing one is the more serious: the model reads it on every turn
-  and no UI ever shows it (#198).
+- **Check the "What does this change make untrue?" answer** (the PR template). Grep for the
+  behaviour the PR changed yourself, in the places Invariant 9 lists, and treat a stale sentence you
+  find as a finding like any other. An agent-facing one is the more serious: the model reads it on
+  every turn and no UI ever shows it (#198).
 
 ## House style
 
