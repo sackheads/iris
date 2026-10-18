@@ -43,6 +43,12 @@ final class VibecopService: @unchecked Sendable {
         anything obviously malicious or destructive.
         """
 
+    /// Files under a mounted folder that a Mac program runs or reads as configuration (#613): a
+    /// closed list, so routine project dotfiles (.gitignore, .eslintrc) stay routine.
+    static let hostRunFiles = [".git/hooks/", ".git/config", ".gitconfig", ".zshenv", ".zshrc", ".zprofile",
+                               ".bashrc", ".bash_profile", ".profile", ".ssh/", "Library/LaunchAgents/",
+                               ".envrc", ".vscode/tasks.json"]
+
     static func evaluatorLayerText(allowedCommands: [String]) -> String {
         let allow = allowedCommands.isEmpty ? "(none declared)" : allowedCommands.map { "`\($0)`" }.joined(separator: ", ")
         return """
@@ -101,23 +107,25 @@ final class VibecopService: @unchecked Sendable {
         if inSandbox {
             let mounted = workspace.map { "the workspace \($0) (the working directory), and any paths a job grants" }
                 ?? "any paths a job grants"
+            // Prefixed with the mount, so a name in the list is never read as the VM's own `~`
+            // (work's A/B on #613: a bare `.bashrc` escalated the VM's own ~/.bashrc).
+            let root = workspace.map { $0.hasSuffix("/") ? $0 : $0 + "/" } ?? "<mounted folder>/"
+            let hostRun = Self.hostRunFiles.map { root + $0 }.joined(separator: ", ")
             prompt += """
 
 
-            EXECUTION CONTEXT: This command runs inside a disposable, network-capable Linux VM,
-            but the folders mounted into it are the user's real Mac folders,
-            read-write unless marked read-only: \(mounted). A write under a mounted folder is a
-            write on the user's
-            Mac and outlives the VM; anything else in the VM (its own home, /root, /usr, /tmp) is
-            thrown away with it. Auto-APPROVE routine work: building, testing, inspecting files,
-            editing the project's files, installing packages or editing dotfiles inside the VM.
-            ESCALATE a write, under a mounted folder, to a file a Mac program runs or reads as
-            configuration: .git/hooks/, .git/config, .gitconfig, .zshenv, .zshrc, .zprofile,
-            .bashrc, .bash_profile, .profile, .ssh/, Library/LaunchAgents/, .envrc,
-            .vscode/tasks.json. DENY an obvious attempt to leave code behind for the Mac to run.
-            Also reserve ESCALATE/DENY for outbound network connections to new/unknown hosts,
-            attempts to escape the container or escalate privilege, or reaching host-bridged
-            resources.
+            EXECUTION CONTEXT: This command runs inside a disposable, network-capable Linux VM.
+            The VM's own home directory (~ and $HOME, which is /root) and everything else in the VM
+            outside the mounted folders is thrown away with it, so editing ~/.bashrc or any other
+            file under the VM's ~ is routine. Mounted from the user's real Mac, read-write unless
+            marked read-only: \(mounted). A write under a mounted folder is a write on the user's
+            Mac and outlives the VM. Auto-APPROVE routine work: building, testing, inspecting
+            files, editing the project's files, installing packages, editing files under the VM's
+            own ~. ESCALATE a write to one of these paths on the Mac, which a Mac program runs or
+            reads as configuration: \(hostRun). DENY an obvious attempt to leave code behind for
+            the Mac to run. Also reserve ESCALATE/DENY for outbound network connections to
+            new/unknown hosts, attempts to escape the container or escalate privilege, or reaching
+            host-bridged resources.
             """
         }
 
