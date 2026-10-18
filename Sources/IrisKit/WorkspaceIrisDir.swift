@@ -50,15 +50,12 @@ enum WorkspaceIrisDir {
         case refused(String)
     }
 
-    /// What a protected path inside a read-write mount must be.
-    enum Kind: Sendable { case directory, file }
-
-    /// One path a read-write mount carries read-only inside it (#617; `.git/hooks` and
-    /// `.git/config` reuse it for #623). `createIfMissing` makes it before the container exists, so
-    /// the VM cannot; off, a missing path is simply not mounted.
+    /// One directory a read-write mount carries read-only inside it (#617). Directories only: the
+    /// container runtime cannot mount a single file (virtiofs refuses one at create, CLI 1.1.0), so
+    /// a file can be protected only by a directory around it. `createIfMissing` makes it before the
+    /// container exists, so the VM cannot; off, a missing path is simply not mounted.
     struct Protected: Sendable, Equatable {
         var relative: String
-        var kind: Kind = .directory
         var createIfMissing = true
     }
 
@@ -68,34 +65,26 @@ enum WorkspaceIrisDir {
     static func protected(for source: String) -> [Protected] { [Protected(relative: name)] }
 
     /// Makes `<dir>/<relative>` something the VM can be given read-only, before the container that
-    /// mounts `dir` is made. Every component must be a real directory, and the last one a real
-    /// directory or regular file as `kind` says: a symlink anywhere could point the read-only
-    /// mount at somewhere else, leaving the real path writable.
+    /// mounts `dir` is made. Every component must be a real directory: a symlink anywhere could
+    /// point the read-only mount at somewhere else, leaving the real path writable.
     static func prepareForMount(_ dir: String, _ item: Protected = Protected(relative: name)) -> Prepared {
         var info = stat()
         // No workspace, nothing to protect: the container's own bind of it fails on its own.
         if lstat(dir, &info) != 0, errno == ENOENT { return .ready((dir as NSString).appendingPathComponent(item.relative)) }
         let parts = item.relative.split(separator: "/").map(String.init)
         var path = dir
-        for (i, part) in parts.enumerated() {
+        for part in parts {
             path = (path as NSString).appendingPathComponent(part)
-            let last = i == parts.count - 1
-            let want: Kind = last ? item.kind : .directory
             if lstat(path, &info) != 0 {
                 guard errno == ENOENT else { return .refused(refusal(path, "it cannot be read")) }
                 guard item.createIfMissing else { return .absent }
-                let made = want == .directory ? mkdir(path, 0o755) == 0
-                                              : { let fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o644)
-                                                  if fd >= 0 { close(fd) }; return fd >= 0 }()
-                guard made || errno == EEXIST, lstat(path, &info) == 0 else {
+                guard mkdir(path, 0o755) == 0 || errno == EEXIST, lstat(path, &info) == 0 else {
                     return .refused(refusal(path, "it could not be created"))
                 }
             }
             let type = info.st_mode & S_IFMT
             if type == S_IFLNK { return .refused(refusal(path, "it is a symbolic link")) }
-            guard type == (want == .directory ? S_IFDIR : S_IFREG) else {
-                return .refused(refusal(path, want == .directory ? "it is not a directory" : "it is not a regular file"))
-            }
+            guard type == S_IFDIR else { return .refused(refusal(path, "it is not a directory")) }
         }
         return .ready(path)
     }

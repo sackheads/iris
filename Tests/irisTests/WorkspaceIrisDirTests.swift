@@ -63,18 +63,17 @@ struct WorkspaceIrisDirTests {
         #expect(WorkspaceIrisDir.prepareForMount(other) != .ready(other + "/.iris"))
     }
 
-    @Test("an optional protected path that is missing is absent, not created, whether a folder or a file")
+    @Test("an optional protected directory that is missing is absent and not created; a file in its place refuses")
     func optionalAbsent() throws {
         let ws = try workspace()
         defer { try? FileManager.default.removeItem(atPath: ws) }
         let hooks = WorkspaceIrisDir.Protected(relative: ".git/hooks", createIfMissing: false)
-        let config = WorkspaceIrisDir.Protected(relative: ".git/config", kind: .file, createIfMissing: false)
         #expect(WorkspaceIrisDir.prepareForMount(ws, hooks) == .absent)
-        #expect(WorkspaceIrisDir.prepareForMount(ws, config) == .absent)
         #expect(!FileManager.default.fileExists(atPath: ws + "/.git"), "nothing makes a plain folder look like a repository")
-        // Present, a file kind must be a regular file, and a directory where it should be refuses.
-        try FileManager.default.createDirectory(atPath: ws + "/.git/config", withIntermediateDirectories: true)
-        guard case .refused = WorkspaceIrisDir.prepareForMount(ws, config) else { Issue.record("a directory passed as a file"); return }
+        // A file where the directory should be cannot be mounted read-only, so it refuses.
+        try FileManager.default.createDirectory(atPath: ws + "/.git", withIntermediateDirectories: true)
+        try "x".write(toFile: ws + "/.git/hooks", atomically: false, encoding: .utf8)
+        guard case .refused = WorkspaceIrisDir.prepareForMount(ws, hooks) else { Issue.record("a file passed as a directory"); return }
         // And mountList leaves out what the caller found absent.
         let list = SandboxSessionManager.mountList(workspace: ContainerMount(source: "/ws"), extra: []) { _, _ in false }
         #expect(list == ["/ws:/ws"])
