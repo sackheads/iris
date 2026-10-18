@@ -104,7 +104,7 @@ struct SubagentGoalLoopTests {
     /// A background run registered as `JobRunner` registers one, so the subagent is on its registry.
     private func run(in state: AppState, maxTokens: Int = 100_000) -> UUID {
         let run = state.createNewConversation(isBackground: true, select: false)
-        state.registerRun(run, budget: TurnBudget(maxTokens: maxTokens, deadline: Date().addingTimeInterval(600)),
+        state.registerRun(run, budget: TurnBudget(maxTokens: maxTokens, seconds: 600),
                           sink: DelegatedSpendTests.RecordingSink())
         return run
     }

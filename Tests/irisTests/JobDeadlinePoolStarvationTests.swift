@@ -62,6 +62,8 @@ enum DeadlineStarvation {
         private var current = Date()
         func now() -> Date { lock.withLock { current } }
         func advance(by seconds: TimeInterval) { lock.withLock { current += seconds } }
+        /// The same clock as the run deadline reads it (#608).
+        var uptime: UptimeClock { UptimeClock { self.now().timeIntervalSinceReferenceDate } }
     }
 
     static func run(log: String, stopFirst: Bool = false) async {
@@ -92,7 +94,7 @@ enum DeadlineStarvation {
             guard (try? store.ledger.upsert(job)) != nil else { return nil }
             let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                    config: config, activity: activity, watchdogSlice: 0.05,
-                                   deadlineClock: clock.now, stop: stop)
+                                   deadlineClock: clock.uptime, stop: stop)
             return (job, runner, store, state, engine)
         }
         guard let (job, runner, store, state, engine) = started else { finish(log, 1, "could not build the harness") }

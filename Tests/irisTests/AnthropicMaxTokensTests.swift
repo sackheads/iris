@@ -255,7 +255,7 @@ struct BudgetOutputCapTests {
 
     @Test("20K weighted left sends max_tokens <= 4000, not 32000")
     func twentyKLeft() async throws {
-        let budget = TurnBudget(maxTokens: 20_000, deadline: Date().addingTimeInterval(600), provider: LLMProvider.anthropic.rawValue)
+        let budget = TurnBudget(maxTokens: 20_000, seconds: 600, provider: LLMProvider.anthropic.rawValue)
         let request = try await firstRequest(budget: budget)
         #expect(request.maxOutputTokens == 4000)
         let urlRequest = try AnthropicClient.makeURLRequest(request: request, model: "claude-opus-5-5",
@@ -268,10 +268,10 @@ struct BudgetOutputCapTests {
 
     @Test("a nearly spent budget still asks for the 1024 floor")
     func floor() {
-        let budget = TurnBudget(maxTokens: 2000, deadline: Date().addingTimeInterval(600), provider: LLMProvider.anthropic.rawValue)
+        let budget = TurnBudget(maxTokens: 2000, seconds: 600, provider: LLMProvider.anthropic.rawValue)
         #expect(budget.outputTokenCap(weightedTokens: 1500) == TurnBudget.minOutputTokenCap)
-        #expect(TurnBudget(maxTokens: 0, deadline: Date()).outputTokenCap(weightedTokens: 0) == nil)
-        #expect(TurnBudget(maxTokens: 10_000, deadline: Date()).outputTokenCap(weightedTokens: 0) == 10_000, "no provider weighs output at 1x")
+        #expect(TurnBudget(maxTokens: 0, seconds: 0).outputTokenCap(weightedTokens: 0) == nil)
+        #expect(TurnBudget(maxTokens: 10_000, seconds: 0).outputTokenCap(weightedTokens: 0) == 10_000, "no provider weighs output at 1x")
     }
 
     @Test("an unbudgeted turn sets no cap")

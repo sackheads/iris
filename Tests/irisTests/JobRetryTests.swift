@@ -401,6 +401,10 @@ struct JobRetryTests {
         }
 
         func advance(by seconds: TimeInterval) { lock.withLock { current += seconds } }
+
+        /// The same clock as the run deadline reads it (#608).
+
+        var uptime: UptimeClock { UptimeClock { self.now().timeIntervalSinceReferenceDate } }
     }
 
     /// Resumes its continuation once, with whichever answer arrives first.
@@ -555,6 +559,51 @@ struct JobRetryTests {
         #expect(activity.events == [.begin("Iris job pr-sweep"), .end])
     }
 
+    /// Takes `delay` of real time on its first call, as a model would across a Mac's sleep, and
+    /// asks for one tool; answers with text on the second.
+    private final class SlowThenDone: LLMClientProtocol, @unchecked Sendable {
+        private let lock = NSLock()
+        private var calls = 0
+        let delay: TimeInterval
+        init(delay: TimeInterval) { self.delay = delay }
+        var callCount: Int { lock.withLock { calls } }
+
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            let n = lock.withLock { calls += 1; return calls }
+            guard n == 1 else {
+                return GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "done")]))],
+                                      usageMetadata: nil)
+            }
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            // A tool a background run calls with no approval: the point is the second round.
+            let call = FunctionCall(name: "search_memory", args: ["query": .string("anything")])
+            return GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: call)]))],
+                                  usageMetadata: nil)
+        }
+    }
+
+    @Test("time the Mac spends asleep does not count toward a run's timeout (#608)")
+    func sleepDoesNotSpendTheTimeout() async throws {
+        // A sleep, as the run sees it: real time passes the one-second timeout while the run's
+        // clock, which pauses in sleep, stands still. Both checks must read that clock: the
+        // watchdog during the slow first call, and the round check before the second.
+        let client = SlowThenDone(delay: 1.5)
+        let (store, state, engine) = try harness([], client: client)
+        let j = job(timeoutSeconds: 1)
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let frozen = UptimeClock.live.now()
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
+                               activity: RecordingActivity(), watchdogSlice: 0.05,
+                               deadlineClock: UptimeClock { frozen })
+        let fire = Task { await runner.fire(job: j, origin: .schedule) }
+        try #require(await finished(fire) != nil, "the run ended")
+        let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
+        #expect(run.status == .completed, "not \(run.status) / \(run.failureReason ?? "-")")
+        #expect(client.callCount == 2, "the round after the slow call went ahead")
+    }
+
     @Test("a run that overruns its timeout is ended at the deadline, and the row says so")
     func deadlineEndsTheRun() async throws {
         // A client that never returns: the round-boundary budget check cannot reach a turn parked
@@ -568,7 +617,7 @@ struct JobRetryTests {
         let activity = RecordingActivity()
         let clock = ManualClock()
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
-                               activity: activity, watchdogSlice: 0.01, deadlineClock: clock.now)
+                               activity: activity, watchdogSlice: 0.01, deadlineClock: clock.uptime)
 
         let fire = Task { await runner.fire(job: j, origin: .schedule) }
         // Only a failed test needs this: a passing one never releases the call.
@@ -608,7 +657,7 @@ struct JobRetryTests {
         let activity = RecordingActivity()
         let clock = ManualClock()
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
-                               activity: activity, watchdogSlice: 0.01, deadlineClock: clock.now)
+                               activity: activity, watchdogSlice: 0.01, deadlineClock: clock.uptime)
         defer { client.releaseAll() }
 
         let fire = Task { await runner.fire(job: j, origin: .schedule) }
@@ -683,7 +732,7 @@ struct JobRetryTests {
         let activity = RecordingActivity()
         let clock = ManualClock()
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
-                               activity: activity, watchdogSlice: 0.02, deadlineClock: clock.now)
+                               activity: activity, watchdogSlice: 0.02, deadlineClock: clock.uptime)
         defer { client.releaseAll() }
 
         let fire = Task { await runner.fire(job: j, origin: .schedule) }
@@ -734,7 +783,7 @@ struct JobRetryTests {
         let activity = RecordingActivity()
         let clock = ManualClock()
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
-                               activity: activity, watchdogSlice: 0.01, deadlineClock: clock.now)
+                               activity: activity, watchdogSlice: 0.01, deadlineClock: clock.uptime)
 
         let fire = Task { await runner.fire(job: j, origin: .schedule) }
         defer { client.release() }
@@ -965,7 +1014,7 @@ struct JobRetryTests {
                                    try? await Task.sleep(nanoseconds: 30_000_000_000)
                                },
                                config: config, activity: RecordingActivity(), watchdogSlice: 0.01,
-                               deadlineClock: clock.now, stop: stop)
+                               deadlineClock: clock.uptime, stop: stop)
         let fire = Task { await runner.fire(job: j, origin: .manual) }
         defer { client.release() }
         try #require(await client.calls.reach(1))
