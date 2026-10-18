@@ -122,7 +122,7 @@ actor SandboxSessionManager {
         // there to mount before the container is made; one that cannot be protected refuses.
         var absent: Set<String> = []
         for (source, _) in Self.readWriteMounts(workspace: workspace, extra: extraMounts) {
-            for item in WorkspaceIrisDir.protected {
+            for item in WorkspaceIrisDir.protected(for: source) {
                 switch WorkspaceIrisDir.prepareForMount(source, item) {
                 case .refused(let why): return why
                 case .absent: absent.insert((source as NSString).appendingPathComponent(item.relative))
@@ -250,7 +250,7 @@ actor SandboxSessionManager {
     static func mountList(workspace: ContainerMount?, extra: [String],
                           include: (String, String) -> Bool = { _, _ in true }) -> [String] {
         func protecting(_ source: String, _ target: String) -> [String] {
-            WorkspaceIrisDir.protected.filter { include(source, $0.relative) }
+            WorkspaceIrisDir.protected(for: source).filter { include(source, $0.relative) }
                 .map { WorkspaceIrisDir.mountEntry(source: source, target: target, relative: $0.relative) }
         }
         var list: [String] = []
