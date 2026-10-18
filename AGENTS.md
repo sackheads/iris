@@ -145,6 +145,12 @@ run (#428). Await it through `value(of:within:)` (`Tests/irisTests/BoundedWait.s
 the test at its bound instead, and give a suite that starts tasks or processes
 `.timeLimit(.minutes(1))` (#435).
 
+**A test times elapsed bounds with `TestClock`, not `Date()`.** `Date()` counts the Mac's sleep, and a
+maintenance sleep mid-run failed tests with walls they could not have spent (#605). `TestClock`
+(`Tests/irisTests/TestClock.swift`) runs on `SuspendingClock`, as the product's dispatch timers do:
+`seconds(since:)` for a bound, `deadline(_:)` for a polling loop, and `NSCondition.wait(until:)` for a
+stub's hang. `Date()` is for what means wall time: a timestamp, a calendar date, a schedule.
+
 **Opt-in tests.** Two kinds of test are skipped unless an environment variable asks for them,
 because they need something the default suite must not depend on:
 

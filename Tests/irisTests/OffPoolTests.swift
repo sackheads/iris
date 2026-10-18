@@ -20,7 +20,7 @@ struct OffPoolTests {
             lock.lock(); defer { lock.unlock() }
             label = here
             entered = true
-            let deadline = Date().addingTimeInterval(20)
+            let deadline = TestClock.deadline(20)
             while !released && lock.wait(until: deadline) {}
         }
     }

@@ -207,7 +207,7 @@ struct WatcherManagerSyncTests {
             defer { lock.unlock() }
             guard slow, only == nil || only == path else { return true }
             inside = true
-            let deadline = Date().addingTimeInterval(5)
+            let deadline = TestClock.deadline(5)
             while !released && lock.wait(until: deadline) {}
             inside = false
             return true
@@ -406,7 +406,7 @@ struct WatcherManagerSyncTests {
             defer { lock.unlock() }
             label = here
             inside = true
-            let deadline = Date().addingTimeInterval(10)
+            let deadline = TestClock.deadline(10)
             while !released && lock.wait(until: deadline) {}
             return true
         }
