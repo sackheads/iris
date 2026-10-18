@@ -62,14 +62,16 @@ enum WorkspaceIrisDir {
         var createIfMissing = true
     }
 
-    /// What every read-write mount protects today.
-    static let protected = [Protected(relative: name)]
+    /// What the read-write mount of `source` protects: today its `.iris/`, for every mount. Per
+    /// mount, so a later entry can depend on what is there (#623 reads `.git`, a directory or a
+    /// worktree's gitdir file) rather than refusing a layout it does not apply to.
+    static func protected(for source: String) -> [Protected] { [Protected(relative: name)] }
 
     /// Makes `<dir>/<relative>` something the VM can be given read-only, before the container that
     /// mounts `dir` is made. Every component must be a real directory, and the last one a real
     /// directory or regular file as `kind` says: a symlink anywhere could point the read-only
     /// mount at somewhere else, leaving the real path writable.
-    static func prepareForMount(_ dir: String, _ item: Protected = protected[0]) -> Prepared {
+    static func prepareForMount(_ dir: String, _ item: Protected = Protected(relative: name)) -> Prepared {
         var info = stat()
         // No workspace, nothing to protect: the container's own bind of it fails on its own.
         if lstat(dir, &info) != 0, errno == ENOENT { return .ready((dir as NSString).appendingPathComponent(item.relative)) }

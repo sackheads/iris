@@ -552,7 +552,7 @@ struct ToolExecutor {
                 containerArgs.insert(contentsOf: ["-v", "\(expandedPath):\(expandedPath)", "--workdir", expandedPath], at: 4)
                 // Its `.iris/` read-only over it, as the session path does (#617).
                 var at = 6
-                for item in WorkspaceIrisDir.protected {
+                for item in WorkspaceIrisDir.protected(for: expandedPath) {
                     switch WorkspaceIrisDir.prepareForMount(expandedPath, item) {
                     case .refused(let why): return why
                     case .absent: continue
