@@ -23,7 +23,10 @@ enum HomeMount {
     }
 
     /// Why a sandbox may not mount `path` read-write without the opt-in, or nil when it may.
-    static func reason(for path: String, home: String = NSHomeDirectory(), paths: IrisPaths = .default) -> String? {
+    /// `release`: in a dev build, the installed app's settings are guarded too, as `JobGrant`
+    /// guards its home.
+    static func reason(for path: String, home: String = NSHomeDirectory(), paths: IrisPaths = .default,
+                       release: IrisPaths? = BuildIdentity.current == .dev ? .release : nil) -> String? {
         let p = IrisPaths.canonicalPath(IrisEngine.expandTilde(path)).lowercased()
         let h = IrisPaths.canonicalPath(home).lowercased()
         if p == "/" || p == h || h.hasPrefix(p + "/") {
@@ -35,7 +38,8 @@ enum HomeMount {
         if JobGrant.isCredentialStore(p, home: home) {
             return "it is or holds a credential store (~/.ssh, ~/.aws, the Keychains folder and the like)"
         }
-        for dir in [paths.configDir.path, paths.pluginsDir.path] {
+        let guarded = [paths] + (release.map { [$0] } ?? [])
+        for dir in guarded.flatMap({ [$0.configDir.path, $0.pluginsDir.path] }) {
             let d = IrisPaths.canonicalPath(dir).lowercased()
             if p == d || p.hasPrefix(d + "/") || d.hasPrefix(p + "/") {
                 return "it is or holds Iris's own settings, which decide what runs without asking"
