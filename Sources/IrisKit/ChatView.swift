@@ -29,6 +29,8 @@ struct ChatView: View {
     @State private var homeOptInTarget: Conversation?
     /// #625: the conversation whose workspace rules are being reviewed.
     @State private var rulesReviewTarget: Conversation?
+    /// Bumped when a trust is refused because a file changed, so the sheet re-reads and says so.
+    @State private var rulesReviewChanged = 0
 
     /// #182 §9: the group auto-expands when the selected conversation *becomes* one of its rows.
     /// Two ways in, and both are a change of the same one value — "the selection, while it is
@@ -565,11 +567,18 @@ struct ChatView: View {
         )) {
             if let wp = rulesReviewTarget?.workspacePath {
                 WorkspaceRulesReview(files: state.untrustedWorkspaceRules(for: wp), workspace: wp,
+                                     changedWhileOpen: rulesReviewChanged > 0,
                                      trust: { shown in
-                                         // Changed since it was shown: keep the sheet open on the new text.
-                                         if state.trustWorkspaceRules(for: wp, reviewed: shown) { rulesReviewTarget = nil }
+                                         // Changed since it was shown: re-read, keep the sheet open on the new text.
+                                         if state.trustWorkspaceRules(for: wp, reviewed: shown) {
+                                             rulesReviewTarget = nil
+                                             rulesReviewChanged = 0
+                                         } else {
+                                             rulesReviewChanged += 1
+                                         }
                                      },
-                                     dismiss: { rulesReviewTarget = nil })
+                                     dismiss: { rulesReviewTarget = nil; rulesReviewChanged = 0 })
+                    .id(rulesReviewChanged)
             }
         }
         .contextMenu {
@@ -1479,6 +1488,8 @@ func formatDuration(_ t: TimeInterval) -> String {
 struct WorkspaceRulesReview: View {
     let files: [(file: String, data: Data)]
     let workspace: String
+    /// A trust was refused because a file changed after it was shown; this is the new text.
+    var changedWhileOpen = false
     /// Called with exactly the files and content shown.
     let trust: ([(file: String, data: Data)]) -> Void
     let dismiss: () -> Void
@@ -1488,6 +1499,10 @@ struct WorkspaceRulesReview: View {
             Text("Review Workspace Rules").font(.headline)
             Text("These files in \(workspace)/.iris came with the folder or changed outside Iris. They decide what Iris runs without asking you (the project allowlist), whether this workspace's commands are sandboxed, and what Vibecop treats as routine. None of them is in effect until you trust it.")
                 .font(.callout).foregroundStyle(.secondary)
+            if changedWhileOpen {
+                Text("These files changed while you were reading them, so nothing was trusted. This is their text now.")
+                    .font(.callout.bold()).foregroundStyle(.orange)
+            }
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(files, id: \.file) { entry in
