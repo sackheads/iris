@@ -322,11 +322,11 @@ final class SubagentManager: @unchecked Sendable {
         // waiting for the verdict, and an evaluator started now would outlive the run (#323).
         var verdict: GoalEvaluation? = nil
         if termination.status == .completed, let unit, unit.grade, !Task.isCancelled, !wasStopped {
-            // The directory the subagent actually worked in. With no bound workspace its
-            // run_command inherits the process cwd, so the grader is pointed at the same place.
-            let workspace = GoalEvaluator.gradingDirectory(await MainActor.run {
+            // The subagent's bound workspace, or nil: the evaluator points the grader at the process
+            // cwd it worked in when none is bound, without mounting it (`GoalEvaluator.evaluate`).
+            let workspace = await MainActor.run {
                 appState.conversations.first { $0.id == subagentId }?.workspacePath
-            })
+            }
             verdict = await GoalEvaluator.shared.evaluate(contract: unit.contract, workspace: workspace,
                                                           originatingConversationId: subagentId,
                                                           app: appState, client: client ?? LLMClient(),
