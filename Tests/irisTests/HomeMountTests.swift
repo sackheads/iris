@@ -26,6 +26,16 @@ struct HomeMountTests {
         }
     }
 
+    @Test("a dev build guards the installed app's settings as well as its own")
+    func devGuardsRelease() {
+        let dev = IrisPaths(root: URL(fileURLWithPath: "/tmp/dev-home/.iris-dev"))
+        let release = IrisPaths(root: URL(fileURLWithPath: "/tmp/dev-home/.iris"))
+        #expect(HomeMount.reason(for: "/tmp/dev-home/.iris/config", home: "/Users/me", paths: dev, release: release) != nil)
+        #expect(HomeMount.reason(for: "/tmp/dev-home/.iris/plugins/p", home: "/Users/me", paths: dev, release: release) != nil)
+        #expect(HomeMount.reason(for: "/tmp/dev-home/.iris/config", home: "/Users/me", paths: dev, release: nil) == nil)
+        #expect(HomeMount.reason(for: "/tmp/dev-home/.iris/workspaces/x", home: "/Users/me", paths: dev, release: release) == nil)
+    }
+
     @Test("an opt-in covers exactly the folder it was given for")
     func coverage() {
         #expect(HomeMount.isCovered("/Users/me", by: "/Users/me"))
