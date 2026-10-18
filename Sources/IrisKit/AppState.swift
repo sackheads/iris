@@ -1996,7 +1996,31 @@ class AppState {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].workspacePath = path
             markChanged(conversationId, .metadata)
+            // #625: rules Iris did not write are not in effect; say so where the person can act.
+            let files = untrustedWorkspaceRules(for: path).map(\.file)
+            if !files.isEmpty {
+                appendMessage(role: .system, content: Self.untrustedRulesNote(files), to: conversationId)
+            }
         }
+    }
+
+    /// Who decides which workspace `.iris/` rules Iris acts on (#625). Injectable for tests.
+    @ObservationIgnored var workspaceTrust = WorkspaceIrisTrust()
+
+    /// The workspace's rule files that are not in effect, for review.
+    func untrustedWorkspaceRules(for workspace: String) -> [(file: String, data: Data)] {
+        workspaceTrust.untrusted(workspace: workspace)
+    }
+
+    /// The person's "Trust These Rules" from "Review Workspace Rules…". Called only from the UI;
+    /// no tool, system event or job reaches it (a source scan pins that).
+    func trustWorkspaceRules(for workspace: String) {
+        workspaceTrust.trustAll(workspace: workspace)
+    }
+
+    static func untrustedRulesNote(_ files: [String]) -> String {
+        let names = files.map { "`.iris/\($0)`" }.joined(separator: ", ")
+        return "This workspace's \(names) came with the folder or changed outside Iris, so \(files.count == 1 ? "its rules aren't" : "their rules aren't") in effect. To use them, right-click the conversation in the sidebar and choose Review Workspace Rules…"
     }
 
     /// Stamps the profile of the job whose run this conversation holds (#187 §4). Persisted, so a

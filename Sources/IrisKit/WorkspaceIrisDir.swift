@@ -14,10 +14,19 @@ import Foundation
 enum WorkspaceIrisDir {
     static let name = ".iris"
 
-    /// Contents of `<workspace>/.iris/<file>`, or nil when it is missing or is not a file Iris
-    /// trusts: a symlink, a hard-linked file, anything but a regular file, or a `.iris` that is
-    /// itself a link or not a directory.
-    static func read(_ file: String, workspace: String) -> Data? {
+    /// Contents of `<workspace>/.iris/<file>` when Iris may act on it: it passes the link checks
+    /// (`readUnverified`) and is what Iris itself wrote or a person trusted (`WorkspaceIrisTrust`,
+    /// #625). Anything else reads as absent.
+    static func read(_ file: String, workspace: String, trust: WorkspaceIrisTrust = WorkspaceIrisTrust()) -> Data? {
+        guard let data = readUnverified(file, workspace: workspace),
+              trust.isTrusted(file, workspace: workspace, data: data) else { return nil }
+        return data
+    }
+
+    /// Contents of `<workspace>/.iris/<file>`, or nil when it is missing or is not a plain file:
+    /// a symlink, a hard-linked file, anything but a regular file, or a `.iris` that is itself a
+    /// link or not a directory. Not yet trusted: for review and for recording, never to act on.
+    static func readUnverified(_ file: String, workspace: String) -> Data? {
         let dir = (IrisEngine.expandTilde(workspace) as NSString).appendingPathComponent(name)
         let dirFD = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard dirFD >= 0 else { return nil }
@@ -33,34 +42,66 @@ enum WorkspaceIrisDir {
     }
 
     enum Prepared: Equatable {
-        /// `.iris/` is a real directory at this host path, ready to mount read-only.
+        /// The path is there, a real directory or file as asked, ready to mount read-only.
         case ready(String)
+        /// It is not there and was not to be created: mount nothing for it.
+        case absent
         /// It cannot be protected, and why.
         case refused(String)
     }
 
-    /// Makes `<dir>/.iris` a directory the VM can be given read-only, before the container that
-    /// mounts `dir` is created. Created empty when missing, so the VM cannot create it (#617).
-    static func prepareForMount(_ dir: String) -> Prepared {
-        let path = (dir as NSString).appendingPathComponent(name)
+    /// What a protected path inside a read-write mount must be.
+    enum Kind: Sendable { case directory, file }
+
+    /// One path a read-write mount carries read-only inside it (#617; `.git/hooks` and
+    /// `.git/config` reuse it for #623). `createIfMissing` makes it before the container exists, so
+    /// the VM cannot; off, a missing path is simply not mounted.
+    struct Protected: Sendable, Equatable {
+        var relative: String
+        var kind: Kind = .directory
+        var createIfMissing = true
+    }
+
+    /// What every read-write mount protects today.
+    static let protected = [Protected(relative: name)]
+
+    /// Makes `<dir>/<relative>` something the VM can be given read-only, before the container that
+    /// mounts `dir` is made. Every component must be a real directory, and the last one a real
+    /// directory or regular file as `kind` says: a symlink anywhere could point the read-only
+    /// mount at somewhere else, leaving the real path writable.
+    static func prepareForMount(_ dir: String, _ item: Protected = protected[0]) -> Prepared {
         var info = stat()
         // No workspace, nothing to protect: the container's own bind of it fails on its own.
-        if lstat(dir, &info) != 0, errno == ENOENT { return .ready(path) }
-        if lstat(path, &info) != 0 {
-            guard errno == ENOENT else { return .refused(refusal(path, "it cannot be read")) }
-            guard mkdir(path, 0o755) == 0 || errno == EEXIST else { return .refused(refusal(path, "it could not be created")) }
-            guard lstat(path, &info) == 0 else { return .refused(refusal(path, "it cannot be read")) }
-        }
-        guard (info.st_mode & S_IFMT) == S_IFDIR else {
-            return .refused(refusal(path, (info.st_mode & S_IFMT) == S_IFLNK ? "it is a symbolic link" : "it is not a directory"))
+        if lstat(dir, &info) != 0, errno == ENOENT { return .ready((dir as NSString).appendingPathComponent(item.relative)) }
+        let parts = item.relative.split(separator: "/").map(String.init)
+        var path = dir
+        for (i, part) in parts.enumerated() {
+            path = (path as NSString).appendingPathComponent(part)
+            let last = i == parts.count - 1
+            let want: Kind = last ? item.kind : .directory
+            if lstat(path, &info) != 0 {
+                guard errno == ENOENT else { return .refused(refusal(path, "it cannot be read")) }
+                guard item.createIfMissing else { return .absent }
+                let made = want == .directory ? mkdir(path, 0o755) == 0
+                                              : { let fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o644)
+                                                  if fd >= 0 { close(fd) }; return fd >= 0 }()
+                guard made || errno == EEXIST, lstat(path, &info) == 0 else {
+                    return .refused(refusal(path, "it could not be created"))
+                }
+            }
+            let type = info.st_mode & S_IFMT
+            if type == S_IFLNK { return .refused(refusal(path, "it is a symbolic link")) }
+            guard type == (want == .directory ? S_IFDIR : S_IFREG) else {
+                return .refused(refusal(path, want == .directory ? "it is not a directory" : "it is not a regular file"))
+            }
         }
         return .ready(path)
     }
 
-    /// The read-only mount of `source`'s `.iris/` at `target`'s, in `ContainerMount`'s
+    /// The read-only mount of `source`'s `relative` at `target`'s, in `ContainerMount`'s
     /// `source:target:ro` form. Listed after the mount it sits inside.
-    static func mountEntry(source: String, target: String) -> String {
-        "\((source as NSString).appendingPathComponent(name)):\((target as NSString).appendingPathComponent(name)):ro"
+    static func mountEntry(source: String, target: String, relative: String = name) -> String {
+        "\((source as NSString).appendingPathComponent(relative)):\((target as NSString).appendingPathComponent(relative)):ro"
     }
 
     /// Whether a model or tool write to `path` lands in a workspace's `.iris/`: any `.iris`

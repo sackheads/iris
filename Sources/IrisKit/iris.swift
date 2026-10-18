@@ -5106,6 +5106,9 @@ actor IrisEngine {
                     graderReadWalked: approvedWorkspaceRoot != nil)
                 if let source {
                     result = await executeToolWithHooks(name: functionCall.name, args: callArgs, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath, restrictedPath: Self.restrictedPath(for: source, tool: functionCall.name))
+                    if source == .person, functionCall.name == "write_file", result.hasPrefix("Successfully wrote to ") {
+                        Self.trustPersonApprovedRulesWrite(path: details)
+                    }
                 } else {
                     result = isUnattended ? Self.unattendedDeniedToolResult(tool: functionCall.name)
                                           : Self.deniedToolResult
@@ -5359,6 +5362,18 @@ actor IrisEngine {
         blockedResultTrackers[conversationId] = tracker
         guard blocked, consecutive >= 2 else { return sanitizedResult }
         return sanitizedResult + "\n[Iris: the injection guard has withheld \(consecutive) consecutive results from \(name). Do not retry the same approach — use a different source or report what you have.]"
+    }
+
+    /// A rule file the person approved writing (`/vibecop init`'s `vibecop.md`, say) is Iris's to
+    /// trust as written (#625): the approval was the person's look at it. Only a direct
+    /// `<workspace>/.iris/<rule file>`, the path the write was judged and made by.
+    nonisolated static func trustPersonApprovedRulesWrite(path: String, trust: WorkspaceIrisTrust = WorkspaceIrisTrust()) {
+        let url = URL(fileURLWithPath: path)
+        let file = url.lastPathComponent
+        let dir = url.deletingLastPathComponent()
+        guard WorkspaceIrisTrust.files.contains(file), dir.lastPathComponent.lowercased() == WorkspaceIrisDir.name else { return }
+        let workspace = dir.deletingLastPathComponent().path
+        trust.record(file, workspace: workspace, data: WorkspaceIrisDir.readUnverified(file, workspace: workspace))
     }
 
     /// The `PATH` a call runs restricted with (#612): only a host `run_command` whose approval was

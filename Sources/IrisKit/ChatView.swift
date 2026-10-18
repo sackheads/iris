@@ -27,6 +27,8 @@ struct ChatView: View {
     @State private var archivedExpanded = false
     /// #611: the conversation whose "let the sandbox write this folder" confirmation is showing.
     @State private var homeOptInTarget: Conversation?
+    /// #625: the conversation whose workspace rules are being reviewed.
+    @State private var rulesReviewTarget: Conversation?
 
     /// #182 §9: the group auto-expands when the selected conversation *becomes* one of its rows.
     /// Two ways in, and both are a change of the same one value — "the selection, while it is
@@ -557,6 +559,16 @@ struct ChatView: View {
         } message: { target in
             Text(HomeMount.optInWarning(path: target.workspacePath ?? ""))
         }
+        .sheet(isPresented: Binding(
+            get: { rulesReviewTarget?.id == conv.id },
+            set: { if !$0 { rulesReviewTarget = nil } }
+        )) {
+            if let wp = rulesReviewTarget?.workspacePath {
+                WorkspaceRulesReview(files: state.untrustedWorkspaceRules(for: wp), workspace: wp,
+                                     trust: { state.trustWorkspaceRules(for: wp); rulesReviewTarget = nil },
+                                     dismiss: { rulesReviewTarget = nil })
+            }
+        }
         .contextMenu {
             Button("Link to Workspace...") {
                 linkWorkspace(to: conv.id)
@@ -578,6 +590,10 @@ struct ChatView: View {
                         Button("Let the Sandbox Write This Folder...") { homeOptInTarget = conv }
                     }
                 }
+            }
+            // #625: rules Iris did not write are off until the person reads and trusts them.
+            if let wp = conv.workspacePath, !state.untrustedWorkspaceRules(for: wp).isEmpty {
+                Button("Review Workspace Rules...") { rulesReviewTarget = conv }
             }
             Button("Export to Markdown...") {
                 exportConversation(id: conv.id)
@@ -1453,4 +1469,41 @@ func formatDuration(_ t: TimeInterval) -> String {
     if s < 60   { return "\(s)s" }
     if s < 3600 { return "\(s / 60)m \(s % 60)s" }
     return "\(s / 3600)h \(s % 3600 / 60)m"
+}
+
+/// #625: the person's look at a workspace's `.iris/` rules that Iris did not write, before any of
+/// them takes effect. Shows each file whole; "Trust These Rules" is the only way they turn on.
+struct WorkspaceRulesReview: View {
+    let files: [(file: String, data: Data)]
+    let workspace: String
+    let trust: () -> Void
+    let dismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Review Workspace Rules").font(.headline)
+            Text("These files in \(workspace)/.iris came with the folder or changed outside Iris. They decide what Iris runs without asking you (the project allowlist), whether this workspace's commands are sandboxed, and what Vibecop treats as routine. None of them is in effect until you trust it.")
+                .font(.callout).foregroundStyle(.secondary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(files, id: \.file) { entry in
+                        Text(".iris/\(entry.file)").font(.subheadline.bold())
+                        Text(String(data: entry.data, encoding: .utf8) ?? "(not text)")
+                            .font(.system(.caption, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                            .background(Color.secondary.opacity(0.1))
+                    }
+                }
+            }
+            .frame(maxHeight: 360)
+            HStack {
+                Spacer()
+                Button("Not Now", role: .cancel, action: dismiss)
+                Button("Trust These Rules", action: trust).keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 560)
+    }
 }
