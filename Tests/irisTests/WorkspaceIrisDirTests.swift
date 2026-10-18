@@ -24,13 +24,13 @@ struct WorkspaceIrisDirTests {
         try FileManager.default.createSymbolicLink(atPath: iris + "/sym.md", withDestinationPath: "../outside.md")
         try FileManager.default.linkItem(atPath: ws + "/outside.md", toPath: iris + "/hard.md")
 
-        #expect(WorkspaceIrisDir.read("vibecop.md", workspace: ws) == Data("rules".utf8))
-        #expect(WorkspaceIrisDir.read("sym.md", workspace: ws) == nil, "a symlink is never followed")
-        #expect(WorkspaceIrisDir.read("hard.md", workspace: ws) == nil, "a second hard link is refused")
+        #expect(WorkspaceIrisDir.readUnverified("vibecop.md", workspace: ws) == Data("rules".utf8))
+        #expect(WorkspaceIrisDir.readUnverified("sym.md", workspace: ws) == nil, "a symlink is never followed")
+        #expect(WorkspaceIrisDir.readUnverified("hard.md", workspace: ws) == nil, "a second hard link is refused")
         #expect(WorkspaceIrisDir.read("missing.md", workspace: ws) == nil)
         // A FIFO is refused rather than blocking the open (#625 review).
         #expect(mkfifo(iris + "/fifo.md", 0o644) == 0)
-        #expect(WorkspaceIrisDir.read("fifo.md", workspace: ws) == nil)
+        #expect(WorkspaceIrisDir.readUnverified("fifo.md", workspace: ws) == nil)
     }
 
     @Test("a .iris that is itself a symlink is read from not at all, and refused for a mount")

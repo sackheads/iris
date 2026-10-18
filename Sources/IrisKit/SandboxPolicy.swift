@@ -75,9 +75,11 @@ public enum SandboxPolicy {
             .appendingPathComponent("sandbox.json")
     }
 
-    public static func perWorkspaceOverride(workspace: String?) -> SandboxPref? {
+    /// Only a `sandbox.json` Iris wrote or a person trusted (#625): one the VM planted in a nested
+    /// `.iris/`, or a cloned repository shipped, would otherwise turn the sandbox off.
+    static func perWorkspaceOverride(workspace: String?, trust: WorkspaceIrisTrust = WorkspaceIrisTrust()) -> SandboxPref? {
         guard let workspace,
-              let data = WorkspaceIrisDir.read("sandbox.json", workspace: workspace),   // #617
+              let data = WorkspaceIrisDir.read("sandbox.json", workspace: workspace, trust: trust),   // #617, #625
               let cfg = try? JSONDecoder().decode(WorkspaceConfig.self, from: data) else {
             return nil
         }
@@ -85,11 +87,13 @@ public enum SandboxPolicy {
     }
 
     @discardableResult
-    public static func setWorkspaceOverride(_ pref: SandboxPref?, for workspace: String) -> Bool {
+    static func setWorkspaceOverride(_ pref: SandboxPref?, for workspace: String,
+                                     trust: WorkspaceIrisTrust = WorkspaceIrisTrust()) -> Bool {
         let fileURL = url(for: workspace)
         guard let pref else {
             // clear: success if the file is gone afterward (removing an absent file is still "cleared")
             try? FileManager.default.removeItem(at: fileURL)
+            trust.record("sandbox.json", workspace: workspace, data: nil)
             return !FileManager.default.fileExists(atPath: fileURL.path)
         }
         do {
@@ -97,6 +101,9 @@ public enum SandboxPolicy {
             guard case .ready = WorkspaceIrisDir.prepareForMount(IrisEngine.expandTilde(workspace)) else { return false }
             let data = try JSONEncoder().encode(WorkspaceConfig(mainAgent: pref))
             try data.write(to: fileURL, options: .atomic)
+            // Iris wrote it, so Iris trusts it (#625).
+            trust.record("sandbox.json", workspace: workspace,
+                         data: WorkspaceIrisDir.readUnverified("sandbox.json", workspace: workspace))
             return true
         } catch {
             return false

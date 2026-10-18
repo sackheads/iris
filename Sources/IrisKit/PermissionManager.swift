@@ -147,6 +147,9 @@ struct PermissionManager: Sendable {
         if !rules.contains(rule) {
             rules.append(rule)
             saveRules(rules, to: projectURL, atomically: true)
+            // Iris wrote it, so Iris trusts it (#625): the person's click is the consent.
+            WorkspaceIrisTrust(paths: paths).record("permissions.json", workspace: workspace,
+                                                    data: WorkspaceIrisDir.readUnverified("permissions.json", workspace: workspace))
         }
     }
     
@@ -158,7 +161,8 @@ struct PermissionManager: Sendable {
     /// Through `WorkspaceIrisDir.read` (#617): a project allowlist that is a link, or a file with
     /// a second hard link, is one the sandbox could have written, so it grants nothing.
     private func loadProjectRules(workspace: String) -> [PermissionRule]? {
-        guard let data = WorkspaceIrisDir.read("permissions.json", workspace: workspace) else { return nil }
+        guard let data = WorkspaceIrisDir.read("permissions.json", workspace: workspace,
+                                               trust: WorkspaceIrisTrust(paths: paths)) else { return nil }
         return try? JSONDecoder().decode([PermissionRule].self, from: data)
     }
 

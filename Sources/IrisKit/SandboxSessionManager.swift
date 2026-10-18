@@ -120,10 +120,19 @@ actor SandboxSessionManager {
         let wasLost = lostSessions.contains(id)
         // #617: every read-write mount's `.iris/` goes in read-only, so a real directory must be
         // there to mount before the container is made; one that cannot be protected refuses.
+        var absent: Set<String> = []
         for (source, _) in Self.readWriteMounts(workspace: workspace, extra: extraMounts) {
-            if case .refused(let why) = WorkspaceIrisDir.prepareForMount(source) { return why }
+            for item in WorkspaceIrisDir.protected {
+                switch WorkspaceIrisDir.prepareForMount(source, item) {
+                case .refused(let why): return why
+                case .absent: absent.insert((source as NSString).appendingPathComponent(item.relative))
+                case .ready: break
+                }
+            }
         }
-        let mounts = Self.mountList(workspace: workspace, extra: extraMounts)
+        let mounts = Self.mountList(workspace: workspace, extra: extraMounts) {
+            !absent.contains(($0 as NSString).appendingPathComponent($1))
+        }
 
         // Recreate if the workspace, the mount list or the network changed (agent-initiated — not a "loss").
         if let s = sessions[id], s.mountedWorkspace != workspace || s.mounts != mounts || s.network != network {
@@ -236,15 +245,22 @@ actor SandboxSessionManager {
     ///
     /// Each read-write mount is followed by its `.iris/` read-only (#617), which shadows it: in the
     /// VM, Vibecop's rules and the project allowlist cannot be written, renamed or linked over.
-    static func mountList(workspace: ContainerMount?, extra: [String]) -> [String] {
+    /// `include` says whether a protected path (source, relative) is there to mount; the caller
+    /// prepared them (`WorkspaceIrisDir.prepareForMount`), so a missing optional one is skipped.
+    static func mountList(workspace: ContainerMount?, extra: [String],
+                          include: (String, String) -> Bool = { _, _ in true }) -> [String] {
+        func protecting(_ source: String, _ target: String) -> [String] {
+            WorkspaceIrisDir.protected.filter { include(source, $0.relative) }
+                .map { WorkspaceIrisDir.mountEntry(source: source, target: target, relative: $0.relative) }
+        }
         var list: [String] = []
         if let workspace {
             list.append("\(workspace.source):\(workspace.target)")
-            list.append(WorkspaceIrisDir.mountEntry(source: workspace.source, target: workspace.target))
+            list += protecting(workspace.source, workspace.target)
         }
         for entry in extra {
             list.append(entry)
-            if let rw = readWrite(entry) { list.append(WorkspaceIrisDir.mountEntry(source: rw.source, target: rw.target)) }
+            if let rw = readWrite(entry) { list += protecting(rw.source, rw.target) }
         }
         return list
     }

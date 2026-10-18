@@ -551,13 +551,19 @@ struct ToolExecutor {
                 // path and is left as it was rather than changed for symmetry alone.
                 containerArgs.insert(contentsOf: ["-v", "\(expandedPath):\(expandedPath)", "--workdir", expandedPath], at: 4)
                 // Its `.iris/` read-only over it, as the session path does (#617).
-                switch WorkspaceIrisDir.prepareForMount(expandedPath) {
-                case .refused(let why): return why
-                case .ready:
-                    guard let iris = try? ContainerMount.argument(for: WorkspaceIrisDir.mountEntry(source: expandedPath, target: expandedPath)) else {
-                        return "Not run: the workspace's .iris folder could not be mounted read-only."
+                var at = 6
+                for item in WorkspaceIrisDir.protected {
+                    switch WorkspaceIrisDir.prepareForMount(expandedPath, item) {
+                    case .refused(let why): return why
+                    case .absent: continue
+                    case .ready:
+                        guard let mount = try? ContainerMount.argument(for: WorkspaceIrisDir.mountEntry(
+                            source: expandedPath, target: expandedPath, relative: item.relative)) else {
+                            return "Not run: \(item.relative) in the workspace could not be mounted read-only."
+                        }
+                        containerArgs.insert(contentsOf: ["--mount", mount], at: at)
+                        at += 2
                     }
-                    containerArgs.insert(contentsOf: ["--mount", iris], at: 6)
                 }
             }
             arguments = containerArgs
