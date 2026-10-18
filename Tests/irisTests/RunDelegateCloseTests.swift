@@ -66,6 +66,8 @@ struct RunDelegateCloseTests {
         private var current = Date()
         func now() -> Date { lock.withLock { current } }
         func advance(by seconds: TimeInterval) { lock.withLock { current += seconds } }
+        /// The same clock as the run deadline reads it (#608).
+        var uptime: UptimeClock { UptimeClock { self.now().timeIntervalSinceReferenceDate } }
     }
 
     final class Recorder: @unchecked Sendable {
@@ -120,7 +122,7 @@ struct RunDelegateCloseTests {
         // app's runner closes through the shared one.
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, sandboxSessions: sessions,
                                ensureIsolatedNetwork: { nil }, config: config, activity: RecordingActivity(),
-                               sandboxAvailable: { true }, watchdogSlice: 0.01, deadlineClock: clock.now,
+                               sandboxAvailable: { true }, watchdogSlice: 0.01, deadlineClock: clock.uptime,
                                beforeDelegateWalk: { run in
                                    guard delegatesExitFirst else { return }
                                    let exited = await self.eventually { state.liveSubagents(ofRun: run).isEmpty }
@@ -182,7 +184,7 @@ struct RunDelegateCloseTests {
         let state = AppState(store: try ConversationStore.inMemory(), tier2Provisioning: .provisioned,
                              tier3Provisioning: .provisioned)
         let run = state.createNewConversation(isBackground: true, select: false)
-        state.registerRun(run, budget: TurnBudget(maxTokens: 100, deadline: Date().addingTimeInterval(600)),
+        state.registerRun(run, budget: TurnBudget(maxTokens: 100, seconds: 600),
                           sink: DelegatedSpendTests.RecordingSink())
         func live(_ id: UUID) {
             state.linkBackgroundDescendant(id, of: run)

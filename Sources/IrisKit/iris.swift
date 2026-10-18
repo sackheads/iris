@@ -51,7 +51,13 @@ struct TurnBudget: Sendable, Equatable {
     /// No such escape hatch here: there is always a deadline, because it is the only thing that
     /// can end a turn that has stopped responding. `JobLimits.resolve` reads a zero timeout as the
     /// global default rather than as "unbounded" for exactly that reason.
-    let deadline: Date
+    ///
+    /// Seconds on `clock`, which pauses while the Mac sleeps (#608): time asleep does not count
+    /// toward a run's timeout, and the run's hard watchdog reads the same clock.
+    let deadline: Double
+    /// What `stopReason` reads `deadline` against: the run's own clock, so the round check and the
+    /// watchdog agree. Not part of equality.
+    let clock: UptimeClock
     /// Whose prices the spend is weighed at (5c §0.5): the run's own provider, stamped on its
     /// row. nil prices at the plain total, as a pre-5c row is.
     let provider: String?
@@ -59,11 +65,25 @@ struct TurnBudget: Sendable, Equatable {
     /// price at its ratio. nil reads at the provider's.
     let model: String?
 
-    init(maxTokens: Int, deadline: Date, provider: String? = nil, model: String? = nil) {
+    init(maxTokens: Int, deadline: Double, clock: UptimeClock = .live, provider: String? = nil,
+         model: String? = nil) {
         self.maxTokens = maxTokens
         self.deadline = deadline
+        self.clock = clock
         self.provider = provider
         self.model = model
+    }
+
+    /// A budget whose deadline is `seconds` from now on `clock`.
+    init(maxTokens: Int, seconds: TimeInterval, clock: UptimeClock = .live, provider: String? = nil,
+         model: String? = nil) {
+        self.init(maxTokens: maxTokens, deadline: clock.now() + seconds, clock: clock, provider: provider,
+                  model: model)
+    }
+
+    static func == (lhs: TurnBudget, rhs: TurnBudget) -> Bool {
+        lhs.maxTokens == rhs.maxTokens && lhs.deadline == rhs.deadline && lhs.provider == rhs.provider
+            && lhs.model == rhs.model
     }
 
     static let weightedTokensExceeded = "budget: weighted tokens exceeded"
@@ -73,9 +93,9 @@ struct TurnBudget: Sendable, Equatable {
 
     /// Why the turn must not make another model call, or `nil` to go ahead. Tokens are named
     /// first when both are gone: a person can act on the figure that was spent.
-    func stopReason(weightedTokens: Int, now: Date) -> String? {
+    func stopReason(weightedTokens: Int) -> String? {
         if maxTokens > 0, weightedTokens >= maxTokens { return Self.weightedTokensExceeded }
-        if now >= deadline { return Self.timeExceeded }
+        if clock.now() >= deadline { return Self.timeExceeded }
         return nil
     }
 
@@ -2206,7 +2226,7 @@ actor IrisEngine {
                     "gate_script": Schema(type: "STRING", description: "Only run the job when this shell script says so. It runs inside the sandbox VM on every tick, and its LAST line of stdout must be exactly CHANGED or UNCHANGED (the exit code is not the verdict; a non-zero exit is a gate failure). Everything it printed before that line is handed to the run as untrusted context. Requires the container runtime and sandboxing; reviewed once before the job is created when Vibecop is on."),
                     "gate_mounts": Schema(type: "ARRAY", description: "Directories the gate script can read, as '/host/dir' or '/host/dir:/path/in/container'. Always mounted read-only, and recorded as the directory the path resolves to. A single file cannot be mounted — give its directory. The whole filesystem and Iris's own configuration cannot be mounted at all, so name the narrowest directory the check needs.", items: Schema(type: "STRING")),
                     "gate_timeout_seconds": Schema(type: "INTEGER", description: "How long the gate script may take before it is killed and counted as a failure (default 60, clamped to 5-600)."),
-                    "timeout_seconds": Schema(type: "INTEGER", description: "Wall-clock limit for one run of this job, in seconds, 60-3600 (clamped). Overrides the global job run timeout (default 10 minutes) for this job only, and is reported in the answer. A run that reaches it is stopped and recorded as failed. Omit it unless the work needs longer, or should be held shorter; re-scheduling without it returns the job to the global setting. It does not lengthen one run_command past that command's own timeout_seconds."),
+                    "timeout_seconds": Schema(type: "INTEGER", description: "Time limit for one run of this job, in seconds, 60-3600 (clamped); time the Mac spends asleep does not count. Overrides the global job run timeout (default 10 minutes) for this job only, and is reported in the answer. A run that reaches it is stopped and recorded as failed. Omit it unless the work needs longer, or should be held shorter; re-scheduling without it returns the job to the global setting. It does not lengthen one run_command past that command's own timeout_seconds."),
                     "overlap": Schema(type: "STRING", description: "What a fire does when the previous run has not finished: 'skip' (default — the fire is dropped and recorded) or 'queue' (one fire is held and taken as soon as that run ends; never more than one)."),
                     "catch_up": Schema(type: "STRING", description: "What a wake does with occurrences missed while the Mac slept: 'coalesce' (default — one fire now), 'skip' (none; jump to the next occurrence), or 'replay' to run the most recent missed ones one at a time, up to a cap (default 5, at most 100) — write a cap as 'replay:3'. A replayed fire is an ordinary one, so it asks the gate and counts against the breaker and the budgets, and the burst stops at the first fire that is refused or fails."),
                     "mounts": Schema(type: "ARRAY", description: "Directories the job may use, as '/host/dir', '/host/dir:ro' or '/host/dir:/path/in/container'. Read-write unless ':ro'. The first read-write one is the job's working directory. Mutating jobs only. Recorded as the directory each path resolves to; the whole filesystem, the home directory, volume roots and Iris's own directory cannot be mounted.", items: Schema(type: "STRING")),
@@ -2668,7 +2688,7 @@ actor IrisEngine {
                 let spent = CostWeights.weighted(usage.components, provider: budget.provider,
                                                  model: budget.model)
                 outputTokenCap = budget.outputTokenCap(weightedTokens: spent)
-                if let reason = budget.stopReason(weightedTokens: spent, now: Date()) {
+                if let reason = budget.stopReason(weightedTokens: spent) {
                     turnFinished = true
                     // The drain consumes queued steers into history and no follow-up turn starts
                     // (R8). Both halves are deliberate. Leaving them queued would be worse than

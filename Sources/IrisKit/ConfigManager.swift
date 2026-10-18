@@ -258,6 +258,13 @@ class ConfigManager: @unchecked Sendable {
         didSet { store.set(vibecopModel, forKey: "VIBECOP_MODEL") }
     }
 
+    /// The model Vibecop's cloud engine asks (#620), on the primary provider. Empty, the default,
+    /// is the easy tier's model, which is all the cloud engine ever used before. Its own key:
+    /// `vibecopModel` is shared with the local engines and holds a GGUF file or an Ollama tag.
+    var vibecopCloudModel: String {
+        didSet { store.set(vibecopCloudModel, forKey: "VIBECOP_CLOUD_MODEL") }
+    }
+
     static let defaultMaxSubagentIterations = 10
     /// Longer than `run_command`'s 10-minute default, so one long command fits in a turn (#402).
     static let defaultSubagentTurnTimeoutSeconds = 900
@@ -525,6 +532,7 @@ class ConfigManager: @unchecked Sendable {
         
         let savedVibecop = saved.string(forKey: "VIBECOP_MODEL") ?? ""
         self.vibecopModel = savedVibecop.isEmpty ? "gemma-4-E2B-it-Q4_K_M.gguf" : savedVibecop
+        self.vibecopCloudModel = saved.string(forKey: "VIBECOP_CLOUD_MODEL") ?? ""
 
         let savedMaxIters = saved.integer(forKey: "MAX_GOAL_ITERATIONS")
         self.maxGoalIterations = savedMaxIters == 0 ? 50 : savedMaxIters

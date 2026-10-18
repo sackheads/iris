@@ -50,6 +50,8 @@ struct SubagentRunStopTests {
         private var current = Date()
         func now() -> Date { lock.withLock { current } }
         func advance(by seconds: TimeInterval) { lock.withLock { current += seconds } }
+        /// The same clock as the run deadline reads it (#608).
+        var uptime: UptimeClock { UptimeClock { self.now().timeIntervalSinceReferenceDate } }
     }
 
     final class Recorder: @unchecked Sendable {
@@ -86,7 +88,7 @@ struct SubagentRunStopTests {
     /// A background run registered as `JobRunner` registers one.
     private func run(in state: AppState, maxTokens: Int = 100_000) -> UUID {
         let run = state.createNewConversation(isBackground: true, select: false)
-        state.registerRun(run, budget: TurnBudget(maxTokens: maxTokens, deadline: Date().addingTimeInterval(600)),
+        state.registerRun(run, budget: TurnBudget(maxTokens: maxTokens, seconds: 600),
                           sink: DelegatedSpendTests.RecordingSink())
         return run
     }
@@ -248,7 +250,7 @@ struct SubagentRunStopTests {
         let clock = ManualClock()
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                config: config, activity: RecordingActivity(), sandboxAvailable: { true },
-                               watchdogSlice: 0.01, deadlineClock: clock.now)
+                               watchdogSlice: 0.01, deadlineClock: clock.uptime)
 
         let fire = Task { await runner.fire(job: job, origin: .schedule) }
         #expect(await eventually { client.parkedCalls == 1 }, "the run is waiting on its subagent's model call")

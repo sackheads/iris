@@ -258,7 +258,7 @@ struct AppendOnlyRequestTests {
 
     @Test("#385's budget cap reaches every request's max_tokens through a rewriting hook and replay")
     func budgetCapSurvivesReplay() async throws {
-        let budget = TurnBudget(maxTokens: 20_000, deadline: Date().addingTimeInterval(600),
+        let budget = TurnBudget(maxTokens: 20_000, seconds: 600,
                                 provider: LLMProvider.anthropic.rawValue)
         let h = try await run("budget", hooks: ["BeforeModel": { _ in "sed -E '\(Self.systemExpr)'" }], budget: budget)
         #expect(try h.sentSignatures() == [[], ["sig-1"], ["sig-1", "sig-2"], ["sig-1", "sig-2", "sig-3"]],

@@ -1025,7 +1025,7 @@ then an overlap (skipped or queued by `policy.overlap`), then the breaker, then 
 - A refused fire writes a zero-length `interrupted` row and one card naming the figure that tripped
   it, so a pause is never silent.
 
-**During a run**, the turn itself is bounded: **200,000 weighted tokens** and **10 minutes** (or the job's own `timeout_seconds`). The token
+**During a run**, the turn itself is bounded: **200,000 weighted tokens** and **10 minutes** (or the job's own `timeout_seconds`). Time asleep doesn't count toward a run's timeout: a run the Mac slept through, after a lid close or a sleep you asked for, carries on with the time it had left when it wakes (#608). The token
 budget is checked before every model round — the run's own, and those of every subagent and
 evaluator working for it — against the run's tokens so far, its subagents' included, so whichever
 of them would spend past the budget is refused its next round. A round already under way is not

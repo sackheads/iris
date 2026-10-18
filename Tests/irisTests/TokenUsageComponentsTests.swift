@@ -51,7 +51,7 @@ import Foundation
     @Test func delegatedOneHourWritesReachTheRun() throws {
         let state = AppState(store: try ConversationStore.inMemory())
         let run = state.createNewConversation(isBackground: true, select: false)
-        state.registerRun(run, budget: TurnBudget(maxTokens: 0, deadline: Date().addingTimeInterval(600)),
+        state.registerRun(run, budget: TurnBudget(maxTokens: 0, seconds: 600),
                           sink: NoSink())
         let child = state.createNewConversation(isSubagent: true, isBackground: true, select: false)
         state.linkBackgroundDescendant(child, of: run)
