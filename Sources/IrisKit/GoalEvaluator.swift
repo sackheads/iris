@@ -65,9 +65,11 @@ final class GoalEvaluator: Sendable {
                   app: AppState, client: any LLMClientProtocol = LLMClient(),
                   recentWrites: RecentWrites = .shared) async -> GoalEvaluation {
 
-        // The directory the grader inspects. Callers resolve this to the main agent's effective
-        // working directory (its bound workspace, or the process cwd it actually ran in), so the
-        // grader never has to guess where the work is.
+        // The directory the grader inspects: the graded conversation's bound workspace, or with
+        // none, the process cwd its host commands ran in. Only a bound workspace becomes the
+        // grader's own: its run_command is always sandboxed, and the grader's workspace is
+        // mounted read-write, so an unbound one would have mounted the process cwd (`/` for the
+        // app, anything for a `--run-job`) writable into the VM. With none, nothing is mounted.
         let workspaceDir = Self.gradingDirectory(workspace, contract: contract)
 
         let evalId = UUID()
@@ -94,7 +96,7 @@ final class GoalEvaluator: Sendable {
             if originIsBackground { app.linkBackgroundDescendant(evalId, of: originId) }
             app.linkDelegate(evalId, of: originId, kind: .evaluator)   // #418: its asks are the graded session's
             app.updateConversationTitle(id: evalId, title: "Evaluator")
-            app.setWorkspace(for: evalId, path: workspaceDir)   // its run_command runs here
+            if workspace != nil { app.setWorkspace(for: evalId, path: workspaceDir) }   // its run_command runs here
             app.registerSubagent(id: evalId, role: "evaluator", kind: .evaluator)
             // Stoppable like any delegate (#464): the run drain, a walk of the delegation tree on
             // a run's close or a parent's delete, and — grading a background subagent, which no
@@ -105,7 +107,7 @@ final class GoalEvaluator: Sendable {
                                      kind: .evaluator, stop: stop)
         }
 
-        let prompt = Self.systemPrompt(for: contract, workspaceDir: workspaceDir)
+        let prompt = Self.systemPrompt(for: contract, workspaceDir: workspaceDir, bound: workspace != nil)
         await engine.setSystemPrompt(text: prompt)
 
         // Filled in by the completion callback. The did-it-submit check below reads this rather
@@ -221,7 +223,7 @@ final class GoalEvaluator: Sendable {
         return directory
     }
 
-    private static func systemPrompt(for contract: GoalContract, workspaceDir: String) -> String {
+    static func systemPrompt(for contract: GoalContract, workspaceDir: String, bound: Bool = true) -> String {
         guard let url = Bundle.module.url(forResource: "EVALUATOR", withExtension: "md"),
               let base = try? String(contentsOf: url, encoding: .utf8),
               !base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -230,7 +232,10 @@ final class GoalEvaluator: Sendable {
         }
         var s = base
         s += "\n\n## Workspace\nThe completed work is in this directory:\n`\(workspaceDir)`\n"
-        s += "Your `run_command` calls already execute there. Confine your inspection to this directory — start by reading it with `read_file`, which lists a directory. NEVER search the wider filesystem (no `find /`, no reading files outside this directory, no `~root`/home snooping). If an expected artifact is not present here, the relevant criterion is `not_met` or `cannot_verify` — do not go hunting for it elsewhere.\n"
+        s += bound
+            ? "Your `run_command` calls already execute there. "
+            : "No workspace is bound, so your `run_command` calls run in an empty sandbox that cannot see this directory: inspect it with `read_file`. "
+        s += "Confine your inspection to this directory — start by reading it with `read_file`, which lists a directory. NEVER search the wider filesystem (no `find /`, no reading files outside this directory, no `~root`/home snooping). If an expected artifact is not present here, the relevant criterion is `not_met` or `cannot_verify` — do not go hunting for it elsewhere.\n"
         s += "\n## The locked contract you are grading\nObjective: \(contract.objective)\n\nCriteria (grade each by its id):\n"
         for c in contract.criteria {
             let checkNote = (c.kind == .executable) ? " — run this check: `\(c.check ?? "")`" : ""
