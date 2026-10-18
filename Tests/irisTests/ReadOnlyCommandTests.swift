@@ -140,38 +140,41 @@ struct ReadOnlyCommandTests {
         ReadOnlyCommand.HostLookup(path: path, cwd: cwd, home: home, isExecutable: { installed.contains($0) })
     }
 
-    @Test("the host lookup: absolute PATH entries outside home and the working directory, found before any other")
-    func hostLookup() {
-        func safe(_ program: String, cwd: String? = nil, _ lookup: ReadOnlyCommand.HostLookup = Self.lookup()) -> Bool {
-            ReadOnlyCommand.hostLookupIsSafe(program: program, cwd: cwd, lookup: lookup)
+    @Test("the restricted PATH: only absolute entries outside home, the working directory and every sandbox-writable folder")
+    func restrictedPath() {
+        func path(_ program: String, cwd: String? = nil, _ lookup: ReadOnlyCommand.HostLookup = Self.lookup()) -> [String]? {
+            ReadOnlyCommand.restrictedPath(program: program, cwd: cwd, lookup: lookup)
         }
-        #expect(safe("ls"))
-        #expect(safe("rg"))
-        #expect(!safe("grep"), "not installed anywhere on PATH: nothing to vouch for")
-        // A relative or empty entry is searched from the working directory, which the VM may write.
-        #expect(!safe("ls", Self.lookup(path: ".:/bin")))
-        #expect(!safe("ls", Self.lookup(path: "node_modules/.bin:/bin")))
-        #expect(!safe("ls", Self.lookup(path: ":/bin")))
-        #expect(safe("ls", Self.lookup(path: "/bin:")), "found in /bin before the empty entry is reached")
-        #expect(!safe("rg", Self.lookup(path: "/bin:")), "searched past the empty entry")
-        // An entry under home, or under the working directory, ahead of where the program is found.
-        #expect(!safe("ls", Self.lookup(path: "/Users/me/bin:/bin")))
-        #expect(!safe("ls", Self.lookup(path: "/tmp/w/bin:/bin", cwd: "/tmp/w")))
-        #expect(safe("ls", Self.lookup(path: "/bin:/Users/me/bin")), "found before the home entry is searched")
-        // The working directory: never home or above it, whose startup files zsh reads.
-        #expect(!safe("ls", cwd: "/Users/me"))
-        #expect(!safe("ls", cwd: "/Users"))
-        #expect(!safe("ls", cwd: "/"))
-        #expect(!safe("echo", cwd: "/Users/me"), "a builtin is still run by a shell that read ~/.zshenv")
-        #expect(safe("ls", cwd: "/tmp/elsewhere"))
-        // zsh's builtins never search PATH.
-        #expect(safe("echo", Self.lookup(path: ".:/Users/me/bin")))
-        #expect(safe("pwd", Self.lookup(path: "")))
-        #expect(!safe("ls", Self.lookup(path: "")))
+        #expect(path("ls") == ["/bin", "/usr/bin"])
+        #expect(path("rg") == ["/bin", "/usr/bin"])
+        #expect(path("grep") == nil, "not installed on the PATH it would run with: nothing to run")
+        // Unsafe entries are dropped from the run, not merely judged: the run never searches them.
+        #expect(path("ls", Self.lookup(path: ".:node_modules/.bin::/bin")) == ["/bin"])
+        #expect(path("ls", Self.lookup(path: "/Users/me/bin:/bin:/Users/me/.local/bin")) == ["/bin"])
+        #expect(path("ls", Self.lookup(path: "/tmp/w/bin:/bin", cwd: "/tmp/w")) == ["/bin"])
+        #expect(path("ls", Self.lookup(path: "/bin:/bin:/usr/bin")) == ["/bin", "/usr/bin"])
+        #expect(path("rg", Self.lookup(path: "/Users/me/bin:/bin", installed: ["/Users/me/bin/rg"])) == nil,
+                "found only where it may not run from")
+        // A folder a sandbox mount can write is no better than home: a mount covering Homebrew drops it.
+        let brew = Self.lookup(path: "/opt/homebrew/bin:/bin", installed: ["/opt/homebrew/bin/rg", "/bin/ls"])
+        #expect(path("rg", brew) == ["/opt/homebrew/bin", "/bin"])
+        var mounted = brew
+        mounted.writableRoots = ["/opt/homebrew"]
+        #expect(path("rg", mounted) == nil)
+        #expect(path("ls", mounted) == ["/bin"])
+        // The working directory: never home or above it.
+        #expect(path("ls", cwd: "/Users/me") == nil)
+        #expect(path("ls", cwd: "/Users") == nil)
+        #expect(path("ls", cwd: "/") == nil)
+        #expect(path("echo", cwd: "/Users/me") == nil)
+        #expect(path("ls", cwd: "/tmp/elsewhere") == ["/bin", "/usr/bin"])
+        // zsh's builtins need nothing on PATH.
+        #expect(path("echo", Self.lookup(path: ".:/Users/me/bin")) == [])
+        #expect(path("ls", Self.lookup(path: "")) == nil)
     }
 
     @Test("symlinks are resolved before a PATH entry or the working directory is placed")
-    func hostLookupResolvesLinks() throws {
+    func restrictedPathResolvesLinks() throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("iris-606-\(UUID().uuidString)").resolvingSymlinksInPath()
         defer { try? fm.removeItem(at: root) }
@@ -182,26 +185,101 @@ struct ReadOnlyCommandTests {
         try fm.createSymbolicLink(at: linkToHome, withDestinationURL: home)
         let installed: Set<String> = [linkToBin.path + "/ls", "/bin/ls"]
         let viaLink = Self.lookup(path: linkToBin.path + ":/bin", cwd: "/tmp", home: home.path, installed: installed)
-        #expect(!ReadOnlyCommand.hostLookupIsSafe(program: "ls", cwd: nil, lookup: viaLink),
+        #expect(ReadOnlyCommand.restrictedPath(program: "ls", cwd: nil, lookup: viaLink) == ["/bin"],
                 "a PATH entry that is a link into home is in home")
         let plain = Self.lookup(path: "/bin", cwd: "/tmp", home: home.path, installed: installed)
-        #expect(!ReadOnlyCommand.hostLookupIsSafe(program: "ls", cwd: linkToHome.path, lookup: plain),
+        #expect(ReadOnlyCommand.restrictedPath(program: "ls", cwd: linkToHome.path, lookup: plain) == nil,
                 "a working directory that is a link to home is home")
     }
 
-    @Test("Vibecop may approve: any command in the VM, only a read from a safe place on the host, never a file write")
-    func vibecopMayApprove() {
+    @Test("the restricted environment is an allowlist: the judged PATH and a few basics, nothing inherited")
+    func restrictedEnvironment() {
+        let base = ["HOME": "/Users/me", "USER": "me", "LANG": "en_US.UTF-8", "LC_ALL": "C", "TERM": "xterm",
+                    "PATH": "/Users/me/bin:/bin", "DYLD_INSERT_LIBRARIES": "/tmp/x.dylib", "ZDOTDIR": "/tmp/z",
+                    "ENV": "/tmp/e", "BASH_ENV": "/tmp/b", "GIT_CONFIG_GLOBAL": "/tmp/g", "RIPGREP_CONFIG_PATH": "/tmp/r",
+                    "GREP_OPTIONS": "-r", "FOO": "leak"]
+        let env = ReadOnlyCommand.restrictedEnvironment(path: ["/bin", "/usr/bin"], base: base)
+        #expect(env == ["HOME": "/Users/me", "USER": "me", "LANG": "en_US.UTF-8", "LC_ALL": "C", "TERM": "xterm",
+                        "PATH": "/bin:/usr/bin"])
+    }
+
+    @Test("the spawn: restricted is zsh -f with exactly the judged PATH; anything else is the usual shell")
+    func hostSpawn() {
+        let base = ["HOME": "/Users/me", "PATH": "/Users/me/bin:/bin", "FOO": "leak"]
+        let restricted = ToolExecutor.hostSpawn("ls -la", restrictedPath: ["/bin"], base: base)
+        #expect(restricted.executable == "/bin/zsh")
+        #expect(restricted.arguments == ["-f", "-c", "ls -la"])
+        #expect(restricted.environment["PATH"] == "/bin")
+        #expect(restricted.environment["FOO"] == nil)
+        let usual = ToolExecutor.hostSpawn("ls -la", restrictedPath: nil, base: base)
+        #expect(usual.arguments == ["-c", "ls -la"])
+        #expect(usual.environment["FOO"] == "leak", "an approved command keeps the user's environment")
+    }
+
+    @Test("run for real: a planted .zshenv and an inherited variable reach the usual shell but not a restricted run")
+    func restrictedRunForReal() throws {
+        let fm = FileManager.default
+        let home = fm.temporaryDirectory.appendingPathComponent("iris-612-\(UUID().uuidString)").resolvingSymlinksInPath()
+        defer { try? fm.removeItem(at: home) }
+        let planted = home.appendingPathComponent("bin")
+        try fm.createDirectory(at: planted, withIntermediateDirectories: true)
+        let marker = home.appendingPathComponent("zshenv-ran")
+        // What the VM could leave in a home it mounts: a .zshenv that runs and puts its own ls first.
+        try "touch \(marker.path)\nexport PATH=\(planted.path):$PATH\n".write(to: home.appendingPathComponent(".zshenv"), atomically: true, encoding: .utf8)
+        let fakeLs = planted.appendingPathComponent("ls")
+        try "#!/bin/sh\necho PLANTED\n".write(to: fakeLs, atomically: true, encoding: .utf8)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeLs.path)
+        let base = ["HOME": home.path, "ZDOTDIR": home.path, "PATH": "/bin:/usr/bin", "FOO": "leak"]
+
+        func run(_ spawn: (executable: String, arguments: [String], environment: [String: String])) throws -> String {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: spawn.executable)
+            process.arguments = spawn.arguments
+            process.environment = spawn.environment
+            process.currentDirectoryURL = fm.temporaryDirectory
+            let out = Pipe()
+            process.standardOutput = out
+            process.standardInput = FileHandle.nullDevice
+            try process.run()
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return String(decoding: data, as: UTF8.self)
+        }
+
+        let command = "echo \"[$FOO]\"; ls -d /"
+        let restricted = try run(ToolExecutor.hostSpawn(command, restrictedPath: ["/bin", "/usr/bin"], base: base))
+        #expect(restricted.contains("[]"), "an inherited variable reached the restricted run: \(restricted)")
+        #expect(!restricted.contains("PLANTED"))
+        #expect(!fm.fileExists(atPath: marker.path), "the restricted run read .zshenv")
+
+        // The control: the same plant does reach the usual shell, so the test can tell the two apart.
+        let usual = try run(ToolExecutor.hostSpawn(command, restrictedPath: nil, base: base))
+        #expect(usual.contains("[leak]"))
+        #expect(usual.contains("PLANTED"))
+        #expect(fm.fileExists(atPath: marker.path))
+    }
+
+    @Test("Vibecop's APPROVE: any command in the VM, a host read restricted, a file read, never a file write")
+    func vibecopGate() {
         let host = Self.lookup()
-        #expect(ReadOnlyCommand.vibecopMayApprove(toolName: "run_command", details: "rm -f x", inSandbox: true))
-        #expect(!ReadOnlyCommand.vibecopMayApprove(toolName: "run_command", details: "rm -f x", inSandbox: false, lookup: host))
-        #expect(ReadOnlyCommand.vibecopMayApprove(toolName: "run_command", details: "ls -la", inSandbox: false, lookup: host))
-        #expect(!ReadOnlyCommand.vibecopMayApprove(toolName: "run_command", details: "ls -la", inSandbox: false,
-                                                    lookup: Self.lookup(path: ".:/bin")))
-        #expect(!ReadOnlyCommand.vibecopMayApprove(toolName: "run_command", details: "ls -la", inSandbox: false,
-                                                    cwd: "/Users/me", lookup: host))
-        #expect(ReadOnlyCommand.vibecopMayApprove(toolName: "read_file", details: "/etc/hosts", inSandbox: false))
-        #expect(!ReadOnlyCommand.vibecopMayApprove(toolName: "write_file", details: "/tmp/x", inSandbox: false))
-        #expect(!ReadOnlyCommand.vibecopMayApprove(toolName: "write_file", details: "/tmp/x", inSandbox: true))
-        #expect(!ReadOnlyCommand.vibecopMayApprove(toolName: "schedule_job", details: "x", inSandbox: false))
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "run_command", details: "rm -f x", inSandbox: true, lookup: host) == .run)
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "run_command", details: "rm -f x", inSandbox: false, lookup: host) == .ask)
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "run_command", details: "ls -la", inSandbox: false, lookup: host)
+                == .runRestricted(path: ["/bin", "/usr/bin"]))
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "run_command", details: "ls -la", inSandbox: false,
+                                            cwd: "/Users/me", lookup: host) == .ask)
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "read_file", details: "/etc/hosts", inSandbox: false, lookup: host) == .run)
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "write_file", details: "/tmp/x", inSandbox: false, lookup: host) == .ask)
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "write_file", details: "/tmp/x", inSandbox: true, lookup: host) == .ask)
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "schedule_job", details: "x", inSandbox: false, lookup: host) == .ask)
+    }
+
+    @Test("only the gate's own approval runs restricted; a person's, the allowlist's or the VM's runs as usual")
+    func onlyTheGateRestricts() {
+        #expect(IrisEngine.restrictedPath(for: .vibecopRestricted(path: ["/bin"]), tool: "run_command") == ["/bin"])
+        for source: AppState.ApprovalSource in [.person, .allowlist, .autoApprove, .grant, .graderCheck, .vibecop] {
+            #expect(IrisEngine.restrictedPath(for: source, tool: "run_command") == nil, "\(source)")
+        }
+        #expect(IrisEngine.restrictedPath(for: .vibecopRestricted(path: ["/bin"]), tool: "read_file") == nil)
     }
 }
