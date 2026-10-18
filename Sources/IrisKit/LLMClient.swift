@@ -190,6 +190,12 @@ struct LLMClient {
     }
 
     func generateContent(request: GeminiRequest, tier: ModelTier = .medium) async throws -> GeminiResponse {
+        try await generateContent(request: request, tier: tier, model: nil)
+    }
+
+    /// `model` replaces the tier's configured model for this one call (#620: Vibecop's cloud
+    /// model); nil is the tier's own. The tier still names the call in the metrics.
+    func generateContent(request: GeminiRequest, tier: ModelTier, model: String?) async throws -> GeminiResponse {
         let config = ConfigManager.shared
         let provider = config.primaryProvider
         
@@ -200,7 +206,7 @@ struct LLMClient {
         case .hard: metricOp = .hard
         }
         
-        let modelName = config.getModel(for: tier)
+        let modelName = model ?? config.getModel(for: tier)
         
         let startTime = CFAbsoluteTimeGetCurrent()
         

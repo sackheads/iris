@@ -518,9 +518,26 @@ struct SettingsView: View {
                                     vibecopTestButton()
                                 }
                             }
+                        } else if config.vibecopEngine == "cloud" {
+                            // #620: its own field; the local engines' model name means nothing here.
+                            TextField("Cloud Model", text: $config.vibecopCloudModel,
+                                      prompt: Text("Easy tier: \(config.getModel(for: .easy))"))
+                                .help("The \(config.primaryProvider) model Vibecop asks. Leave empty for the easy tier's model.")
+                            let chosen = config.vibecopCloudModel.trimmingCharacters(in: .whitespacesAndNewlines)
+                            Text("Effective model: \(chosen.isEmpty ? config.getModel(for: .easy) : chosen)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            if let mismatch = CloudAuxiliaryEngine.providerMismatch(model: chosen, provider: config.primaryProvider) {
+                                Text("⚠️ \(mismatch) If it doesn't exist there, Vibecop uses the easy tier's model and says so once.")
+                                    .font(.caption)
+                                    .foregroundColor(.orange)
+                            }
+                            HStack {
+                                vibecopTestButton()
+                            }
                         } else {
-                            TextField("Ollama/Cloud Model", text: $config.vibecopModel)
-                                .help("The external model to use for Vibecop background evaluation (e.g. qwen3.5, gemma4:12b)")
+                            TextField("MLX Model", text: $config.vibecopModel)
+                                .help("The local model to use for Vibecop background evaluation (e.g. qwen3.5, gemma4:12b)")
                             
                             HStack {
                                 Text("✅ Assuming model is ready via external daemon.")
