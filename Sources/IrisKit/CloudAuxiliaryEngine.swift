@@ -42,7 +42,10 @@ struct CloudAuxiliaryEngine: AuxiliaryInferenceEngine {
                 response = try await send(request, chosen)
             } catch let error as APIError where Self.isModelUnavailable(error) {
                 if Self.firstFallback(for: chosen) {
-                    await notice("Vibecop's cloud model \(chosen) isn't available on \(error.provider ?? "the primary provider"); using the easy tier's model instead. Change it in Settings → Vibecop.")
+                    // The provider's own words too: a 404 can also be a wrong project or region,
+                    // and the easy-tier retry then fails on its own, so the notice must not blame
+                    // the model alone.
+                    await notice("Vibecop's cloud model \(chosen) couldn't be used on \(error.provider ?? "the primary provider") (\(error.message)); using the easy tier's model instead. Change it in Settings → Vibecop.")
                 }
                 response = try await send(request, nil)
             }
@@ -61,13 +64,18 @@ struct CloudAuxiliaryEngine: AuxiliaryInferenceEngine {
         return text
     }
 
-    /// A provider's answer that the model does not exist or is not one it accepts: Gemini's and
-    /// Anthropic's 404, OpenAI's `model_not_found`, a 400 that names the model.
+    /// A provider's answer that the model does not exist: a 404 (Gemini, Anthropic, OpenAI's
+    /// `model_not_found`), or a 400 in not-found words. Not any 400 that mentions a model: "this
+    /// model's maximum context length", "max_tokens is not supported with this model" or "function
+    /// calling is not enabled for models/…" are a real model refusing the request, and must surface
+    /// rather than be retried on another model (#627 review).
     static func isModelUnavailable(_ error: APIError) -> Bool {
         guard let status = error.statusCode else { return false }
-        let text = (error.message + " " + (error.detail ?? "")).lowercased()
         if status == 404 { return true }
-        return status == 400 && text.contains("model")
+        guard status == 400 else { return false }
+        let text = (error.message + " " + (error.detail ?? "")).lowercased()
+        return ["model_not_found", "does not exist", "not found", "unknown model", "invalid model",
+                "no such model", "is not a valid model"].contains { text.contains($0) }
     }
 
     private static let fallbackLock = NSLock()
