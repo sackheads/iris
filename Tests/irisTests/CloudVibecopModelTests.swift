@@ -60,7 +60,8 @@ struct CloudVibecopModelTests {
         _ = try await e.generate(prompt: "p", jsonSchema: nil)
         #expect(calls.sentModels == [name, nil, name, nil])
         #expect(calls.saidNotices.count == 1)
-        #expect(calls.saidNotices.first?.contains("Vibecop's cloud model \(name) isn't available on Gemini") == true)
+        #expect(calls.saidNotices.first?.contains("Vibecop's cloud model \(name) couldn't be used on Gemini") == true)
+        #expect(calls.saidNotices.first?.contains("is not found") == true, "the provider's own words are in the notice")
     }
 
     @Test("any other failure is not a fallback: it surfaces as before")
@@ -78,7 +79,14 @@ struct CloudVibecopModelTests {
     func modelUnavailable() {
         #expect(CloudAuxiliaryEngine.isModelUnavailable(APIError(message: "x", statusCode: 404)))
         #expect(CloudAuxiliaryEngine.isModelUnavailable(APIError(message: "OpenAI HTTP 400: invalid model ID", statusCode: 400)))
+        #expect(CloudAuxiliaryEngine.isModelUnavailable(APIError(message: "OpenAI HTTP 400: The model `x` does not exist", statusCode: 400)))
         #expect(!CloudAuxiliaryEngine.isModelUnavailable(APIError(message: "OpenAI HTTP 400: bad request", statusCode: 400)))
+        // A real model refusing the request: surface it, never retry it elsewhere (#627 review).
+        for refusal in ["OpenAI HTTP 400: This model's maximum context length is 8192 tokens",
+                        "OpenAI HTTP 400: max_tokens is not supported with this model",
+                        "Gemini HTTP 400 INVALID_ARGUMENT: Function calling is not enabled for models/gemini-x"] {
+            #expect(!CloudAuxiliaryEngine.isModelUnavailable(APIError(message: refusal, statusCode: 400)), "\(refusal)")
+        }
         #expect(!CloudAuxiliaryEngine.isModelUnavailable(APIError(message: "x", statusCode: 429)))
         #expect(!CloudAuxiliaryEngine.isModelUnavailable(APIError(message: "no status")))
     }
