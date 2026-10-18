@@ -3598,7 +3598,8 @@ class AppState {
             // On the host, an APPROVE stands in for the person only on a read (#600), and not at all
             // for a command once the person has denied one in this conversation.
             if decision.decision == "APPROVE",
-               ReadOnlyCommand.vibecopMayApprove(toolName: toolName, details: details, inSandbox: inSandbox),
+               ReadOnlyCommand.vibecopMayApprove(toolName: toolName, details: details, inSandbox: inSandbox,
+                                                 cwd: workspace, lookup: hostLookup()),
                !(toolName == "run_command" && commandDenied(in: conversationId)) {
                 return true
             }
@@ -3996,6 +3997,9 @@ class AppState {
     /// clicked Deny on a `run_command` since launch (#600). There, Vibecop no longer approves any
     /// command on its own; the allowlist still does, since the person set it. Transient on purpose.
     @ObservationIgnored private var commandDeniedRoots: Set<UUID?> = []
+
+    /// Where a host command runs from, for the read-only gate (#606 review); a test injects its own.
+    @ObservationIgnored var hostLookup: @MainActor () -> ReadOnlyCommand.HostLookup = { .live }
 
     func commandDenied(in conversationId: UUID?) -> Bool {
         commandDeniedRoots.contains(conversationId.map(delegationRoot(of:)))

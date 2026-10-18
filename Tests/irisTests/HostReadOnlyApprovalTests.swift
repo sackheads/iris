@@ -33,6 +33,11 @@ struct HostReadOnlyApprovalTests {
                              tier2Provisioning: .provisioned, tier3Provisioning: .provisioned,
                              createIfEmpty: false, emitLaunchNotices: false)
         state.permissions = PermissionManager(paths: IrisPaths(root: home))
+        // A fixed host, so the developer's own PATH decides nothing here.
+        state.hostLookup = {
+            ReadOnlyCommand.HostLookup(path: "/bin:/usr/bin", cwd: "/tmp", home: home.path,
+                                       isExecutable: { FileManager.default.isExecutableFile(atPath: $0) })
+        }
         return (state, home)
     }
 
@@ -89,7 +94,7 @@ struct HostReadOnlyApprovalTests {
         let vibecop = Approver()
 
         #expect(try await call(state, "ls -la", in: cid, engine: vibecop) == .silent(true))
-        #expect(try await call(state, "git status", in: cid, engine: vibecop) == .silent(true))
+        #expect(try await call(state, "cat /etc/hosts", in: cid, engine: vibecop) == .silent(true))
         #expect(try await call(state, "/etc/hosts", tool: "read_file", in: cid, engine: vibecop) == .silent(true))
         // Approved by the person, so no Deny is remembered: the next read is still unprompted.
         #expect(try await call(state, "touch x", in: cid, answer: .approve, engine: vibecop) == .asked)
