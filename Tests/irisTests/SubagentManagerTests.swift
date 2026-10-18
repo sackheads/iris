@@ -291,6 +291,8 @@ final class SubagentManagerTests: XCTestCase {
         private var current = Date()
         func now() -> Date { lock.withLock { current } }
         func advance(by seconds: TimeInterval) { lock.withLock { current += seconds } }
+        /// The same clock as the subagent's turn deadline reads it (#624).
+        var uptime: UptimeClock { UptimeClock { self.now().timeIntervalSinceReferenceDate } }
     }
 
     /// Parks every call to the model forever, so the test can prove the run is actually inside its
@@ -337,7 +339,7 @@ final class SubagentManagerTests: XCTestCase {
             await SubagentManager.shared.runSubagent(
                 role: "worker", task: "loop forever", effort: "easy",
                 parentConversationId: parentId, turnTimeout: 1, client: client, appState: state,
-                deadlineClock: clock.now)
+                deadlineClock: clock.uptime)
         }
 
         await waitFor("the subagent to reach its model call") { client.calls >= 1 }

@@ -95,6 +95,8 @@ struct SubagentGradingTests {
         private var current = Date()
         func now() -> Date { lock.withLock { current } }
         func advance(by seconds: TimeInterval) { lock.withLock { current += seconds } }
+        /// The same clock as the subagent's turn deadline reads it (#624).
+        var uptime: UptimeClock { UptimeClock { self.now().timeIntervalSinceReferenceDate } }
     }
 
     /// Parks every call to the model forever — the shape of a subagent genuinely mid-turn — so the
@@ -202,7 +204,7 @@ struct SubagentGradingTests {
             await SubagentManager.shared.runSubagent(
                 role: "engineer", task: "build a widget", effort: "easy",
                 parentConversationId: parentId, unit: gradedUnit("the widget exists"),
-                turnTimeout: 1, client: client, appState: state, deadlineClock: clock.now)
+                turnTimeout: 1, client: client, appState: state, deadlineClock: clock.uptime)
         }
 
         // Hold the precondition: the deadline cannot be allowed to arrive until the subagent's own

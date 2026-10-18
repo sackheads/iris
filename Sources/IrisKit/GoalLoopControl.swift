@@ -110,11 +110,12 @@ final class SubagentTurnStart: @unchecked Sendable {
     private let lock = NSLock()
     private var seq = 0
     private var ended = false
-    private var at: Date?
+    /// On `SubagentManager`'s `deadlineClock` (uptime seconds, #624).
+    private var at: Double?
     /// Seeded with a start, so turn 1 is covered before its own begin arrives.
-    init(_ at: Date) { self.at = at }
+    init(_ at: Double) { self.at = at }
 
-    func record(began: Bool, seq: Int, at now: @autoclosure () -> Date) {
+    func record(began: Bool, seq: Int, at now: @autoclosure () -> Double) {
         lock.withLock {
             if seq < self.seq { return }
             if began {
@@ -127,5 +128,5 @@ final class SubagentTurnStart: @unchecked Sendable {
         }
     }
 
-    var start: Date? { lock.withLock { at } }
+    var start: Double? { lock.withLock { at } }
 }

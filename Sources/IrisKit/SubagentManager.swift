@@ -75,11 +75,12 @@ final class SubagentManager: @unchecked Sendable {
     /// `endSandboxSession` frees the subagent's container on every way out, injected so a test can
     /// see it called without a container runtime (#291). The default closes the session for good,
     /// so an engine that ignored its cancellation cannot start another container (#292).
-    /// `deadlineClock` is the wall clock the per-turn deadline below is set and watched on,
-    /// injected only so a test can hold it off until the subagent is parked mid-turn, then move it
-    /// (#355, following #335/#342): a real deadline raced a busy suite's MainActor work and
-    /// sometimes let the run's own soft-stop classify as `.failed` first. The default is the same
-    /// wall clock as before, so nothing changes outside tests.
+    /// `deadlineClock` is the clock the per-turn deadline below is set and watched on: uptime,
+    /// which pauses while the Mac sleeps, so a turn the Mac sleeps through is not timed out at
+    /// wake for time in which nothing ran (#624, as #608 ruled for a job run). Injected only so a
+    /// test can hold it off until the subagent is parked mid-turn, then move it (#355, following
+    /// #335/#342): a real deadline raced a busy suite's MainActor work and sometimes let the run's
+    /// own soft-stop classify as `.failed` first.
     /// `turnTimeout` is how long one turn may run before the subagent ends `.timedOut` (#402),
     /// restarted whenever a turn begins. Nil, as at every production call site, reads `config`'s
     /// `subagentTurnTimeoutSeconds`; tests pass a short one. There is no total limit of its own:
@@ -102,7 +103,7 @@ final class SubagentManager: @unchecked Sendable {
                      client: (any LLMClientProtocol)? = nil,
                      appState: AppState,
                      recentWrites: RecentWrites = .shared,
-                     deadlineClock: @escaping @Sendable () -> Date = Date.init,
+                     deadlineClock: UptimeClock = .live,
                      config: ConfigManager = .shared,
                      hooks: HookManager = .shared,
                      repromptDelay: TimeInterval = 1.5,
@@ -204,16 +205,16 @@ final class SubagentManager: @unchecked Sendable {
         }
         let engineDone = EngineDone()
 
-        // Per turn, on the wall clock (`deadlineClock`), not a poll count: a count of 100ms sleeps
+        // Per turn, on uptime (`deadlineClock`), not a poll count: a count of 100ms sleeps
         // still measures *polls*, not time, when the clock behind it is injected and can be held
         // still or jumped — see the parameter doc above. Each turn stamps its own start as it
         // begins and clears it as it ends (#402), so the deadline restarts on every reprompt, from
         // the turn's real start, and only a turn in flight is held to it: the reprompt pause and
         // the grace polls after the loop's end never count, and never turn a `.failed` into a
         // `.timedOut`. Seeded with now, so turn 1 is covered before its own stamp lands.
-        let turnStart = SubagentTurnStart(deadlineClock())
+        let turnStart = SubagentTurnStart(deadlineClock.now())
         engine.observeGoalLoopTurns(for: subagentId) { began, seq in
-            turnStart.record(began: began, seq: seq, at: deadlineClock())
+            turnStart.record(began: began, seq: seq, at: deadlineClock.now())
             onTurnEvent?(began, seq)
         }
 
@@ -262,7 +263,7 @@ final class SubagentManager: @unchecked Sendable {
                         break
                     }
                 }
-                if let start = turnStart.start, deadlineClock() >= start.addingTimeInterval(perTurn) {
+                if let start = turnStart.start, deadlineClock.now() >= start + perTurn {
                     // Classify BEFORE `engineTask.cancel()`, not after: cancelling it can itself
                     // unwind the engine's in-flight model call, which hits `processInput`'s own
                     // catch block and fires `onSubagentComplete` with `.failed` — a second write to
