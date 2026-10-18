@@ -28,13 +28,14 @@ struct VibecopVMContextTests {
         return engine.prompt
     }
 
-    @Test("in the VM the prompt says the mounts are the user's real folders, and never that it is isolated")
+    @Test("in the VM the prompt says the mounts are the user's real Mac, and never that it is isolated")
     func vmPromptIsTruthful() async throws {
         let text = try await prompt(inSandbox: true)
         #expect(text.contains("EXECUTION CONTEXT"))
         #expect(!text.localizedCaseInsensitiveContains("isolated"))
-        #expect(text.contains("the user's real Mac folders"))
-        #expect(text.contains("read-write unless marked"))
+        #expect(text.contains("Mounted from the user's real Mac"))
+        #expect(text.contains("read-write unless"))
+        #expect(text.contains("disposable, network-capable Linux VM"), "the phrase #606's tests key on")
         #expect(text.contains("Library/LaunchAgents/"))
         #expect(text.contains(".git/hooks/"))
         #expect(!text.contains("other dotfiles"), "an open-ended list escalates routine project edits")
@@ -45,6 +46,21 @@ struct VibecopVMContextTests {
         let text = try await prompt(inSandbox: true, workspace: "/Users/me/src/p")
         #expect(text.contains("the workspace /Users/me/src/p (the working directory)"))
         #expect(text.contains("thrown away with it"))
+        // Every listed file carries the mount, and the VM's own ~ is named as /root and routine
+        // (work's A/B: a bare `.bashrc` escalated the VM's own ~/.bashrc on both models).
+        for file in VibecopService.hostRunFiles {
+            #expect(text.contains("/Users/me/src/p/" + file), "\(file)")
+        }
+        #expect(!text.contains(" .bashrc"), "a bare name reads as the VM's own ~")
+        #expect(text.contains("which is /root"))
+        #expect(text.contains("editing ~/.bashrc or any other\nfile under the VM's ~ is routine"))
+    }
+
+    @Test("with no workspace known, the list is still placed under a mounted folder")
+    func vmPromptWithoutWorkspace() async throws {
+        let text = try await prompt(inSandbox: true)
+        #expect(text.contains("<mounted folder>/.bashrc"))
+        #expect(text.contains("any paths a job grants"))
     }
 
     @Test("on the host the VM paragraph is absent")
