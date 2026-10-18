@@ -31,3 +31,17 @@ enum TestClock {
         return Double(span.seconds) + Double(span.attoseconds) / 1e18
     }
 }
+
+extension NSCondition {
+    /// `wait(until:)` against a `TestClock` deadline, for a stub that blocks until released or
+    /// its hang runs out: false once the deadline has passed. Waits in short slices of wall time
+    /// and re-reads the suspending clock, because `NSCondition` only takes a `Date`, and a hang
+    /// capped by wall time ends early across a sleep, so a cancel that waited it out would pass
+    /// a test's suspending-clock bound. Call with the lock held, in a loop on the condition.
+    func wait(until deadline: TestClock.Instant) -> Bool {
+        let left = TestClock.seconds(from: TestClock.now(), to: deadline)
+        guard left > 0 else { return false }
+        _ = wait(until: Date().addingTimeInterval(min(left, 0.1)))
+        return true
+    }
+}

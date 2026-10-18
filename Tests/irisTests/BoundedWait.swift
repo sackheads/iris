@@ -45,8 +45,9 @@ private func firstOf<T: Sendable>(_ seconds: Double, _ operation: @escaping @Sen
     let first = FirstOf<T>()
     let work = Task { first.resolve(await operation()) }
     let timer = Task {
-        // The suspending clock (#605): a bound counts the test's time, not the Mac's sleep, which
-        // `Task.sleep(nanoseconds:)` counted, ending a 30 s wait after 1 s of real work.
+        // The suspending clock, named rather than implied (#605): a bound counts the test's time,
+        // not the Mac's sleep. In the sleep that filed #605 this bound, then a bare
+        // `Task.sleep(nanoseconds:)`, reported 30 s after a test that had run 1.07 s.
         try? await SuspendingClock().sleep(for: .milliseconds(Int64(seconds * 1000)))
         first.resolve(nil)
     }

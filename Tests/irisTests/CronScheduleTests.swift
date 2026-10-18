@@ -27,8 +27,8 @@ struct CronScheduleTests {
         let box = NextBox()
         let work = Task.detached { await box.put(schedule.next(after: after)) }
         defer { work.cancel() }
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline {
+        let deadline = TestClock.deadline(seconds)
+        while TestClock.now() < deadline {
             if let result = await box.take() { return result }
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
