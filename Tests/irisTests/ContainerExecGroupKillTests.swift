@@ -234,39 +234,39 @@ struct ContainerExecGroupKillTests {
         }
         /// Both killers finished, so neither writes its marker after the cleanup above.
         func killersDone() async throws {
-            let end = Date().addingTimeInterval(CLIProcessRunner.killGraceSeconds * 2 + 5)
+            let end = TestClock.deadline(CLIProcessRunner.killGraceSeconds * 2 + 5)
             func done() -> Int { ((try? String(contentsOfFile: log + ".done", encoding: .utf8)) ?? "").split(separator: "\n").count }
-            while done() < 2, Date() < end { try await Task.sleep(nanoseconds: 50_000_000) }
+            while done() < 2, TestClock.now() < end { try await Task.sleep(nanoseconds: 50_000_000) }
         }
         if late {
             // The first killer finished, not merely fired: its marker is down before the wrapper
             // starts (`fire` returns as the killer process is spawned, before it has run).
             func done() -> Int { ((try? String(contentsOfFile: log + ".done", encoding: .utf8)) ?? "").split(separator: "\n").count }
-            let fired = Date().addingTimeInterval(10)
-            while done() < 1, Date() < fired { try await Task.sleep(nanoseconds: 20_000_000) }
+            let fired = TestClock.deadline(10)
+            while done() < 1, TestClock.now() < fired { try await Task.sleep(nanoseconds: 20_000_000) }
             #expect(done() >= 1, "precondition: the first kill ran")
             #expect(FileManager.default.createFile(atPath: go, contents: nil))
-            let ended = Date().addingTimeInterval(10)
-            while !FileManager.default.fileExists(atPath: status), Date() < ended { try await Task.sleep(nanoseconds: 20_000_000) }
+            let ended = TestClock.deadline(10)
+            while !FileManager.default.fileExists(atPath: status), TestClock.now() < ended { try await Task.sleep(nanoseconds: 20_000_000) }
             let code = (try? String(contentsOfFile: status, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
             #expect(code == "143", "the late wrapper found the marker and ran nothing")
             #expect(!FileManager.default.fileExists(atPath: ran), "not ran and then killed: never ran")
             #expect(!RunCommandProcessGroupTests.exists("^sleep \(nap)"))
             #expect(killers().first == "none", "the first kill came before any note")
-            let both = Date().addingTimeInterval(CLIProcessRunner.killGraceSeconds + 3)
-            while fires.lock.withLock({ fires.count }) < 2, Date() < both { try await Task.sleep(nanoseconds: 50_000_000) }
+            let both = TestClock.deadline(CLIProcessRunner.killGraceSeconds + 3)
+            while fires.lock.withLock({ fires.count }) < 2, TestClock.now() < both { try await Task.sleep(nanoseconds: 50_000_000) }
             #expect(fires.lock.withLock { fires.count } == 2, "the ladder still fires twice")
             try await killersDone()
             return
         }
-        let deadline = Date().addingTimeInterval(CLIProcessRunner.killGraceSeconds * 2 + 3)
-        while RunCommandProcessGroupTests.exists("^sleep \(nap)"), Date() < deadline {
+        let deadline = TestClock.deadline(CLIProcessRunner.killGraceSeconds * 2 + 3)
+        while RunCommandProcessGroupTests.exists("^sleep \(nap)"), TestClock.now() < deadline {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
         #expect(!RunCommandProcessGroupTests.exists("^sleep \(nap)"), "the group outlived both kills")
         // The second fire comes a grace after the first, however soon the group died.
-        let killersDeadline = Date().addingTimeInterval(CLIProcessRunner.killGraceSeconds + 3)
-        while killers().count < 2, Date() < killersDeadline { try await Task.sleep(nanoseconds: 50_000_000) }
+        let killersDeadline = TestClock.deadline(CLIProcessRunner.killGraceSeconds + 3)
+        while killers().count < 2, TestClock.now() < killersDeadline { try await Task.sleep(nanoseconds: 50_000_000) }
         #expect(fires.lock.withLock { fires.count } == 2)
         #expect(killers() == ["note", "none"])
         try await killersDone()
@@ -291,13 +291,13 @@ struct ContainerExecGroupKillTests {
         }
         #expect(await RunCommandProcessGroupTests.appears("^sleep \(nap)", within: 5))
         BlockingSpawn.detached("/bin/bash", ["-c", CLIContainerRuntime.groupKiller(pidFile)], timeoutSeconds: 30)
-        let taken = Date().addingTimeInterval(1)
-        while FileManager.default.fileExists(atPath: pidFile), Date() < taken { try await Task.sleep(nanoseconds: 20_000_000) }
+        let taken = TestClock.deadline(1)
+        while FileManager.default.fileExists(atPath: pidFile), TestClock.now() < taken { try await Task.sleep(nanoseconds: 20_000_000) }
         #expect(!FileManager.default.fileExists(atPath: pidFile), "the note was still there during the grace")
         #expect(RunCommandProcessGroupTests.exists("^sleep \(nap)"), "the first killer's grace should not be over yet")
-        let started = Date()
+        let started = TestClock.now()
         #expect(BlockingSpawn.run("/bin/bash", ["-c", CLIContainerRuntime.groupKiller(pidFile)], timeoutSeconds: 10) == 0)
-        #expect(Date().timeIntervalSince(started) < 1, "the second killer waited out a grace: it signalled something")
+        #expect(TestClock.seconds(since: started) < 1, "the second killer waited out a grace: it signalled something")
         _ = try await value(of: command)
         #expect(!RunCommandProcessGroupTests.exists("^sleep \(nap)"))
     }

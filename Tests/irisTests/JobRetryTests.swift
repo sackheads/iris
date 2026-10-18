@@ -524,8 +524,8 @@ struct JobRetryTests {
 
     private func waitFor(_ description: String, timeout: TimeInterval = 10,
                          _ condition: () -> Bool) async {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
+        let deadline = TestClock.deadline(timeout)
+        while TestClock.now() < deadline {
             if condition() { return }
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
@@ -886,10 +886,10 @@ struct JobRetryTests {
         let fire = Task { await runner.fire(job: j, origin: .manual) }
         defer { client.releaseAll() }
         try #require(await client.parks.reach(1), "the turn is parked in the stream")
-        let asked = Date()
+        let asked = TestClock.now()
         _ = stop.request(reason: RunStop.reason(for: SIGTERM))
         try #require(await finished(fire, within: 10) != nil, "the grace bounded the wait")
-        #expect(Date().timeIntervalSince(asked) >= 0.3)
+        #expect(TestClock.seconds(since: asked) >= 0.3)
         let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
         #expect(run.status == .interrupted)
         #expect(run.failureReason == "stopped by a signal (SIGTERM)")
@@ -940,10 +940,10 @@ struct JobRetryTests {
         try #require(await client.calls.reach(1))
         client.release()
         try #require(await closing.reach(1), "the turn came back and the teardown is under way")
-        let asked = Date()
+        let asked = TestClock.now()
         #expect(stop.request(reason: RunStop.reason(for: SIGINT)) == .runWillStop)
         try #require(await finished(fire, within: 10) != nil, "the teardown was abandoned at its bound")
-        #expect(Date().timeIntervalSince(asked) < 5)
+        #expect(TestClock.seconds(since: asked) < 5)
         let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
         #expect(run.status == .completed, "the turn won the ending, so the row is the turn's")
     }
@@ -971,10 +971,10 @@ struct JobRetryTests {
         try #require(await client.calls.reach(1))
         clock.advance(by: TimeInterval(Self.heldTimeout + 1))
         try #require(await closing.reach(1), "the deadline ended the run and the teardown is under way")
-        let asked = Date()
+        let asked = TestClock.now()
         #expect(stop.request(reason: RunStop.reason(for: SIGINT)) == .runWillStop)
         try #require(await finished(fire, within: 10) != nil, "the teardown was abandoned at its bound")
-        #expect(Date().timeIntervalSince(asked) < 5)
+        #expect(TestClock.seconds(since: asked) < 5)
         let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
         #expect(run.status == .failed)
         #expect(run.failureReason == TurnBudget.timeExceeded)

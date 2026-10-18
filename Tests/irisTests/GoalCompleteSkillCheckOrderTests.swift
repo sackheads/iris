@@ -61,8 +61,8 @@ struct GoalCompleteSkillCheckOrderTests {
 
         await engine.processInput("go", source: "UI", conversationId: id)
         // The check is its own turn now, so it may still be pending or running here.
-        let deadline = Date().addingTimeInterval(20)
-        while engine.goalLoopIsLive(for: id), Date() < deadline {
+        let deadline = TestClock.deadline(20)
+        while engine.goalLoopIsLive(for: id), TestClock.now() < deadline {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         #expect(!engine.goalLoopIsLive(for: id), "the skill-check turn never finished")
@@ -119,8 +119,8 @@ struct GoalCompleteSkillCheckOrderTests {
 
     /// Waits, bounded, until the conversation's goal loop has nothing running or pending.
     private func settle(_ engine: IrisEngine, _ id: UUID, within seconds: Double = 20) async throws {
-        let deadline = Date().addingTimeInterval(seconds)
-        while engine.goalLoopIsLive(for: id), Date() < deadline {
+        let deadline = TestClock.deadline(seconds)
+        while engine.goalLoopIsLive(for: id), TestClock.now() < deadline {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         #expect(!engine.goalLoopIsLive(for: id), "the conversation's follow-up turns never settled")
@@ -157,8 +157,8 @@ struct GoalCompleteSkillCheckOrderTests {
         func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
             let n = lock.withLock { recorded.append(request); return recorded.count }
             if n == gated {
-                let deadline = Date().addingTimeInterval(10)
-                while !lock.withLock({ open }), Date() < deadline {
+                let deadline = TestClock.deadline(10)
+                while !lock.withLock({ open }), TestClock.now() < deadline {
                     try await Task.sleep(nanoseconds: 10_000_000)
                 }
             }
@@ -227,8 +227,8 @@ struct GoalCompleteSkillCheckOrderTests {
                                 retryDelays: [], protectionEnabled: false, sessionPeerCount: 0,
                                 hooks: hooks, repromptDelay: 30)
         let turn = Task { await engine.processInput("go", source: "UI", conversationId: id) }
-        let deadline = Date().addingTimeInterval(10)
-        while !FileManager.default.fileExists(atPath: marker.path), Date() < deadline {
+        let deadline = TestClock.deadline(10)
+        while !FileManager.default.fileExists(atPath: marker.path), TestClock.now() < deadline {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         try #require(FileManager.default.fileExists(atPath: marker.path), "the AfterAgent hook never ran")

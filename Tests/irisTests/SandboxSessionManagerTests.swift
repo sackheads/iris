@@ -268,8 +268,8 @@ struct SandboxSessionManagerTests {
         #expect(await EphemeralContainerRegistry.shared.register(name))
         #expect(await EphemeralContainerRegistry.shared.current().contains(name))
         EphemeralContainerRegistry.deleteNow(binary: "/usr/bin/true", name: name)
-        let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline, await EphemeralContainerRegistry.shared.current().contains(name) {
+        let deadline = TestClock.deadline(5)
+        while TestClock.now() < deadline, await EphemeralContainerRegistry.shared.current().contains(name) {
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
         #expect(!(await EphemeralContainerRegistry.shared.current().contains(name)))

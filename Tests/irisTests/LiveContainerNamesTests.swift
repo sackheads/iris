@@ -55,14 +55,14 @@ final class LiveContainerNamesTests {
         let live = LiveContainerNames()
         for name in ["iris-a", "iris-b", "iris-c"] { live.add(name) }
         let (script, log) = try stub(sleeping: 2)
-        let started = Date()
+        let started = TestClock.now()
         let task = Task.detached {
             live.deleteAll(within: 4) { name in ("/bin/sh", [script.path, "delete", "--force", name]) }
         }
         let finished = try await value(of: task, within: 15)
         #expect(finished == 3)
         // No bound under 5 s (CI is serial on 3 cores): three 2 s deletes in series take 6 s.
-        #expect(Date().timeIntervalSince(started) < 5, "three 2 s deletes in parallel, not 6 s in series")
+        #expect(TestClock.seconds(since: started) < 5, "three 2 s deletes in parallel, not 6 s in series")
         let logged = lines(log).filter { $0.contains(" pgid=") }
         #expect(Set(logged.compactMap { $0.split(separator: " ").dropFirst(2).first.map(String.init) })
             == ["iris-a", "iris-b", "iris-c"])
@@ -81,12 +81,12 @@ final class LiveContainerNamesTests {
         let live = LiveContainerNames()
         live.add("iris-stuck")
         let (script, log) = try stub(sleeping: 30)
-        let started = Date()
+        let started = TestClock.now()
         let task = Task.detached {
             live.deleteAll(within: 0.5) { name in ("/bin/sh", [script.path, "delete", "--force", name]) }
         }
         _ = try await value(of: task, within: 10)
-        #expect(Date().timeIntervalSince(started) < 5)
+        #expect(TestClock.seconds(since: started) < 5)
         #expect(live.names == ["iris-stuck"], "not deleted, so still recorded")
         // The helper itself was SIGKILLed at the bound, not merely stopped being waited for.
         let pid = try #require(lines(log).first?.split(separator: " ").first { $0.hasPrefix("pid=") }

@@ -51,8 +51,8 @@ struct BlockedCardBeforeVerdictTests {
         func unloadModel() async {}
         func generate(prompt: String, jsonSchema: String?) async throws -> String {
             lock.withLock { entered += 1 }
-            let deadline = Date().addingTimeInterval(20)
-            while !lock.withLock({ open }), Date() < deadline {
+            let deadline = TestClock.deadline(20)
+            while !lock.withLock({ open }), TestClock.now() < deadline {
                 try await Task.sleep(nanoseconds: 10_000_000)
             }
             return #"{"decision":"DENY","reason":"this deletes things"}"#
@@ -60,9 +60,9 @@ struct BlockedCardBeforeVerdictTests {
     }
 
     private func until(within seconds: TimeInterval = 20, _ condition: () -> Bool) async -> Bool {
-        let deadline = Date().addingTimeInterval(seconds)
+        let deadline = TestClock.deadline(seconds)
         while !condition() {
-            if Date() >= deadline { return false }
+            if TestClock.now() >= deadline { return false }
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         return true

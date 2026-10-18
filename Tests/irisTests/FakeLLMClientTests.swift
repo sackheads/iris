@@ -34,9 +34,9 @@ struct FakeLLMClientTests {
     func honorsLatency() async throws {
         let client = FakeLLMClient(responses: [textResponse("slow")],
                                    latency: .init(minMs: 40, maxMs: 40))
-        let start = Date()
+        let start = TestClock.now()
         _ = try await client.generateContent(request: GeminiRequest(contents: []), tier: .medium)
-        let elapsedMs = Date().timeIntervalSince(start) * 1000
+        let elapsedMs = TestClock.seconds(since: start) * 1000
         #expect(elapsedMs >= 30) // generous lower bound to avoid flakiness
     }
 }

@@ -67,13 +67,13 @@ struct SandboxRealVMTests {
 
         // The in-VM killer runs after the client's ladder and takes its own grace.
         var table = ""
-        let deadline = Date().addingTimeInterval(20)
+        let deadline = TestClock.deadline(20)
         repeat {
             table = (try? await rt.exec(name: name, workdir: "/", command: "ps -eo stat=,ppid=,args=", timeoutSeconds: 30).stdout) ?? ""
             let rows = table.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
             if !rows.contains(where: { $0.contains("sleep \(nap)") || $0.hasPrefix("Z") }) { break }
             try await Task.sleep(nanoseconds: 250_000_000)
-        } while Date() < deadline
+        } while TestClock.now() < deadline
 
         let rows = table.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
         #expect(!rows.isEmpty, "ps printed nothing")
@@ -128,12 +128,12 @@ enum VMStarvation {
             finish(4, name, "create failed: \(error)")
         }
         let nap = "30.\(Int.random(in: 100_000...999_999))"
-        let started = Date()
+        let started = TestClock.now()
         let call = Task.detached {
             try await rt.exec(name: name, workdir: "/", command: "sleep \(nap); true", timeoutSeconds: timeout)
         }
-        let appeared = Date().addingTimeInterval(Double(timeout) - 3)
-        while !RealContainer.runs("^sleep \(nap)", in: name), Date() < appeared { usleep(100_000) }
+        let appeared = TestClock.deadline(Double(timeout) - 3)
+        while !RealContainer.runs("^sleep \(nap)", in: name), TestClock.now() < appeared { usleep(100_000) }
         guard RealContainer.runs("^sleep \(nap)", in: name) else { finish(1, name, "the command never started in the VM") }
 
         let hold = PoolHold()
@@ -142,13 +142,13 @@ enum VMStarvation {
             hold.release()
             finish(2, name, "could not hold the cooperative pool")
         }
-        guard Date() < started.addingTimeInterval(Double(timeout)) else {
+        guard TestClock.now() < TestClock.instant(started, plus: Double(timeout)) else {
             hold.release()
             finish(2, name, "the pool was taken only after the deadline; the scenario proves nothing")
         }
         // The deadline, the client's ladder, then the killer's own `container exec` and grace.
-        let until = started.addingTimeInterval(Double(timeout) + CLIProcessRunner.killGraceSeconds + 6)
-        while RealContainer.runs("^sleep \(nap)", in: name), Date() < until { usleep(250_000) }
+        let until = TestClock.instant(started, plus: Double(timeout) + CLIProcessRunner.killGraceSeconds + 6)
+        while RealContainer.runs("^sleep \(nap)", in: name), TestClock.now() < until { usleep(250_000) }
         let survived = RealContainer.runs("^sleep \(nap)", in: name)
         hold.release()
         _ = call

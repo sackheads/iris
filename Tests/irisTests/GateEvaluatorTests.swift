@@ -455,7 +455,7 @@ struct GateEvaluatorTests {
     func scriptCreateCeiling() async throws {
         let runtime = GateRuntime()
         runtime.createDelaySeconds = 30      // longer than any test would wait for
-        let started = Date()
+        let started = TestClock.now()
         let result = await GateEvaluator.evaluate(.script(command: "s", mounts: [], timeoutSeconds: 10),
                                                   previous: nil, runtime: runtime, image: "i",
                                                   createCeilingSeconds: 1)
@@ -464,7 +464,7 @@ struct GateEvaluatorTests {
             Issue.record("a wedged create is a gate error, not a wedged job: \(result)"); return
         }
         #expect(detail.contains("could not be started within"))
-        #expect(Date().timeIntervalSince(started) < 10, "and it answered at the ceiling, not at the create")
+        #expect(TestClock.seconds(since: started) < 10, "and it answered at the ceiling, not at the create")
         #expect(runtime.execCount == 0)
         #expect(runtime.removedNames.count == 1, "the half-started container is swept")
     }

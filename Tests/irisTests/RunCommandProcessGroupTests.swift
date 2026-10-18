@@ -17,12 +17,12 @@ struct RunCommandProcessGroupTests {
     func compoundTimeoutKillsChild() async {
         let nap = Self.marker()
         defer { Self.killAll(nap) }
-        let started = Date()
+        let started = TestClock.now()
         // `; true` stops zsh exec'ing `sleep` in its own place: the shell forks it, so killing the
         // shell's pid alone would leak it. (`Process.terminate()` happened to signal the group, which
         // is undocumented; this pins the behaviour now that the runner does it on purpose.)
         let out = await ToolExecutor().runCommand("sleep \(nap); true", cwd: nil, timeoutSeconds: 1)
-        let wall = Date().timeIntervalSince(started)
+        let wall = TestClock.seconds(since: started)
 
         #expect(out == ToolExecutor.commandTimedOutMessage(seconds: 1))
         #expect(wall < 3, "returned after \(wall)s; the deadline was 1s")
@@ -46,10 +46,10 @@ struct RunCommandProcessGroupTests {
         defer { Self.killAll(nap) }
         let task = Task { await ToolExecutor().runCommand("sleep \(nap); true", cwd: nil, timeoutSeconds: 60) }
         #expect(await Self.appears("sleep \(nap)", within: 5), "the command never started")
-        let cancelled = Date()
+        let cancelled = TestClock.now()
         task.cancel()
         _ = try await value(of: task)
-        #expect(Date().timeIntervalSince(cancelled) < 2, "the cancelled call did not return promptly")
+        #expect(TestClock.seconds(since: cancelled) < 2, "the cancelled call did not return promptly")
         #expect(await Self.gone("sleep \(nap)", within: 4), "sleep \(nap) outlived the cancel")
     }
 
@@ -57,10 +57,10 @@ struct RunCommandProcessGroupTests {
     func timeoutEscalatesToSigkill() async {
         let nap = Self.marker()
         defer { Self.killAll(nap) }
-        let started = Date()
+        let started = TestClock.now()
         let out = await ToolExecutor().runCommand("trap '' TERM; sleep \(nap); true", cwd: nil, timeoutSeconds: 1)
         #expect(out == ToolExecutor.commandTimedOutMessage(seconds: 1))
-        #expect(Date().timeIntervalSince(started) < 3)
+        #expect(TestClock.seconds(since: started) < 3)
         // `Process.terminate()` sent SIGTERM and nothing after it, so this one used to run its full 30 s.
         #expect(await Self.gone("sleep \(nap)", within: ProcessGroupRunner.terminateGraceSeconds + 3),
                 "sleep \(nap) survived the SIGKILL rung")
@@ -79,10 +79,10 @@ struct RunCommandProcessGroupTests {
         // Anchored, so it matches `sleep` itself and not the shell's argv: the trap must be set
         // before the SIGTERM lands, and the shell only forks `sleep` after setting it.
         #expect(await Self.appears("^sleep \(nap)", within: 5), "the command never started")
-        let started = Date()
+        let started = TestClock.now()
         runner.terminate()
         let result = try await value(of: running)
-        let wall = Date().timeIntervalSince(started)
+        let wall = TestClock.seconds(since: started)
         #expect(wall >= ProcessGroupRunner.terminateGraceSeconds - 0.2, "SIGTERM should not have ended it")
         #expect(wall < ProcessGroupRunner.terminateGraceSeconds + 2)
         if case .success(let output) = result {
@@ -143,10 +143,10 @@ struct RunCommandProcessGroupTests {
     func normalExitKillsPipeHolder() async {
         let nap = Self.marker()
         defer { Self.killAll(nap) }
-        let started = Date()
+        let started = TestClock.now()
         // The background sleep inherits stdout; before #353 its read blocked until the deadline.
         let out = await ToolExecutor().runCommand("(sleep \(nap) &); echo done", cwd: nil, timeoutSeconds: 20)
-        let wall = Date().timeIntervalSince(started)
+        let wall = TestClock.seconds(since: started)
         #expect(out == "done\n")
         #expect(wall < ProcessGroupRunner.strayGraceSeconds + 2, "returned after \(wall)s")
         #expect(await Self.gone("sleep \(nap)", within: 3), "sleep \(nap) was left running")
@@ -167,12 +167,12 @@ struct RunCommandProcessGroupTests {
         // measures the real property: the runner returns once the leader exits, without waiting
         // on a background job that no longer holds its pipes.
         let runner = ProcessGroupRunner()
-        let started = Date()
+        let started = TestClock.now()
         let result = await runner.run(executable: "/bin/zsh",
                                        arguments: ["-c", "(sleep \(nap) >/dev/null 2>&1 &); echo started"],
                                        environment: BinaryResolver.commandEnvironment(base: ProcessInfo.processInfo.environment),
                                        currentDirectory: nil)
-        let wall = Date().timeIntervalSince(started)
+        let wall = TestClock.seconds(since: started)
         #expect(wall < ProcessGroupRunner.strayGraceSeconds, "returned after \(wall)s; looks like it paid the stray grace")
         guard case .success(let output) = result else {
             Issue.record("expected success, got \(result)")
@@ -193,11 +193,11 @@ struct RunCommandProcessGroupTests {
         // dropped coverage at this layer for the property that matters — if `runCommand` ever
         // killed the group on return, it would take a detached background job with it, and
         // nothing at this layer would notice.
-        let started = Date()
+        let started = TestClock.now()
         let out = await ToolExecutor().runCommand("(sleep \(nap) >/dev/null 2>&1 &); echo started",
                                                     cwd: nil, timeoutSeconds: 10)
         // Generous, not tight: this is a liveness check, not a timing measurement (#429).
-        #expect(Date().timeIntervalSince(started) < 20, "runCommand should not have hung")
+        #expect(TestClock.seconds(since: started) < 20, "runCommand should not have hung")
         #expect(out == "started\n")
         #expect(await Self.appears("sleep \(nap)", within: 3),
                 "a detached background job must survive runCommand's return")
@@ -217,8 +217,8 @@ struct RunCommandProcessGroupTests {
     static func marker() -> String { "30.\(Int.random(in: 100_000...999_999))" }
 
     static func gone(_ needle: String, within seconds: Double) async -> Bool {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline {
+        let deadline = TestClock.deadline(seconds)
+        while TestClock.now() < deadline {
             if !exists(needle) { return true }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
@@ -226,8 +226,8 @@ struct RunCommandProcessGroupTests {
     }
 
     static func appears(_ needle: String, within seconds: Double) async -> Bool {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline {
+        let deadline = TestClock.deadline(seconds)
+        while TestClock.now() < deadline {
             if exists(needle) { return true }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }

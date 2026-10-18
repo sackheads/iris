@@ -105,8 +105,8 @@ struct SubagentTurnDeadlineTests {
     }
 
     private func eventually(_ seconds: Double = 10, _ condition: @MainActor () -> Bool) async -> Bool {
-        let end = Date().addingTimeInterval(seconds)
-        while Date() < end {
+        let end = TestClock.deadline(seconds)
+        while TestClock.now() < end {
             if condition() { return true }
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
@@ -313,8 +313,8 @@ struct SubagentTurnDeadlineTests {
         // Hold the main actor through the verdict: the cleanup after the poll loop needs it, so
         // turn 2 can only be cancelled while it is held if the timeout itself halted the loop.
         // Held until the cancel lands, not for a fixed time a busy suite's poll can outlast (#410).
-        let holdUntil = Date().addingTimeInterval(10)
-        while client.cancelled == 0, Date() < holdUntil { Self.block(seconds: 0.01) }
+        let holdUntil = TestClock.deadline(10)
+        while client.cancelled == 0, TestClock.now() < holdUntil { Self.block(seconds: 0.01) }
         let cancelledWhileMainHeld = client.cancelled
         let outcome = try await value(of: task)
 

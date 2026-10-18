@@ -33,9 +33,9 @@ struct BlockingSpawnTests {
 
     @Test("it waits for the child to exit")
     func waitsForExit() {
-        let started = Date()
+        let started = TestClock.now()
         #expect(BlockingSpawn.run("/bin/sleep", ["0.3"]) == 0)
-        #expect(Date().timeIntervalSince(started) >= 0.3)
+        #expect(TestClock.seconds(since: started) >= 0.3)
     }
 
     @Test("stdin reads as empty, so a child that reads it does not block")
@@ -48,9 +48,9 @@ struct BlockingSpawnTests {
     func timeoutKills() {
         let nap = Self.marker()
         defer { RunCommandProcessGroupTests.killAll(nap) }
-        let started = Date()
+        let started = TestClock.now()
         let status = BlockingSpawn.run("/bin/sleep", [nap], timeoutSeconds: 0.5)
-        let wall = Date().timeIntervalSince(started)
+        let wall = TestClock.seconds(since: started)
         #expect(status == 128 + SIGKILL)
         #expect(wall >= 0.5)
         #expect(wall < 5)
@@ -80,13 +80,13 @@ struct BlockingSpawnTests {
         }
         let box = Box()
         let done = DispatchSemaphore(value: 0)
-        let started = Date()
+        let started = TestClock.now()
         BlockingSpawn.detached("/bin/sh", ["-c", "sleep 0.3; exit 4"], timeoutSeconds: 10) { status in
             let label = String(cString: __dispatch_queue_get_label(nil))
             box.lock.withLock { box.status = .some(status); box.label = label }
             done.signal()
         }
-        #expect(Date().timeIntervalSince(started) < 0.3)
+        #expect(TestClock.seconds(since: started) < 0.3)
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             DispatchQueue(label: "iris.test.wait").async { done.wait(); c.resume() }
         }

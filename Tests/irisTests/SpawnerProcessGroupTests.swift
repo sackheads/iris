@@ -54,9 +54,9 @@ struct HookManagerProcessGroupTests {
         defer { P.killAll(nap) }
         let (m, url) = try manager("trap '' TERM; sleep \(nap); true", timeout: 1)
         defer { try? FileManager.default.removeItem(at: url) }
-        let started = Date()
+        let started = TestClock.now()
         let decision = await m.fireBeforeTool(toolName: "t", args: [:])
-        let wall = Date().timeIntervalSince(started)
+        let wall = TestClock.seconds(since: started)
         // A hook its timeout killed blocks: it never gave its verdict (#452).
         guard case .block = decision else { Issue.record("got \(decision)"); return }
         #expect(wall < 1 + ProcessGroupRunner.terminateGraceSeconds + 2, "returned after \(wall)s")
@@ -112,9 +112,9 @@ struct HookManagerProcessGroupTests {
         defer { P.killAll(nap) }
         let (m, url) = try manager(#"(sleep \#(nap) &); echo '{"ok":"1"}'"#)
         defer { try? FileManager.default.removeItem(at: url) }
-        let started = Date()
+        let started = TestClock.now()
         let decision = await m.fireBeforeTool(toolName: "t", args: [:])
-        let wall = Date().timeIntervalSince(started)
+        let wall = TestClock.seconds(since: started)
         guard case .proceed(let data?) = decision else { Issue.record("got \(decision)"); return }
         #expect(String(data: data, encoding: .utf8) == "{\"ok\":\"1\"}\n")
         #expect(wall < ProcessGroupRunner.strayGraceSeconds + 2, "returned after \(wall)s")
@@ -200,10 +200,10 @@ struct PluginAuthRunnerProcessGroupTests {
     func timeoutEscalatesToSigkill() async {
         let nap = P.marker()
         defer { P.killAll(nap) }
-        let started = Date()
+        let started = TestClock.now()
         let status = await PluginAuthRunner.check(auth("trap '' TERM; sleep \(nap); true"), config: [:],
                                                   approve: allow, timeoutSeconds: 1)
-        let wall = Date().timeIntervalSince(started)
+        let wall = TestClock.seconds(since: started)
         #expect(!status.signedIn)
         #expect(wall < 1 + ProcessGroupRunner.terminateGraceSeconds + 2, "returned after \(wall)s")
         #expect(await P.gone("sleep \(nap)", within: 2), "sleep \(nap) outlived the SIGKILL")
@@ -227,9 +227,9 @@ struct PluginAuthRunnerProcessGroupTests {
     func backgroundedGrandchild() async {
         let nap = P.marker()
         defer { P.killAll(nap) }
-        let started = Date()
+        let started = TestClock.now()
         let status = await PluginAuthRunner.check(auth("(sleep \(nap) &); echo ok"), config: [:], approve: allow)
-        let wall = Date().timeIntervalSince(started)
+        let wall = TestClock.seconds(since: started)
         #expect(status.signedIn)
         #expect(status.output == "ok\n")
         #expect(wall < ProcessGroupRunner.strayGraceSeconds + 2, "returned after \(wall)s")

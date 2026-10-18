@@ -61,8 +61,8 @@ final class LockStub {
 
     /// Up to 10 s for `process` to be reaped. False when it is still running.
     private static func waitForExit(_ process: Process) -> Bool {
-        let deadline = Date().addingTimeInterval(10)
-        while process.isRunning && Date() < deadline { usleep(10_000) }
+        let deadline = TestClock.deadline(10)
+        while process.isRunning && TestClock.now() < deadline { usleep(10_000) }
         return !process.isRunning
     }
 

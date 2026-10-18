@@ -59,9 +59,9 @@ struct SandboxingManagerStartTests {
         let stub = try stub("sleep 30")
         defer { try? FileManager.default.removeItem(at: stub.dir) }
         let m = SandboxingManager(binaryPath: { stub.binary }, startTimeoutSeconds: 1)
-        let startedAt = Date()
+        let startedAt = TestClock.now()
         let result = await m.startContainerSystem()
-        #expect(Date().timeIntervalSince(startedAt) < 15, "answered near the 1s timeout, not after the real 30s sleep")
+        #expect(TestClock.seconds(since: startedAt) < 15, "answered near the 1s timeout, not after the real 30s sleep")
         #expect(result.success == false)
         #expect(result.message != nil)
     }
@@ -126,10 +126,10 @@ struct SandboxingManagerStartTests {
         let other = Task { await m.startContainerSystem() }
         try await Task.sleep(nanoseconds: 50_000_000)
 
-        let cancelledAt = Date()
+        let cancelledAt = TestClock.now()
         cancelled.cancel()
         let cancelledResult = try await value(of: cancelled)
-        #expect(Date().timeIntervalSince(cancelledAt) < 0.5,
+        #expect(TestClock.seconds(since: cancelledAt) < 0.5,
                 "returned on cancellation, not after the stub's 1s sleep or the 10s timeout")
         #expect(cancelledResult.success == false)
 

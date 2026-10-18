@@ -27,7 +27,7 @@ struct TimeoutTests {
     /// cancellation held `withTimeout` for its whole duration.
     @Test("an operation that ignores cancellation is abandoned at the deadline")
     func nonCooperativeReturnsAtDeadline() async {
-        let started = Date()
+        let started = TestClock.now()
         await #expect(throws: TimeoutError.self) {
             try await withTimeout(seconds: 0.2) { () -> Int in
                 await Self.ignoresCancellation(seconds: 20)
@@ -36,7 +36,7 @@ struct TimeoutTests {
         }
         // Loose on purpose: it separates the deadline from the operation's 20 s, not from pool
         // latency, which under a parallel run at suite start has measured 1.7-2.4 s.
-        let elapsed = Date().timeIntervalSince(started)
+        let elapsed = TestClock.seconds(since: started)
         #expect(elapsed < 10, "returned after \(elapsed)s; the deadline was 0.2s")
     }
 
@@ -46,7 +46,7 @@ struct TimeoutTests {
         // for about the deadline; the 30 s backstop only matters if the test never gets there.
         let release = DispatchSemaphore(value: 0)
         let finished = Flag()
-        let started = Date()
+        let started = TestClock.now()
         await #expect(throws: TimeoutError.self) {
             try await withTimeout(seconds: 0.2) { () -> Int in
                 Self.block(until: release, backstop: 30)
@@ -54,7 +54,7 @@ struct TimeoutTests {
                 return 1
             }
         }
-        let elapsed = Date().timeIntervalSince(started)
+        let elapsed = TestClock.seconds(since: started)
         #expect(!finished.isSet, "withTimeout returned while the operation was still blocked")
         release.signal()
         #expect(elapsed < 10, "returned after \(elapsed)s; the deadline was 0.2s")
@@ -103,10 +103,10 @@ struct TimeoutTests {
             }
         }
         try? await Task.sleep(nanoseconds: 50_000_000)
-        let started = Date()
+        let started = TestClock.now()
         caller.cancel()
         let result = await caller.result
-        #expect(Date().timeIntervalSince(started) < 10, "the cancel, not the 30 s sleep or deadline")
+        #expect(TestClock.seconds(since: started) < 10, "the cancel, not the 30 s sleep or deadline")
         #expect(throws: CancellationError.self) { try result.get() }
         #expect(await saw.becomesTrue(within: 2))
     }
@@ -120,10 +120,10 @@ struct TimeoutTests {
             }
         }
         try? await Task.sleep(nanoseconds: 50_000_000)
-        let started = Date()
+        let started = TestClock.now()
         caller.cancel()
         let result = await caller.result
-        #expect(Date().timeIntervalSince(started) < 10, "the cancel, not the 30 s operation or deadline")
+        #expect(TestClock.seconds(since: started) < 10, "the cancel, not the 30 s operation or deadline")
         #expect(throws: CancellationError.self) { try result.get() }
     }
 
@@ -136,9 +136,9 @@ struct TimeoutTests {
                 return 1
             }
         }
-        let started = Date()
+        let started = TestClock.now()
         let result = await caller.result
-        #expect(Date().timeIntervalSince(started) < 10, "the cancel, not the 30 s operation or deadline")
+        #expect(TestClock.seconds(since: started) < 10, "the cancel, not the 30 s operation or deadline")
         #expect(throws: CancellationError.self) { try result.get() }
     }
 
@@ -211,8 +211,8 @@ struct TimeoutTests {
         func set() { lock.lock(); value = true; lock.unlock() }
         var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
         func becomesTrue(within seconds: Double) async -> Bool {
-            let deadline = Date().addingTimeInterval(seconds)
-            while Date() < deadline {
+            let deadline = TestClock.deadline(seconds)
+            while TestClock.now() < deadline {
                 if isSet { return true }
                 try? await Task.sleep(nanoseconds: 10_000_000)
             }

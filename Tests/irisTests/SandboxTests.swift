@@ -98,8 +98,8 @@ struct SandboxTests {
         }
         let name = try #require(calls().first { $0.hasPrefix("run ") }?.split(separator: " ").dropFirst(3).first.map(String.init))
         #expect(name.hasPrefix("\(SandboxSessionManager.namePrefix)run-"))
-        let deadline = Date().addingTimeInterval(1 + ProcessGroupRunner.terminateGraceSeconds + 5)
-        while Date() < deadline {
+        let deadline = TestClock.deadline(1 + ProcessGroupRunner.terminateGraceSeconds + 5)
+        while TestClock.now() < deadline {
             let registered = await EphemeralContainerRegistry.shared.current().contains(name)
             if calls().contains("delete --force \(name)"), !registered { break }
             try await Task.sleep(nanoseconds: 50_000_000)

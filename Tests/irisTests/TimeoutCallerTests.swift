@@ -11,9 +11,9 @@ struct RunCommandTimeoutTests {
     func timedOutCommandIsKilled() async {
         // A duration nothing else on this machine would be sleeping for, so `pgrep` matches only ours.
         let marker = "29.\(Int.random(in: 100_000...999_999))"
-        let started = Date()
+        let started = TestClock.now()
         let out = await ToolExecutor().runCommand("sleep \(marker)", cwd: nil, timeoutSeconds: 1)
-        let wall = Date().timeIntervalSince(started)
+        let wall = TestClock.seconds(since: started)
 
         #expect(out == ToolExecutor.commandTimedOutMessage(seconds: 1))
         #expect(wall < 3, "returned after \(wall)s; the deadline was 1s")
@@ -28,8 +28,8 @@ struct RunCommandTimeoutTests {
     }
 
     private static func gone(_ needle: String, within seconds: Double) async -> Bool {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline {
+        let deadline = TestClock.deadline(seconds)
+        while TestClock.now() < deadline {
             if !exists(needle) { return true }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
@@ -54,14 +54,14 @@ struct VibecopTimeoutTests {
     /// A native inference call does not look at cancellation; before #345 the "timeout" waited it out.
     @Test("an evaluation that ignores cancellation yields no verdict at the deadline")
     func nonCooperativeEvaluationTimesOut() async {
-        let started = Date()
+        let started = TestClock.now()
         let verdict = await AppState.boundedVibecopVerdict(seconds: 0.2) {
             await TimeoutTests.ignoresCancellation(seconds: 20)
             return VibecopDecision(decision: "APPROVE", reason: "too late to count")
         }
         #expect(verdict == nil, "a late APPROVE must not be honoured")
         // Separates the deadline from the 20 s evaluation, not from pool latency.
-        #expect(Date().timeIntervalSince(started) < 10)
+        #expect(TestClock.seconds(since: started) < 10)
     }
 
     @Test("an evaluation inside the deadline passes its verdict through")
@@ -74,13 +74,13 @@ struct VibecopTimeoutTests {
 
     @Test("an Ollama warm-up probe that never answers is bounded, and taken as a cold model")
     func wedgedOllamaProbeIsBounded() async {
-        let started = Date()
+        let started = TestClock.now()
         let budget = await AppState.ollamaVibecopBudget(configured: 7, probeSeconds: 0.2) {
             await TimeoutTests.ignoresCancellation(seconds: 20)
             return true
         }
         // Separates the probe's deadline from the 20 s probe, not from pool latency.
-        #expect(Date().timeIntervalSince(started) < 10)
+        #expect(TestClock.seconds(since: started) < 10)
         #expect(budget == AppState.ollamaColdBudgetSeconds)
     }
 

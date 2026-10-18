@@ -45,7 +45,9 @@ private func firstOf<T: Sendable>(_ seconds: Double, _ operation: @escaping @Sen
     let first = FirstOf<T>()
     let work = Task { first.resolve(await operation()) }
     let timer = Task {
-        try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+        // The suspending clock (#605): a bound counts the test's time, not the Mac's sleep, which
+        // `Task.sleep(nanoseconds:)` counted, ending a 30 s wait after 1 s of real work.
+        try? await SuspendingClock().sleep(for: .milliseconds(Int64(seconds * 1000)))
         first.resolve(nil)
     }
     defer { work.cancel(); timer.cancel() }
@@ -96,9 +98,9 @@ func offPool<T: Sendable>(_ blocking: @escaping @Sendable () -> T) async -> T {
 /// Whether `condition` held within `seconds`, polled every 10 ms off the pool (`offPool`).
 func polled(within seconds: Double, _ condition: @escaping @Sendable () -> Bool) async -> Bool {
     await offPool {
-        let deadline = Date().addingTimeInterval(seconds)
+        let deadline = TestClock.deadline(seconds)
         while !condition() {
-            if Date() >= deadline { return false }
+            if TestClock.now() >= deadline { return false }
             usleep(10_000)
         }
         return true
