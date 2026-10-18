@@ -29,8 +29,10 @@ struct ChatView: View {
     @State private var homeOptInTarget: Conversation?
     /// #625: the conversation whose workspace rules are being reviewed.
     @State private var rulesReviewTarget: Conversation?
-    /// Bumped when a trust is refused because a file changed, so the sheet re-reads and says so.
-    @State private var rulesReviewChanged = 0
+    /// What the sheet shows: read once when it opens, and again only when a trust is refused
+    /// because a file changed, so the text never changes under the person mid-read (#625 review).
+    @State private var rulesReviewFiles: [(file: String, data: Data)] = []
+    @State private var rulesReviewChanged = false
 
     /// #182 §9: the group auto-expands when the selected conversation *becomes* one of its rows.
     /// Two ways in, and both are a change of the same one value — "the selection, while it is
@@ -566,19 +568,19 @@ struct ChatView: View {
             set: { if !$0 { rulesReviewTarget = nil } }
         )) {
             if let wp = rulesReviewTarget?.workspacePath {
-                WorkspaceRulesReview(files: state.untrustedWorkspaceRules(for: wp), workspace: wp,
-                                     changedWhileOpen: rulesReviewChanged > 0,
+                WorkspaceRulesReview(files: rulesReviewFiles, workspace: wp,
+                                     changedWhileOpen: rulesReviewChanged,
                                      trust: { shown in
-                                         // Changed since it was shown: re-read, keep the sheet open on the new text.
                                          if state.trustWorkspaceRules(for: wp, reviewed: shown) {
                                              rulesReviewTarget = nil
-                                             rulesReviewChanged = 0
+                                             rulesReviewChanged = false
                                          } else {
-                                             rulesReviewChanged += 1
+                                             // Changed since it was opened: show the new text and say so.
+                                             rulesReviewFiles = state.untrustedWorkspaceRules(for: wp)
+                                             rulesReviewChanged = true
                                          }
                                      },
-                                     dismiss: { rulesReviewTarget = nil; rulesReviewChanged = 0 })
-                    .id(rulesReviewChanged)
+                                     dismiss: { rulesReviewTarget = nil; rulesReviewChanged = false })
             }
         }
         .contextMenu {
@@ -605,7 +607,11 @@ struct ChatView: View {
             }
             // #625: rules Iris did not write are off until the person reads and trusts them.
             if let wp = conv.workspacePath, !state.untrustedWorkspaceRules(for: wp).isEmpty {
-                Button("Review Workspace Rules...") { rulesReviewTarget = conv }
+                Button("Review Workspace Rules...") {
+                    rulesReviewFiles = state.untrustedWorkspaceRules(for: wp)
+                    rulesReviewChanged = false
+                    rulesReviewTarget = conv
+                }
             }
             Button("Export to Markdown...") {
                 exportConversation(id: conv.id)
@@ -1500,7 +1506,7 @@ struct WorkspaceRulesReview: View {
             Text("These files in \(workspace)/.iris came with the folder or changed outside Iris. They decide what Iris runs without asking you (the project allowlist), whether this workspace's commands are sandboxed, and what Vibecop treats as routine. None of them is in effect until you trust it.")
                 .font(.callout).foregroundStyle(.secondary)
             if changedWhileOpen {
-                Text("These files changed while you were reading them, so nothing was trusted. This is their text now.")
+                Text("These files changed since you opened this, so nothing was trusted. This is their text now.")
                     .font(.callout.bold()).foregroundStyle(.orange)
             }
             ScrollView {
