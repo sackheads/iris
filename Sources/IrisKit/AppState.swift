@@ -3595,7 +3595,13 @@ class AppState {
 
         if let decision = await consultVibecop(toolName: toolName, details: details, workspace: workspace, inSandbox: inSandbox,
                                                callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: vibecopEnabled) {
-            if decision.decision == "APPROVE" { return true }
+            // On the host, an APPROVE stands in for the person only on a read (#600), and not at all
+            // for a command once the person has denied one in this conversation.
+            if decision.decision == "APPROVE",
+               ReadOnlyCommand.vibecopMayApprove(toolName: toolName, details: details, inSandbox: inSandbox),
+               !(toolName == "run_command" && commandDenied(in: conversationId)) {
+                return true
+            }
             if decision.decision == "DENY" { return false }
             // ESCALATE → fall through to the user prompt.
         }
@@ -3986,6 +3992,15 @@ class AppState {
         backgroundRunAncestor[id] ?? id
     }
 
+    /// The conversations (by `delegationRoot`; nil for an unattributed call) where the person has
+    /// clicked Deny on a `run_command` since launch (#600). There, Vibecop no longer approves any
+    /// command on its own; the allowlist still does, since the person set it. Transient on purpose.
+    @ObservationIgnored private var commandDeniedRoots: Set<UUID?> = []
+
+    func commandDenied(in conversationId: UUID?) -> Bool {
+        commandDeniedRoots.contains(conversationId.map(delegationRoot(of:)))
+    }
+
     /// Resolves the request the click was shown, by id: Stop removes requests from anywhere in the
     /// queue (#334), so the head is not necessarily what the banner showed. A click on a request
     /// that is gone resolves nothing.
@@ -3998,6 +4013,7 @@ class AppState {
             approved = true
         case .deny:
             approved = false
+            if pending.toolName == "run_command" { commandDeniedRoots.insert(pending.conversationId.map(delegationRoot(of:))) }
         case .alwaysAllowGlobal:
             // Review #340, item 3 (defense in depth): `ChatView`'s banner already hides the
             // Always-Allow buttons for a `humanOnly` request, but that is UI-level — any other

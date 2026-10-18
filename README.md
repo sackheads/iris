@@ -13,7 +13,7 @@ Iris is a native macOS AI assistant: a compiled, local-first agent harness that 
 - **Background jobs.**  Run a prompt on a cron schedule, or whenever a folder changes.  Each run happens in a hidden conversation of its own and reports back with a card.  Jobs are read-only unless you say otherwise, and a call nobody was there to approve waits on the card for your click.  [Details](docs/jobs.md)
 - **Memory you can read.**  Long-term memory, skills and rules are plain Markdown files under `~/.iris`, so you can read them, edit them and back them up like anything else.  [Details](docs/features.md#memory-and-skills)
 - **Plays well with others.**  MCP servers, installable plugins, Google Workspace (Calendar, Docs, Drive, Sheets, Gmail, Tasks) with no extra dependencies, and conversations that can message each other.  [Details](docs/features.md#plugins)
-- **Guards at the door.**  Untrusted text goes through a tiered prompt-injection guard, and an optional guardian model (Vibecop, local or cloud) can pre-screen commands so routine ones don't need your click.  [Details](docs/features.md#vibecop-guardian)
+- **Guards at the door.**  Untrusted text goes through a tiered prompt-injection guard, and an optional guardian model (Vibecop, local or cloud) can pre-screen commands so routine reads don't need your click.  [Details](docs/features.md#vibecop-guardian)
 
 The [full feature tour](docs/features.md) has the rest: streaming replies, steering a turn while it runs, delegation to graded subagents, checkpoints, the menu bar status item and a good deal more.
 
