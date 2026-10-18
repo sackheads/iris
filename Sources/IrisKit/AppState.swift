@@ -1027,6 +1027,11 @@ class AppState {
     @ObservationIgnored var closeSandboxSession: @Sendable (UUID) async -> Void = {
         await SandboxSessionManager.shared.closeSession($0)
     }
+    /// How a withdrawn #611 opt-in ends the containers created under it; the conversation may
+    /// start a new one, which the executor then judges without the opt-in. A seam, as above.
+    @ObservationIgnored var endSandboxSession: @Sendable (UUID) async -> Void = {
+        await SandboxSessionManager.shared.endSession($0)
+    }
     /// The delegates that are goal evaluators, so their asks are labelled as such (#426).
     @ObservationIgnored private var evaluatorDelegates: Set<UUID> = []
 
@@ -1962,10 +1967,21 @@ class AppState {
     /// #611: the person allows (a path) or withdraws (nil) the sandbox writing this conversation's
     /// workspace although `HomeMount` would refuse it. Called only from the UI, after its
     /// confirmation; no tool, system event or job reaches it (a source scan pins that).
-    func setHomeWritableOptIn(for conversationId: UUID, path: String?) {
-        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
-        conversations[idx].homeWritableOptIn = path.map { IrisPaths.canonicalPath(IrisEngine.expandTilde($0)) }
+    ///
+    /// Withdrawing it, or moving it to another folder, ends the session containers of the
+    /// conversation and every delegate under it: a container made under the opt-in keeps its
+    /// read-write mount for as long as it runs, and anything left running in it keeps writing.
+    @discardableResult
+    func setHomeWritableOptIn(for conversationId: UUID, path: String?) -> Task<Void, Never>? {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return nil }
+        let old = conversations[idx].homeWritableOptIn
+        let new = path.map { IrisPaths.canonicalPath(IrisEngine.expandTilde($0)) }
+        conversations[idx].homeWritableOptIn = new
         markChanged(conversationId, .metadata)
+        guard let old, old != new else { return nil }
+        let ids = [conversationId] + delegationParent.keys.filter { $0 != conversationId && delegationRoot(of: $0) == conversationId }
+        let end = endSandboxSession
+        return Task { for id in ids { await end(id) } }
     }
 
     /// #611: whether this call's sandbox writes a folder `HomeMount` guards, by its delegation
