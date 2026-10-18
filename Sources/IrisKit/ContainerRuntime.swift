@@ -415,38 +415,39 @@ struct CLIProcessRunner: Sendable {
     static func enforce(_ reason: @escaping @Sendable () -> Error, on child: Child,
                         hasAnswered: @escaping @Sendable () -> Bool,
                         fail: @escaping @Sendable (Error) -> Void,
-                        onKill: (@Sendable () -> Void)? = nil) {
+                        onKill: (@Sendable () -> Void)? = nil, clock: UptimeClock = .live) {
         let launched = child.pid()
-        var firstKill: Date?
+        var firstKill: Double?
         if child.isRunning(), launched > 0 {
-            firstKill = Date()
+            firstKill = clock.now()
             onKill?()
             child.killChildren(launched)
             child.terminate()                                           // SIGTERM
         }
-        waitUntil(Self.killGraceSeconds) { !child.isRunning() }
+        waitUntil(Self.killGraceSeconds, clock: clock) { !child.isRunning() }
         let pid = child.pid()
         if child.isRunning(), pid > 0 {
             child.killChildren(pid)                                     // anything it spawned since
             child.signal(pid, SIGKILL)
         }
         if let firstKill, let onKill {
-            let wait = max(0, Self.killGraceSeconds - Date().timeIntervalSince(firstKill))
+            let wait = max(0, Self.killGraceSeconds - clock.seconds(since: firstKill))
             DispatchQueue(label: "iris.cli-process.refire").asyncAfter(deadline: .now() + wait, execute: onKill)
         }
         // A moment for the ordinary path to land with the real output, then the ladder answers.
         // Load bearing on the cancellation path, where a promptly-exiting child's real result is
         // what the caller gets. On the deadline path it only costs latency: `run` throws
         // `.timedOut` below whether or not the result landed, because the deadline did fire.
-        waitUntil(Self.postKillSettleSeconds) { hasAnswered() }
+        waitUntil(Self.postKillSettleSeconds, clock: clock) { hasAnswered() }
         fail(reason())
     }
 
     /// Polls `condition` until it holds or `seconds` elapse, blocking the ladder's thread. In
     /// slices rather than for the whole grace, so a child that dies promptly is not waited out.
-    private static func waitUntil(_ seconds: Double, _ condition: @Sendable () -> Bool) {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline, !condition() {
+    /// On uptime (#608), so a sleep mid-grace does not end the grace on wake.
+    static func waitUntil(_ seconds: Double, clock: UptimeClock = .live, _ condition: @Sendable () -> Bool) {
+        let deadline = clock.now() + seconds
+        while clock.now() < deadline, !condition() {
             usleep(50_000)
         }
     }
