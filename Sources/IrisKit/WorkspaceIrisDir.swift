@@ -57,12 +57,18 @@ enum WorkspaceIrisDir {
     struct Protected: Sendable, Equatable {
         var relative: String
         var createIfMissing = true
+        /// Off for a directory mounted read-write over itself only to be a mountpoint, which the VM
+        /// cannot rename or remove (a repository's `.git`, #623).
+        var readOnly = true
+        /// What the refusal says the directory holds.
+        var holds = "Vibecop's rules and the project allowlist"
     }
 
-    /// What the read-write mount of `source` protects: today its `.iris/`, for every mount. Per
-    /// mount, so a later entry can depend on what is there (#623 reads `.git`, a directory or a
-    /// worktree's gitdir file) rather than refusing a layout it does not apply to.
-    static func protected(for source: String) -> [Protected] { [Protected(relative: name)] }
+    /// What the read-write mount of `source` protects: its `.iris/`, and the hooks of a repository
+    /// at its root (`WorkspaceGit`, #623). Per mount, because the second depends on what is there.
+    static func protected(for source: String) -> [Protected] {
+        [Protected(relative: name)] + WorkspaceGit.protected(for: source)
+    }
 
     /// Makes `<dir>/<relative>` something the VM can be given read-only, before the container that
     /// mounts `dir` is made. Every component must be a real directory: a symlink anywhere could
@@ -76,23 +82,23 @@ enum WorkspaceIrisDir {
         for part in parts {
             path = (path as NSString).appendingPathComponent(part)
             if lstat(path, &info) != 0 {
-                guard errno == ENOENT else { return .refused(refusal(path, "it cannot be read")) }
+                guard errno == ENOENT else { return .refused(refusal(path, item, "it cannot be read")) }
                 guard item.createIfMissing else { return .absent }
                 guard mkdir(path, 0o755) == 0 || errno == EEXIST, lstat(path, &info) == 0 else {
-                    return .refused(refusal(path, "it could not be created"))
+                    return .refused(refusal(path, item, "it could not be created"))
                 }
             }
             let type = info.st_mode & S_IFMT
-            if type == S_IFLNK { return .refused(refusal(path, "it is a symbolic link")) }
-            guard type == S_IFDIR else { return .refused(refusal(path, "it is not a directory")) }
+            if type == S_IFLNK { return .refused(refusal(path, item, "it is a symbolic link")) }
+            guard type == S_IFDIR else { return .refused(refusal(path, item, "it is not a directory")) }
         }
         return .ready(path)
     }
 
-    /// The read-only mount of `source`'s `relative` at `target`'s, in `ContainerMount`'s
-    /// `source:target:ro` form. Listed after the mount it sits inside.
-    static func mountEntry(source: String, target: String, relative: String = name) -> String {
-        "\((source as NSString).appendingPathComponent(relative)):\((target as NSString).appendingPathComponent(relative)):ro"
+    /// The mount of `source`'s `relative` at `target`'s, in `ContainerMount`'s `source:target[:ro]`
+    /// form, read-only unless asked. Listed after the mount it sits inside.
+    static func mountEntry(source: String, target: String, relative: String = name, readOnly: Bool = true) -> String {
+        "\((source as NSString).appendingPathComponent(relative)):\((target as NSString).appendingPathComponent(relative))" + (readOnly ? ":ro" : "")
     }
 
     /// Whether a model or tool write to `path` lands in a workspace's `.iris/`: any `.iris`
@@ -121,7 +127,7 @@ enum WorkspaceIrisDir {
         return false
     }
 
-    private static func refusal(_ path: String, _ why: String) -> String {
-        "Not run: the workspace's \(name) folder (\(path)) cannot be protected from the sandbox because \(why). It holds Vibecop's rules and the project allowlist; fix or remove it, then try again."
+    private static func refusal(_ path: String, _ item: Protected, _ why: String) -> String {
+        "Not run: the workspace's \(item.relative) folder (\(path)) cannot be protected from the sandbox because \(why). It holds \(item.holds); fix or remove it, then try again."
     }
 }

@@ -232,7 +232,7 @@ does not know).
 **Making one.** `schedule_job` and `register_directory_watcher` take `mounts` and `network`, and
 both take `profile` (new to the watch tool, since a watch that writes has to be `mutating`).
 `mounts` is an ordered list of `source[:target][:ro]` entries (a leading `~` is expanded) —
-read-write unless `:ro` (a read-write mount's own `.iris/` is still mounted read-only over it, #617), and identity-mapped when no target is given, which is the form to prefer:
+read-write unless `:ro` (a read-write mount's own `.iris/` is still mounted read-only over it, #617, and so is the `.git/hooks` of a repository at its root, #623), and identity-mapped when no target is given, which is the form to prefer:
 a `write_file` names the host *source*, a command inside the container names the *target*, and
 with no target the two are the same path. `network` is a Bool and
 defaults to `false`. Only a `mutating` job may carry a grant; a read-only job created with `mounts`,
