@@ -65,6 +65,8 @@ struct BackgroundApprovalTests {
         let dir = root.appendingPathComponent(".iris", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try JSONEncoder().encode(rules).write(to: dir.appendingPathComponent("permissions.json"))
+        // The person's own rules, as an "Always allow in project" click records them (#625).
+        WorkspaceIrisTrust().trustAll(workspace: root.path)
         return root
     }
 
