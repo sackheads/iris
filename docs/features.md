@@ -56,7 +56,9 @@ Includes a dependency-free TCP loopback listener for Google Workspace OAuth, ena
 
 ### Subagent Sandboxing
 
-Transparently routes terminal execution through `apple/container` lightweight Linux VMs, allowing Iris to safely execute potentially dangerous autonomous behavior.
+Transparently routes terminal execution through `apple/container` lightweight Linux VMs. The VM itself is thrown away, but the conversation's workspace is mounted into it read-write: what a command writes there lands on your Mac and stays.
+
+So a sandboxed command refuses to run when that workspace is your home folder or a folder above it, or is or holds a place your Mac runs programs or settings from (`~/Library/LaunchAgents`, `~/.config`, `~/bin`, `~/.local/bin`), a credential store (`~/.ssh`, `~/.aws`, the Keychains folder and the like), or Iris's own settings. Code left in any of those could run on your Mac later, even in a command you approve yourself. Nothing runs and nothing falls back to the host; the reply says why. If you do want it for one conversation, right-click it in the sidebar and choose **Let the Sandbox Write This Folder…**. After a confirmation naming what becomes writable, that conversation (and its subagents and grader) may mount exactly that folder, the row shows **home writable by the sandbox**, and Vibecop then lets only read-only commands run in its sandbox without asking. The same menu stops it. Only you can turn it on: no tool, job or message can, and a dev home seeded from the installed app does not carry it over.
 
 ### Workspace Binding
 

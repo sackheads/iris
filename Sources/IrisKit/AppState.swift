@@ -212,6 +212,12 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// among active sessions; `SessionRoles.normalize` restores that on load.
     var role: String?
 
+    /// #611 option c: the workspace path, canonical, that the person allowed the sandbox to mount
+    /// read-write although it is home or above it, or holds startup or credential files. Set only
+    /// by the person in the UI, never by a tool; a workspace moved elsewhere is not covered. Nil
+    /// is no opt-in.
+    var homeWritableOptIn: String?
+
     /// Sticky taint (#187 §0.5, structural ruling, renamed from `hasPeerContent` under review #340):
     /// true once this conversation has had a turn started on it by content that was NOT the owner
     /// present and typing — a peer's `send_to_session` delivery (idle, or queued behind a busy turn
@@ -259,7 +265,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, prefixMismatchBehavior, role
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, prefixMismatchBehavior, role, homeWritableOptIn
     }
 
     init(from decoder: Decoder) throws {
@@ -296,6 +302,8 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         sessionCard = try container.decodeIfPresent(SessionCard.self, forKey: .sessionCard)
         // Invariant 1: absent on every conversation persisted before #469, and absent is no role.
         role = try container.decodeIfPresent(String.self, forKey: .role)
+        // Invariant 1: absent on every conversation persisted before #611, and absent is no opt-in.
+        homeWritableOptIn = try container.decodeIfPresent(String.self, forKey: .homeWritableOptIn)
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
         // Invariant 1: a conversation persisted before this ruling has no such key, and absent
         // means "no turn here ever started without the owner present", the correct default.
@@ -1951,6 +1959,23 @@ class AppState {
         }
     }
     
+    /// #611: the person allows (a path) or withdraws (nil) the sandbox writing this conversation's
+    /// workspace although `HomeMount` would refuse it. Called only from the UI, after its
+    /// confirmation; no tool, system event or job reaches it (a source scan pins that).
+    func setHomeWritableOptIn(for conversationId: UUID, path: String?) {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
+        conversations[idx].homeWritableOptIn = path.map { IrisPaths.canonicalPath(IrisEngine.expandTilde($0)) }
+        markChanged(conversationId, .metadata)
+    }
+
+    /// #611: whether this call's sandbox writes a folder `HomeMount` guards, by its delegation
+    /// root's opt-in. Only then is the VM treated like the host for Vibecop's APPROVE.
+    func homeWritable(_ conversationId: UUID?, workspace: String?) -> Bool {
+        guard let conversationId, let workspace, HomeMount.reason(for: workspace) != nil else { return false }
+        let root = delegationRoot(of: conversationId)
+        return HomeMount.isCovered(workspace, by: conversations.first { $0.id == root }?.homeWritableOptIn)
+    }
+
     func setWorkspace(for conversationId: UUID, path: String) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].workspacePath = path
@@ -3625,6 +3650,7 @@ class AppState {
             // for a command once the person has denied one in this conversation.
             if decision.decision == "APPROVE", !(toolName == "run_command" && commandDenied(in: conversationId)) {
                 switch ReadOnlyCommand.vibecopGate(toolName: toolName, details: details, inSandbox: inSandbox,
+                                                   homeWritable: homeWritable(conversationId, workspace: workspace),
                                                    cwd: workspace, lookup: hostLookup()) {
                 case .run: return .vibecop
                 case .runRestricted(let path): return .vibecopRestricted(path: path)

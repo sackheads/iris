@@ -257,7 +257,9 @@ any volume root or mount point (a folder *inside* one of those is fine: `/privat
 `~/proj`); a path that is or contains `~/.iris` — read-only included, because even a read-only
 mount hands the container `config/permissions.json`, the plugin settings and the memory store; a
 **credential store**, read-only included (the list is below,
-beside the fact it belongs with); a read-only first entry when a read-write entry follows it; the
+beside the fact it belongs with); a path that is or contains a place your Mac runs programs or
+settings from — `~/Library/LaunchAgents`, `~/.config`, `~/bin`, `~/.local/bin` — read-only included,
+because a program planted there runs on the host later (#611); a read-only first entry when a read-write entry follows it; the
 same source twice. A source is judged and stored as the directory it *resolves to* — `~/x -> /` is
 a mount of the whole disk — never as it was spelled, and that resolved spelling is what every later
 check compares against.

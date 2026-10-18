@@ -232,6 +232,24 @@ struct DevHomeSeederTests {
         #expect(rewritten == "{\"workspace\":\"\(destEscaped)\\/workspaces\\/ship\",\"other\":\"\(escaped)-other\"}")
     }
 
+    @Test("a copied conversation does not inherit the release app's opt-in to a writable home (#611)")
+    func clearsHomeWritableOptIn() throws {
+        let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }
+        let id = UUID()
+        do {
+            let store = try ConversationStore.onDisk(at: src.conversationsDB)
+            var conv = Conversation(id: id, title: "home", workspacePath: "/Users/me")
+            conv.homeWritableOptIn = "/Users/me"
+            _ = try store.importLegacy([conv])
+        }
+        try seedDefault(src, dst)
+        let copied = try ConversationStore.onDisk(at: dst.conversationsDB).loadAll().conversations.first { $0.id == id }
+        #expect(copied?.workspacePath == "/Users/me")
+        #expect(copied?.homeWritableOptIn == nil)
+        let original = try ConversationStore.onDisk(at: src.conversationsDB).loadAll().conversations.first { $0.id == id }
+        #expect(original?.homeWritableOptIn == "/Users/me", "the release store keeps its own")
+    }
+
     @Test("every copied job is paused in the dev home, so it never fires in both apps")
     func pausesCopiedJobs() throws {
         let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }

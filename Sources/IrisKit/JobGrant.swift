@@ -75,6 +75,10 @@ extension JobGrant {
         "the mount source \(source) is or contains a credential store; copy the one key the job needs into a directory made for it."
     }
 
+    static func startupLocationRefusal(_ source: String) -> String {
+        "the mount source \(source) is or contains a folder your Mac runs programs or settings from (~/Library/LaunchAgents, ~/.config, ~/bin, ~/.local/bin), which a job may not mount."
+    }
+
     static func isCredentialStore(_ canonicalSource: String, home: String) -> Bool {
         let lowered = canonicalSource.lowercased()
         return credentialStores.contains { entry in
@@ -127,6 +131,10 @@ extension JobGrant {
             case nil: break
             }
             if isCredentialStore(source, home: home) { return .failure(ToolMessage(credentialStoreRefusal(source))) }
+            // #611: nor a place a Mac program runs from or reads as configuration, in either direction.
+            if HomeMount.touches(source, HomeMount.startupLocations, home: home) {
+                return .failure(ToolMessage(startupLocationRefusal(source)))
+            }
             // An unnamed target is identity to the *stored* source — what "recorded as the directory
             // each path resolves to" promises — not to the spelling: `/private/tmp/x` would otherwise
             // store as `/tmp/x:/private/tmp/x`, and every command would see a path `write_file`

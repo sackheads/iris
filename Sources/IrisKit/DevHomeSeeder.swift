@@ -221,6 +221,13 @@ enum DevHomeSeeder {
                 try db.execute(sql: "UPDATE job_runs SET approvedAt = ? WHERE blockedCall IS NOT NULL AND approvedAt IS NULL",
                                arguments: [Date()])
             }
+            // #611: the person let the sandbox write a home folder in the release app's
+            // conversation, not in this copy, so the copy asks again. A store older than v22 has
+            // no such column, and nothing to clear.
+            if try db.tableExists("conversations"),
+               try db.columns(in: "conversations").contains(where: { $0.name == "homeWritableOptIn" }) {
+                try db.execute(sql: "UPDATE conversations SET homeWritableOptIn = NULL")
+            }
         }
     }
 

@@ -25,6 +25,8 @@ struct ChatView: View {
     /// Whether the Archived disclosure group is open. The single source of truth: the group
     /// binds to it directly, so the disclosure triangle always does what it looks like it does.
     @State private var archivedExpanded = false
+    /// #611: the conversation whose "let the sandbox write this folder" confirmation is showing.
+    @State private var homeOptInTarget: Conversation?
 
     /// #182 §9: the group auto-expands when the selected conversation *becomes* one of its rows.
     /// Two ways in, and both are a change of the same one value — "the selection, while it is
@@ -527,6 +529,13 @@ struct ChatView: View {
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                    // #611: shown for as long as the person's opt-in covers this workspace.
+                    if HomeMount.isCovered(wp, by: conv.homeWritableOptIn) {
+                        Label("home writable by the sandbox", systemImage: "exclamationmark.shield")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                            .help("You let the sandbox write \(wp) for this conversation, so a command in it can change files your Mac runs. Right-click to stop.")
+                    }
                 }
             }
             Spacer()
@@ -536,6 +545,18 @@ struct ChatView: View {
         .conversationMark(needsHuman: state.needsHuman[conv.id], unread: state.unreadReplies.contains(conv.id))
         .padding(.vertical, 2)
         .tag(conv.id)
+        .alert("Let the sandbox write this folder?", isPresented: Binding(
+            get: { homeOptInTarget?.id == conv.id },
+            set: { if !$0 { homeOptInTarget = nil } }
+        ), presenting: homeOptInTarget) { target in
+            Button("Let It Write", role: .destructive) {
+                state.setHomeWritableOptIn(for: target.id, path: target.workspacePath)
+                homeOptInTarget = nil
+            }
+            Button("Cancel", role: .cancel) { homeOptInTarget = nil }
+        } message: { target in
+            Text(HomeMount.optInWarning(path: target.workspacePath ?? ""))
+        }
         .contextMenu {
             Button("Link to Workspace...") {
                 linkWorkspace(to: conv.id)
@@ -546,6 +567,17 @@ struct ChatView: View {
                     set: { state.setMainAgentSandbox(for: conv.id, pref: $0 ? .sandboxed : .host) }
                 ))
                 .disabled(!ConfigManager.shared.enableSandboxing)
+                // #611: only for a workspace the sandbox is refused without it. Set here and
+                // nowhere else: no tool, system event or job can.
+                if let wp = conv.workspacePath, HomeMount.reason(for: wp) != nil {
+                    if HomeMount.isCovered(wp, by: conv.homeWritableOptIn) {
+                        Button("Stop Letting the Sandbox Write This Folder") {
+                            state.setHomeWritableOptIn(for: conv.id, path: nil)
+                        }
+                    } else {
+                        Button("Let the Sandbox Write This Folder...") { homeOptInTarget = conv }
+                    }
+                }
             }
             Button("Export to Markdown...") {
                 exportConversation(id: conv.id)

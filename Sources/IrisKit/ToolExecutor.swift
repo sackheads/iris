@@ -206,7 +206,7 @@ struct ToolExecutor {
     func execute(name: String, args: [String: JSONValue], cwd: String? = nil, conversationId: UUID? = nil,
                  useSandbox: Bool = false, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil,
                  approvedWorkspaceRoot: String? = nil, decidedPath: String? = nil,
-                 restrictedPath: [String]? = nil) async -> String {
+                 restrictedPath: [String]? = nil, homeWritableOptIn: String? = nil) async -> String {
         // A NUL ends the C string the kernel is handed, so the file opened is not the one named
         // (#256). The dispatcher refuses it before approval; this covers a hook's rewrite.
         if ["read_file", "write_file", "register_directory_watcher"].contains(name),
@@ -223,7 +223,8 @@ struct ToolExecutor {
             }
             let timeoutSeconds = min(max(rawTimeout, 10), 3600)
             return await runCommand(command, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox,
-                                    timeoutSeconds: timeoutSeconds, grant: grant, restrictedPath: restrictedPath)
+                                    timeoutSeconds: timeoutSeconds, grant: grant, restrictedPath: restrictedPath,
+                                    homeWritableOptIn: homeWritableOptIn)
         case "read_file":
             guard let path = args["path"]?.stringValue else { return "Error: Missing path" }
             if let grant {
@@ -481,7 +482,8 @@ struct ToolExecutor {
     }
 
     func runCommand(_ command: String, cwd: String?, conversationId: UUID? = nil, useSandbox: Bool = false,
-                    timeoutSeconds: Double = 600, grant: JobGrant? = nil, restrictedPath: [String]? = nil) async -> String {
+                    timeoutSeconds: Double = 600, grant: JobGrant? = nil, restrictedPath: [String]? = nil,
+                    homeWritableOptIn: String? = nil) async -> String {
         // A grant is a promise about a container (#282). Off the sandboxed branch — sandboxing
         // resolved off, or no conversation to own a session — there is no container to keep it
         // in, and the host with `cwd` is not a fallback. The dispatcher refuses this upstream
@@ -502,6 +504,13 @@ struct ToolExecutor {
             // mount yields nil here, i.e. `/`, not the cwd.
             let workspace: ContainerMount? = if let grant { grant.workspaceMount }
                                              else { cwd.map { ContainerMount(source: IrisEngine.expandTilde($0)) } }   // #275: no PATH_MAX truncation on a mount
+            // #611: that mount is read-write. Home or above it, or a startup or credential folder,
+            // only with the person's opt-in for this conversation, by path; otherwise nothing runs
+            // and nothing falls back. A grant's mounts were judged when it was granted.
+            if grant == nil, let source = workspace?.source, let reason = HomeMount.reason(for: source),
+               !HomeMount.isCovered(source, by: homeWritableOptIn) {
+                return HomeMount.refusal(path: source, reason: reason)
+            }
             let extraMounts = grant?.extraMountEntries() ?? []
             let network = NetworkMode.forGrant(grant)
             if let sandboxSession {
@@ -533,6 +542,10 @@ struct ToolExecutor {
             var containerArgs = ["run", "--rm", "--name", name, ConfigManager.shared.sandboxImage, "bash", "-c", command]
             if let cwd = cwd {
                 let expandedPath = IrisEngine.expandTilde(cwd)   // #275: never `expandingTildeInPath` on a decider
+                // #611: read-write here too; no conversation means no opt-in.
+                if let reason = HomeMount.reason(for: expandedPath), !HomeMount.isCovered(expandedPath, by: homeWritableOptIn) {
+                    return HomeMount.refusal(path: expandedPath, reason: reason)
+                }
                 // `-v`, where the session path uses `--mount` (see `ContainerMount`). The CLI
                 // lowers both to the same virtiofs bind; this one is the ephemeral no-conversation
                 // path and is left as it was rather than changed for symmetry alone.

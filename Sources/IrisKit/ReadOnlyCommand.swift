@@ -190,11 +190,15 @@ enum ReadOnlyCommand {
 
     /// In the VM, any command: the in-VM rules are unchanged. On the host, a read-only command,
     /// restricted, or a file read. A file write is a write wherever it lands.
-    static func vibecopGate(toolName: String, details: String, inSandbox: Bool,
+    ///
+    /// `homeWritable` (#611, the owner's "1: a"): the conversation let the sandbox write a home
+    /// folder or above it, so the VM is no safe box, and in it too only a read-only command runs
+    /// on an APPROVE. The VM has its own `PATH`, so the host lookup does not apply there.
+    static func vibecopGate(toolName: String, details: String, inSandbox: Bool, homeWritable: Bool = false,
                             cwd: String? = nil, lookup: @autoclosure () -> HostLookup) -> VibecopGate {
         switch toolName {
         case "run_command":
-            if inSandbox { return .run }
+            if inSandbox { return !homeWritable || isReadOnly(details) ? .run : .ask }
             guard isReadOnly(details), let program = words(details)?.first,
                   let path = restrictedPath(program: program, cwd: cwd, lookup: lookup()) else { return .ask }
             return .runRestricted(path: path)
