@@ -148,8 +148,9 @@ struct PermissionManager: Sendable {
             rules.append(rule)
             saveRules(rules, to: projectURL, atomically: true)
             // Iris wrote it, so Iris trusts it (#625): the person's click is the consent.
-            WorkspaceIrisTrust(paths: paths).record("permissions.json", workspace: workspace,
-                                                    data: WorkspaceIrisDir.readUnverified("permissions.json", workspace: workspace))
+            if let written = try? JSONEncoder().encode(rules) {
+                WorkspaceIrisTrust(paths: paths).recordWritten("permissions.json", workspace: workspace, written: written)
+            }
         }
     }
     
