@@ -105,6 +105,23 @@ struct ReadOnlyCommandTests {
         #expect(Self.refused.count >= 60)
     }
 
+    /// The `date` rows refused by `date`'s own grammar, not by the tokenizer (#682): each must
+    /// tokenize, so the refusal it pins is `dateIsReadOnly`'s.
+    static let dateGrammarRefused: [String] = [
+        "date 1019160000", "date 10191600", "date 0000", "date -u 1019160000", "date '+%s' 1019160000",
+        "date -f '%s' 0", "date -j 1019160000", "date -n 1019160000", "date -v+1d", "date -r f", "date -s now",
+        "date -d now", "date -t x", "date -uR", "date -- '+%s'", "date -u -- '+%s'", "date '+%s' '+%Y'",
+        "date '+%s' -u", "date --utc", "date -",
+    ]
+
+    @Test("each date grammar row tokenizes, and date's grammar is what refuses it", arguments: dateGrammarRefused)
+    func dateGrammarRefuses(command: String) throws {
+        let words = try #require(ReadOnlyCommand.words(command), "the tokenizer refused \(command.debugDescription)")
+        #expect(words.first == "date")
+        #expect(!ReadOnlyCommand.dateIsReadOnly(Array(words.dropFirst())), "date's grammar allowed \(command.debugDescription)")
+        #expect(Self.refused.contains(command), "also a row of the refusal table")
+    }
+
     @Test("plain reads pass", arguments: allowed)
     func allows(command: String) {
         #expect(ReadOnlyCommand.isReadOnly(command), "may-write: \(command.debugDescription)")
