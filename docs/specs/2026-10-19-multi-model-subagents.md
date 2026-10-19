@@ -117,13 +117,45 @@ A subagent can run on a different provider and model than the conversation that 
 
 ## Fork E: cost attribution
 
-**For Brian (the planner is asking him now; it's half 2's question).** The options:
-- **(a)** Count delegated tokens from another family at the run's own weights. A budget then caps weighted tokens, not dollars, and the docs say so. The ledger still shows tokens per model. *(Planner's recommendation.)*
-- **(b)** Per-family weights, which need a price table someone keeps current.
-- **(c)** Refuse other-family subagents inside job runs in v1.
+**Brian ruled (b), per-family prices** (verbatim: "I would go for b, the price model, since it's kind of the point. We can look up those rates dynamically, and yes this is a generalized product that will run in various places."). This is half 2 work.
 
-The analysis below stands whichever is ruled.
+**The planner's rulings** (no money trade-off in them):
+1. **Unit.** Budgets stay in today's weighted-token unit, so no existing job budget migrates. A subagent's usage on another family is converted to primary-equivalent weighted tokens: its dollars at its own rate, divided by the primary's rate. It uses the same `CostWeights` split: input, output and cache read.
+2. **Ledger.** Each delegated usage row records:
+   - the model and its tokens;
+   - the rate used;
+   - the rate's source and as-of date;
+   - an `estimated` flag when it wasn't a known rate.
 
+   `/jobs` and the run card say "estimated" when any part of the run was.
+3. **Guarding the rate.** A fetched rate is data that controls a spending cap. For any non-loopback endpoint, a rate of zero or below a sanity floor is rejected and the fallback used instead, with a log note. Otherwise a wrong 0 removes the cap.
+4. **Local loopback models** really cost $0. They still count tokens at the primary's weights for the budget, so a local runaway still stops.
+5. **Caching.** Rates are cached with their as-of date, refreshed at most daily and on a Settings Check. A failed refresh keeps the last good cache.
+
+**Open for Brian (sent via the Overseer):**
+- **Source for the built-in families.** None of Anthropic, OpenAI or Gemini publishes prices through an API. OpenRouter's `/api/v1/models` does, so an OpenRouter endpoint uses it whatever is chosen here. The options:
+  - **(i)** A community price map, LiteLLM's public JSON, fetched, with a bundled snapshot as the fallback. *(The planner's lean.)*
+  - **(ii)** A table Iris publishes with its releases.
+  - **(iii)** Rates the person types in Settings.
+- **Unknown model, or no rate:**
+  - **(a)** Charge at the highest known rate in that family, marked estimated. It never overspends and may stop early. *(The planner's lean.)*
+  - **(b)** Refuse other-family subagents with no rate inside job runs.
+  - **(c)** Use the primary's rate, marked estimated.
+
+**The LiteLLM check (iris-dev-3, 2026-10-19).** `https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json` returned HTTP 200, 2.9 MB, with 4,223 entries. Each entry gives `input_cost_per_token`, `output_cost_per_token` and `cache_read_input_token_cost` in USD per token, plus `litellm_provider`.
+
+Lookups for the current ids:
+
+| id | input | output | cache read | key |
+| --- | --- | --- | --- | --- |
+| `gemini-3.8-flash` | 7.5e-7 | 3.75e-6 | 7.5e-8 | `gemini/gemini-3.8-flash` (also bare, as `vertex_ai`) |
+| `claude-fable-5-1` | 1e-5 | 5e-5 | 2.5e-7 | bare, `anthropic` |
+| `deepseek-v4-pro` | 1.32e-6 | 3.96e-6 | 4.4e-8 | bare and `deepseek/` |
+
+`claude-opus-5-5`, `claude-sonnet-5-5` and `claude-sonnet-4-6` are present too. What a lookup must handle:
+- **Keys vary by host.** The same model appears under several hosts at different prices (`azure_ai/deepseek-v4-pro`, `dashscope/deepseek-v4-pro`, Bedrock's `anthropic.claude-fable-5-1`). A lookup matches the family's own `litellm_provider` (`anthropic`, `gemini`, `openai`, `deepseek`), and an endpoint names its LiteLLM provider. A bare-id match on another host's row is never used.
+- **`sample_spec` has 0 for every rate**, an example of why rule 3's floor is needed.
+- **Size.** 2.9 MB fetched at most daily is fine. The bundled snapshot keeps only the rows for the families Iris supports.
 
 **Today everything assumes one provider:**
 - `TokenUsage` has no provider field.
@@ -131,13 +163,10 @@ The analysis below stands whichever is ruled.
 - `JobRun.provider`/`tier`/`model` are stamped once from the global (JobRunner.swift:1079).
 - `TurnBudget` carries one provider and model.
 
-**Half 2, lean:**
-- Delegated usage is recorded per provider and model. A new `delegatedUsageByModel: [String: TokenUsage]` on the background run's usage and on `JobRun`, with `decodeIfPresent` and a new ledger column.
-- `weighted` prices each delegated entry at its own provider's rates and the run's own usage at the run's.
-- `TurnBudget` charges a subagent's tokens at the subagent's provider weights.
-- `JobRun.provider`/`model` stay the run's own engine, as today.
-
-**Open for the planner:** weighted-token budgets (`CostWeights`) are relative, not dollars. A cheap provider's tokens weigh less, so a budget stretches further on it. That's correct, but it means a budget doesn't cap dollars across families. Pricing in dollars is out of scope here.
+**What half 2 changes (under the rulings above):**
+- **Ledger rows.** Delegated usage is recorded per model: a new `delegatedUsage` list on the background run's usage and on `JobRun`, each row holding the model, its tokens, the rate, its source and as-of date, and `estimated`. It's read with `decodeIfPresent`, and gets a new ledger column.
+- **`weighted` and `TurnBudget`.** `weighted` converts each delegated row to primary-equivalent weighted tokens (rule 1) and prices the run's own usage as today. `TurnBudget` charges a subagent's tokens the same way, as they arrive.
+- **Unchanged:** `JobRun.provider`/`model` stay the run's own engine, as today.
 
 **Attended conversations:** `TokenUsage` on the conversation keeps its total. The subagent's own conversation row records its provider and model, so the split can be read from there. No new field on the attended path in v1.
 
