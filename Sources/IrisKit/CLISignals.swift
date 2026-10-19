@@ -31,6 +31,10 @@ enum CLISignals {
         iris_reset_interrupt_once_delivered(count)
     }
 
+    /// How many stopping signals have been delivered to the handler, as opposed to heard by a
+    /// source (#636). For tests.
+    static var deliveries: Int { iris_stop_signal_deliveries() }
+
     final class Installation: @unchecked Sendable {
         /// The signals this installation caught: `stopping` minus any inherited ignore it kept.
         let installed: [Int32]

@@ -112,13 +112,19 @@ struct CLISignalTests {
                                exitNow: { code in
                                    // The real reset ran, once the second signal was delivered (#510).
                                    for _ in 0..<100 where CLISignalTests.raw(SIGINT) != 0 { usleep(10_000) }
-                                   _exit(CLISignalTests.raw(SIGINT) == 0 ? code : 7)
+                                   // 6: the second was not delivered in time; 7: it was, and SIGINT was not reset.
+                                   _exit(CLISignalTests.raw(SIGINT) == 0 ? code : CLISignals.deliveries < 2 ? 6 : 7)
                                })
             _ = stop.run.arm()
             let installation = CLISignals.install(onSignal: { stop.receive($0) })
             guard installation.installed.contains(SIGINT) else { exit(5) }   // run `swift test` in the foreground
             kill(getpid(), SIGINT)
             for _ in 0..<500 where stop.run.graceDeadline == nil { usleep(10_000) }
+            // Delivered, not only heard by its source (#636): a second SIGINT posted while the
+            // first is still pending merges with it into one delivery, and the reset then waits
+            // for a third, which errs toward running the cleanup but is not this case.
+            for _ in 0..<500 where CLISignals.deliveries < 1 { usleep(10_000) }
+            guard CLISignals.deliveries == 1 else { exit(9) }
             kill(getpid(), SIGINT)   // exits from the signal queue
             for _ in 0..<500 { usleep(10_000) }
             withExtendedLifetime((running, installation)) {}
@@ -187,6 +193,9 @@ struct CLISignalTests {
             kill(getpid(), SIGINT)   // the clean stop, delivered
             for _ in 0..<500 where stop.run.graceDeadline == nil { usleep(10_000) }
             guard stop.run.graceDeadline != nil else { exit(4) }
+            // Its delivery too, or the real second signal below can merge with it (#636).
+            for _ in 0..<500 where CLISignals.deliveries < 1 { usleep(10_000) }
+            guard CLISignals.deliveries == 1 else { exit(9) }
 
             // The second signal as its source hears it, ahead of its delivery.
             DispatchQueue(label: "iris.tests.510.source").async { stop.receive(SIGINT) }
