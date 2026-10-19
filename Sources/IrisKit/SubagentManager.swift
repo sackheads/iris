@@ -157,7 +157,8 @@ final class SubagentManager: @unchecked Sendable {
         let engine = IrisEngine(state: appState, tier: tier, principal: .subagent, roleLabel: role,
                                 client: route.map { _ in routedClient ?? LLMClient(route: route) } ?? client ?? LLMClient(),
                                 recentWrites: recentWrites, hooks: hooks, provider: route.map(Self.familyLabel),
-                                subagentConfig: config, repromptDelay: repromptDelay, subagentRoute: route)
+                                subagentConfig: config, repromptDelay: repromptDelay, subagentRoute: route,
+                                primaryClient: client)
 
         // 3. Craft the role-specific prompt
         let iterationCap = max(1, config.maxSubagentIterations)

@@ -145,6 +145,32 @@ struct SubagentDispatchTests {
         #expect(outcome.rendered.contains("Ran on provider `local-ollama`, model `gemma4:12b`."))
     }
 
+    @Test("a routed subagent's own subagent, with no provider named, stays on the route; grading stays on the primary")
+    func nestedInheritsRoute() async throws {
+        let app = AppState()
+        app.autoApproveTools = true
+        let parent = app.createNewConversation(select: false)
+        let route = ProviderRoute(providerId: "local-ollama", target: .endpoint(baseURL: "http://localhost:11434/v1", apiKey: ""),
+                                  model: "gemma4:12b")
+        // One scripted endpoint, shared in turn: the child delegates, the grandchild finishes, the child finishes.
+        let routedClient = FakeLLMClient(responses: [
+            call("invoke_subagent", ["role": .string("helper"), "task": .string("look"), "effort": .string("easy")]),
+            call("goal_complete", ["summary": .string("grandchild done")]),
+            call("goal_complete", ["summary": .string("child done")]),
+        ])
+        let primaryClient = FakeLLMClient(responses: [])
+        let outcome = await SubagentManager.shared.runSubagent(role: "reviewer", task: "review", effort: "medium",
+                                                               parentConversationId: parent, client: primaryClient,
+                                                               route: route, routedClient: routedClient, appState: app)
+        #expect(outcome.status == .completed)
+        #expect(routedClient.callCount == 3, "the grandchild spoke to the route too")
+        #expect(primaryClient.callCount == 0)
+        let child = try #require(app.conversations.first { $0.isSubagent && $0.title.contains("reviewer") })
+        let results = child.history.flatMap(\.parts).compactMap(\.functionResponse).map { "\($0.response)" }
+        #expect(results.contains { $0.contains("Ran on provider `local-ollama`, model `gemma4:12b`.") },
+                "the grandchild's result names the inherited route")
+    }
+
     @Test("a subagent on a custom endpoint asks Allow Once only, and the dialog names the provider and model")
     func endpointApprovalIsAllowOnce() async throws {
         let app = AppState()
