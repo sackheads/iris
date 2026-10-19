@@ -113,15 +113,15 @@ struct ModelLEDBar: View {
     /// appears. Its pulse animates a change of state, so forcing it on from the start ran nothing.
     @State private var debugPulse = false
 
+    /// Opens Settings on a tab, from a popover's action. `ChatView` passes the scene's
+    /// `openSettings` through `SettingsNavigation`; the default does nothing, for previews.
+    var openSettings: (SettingsTab) -> Void = { _ in }
+    /// The light whose details popover is open, if any (#88).
+    @State private var shown: LEDKind?
+
     var body: some View {
         HStack(spacing: 16) {
-            ModelLED(label: "PRI", state: primaryState())
-            ModelLED(label: "VC",  state: vibecopState())
-            ModelLED(label: "P1",  state: tier1State())
-            ModelLED(label: "P2", state: tier2State(failure: health.tier2Failure),
-                     tierNumber: 2, failure: health.tier2Failure)
-            ModelLED(label: "P3", state: tier3State(failure: health.tier3Failure),
-                     tierNumber: 3, failure: health.tier3Failure)
+            ForEach(LEDKind.allCases, id: \.self) { led($0) }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 6)
@@ -137,6 +137,44 @@ struct ModelLEDBar: View {
             guard DebugForceAnimation.isOn(.led) else { return }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             debugPulse = true
+        }
+    }
+
+    /// One light, with its label, as the click target: the 10pt dot alone is too small (#88).
+    private func led(_ kind: LEDKind) -> some View {
+        let failure = failure(of: kind)
+        let state = state(of: kind, failure: failure)
+        return Button { shown = kind } label: {
+            ModelLED(label: kind.label, state: state, tierNumber: kind.tierNumber, failure: failure)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(kind.label), \(state.spoken)")
+        .accessibilityHint("Show details")
+        .popover(isPresented: Binding(get: { shown == kind }, set: { if !$0 { shown = nil } }),
+                 arrowEdge: .top) {
+            LEDDetailPopover(detail: detail(for: kind, state: state, failure: failure)) { tab in
+                shown = nil
+                openSettings(tab)
+            }
+        }
+    }
+
+    func failure(of kind: LEDKind) -> String? {
+        switch kind {
+        case .tier2: health.tier2Failure
+        case .tier3: health.tier3Failure
+        default:     nil
+        }
+    }
+
+    func state(of kind: LEDKind, failure: String?) -> ModelLED.LEDState {
+        switch kind {
+        case .primary: primaryState()
+        case .vibecop: vibecopState()
+        case .tier1:   tier1State()
+        case .tier2:   tier2State(failure: failure)
+        case .tier3:   tier3State(failure: failure)
         }
     }
 

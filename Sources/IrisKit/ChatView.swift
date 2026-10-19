@@ -402,7 +402,8 @@ struct ChatView: View {
                     // #261: absent, not hidden — a `.hidden()` or a zero-opacity bar would keep
                     // its slot in the stack and give the space back to nothing.
                     if config.showModelLEDs {
-                        ModelLEDBar(isThinking: state.isThinking(in: conv.id))
+                        ModelLEDBar(isThinking: state.isThinking(in: conv.id),
+                                    openSettings: { SettingsNavigation.shared.show($0) { openSettings() } })
                     }
 
                     messageInputBar
