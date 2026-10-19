@@ -339,6 +339,8 @@ final class GitConfigGuard: @unchecked Sendable {
         if saved.count < entries.count {
             let failed = entries.count - saved.count
             let aside = Self.setAside(store, move: false)
+            // With no copy kept, the next save would write the list without them over the only one.
+            saveDisabled = aside == nil
             unknownFolders = true
             loadNote = "[sandbox] Iris could not read \(failed) of the \(entries.count) folders in its list of those sandboxes have mounted"
                 + (aside.map { "; the list as it was is kept at \($0)." } ?? ".")

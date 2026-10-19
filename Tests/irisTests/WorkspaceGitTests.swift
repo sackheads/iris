@@ -1176,4 +1176,20 @@ struct GitGuardStoreTests {
         #expect(note.contains("left it as it is"))
         #expect(GitFixture.read(store.path) == original)
     }
+
+    @Test("a list with an unreadable entry that cannot be copied aside is never written over")
+    func cannotCopyAside() async throws {
+        let (dir, store, _) = try await setUp()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        for n in 1...100 {
+            try Data().write(to: URL(fileURLWithPath: store.path + ".corrupt" + (n == 1 ? "" : "-\(n)")))
+        }
+        let original = Data(("[" + entry(dir + "/ws", hooks: dir + "/ws/.git/hooks") + ",{\"hooks\":3}]").utf8)
+        try original.write(to: store)
+
+        let guardian = GitConfigGuard(store: store)
+        guardian.watch(owner: "c", sources: [dir + "/plain"])
+        guardian.end(owner: "c")
+        #expect(GitFixture.read(store.path) == original, "the bad entry's only copy is kept")
+    }
 }
