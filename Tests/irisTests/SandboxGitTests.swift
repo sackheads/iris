@@ -190,7 +190,22 @@ struct SandboxGitTests {
         #expect(new != old, "the host branch moved")
         #expect(notes == ["Moved main \(old.prefix(7))..\(new.prefix(7)) (1 commit from the sandbox)."], "\(notes)")
         #expect(try await f.host("git status --porcelain").out.isEmpty, "the host index matches")
-        #expect(try await f.sha("refs/iris/sandbox/main") == new)
+        #expect(try await f.host("git rev-parse -q --verify refs/iris/sandbox/main").status != 0, "no sandbox ref left beside the moved branch")
+    }
+
+    @Test("with no real git on the Mac, nothing runs it and the note says the commits stay in the sandbox")
+    func noGit() async throws {
+        let f = try await SyncFixture.make()
+        defer { try? FileManager.default.removeItem(atPath: f.dir) }
+        var env = f.env
+        env["PATH"] = f.dir + "/no-such-bin"
+        let sync = SandboxGitSync(repo: f.repo, vm: f.sync.vm, host: SandboxHostGit(environment: env))
+        let (before, pre) = await sync.before()
+        #expect(pre.isEmpty)
+        try await f.vm("echo v > v.txt && git add v.txt && git commit -qm vm")
+        let notes = await sync.after(before)
+        #expect(notes.contains { $0.contains("Git is not installed on your Mac") }, "\(notes)")
+        #expect(try await f.host("git rev-parse -q --verify refs/iris/sandbox/main").status != 0, "nothing was fetched")
     }
 
     @Test("diverged, files that differ, or staged changes keep the commits on refs/iris/sandbox and say why")

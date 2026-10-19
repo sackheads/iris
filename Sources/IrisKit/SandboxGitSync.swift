@@ -67,6 +67,10 @@ struct SandboxHostGit: Sendable {
         return env
     }()
 
+    /// Whether a real git is there: with only Apple's `/usr/bin/git` placeholder, running it
+    /// opens the developer tools install dialog (#662 review), so nothing here runs it then.
+    func isInstalled() async -> Bool { await ToolExecutor.gitIsInstalled(env: environment) }
+
     func run(_ args: [String], in dir: String, extra: [String: String] = [:]) async -> (status: Int32, out: String) {
         var env = environment
         env.merge(extra) { $1 }
@@ -97,7 +101,7 @@ struct SandboxGitSync: Sendable {
         let worktree = SandboxGit.worktreeSnapshot(source: repo.source)
         var notes: [String] = []
         var state = await vm.state()
-        if let vmState = state, let branch = vmState.headBranch, let vmSha = vmState.headSha,
+        if await host.isInstalled(), let vmState = state, let branch = vmState.headBranch, let vmSha = vmState.headSha,
            await hostHeadBranch() == branch, let hostSha = await hostSha(of: branch), hostSha != vmSha,
            await host.run(["merge-base", "--is-ancestor", vmSha, hostSha], in: repo.source).status == 0 {
             if await vm.fastForward(branch: branch, from: vmSha, to: hostSha) {
@@ -122,6 +126,9 @@ struct SandboxGitSync: Sendable {
         let changed = now.branches.keys.sorted().filter { now.branches[$0] != was.branches[$0] && Self.isPlainBranch($0) }
         let detachedMoved = now.headBranch == nil && now.headSha != was.headSha && now.headSha.map(Self.isSha) == true
         guard !changed.isEmpty || detachedMoved else { return [] }
+        guard await host.isInstalled() else {
+            return ["Git is not installed on your Mac, so the sandbox's commits stay in its copy of the repository. Install the developer tools (`xcode-select --install`) to bring them back."]
+        }
 
         // What the host already has needs no bundle; what it lacks comes in one.
         var missing: [String] = []
@@ -207,6 +214,8 @@ struct SandboxGitSync: Sendable {
             return "The sandbox's \(branch) is at refs/iris/sandbox/\(branch) (\(short(new))); Iris could not move \(branch) on your Mac."
         }
         _ = await host.run(["update-index", "-q", "--refresh"], in: repo.source)
+        // The branch holds it now; a sandbox ref left beside it would only say it twice.
+        _ = await host.run(["update-ref", "-d", "refs/iris/sandbox/\(branch)", new], in: repo.source)
         let n = Int(count) ?? 0
         return "Moved \(branch) \(short(old))..\(short(new)) (\(n) commit\(n == 1 ? "" : "s") from the sandbox)."
     }
