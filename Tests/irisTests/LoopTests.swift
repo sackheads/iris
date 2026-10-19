@@ -52,6 +52,7 @@ struct LoopTests {
         #expect(ConversationLoop.parse("10m check my PRs") == .start(intervalSeconds: 600, prompt: "check my PRs"))
         #expect(ConversationLoop.parse("2h  look again ") == .start(intervalSeconds: 7200, prompt: "look again"))
         #expect(ConversationLoop.parse("1d x") == .start(intervalSeconds: 86400, prompt: "x"))
+        #expect(ConversationLoop.parse("10M x") == .start(intervalSeconds: 600, prompt: "x"), "units in either case")
         #expect(ConversationLoop.parse("") == .status)
         #expect(ConversationLoop.parse(" STOP ") == .stop)
         #expect(ConversationLoop.parse("pause") == .pause)
@@ -169,7 +170,55 @@ struct LoopTests {
         state.startLoop(ConversationLoop(prompt: "p", intervalSeconds: 3600, cap: 3), in: id)
         state.sendMessage("/stop")
         #expect(conversation(state, id)?.loop == nil)
-        #expect(conversation(state, id)?.messages.last?.content.hasPrefix("Loop stopped.") == true)
+        #expect(conversation(state, id)?.messages.last?.content == "Loop stopped.", "no goal, so no \"Goal mode cancelled\"")
+    }
+
+    // MARK: arrivals (#676 review)
+
+    @Test("an arrival in an idle looping conversation runs at once, takes the waiting tick's place, and re-arms it")
+    func arrivalRunsNow() async throws {
+        let (state, id) = try app()
+        let engine = try #require(state.engine)
+        state.startLoop(ConversationLoop(prompt: "p", intervalSeconds: 3600, cap: 5), in: id)
+        #expect(await eventually { state.loopNextTick[id] != nil })
+        #expect(!engine.goalFollowUpPending(for: id) && !engine.goalLoopIsLive(for: id),
+                "a waiting tick holds nothing that arrivals queue behind")
+        await engine.handleSystemEvent("File changed: notes.md", source: "Watcher", conversationId: id)
+        #expect(await eventually { sent(state, id).contains { $0.contains("File changed: notes.md") } }, "the event's turn ran now")
+        #expect(!sent(state, id).contains { $0.hasPrefix("Loop tick") })
+        #expect(await eventually { !state.isThinking(in: id) && state.loopNextTick[id] != nil }, "its end armed the next tick")
+        #expect(await engine.hasLoopTick(for: id))
+        state.pauseLoop(for: id)
+    }
+
+    @Test("pause and /loop stop drop the waiting tick")
+    func pauseAndStopDropTheTick() async throws {
+        let (state, id) = try app()
+        let engine = try #require(state.engine)
+        state.startLoop(ConversationLoop(prompt: "p", intervalSeconds: 3600, cap: 5), in: id)
+        #expect(await eventually { state.loopNextTick[id] != nil })
+        #expect(await engine.hasLoopTick(for: id))
+        state.pauseLoop(for: id)
+        var dropped = false
+        for _ in 0..<200 where !dropped { dropped = !(await engine.hasLoopTick(for: id)); if !dropped { try await Task.sleep(nanoseconds: 10_000_000) } }
+        #expect(dropped, "pause dropped it")
+        state.resumeLoop(for: id)
+        #expect(await eventually { state.loopNextTick[id] != nil })
+        state.sendMessage("/loop stop")
+        dropped = false
+        for _ in 0..<200 where !dropped { dropped = !(await engine.hasLoopTick(for: id)); if !dropped { try await Task.sleep(nanoseconds: 10_000_000) } }
+        #expect(dropped, "/loop stop dropped it")
+    }
+
+    @Test("a typed turn clears the chip's next-tick time while it runs")
+    func typedTurnClearsNextTick() async throws {
+        let (state, id) = try app(latencyMs: 400)
+        state.startLoop(ConversationLoop(prompt: "p", intervalSeconds: 3600, cap: 5), in: id)
+        #expect(await eventually { state.loopNextTick[id] != nil })
+        state.sendMessage("hello")
+        #expect(await eventually { state.isThinking(in: id) && state.loopNextTick[id] == nil })
+        #expect(await eventually { !state.isThinking(in: id) && state.loopNextTick[id] != nil })
+        state.pauseLoop(for: id)
     }
 
     @Test("a tick never acts as a trigger, whatever its prompt starts with")

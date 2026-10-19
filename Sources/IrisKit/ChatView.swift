@@ -1658,7 +1658,16 @@ struct LoopChip: View {
                     if loop.paused {
                         Text("Paused").font(.caption2).foregroundColor(.orange)
                     } else if let next = state.loopNextTick[conversationId] {
-                        Text("Next tick \(next, style: .relative)").font(.caption2).foregroundColor(.secondary)
+                        // The tick waits on uptime and this is wall time, so after a sleep it is
+                        // past while the tick is still to come.
+                        TimelineView(.periodic(from: .now, by: 30)) { context in
+                            if next > context.date {
+                                Text("Next tick \(next, style: .relative)")
+                            } else {
+                                Text("Next tick due shortly")
+                            }
+                        }
+                        .font(.caption2).foregroundColor(.secondary)
                     } else if thinking {
                         Text("Next tick after this turn").font(.caption2).foregroundColor(.secondary)
                     } else {
@@ -1671,7 +1680,8 @@ struct LoopChip: View {
                 } else {
                     Button("Pause") { state.pauseLoop(for: conversationId) }
                 }
-                Button("Stop") {
+                // "End loop", not "Stop": the composer's Stop keeps the loop.
+                Button("End loop") {
                     if state.clearLoop(for: conversationId) {
                         state.appendMessage(role: .system, content: "Loop stopped.", to: conversationId)
                     }
