@@ -326,6 +326,9 @@ extension ConfigManager {
 
     /// The secrets item for reads: cached for this manager's own keychain, read once, and empty
     /// when the item couldn't be read at launch (#678), so no other-family route can come of it.
+    /// The cache lives as long as this manager, which for `shared` is the process: a key changed
+    /// from outside Iris (another process, the `security` tool) is seen only after a relaunch or a
+    /// write through this manager (#697 review).
     func secretsSnapshot(_ keychain: KeychainManager) -> [String: String] {
         guard keychain === guardedKeychain else { return keychain.loadSecrets() }
         if case .unreadable = guardedState { return [:] }
