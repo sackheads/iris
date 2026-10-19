@@ -31,7 +31,7 @@ import Foundation
     @Test func eligibleSetIsTheStateGatedTools() {
         #expect(StickyTools.eligible == ["manage_fact", "list_sessions", "describe_session", "send_to_session", "set_session_card",
                                          "close_request", "amend_goal_contract", "reach_checkpoint", "delegate_milestone",
-                                         "waive_criterion", "goal_complete"])
+                                         "waive_criterion", "goal_complete", IrisEngine.scheduleNextTickTool])
         // Never the workflow triggers (decision 1), the pinned-only job tools (plan note 5) or
         // set_workspace (plan note 3).
         for name in ["rename_conversation", "propose_goal_contract", "schedule_job", "list_jobs", "set_workspace"] {

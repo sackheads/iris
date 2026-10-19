@@ -625,7 +625,7 @@ struct ChatView: View {
                 }
                 // #190: a conversation that loops says so in the list.
                 if let loop = conv.loop {
-                    Label(loop.paused ? "loop paused" : "every \(loop.every)", systemImage: "arrow.triangle.2.circlepath")
+                    Label(loop.paused ? "loop paused" : loop.cadence, systemImage: "arrow.triangle.2.circlepath")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                         .help("This conversation runs a /loop: \(loop.prompt)")
@@ -1671,14 +1671,14 @@ struct LoopChip: View {
         .background(Color.accentColor.opacity(0.06))
         .cornerRadius(8)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Loop, every \(loop.every), \(loop.ticksLeft) ticks left\(loop.paused ? ", paused" : "")")
+        .accessibilityLabel("Loop, \(loop.cadence), \(loop.ticksLeft) ticks left\(loop.paused ? ", paused" : "")")
     }
 
     private var content: some View {
             HStack(spacing: 8) {
                 Image(systemName: "arrow.triangle.2.circlepath").foregroundColor(.accentColor)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(verbatim: "Looping every \(loop.every) · \(loop.ticksLeft) of \(loop.cap) ticks left")
+                    Text(verbatim: "Looping \(loop.cadence) · \(loop.ticksLeft) of \(loop.cap) ticks left")
                         .font(.caption.bold())
                     Text(verbatim: loop.prompt)
                         .font(.caption2).foregroundColor(.secondary).lineLimit(2)

@@ -58,7 +58,8 @@ struct LoopTests {
         #expect(ConversationLoop.parse(" STOP ") == .stop)
         #expect(ConversationLoop.parse("pause") == .pause)
         #expect(ConversationLoop.parse("resume") == .resume)
-        for bad in ["check my PRs", "10m", "10x check", "30s too often", "2d too rare", "0m nothing", "-5m x"] {
+        // A prompt alone is self-paced since PR 2 (`LoopSelfPacedTests`).
+        for bad in ["10m", "10x check", "30s too often", "2d too rare", "0m nothing", "-5m x"] {
             guard case .invalid = ConversationLoop.parse(bad) else { Issue.record("\(bad) should be refused"); continue }
         }
         #expect(ConversationLoop.describe(seconds: 600) == "10m")
