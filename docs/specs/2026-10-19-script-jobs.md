@@ -75,10 +75,19 @@ So a script job is mostly `runBuiltin`'s shape with `evaluateScript`'s machinery
   - the dialog offers no Always Allow (the same flag as #652's).
 
   With network off, Vibecop judges it as it does a gate script.  The cost is one dialog at creation, for network scripts only.  A test pins both: a network script raises the dialog even when Vibecop approves, and an offline one doesn't.
-  - **Open, from both reviews (dev-3 and dev-1):** make *every* script job human-only at review, network or not.  Their reason: outside Iris or a tainted conversation, #652's human-only ask skips a read-only job.  So under this ruling, an offline script job would be created on Vibecop's APPROVE alone, and would then run model-free on every fire with no person ever having read it.  Vibecop would still advise.  The cost is one dialog per script job, at creation, never per fire.  This is back with the planner, since it changes the ruling above.
+  - **Every script job human-only?**  Both reviews (dev-3, dev-1) asked for it, since #652's human-only ask skips a read-only job outside Iris or a tainted conversation.  **Overruled for network-off scripts** (planner, reason on the #686 thread).  A read-only, network-off script reads what the job mounted and posts a line that passed the tier-3 guard.  The model can already do that with `read_file` under the same guards.
+- **"Off" isn't "no network at all"** (dev-1).  The isolated network is host-only, so the VM can still reach services on the Mac that listen on all interfaces.  Today's read-only prompt jobs have the same property, so it isn't new here, but the review and the docs say "network: off (host-only)".
 - **The dialog says what the combination means.**  With network on and a mount: "This script can read <mounts> and reach the internet on every run, with no one watching: it could send what it reads anywhere, or download and run more code."  With network on and no mounts, it says the second half only.
 - **A change re-asks.**  Any change to a stored job's script, mounts or network (a later `schedule_job` with the same name, or an edit) goes through the same review, as a new job would.
-- **Gate scripts** get network silently today.  The same egress argument applies to them, but changing them is filed separately as #687 (dev-1's, which also covers a read-only job's gate being approved on Vibecop alone), and they're unchanged here.
+- **Gate scripts get the same treatment, in this PR** (planner's addendum, folding in #687).  Today they get network silently and a read-only job's gate is approved on Vibecop alone.  One code path serves both:
+  - an isolated network by default;
+  - a `gate_network` flag, shown in the review;
+  - network-on is human-only.
+
+  **Existing gate-script jobs:**
+  - On upgrade their network goes off, as a data migration on the stored gates, run once and keyed by a marker.
+  - A one-time notice names each job and how to re-enable it: schedule it again with `gate_network: true`, which takes the human-only review.
+  - Tests: the migration, the notice naming each job, and a second run changing nothing (idempotent).
 
 ### C. The card and the status
 
@@ -122,7 +131,7 @@ Brian: "Let do it this way for now and if it becomes a hindrance we can revisit"
 - **Invariant 4.**  The container joins `LiveContainerNames` (through `GateContainerRegistry` or its sibling).  The deadline is on the dispatch watchdog, the kill happens inside the VM, and the container is swept on every exit.  A `--run-job` stopped by a signal ends it as it ends a gate.
 - **Invariant 1.**  `JobAction.script`, `JobRun.scriptOutput` and `scriptStderr` are read with `decodeIfPresent`, and the ledger gets new columns.
 - **Invariant 6.**  No new tool: `schedule_job`'s new arguments sit beside `gate_script`'s.
-- **Invariant 9**, the sentences this makes untrue (searched, not composed):
+- **Invariant 9**, the sentences this makes untrue (searched, not composed).  Also, from #687: jobs.md's gate-script section and the `gate_script` text in the `schedule_job` description both say or imply that a gate script has network, or doesn't say; they gain "network off unless `gate_network`, which asks you":
   - jobs.md:3: "A job is … a recurring prompt (`schedule_job`) or a directory watch".
   - jobs.md:18-20 and :689-692: every fire is "a run in a hidden conversation".
   - jobs.md:701, built-ins: "`schedule_job` cannot create one".  This stays true for built-ins, but the section needs a sibling for script jobs.
@@ -139,6 +148,10 @@ Brian: "Let do it this way for now and if it becomes a hindrance we can revisit"
   2. A script that overruns its timeout is killed in the VM, leaving no process and no container.
   3. With network off (B), `curl` fails and the run is `failed`.
   4. A read-only mount refuses a write (`touch` → non-zero exit, `failed`).
+
+## Scope
+
+Closes #330 and #687.
 
 ## Out of scope
 
