@@ -117,6 +117,9 @@ enum GuardedSettings {
         case missing
         /// The item exists but couldn't be read: a denied prompt, or damage.
         case unreadable(OSStatus)
+        /// The upgrade is due, but this process doesn't announce (`--run-job` and the other
+        /// headless roles), so it is left to the app: protective values for this run, nothing written.
+        case deferredToApp
     }
 
     /// The secrets item as one launch found it: its dict (empty when there is none), or unreadable.
@@ -140,8 +143,26 @@ enum GuardedSettings {
     /// The decision for one launch, from the item and the defaults domain. Pure.
     /// - item: the secrets dict, `.read([:])` when there is none, `.unreadable` when it can't be read.
     /// - defaults: the defaults domain's guarded keys (as strings) and its marker.
+    /// - mayChange: false for a process that can't announce: it changes nothing (no item write, no
+    ///   marker, no defaults deletion), so a replayed upgrade can't be completed silently there
+    ///   (#679 review); the app's next launch does it, and says so.
     static func load(item: ItemRead, defaults: [String: String],
-                     defaultsMarker: Bool) -> Load {
+                     defaultsMarker: Bool, mayChange: Bool = true) -> Load {
+        var load = decide(item: item, defaults: defaults, defaultsMarker: defaultsMarker)
+        guard !mayChange else { return load }
+        if load.write != nil {
+            let protective = Dictionary(uniqueKeysWithValues: GuardedKey.allCases.map { ($0, $0.protective) })
+            load = Load(values: protective, state: .deferredToApp, notices: [], write: nil,
+                        removeFromDefaults: [], setDefaultsMarker: false)
+        }
+        load.removeFromDefaults = []
+        load.setDefaultsMarker = false
+        load.notices = []
+        return load
+    }
+
+    private static func decide(item: ItemRead, defaults: [String: String],
+                               defaultsMarker: Bool) -> Load {
         let present = GuardedKey.allCases.filter { defaults[$0.rawValue] != nil }
         let protective = Dictionary(uniqueKeysWithValues: GuardedKey.allCases.map { ($0, $0.protective) })
 
