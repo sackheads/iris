@@ -288,6 +288,11 @@ struct SandboxGitTests {
         #expect(notes.contains { $0.contains("\(wt)/.git pointed git at") && $0.contains("moved it aside") }, "\(notes)")
         let new = try await GitFixture.sh("git --git-dir=\(common)/worktrees/wt rev-parse wtb", in: wt, env: base.env).out.trimmingCharacters(in: .whitespacesAndNewlines)
         #expect(new != old && notes.contains { $0.hasPrefix("Moved wtb") }, "synced through the recorded git dir: \(notes)")
+
+        // Rewritten again while no command ran: the next command's check moves it aside first.
+        try "gitdir: \(base.dir)/evil/.git\n".write(toFile: wt + "/.git", atomically: false, encoding: .utf8)
+        let (_, early) = await sync.before()
+        #expect(early.contains { $0.contains("moved it aside") }, "\(early)")
     }
 
     @Test("when the host moved ahead, the VM's branch and index follow before the next command")
