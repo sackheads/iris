@@ -33,10 +33,10 @@ Profiles don't apply to the pinned Iris conversation, to a subagent's own conver
 
 ## A conversation follows its file
 
-A conversation remembers its profile by name, and **the file is the source**. Edit the file and the conversation uses the new version on its next turn, with a line in the chat saying so.
+A conversation remembers its profile by name, and **the file is the source**. Edit the file and the conversation uses the new version on its next turn, with a system line in the chat saying so, including for an edit made while Iris was closed.
 - **The cost:** an edit changes that conversation's system prompt, so its next turn starts a fresh provider prompt cache. That's expected.
 
-**A missing or broken file:** each time the file reads cleanly, Iris keeps a copy of it with the conversation. If the file is deleted, renamed or stops parsing, the conversation keeps using that last good copy, so a narrowed conversation never quietly widens. The chat says so once and names the parse error, and the sidebar shows the profile as "(last known)".
+**A missing or broken file:** each time the file reads cleanly, Iris keeps a copy of it with the conversation. If the file is deleted, renamed or stops parsing, the conversation keeps using that last good copy, so a narrowed conversation never quietly widens. A system line in the chat says so once and names the parse error, and the sidebar shows the profile as "(last known)".
 
 **Clear Agent Profile** in the conversation's right-click menu removes the profile and its copy. The conversation then runs as an ordinary one. It's the only way to drop a profile. A profile can't be added to an existing conversation (#670).
 
