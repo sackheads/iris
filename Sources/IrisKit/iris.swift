@@ -1562,6 +1562,7 @@ actor IrisEngine {
     func cancelReprompt(for conversationId: UUID) {
         skillCheckScheduled[conversationId] = nil
         goalLoop.cancelReprompt(for: conversationId)
+        cancelLoopTick(for: conversationId, includingRunning: true)
     }
 
     /// The tail of the `.system` line a soft stop posts. Shared rather than copied because
@@ -2027,6 +2028,9 @@ actor IrisEngine {
             if skillCheckScheduled.removeValue(forKey: conversationId) != nil { skillCheckDue.insert(conversationId) }
             goalLoop.cancelReprompt(for: conversationId)
         }
+        // #190: any other turn takes a waiting loop tick's place, so the two never share a
+        // history, and its end arms the next tick an interval on.
+        if source != Self.loopSource { cancelLoopTick(for: conversationId, includingRunning: false) }
 
         // Callers that already shaped their prompt as `System Event [X]: …` (rename, reflection,
         // goal draft) keep their own label rather than gaining a second `System Event [System]:`.
@@ -3286,8 +3290,28 @@ actor IrisEngine {
         return goalLoop.setReprompt(task, token: token, for: conversationId)
     }
 
-    /// Schedules the conversation's next `/loop` tick, its interval from now on uptime (#190), on
-    /// the goal loop's reprompt slot: Stop and a typed message cancel it as they cancel a reprompt.
+    /// Each conversation's scheduled `/loop` tick (#190), on a slot of its own rather than the goal
+    /// loop's: a goal follow-up holds arrivals (`goalFollowUpPending`, `isLive`) until it runs,
+    /// and a tick waits up to a day, so a peer's message or a subagent's post-back would have
+    /// waited with it. `running` once the tick has started its turn.
+    private var loopTicks: [UUID: (token: UUID, task: Task<Void, Never>, running: Bool)] = [:]
+
+    /// Cancels the conversation's loop tick: a waiting one always, a running one only when
+    /// `includingRunning` (Stop). Pause and `/loop stop` let a running tick finish.
+    func cancelLoopTick(for conversationId: UUID, includingRunning: Bool) {
+        guard let tick = loopTicks[conversationId], includingRunning || !tick.running else { return }
+        loopTicks[conversationId] = nil
+        tick.task.cancel()
+        if !tick.running {
+            let localState = state
+            Task { @MainActor in localState?.loopNextTick[conversationId] = nil }
+        }
+    }
+
+    /// Test seam: whether a tick is scheduled or running for the conversation.
+    func hasLoopTick(for conversationId: UUID) -> Bool { loopTicks[conversationId] != nil }
+
+    /// Schedules the conversation's next `/loop` tick, its interval from now on uptime (#190).
     /// A paused loop, or none, schedules nothing; one with no ticks left ends with a line saying so.
     func armLoopTick(for conversationId: UUID) async {
         let localState = state
@@ -3297,31 +3321,39 @@ actor IrisEngine {
             await MainActor.run { localState?.endLoopAtCap(for: conversationId) }
             return
         }
-        let goalLoop = self.goalLoop
         let token = UUID()
         let task = Task { [weak self] in
-            defer {
-                goalLoop.finishReprompt(token: token, for: conversationId)
-                Task { @MainActor in localState?.drainPendingUserMessages(for: conversationId) }
-            }
             await UptimeWait.seconds(loop.intervalSeconds)
-            guard !Task.isCancelled, let self else { return }
-            // Taken on the main actor: a tick for an ended, paused or replaced loop is no tick at
-            // all, and one landing while a turn runs is skipped, the next an interval away.
-            switch await MainActor.run(body: { localState?.takeLoopTick(for: conversationId, loopId: loop.id) ?? .none }) {
-            case .none:
-                return
-            case .busy:
-                guard !Task.isCancelled else { return }
-                await self.armLoopTick(for: conversationId)
-            case .run(let tick):
-                guard !Task.isCancelled else { return }
-                await self.processInput(tick, source: Self.loopSource, conversationId: conversationId, goalFacts: .carry)
-            }
+            guard let self else { return }
+            await self.runLoopTick(for: conversationId, loop: loop, token: token)
+            await self.finishLoopTick(for: conversationId, token: token)
         }
-        if goalLoop.setReprompt(task, token: token, for: conversationId) {
-            await MainActor.run { localState?.loopNextTick[conversationId] = Date().addingTimeInterval(loop.intervalSeconds) }
+        // A running tick is the turn arming this one, finishing: replaced, not cancelled.
+        if let old = loopTicks[conversationId], !old.running { old.task.cancel() }
+        loopTicks[conversationId] = (token, task, false)
+        await MainActor.run { localState?.loopNextTick[conversationId] = Date().addingTimeInterval(loop.intervalSeconds) }
+    }
+
+    private func runLoopTick(for conversationId: UUID, loop: ConversationLoop, token: UUID) async {
+        guard !Task.isCancelled, loopTicks[conversationId]?.token == token else { return }
+        loopTicks[conversationId]?.running = true
+        let localState = state
+        // Taken on the main actor: a tick for an ended, paused or replaced loop is no tick at
+        // all, and one landing while a turn runs is skipped, the next an interval away.
+        switch await MainActor.run(body: { localState?.takeLoopTick(for: conversationId, loopId: loop.id) ?? .none }) {
+        case .none:
+            return
+        case .busy:
+            guard !Task.isCancelled else { return }
+            await armLoopTick(for: conversationId)
+        case .run(let tick):
+            guard !Task.isCancelled else { return }
+            await processInput(tick, source: Self.loopSource, conversationId: conversationId, goalFacts: .carry)
         }
+    }
+
+    private func finishLoopTick(for conversationId: UUID, token: UUID) {
+        if loopTicks[conversationId]?.token == token { loopTicks[conversationId] = nil }
     }
 
     /// What the parent is told when a subagent spends its iteration cap without `goal_complete`.

@@ -71,6 +71,7 @@ struct ConversationLoop: Codable, Equatable, Sendable {
 
     /// `5m` as seconds, or nil.
     static func interval(_ text: String) -> Double? {
+        let text = text.lowercased()
         guard let unit = text.last, let number = Double(text.dropLast()), number > 0, number.isFinite else { return nil }
         switch unit {
         case "s": return number

@@ -2700,10 +2700,12 @@ class AppState {
         } else if trimmed.hasPrefix("/stop") {
             // #190: `/stop` ends a loop as it ends a goal.
             let hadLoop = clearLoop(for: convId)
+            let hadGoal = conversations.first { $0.id == convId }?.activeGoal != nil
             clearGoal(for: convId)
             let stopped = stopBackgroundSubagents(under: convId)
             cancelTasks(for: convId)
-            appendMessage(role: .system, content: (hadLoop ? "Loop stopped. " : "") + "Goal mode cancelled." + Self.stoppedSubagentsSuffix(stopped), to: convId)
+            let said = hadLoop && !hadGoal ? "Loop stopped." : (hadLoop ? "Loop stopped. " : "") + "Goal mode cancelled."
+            appendMessage(role: .system, content: said + Self.stoppedSubagentsSuffix(stopped), to: convId)
             return
         } else if trimmed == "/skills" || trimmed.hasPrefix("/skills ") {
             handleSkillsCommand(trimmed, convId: convId)
@@ -5209,7 +5211,7 @@ class AppState {
     /// Why `/loop` cannot start in `conv`, or nil.
     func loopRefusal(_ conv: Conversation) -> String? {
         if conv.isPinned {
-            return "Iris can't run a loop: its memory upkeep runs as the conversation grows, so a loop would keep grooming your memory. Start one in another conversation."
+            return "Iris can't run a loop: it's the conversation your memory and `/new` work from, and a loop would fill it with ticks. Start one in another conversation."
         }
         if conv.isBackground || conv.isSubagent {
             return "A loop needs someone to talk to, so it runs only in a conversation of your own."
@@ -5243,6 +5245,7 @@ class AppState {
         guard let idx = conversations.firstIndex(where: { $0.id == id }), conversations[idx].loop != nil else { return }
         conversations[idx].loop?.paused = true
         loopNextTick[id] = nil
+        cancelWaitingLoopTick(id)
         markChanged(id, .metadata)
         appendMessage(role: .system, content: "Loop paused. `/loop resume` or the chip's Resume starts it again.", to: id)
     }
@@ -5262,8 +5265,15 @@ class AppState {
         guard let idx = conversations.firstIndex(where: { $0.id == id }), conversations[idx].loop != nil else { return false }
         conversations[idx].loop = nil
         loopNextTick[id] = nil
+        cancelWaitingLoopTick(id)
         markChanged(id, .metadata)
         return true
+    }
+
+    /// A tick still waiting for its interval is dropped; one already running finishes.
+    private func cancelWaitingLoopTick(_ id: UUID) {
+        let engine = self.engine
+        Task { await engine?.cancelLoopTick(for: id, includingRunning: false) }
     }
 
     private func armLoopIfIdle(_ id: UUID) {
