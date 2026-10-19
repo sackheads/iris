@@ -186,6 +186,15 @@ struct GateReviewPauseTests {
         try? await Task.sleep(nanoseconds: 200_000_000)
         #expect(try store.ledger.jobs().first?.pausedReason == AppState.gateNeedsReviewReason,
                 "an owner's pause never replaces the review pause")
+
+        // Two steps that would otherwise launder it: a cron that never matches, then a good one.
+        app.sendMessage("/jobs reschedule watch-build 0 0 31 2 *")
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        #expect(try store.ledger.jobs().first?.pausedReason == AppState.gateNeedsReviewReason)
+        app.sendMessage("/jobs reschedule watch-build 0 9 * * *")
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        #expect(try store.ledger.jobs().first?.pausedReason == AppState.gateNeedsReviewReason,
+                "a reschedule never lifts a review pause")
     }
 }
 
