@@ -38,9 +38,10 @@ You review pull requests for this repository. Read the diff, run the touched tes
 
 `Conversation.agentProfile: String?` holds the **name**, not a snapshot. The file is read when it's used, so editing the file changes the conversation's next turn.
 - **Why not a snapshot:** the file is something you tune as you use it, and a snapshot would freeze every existing conversation on the old text with no way to update it.
-- **The prompt cache:** the composed prompt is keyed by the profile's name and the file's modification stamp, so an unchanged file keeps the provider prompt cache warm.
+- **The prompt cache:** the composed prompt is keyed by the profile's name and a hash of the file's content, so an unchanged file keeps the provider prompt cache warm. The modification time isn't used: it can miss an edit made within the same second.
 - **Editing a profile costs a cache prefix.** Because the link is live, an edit changes the system prompt on that conversation's next turn, which starts a new prompt-cache prefix. That's expected, and `docs/agent_profiles.md` will say so, so the cost isn't a surprise.
-- **Missing or unreadable file** (deleted, renamed, broken frontmatter): the conversation runs as a conversation without a profile. The chat says so once ("Agent profile `reviewer` isn't there any more; this conversation runs without it"), and the sidebar label shows "(missing)". This is safe because v1 profiles only narrow: losing one never widens past what an ordinary conversation already has.
+- **A profile's tool list is for focus and token cost, not security.** Permissions come only from the approval ladder (allowlist, Vibecop, the person) and from job profiles. The spec and `docs/agent_profiles.md` both say so plainly, so nobody relies on `tools:` to keep a conversation from writing.
+- **Missing or unreadable file** (deleted, renamed, broken frontmatter): **the live link is the only source; there's no snapshot.** The conversation runs as a plain conversation. The chat says so once and names the parse error, for example "Agent profile `reviewer` couldn't be read (line 3: tools must be a list); this conversation runs without it until it's fixed". The sidebar label shows "(missing)" or "(unreadable)". Since the tool list was never a security boundary, a plain conversation is a fallback the person can see, not a loss of protection.
 
 ## Roles
 
@@ -54,12 +55,13 @@ Session roles (#469/#480) already exist: `Conversation.role`, user-assigned with
 
 | Part | Where | How |
 |---|---|---|
-| **System-prompt addition** | `assembledSystemPrompt(workspacePath:)` | A layer after USER.md and AGENTS.md: `# Agent Profile: <name>` plus the body. The cache key gains the profile's name and stamp. |
-| **Skills** | the `# Available Skills` block in the base prompt | A per-conversation skill list, in the same shape as a skill bundle. It **replaces** the global `/bundle` for that conversation. The base prompt is currently cached once per engine, so it becomes cached per skills selection (default, or per profile). |
+| **System-prompt addition** | `assembledSystemPrompt(workspacePath:)` | A layer after USER.md and AGENTS.md: `# Agent Profile: <name>` plus the body. The cache key gains the profile's name and content hash. |
+| **Skills** | the `# Available Skills` block in the base prompt | A per-conversation skill list, in the same shape as a skill bundle. It **replaces** the global `/bundle` for that conversation. The base prompt is currently cached once per engine, so it becomes a map on the actor, keyed by skills selection (default, or a profile's list), and invalidation clears the map. |
 | **Tools** | `processInputBody`, the tool pipeline | Intersect with the profile's `tools`. This runs **after** the sticky union and `hardStrip`, so a sticky tool can't widen a profile (5c). A call to a tool outside the list is refused at dispatch, like `profileRefusal`. |
 | **Tier** | the three `modelTier` reads in `iris.swift` | Resolved per turn: the conversation's own tier (set by `/model`, #667), else the profile's, else the engine's. |
 
-- **Ruled (Fork B, option 1): flow tools are exempt from a profile's narrowing.** That covers `goal_complete`, `propose_goal_contract`, `rename_conversation`, `reach_checkpoint`, `amend_goal_contract` and `send_to_session` replies. They're already gated to their trigger or state (Invariant 6), so narrowing them would break `/goal` and `/rename` in a profiled chat without saving any tokens.
+- **Ruled (Fork B, option 1): flow tools are exempt from a profile's narrowing.** That covers `goal_complete`, `propose_goal_contract`, `rename_conversation`, `reach_checkpoint` and `amend_goal_contract`. They're already gated to their trigger or state (Invariant 6), so narrowing them would break `/goal` and `/rename` in a profiled chat without saving any tokens. `send_to_session` isn't a flow tool and is narrowed like any other: a profile without it can't message peers.
+- **MCP and plugin tools** are named in `tools:` by their declared names, exactly as the model sees them. `mcp:<server>` stands for every tool that server declares.
 - **Unknown names:** a name in `tools:` that isn't a tool is ignored and listed in the picker's details. So is a name in `skills:` that isn't a skill.
 
 ## Invariant 6 and token cost
@@ -74,7 +76,7 @@ Session roles (#469/#480) already exist: `Conversation.role`, user-assigned with
   - the picker isn't offered for it;
   - `/new` rotation in Iris doesn't apply one;
   - a stored value on the pinned conversation is ignored when loaded, as `mayHoldRole` does for roles.
-- **Subagents and the evaluator:** they don't inherit the delegating conversation's profile. A subagent keeps its own role prompt (#668 tracks a bug there), and the grader keeps its own toolset.
+- **Subagents and the evaluator:** a subagent doesn't inherit the profile's prompt, skills or tier, and keeps its own role prompt (#668). It **does** inherit the tool narrowing: its tools are intersected with the profile's `tools:`, so delegation can't go around it. The grader keeps its own toolset, which a profile doesn't touch.
 - **Job runs:** no profile in v1, because a job's hidden conversation is created by the runner.
 - **Approvals:** none of the above reaches `requestApprovalSource`.
 
@@ -82,7 +84,7 @@ Session roles (#469/#480) already exist: `Conversation.role`, user-assigned with
 
 - **New Conversation** becomes a split button. Clicking it starts a plain conversation, as today. Its menu triangle lists the agent profiles: name, role, and the first line of the body, plus unusable ones greyed out with their error. It ends with **Open Agent Profiles Folder**, which reveals the folder in Finder and creates it if missing.
 - **The sidebar row** gets a secondary line in the style of the "home writable by the sandbox" label: `◆ reviewer`. The role is shown after it when it differs from the profile's name, and "(missing)" when the file is gone.
-- **Ruled (Fork C, option 1):** a profile is chosen at creation only in v1. Applying one to an existing conversation is filed as #670.
+- **Ruled (Fork C, option 1):** a profile is chosen at creation only in v1. Applying one to an existing conversation is filed as #670. The reason is scope: switching a conversation's profile also has to decide its role and tier mid-session. It isn't that the prompt changes mid-history, because the live link already does that when the file is edited. Such an edit is noted in the chat: "Agent profile `reviewer` changed; this turn uses the new version."
 
 ## Persistence (Invariant 1)
 
