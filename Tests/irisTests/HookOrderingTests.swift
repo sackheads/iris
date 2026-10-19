@@ -217,6 +217,17 @@ struct HookOrderingTests {
         #expect(t.pill?.approval == nil, "denied, so nothing ran")
     }
 
+    @Test("a refusal that does not depend on the hook comes first: a NUL path never fires it")
+    func nulPathRefusedBeforeHook() async throws {
+        let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
+        let hooks = try hooks(f, tool: "write_file", output: nil)
+        let t = try await turn(try app(f), call("write_file", ["path": .string(f.workspace.path + "/a\u{0}b"), "content": .string("x")]),
+                               hooks: hooks, workspace: f.workspace, engine: Recorder(), answer: .approve)
+        #expect(!t.asked)
+        #expect(t.result == ToolExecutor.nulPathRefusal("write_file"))
+        #expect(!FileManager.default.fileExists(atPath: f.marker.path), "the person's hook did not run")
+    }
+
     @Test("the hook's gate and the dispatcher's agree on which calls are gated")
     func gatedConditionsAgree() {
         let gated = [FunctionCall(name: "run_command", args: ["command": .string("ls")]),

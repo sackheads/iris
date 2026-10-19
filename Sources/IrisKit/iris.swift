@@ -4066,6 +4066,10 @@ actor IrisEngine {
         var jobHooksFired = false
         var jobRewrittenByHook: String?
         if functionCall.name == "register_directory_watcher" {
+            // A refusal that does not depend on the hook comes first (#661 review).
+            if let raw = functionCall.args["path"]?.stringValue, raw.contains("\u{0}") {
+                return ToolExecutor.nulPathRefusal(functionCall.name)
+            }
             switch await beforeToolArguments(name: functionCall.name, args: functionCall.args,
                                              conversationId: conversationId, workspacePath: workspacePath) {
             case .blocked(let message): return message
@@ -5128,6 +5132,9 @@ actor IrisEngine {
             // never fires a person's hook.
             var rewrittenByHook: String?
             if Self.isGatedFileOrCommand(functionCall) {
+                if functionCall.name != "run_command", let raw = functionCall.args["path"]?.stringValue, raw.contains("\u{0}") {
+                    return ToolExecutor.nulPathRefusal(functionCall.name)
+                }
                 switch await beforeToolArguments(name: functionCall.name, args: functionCall.args,
                                                  conversationId: conversationId, workspacePath: workspacePath) {
                 case .blocked(let message): return message
