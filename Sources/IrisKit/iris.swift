@@ -1867,11 +1867,11 @@ actor IrisEngine {
         defer { goalLoop.endTurn(for: conversationId) }
         await withEngineTurn(conversationId, lifetime: lifetime) {
             let turnID = PerformanceProfiler.shared.beginTurn(label: input, source: source)
-            let turnStart = CFAbsoluteTimeGetCurrent()
+            let turnStart = UptimeClock.live.now()   // uptime: a sleep is not time spent (#640)
             await PerformanceProfiler.$currentTurnID.withValue(turnID) {
                 await processInputBody(input, source: source, conversationId: conversationId, inlineParts: inlineParts, restrictToGoalComplete: restrictToGoalComplete, turnBudget: turnBudget, usageSink: usageSink, goalFacts: goalFacts)
             }
-            PerformanceProfiler.shared.endTurn(turnID, totalMs: (CFAbsoluteTimeGetCurrent() - turnStart) * 1000.0)
+            PerformanceProfiler.shared.endTurn(turnID, totalMs: UptimeClock.live.seconds(since: turnStart) * 1000.0)
         }
     }
 
@@ -2747,7 +2747,7 @@ actor IrisEngine {
                 // uniformly, and the span includes engine-side call overhead. Each attempt is
                 // its own span so retry backoff sleeps are not counted as model time.
                 let requestToSend = activeRequest
-                let modelCallStart = CFAbsoluteTimeGetCurrent()
+                let modelCallStart = UptimeClock.live.now()   // uptime: a sleep is not time spent (#640)
                 // Resolved once, here, per model call (see `streamResponsesOverride`): a config
                 // flip after this point cannot change what THIS call does, but the next call
                 // re-resolves and sees it — never mid-stream.
@@ -2781,7 +2781,7 @@ actor IrisEngine {
                     ModelCallRecord(
                         round: modelRound,
                         model: modelName,
-                        latencyMs: (CFAbsoluteTimeGetCurrent() - modelCallStart) * 1000.0,
+                        latencyMs: UptimeClock.live.seconds(since: modelCallStart) * 1000.0,
                         promptTokens: response.usageMetadata?.promptTokenCount,
                         outputTokens: response.usageMetadata?.candidatesTokenCount,
                         returnedToolCalls: response.candidates?.first?.content?.parts.contains { $0.functionCall != nil } ?? false,

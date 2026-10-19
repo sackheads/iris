@@ -420,10 +420,10 @@ struct ModelCatalog: Sendable {
     /// One tiny generation against an explicit model name, timed. Never throws — an error becomes
     /// `.failed(message)` so a caller can render every target's outcome uniformly.
     func probe(model: String, label: String, adcToken: String? = nil, quotaProject: String? = nil) async -> ModelProbeResult {
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = UptimeClock.live.now()   // uptime: a sleep is not time spent (#640)
         do {
             try await performProbeRequest(model: model, adcToken: adcToken, quotaProject: quotaProject)
-            let latencyMs = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+            let latencyMs = Int(UptimeClock.live.seconds(since: start) * 1000)
             return ModelProbeResult(id: label, label: label, model: model, outcome: .ok(latencyMs: max(0, latencyMs)))
         } catch {
             let message = (error as? APIError)?.message ?? error.localizedDescription

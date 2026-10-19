@@ -113,10 +113,10 @@ struct HookManager {
             return .proceed(modifiedData: nil) // No hooks registered — not counted
         }
         let __turnID = PerformanceProfiler.currentTurnID
-        let __start = CFAbsoluteTimeGetCurrent()
+        let __start = UptimeClock.live.now()   // uptime: a sleep is not time spent (#640)
         defer {
             PerformanceProfiler.shared.record(turnID: __turnID, category: .hooks,
-                                              durationMs: (CFAbsoluteTimeGetCurrent() - __start) * 1000.0)
+                                              durationMs: UptimeClock.live.seconds(since: __start) * 1000.0)
         }
 
         var currentData = payload

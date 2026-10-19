@@ -171,7 +171,7 @@ struct LLMClient {
             }
         }
         // Provider latency metrics, as the plain call records them.
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = UptimeClock.live.now()   // uptime: a sleep is not time spent (#640)
         return AsyncThrowingStream { continuation in
             let task = Task {
                 var succeeded = true
@@ -182,7 +182,7 @@ struct LLMClient {
                     continuation.finish(throwing: error)
                 }
                 await MetricsManager.shared.trackLatency(operation: metricOp, modelName: modelName,
-                                                         durationMs: (CFAbsoluteTimeGetCurrent() - start) * 1000.0, success: succeeded)
+                                                         durationMs: UptimeClock.live.seconds(since: start) * 1000.0, success: succeeded)
                 if succeeded { continuation.finish() }
             }
             continuation.onTermination = { _ in task.cancel() }
@@ -208,7 +208,7 @@ struct LLMClient {
         
         let modelName = model ?? config.getModel(for: tier)
         
-        let startTime = CFAbsoluteTimeGetCurrent()
+        let startTime = UptimeClock.live.now()   // uptime: a sleep is not time spent (#640)
         
         do {
             let response: GeminiResponse
@@ -238,14 +238,14 @@ struct LLMClient {
                 response = try decoder.decode(GeminiResponse.self, from: data)
             }
             
-            let durationMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000.0
+            let durationMs = UptimeClock.live.seconds(since: startTime) * 1000.0
             // primaryLLM profiling now happens at the engine's call seam (measure(.primaryLLM))
             // so it covers every client uniformly; here we only track provider latency metrics.
             await MetricsManager.shared.trackLatency(operation: metricOp, modelName: modelName, durationMs: durationMs, success: true)
             return response
 
         } catch {
-            let durationMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000.0
+            let durationMs = UptimeClock.live.seconds(since: startTime) * 1000.0
             await MetricsManager.shared.trackLatency(operation: metricOp, modelName: modelName, durationMs: durationMs, success: false)
             throw error
         }

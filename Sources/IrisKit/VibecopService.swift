@@ -138,11 +138,11 @@ final class VibecopService: @unchecked Sendable {
 
         prompt += "\n\nProposed Action:\nTool: \(toolName)\nDetails: \(details)"
         
-        let startTime = CFAbsoluteTimeGetCurrent()
+        let startTime = UptimeClock.live.now()   // uptime: a sleep is not time spent (#640)
         
         do {
             let responseJson = try await engine.generate(prompt: prompt, jsonSchema: "vibecop_schema")
-            let durationMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000.0
+            let durationMs = UptimeClock.live.seconds(since: startTime) * 1000.0
             
             var cleanJson = responseJson
             
@@ -169,7 +169,7 @@ final class VibecopService: @unchecked Sendable {
             await MetricsManager.shared.trackLatency(operation: .vibecop, modelName: config.modelPathOrName, durationMs: durationMs, success: false)
             return VibecopDecision(decision: "ESCALATE", reason: "Failed to parse Vibecop response. Defaulting to escalate.")
         } catch {
-            let durationMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000.0
+            let durationMs = UptimeClock.live.seconds(since: startTime) * 1000.0
             PerformanceProfiler.shared.record(turnID: PerformanceProfiler.currentTurnID, category: .vibecop, durationMs: durationMs)
             PerformanceProfiler.shared.recordSpan(turnID: PerformanceProfiler.currentTurnID, name: "vibecop", durationMs: durationMs)
             await MetricsManager.shared.trackLatency(operation: .vibecop, modelName: config.modelPathOrName, durationMs: durationMs, success: false)
