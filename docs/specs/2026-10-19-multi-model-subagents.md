@@ -31,6 +31,12 @@ A subagent can run on a different provider and model than the conversation that 
 - **https only,** except loopback (`localhost`, `127.0.0.1`, `::1`) for a local Ollama or LM Studio. Any other `http:` URL is refused at save, with the reason.
 - **The row says where content goes:** a subagent's whole context, workspace content included, is sent to that endpoint.
 - **Storage:** the URL goes in defaults, and the key goes in the secret store (Fork B).
+- **The defaults domain isn't protected (iris-dev-2's review), so a key is bound to its origin.** One approved `defaults write` could add an endpoint or re-point an existing one's `baseURL`. So:
+  - **Origin binding.** The secrets dict stores each endpoint's key together with the origin it was entered for (scheme, host and port, as `PROVIDER_<id>_ORIGIN`). A route whose endpoint origin no longer matches is refused: "Provider `x`'s address changed since its key was entered; re-enter the key in Settings." The key is never sent to the new origin.
+  - **Keyless endpoints are loopback only.** Otherwise a written-in keyless https endpoint would receive a subagent's context with no key involved.
+  - **Exact loopback match:** `URLComponents.host` must be exactly `localhost`, `127.0.0.1` or `::1`. A URL with userinfo is refused. Tests cover `localhost.evil.com`, `localhost@evil.com`, `127.0.0.1.nip.io`, `::ffff:127.0.0.1` and `0.0.0.0`.
+  - **No redirects.** A routed endpoint call uses a session that follows no redirect at all. A 307 or 308 would resend the POST body (the subagent's context) to wherever it points, so it ends the call as an error instead.
+  - **Not covered here:** the built-in families' base URLs (`OPENAI_BASE_URL` and its siblings) live in defaults today too, and a re-point sends the primary's own key there. That's pre-existing, and it's filed as its own issue rather than widened into this PR.
 
 
 - **Option 1 (lean): the primary stays as today, with subagent providers beside it.**
@@ -59,7 +65,7 @@ A subagent can run on a different provider and model than the conversation that 
 - **Removal:** removing an endpoint deletes its key from the dict.
 - **Masking:** the key field in Settings is a masked field.
 - **No leaks:** no key appears in a log, an error string, a test fixture or a request dump. PR 1 checks `requestDumpSink` and the perf dumps, and adds a test for it.
-- **A validated slug for `<id>`:** lowercase letters, digits and `-`, 1 to 32 characters. The key's name comes from the slug, never from the display name, and its prefix `PROVIDER_` keeps every endpoint key apart from `GEMINI_API_KEY` and its siblings. A test adds an endpoint named "GEMINI" and checks that `GEMINI_API_KEY` is untouched.
+- **A validated slug for `<id>`:** lowercase letters, digits and inner `-`, 1 to 32 characters. A duplicate id is refused at save. Renaming an endpoint moves its key and origin to the new id. A built-in family's id (`gemini`, `anthropic`, `openai`) is refused. The key's name comes from the slug, never from the display name, and its prefix `PROVIDER_` keeps every endpoint key apart from `GEMINI_API_KEY` and its siblings. A test adds an endpoint named "GEMINI" and checks that `GEMINI_API_KEY` is untouched.
 
 
 - **Option 1 (my lean; it differs from the brief's): keys go in the existing secrets dict.**
@@ -101,6 +107,7 @@ A subagent can run on a different provider and model than the conversation that 
 - **A model not in that provider's list:** "Model `deepseek` isn't in provider `deepseek-api`'s list: deepseek-v4-pro, deepseek-v4-flash. Use an exact id." That's the bare-alias pitfall: an alias that 404s and a lens that found nothing look the same downstream.
   - For a built-in family, the list is its three tier models plus an optional **extra subagent models** list. That list is kept beside the switch in the Subagent providers section, because the tier fields are the main tiers' and stay untouched.
   - For a custom endpoint, the list is the `models` field.
+  - **Model ids are validated** (letters, digits and `. _ : / -`, up to 100 characters), because half 2 puts them in an agent-facing description. An id that fails is dropped at save and at read.
 
 **The Settings check.** Settings has a **Check** button per provider. For a custom endpoint it lists models through `GET /v1/models` (reusing `ModelCatalog`) and marks each configured id found or not found, so a typo shows before a dispatch.
 
@@ -137,6 +144,10 @@ The analysis below stands whichever is ruled.
 ## Fork F: the guard tiers don't change
 
 **Ruled as written.** Half 2 states this in `docs/delegation.md` as well, when subagents can first use another provider.
+
+**The trust change (iris-dev-2's review).** A subagent on a custom endpoint makes that endpoint both an injection source and the caller: the model behind it chooses the subagent's tool calls.
+- **Unchanged:** those calls go through approval and Vibecop like any subagent's, and the subagent's result reaches the parent as tool output, sanitised by P1-P3 like any tool output.
+- **Open for the planner:** whether an approval asked by a subagent on a custom endpoint may offer **Always Allow**, or only Allow Once.
 
 
 Vibecop and the prompt-injection guard (P1 structural, P2 classifier, P3 canary) judge a subagent's calls and tool output **exactly as now, whatever model the subagent runs on**:
