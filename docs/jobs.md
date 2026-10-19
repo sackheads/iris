@@ -238,10 +238,13 @@ with no target the two are the same path. `network` is a Bool and
 defaults to `false`. Only a `mutating` job may carry a grant; a read-only job created with `mounts`,
 or with `network: true`, is refused with a sentence saying why — a read-only run has no mounts and
 no network by definition. The grant is made once, in the attended conversation that created the
-job, from what you asked for, and there is no confirmation card: the result sentence echoes it back
-— `Grant: read-write /Users/me/proj (working directory) · read-only /Users/me/deploy-key · network
-off.` — and `/jobs` repeats it, which is where you would catch a grant the model phrased wider than
-you did; the fix is a re-schedule. No run can make one: a background run is never offered the two
+job, from what you asked for, and only after you approve it: creating or replacing any job or watch
+that is not read-only asks you first (#652), on a dialog that shows the profile, each mount
+read-write or read-only, and the network, `default (on)` for a mutating job that names none. Neither
+Vibecop nor an allowlist rule can answer it for you, and it offers no Always Allow. The result
+sentence echoes the grant back — `Grant: read-write /Users/me/proj (working directory) · read-only
+/Users/me/deploy-key · network off.` — and `/jobs` repeats it. A read-only job asks nothing in an
+ordinary conversation, and no run of any job ever asks. No run can make one: a background run is never offered the two
 job-creating tools, so no job writes a grant for itself.
 
 An explicit `network: false` on a `mutating` job is itself a grant, mounts or not — the job reads
@@ -794,9 +797,9 @@ transcript to view, no call to approve and nothing for `/jobs ack` to acknowledg
 changed nothing posts no card, and Iris's own reflections stay in Iris.
 
 Because Iris reads every other conversation's cards and holds both job-creating tools, calling
-`schedule_job` or `register_directory_watcher` from Iris itself is one case where creating a job or
-watch asks you first: the call pauses on an ordinary approval dialog, and declining it creates
-nothing — unless `autoApproveTools` (the switch a headless driver or scenario run sets) is on,
+`schedule_job` or `register_directory_watcher` from Iris itself asks you first for every job or
+watch, read-only ones too (elsewhere only a job that is not read-only asks, above): the call pauses
+on the same approval dialog, and declining it creates nothing — unless `autoApproveTools` (the switch a headless driver or scenario run sets) is on,
 which exempts this dialog exactly as it exempts every other approval, since there is nobody there
 to ask. The same ask applies to any conversation that has received a message from another session
 or a background subagent's report — pinned or not, and regardless of whether the job-creating call
