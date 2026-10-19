@@ -1337,12 +1337,10 @@ struct ApprovalBannerView: View {
                 .cornerRadius(4)
             
             HStack {
-                // Fix round 2 (#187): a `humanOnly` request bypassed the allowlist on the way in so
-                // neither it nor Vibecop could stand in for this click — "Always Allow" would write
-                // a `PermissionRule` a `humanOnly` call never reads (`requestApproval` skips
-                // `permissions.isAllowed` for it entirely), so offering it here is a choice that
-                // looks like it changes future behavior and cannot.
-                if !request.humanOnly {
+                // No "Always Allow" where a rule would mean nothing or too much: a `humanOnly`
+                // request never reads the allowlist (#187), and a gate script's rule would let its
+                // text run on the host unasked (#648). See `ToolApprovalRequest.offersAlwaysAllow`.
+                if request.offersAlwaysAllow {
                     Button(action: { onResolve(.alwaysAllowGlobal) }) {
                         Text("Always Allow (Global)")
                     }
