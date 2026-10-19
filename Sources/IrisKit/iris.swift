@@ -5133,6 +5133,8 @@ actor IrisEngine {
                 case .blocked(let message): return message
                 case .unchanged: break
                 case .rewritten(let args):
+                    // Still gated whatever the hook sent: the merge only sets keys, and `stringValue`
+                    // gives every JSON value a text form, which is what is approved and what runs.
                     functionCall.args = args
                     rewrittenByHook = Self.rewriteSummary(functionCall)
                 }
@@ -5148,6 +5150,8 @@ actor IrisEngine {
             var approvedWorkspaceRoot: String?
             // The path a by-path open must still be at the moment it is opened; nil for a walked call.
             var decidedPath: String?
+            // The same conditions as `isGatedFileOrCommand`, which decided the hook above; a test
+            // holds the two together (#661 review).
             if functionCall.name == "run_command", let cmd = functionCall.args["command"]?.stringValue {
                 needsApproval = true
                 details = cmd

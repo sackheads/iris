@@ -201,6 +201,34 @@ struct HookOrderingTests {
         #expect(!detail.contains("/asked"), "\(detail)")
     }
 
+    @Test("a hook that makes a gated call's command something other than text cannot un-gate it: what is shown is what runs")
+    func nonStringRewriteIsRefused() async throws {
+        let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
+        let url = f.root.appendingPathComponent("settings.json")
+        let command = "touch '\(f.marker.path)'; printf '%s' '{\"command\": 42}'"
+        let config: [String: Any] = ["hooks": ["BeforeTool": [["matcher": "run_command", "hooks": [["type": "command", "command": command]]]]]]
+        try JSONSerialization.data(withJSONObject: config).write(to: url)
+        var hooks = HookManager()
+        hooks.configPathOverride = url.path
+        let t = try await turn(try app(f), call("run_command", ["command": .string("echo hi")]),
+                               hooks: hooks, workspace: f.workspace, engine: Recorder(), answer: .deny)
+        #expect(t.asked, "still asked: a non-text value is not a way around the gate")
+        #expect(t.shown == "42", "shown as the text that would run")
+        #expect(t.pill?.approval == nil, "denied, so nothing ran")
+    }
+
+    @Test("the hook's gate and the dispatcher's agree on which calls are gated")
+    func gatedConditionsAgree() {
+        let gated = [FunctionCall(name: "run_command", args: ["command": .string("ls")]),
+                     FunctionCall(name: "read_file", args: ["path": .string("/x")]),
+                     FunctionCall(name: "write_file", args: ["path": .string("/x"), "content": .string("y")])]
+        let ungated = [FunctionCall(name: "run_command", args: [:]),
+                       FunctionCall(name: "read_file", args: [:]),
+                       FunctionCall(name: "search_web", args: ["query": .string("q")])]
+        #expect(gated.allSatisfy(IrisEngine.isGatedFileOrCommand))
+        #expect(!ungated.contains(where: IrisEngine.isGatedFileOrCommand))
+    }
+
     @Test("Approve and run refuses a call its hook rewrites at the click, and says why")
     func approvedCardRefusesRewrite() async throws {
         let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
