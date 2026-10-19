@@ -131,6 +131,8 @@ A subagent can run on a different provider and model than the conversation that 
 3. **Guarding the rate.** A fetched rate is data that controls a spending cap, and it sits on both sides of rule 1's division. **Every guess may only overcharge.**
    - **Per field** (planner): each rate must be greater than 0, and cache read must not exceed input. A field that fails takes the bundled snapshot's value, marked estimated.
    - **A band against the snapshot** (iris-dev-2's review): a fetched rate more than 10x above or below the snapshot's row for that model is rejected, and the snapshot's value is used, marked estimated. This holds for the primary's rate (the denominator) and for delegated rates alike. Without it, a primary rate 100x too high would make a $5 subagent cost 5 cents of budget.
+   - **A model with no snapshot row** (one released after the snapshot) is banded against its family's snapshot range (planner). It may be at most 10x the family's highest rate and at least 1/10 of its lowest. Tested with a fetched row for an id the snapshot lacks.
+   - **A family with no snapshot rows at all** (for example a new custom endpoint's) gets absolute bounds (iris-dev-2's review): at least $0.01/MTok and at most $1000/MTok per field. Anything outside takes the fallback, marked estimated. Within them, the file's rate is used and marked estimated, and the docs say so.
    - **An unknown primary rate** (no row, no snapshot) uses the **lowest** known rate in the primary's family, marked estimated. A small denominator overcharges.
    - **An unknown delegated rate** is the open choice for Brian below. Its lean, (a) highest known in the family, also only overcharges.
    - **What's left:** a rate that is wrong but nonzero, within the band, and not above input can't be caught mechanically. The docs say the caps rest on the price file's accuracy within that band.
@@ -138,15 +140,22 @@ A subagent can run on a different provider and model than the conversation that 
 4. **Local loopback models** really cost $0. They still count tokens at the primary's weights for the budget, so a local runaway still stops.
 5. **Caching.** Rates are cached with their as-of date, refreshed at most daily and on a Settings Check. A failed refresh keeps the last good cache.
 
-**Open for Brian (sent via the Overseer):**
-- **Source for the built-in families.** None of Anthropic, OpenAI or Gemini publishes prices through an API. OpenRouter's `/api/v1/models` does, so an OpenRouter endpoint uses it whatever is chosen here. The options:
-  - **(i)** A community price map, LiteLLM's public JSON, fetched, with a bundled snapshot as the fallback. *(The planner's lean.)*
-  - **(ii)** A table Iris publishes with its releases.
-  - **(iii)** Rates the person types in Settings.
-- **Unknown model, or no rate:**
-  - **(a)** Charge at the highest known rate in that family, marked estimated. It never overspends and may stop early. *(The planner's lean.)*
-  - **(b)** Refuse other-family subagents with no rate inside job runs.
-  - **(c)** Use the primary's rate, marked estimated.
+**Brian's decisions on the two choices** (verbatim: "a for q2.  q1 (i+iii) sounds pretty good to start with"):
+- **Q1, the price source: (i) plus (iii).**
+  - LiteLLM's public price file supplies the defaults, with the bundled snapshot as its fallback, under rule 3's guards.
+  - Rates typed in Settings override any model.
+  - An OpenRouter endpoint uses OpenRouter's own `/api/v1/models` prices.
+  - The ledger's source field reads `litellm`, `snapshot`, `settings`, `settings (clamped)` or `openrouter`.
+- **Q2, a model with no known rate: (a).** It's charged at its family's highest known rate, marked estimated. It never overspends, and may stop early.
+- **Rejected:** (ii) a table Iris publishes; (b) refusing other-family subagents in job runs; (c) the primary's rate.
+
+**Typed rates (planner's revised ruling).** A rate kept in defaults can be set by one approved `defaults write` (#678's class), so a typed rate isn't trusted downward:
+- **Above:** a typed rate may be any value above the fetched or snapshot rate.
+- **Below:** it's held to the same floor and the same 1/10-of-snapshot limit as fetched rates, using the family range for an id missing from the snapshot. Settings refuses a lower value with a sentence naming the limit.
+- **At use time** the rate is clamped to those bounds again, so a value written behind the UI's back is clamped too. The ledger marks it `settings (clamped)`.
+- **Storage and clearing:** typed rates live in defaults, per provider and model id, decoded with `decodeIfPresent`. Clearing one goes back to the fetched rate.
+- **Tests:** a value written straight to the store below the band is clamped at use time, and an upward override is honoured.
+- **Out of scope here:** protecting the settings that guard spend and egress (base URLs, budgets, rates) is #678's job, widened by the planner to cover all three.
 
 **The LiteLLM check (iris-dev-3, 2026-10-19).** `https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json` returned HTTP 200, 2.9 MB, with 4,223 entries. Each entry gives `input_cost_per_token`, `output_cost_per_token` and `cache_read_input_token_cost` in USD per token, plus `litellm_provider`.
 
