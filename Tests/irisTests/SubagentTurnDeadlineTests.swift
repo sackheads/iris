@@ -26,6 +26,7 @@ struct SubagentTurnDeadlineTests {
         private var callCount = 0
         private var parkedCount = 0
         private var cancelledCount = 0
+        private var cancelRequestedCount = 0
         let clock: ManualClock
 
         init(clock: ManualClock, _ steps: [Step]) { self.clock = clock; self.steps = steps }
@@ -33,6 +34,9 @@ struct SubagentTurnDeadlineTests {
         var calls: Int { lock.withLock { callCount } }
         var parked: Int { lock.withLock { parkedCount } }
         var cancelled: Int { lock.withLock { cancelledCount } }
+        /// Counted in the cancellation handler, which runs on the cancelling thread as the cancel
+        /// is made, so it shows the moment of the cancel rather than when the sleep unwinds.
+        var cancelRequested: Int { lock.withLock { cancelRequestedCount } }
 
         func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
             let step: Step = lock.withLock {
@@ -47,7 +51,11 @@ struct SubagentTurnDeadlineTests {
             case .park:
                 lock.withLock { parkedCount += 1 }
                 do {
-                    try await Task.sleep(nanoseconds: 600 * 1_000_000_000)
+                    try await withTaskCancellationHandler {
+                        try await Task.sleep(nanoseconds: 600 * 1_000_000_000)
+                    } onCancel: { [lock] in
+                        lock.withLock { cancelRequestedCount += 1 }
+                    }
                 } catch {
                     lock.withLock { cancelledCount += 1 }
                     throw error
@@ -55,6 +63,14 @@ struct SubagentTurnDeadlineTests {
                 return SubagentGoalLoopTests.text("late")
             }
         }
+    }
+
+    /// What the settle hook read at the first MainActor hop, if it ran.
+    final class Seen: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: Int?
+        func set(_ v: Int) { lock.withLock { stored = v } }
+        var value: Int? { lock.withLock { stored } }
     }
 
     final class Finished: @unchecked Sendable {
@@ -227,9 +243,6 @@ struct SubagentTurnDeadlineTests {
 
     // MARK: Review fixes (#403)
 
-    /// Blocks the calling thread: from a MainActor test, that holds the main actor.
-    static func block(seconds: TimeInterval) { Thread.sleep(forTimeInterval: seconds) }
-
     @Test("a turn that ends just under the limit is followed by a turn that completes: the gap between turns does not count")
     func gapBetweenTurnsDoesNotCount() async throws {
         // Turn 1 takes 599 s of 600, and 5 s pass while no turn runs: the reprompt pause.
@@ -302,6 +315,11 @@ struct SubagentTurnDeadlineTests {
         let parent = UUID(); state.createNewConversation(id: parent)
         let (config, teardown) = config(turnTimeout: 600); defer { teardown() }
 
+        // The first MainActor hop after the poll loop runs this hook. Turn 2's cancel must already
+        // have been made by then: only the halt at the verdict comes before it. Read, not held, so
+        // no other suite waits on the main actor for this test (#637; it once slept on it, #410).
+        let atFirstHop = Seen()
+        state.beforeSubagentSettle = { _ in atFirstHop.set(client.cancelRequested) }
         let task = Task {
             await SubagentManager.shared.runSubagent(
                 role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
@@ -310,15 +328,10 @@ struct SubagentTurnDeadlineTests {
         }
         #expect(await eventually { client.parked == 1 }, "turn 2 is under way")
         clock.advance(by: 700)
-        // Hold the main actor through the verdict: the cleanup after the poll loop needs it, so
-        // turn 2 can only be cancelled while it is held if the timeout itself halted the loop.
-        // Held until the cancel lands, not for a fixed time a busy suite's poll can outlast (#410).
-        let holdUntil = TestClock.deadline(10)
-        while client.cancelled == 0, TestClock.now() < holdUntil { Self.block(seconds: 0.01) }
-        let cancelledWhileMainHeld = client.cancelled
         let outcome = try await value(of: task)
 
-        #expect(cancelledWhileMainHeld == 1, "turn 2 was cancelled at the verdict, not after a MainActor hop")
+        #expect(atFirstHop.value == 1, "turn 2 was cancelled at the verdict, before the first MainActor hop")
+        #expect(await eventually { client.cancelled == 1 }, "turn 2's call unwound")
         #expect(outcome.status == .timedOut)
         try? await Task.sleep(nanoseconds: 300_000_000)
         #expect(client.calls == 2, "nothing ran after the timeout")
