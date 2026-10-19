@@ -22,14 +22,21 @@ enum HomeMount {
         }
     }
 
+    /// Whether `path` is the home folder, `/`, or a folder holding home. Shared with
+    /// `JobGrant.resolve`, so a grant never depends on where Iris's own folder happens to be (#649).
+    static func isHomeOrAbove(_ path: String, home: String) -> Bool {
+        let p = IrisPaths.canonicalPath(IrisEngine.expandTilde(path)).lowercased()
+        let h = IrisPaths.canonicalPath(home).lowercased()
+        return p == "/" || p == h || h.hasPrefix(p + "/")
+    }
+
     /// Why a sandbox may not mount `path` read-write without the opt-in, or nil when it may.
     /// `release`: in a dev build, the installed app's settings are guarded too, as `JobGrant`
     /// guards its home.
     static func reason(for path: String, home: String = NSHomeDirectory(), paths: IrisPaths = .default,
                        release: IrisPaths? = BuildIdentity.current == .dev ? .release : nil) -> String? {
         let p = IrisPaths.canonicalPath(IrisEngine.expandTilde(path)).lowercased()
-        let h = IrisPaths.canonicalPath(home).lowercased()
-        if p == "/" || p == h || h.hasPrefix(p + "/") {
+        if isHomeOrAbove(p, home: home) {
             return "it is your home folder or a folder above it, so the sandbox could rewrite your shell's startup files"
         }
         if touches(p, startupLocations, home: home) {

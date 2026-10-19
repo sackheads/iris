@@ -131,6 +131,28 @@ struct JobGrantResolveTests {
 
     private func canonical(_ url: URL) -> String { IrisPaths.canonicalPath(url.path) }
 
+    /// #649: a folder above home is refused by its own rule, not because Iris's folder is inside
+    /// it. The fixture keeps Iris's root outside the folder that holds home.
+    @Test("a parent of home is refused even when Iris's folder is not inside it")
+    func parentOfHomeRefusedWherever() throws {
+        let f = try Self.fixture(); defer { f.tearDown() }
+        let outer = f.base.appendingPathComponent("users")
+        let home = outer.appendingPathComponent("me")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let result = JobGrant.resolve(mounts: [outer.path], network: nil, profile: .mutating, paths: f.paths,
+                                      home: home.path, isVolume: { _ in false }, identity: .release, release: f.paths)
+        #expect(result == .failure(ToolMessage(JobGrant.tooBroad(canonical(outer)))))
+        // Home itself, as before, and a folder inside home still resolves.
+        let homeResult = JobGrant.resolve(mounts: [home.path], network: nil, profile: .mutating, paths: f.paths,
+                                          home: home.path, isVolume: { _ in false }, identity: .release, release: f.paths)
+        #expect(homeResult == .failure(ToolMessage(JobGrant.tooBroad(canonical(home)))))
+        let proj = home.appendingPathComponent("proj")
+        try FileManager.default.createDirectory(at: proj, withIntermediateDirectories: true)
+        let inside = JobGrant.resolve(mounts: [proj.path], network: nil, profile: .mutating, paths: f.paths,
+                                      home: home.path, isVolume: { _ in false }, identity: .release, release: f.paths)
+        #expect((try? inside.get()) != nil)
+    }
+
     @Test("in a dev process a mount of the release home is refused, worded for the installed app's directory")
     func releaseHomeMountFromDev() throws {
         let f = try Self.fixture(); defer { f.tearDown() }

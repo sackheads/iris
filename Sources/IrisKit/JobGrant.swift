@@ -130,6 +130,9 @@ extension JobGrant {
             case .protectedRelease: return .failure(ToolMessage(protectedRelease(source)))
             case nil: break
             }
+            // Home and every folder above it, by its own rule (#649): a parent of home used to be
+            // refused only because Iris's folder sat inside it.
+            if HomeMount.isHomeOrAbove(source, home: home) { return .failure(ToolMessage(tooBroad(source))) }
             if isCredentialStore(source, home: home) { return .failure(ToolMessage(credentialStoreRefusal(source))) }
             // #611: nor a place a Mac program runs from or reads as configuration, in either direction.
             if HomeMount.touches(source, HomeMount.startupLocations, home: home) {
