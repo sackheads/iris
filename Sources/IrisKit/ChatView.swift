@@ -192,13 +192,22 @@ struct ChatView: View {
                 // #465: the button starts a plain conversation, as before; the menu beside it starts
                 // one on an agent profile, read when it opens so a new or edited file shows at once.
                 // Two controls, not one Menu with primaryAction: as a button-style menu it dropped
-                // the prominent style and the full-width label, which truncated to "New C...".
-                HStack(spacing: 6) {
+                // the prominent style and the full-width label, which truncated to "New C...". The
+                // menu is a bare icon so the button keeps the width, and the label shortens to "New"
+                // in a sidebar too narrow for the whole of it.
+                HStack(spacing: 8) {
                     Button(action: { state.createNewConversation(); composerShouldFocus = true }) {
-                        HStack {
-                            Image(systemName: "plus.message.fill")
-                            Text("New Conversation")
+                        ViewThatFits(in: .horizontal) {
+                            HStack {
+                                Image(systemName: "plus.message.fill")
+                                Text("New Conversation")
+                            }
+                            HStack {
+                                Image(systemName: "plus.message.fill")
+                                Text("New")
+                            }
                         }
+                        .lineLimit(1)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
                     }
@@ -207,10 +216,10 @@ struct ChatView: View {
                         agentProfileMenu
                     } label: {
                         Image(systemName: "person.crop.square")
-                            .padding(.vertical, 8)
+                            .font(.title3)
                     }
-                    .menuStyle(.button)
-                    .buttonStyle(.bordered)
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
                     .fixedSize()
                     .help("New conversation on an agent profile")
                     .accessibilityLabel("New conversation on an agent profile")
