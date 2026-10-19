@@ -130,6 +130,8 @@ struct ProviderRoute: Sendable, Equatable, CustomStringConvertible {
 
     /// Never the key.
     var description: String { "ProviderRoute(\(providerId), \(model))" }
+
+    var isEndpoint: Bool { if case .endpoint = target { return true } else { return false } }
 }
 
 /// One provider as a subagent could see it: the primary, a built-in family, or an endpoint.
@@ -267,7 +269,7 @@ extension ConfigManager {
         let keychain = explicitKeychain ?? guardedKeychain ?? .shared
         let primary = LLMProvider(rawValue: primaryProvider) ?? .gemini
         let builtIns = subagentBuiltIns
-        let secrets = keychain.loadSecrets()
+        let secrets = secretsSnapshot(keychain)
         let families = LLMProvider.allCases.map { family -> RegisteredProvider in
             let isPrimary = family == primary
             let use = builtIns[family.rawValue] ?? BuiltInSubagentUse()
@@ -331,7 +333,7 @@ extension ConfigManager {
         guard let endpoint = subagentEndpoints.first(where: { $0.id == entry.id }) else {
             return .failure(.unknownProvider(providerId, usable: usable))
         }
-        let key = keychain.loadSecrets()[ProviderSlug.secretName(endpoint.id)] ?? ""
+        let key = secretsSnapshot(keychain)[ProviderSlug.secretName(endpoint.id)] ?? ""
         return .success(ProviderRoute(providerId: endpoint.id,
                                       target: .endpoint(baseURL: endpoint.baseURL, apiKey: key), model: model))
     }
@@ -370,7 +372,7 @@ extension ConfigManager {
             secrets[ProviderSlug.secretName(clean.id)] = trimmed.isEmpty ? nil : trimmed
             secrets[ProviderSlug.originName(clean.id)] = trimmed.isEmpty ? nil : EndpointURL.origin(of: clean.baseURL)
         }
-        keychain.saveSecrets(secrets)
+        keychain.saveSecrets(secrets); secretsCache = nil
 
         list.removeAll { $0.id == (oldId ?? clean.id) }
         list.append(clean)
@@ -384,18 +386,18 @@ extension ConfigManager {
         var secrets = keychain.loadSecrets()
         let hadKey = secrets.removeValue(forKey: ProviderSlug.secretName(id)) != nil
         let hadOrigin = secrets.removeValue(forKey: ProviderSlug.originName(id)) != nil
-        if hadKey || hadOrigin { keychain.saveSecrets(secrets) }
+        if hadKey || hadOrigin { keychain.saveSecrets(secrets); secretsCache = nil }
     }
 
     func subagentEndpointHasKey(_ id: String, keychain explicitKeychain: KeychainManager? = nil) -> Bool {
         let keychain = explicitKeychain ?? guardedKeychain ?? .shared
-        return !(keychain.loadSecrets()[ProviderSlug.secretName(id)] ?? "").isEmpty
+        return !(secretsSnapshot(keychain)[ProviderSlug.secretName(id)] ?? "").isEmpty
     }
 
     /// The stored key, for Check only. Never displayed.
     func subagentEndpointKey(_ id: String, keychain explicitKeychain: KeychainManager? = nil) -> String {
         let keychain = explicitKeychain ?? guardedKeychain ?? .shared
-        return keychain.loadSecrets()[ProviderSlug.secretName(id)] ?? ""
+        return secretsSnapshot(keychain)[ProviderSlug.secretName(id)] ?? ""
     }
 
     func setSubagentUse(_ use: BuiltInSubagentUse, for family: LLMProvider) {
@@ -425,7 +427,7 @@ extension ConfigManager {
             return .failure(.unknownProvider(id, usable: []))
         }
         guard endpoint.needsKey else { return .success((endpoint.baseURL, "")) }
-        let secrets = keychain.loadSecrets()
+        let secrets = secretsSnapshot(keychain)
         let key = secrets[ProviderSlug.secretName(id)] ?? ""
         guard !key.isEmpty else { return .failure(.noKey(id, isBuiltIn: false)) }
         guard secrets[ProviderSlug.originName(id)] == EndpointURL.origin(of: endpoint.baseURL) else {

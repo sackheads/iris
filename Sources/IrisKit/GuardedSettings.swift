@@ -285,6 +285,7 @@ extension ConfigManager {
         for k in GuardedKey.allCases { dict[k.rawValue] = guardedValue(k) }
         dict[GuardedSettings.markerKey] = "1"
         keychain.saveSecrets(dict)
+        secretsCache = nil
         // The item holds every guarded value again, so the refusal and the notice stop applying.
         if guardedState == .missing { guardedState = .normal }
     }
@@ -306,7 +307,7 @@ extension ConfigManager {
     func guardedBlob(_ key: GuardedKey) -> String {
         guard let keychain = guardedKeychain else { return store.string(forKey: key.rawValue) ?? "" }
         guard guardedState == .normal else { return "" }
-        let value = keychain.loadSecrets()[key.rawValue] ?? ""
+        let value = secretsSnapshot(keychain)[key.rawValue] ?? ""
         return key.isValid(value) ? value : ""
     }
 
@@ -319,6 +320,18 @@ extension ConfigManager {
         dict[key.rawValue] = value
         dict[GuardedSettings.markerKey] = "1"
         keychain.saveSecrets(dict)
+        secretsCache = nil
         if guardedState == .missing { guardedState = .normal }
+    }
+
+    /// The secrets item for reads: cached for this manager's own keychain, read once, and empty
+    /// when the item couldn't be read at launch (#678), so no other-family route can come of it.
+    func secretsSnapshot(_ keychain: KeychainManager) -> [String: String] {
+        guard keychain === guardedKeychain else { return keychain.loadSecrets() }
+        if case .unreadable = guardedState { return [:] }
+        if let secretsCache { return secretsCache }
+        let read = keychain.loadSecrets()
+        secretsCache = read
+        return read
     }
 }
