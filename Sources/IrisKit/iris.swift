@@ -1912,11 +1912,45 @@ actor IrisEngine {
         await withEngineTurn(conversationId, lifetime: lifetime) {
             let turnID = PerformanceProfiler.shared.beginTurn(label: input, source: source)
             let turnStart = UptimeClock.live.now()   // uptime: a sleep is not time spent (#640)
-            await PerformanceProfiler.$currentTurnID.withValue(turnID) {
-                await processInputBody(input, source: source, conversationId: conversationId, inlineParts: inlineParts, restrictToGoalComplete: restrictToGoalComplete, turnBudget: turnBudget, usageSink: usageSink, goalFacts: goalFacts)
+            // #465: the profile this turn runs with, and what its `tools:` list leaves the turn,
+            // bound to this turn's task tree (its tool dispatch included), so a turn running beside
+            // it, or a reprompt it schedules, never reads or changes this turn's scope.
+            let reflecting = Self.isReflectionTurn
+            let (agentProfile, scope) = await turnAgentProfile(for: conversationId, reflecting: reflecting)
+            await Self.$isReflectionTurn.withValue(false) {
+                await Self.$agentToolScope.withValue(scope) {
+                    await PerformanceProfiler.$currentTurnID.withValue(turnID) {
+                        await processInputBody(input, source: source, conversationId: conversationId, inlineParts: inlineParts, restrictToGoalComplete: restrictToGoalComplete, turnBudget: turnBudget, usageSink: usageSink, goalFacts: goalFacts, agentProfile: agentProfile)
+                    }
+                }
             }
             PerformanceProfiler.shared.endTurn(turnID, totalMs: UptimeClock.live.seconds(since: turnStart) * 1000.0)
         }
+    }
+
+    /// Set by `AppState.runReflection` around its turn, and read once as that turn begins (#465
+    /// part 2): the reflection's own task, never a turn beside it or one it schedules.
+    @TaskLocal static var isReflectionTurn = false
+    /// The current turn's agent-profile tool scope (#465 part 2). nil: no profile, or no `tools:`.
+    @TaskLocal static var agentToolScope: AgentToolScope?
+
+    /// The profile a turn of `conversationId` runs with (main principal only), and the tool scope
+    /// its `tools:` list sets. A subagent takes the scope of the conversation it works for, so
+    /// delegation cannot widen it; the evaluator keeps its own toolset.
+    private func turnAgentProfile(for conversationId: UUID, reflecting: Bool) async -> (AgentProfile?, AgentToolScope?) {
+        let localState = state
+        let principal = self.principal
+        let (own, scoped) = await MainActor.run { () -> (AgentProfile?, AgentProfile?) in
+            switch principal {
+            case .main:
+                let own = localState?.resolveAgentProfile(for: conversationId)
+                return (own, own)
+            case .subagent: return (nil, localState?.delegatedAgentProfile(for: conversationId))
+            case .evaluator: return (nil, nil)
+            }
+        }
+        guard let scoped, scoped.tools != nil else { return (own, nil) }
+        return (own, AgentToolScope(profile: scoped, reflecting: reflecting && principal == .main))
     }
 
     /// Top-k cap on the facts JIT injects into one turn.
@@ -2019,7 +2053,7 @@ actor IrisEngine {
         return !entityWords.isEmpty && entityWords.allSatisfy(contentWords.contains) ? nil : entity
     }
 
-    private func processInputBody(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil, usageSink: (any TurnUsageSink)? = nil, goalFacts: GoalFacts? = nil) async {
+    private func processInputBody(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil, usageSink: (any TurnUsageSink)? = nil, goalFacts: GoalFacts? = nil, agentProfile: AgentProfile? = nil) async {
         if source == "UI" {
             loopDetectors[conversationId] = nil
             blockedResultTrackers[conversationId] = nil
@@ -2088,27 +2122,7 @@ actor IrisEngine {
         // guard tier's provisioning state (5a Task 7). An unchanged turn gets back the identical
         // `Content` it got last time, keeping the system prompt byte-stable for the provider's
         // prompt cache (5a §0.2).
-        // #465: the conversation's agent profile, resolved each turn from its file (or its last
-        // good read). Only the main principal's own conversations have one.
-        let agentProfile = principal == .main
-            ? await MainActor.run { localState?.resolveAgentProfile(for: conversationId) } : nil
         let currentSystemPrompt = await assembledSystemPrompt(workspacePath: workspacePath, agentProfile: agentProfile)
-        // #465 part 2: what the profile's `tools:` list leaves this turn. A subagent takes the
-        // profile of the conversation it works for, so delegation cannot widen it; the evaluator
-        // keeps its own toolset. Set per turn, for the tool list below and for dispatch.
-        let scopeProfile: AgentProfile?
-        switch principal {
-        case .main: scopeProfile = agentProfile
-        case .subagent: scopeProfile = await MainActor.run { localState?.delegatedAgentProfile(for: conversationId) }
-        case .evaluator: scopeProfile = nil
-        }
-        if let scopeProfile, scopeProfile.tools != nil {
-            let reflecting = principal == .main
-                ? await MainActor.run { localState?.isReflecting(conversationId) ?? false } : false
-            agentToolScopes[conversationId] = AgentToolScope(profile: scopeProfile, reflecting: reflecting)
-        } else {
-            agentToolScopes[conversationId] = nil
-        }
 
         // Read once for the gates below that all ask about this conversation: whether it is an
         // unattended run, whether it has a goal to complete, what a job run of it may do, and
@@ -2624,7 +2638,7 @@ actor IrisEngine {
 
         // #465 part 2: a profile's `tools:` list, after the sticky union and `hardStrip`, so a
         // sticky tool cannot widen it and nothing a strip removed comes back.
-        if let scope = agentToolScopes[conversationId] {
+        if let scope = Self.agentToolScope {
             toolsList = scope.narrow(toolsList)
         }
 
@@ -4179,10 +4193,6 @@ actor IrisEngine {
         "Not available: this conversation's agent profile `\(profile)` doesn't include `\(tool)`. Use the tools you have, and if the task needs this one, say so to the user."
     }
 
-    /// Each conversation's agent-profile tool scope for its current turn (#465 part 2), set at
-    /// the turn's start. Absent: no profile, or one without a `tools:` list.
-    private var agentToolScopes: [UUID: AgentToolScope] = [:]
-
     /// The conversations whose turn met a `.profile` denial. Set by `profileRefusal`
     /// (actor-isolated, so the concurrent tool batch can write it safely), taken by the
     /// model-round loop, which ends the turn on it. The tool it names comes from the recorded
@@ -4313,7 +4323,7 @@ actor IrisEngine {
 
         // #465 part 2: a call outside the profile's list is refused, as the declaration above
         // stops only a model that plays by it.
-        if let scope = agentToolScopes[conversationId], !scope.allows(functionCall.name) {
+        if let scope = Self.agentToolScope, !scope.allows(functionCall.name) {
             return Self.agentProfileDeniedToolResult(tool: functionCall.name, profile: scope.profile.name)
         }
 

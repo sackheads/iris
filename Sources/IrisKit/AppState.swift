@@ -1833,9 +1833,6 @@ class AppState {
     For a skill, set `title`/`tags` with `update_skill`'s own `title`/`tags` parameters — not `write_file` — and only pass the field that's actually missing or stale; omitting the other leaves it as it was. Verify that your cross-links between files are still valid, and reorganize or fix any broken links. Output a transparent summary of the gist of the updates and grooming performed for the user. If nothing needs updating, just reply 'No memory consolidation needed at this time.'
     """)
 
-    /// Whether `id`'s current turn is a memory reflection: `runReflection` holds this for its turn.
-    func isReflecting(_ id: UUID) -> Bool { reflectionSteerPoints[id] != nil }
-
     /// What a reflection says when it changed nothing (both prompts ask for exactly this). Matched
     /// as a prefix of the trimmed reply; such a reflection posts no card.
     static let noConsolidationReply = "No memory consolidation needed at this time."
@@ -1860,7 +1857,10 @@ class AppState {
     func runReflection(_ prompt: String, in convId: UUID, moveReplyToIris: Bool) async {
         let before = conversations.first { $0.id == convId }?.messages.count ?? 0
         reflectionSteerPoints[convId] = .some(nil)
-        await engine.processInput(prompt, source: "System", conversationId: convId)
+        // #465 part 2: marks this turn alone as a reflection, for a profile's tool narrowing.
+        await IrisEngine.$isReflectionTurn.withValue(true) {
+            await engine.processInput(prompt, source: "System", conversationId: convId)
+        }
         let steerPoint = reflectionSteerPoints.removeValue(forKey: convId) ?? nil
         // Stopped mid-turn: whatever it said so far is not a report of what it changed.
         guard !Task.isCancelled,
