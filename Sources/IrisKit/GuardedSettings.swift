@@ -101,6 +101,12 @@ enum GuardedSettings {
     /// In the item: guarded values have been written here. In defaults: the upgrade has run.
     static let markerKey = "GUARDED_SETTINGS_V1"
 
+    /// Settings' banner, only while the item couldn't be read: an edit then lasts until Iris quits.
+    static func settingsBanner(for state: State) -> String? {
+        guard case .unreadable = state else { return nil }
+        return "Changes here last only until Iris quits: its Keychain item couldn't be read at launch, so nothing is saved to it."
+    }
+
     static let upgradeNotice = "Iris moved its protected settings into the Keychain (first launch of this version). If you didn't just update Iris, something reset them: check Settings → Advanced (Sandboxing, Job Limits, Agent Limits) and Settings → Vibecop."
 
     /// The approval dialog's warning when a call's text names Iris's own keychain service or

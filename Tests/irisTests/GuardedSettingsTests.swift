@@ -191,6 +191,8 @@ struct GuardedSettingsTests {
         keychain.saveSecrets(["GEMINI_API_KEY": "would-replace-everything"])
         keychain.simulateReadFailure(nil)
         #expect(keychain.loadSecrets() == before, "the item is exactly as it was")
+        #expect(GuardedSettings.settingsBanner(for: config.guardedState) != nil, "Settings says edits won't be saved")
+        #expect(GuardedSettings.settingsBanner(for: .normal) == nil && GuardedSettings.settingsBanner(for: .missing) == nil)
     }
 
     @Test("an item deleted after the upgrade: protective values, and the next Settings change saves all of them")
