@@ -1729,6 +1729,22 @@ class AppState {
 
     /// Starts `id` on the profile named `name`: the link, its first good read as the fallback,
     /// and its role when no other active session holds it (Fork A: never moved from its holder).
+    /// What a profile's lists can name, as last gathered (#465). Nil until the first refresh: the
+    /// picker then lists nothing as unknown rather than guessing.
+    @ObservationIgnored var knownCapabilities: KnownCapabilities?
+
+    /// Gathers the tool, MCP and skill names a profile may use. Run when the sidebar appears and
+    /// after a profile starts a conversation, so a newly installed skill or server is counted.
+    func refreshKnownCapabilities() async {
+        let skills = await SkillManager().listSkills()
+        let servers = await MCPManager.shared.getServerNames()
+        let mcpTools = await MCPManager.shared.getGeminiTools().map(\.name)
+        knownCapabilities = KnownCapabilities(
+            tools: IrisEngine.allDeclaredToolNames.union(mcpTools),
+            mcpServers: Set(servers),
+            skills: Set(skills.flatMap { [$0.name.lowercased(), $0.folderName.lowercased()] }))
+    }
+
     private func applyAgentProfile(_ name: String, to id: UUID) {
         guard let idx = conversations.firstIndex(where: { $0.id == id }), !conversations[idx].isPinned else { return }
         guard case .loaded(let profile) = agentProfiles.load(name) else {
@@ -1745,6 +1761,9 @@ class AppState {
             } else {
                 conversations[idx].role = role
             }
+        }
+        if let line = knownCapabilities?.unknownLine(for: profile) {
+            appendMessage(role: .system, content: "[agent profile] `\(name)` " + line.prefix(1).lowercased() + line.dropFirst(), to: id)
         }
         markChanged(id, .metadata)
     }

@@ -230,3 +230,32 @@ struct AgentToolScope: Equatable, Sendable {
         tools.filter { allows($0.name) }
     }
 }
+
+/// The names a profile's `tools:` and `skills:` may use, as this launch knows them (#465):
+/// every tool Iris can declare, the MCP servers and their tools, and the installed skills.
+struct KnownCapabilities: Equatable, Sendable {
+    var tools: Set<String>
+    var mcpServers: Set<String>
+    /// Skill names and folder names, lowercased: `discoverSkills` matches either.
+    var skills: Set<String>
+
+    /// The names in `profile`'s lists that match nothing here. They are ignored, as the spec
+    /// says, and listed so a typo doesn't silently narrow a conversation to nothing.
+    func unknown(in profile: AgentProfile) -> (tools: [String], skills: [String]) {
+        let unknownTools = (profile.tools ?? []).filter { name in
+            if name.hasPrefix("mcp:") { return !mcpServers.contains(String(name.dropFirst(4))) }
+            return !tools.contains(name)
+        }
+        let unknownSkills = (profile.skills ?? []).filter { !skills.contains($0.lowercased()) }
+        return (unknownTools, unknownSkills)
+    }
+
+    /// One line for the picker and the start notice, or nil when every name is known.
+    func unknownLine(for profile: AgentProfile) -> String? {
+        let (tools, skills) = unknown(in: profile)
+        var parts: [String] = []
+        if !tools.isEmpty { parts.append("tools Iris doesn't have: " + tools.joined(separator: ", ")) }
+        if !skills.isEmpty { parts.append("skills it can't find: " + skills.joined(separator: ", ")) }
+        return parts.isEmpty ? nil : "Names " + parts.joined(separator: "; ") + ". They are ignored."
+    }
+}

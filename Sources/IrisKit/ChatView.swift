@@ -185,6 +185,8 @@ struct ChatView: View {
                         previousArchivedSelection: old, selection: state.selectedConversationId)
                 }
                 .searchable(text: $sidebarQuery, placement: .sidebar, prompt: "Search conversations")
+                // #465: what a profile's tools and skills lists can name, for the picker.
+                .task { await state.refreshKnownCapabilities() }
                 .task(id: sidebarQuery) {
                     await runSidebarSearch()
                 }
@@ -566,10 +568,13 @@ struct ChatView: View {
             case .loaded(let profile):
                 Button {
                     state.createNewConversation(agentProfile: profile.name); composerShouldFocus = true
+                    Task { await state.refreshKnownCapabilities() }
                 } label: {
-                    Text(verbatim: profile.role.flatMap { $0 == profile.name ? nil : "\(profile.name) (\($0))" } ?? profile.name)
+                    let base = profile.role.flatMap { $0 == profile.name ? nil : "\(profile.name) (\($0))" } ?? profile.name
+                    Text(verbatim: state.knownCapabilities?.unknownLine(for: profile) == nil ? base : base + " (unknown names)")
                 }
-                .help(String(profile.prompt.prefix(200)))
+                .help(state.knownCapabilities?.unknownLine(for: profile).map { $0 + "\n\n" + profile.prompt.prefix(200) }
+                      ?? String(profile.prompt.prefix(200)))
             case .unreadable(let why):
                 Button {} label: { Text(verbatim: "\(entry.name): \(why)") }.disabled(true)
             case .missing:
