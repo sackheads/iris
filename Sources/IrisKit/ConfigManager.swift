@@ -43,7 +43,7 @@ class ConfigManager: @unchecked Sendable {
     /// over its own suite that passes no keychain, which keeps them in that suite as before.
     @ObservationIgnored let guardedKeychain: KeychainManager?
     /// What this launch found in the secrets item for the guarded settings.
-    @ObservationIgnored private(set) var guardedState: GuardedSettings.State = .normal
+    @ObservationIgnored var guardedState: GuardedSettings.State = .normal
     /// Launch notices about the guarded settings, taken once by `AppState`.
     @ObservationIgnored var guardedNotices: [String] = []
 

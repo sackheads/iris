@@ -157,6 +157,7 @@ struct GuardedSettingsTests {
         #expect(saved["JOB_PER_RUN_TOKEN_BUDGET"] == "500")
         #expect(saved["ENABLE_SANDBOXING"] == "true" && saved["ENABLE_VIBECOP"] == "true",
                 "the untouched keys keep the protective values the person was shown")
+        #expect(!config.refusesHostWithoutRuntime, "saved again: the refusal ends without a relaunch")
         #expect(ConfigManager(store: store, guardedSecrets: keychain).guardedState == .normal)
     }
 
@@ -179,6 +180,7 @@ struct GuardedSettingsTests {
         #expect(GuardedSettings.approvalWarning(for: "security delete-generic-password -s com.iris.secrets.dev") != nil)
         #expect(GuardedSettings.approvalWarning(for: "defaults write com.bnaylor.iris.dev JOB_DAILY_TOKEN_BUDGET 1") != nil)
         #expect(GuardedSettings.approvalWarning(for: "DEFAULTS WRITE COM.BNAYLOR.IRIS X 1") != nil)
+        #expect(GuardedSettings.approvalWarning(for: "defaults delete \"$D\" GUARDED_SETTINGS_V1") != nil)
         #expect(GuardedSettings.approvalWarning(for: "ls -la ~/src") == nil)
     }
 }
