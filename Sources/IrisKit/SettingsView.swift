@@ -1010,6 +1010,10 @@ struct SettingsView: View {
                             value: Binding(get: { config.maxSubagentIterations },
                                            set: { config.maxSubagentIterations = max(1, $0) }), in: 1...100)
                         .help("Hard cap on a subagent's goal-loop turns. A subagent that reaches it without calling goal_complete ends as failed, with no summary turn.")
+                    Stepper("Loop tick limit: \(config.loopTickCap)",
+                            value: Binding(get: { config.loopTickCap },
+                                           set: { config.loopTickCap = max(1, $0) }), in: 1...500)
+                        .help("How many times a /loop runs before it stops. Each tick sends the whole conversation so far, so each one costs a little more than the last. Running /loop again renews it.")
                     // Steps a minute at a time over the stored seconds, so a hand-edited 90 stays 90.
                     Stepper("Subagent turn timeout: \(SubagentManager.describe(seconds: Double(config.subagentTurnTimeoutSeconds)))",
                             value: Binding(get: { config.subagentTurnTimeoutSeconds },

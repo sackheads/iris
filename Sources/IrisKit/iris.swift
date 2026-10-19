@@ -595,6 +595,10 @@ actor IrisEngine {
     /// The source the harness's own turns arrive under: /rename, the automatic rename, the /goal
     /// draft, reflection, the goal loop's reprompts.
     nonisolated static let systemSource = "System"
+    /// The source a `/loop` tick arrives under (#190). Not `systemSource`, so no trigger prefix in
+    /// the person's loop prompt can act as one (`isTrigger`), and its text is framed by
+    /// `ConversationLoop.tickText`, without `systemEventAnalysis`'s "briefly acknowledge it".
+    nonisolated static let loopSource = "Loop"
 
     /// Whether this turn is the harness's own `prefix` trigger, which offers that flow's tool for
     /// one turn (invariant 6). The prefix alone is text: a job's prompt, a peer's message or a
@@ -2032,6 +2036,8 @@ actor IrisEngine {
             text = input
         } else if source.hasPrefix(Self.jobSourcePrefix) {
             text = Self.jobRunFraming(name: String(source.dropFirst(Self.jobSourcePrefix.count)), input: input)
+        } else if source == Self.loopSource {
+            text = input
         } else if input.hasPrefix("System Event [") {
             text = input + eventAnalysis
         } else if source == Self.peerSource {
@@ -3179,6 +3185,14 @@ actor IrisEngine {
             }
         }
 
+        // #190: a conversation's `/loop` schedules its next tick at the end of every turn in it (a
+        // tick's, or one the person or a peer started), as `/goal` schedules its next reprompt.
+        // Not after a Stop: Stop keeps the loop and re-arms it with the next turn, as it keeps a
+        // goal. Never for an unattended run, which cannot hold a loop.
+        if activeGoalResult.0 == nil, !Task.isCancelled, !isUnattended {
+            await armLoopTick(for: conversationId)
+        }
+
         // `goal_complete`'s reflection, now that its result is in history (#474). Not after a
         // Stop: the turn that was stopped would have run it, and the user asked for nothing more.
         // Not for an unattended run either: the run is over when this turn returns, so the check
@@ -3270,6 +3284,44 @@ actor IrisEngine {
             await self.processInput(reprompt, source: "System", conversationId: conversationId, goalFacts: .carry)
         }
         return goalLoop.setReprompt(task, token: token, for: conversationId)
+    }
+
+    /// Schedules the conversation's next `/loop` tick, its interval from now on uptime (#190), on
+    /// the goal loop's reprompt slot: Stop and a typed message cancel it as they cancel a reprompt.
+    /// A paused loop, or none, schedules nothing; one with no ticks left ends with a line saying so.
+    func armLoopTick(for conversationId: UUID) async {
+        let localState = state
+        let loop = await MainActor.run { localState?.armableLoop(for: conversationId) }
+        guard let loop else { return }
+        guard loop.ticksLeft > 0 else {
+            await MainActor.run { localState?.endLoopAtCap(for: conversationId) }
+            return
+        }
+        let goalLoop = self.goalLoop
+        let token = UUID()
+        let task = Task { [weak self] in
+            defer {
+                goalLoop.finishReprompt(token: token, for: conversationId)
+                Task { @MainActor in localState?.drainPendingUserMessages(for: conversationId) }
+            }
+            await UptimeWait.seconds(loop.intervalSeconds)
+            guard !Task.isCancelled, let self else { return }
+            // Taken on the main actor: a tick for an ended, paused or replaced loop is no tick at
+            // all, and one landing while a turn runs is skipped, the next an interval away.
+            switch await MainActor.run(body: { localState?.takeLoopTick(for: conversationId, loopId: loop.id) ?? .none }) {
+            case .none:
+                return
+            case .busy:
+                guard !Task.isCancelled else { return }
+                await self.armLoopTick(for: conversationId)
+            case .run(let tick):
+                guard !Task.isCancelled else { return }
+                await self.processInput(tick, source: Self.loopSource, conversationId: conversationId, goalFacts: .carry)
+            }
+        }
+        if goalLoop.setReprompt(task, token: token, for: conversationId) {
+            await MainActor.run { localState?.loopNextTick[conversationId] = Date().addingTimeInterval(loop.intervalSeconds) }
+        }
     }
 
     /// What the parent is told when a subagent spends its iteration cap without `goal_complete`.

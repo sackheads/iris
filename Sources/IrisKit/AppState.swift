@@ -224,6 +224,8 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// by the person in the UI, never by a tool; a workspace moved elsewhere is not covered. Nil
     /// is no opt-in.
     var homeWritableOptIn: String?
+    /// This conversation's `/loop`, if one is set (#190). Comes back paused after a relaunch.
+    var loop: ConversationLoop?
 
     /// #465: the agent profile this conversation was started with, by name: the link, with the
     /// file (`config/agent-profiles/<name>.md`) as the source. Set only at creation from the New
@@ -280,7 +282,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop
     }
 
     init(from decoder: Decoder) throws {
@@ -323,6 +325,8 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         // decode drops only itself; the link stays and the file is read again.
         agentProfile = try container.decodeIfPresent(String.self, forKey: .agentProfile)
         agentProfileSnapshot = (try? container.decodeIfPresent(AgentProfileSnapshot.self, forKey: .agentProfileSnapshot)) ?? nil
+        // Invariant 1: absent before #190. One that does not decode drops only the loop.
+        loop = (try? container.decodeIfPresent(ConversationLoop.self, forKey: .loop)) ?? nil
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
         // Invariant 1: a conversation persisted before this ruling has no such key, and absent
         // means "no turn here ever started without the owner present", the correct default.
@@ -1645,6 +1649,8 @@ class AppState {
         for (_, entry) in activeTasks where entry.conversationId == conversationId {
             entry.task.cancel()
         }
+        // #190: Stop keeps a loop but cancels its pending tick, so the chip offers Resume.
+        loopNextTick[conversationId] = nil
         let engine = self.engine
         Task { await engine?.cancelReprompt(for: conversationId) }
     }
@@ -2668,7 +2674,14 @@ class AppState {
         guard (!trimmed.isEmpty || !attachments.isEmpty), let convId = selectedConversationId else { return }
         
         let messageContent = trimmed
-        if trimmed.hasPrefix("/goal") {
+        if trimmed == "/loop" || trimmed.hasPrefix("/loop ") {
+            handleLoopCommand(String(trimmed.dropFirst(5)), convId: convId)
+            return
+        } else if trimmed.hasPrefix("/goal") {
+            if let refusal = goalRefusalForLoop(convId) {
+                appendMessage(role: .system, content: refusal, to: convId)
+                return
+            }
             let goalText = trimmed.dropFirst(5).trimmingCharacters(in: .whitespacesAndNewlines)
             if goalText.isEmpty {
                 appendMessage(role: .system, content: "Please specify a goal, e.g., `/goal Build a snake game in Python`", to: convId)
@@ -2685,10 +2698,12 @@ class AppState {
             }
             return
         } else if trimmed.hasPrefix("/stop") {
+            // #190: `/stop` ends a loop as it ends a goal.
+            let hadLoop = clearLoop(for: convId)
             clearGoal(for: convId)
             let stopped = stopBackgroundSubagents(under: convId)
             cancelTasks(for: convId)
-            appendMessage(role: .system, content: "Goal mode cancelled." + Self.stoppedSubagentsSuffix(stopped), to: convId)
+            appendMessage(role: .system, content: (hadLoop ? "Loop stopped. " : "") + "Goal mode cancelled." + Self.stoppedSubagentsSuffix(stopped), to: convId)
             return
         } else if trimmed == "/skills" || trimmed.hasPrefix("/skills ") {
             handleSkillsCommand(trimmed, convId: convId)
@@ -3465,6 +3480,11 @@ class AppState {
     /// that directory — the one the grader will run them in — and locks.
     func approveGoalContract(for conversationId: UUID, _ draft: GoalContract, paths: IrisPaths = .default) {
         guard conversations.contains(where: { $0.id == conversationId }) else { return }
+        // #190: a goal and a loop never run in one conversation at once.
+        if let refusal = goalRefusalForLoop(conversationId) {
+            appendMessage(role: .system, content: refusal, to: conversationId)
+            return
+        }
         bindGoalWorkspace(for: conversationId, contract: draft, paths: paths)
         // The directory the grader will run in, by the grader's own rule.
         let workspace = GoalEvaluator.gradingDirectory(
@@ -4374,6 +4394,10 @@ class AppState {
                 loaded[i].lastGoalEvaluation = nil
             }
             loaded[i].messages = loaded[i].messages.map(LLMErrorMessage.migrateLegacy)
+            // #190: a loop comes back paused, so nothing fires at launch that the person stopped
+            // looking at, and never on Iris, where it is refused.
+            if loaded[i].isPinned || loaded[i].isBackground || loaded[i].isSubagent { loaded[i].loop = nil }
+            else { loaded[i].loop?.paused = true }
         }
         return (loaded, roleNormalizationChanged)
     }
@@ -5148,6 +5172,142 @@ class AppState {
                 self.emitCommandOutput(body, format: .markdown, to: convId)
             }
         }
+    }
+
+    // MARK: /loop (#190)
+
+    /// When each conversation's next loop tick is due, for the chip. Wall time, for display only:
+    /// the tick itself waits on uptime (`UptimeWait`).
+    var loopNextTick: [UUID: Date] = [:]
+
+    private func handleLoopCommand(_ arguments: String, convId: UUID) {
+        guard let idx = conversations.firstIndex(where: { $0.id == convId }) else { return }
+        let conv = conversations[idx]
+        switch ConversationLoop.parse(arguments) {
+        case .invalid(let why):
+            appendMessage(role: .system, content: why, to: convId)
+        case .status:
+            appendMessage(role: .system, content: loopStatus(conv.loop), to: convId)
+        case .stop:
+            appendMessage(role: .system, content: clearLoop(for: convId) ? "Loop stopped." : "No loop is running here.", to: convId)
+        case .pause:
+            guard conv.loop != nil else { appendMessage(role: .system, content: "No loop is running here.", to: convId); return }
+            pauseLoop(for: convId)
+        case .resume:
+            guard conv.loop != nil else { appendMessage(role: .system, content: "No loop is running here. " + ConversationLoop.usage, to: convId); return }
+            resumeLoop(for: convId)
+        case .start(let interval, let prompt):
+            if let refusal = loopRefusal(conv) {
+                appendMessage(role: .system, content: refusal, to: convId)
+                return
+            }
+            let loop = ConversationLoop(prompt: prompt, intervalSeconds: interval, cap: max(1, ConfigManager.shared.loopTickCap))
+            startLoop(loop, in: convId)
+        }
+    }
+
+    /// Why `/loop` cannot start in `conv`, or nil.
+    func loopRefusal(_ conv: Conversation) -> String? {
+        if conv.isPinned {
+            return "Iris can't run a loop: its memory upkeep runs as the conversation grows, so a loop would keep grooming your memory. Start one in another conversation."
+        }
+        if conv.isBackground || conv.isSubagent {
+            return "A loop needs someone to talk to, so it runs only in a conversation of your own."
+        }
+        if let goal = conv.activeGoal {
+            return "A goal is running in this conversation (\"\(goal)\"). `/stop` it first, then start the loop."
+        }
+        return nil
+    }
+
+    /// Why a goal cannot start in `id` while its loop runs, or nil.
+    func goalRefusalForLoop(_ id: UUID) -> String? {
+        guard let loop = conversations.first(where: { $0.id == id })?.loop else { return nil }
+        return "A loop is running in this conversation (every \(loop.every): \(loop.prompt)). `/loop stop` it first, then start the goal."
+    }
+
+    /// Starts `loop` in `id`, replacing any loop there, and arms its first tick unless a turn is
+    /// running (that turn's end arms it).
+    func startLoop(_ loop: ConversationLoop, in id: UUID) {
+        guard let idx = conversations.firstIndex(where: { $0.id == id }) else { return }
+        conversations[idx].loop = loop
+        markChanged(id, .metadata)
+        appendMessage(role: .system, content: """
+            ↻ Looping every \(loop.every): \(loop.prompt)
+            Up to \(loop.cap) ticks (Settings → Agent Limits → Loop tick limit). Each tick sends the whole conversation so far, so each costs a little more than the last. Talk to it any time; `/loop pause`, `/loop resume` and `/loop stop` control it.
+            """, to: id)
+        armLoopIfIdle(id)
+    }
+
+    func pauseLoop(for id: UUID) {
+        guard let idx = conversations.firstIndex(where: { $0.id == id }), conversations[idx].loop != nil else { return }
+        conversations[idx].loop?.paused = true
+        loopNextTick[id] = nil
+        markChanged(id, .metadata)
+        appendMessage(role: .system, content: "Loop paused. `/loop resume` or the chip's Resume starts it again.", to: id)
+    }
+
+    func resumeLoop(for id: UUID) {
+        guard let idx = conversations.firstIndex(where: { $0.id == id }), let loop = conversations[idx].loop else { return }
+        conversations[idx].loop?.paused = false
+        markChanged(id, .metadata)
+        appendMessage(role: .system, content: "Loop resumed: the next tick in \(loop.every).", to: id)
+        armLoopIfIdle(id)
+    }
+
+    /// Ends `id`'s loop; true when there was one. A tick already scheduled finds no loop and
+    /// runs nothing; a tick turn already running finishes.
+    @discardableResult
+    func clearLoop(for id: UUID) -> Bool {
+        guard let idx = conversations.firstIndex(where: { $0.id == id }), conversations[idx].loop != nil else { return false }
+        conversations[idx].loop = nil
+        loopNextTick[id] = nil
+        markChanged(id, .metadata)
+        return true
+    }
+
+    private func armLoopIfIdle(_ id: UUID) {
+        guard !isThinking(in: id) else { return }
+        let engine = self.engine
+        Task { await engine?.armLoopTick(for: id) }
+    }
+
+    /// The loop the engine may schedule a tick for, or nil.
+    func armableLoop(for id: UUID) -> ConversationLoop? {
+        guard let conv = conversations.first(where: { $0.id == id }), let loop = conv.loop,
+              !loop.paused, loopRefusal(conv) == nil else {
+            loopNextTick[id] = nil
+            return nil
+        }
+        return loop
+    }
+
+    enum LoopTake: Equatable { case run(String), busy, none }
+
+    /// Takes one tick of loop `loopId` in `id`. `.none` when that loop has ended, been replaced or
+    /// paused, or has no ticks left. `.busy` when a turn is running: this tick is skipped, not
+    /// queued, and the next is an interval away.
+    func takeLoopTick(for id: UUID, loopId: UUID) -> LoopTake {
+        loopNextTick[id] = nil
+        guard let idx = conversations.firstIndex(where: { $0.id == id }), let loop = conversations[idx].loop,
+              loop.id == loopId, !loop.paused, loop.ticksLeft > 0, loopRefusal(conversations[idx]) == nil else { return .none }
+        if isThinking(in: id) { return .busy }
+        conversations[idx].loop?.ticksLeft -= 1
+        markChanged(id, .metadata)
+        let number = loop.cap - loop.ticksLeft + 1
+        appendMessage(role: .system, content: "↻ Loop tick \(number) of \(loop.cap)", to: id)
+        return .run(loop.tickText(number: number))
+    }
+
+    /// The loop spent its ticks: it ends, said once.
+    func endLoopAtCap(for id: UUID) {
+        guard let loop = conversations.first(where: { $0.id == id })?.loop, clearLoop(for: id) else { return }
+        appendMessage(role: .system, content: "The loop reached its \(loop.cap)-tick limit and stopped. Run `/loop` again to start it anew.", to: id)
+    }
+
+    private func loopStatus(_ loop: ConversationLoop?) -> String {
+        guard let loop else { return "No loop is running here. " + ConversationLoop.usage }
+        return "↻ Every \(loop.every), \(loop.ticksLeft) of \(loop.cap) ticks left\(loop.paused ? ", paused" : ""): \(loop.prompt)"
     }
 
     private func handleModelCommand(_ trimmed: String, convId: UUID) {
