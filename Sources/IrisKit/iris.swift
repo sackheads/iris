@@ -200,6 +200,10 @@ actor IrisEngine {
             let owner = await MainActor.run { state?.engine }
             if let owner, owner !== self { await owner.invalidateSystemPrompt() }
         }
+        // #658: what the sandbox's git sync did is the person's to see, not only the model's.
+        executor.postSandboxNote = { [weak self] conversationId, text in
+            await self?.pushToUI(role: .system, text: text, conversationId: conversationId)
+        }
         return executor
     }
 

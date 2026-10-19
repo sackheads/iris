@@ -64,10 +64,10 @@ enum WorkspaceIrisDir {
         var holds = "Vibecop's rules and the project allowlist"
     }
 
-    /// What the read-write mount of `source` protects: its `.iris/`, and the hooks of a repository
-    /// at its root (`WorkspaceGit`, #623). Per mount, because the second depends on what is there.
+    /// What the read-write mount of `source` protects: its `.iris/`. A repository at its root gets
+    /// a git dir of the sandbox's own instead (`SandboxGit`, #658).
     static func protected(for source: String) -> [Protected] {
-        [Protected(relative: name)] + WorkspaceGit.protected(for: source)
+        [Protected(relative: name)]
     }
 
     /// Makes `<dir>/<relative>` something the VM can be given read-only, before the container that

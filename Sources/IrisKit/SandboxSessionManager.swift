@@ -82,13 +82,18 @@ actor SandboxSessionManager {
     /// one guard for `shared`, which host commands consult; a manager a test builds gets its own.
     private let gitGuard: GitConfigGuard
 
+    /// The home whose `sandbox-git/` holds each repository's copy for the VM (#658).
+    private let paths: IrisPaths
+
     init(runtime: ContainerRuntime, image: @escaping @Sendable () -> String,
          mountAgreementAttempts: Int = SandboxSessionManager.mountAgreementAttempts,
          startContainerSystem: @escaping @Sendable () async -> Bool = {
              await SandboxingManager.shared.startContainerSystem().success
          },
-         live: LiveContainerNames = .shared, gitGuard: GitConfigGuard = GitConfigGuard()) {
+         live: LiveContainerNames = .shared, gitGuard: GitConfigGuard = GitConfigGuard(),
+         paths: IrisPaths = .default) {
         self.gitGuard = gitGuard
+        self.paths = paths
         self.runtime = runtime
         self.image = image
         self.mountAgreementAttempts = mountAgreementAttempts
@@ -124,8 +129,10 @@ actor SandboxSessionManager {
     /// (#282); a gate still builds a container of its own rather than borrowing a conversation's
     /// session. `timeoutSeconds` bounds the command itself — past it the command is killed and the
     /// result reads exactly like a host timeout.
+    /// `onNote` is told, for the person, what the sandbox's git sync did around the command (#658).
     func run(command: String, conversationId id: UUID, workspace: ContainerMount?, extraMounts: [String] = [],
-             network: NetworkMode = .default, timeoutSeconds: Int? = nil) async -> String {
+             network: NetworkMode = .default, timeoutSeconds: Int? = nil,
+             onNote: (@Sendable (String) async -> Void)? = nil) async -> String {
         let wasLost = lostSessions.contains(id)
         // #617: every read-write mount's `.iris/` goes in read-only, so a real directory must be
         // there to mount before the container is made; one that cannot be protected refuses.
@@ -139,9 +146,19 @@ actor SandboxSessionManager {
                 }
             }
         }
+        // #658: a repository at a read-write mount's root gets the sandbox's own git dir over
+        // its common dir's path, and the person's `.git` only read-only.
+        var repos: [SandboxGit.Repo] = []
+        for (source, target) in Self.readWriteMounts(workspace: workspace, extra: extraMounts) {
+            switch SandboxGit.prepare(source: source, target: target, paths: paths) {
+            case .refused(let why): return why
+            case .repo(let repo): repos.append(repo)
+            case .none: break
+            }
+        }
         let mounts = Self.mountList(workspace: workspace, extra: extraMounts) {
             !absent.contains(($0 as NSString).appendingPathComponent($1))
-        }
+        } + repos.flatMap(\.mounts)
 
         // Recreate if the workspace, the mount list or the network changed (agent-initiated — not a "loss").
         if let s = sessions[id], s.mountedWorkspace != workspace || s.mounts != mounts || s.network != network {
@@ -189,14 +206,32 @@ actor SandboxSessionManager {
         let owner = name(for: id)
         gitGuard.watch(owner: owner, sources: sources)
         let gitBefore = gitGuard.check(owner: owner)
-        func noted(_ result: String) -> String {
-            GitConfigGuard.withNotices(result, before: gitBefore, after: gitGuard.check(owner: owner))
+        let runtime = self.runtime
+        let syncs = repos.map { repo in
+            SandboxGitSync(repo: repo, vm: ContainerVMGit(repo: repo) { script in
+                guard let r = try? await runtime.exec(name: owner, workdir: "/", command: script, timeoutSeconds: 120) else { return nil }
+                return (r.stdout, r.exitCode)
+            })
+        }
+        var befores: [SandboxGitSync.Before] = []
+        var syncNotes: [String] = []
+        for sync in syncs {
+            let (before, notes) = await sync.before()
+            befores.append(before)
+            syncNotes += notes
+        }
+        func noted(_ result: String) async -> String {
+            var notes = syncNotes
+            for (sync, before) in zip(syncs, befores) { notes += await sync.after(before) }
+            if !notes.isEmpty { await onNote?(notes.joined(separator: "\n")) }
+            let synced = notes.isEmpty ? result : ([result] + notes.map { "[sandbox git] " + $0 }).joined(separator: "\n")
+            return GitConfigGuard.withNotices(synced, before: gitBefore, after: gitGuard.check(owner: owner))
         }
         do {
             let r = try await runtime.exec(name: name(for: id), workdir: workdir, command: command,
                                            timeoutSeconds: timeoutSeconds)
             sessions[id]?.lastUsed = Date()
-            return noted(decorate(format(r), notice: wasLost && created, for: id))
+            return await noted(decorate(format(r), notice: wasLost && created, for: id))
         } catch {
             // A deadline is the command's answer, not a dead container. The session is intact and
             // re-running would spend the same wall clock over again, so this one does not go down
@@ -206,13 +241,13 @@ actor SandboxSessionManager {
                 // Decorated like any other outcome: the reset notice is written by the call that
                 // recreated the container and by no other, so a timeout on that very call would
                 // otherwise be the thing that loses it for good.
-                return noted(decorate(ToolExecutor.commandTimedOutMessage(seconds: timeoutSeconds.map(Double.init) ?? elapsed),
+                return await noted(decorate(ToolExecutor.commandTimedOutMessage(seconds: timeoutSeconds.map(Double.init) ?? elapsed),
                                       notice: wasLost && created, for: id))
             }
             // Nor is a cancelled turn a dead container. Tearing the session down and building a
             // new one to retry a command nobody is waiting for is work for its own sake.
             if error is CancellationError {
-                return noted(decorate("Error: the command was cancelled.", notice: wasLost && created, for: id))
+                return await noted(decorate("Error: the command was cancelled.", notice: wasLost && created, for: id))
             }
             // Closed under the running command: the run is over, so there is nothing to heal.
             if closed.contains(id) { return Self.closedMidCommandError }
@@ -226,11 +261,11 @@ actor SandboxSessionManager {
                 let r = try await runtime.exec(name: name(for: id), workdir: workdir, command: command,
                                                timeoutSeconds: timeoutSeconds)
                 sessions[id]?.lastUsed = Date()
-                return noted(decorate(format(r), notice: true, for: id))
+                return await noted(decorate(format(r), notice: true, for: id))
             } catch {
                 if case ContainerRuntimeError.timedOut(let elapsed) = error {
                     sessions[id]?.lastUsed = Date()
-                    return noted(decorate(ToolExecutor.commandTimedOutMessage(seconds: timeoutSeconds.map(Double.init) ?? elapsed),
+                    return await noted(decorate(ToolExecutor.commandTimedOutMessage(seconds: timeoutSeconds.map(Double.init) ?? elapsed),
                                           notice: true, for: id))
                 }
                 return creationError(error)

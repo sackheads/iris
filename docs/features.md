@@ -62,7 +62,7 @@ So a sandboxed command refuses to run when that workspace is your home folder or
 
 ### Repositories in the Sandbox
 
-When a sandboxed workspace is a git repository, the VM can't choose what git on your Mac runs: its hooks are read-only in the VM, config changes that could run a program are put back, submodules the VM adds are moved aside, and Iris's own host git runs with the risky settings overridden (#623). [Details](sandbox_repositories.md)
+When a sandboxed workspace is a git repository, the VM can't choose what git on your Mac runs: git in the VM works on a git dir of its own, your `.git` goes in only read-only, and the sandbox's commits come back as a bundle, moving your branch only on a clean fast-forward and saying so in the chat (#623, #658). [Details](sandbox_repositories.md)
 
 ### Workspace Binding
 

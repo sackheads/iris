@@ -2282,7 +2282,17 @@ class AppState {
             markChanged(ownerId, .metadata)
             appendMessage(role: .system, content: "Workspace \(entry.url.path) was deleted from Settings", to: ownerId)
         }
+        pruneSandboxGit()
         return .trashed(entry.url)
+    }
+
+    /// Removes the sandbox's git dir copy of each repository no conversation's workspace or grant
+    /// mounts any more (#658). Off the main actor: it walks folders. A copy holds nothing that is
+    /// not on the host already, since each VM commit is fetched when it is made.
+    func pruneSandboxGit() {
+        let inUse = conversations.compactMap { $0.workspacePath.map(IrisEngine.expandTilde) }
+            + conversations.flatMap { ($0.sandboxGrant?.mounts ?? []).filter { !$0.readOnly }.map(\.source) }
+        Task.detached(priority: .utility) { SandboxGit.prune(inUse: inUse) }
     }
 
     func setMainAgentSandbox(for conversationId: UUID, pref: SandboxPref?) {
@@ -2455,6 +2465,7 @@ class AppState {
         // forever waiting for a turn that can never run.
         _ = takePendingEventLines(for: id)
         conversations.removeAll { $0.id == id }
+        pruneSandboxGit()   // #658
         // Re-point at what the sidebar actually renders (`ChatView` lists non-subagent
         // conversations). Picking `conversations.last` could land the selection on a subagent or
         // evaluator scratch conversation the user cannot see or navigate away from — and
