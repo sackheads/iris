@@ -64,7 +64,7 @@ struct ConversationLoop: Codable, Equatable, Sendable {
     static func parse(_ arguments: String) -> Parsed {
         let trimmed = arguments.trimmingCharacters(in: .whitespacesAndNewlines)
         switch trimmed.lowercased() {
-        case "": return .status
+        case "", "status": return .status
         case "stop": return .stop
         case "pause": return .pause
         case "resume": return .resume
