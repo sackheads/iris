@@ -250,6 +250,27 @@ struct AgentProfileToolsTests {
         #expect(evalClient.declared[0].contains("run_command"), "the grader keeps its own toolset")
     }
 
+    /// A reprompt's task is created inside the turn before it, so it starts with that turn's scope
+    /// bound; it is right only because every `processInput` binds its own. This pins that, and
+    /// would catch a later dispatch path outside `processInput` that inherits a stale scope.
+    @Test("a goal reprompt scheduled by a narrowed turn, after Clear, is offered the full set")
+    func repromptRebinds() async throws {
+        let (app, root) = try setUp(); defer { try? FileManager.default.removeItem(at: root) }
+        let id = app.createNewConversation(select: false, agentProfile: "reviewer")
+        app.setGoal(for: id, goal: "keep going")
+        let client = ScriptedClient([Self.reply(Part(text: "working on it"))])
+        let engine = IrisEngine(state: app, client: client, retryDelays: [], protectionEnabled: false,
+                                sessionPeerCount: 0, repromptDelay: 0.3)
+        await engine.processInput("go", source: "UI", conversationId: id)
+        app.clearAgentProfile(for: id)
+        for _ in 0..<1000 where client.requests.count < 2 { try await Task.sleep(nanoseconds: 5_000_000) }
+        app.clearGoal(for: id)
+        await engine.cancelReprompt(for: id)
+        try #require(client.requests.count >= 2, "the reprompt ran")
+        #expect(!client.declared[0].contains("write_file"))
+        #expect(client.declared[1].contains("write_file"), "the reprompt bound its own, cleared, scope")
+    }
+
     @Test("Clear Agent Profile widens the next turn back")
     func clearWidens() async throws {
         let (app, root) = try setUp(); defer { try? FileManager.default.removeItem(at: root) }
