@@ -3347,8 +3347,10 @@ actor IrisEngine {
             guard !Task.isCancelled else { return }
             await armLoopTick(for: conversationId)
         case .run(let tick):
-            guard !Task.isCancelled else { return }
-            await processInput(tick, source: Self.loopSource, conversationId: conversationId, goalFacts: .carry)
+            if !Task.isCancelled {
+                await processInput(tick, source: Self.loopSource, conversationId: conversationId, goalFacts: .carry)
+            }
+            await MainActor.run { localState?.endEngineTurn(for: conversationId) }
         }
     }
 

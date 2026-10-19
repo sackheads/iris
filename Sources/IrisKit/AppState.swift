@@ -5306,6 +5306,10 @@ class AppState {
         markChanged(id, .metadata)
         let number = loop.cap - loop.ticksLeft + 1
         appendMessage(role: .system, content: "↻ Loop tick \(number) of \(loop.cap)", to: id)
+        // Reserved in the same main-actor step that took the tick, so an arrival before the tick's
+        // own turn begins queues behind it instead of running beside it (#676 review). The engine
+        // releases it once the tick's turn has run.
+        beginEngineTurn(for: id)
         return .run(loop.tickText(number: number))
     }
 

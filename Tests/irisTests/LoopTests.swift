@@ -191,6 +191,21 @@ struct LoopTests {
         state.pauseLoop(for: id)
     }
 
+    @Test("a tick reserves its turn as it is taken, so an arrival before the turn begins queues behind it")
+    func takenTickReservesItsTurn() async throws {
+        let (state, id) = try app()
+        let engine = try #require(state.engine)
+        let loop = ConversationLoop(prompt: "p", intervalSeconds: 3600, cap: 5)
+        state.startLoop(loop, in: id)
+        guard case .run = state.takeLoopTick(for: id, loopId: loop.id) else { Issue.record("no tick"); return }
+        #expect(state.hasTurnInFlight(for: id), "reserved")
+        await engine.handleSystemEvent("File changed: notes.md", source: "Watcher", conversationId: id)
+        #expect(!sent(state, id).contains { $0.contains("File changed: notes.md") }, "queued, not run beside the tick")
+        state.endEngineTurn(for: id)
+        #expect(await eventually { sent(state, id).contains { $0.contains("File changed: notes.md") } }, "run once the reservation ends")
+        state.pauseLoop(for: id)
+    }
+
     @Test("pause and /loop stop drop the waiting tick")
     func pauseAndStopDropTheTick() async throws {
         let (state, id) = try app()
