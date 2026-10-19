@@ -19,6 +19,7 @@ enum ReadOnlyCommand {
         // `echo` (a zsh builtin) prints its arguments and nothing else, whatever they are.
         if program == "echo" { return true }
         if program == "find" { return findIsReadOnly(args) }
+        if program == "date" { return dateIsReadOnly(args) }
         guard let flags = programs[program] else { return false }
         return flagsAllowed(args, flags)
     }
@@ -118,6 +119,18 @@ enum ReadOnlyCommand {
             if tests.contains(word) { continue }
             guard valued.contains(word), i < args.count else { return false }
             i += 1
+        }
+        return true
+    }
+
+    /// `date`'s own grammar (#682): `-u` and `-R`, each a word of its own, in any order, then at most
+    /// one `+FORMAT` as the last word. Any other operand sets the clock (BSD's
+    /// `[[[mm]dd]HH]MM[[cc]yy][.ss]`, GNU's `-s`); `-f`, `-j`, `-n`, `-v` and `-r` are left out, the
+    /// last because a file path is more than a time check needs.
+    static func dateIsReadOnly(_ args: [String]) -> Bool {
+        for (i, arg) in args.enumerated() {
+            if arg == "-u" || arg == "-R" { continue }
+            guard arg.hasPrefix("+"), i == args.count - 1 else { return false }
         }
         return true
     }
