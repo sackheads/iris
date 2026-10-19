@@ -1433,17 +1433,7 @@ class AppState {
         let noticeTarget = emitLaunchNotices ? selectedConversationId : nil
         // #678: what the guarded settings' launch found (an upgrade reset, a defaults write that
         // was ignored, a missing or unreadable item).
-        if let target = noticeTarget {
-            for notice in guardedConfig.takeGuardedNotices() {
-                // The upgrade notice is never deduplicated: a replayed upgrade posts the same text
-                // into a conversation that may already hold it, and that repeat is the signal.
-                if notice.hasPrefix(GuardedSettings.upgradeNotice) {
-                    appendMessage(role: .system, content: notice, to: target)
-                } else {
-                    appendLaunchNotice(notice, to: target)
-                }
-            }
-        }
+        if let target = noticeTarget { postGuardedNotices(guardedConfig.takeGuardedNotices(), to: target) }
         // Every launch notice below goes through `appendLaunchNotice`, which persists it like any
         // other system message but skips it when the same wording is already in the conversation.
         // Several of these conditions recur on every launch until a human intervenes, so dedup by
@@ -3083,6 +3073,18 @@ class AppState {
             let target = self.selectedConversationId ?? self.activityConversationId()
             self.appendLaunchNotice(text, to: target)
             return true
+        }
+    }
+
+    /// #678's launch notices. The upgrade notice is never deduplicated: a replayed upgrade posts
+    /// the same text into a conversation that may already hold it, and that repeat is the signal.
+    func postGuardedNotices(_ notices: [String], to conversationId: UUID) {
+        for notice in notices {
+            if notice.hasPrefix(GuardedSettings.upgradeNotice) {
+                appendMessage(role: .system, content: notice, to: conversationId)
+            } else {
+                appendLaunchNotice(notice, to: conversationId)
+            }
         }
     }
 
