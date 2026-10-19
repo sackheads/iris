@@ -3119,8 +3119,13 @@ class AppState {
     /// Marks that #687's one-time notice has been considered, whether or not it named anything.
     nonisolated static let gateNetworkNoticeKey = "GATE_NETWORK_OFF_NOTICE_V1"
 
-    /// The pause reason an existing gate job gets at #687's upgrade. A re-schedule lifts it.
+    /// The pause reason an existing gate job gets at #687's upgrade. Only a re-schedule lifts it.
     nonisolated static let gateNeedsReviewReason = "gate script needs your review"
+
+    /// What `/jobs resume` and `/jobs pause` say about a job waiting for that review.
+    nonisolated static func gateNeedsReviewResume(_ name: String) -> String {
+        "**\(name)** is paused until you review its gate script. Ask Iris to schedule it again (with gate_network: true if it needs the internet); that shows you the script once to approve. `/jobs resume` can't lift this pause."
+    }
 
     /// #687, ruled (a): every script gate is network-off from this version (a stored gate with no
     /// `network` key decodes as off), and every existing script-gate job is **paused**, since it
@@ -5028,6 +5033,12 @@ class AppState {
                     emitCommandOutput("No job named '\(name)'.", format: .markdown, to: convId)
                     return
                 }
+                // #693: a gate waiting for review stays that way; an owner's pause over it would
+                // let `/jobs resume` lift it with no review.
+                if job.pausedReason == Self.gateNeedsReviewReason {
+                    emitCommandOutput(Self.gateNeedsReviewResume(job.name), format: .markdown, to: convId)
+                    return
+                }
                 try ledger.setPaused(jobId: job.id, reason: JobsCommand.pausedByUserReason)
                 refreshLedgerAttention()
                 emitCommandOutput("Paused **\(job.name)**. `/jobs resume \(job.name)` puts it back.",
@@ -5040,6 +5051,12 @@ class AppState {
             do {
                 guard let job = try ledger.job(named: name) else {
                     emitCommandOutput("No job named '\(name)'.", format: .markdown, to: convId)
+                    return
+                }
+                // #693: only a re-schedule lifts this pause, since that is what shows the person
+                // the script (ruling a: an unreviewed script doesn't run).
+                if job.pausedReason == Self.gateNeedsReviewReason {
+                    emitCommandOutput(Self.gateNeedsReviewResume(job.name), format: .markdown, to: convId)
                     return
                 }
                 // Both fields, always: a job paused off the end of the retry ladder that kept its
