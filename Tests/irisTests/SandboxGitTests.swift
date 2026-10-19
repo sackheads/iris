@@ -144,6 +144,34 @@ struct SandboxGitTests {
         #expect(!fm.fileExists(atPath: repo.vmDir), "pruned once nothing uses it")
     }
 
+    @Test("where a worktree's repository is, is recorded at the first look: a .git file rewritten between commands is moved aside, not taken as a new repository")
+    func recordedLayout() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try await GitFixture.sh("git worktree add -q ../wt", in: dir + "/ws", env: env)
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/iris-home"))
+        let wt = dir + "/wt"
+        guard case .repo(let first) = SandboxGit.prepare(source: wt, target: wt, paths: paths) else { Issue.record("no copy"); return }
+
+        // Between two commands the VM points the worktree's .git at a repository of its own.
+        try await GitFixture.sh("git init -q evil", in: dir, env: env)
+        try "gitdir: \(dir)/evil/.git\n".write(toFile: wt + "/.git", atomically: false, encoding: .utf8)
+        guard case .repo(let second) = SandboxGit.prepare(source: wt, target: wt, paths: paths) else { Issue.record("no copy"); return }
+        #expect(second.hostCommonDir == first.hostCommonDir && second.hostGitDir == first.hostGitDir, "the recorded repository, not the file's")
+        #expect(second.vmDir == first.vmDir, "no new copy for the VM's repository")
+        let notes = SandboxGit.quarantinePointers(source: wt, commonDir: second.hostCommonDir)
+        #expect(notes.count == 1 && notes[0].contains("moved it aside"), "\(notes)")
+
+        // Once the recorded repository is gone, the next look is recorded instead.
+        try FileManager.default.removeItem(atPath: dir + "/ws/.git")
+        try FileManager.default.removeItem(atPath: wt + "/.git" + WorkspaceGit.quarantineSuffix)
+        try await GitFixture.sh("git init -q", in: wt, env: env)
+        guard case .repo(let third) = SandboxGit.prepare(source: wt, target: wt, paths: paths) else { Issue.record("no copy"); return }
+        #expect(third.hostCommonDir == IrisPaths.realPath(wt + "/.git"))
+        SandboxGit.prune(inUse: [], paths: paths)
+        #expect(SandboxGit.recorded(source: wt, paths: paths) == nil, "the record goes with the copy")
+    }
+
     // MARK: Pointers
 
     @Test("a submodule or worktree pointer leading outside the host repository is moved aside; one inside is left")

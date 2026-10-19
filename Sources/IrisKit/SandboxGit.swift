@@ -59,12 +59,24 @@ enum SandboxGit {
 
     /// The copy for the repository at `source`, made now if it is not there yet or no longer
     /// belongs to the repository there (re-created since), and the mounts to give it.
+    ///
+    /// Where the repository is comes from the first look at `source` and is recorded in Iris's
+    /// home: a worktree's `.git` file is in the worktree, which the VM can write, so reading it
+    /// again on every command would let a rewritten pointer become the next command's record
+    /// (#662 review). A pointer that no longer matches the record is moved aside by
+    /// `quarantinePointers`, never taken as a new repository. The record is made again only once
+    /// the recorded repository is gone.
     static func prepare(source: String, target: String, paths: IrisPaths = .default) -> Prepared {
         let layout: WorkspaceGit.Layout
         switch WorkspaceGit.entry(at: source) {
         case .none: return .none
         case .unsupported: return .refused(refusal(source, "its .git is a link or a file Iris cannot read"))
-        case .layout(let found): layout = found
+        case .layout(let found):
+            if let recorded = recorded(source: source, paths: paths) { layout = recorded }
+            else {
+                layout = found
+                record(source: source, layout: found, paths: paths)
+            }
         }
         let common = IrisPaths.realPath(layout.commonDir)
         let key = Self.key(common)
@@ -86,6 +98,32 @@ enum SandboxGit {
         return .repo(Repo(source: source, target: target, hostCommonDir: common,
                           hostGitDir: IrisPaths.realPath(layout.gitDir), isWorktree: layout.dotGitIsFile,
                           vmDir: vmDir, vmCommonDir: vmCommonDir, hostMount: hostMount))
+    }
+
+    private static func recordPath(_ source: String, paths: IrisPaths) -> String {
+        ((directory(paths: paths) as NSString).appendingPathComponent("sources") as NSString)
+            .appendingPathComponent(key(IrisPaths.realPath(source)))
+    }
+
+    /// The repository recorded for `source`, while it still exists.
+    static func recorded(source: String, paths: IrisPaths = .default) -> WorkspaceGit.Layout? {
+        guard let text = WorkspaceGit.readSmall(recordPath(source, paths: paths)).flatMap({ String(data: $0, encoding: .utf8) })
+        else { return nil }
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard lines.count >= 4, lines[0] == IrisPaths.realPath(source) else { return nil }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: lines[2], isDirectory: &isDir), isDir.boolValue,
+              FileManager.default.fileExists(atPath: lines[1]) else { return nil }
+        return WorkspaceGit.Layout(dotGitIsFile: lines[3] == "file", gitDir: lines[1], commonDir: lines[2])
+    }
+
+    private static func record(source: String, layout: WorkspaceGit.Layout, paths: IrisPaths) {
+        let path = recordPath(source, paths: paths)
+        try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent,
+                                                 withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let text = [IrisPaths.realPath(source), IrisPaths.realPath(layout.gitDir), IrisPaths.realPath(layout.commonDir),
+                    layout.dotGitIsFile ? "file" : "dir", ""].joined(separator: "\n")
+        try? Data(text.utf8).write(to: URL(fileURLWithPath: path), options: .atomic)
     }
 
     static func key(_ commonDir: String) -> String {
@@ -174,12 +212,18 @@ enum SandboxGit {
         }
     }
 
-    /// Removes copies no workspace in `inUse` needs any more.
+    /// Removes copies, and the records of where repositories are, no workspace in `inUse` needs.
     static func prune(inUse sources: [String], paths: IrisPaths = .default) {
         let dir = directory(paths: paths)
         var keep: Set<String> = []
         for source in sources {
-            if case .layout(let layout) = WorkspaceGit.entry(at: source) { keep.insert(key(IrisPaths.realPath(layout.commonDir))) }
+            if let layout = recorded(source: source, paths: paths) { keep.insert(key(IrisPaths.realPath(layout.commonDir))) }
+            else if case .layout(let layout) = WorkspaceGit.entry(at: source) { keep.insert(key(IrisPaths.realPath(layout.commonDir))) }
+        }
+        let records = (dir as NSString).appendingPathComponent("sources")
+        let keepRecords = Set(sources.map { key(IrisPaths.realPath($0)) })
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: records)) ?? [] where !keepRecords.contains(name) {
+            try? FileManager.default.removeItem(atPath: (records as NSString).appendingPathComponent(name))
         }
         for name in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] where !keep.contains(name) {
             // Only what Iris made: a finished copy, or a staging folder left by a crash.
