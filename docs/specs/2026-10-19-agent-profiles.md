@@ -36,8 +36,8 @@ You review pull requests for this repository. Read the diff, run the touched tes
 
 ## A conversation links to its profile by name
 
-`Conversation.agentProfile: String?` holds the **name**, not a snapshot. The file is read when it's used, so editing the file changes the conversation's next turn.
-- **Why not a snapshot:** the file is something you tune as you use it, and a snapshot would freeze every existing conversation on the old text with no way to update it.
+`Conversation.agentProfile: String?` holds the **name, which is the link**. **The file is the source**: it's read when it's used, so editing it changes the conversation's next turn. The last good read is kept on the conversation only as the fallback for when the file can't be read (below).
+- **Why the file is the source:** it's something you tune as you use it. Freezing each conversation on the text it started with would leave no way to update it.
 - **The prompt cache:** the composed prompt is keyed by the profile's name and a hash of the file's content, so an unchanged file keeps the provider prompt cache warm. The modification time isn't used: it can miss an edit made within the same second.
 - **Editing a profile costs a cache prefix.** Because the link is live, an edit changes the system prompt on that conversation's next turn, which starts a new prompt-cache prefix. That's expected, and `docs/agent_profiles.md` will say so, so the cost isn't a surprise.
 - **A profile's tool list is for focus and token cost, not security.** Permissions come only from the approval ladder (allowlist, Vibecop, the person) and from job profiles. The spec and `docs/agent_profiles.md` both say so plainly. The last-known-good fallback below keeps a narrowed chat from widening by surprise, but it doesn't turn `tools:` into a permission.
@@ -97,7 +97,8 @@ Session roles (#469/#480) already exist: `Conversation.role`, user-assigned with
 - **Tests:**
   - a round-trip test ("the name and snapshot persist with the conversation, and a row from before #465 reads as none");
   - deleting the file keeps the snapshot in use with a notice;
-  - Clear Agent Profile removes both.
+  - Clear Agent Profile removes both;
+  - an undecodable snapshot drops only the snapshot, not the conversation (the soft-loss read `checkpointHistory` uses, reported in `skipped`), and the conversation keeps its name link.
 
 ## Build PRs (each opened as a draft, reviewed by iris-dev-2)
 
