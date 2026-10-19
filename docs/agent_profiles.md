@@ -1,6 +1,6 @@
 # Agent Profiles
 
-An agent profile is a named starting point for a conversation: a role, some text added to its system prompt, and (in later builds) the skills it sees, a narrower set of tools, and a model tier. You start a conversation on one from the profile button beside **New Conversation**, at the foot of the sidebar; **New Conversation** itself still starts an ordinary one. The menu shows each profile's role when it differs from its name.
+An agent profile is a named starting point for a conversation: a role, some text added to its system prompt, a narrower set of tools, and (in a later build) the skills it sees and a model tier. You start a conversation on one from the profile button beside **New Conversation**, at the foot of the sidebar; **New Conversation** itself still starts an ordinary one. The menu shows each profile's role when it differs from its name.
 
 ## The files
 
@@ -23,11 +23,20 @@ You review pull requests for this repository. Read the whole diff first, ...
 
 The folder is one Iris protects. The agent can't write a profile without asking you, and no background job can write one at all.
 
-**What applies today:** the system-prompt text and the role. `skills`, `tools` and `tier` are read and kept, and take effect in the next builds.
+**What applies today:** the system-prompt text, the role and `tools`. `skills` and `tier` are read and kept, and take effect in the next build.
+
+## Tools
+
+With a `tools:` list, a conversation is offered only those tools, and a call to any other is refused with a line naming the profile. Without one, it gets the usual tools.
+- **MCP and plugin tools** are named as the model sees them. `mcp:<server>` stands for every tool that server offers.
+- **Always kept:** the tools `/goal` and `/rename` work through (`goal_complete`, `propose_goal_contract`, `rename_conversation`, `reach_checkpoint`, `amend_goal_contract`, `delegate_milestone`, `waive_criterion`). They're offered only during their own flow anyway.
+- **Messaging other sessions** (`send_to_session`, `list_sessions` and the rest) isn't kept: list those tools if the profile should talk to peers.
+- **Memory reflection still works.** On the turn where Iris consolidates memory, the tools that turn uses (`update_soul`, `update_user_profile`, `update_memory`, `create_skill`, `update_skill`) stay offered. They write the same memory any conversation does.
+- **Subagents** a profiled conversation starts get the same narrowing, at any depth, so delegating can't go around it. The goal grader keeps its own tools.
 
 ## A profile only adds and narrows
 
-A profile adds prompt text, picks a role, and (once those builds land) narrows the skills and tools offered and picks a tier. **It never approves, allowlists, grants or unlocks anything**. A profile's tool list is for focus and token cost, not security. What runs without asking is decided only by your allowlist, Vibecop, your approvals, and a job's profile.
+A profile adds prompt text, picks a role, narrows the tools offered, and (once that build lands) narrows the skills and picks a tier. **It never approves, allowlists, grants or unlocks anything**. A profile's tool list is for focus and token cost, not security. What runs without asking is decided only by your allowlist, Vibecop, your approvals, and a job's profile.
 
 Profiles don't apply to the pinned Iris conversation, to a subagent's own conversation, or to a job run.
 
