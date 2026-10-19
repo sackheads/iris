@@ -1150,6 +1150,13 @@ struct SystemGroupView: View {
     }
 }
 
+private extension View {
+    /// The pill's tooltip says what approved the call (#599), and a pill with nothing to say gets none.
+    @ViewBuilder func approvalHelp(_ line: String?) -> some View {
+        if let line { help(Text(verbatim: line)) } else { self }
+    }
+}
+
 struct SystemMessageContent: View {
     let text: String
     var commandStartTime: Date? = nil
@@ -1241,7 +1248,7 @@ struct SystemMessageContent: View {
                     .padding(.leading, call.command != nil ? 14 : 0)
             }
         }
-        .help(approval?.line ?? "")
+        .approvalHelp(approval?.line)
         .padding(.vertical, 4)
         .padding(.horizontal, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
