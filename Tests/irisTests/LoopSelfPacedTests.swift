@@ -87,12 +87,22 @@ struct LoopSelfPacedTests {
         }
         #expect(ConversationLoop.parse("status") == .status, "`/loop status` is `/loop`, never a loop on \"status\"")
         #expect(ConversationLoop.parse(" Status ") == .status)
+        #expect(ConversationLoop.parse("Stop.") == .stop && ConversationLoop.parse("stop!") == .stop && ConversationLoop.parse("pause.") == .pause)
+        for attempt in ["stop now", "pause for a bit", "off now", "cancel it", "Resume please", "status?"] {
+            switch ConversationLoop.parse(attempt) {
+            case .invalid, .status: break
+            default: Issue.record("/loop \(attempt) started a loop")
+            }
+        }
+        #expect(ConversationLoop.parse("list open issues") == .startSelfPaced(prompt: "list open issues"))
         #expect(ConversationLoop.parse("deploy") == .startSelfPaced(prompt: "deploy"), "an ordinary word is still a prompt")
         #expect(ConversationLoop.parse("end of day summary") == .startSelfPaced(prompt: "end of day summary"))
         let (state, id) = try app()
         state.sendMessage("/loop watch the build")
-        state.sendMessage("/loop off")
-        #expect(state.conversations.first { $0.id == id }?.loop?.prompt == "watch the build", "the running loop is untouched")
+        for attempt in ["/loop off", "/loop stop now", "/loop pause for a bit"] {
+            state.sendMessage(attempt)
+            #expect(state.conversations.first { $0.id == id }?.loop?.prompt == "watch the build", "\(attempt) left the running loop alone")
+        }
         state.sendMessage("/loop watch the deploy")
         #expect(state.conversations.first { $0.id == id }?.messages.last?.content.contains("This replaces the loop that was running (self-paced: watch the build)") == true)
         state.pauseLoop(for: id)

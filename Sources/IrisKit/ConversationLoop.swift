@@ -63,7 +63,8 @@ struct ConversationLoop: Codable, Equatable, Sendable {
 
     static func parse(_ arguments: String) -> Parsed {
         let trimmed = arguments.trimmingCharacters(in: .whitespacesAndNewlines)
-        switch trimmed.lowercased() {
+        // `Stop.` and `stop!` are the command with punctuation (#684 review).
+        switch trimmed.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".!?,;:")) {
         case "", "status": return .status
         case "stop": return .stop
         case "pause": return .pause
@@ -77,8 +78,11 @@ struct ConversationLoop: Codable, Equatable, Sendable {
             if parts[0].drop(while: { $0 == "-" || $0 == "+" }).first?.isNumber == true {
                 return .invalid("The interval is a number and a unit: `30s`, `5m`, `2h` or `1d`. " + usage)
             }
-            if parts.count == 1, controlWords.contains(parts[0].lowercased()) {
-                return .invalid("`/loop \(parts[0])` isn't a loop command. `/loop stop` ends a loop and `/loop pause` pauses it. " + usage)
+            let first = parts[0].lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".!?,;:"))
+            // A command word first is a command, whatever follows (`/loop stop now`); the wider
+            // list only alone, since `end of day summary` or `list open issues` is a real task.
+            if stopWords.contains(first) || (parts.count == 1 && controlWords.contains(first)) {
+                return .invalid("`/loop \(trimmed)` reads as a command, so no loop was started. `/loop stop` ends a loop and `/loop pause` pauses it. " + usage)
             }
             return .startSelfPaced(prompt: trimmed)
         }
@@ -138,6 +142,10 @@ struct ConversationLoop: Codable, Equatable, Sendable {
 
     /// One-word prompts that read as a command to the loop rather than a task for it (#684
     /// review): `/loop off` must not start a 50-tick loop whose task is "off".
+    /// First words that make `/loop …` a command attempt whatever follows them.
+    static let stopWords: Set<String> = [
+        "stop", "pause", "resume", "status", "off", "cancel", "quit", "exit", "halt", "kill", "abort", "unpause",
+    ]
     static let controlWords: Set<String> = [
         "off", "on", "end", "cancel", "quit", "exit", "halt", "kill", "abort", "start", "restart",
         "help", "list", "show", "info", "enable", "disable", "unpause", "continue", "clear", "reset",
