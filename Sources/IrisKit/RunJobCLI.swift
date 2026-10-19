@@ -313,7 +313,11 @@ enum RunJobCLI {
                                gate: (@Sendable (Gate, String?) async -> GateResult)?,
                                out: (String) -> Void, err: (String) -> Void) async -> Int32 {
         guard let jobGate = job.trigger.gate else {
-            return fail("'\(job.name)' has no gate to evaluate; run it without --dry-run.",
+            // #330: a script job's check is the script itself; a dry run that ran it wouldn't be dry.
+            let why = job.action.scriptSpec != nil
+                ? "'\(job.name)' is a script job: a dry run would have to run the script, so there is none; run it without --dry-run."
+                : "'\(job.name)' has no gate to evaluate; run it without --dry-run."
+            return fail(why,
                         code: Exit.usage, json: json, dryRun: true, out: out, err: err)
         }
         let previous = (try? ledger.lastGateSignal(jobId: job.id)) ?? nil

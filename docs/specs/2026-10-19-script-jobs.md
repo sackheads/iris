@@ -155,7 +155,8 @@ Brian: "Let do it this way for now and if it becomes a hindrance we can revisit"
 ## Known limits
 
 - **Changed content after review** (the planner's reason for ruling (b)).  A script judged once can run content that changes after review.  One that executes a file from a mount (`sh /mnt/repo/check.sh`) runs whatever that file holds at each fire, and with host-only network that content can reach Mac services.  The follow-up that relaxes network-off scripts to Vibecop review once there's no interface (#691) has to argue that changed content can then only read the mounts and print a guarded line, which is what `read_file` already allows.
-- **Deletion and replay.**  A script job's stored script lives in the job store like any job.  Changing it outside Iris is the same class as #678's guarded settings, and isn't addressed here.
+- **Changing the stored script outside Iris** is caught: the review's fingerprint (script, mounts, network, timeout) is kept in the Keychain item beside the API keys, and a fire that doesn't match is refused, carded once, and paused until re-scheduled (planner, 2026-10-19).  Gate scripts too: fingerprinted as they stood at the first launch of this version (trust on first use, ruled).
+- **A deleted Keychain item stops script jobs; it doesn't unlock them.**  No fingerprint means no run, and an unreadable item refuses every script fire.  Deleting the item and replaying #678's upgrade also replays the trust-on-first-use pass, but that replay is announced (#679).
 
 ## Scope
 

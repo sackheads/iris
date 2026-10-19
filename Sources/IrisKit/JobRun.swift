@@ -70,6 +70,12 @@ struct JobRun: Identifiable, Equatable, Sendable {
     /// What the burst that started this run saw and absorbed (#187 deliverable 4, spec §6). Set
     /// when the run began; `nil` on every run a watch did not start.
     var watchSummary: WatchSummary?
+    /// A script job's run (#330): what the script printed, each stream capped at
+    /// `ScriptJobs.outputLimit`, untrusted; and whether this run posted a card (only a change or
+    /// a failure does), which `/jobs` reads as "last posted". `nil`/false on every other run.
+    var scriptOutput: String?
+    var scriptStderr: String?
+    var posted: Bool = false
 
     init(id: UUID = UUID(), jobId: UUID, jobName: String, triggerKind: String, startedAt: Date,
          status: Status = .running, transcriptConversationId: UUID? = nil) {

@@ -1,7 +1,8 @@
 # Jobs
 
 A job is a stored instruction that runs without a conversation open: a recurring prompt
-(`schedule_job`) or a directory watch (`register_directory_watcher`). Both tools create a `Job` row
+(`schedule_job`), a recurring script with no model at all (`schedule_job` with `script`, see
+"Script jobs"), or a directory watch (`register_directory_watcher`). Both tools create a `Job` row
 in the `jobs` table of `~/.iris/conversations.sqlite` — the same database every conversation lives
 in, not `UserDefaults`. Jobs survive an app restart.
 
@@ -17,7 +18,8 @@ This document covers deliverables 1 to 4½ of `#187` (see `docs/agency/agency.md
 `docs/specs/2026-09-22-agency-watches.md` and `docs/specs/2026-09-23-agency-job-grants.md`): the
 job model, the cron subset, the schedule aliases, what happens on sleep, what a fire actually does
 — a run in a hidden conversation of its own, a row in the run ledger, and one event card (a
-built-in job has no conversation and no model turn; see "Built-in jobs" below) — the
+built-in job and a script job have no conversation and no model turn; see "Built-in jobs" and
+"Script jobs" below) — the
 gates, limits and retries around it, what a directory watch does with a burst of saves, what a
 `mutating` job may be granted so that it can do its work unattended, and `iris --run-job`, which
 fires one job from a terminal and prints the row it wrote.
@@ -716,7 +718,7 @@ token budgets do not apply to it, since it spends none; scheduling, catch-up, ov
 Iris itself — and a built-in name this build does not know fails its run with
 `unknown built-in: <name>` and pauses the job on that first failure, since retrying cannot make the
 name known. `get_job_run` on a built-in's run returns its outcome and says there is no transcript,
-and `list_jobs` gives every job an `action` of `prompt` or `builtin:<name>`. Built-in runs are left
+and `list_jobs` gives every job an `action` of `prompt`, `builtin:<name>` or `script`. Built-in runs are left
 out of the briefing's recent runs.
 
 #### The daily digest
@@ -759,6 +761,52 @@ Before deliverable 2, a fire posted a system event into the conversation the job
 and started a turn there. That is gone: a five-minute cadence no longer writes into the chat you
 are reading.
 
+### Script jobs
+
+A **script job** (#330) runs a shell script inside the sandbox VM each time it fires, with **no
+model turn**: no background conversation, no transcript, and no tokens for the run itself. It's for
+the cheap cases — "tell me when the build on main goes red", "post the disk-free line every
+morning" — that would otherwise cost a model turn per fire. `schedule_job` makes one when given
+`script` in place of `prompt` (exactly one of the two):
+
+- `script_mounts`: directories it can read, **always read-only**, checked and resolved like a gate
+  script's mounts, and re-checked at every fire;
+- `script_network`: off by default. Off is the sandbox's host-only network: no internet, but it can
+  **still reach services on this Mac** (#690). On is the internet;
+- `script_timeout_seconds`: 5-3600 seconds, default 120. Past it the script is killed inside the VM
+  and the run fails.
+
+It is **read-only in this version**: no `profile: mutating`, no grant mounts or network, and no
+gate (a script job is its own check; it can exit early when there's nothing to do). The VM or
+nothing: with no container runtime it isn't created, and a fire that finds the runtime gone is
+`interrupted`, never run on the host.
+
+**You review every script job before it exists**, Vibecop or not, exactly as a gate script: the
+script, what it can read, whether it has the network and what that means, and its timeout, with
+Approve and Deny and no Always Allow. What you approved is fingerprinted — the script, each mount,
+the network flag and the timeout — and kept in Iris's Keychain item beside its API keys, which a
+shell command can't write. A fire whose stored script no longer matches (its row was edited
+outside Iris) **doesn't run**: one row says `script changed since review`, one card says so, and
+the job pauses until you schedule it again, which is the review again. `/jobs resume` can't lift
+that pause. The same check covers gate scripts, which were fingerprinted as they stood at the
+first launch of this version. If the Keychain item can't be read, no script runs (the run is
+`interrupted`); deleting the item stops script jobs, it doesn't unlock them.
+
+**What a run says.** Exit 0 is `completed`, a non-zero exit or a timeout is `failed` (so the retry
+ladder applies as for any job), and the outcome is the **last non-empty line of its output**, cut
+at 200 characters (`exit N` if it printed nothing). At most 64 KB of each of stdout and stderr is
+kept on the row, and only that much ever leaves the VM. **A card posts only when something
+happened**: the first run, any failure, or a run whose status or outcome differs from the last
+one's. Every run writes its row either way, and `/jobs` shows a script job's *last ran* and
+*last posted* separately so a quiet one doesn't look dead. A posted line is untrusted script
+output, so it passes the injection guard to tier 3 first; a blocked one is posted as `output
+withheld: the injection guard blocked it`, and a line checked without tier 3 (protection off, or
+its model not downloaded) ends `(checked without tier 3)`. `get_job_run` returns the output,
+guarded, and `iris --run-job --dry-run` refuses a script job, since a dry run would have to run it.
+
+The injection guard's tier 3 can be a model call (the cloud or Ollama canary). That spend isn't
+charged to any job budget today, for script jobs or anything else (#689).
+
 ## The run ledger
 
 Every fire writes a row to `job_runs`, in the same database as the jobs and the conversations: job,
@@ -774,8 +822,8 @@ A run ends in one of five statuses, one of which reads two ways:
 | Status | Meaning |
 | --- | --- |
 | `running` | in flight right now |
-| `completed` | the turn finished and said something — or the job's gate found nothing to do, in which case the outcome says `gate: no change` and there was no turn — or a built-in job ran, which never has a turn |
-| `failed` | the model call errored, the loop was cut short, the run's final reply was cut off at the output limit or context window (on any provider: Anthropic `max_tokens` or `model_context_window_exceeded`, Gemini `MAX_TOKENS`, OpenAI `length`), or the turn ended having said nothing at all. A cut in an earlier round or turn that the run went on to finish is a warning, not a failure |
+| `completed` | the turn finished and said something — or the job's gate found nothing to do, in which case the outcome says `gate: no change` and there was no turn — or a built-in job ran, which never has a turn — or a script job's script exited 0 |
+| `failed` | the model call errored, the loop was cut short, the run's final reply was cut off at the output limit or context window (on any provider: Anthropic `max_tokens` or `model_context_window_exceeded`, Gemini `MAX_TOKENS`, OpenAI `length`), or the turn ended having said nothing at all. A cut in an earlier round or turn that the run went on to finish is a warning, not a failure. A script job's run fails when its script exits non-zero, times out, or can't be started |
 | `blocked on approval` | the run wanted a tool it is not allowed to use unattended, and stopped (see below) |
 | `refused by profile` | a read-only job called a tool its profile does not allow, and stopped. No approval can run it; recreate the job as `mutating` if it should. Stored as `blockedOnApproval`, so it waits to be acknowledged like a block. The Run Log's status filter lists it under its own `refused by profile`, apart from `blocked on approval` |
 | `interrupted` | nothing finished it: the app (or a `--run-job`) quit mid-run and the next launch closed the row out, a `--run-job` was stopped by a signal, a cadence came round while the previous run of the same job was still going so this trigger was dropped rather than started twice, a gate could not answer, or a limit refused the fire before it started (the breaker, a budget, or a ledger that could not say what the job has sent) |
@@ -795,7 +843,9 @@ opens it in the main window; one that retention has pruned says so.
 
 When a run ends, one **event card** is delivered: job name, status, the one-line outcome, tokens,
 and a "View run" button onto the transcript. (A built-in job's card has no transcript to view, and a
-built-in with nothing to report posts no card at all.) It goes to the job's destination conversation if it
+built-in with nothing to report posts no card at all. Nor does a script job's: its card shows the
+last line of its output, posts only on a first run, a failure or a change, and marks a line checked
+without the injection guard's tier 3 with `(checked without tier 3)`; see "Script jobs".) It goes to the job's destination conversation if it
 has one, and otherwise to **Iris** — the pinned conversation Iris creates on first use, keeps at
 the top of the sidebar, and treats as your main conversation. (Pinned conversations refuse
 `/clear`. `/new` in Iris archives it and starts a fresh one. The pin moves once the rotation's

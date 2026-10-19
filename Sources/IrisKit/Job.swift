@@ -392,13 +392,22 @@ enum Trigger: Codable, Equatable, Sendable {
 enum JobAction: Codable, Equatable, Sendable {
     case prompt
     case builtin(String)
+    /// A script run in the sandbox VM on each fire, with no model turn (#330). Stored as
+    /// `"script:"` followed by the spec's JSON.
+    case script(ScriptSpec)
 
     static let builtinPrefix = "builtin:"
+    static let scriptPrefix = "script:"
 
     var stored: String {
         switch self {
         case .prompt: return "prompt"
         case .builtin(let name): return Self.builtinPrefix + name
+        case .script(let spec):
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .sortedKeys
+            let json = (try? encoder.encode(spec)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            return Self.scriptPrefix + json
         }
     }
 
@@ -406,6 +415,13 @@ enum JobAction: Codable, Equatable, Sendable {
     init?(stored: String?) {
         guard let stored else { self = .prompt; return }
         if stored == "prompt" { self = .prompt; return }
+        if stored.hasPrefix(Self.scriptPrefix) {
+            // A script that will not decode is unreadable, never a prompt or an empty script.
+            guard let spec = try? JSONDecoder().decode(ScriptSpec.self, from: Data(stored.dropFirst(Self.scriptPrefix.count).utf8))
+            else { return nil }
+            self = .script(spec)
+            return
+        }
         guard stored.hasPrefix(Self.builtinPrefix) else { return nil }
         let name = String(stored.dropFirst(Self.builtinPrefix.count))
         guard !name.isEmpty else { return nil }
@@ -459,8 +475,8 @@ struct Job: Identifiable, Codable, Equatable, Sendable {
     /// `policy.overlap == .queue` only: the one fire that came due while the previous run was
     /// still going, taken when it finishes. Never more than one.
     var queuedFire: Date?
-    /// A model turn, or a built-in with none (5b §0.8). Only harness code creates a built-in:
-    /// `schedule_job` always makes `.prompt`.
+    /// A model turn, a built-in with none (5b §0.8), or a script in the VM with none (#330). Only
+    /// harness code creates a built-in; `schedule_job` makes `.prompt` or `.script`.
     var action: JobAction
     /// D6 decision 9: whether the owner has let a link fire this job. Read from the store; set
     /// only by `/jobs url` through `JobLedger.setURLTrigger`. `upsert` never writes it, so a stale

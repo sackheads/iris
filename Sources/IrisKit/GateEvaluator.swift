@@ -35,8 +35,10 @@ enum GateEvaluator {
     static let payloadLimit = 4_000
     /// The most of each stream a gate script's output Iris holds (#699): drained past this on the
     /// host, so a script can't grow Iris's memory by writing around a cap inside the VM.
-    static let outputLimitBytes = 1_048_576
-    static let outputLimitMessage = "the gate script printed more than 1 MB; its last line must be \(changedToken) or \(unchangedToken)"
+    /// What the host keeps of each stream (#699): above the in-VM cap (`ScriptJobs.outputLimit`,
+    /// 64 KB) and its marker, so only a script that gets round that cap reaches it.
+    static let outputLimitBytes = 128 * 1_024
+    static let outputLimitMessage = "the script printed more than 128 KB on standard output; a gate's last line must be \(changedToken) or \(unchangedToken)"
     /// What a gate script gets when it declared no deadline of its own.
     static let defaultTimeoutSeconds = PollSpec.legacyGateTimeoutSeconds
     /// The window a declared timeout is clamped into. A gate runs unattended on a cadence: below
@@ -287,11 +289,43 @@ enum GateEvaluator {
         // Before anything is started: the mounts must still be the directories that were reviewed.
         if let drift = mountDrift(mounts, fileManager: fileManager) { return .error(drift) }
         let seconds = clampedTimeout(timeoutSeconds)
-        let name = "\(SandboxSessionManager.namePrefix)gate-\(UUID().uuidString.lowercased())"
+        switch await runInVM(command, mounts: mounts, timeoutSeconds: seconds, network: network,
+                             runtime: runtime, image: image, createCeiling: createCeiling, kind: "gate") {
+        case .ran(let stdout, let stderr, let exitCode):
+            return scriptVerdict((stdout, stderr, exitCode))
+        case .timedOut(let allowed):
+            // The allowance, not the elapsed seconds: what a person can act on is the number they
+            // set, exactly as the sandboxed `run_command` route reports it.
+            return .error("the gate script timed out after \(allowed) seconds")
+        case .failed(let detail):
+            return .error(detail)
+        case .outputTooLong:
+            return .error(Self.outputLimitMessage)
+        }
+    }
+
+    /// What one run of a script in the VM came to (#330): its output, a timeout, or a failure to
+    /// run it at all, in words for a gate error or a run's failure reason.
+    enum VMRun: Equatable, Sendable {
+        case ran(stdout: String, stderr: String, exitCode: Int32)
+        case timedOut(seconds: Int)
+        case failed(String)
+        /// More stdout than the host keeps (#699): only a script written to get round the in-VM cap.
+        case outputTooLong
+    }
+
+    /// One script in a fresh container, for a gate or a script job (#330): registered with
+    /// `LiveContainerNames` before the create, on the isolated network unless `network` (#687),
+    /// created within `createCeiling`, run under `timeoutSeconds` with the in-VM group kill, and
+    /// always swept. At most `ScriptJobs.outputLimit` of each stream leaves the VM.
+    static func runInVM(_ command: String, mounts: [String], timeoutSeconds seconds: Int, network: Bool,
+                        runtime: any ContainerRuntime, image: String, createCeiling: Int,
+                        kind: String) async -> VMRun {
+        let name = "\(SandboxSessionManager.namePrefix)\(kind == "gate" ? "gate" : "script")-\(UUID().uuidString.lowercased())"
         // Registered before the create and taken out again by `sweep`, so a sweep of the leftovers
         // of a previous process cannot delete a container that is mid-evaluation right now.
         guard await GateContainerRegistry.shared.register(name) else {
-            return .error(LiveContainerNames.exitingError)
+            return .failed(LiveContainerNames.exitingError)
         }
         // #687: off is the isolated network, made first if it is missing. On is the default one.
         let networkMode: NetworkMode
@@ -301,7 +335,7 @@ enum GateEvaluator {
             do { try await runtime.ensureIsolatedNetwork(named: NetworkMode.isolatedNetworkName) }
             catch {
                 await GateContainerRegistry.shared.unregister(name)
-                return .error("the gate's isolated network could not be set up: \(describe(error))")
+                return .failed("the \(kind)'s isolated network could not be set up: \(describe(error))")
             }
             networkMode = .isolated
         }
@@ -310,32 +344,47 @@ enum GateEvaluator {
                                           mounts: readOnly(mounts), network: networkMode, seconds: createCeiling)
         } catch is CreateTimedOut {
             // Not a hang: a bounded failure that lands on the ordinary error path, so it is
-            // counted towards the three-error pause and somebody is eventually told. The remove
-            // is the same best-effort sweep a failed create gets.
+            // counted and somebody is eventually told. The remove is the same best-effort sweep.
             await sweep(runtime, name: name)
-            return .error("the gate's container could not be started within \(createCeiling) seconds")
+            return .failed("the \(kind)'s container could not be started within \(createCeiling) seconds")
         } catch {
             // Remove anyway: a create that failed part way through can still have left a container
             // behind, and the next tick would collide with nothing but the daemon's opinion of it.
             await sweep(runtime, name: name)
-            return .error("the gate's container could not be started: \(describe(error))")
+            return .failed("the \(kind)'s container could not be started: \(describe(error))")
         }
-        let result: GateResult
+        let result: VMRun
         do {
-            let output = try await runtime.exec(name: name, workdir: workdir, command: command,
+            // In-VM, an ordinary script's output is capped (`ScriptJobs.cappedCommand`); on the host,
+            // #699's bounded drain holds one written to get round that, above the in-VM cap and its
+            // marker. A cut stdout has lost its last line, which a gate reads as its verdict.
+            let output = try await runtime.exec(name: name, workdir: workdir, command: ScriptJobs.cappedCommand(command),
                                                 timeoutSeconds: seconds, outputLimit: outputLimitBytes)
-            // A cut stdout has lost its last line, which is the verdict (#699).
-            result = output.droppedStdout > 0 ? .error(Self.outputLimitMessage) : scriptVerdict(output.tuple)
+            result = output.droppedStdout > 0 ? .outputTooLong
+                : .ran(stdout: output.stdout, stderr: output.stderr, exitCode: output.exitCode)
         } catch ContainerRuntimeError.timedOut {
-            // The allowance, not the elapsed seconds: what a person can act on is the number they
-            // set, exactly as the sandboxed `run_command` route reports it.
-            result = .error("the gate script timed out after \(seconds) seconds")
+            result = .timedOut(seconds: seconds)
         } catch {
-            result = .error("the gate script could not be run: \(describe(error))")
+            result = .failed("the \(kind) script could not be run: \(describe(error))")
         }
         // No `defer`: it cannot await, and a container left running would outlive every tick.
         await sweep(runtime, name: name)
         return result
+    }
+
+    /// A script job's fire (#330): the VM or nothing (F), the mounts still the reviewed ones, then
+    /// `runInVM` under the job's own timeout.
+    static func runScriptJob(_ spec: ScriptSpec, runtime: (any ContainerRuntime)?, image: String,
+                             createCeiling: Int = GateEvaluator.createCeilingSeconds,
+                             fileManager: FileManager = .default) async -> VMRun {
+        guard let runtime else { return .failed("no container runtime: \(sandboxUnavailableDetail.replacingOccurrences(of: "a gate script", with: "a script job"))") }
+        guard !spec.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .failed("this script job has no script to run")
+        }
+        if let drift = mountDrift(spec.mounts, fileManager: fileManager) { return .failed(drift) }
+        return await runInVM(spec.command, mounts: spec.mounts, timeoutSeconds: ScriptJobs.clampedTimeout(spec.timeoutSeconds),
+                             network: spec.network, runtime: runtime, image: image,
+                             createCeiling: createCeiling, kind: "script job")
     }
 
     /// `createDetached` with a deadline on it.

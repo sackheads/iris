@@ -640,6 +640,23 @@ extension JobLedger {
         }
     }
 
+    /// A script job's output and card decision (#330), written as its run finishes.
+    func recordScript(runId: UUID, stdout: String?, stderr: String?, posted: Bool) throws {
+        try writer.write { db in
+            try db.execute(sql: "UPDATE job_runs SET scriptOutput = ?, scriptStderr = ?, posted = ? WHERE id = ?",
+                           arguments: [stdout, stderr, posted, runId.uuidString])
+            guard db.changesCount > 0 else { throw JobLedgerError.unknownRun(runId) }
+        }
+    }
+
+    /// When a job's run last posted a card (#330, `/jobs`' "last posted").
+    func lastPosted(jobId: UUID) throws -> Date? {
+        try writer.read { db in
+            try Date.fetchOne(db, sql: "SELECT startedAt FROM job_runs WHERE jobId = ? AND posted = 1 ORDER BY startedAt DESC, rowid DESC LIMIT 1",
+                              arguments: [jobId.uuidString])
+        }
+    }
+
     // MARK: Reads
 
     func run(id: UUID) throws -> JobRun? {
@@ -1090,6 +1107,9 @@ extension JobLedger {
         if let json = try r.read("watchSummary", String.self) {
             run.watchSummary = try? JSONDecoder().decode(WatchSummary.self, from: Data(json.utf8))
         }
+        run.scriptOutput = try r.read("scriptOutput", String.self)
+        run.scriptStderr = try r.read("scriptStderr", String.self)
+        run.posted = try r.read("posted", Bool.self) ?? false
         return run
     }
 

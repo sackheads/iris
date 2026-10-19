@@ -36,6 +36,11 @@ struct ScheduleJobArguments: Equatable, Sendable {
     let gateTimeoutSeconds: Int?
     /// #687: whether the gate script may reach the network. `nil` is off.
     var gateNetwork: Bool? = nil
+    /// #330: a script job's action, the alternative to `prompt`. Exactly one of the two is given.
+    var script: String? = nil
+    var scriptMounts: [String]? = nil
+    var scriptTimeoutSeconds: Int? = nil
+    var scriptNetwork: Bool? = nil
     /// The two policy fields a model may set at creation (#187 §3). `nil` is "say nothing", which
     /// is not the same as asking for the default: it leaves `JobPolicy`'s own default in place, so
     /// a later change to that default reaches every job that never had an opinion.
@@ -56,7 +61,26 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// resolves to nothing is `makeJob`'s refusal, not this one, so the caller can report the
     /// specific thing that was wrong with the cadence rather than "bad arguments".
     static func parse(_ args: [String: JSONValue]) -> Result<ScheduleJobArguments, ToolMessage> {
-        guard let prompt = text(args["prompt"]) else { return .failure("schedule_job needs a prompt.") }
+        // #330: a prompt or a script, never both: which one a fire runs is not a guess.
+        let script = text(args["script"])
+        if present(args["script"]), script == nil { return .failure("script must be a non-empty string.") }
+        if script != nil, text(args["prompt"]) != nil { return .failure(ToolMessage(Self.promptOrScript)) }
+        guard let prompt = text(args["prompt"]) ?? (script != nil ? "" : nil) else {
+            return .failure("schedule_job needs a prompt, or a script for a job that runs no model.")
+        }
+        let scriptMounts: [String]?
+        switch stringList(args["script_mounts"], shape: Self.scriptMountsShape) {
+        case .failure(let message): return .failure(message)
+        case .success(let values): scriptMounts = values
+        }
+        if present(args["script_timeout_seconds"]), integer(args["script_timeout_seconds"]) == nil {
+            return .failure("script_timeout_seconds must be a number of seconds.")
+        }
+        let scriptNetwork: Bool?
+        switch boolean(args["script_network"]) {
+        case .failure: return .failure("script_network must be true or false.")
+        case .success(let value): scriptNetwork = value
+        }
         let weekdays: [Int]?
         switch weekdayList(args["weekdays"]) {
         case .failure(let message): return .failure(message)
@@ -133,6 +157,8 @@ struct ScheduleJobArguments: Equatable, Sendable {
             gateURL: text(args["gate_url"]), gatePath: text(args["gate_path"]),
             gateScript: text(args["gate_script"]), gateMounts: gateMounts,
             gateTimeoutSeconds: integer(args["gate_timeout_seconds"]), gateNetwork: gateNetwork,
+            script: script, scriptMounts: scriptMounts,
+            scriptTimeoutSeconds: integer(args["script_timeout_seconds"]), scriptNetwork: scriptNetwork,
             overlap: overlap, catchUp: catchUp, runTimeoutSeconds: runTimeout, mounts: mounts,
             network: network, notes: notes))
     }
@@ -175,6 +201,12 @@ struct ScheduleJobArguments: Equatable, Sendable {
         // `JobProfile.asked`, the one reader every job-creating path uses (#517): anything but the
         // word `mutating` is read-only, so the approval and the job can't read a spelling apart.
         let wantsMutating = JobProfile.asked(profile) == .mutating
+        // #330: a script job is decided first; its refusals are about the script, not the grant.
+        let scriptSpec: ScriptSpec?
+        switch resolvedScript(sandboxAvailable: sandboxAvailable, fileManager: fileManager) {
+        case .failure(let message): return .failure(message)
+        case .success(let resolved): scriptSpec = resolved
+        }
         if wantsMutating, !sandboxAvailable { return .failure(ToolMessage(Self.noRuntimeForMutating)) }
         let grant: JobGrant?
         switch JobGrant.resolve(mounts: mounts, network: network,
@@ -204,12 +236,13 @@ struct ScheduleJobArguments: Equatable, Sendable {
             policy.runTimeoutOverride = runTimeoutSeconds
             policy.grants = grant
             return .success(Job(
-                name: Self.uniqueName(Job.slug(from: name ?? prompt), existing: existingNames),
+                name: Self.uniqueName(Job.slug(from: name ?? (scriptSpec != nil ? "script-job" : prompt)), existing: existingNames),
                 prompt: prompt,
                 trigger: trigger,
                 profile: wantsMutating ? .mutating : .readOnly,
                 createdInConversationId: createdIn,
-                policy: policy))
+                policy: policy,
+                action: scriptSpec.map(JobAction.script) ?? .prompt))
         }
     }
 
@@ -360,6 +393,38 @@ struct ScheduleJobArguments: Equatable, Sendable {
     static let catchUpShape: ToolMessage = "catch_up must be 'coalesce' (one fire on wake, whatever was missed), 'skip' (no fire; jump to the next occurrence), or 'replay' to run the most recent missed occurrences one at a time — with a cap, if you want one other than 5, as 'replay:3' (100 is the most a job may replay)."
 
     static let gateOptionsNeedAScript = "gate_mounts, gate_timeout_seconds and gate_network only apply to gate_script."
+    static let promptOrScript = "Give a prompt or a script, not both: a prompt runs a model turn on each fire, a script runs in the sandbox VM with no model."
+    static let scriptOptionsNeedAScript = "script_mounts, script_timeout_seconds and script_network only apply to script."
+    static let scriptNoGate = "A script job is its own check: it can't also have a gate_url, gate_path or gate_script. Have the script exit early when there's nothing to do."
+    static let scriptReadOnly = "A script job is read-only in this version: it can't be profile 'mutating' or take a grant's mounts or network. Use script_mounts (always read-only) and script_network."
+    static let noRuntimeForScript = "A script job runs only inside the sandbox VM, and the container runtime isn't available or sandboxing is off, so no job was created."
+    static let scriptMountsShape: ToolMessage = "script_mounts must be a list of directory paths, like [\"/Users/me/project\"] or [\"/Users/me/project:/in\"]."
+
+    /// The script job these arguments describe (#330), `nil` for a prompt job, or why they
+    /// describe no usable one. Read-only in v1 (fork A), and never with a gate.
+    func resolvedScript(sandboxAvailable: Bool, fileManager: FileManager = .default) -> Result<ScriptSpec?, ToolMessage> {
+        guard let script else {
+            guard scriptMounts == nil, scriptTimeoutSeconds == nil, scriptNetwork == nil else {
+                return .failure(ToolMessage(Self.scriptOptionsNeedAScript))
+            }
+            return .success(nil)
+        }
+        guard gateURL == nil, gatePath == nil, gateScript == nil else { return .failure(ToolMessage(Self.scriptNoGate)) }
+        guard profile?.lowercased() != JobProfile.mutating.rawValue, mounts == nil, network == nil else {
+            return .failure(ToolMessage(Self.scriptReadOnly))
+        }
+        guard sandboxAvailable else { return .failure(ToolMessage(Self.noRuntimeForScript)) }
+        var resolved: [String] = []
+        for entry in scriptMounts ?? [] {
+            if let refusal = GateEvaluator.mountRefusal(entry, fileManager: fileManager) {
+                return .failure(ToolMessage("script_mounts: \(refusal)."))
+            }
+            resolved.append(GateEvaluator.canonicalMount(entry))
+        }
+        return .success(ScriptSpec(command: script, mounts: GateEvaluator.readOnly(resolved),
+                                   timeoutSeconds: ScriptJobs.clampedTimeout(scriptTimeoutSeconds ?? ScriptJobs.defaultTimeoutSeconds),
+                                   network: scriptNetwork ?? false))
+    }
 
     static let timeoutShape: ToolMessage = "timeout_seconds must be a whole number of seconds, 60-3600."
     static let gateMountsShape: ToolMessage = "gate_mounts must be a directory path, or a list of them."
@@ -413,6 +478,12 @@ struct ScheduleJobArguments: Equatable, Sendable {
             sentence = "Scheduled '\(stored.name)' (\(stored.trigger.summary)). \(label): \(formatFire(next, zone: stored.trigger.timeZoneIdentifier))."
         } else {
             sentence = "Saved '\(stored.name)' but it will never fire: \(stored.pausedReason ?? JobScheduler.unmatchableReason)."
+        }
+        // #330: a script job has no turn to time out; its script's own limit and network are what
+        // the person approved.
+        if let spec = stored.action.scriptSpec {
+            let script = "It runs a script in the sandbox VM with no model turn, for up to \(spec.timeoutSeconds) s each fire, network \(spec.network ? "on" : "off (host-only)"); a card posts on the first run, a failure, or a change."
+            return ([sentence] + notes + [script]).joined(separator: " ")
         }
         let timeout = JobPolicy.runTimeoutLine(override: stored.policy.runTimeoutOverride,
                                                global: globalRunTimeoutSeconds)
@@ -654,7 +725,11 @@ struct GateScriptReview: Sendable {
     /// reads every gate script once. Vibecop still advises, shown in the dialog, and a DENY still
     /// refuses without asking.
     func review(script: String, mounts: [String], timeoutSeconds: Int, network: Bool = false) async -> Result<Void, ToolMessage> {
-        let subject = Self.details(script: script, mounts: mounts, timeoutSeconds: timeoutSeconds, network: network)
+        await review(details: Self.details(script: script, mounts: mounts, timeoutSeconds: timeoutSeconds, network: network))
+    }
+
+    /// The same review over composed `details` (a script job's, #330): the script must be last.
+    func review(details subject: String) async -> Result<Void, ToolMessage> {
         let decision = await verdict(subject)
         if decision?.decision == "DENY" {
             return .failure(ToolMessage(Self.denied(decision?.reason ?? "")))
