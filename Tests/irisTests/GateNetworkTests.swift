@@ -78,7 +78,7 @@ struct GateNetworkTests {
         return Job(name: name, prompt: "p", trigger: trigger)
     }
 
-    @Test("the upgrade notice names each script-gate job once, and a second launch says nothing")
+    @Test("the upgrade pauses every script-gate job once, names them, and a second launch does nothing")
     func upgradeNotice() throws {
         let name = "iris-687-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: name))
@@ -92,11 +92,16 @@ struct GateNetworkTests {
             job("url", gate: .urlChanged(url: "https://example.com")),
             job("plain", gate: nil),
         ]
-        let notice = try #require(AppState.gateNetworkNotice(jobs: jobs, defaults: defaults))
+        let paused = Locked<[UUID]>([])
+        let pause: (UUID) -> Void = { id in paused.mutate { $0.append(id) } }
+        let notice = try #require(AppState.gateNetworkNotice(jobs: jobs, defaults: defaults, pause: pause))
         #expect(notice.contains("alpha, zeta"), "names only script gates, sorted")
         #expect(!notice.contains("url") && !notice.contains("plain"))
+        #expect(notice.contains("Vibecop's review alone") && notice.contains("schedule it again"))
         #expect(notice.contains("gate_network: true") && notice.contains("services on this Mac"))
-        #expect(AppState.gateNetworkNotice(jobs: jobs, defaults: defaults) == nil, "idempotent")
+        #expect(Set(paused.value) == Set([jobs[0].id, jobs[1].id]), "every script-gate job pauses, nothing else")
+        #expect(AppState.gateNetworkNotice(jobs: jobs, defaults: defaults, pause: pause) == nil, "idempotent")
+        #expect(paused.value.count == 2, "a second launch pauses nothing")
     }
 
     @Test("with no script gates the notice says nothing, and still never runs again")
@@ -107,10 +112,45 @@ struct GateNetworkTests {
             defaults.removePersistentDomain(forName: name)
             IrisDefaults.removeSuiteFile(named: name, in: IrisDefaults.preferencesDirectory)
         }
-        #expect(AppState.gateNetworkNotice(jobs: [], defaults: defaults) == nil)
+        #expect(AppState.gateNetworkNotice(jobs: [], defaults: defaults, pause: { _ in }) == nil)
         let later = [job("late", gate: .script(command: "x", mounts: [], timeoutSeconds: 60))]
-        #expect(AppState.gateNetworkNotice(jobs: later, defaults: defaults) == nil,
-                "a gate made after the upgrade was made network-aware and needs no notice")
+        #expect(AppState.gateNetworkNotice(jobs: later, defaults: defaults,
+                                           pause: { _ in Issue.record("a gate made after the upgrade was reviewed; it never pauses") }) == nil)
+    }
+}
+
+/// The upgrade through a real launch: a stored script-gate job pauses, the notice lands in the
+/// selected conversation, and a second launch over the same store and defaults does nothing.
+@MainActor
+@Suite(.timeLimit(.minutes(1)))
+struct GateUpgradeLaunchTests {
+    @Test("a launch pauses the stored gate job and says so; the next launch does not")
+    func launch() throws {
+        let suite = "iris-687c-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            IrisDefaults.removeSuiteFile(named: suite, in: IrisDefaults.preferencesDirectory)
+        }
+        let config = ConfigManager(store: defaults, guardedSecrets: KeychainManager(serviceSuffix: ".t", inMemory: true))
+        let store = try ConversationStore.inMemory()
+        let gated = Job(name: "watch-build", prompt: "p",
+                        trigger: .poll(PollSpec(schedule: .interval(seconds: 600),
+                                                gate: .script(command: "echo CHANGED", mounts: [], timeoutSeconds: 60))))
+        _ = try store.ledger.upsert(gated)
+
+        let first = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned,
+                             guardedConfig: config, runsGateUpgrade: true)
+        #expect(try store.ledger.jobs().first?.pausedReason == AppState.gateNeedsReviewReason)
+        let target = try #require(first.selectedConversationId)
+        let said = first.conversations.first { $0.id == target }?.messages.map(\.content) ?? []
+        #expect(said.contains { $0.contains("watch-build") && $0.contains("paused") })
+
+        try store.ledger.setPaused(jobId: gated.id, reason: nil)
+        let second = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned,
+                              guardedConfig: config, runsGateUpgrade: true)
+        #expect(try store.ledger.jobs().first?.pausedReason == nil, "the upgrade ran once")
+        _ = second
     }
 }
 
