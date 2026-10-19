@@ -58,7 +58,7 @@ Session roles (#469/#480) already exist: `Conversation.role`, user-assigned with
 | **System-prompt addition** | `assembledSystemPrompt(workspacePath:)` | A layer after USER.md and AGENTS.md: `# Agent Profile: <name>` plus the body. The cache key gains the profile's name and stamp. |
 | **Skills** | the `# Available Skills` block in the base prompt | A per-conversation skill list, in the same shape as a skill bundle. It **replaces** the global `/bundle` for that conversation. The base prompt is currently cached once per engine, so it becomes cached per skills selection (default, or per profile). |
 | **Tools** | `processInputBody`, the tool pipeline | Intersect with the profile's `tools`. This runs **after** the sticky union and `hardStrip`, so a sticky tool can't widen a profile (5c). A call to a tool outside the list is refused at dispatch, like `profileRefusal`. |
-| **Tier** | the three `modelTier` reads in `iris.swift` | Resolved per turn: the profile's tier, else the engine's. This is also where #667's fix (`/model` never sets the tier) belongs. |
+| **Tier** | the three `modelTier` reads in `iris.swift` | Resolved per turn: the conversation's own tier (set by `/model`, #667), else the profile's, else the engine's. |
 
 - **Fork B:** tools the harness itself relies on (`goal_complete`, `propose_goal_contract`, `rename_conversation`, `reach_checkpoint`, `amend_goal_contract`, `send_to_session` replies).
   - **(1)** Always exempt from the profile's narrowing, because `/goal`, `/rename` and the goal loop would break without them, and they're already gated to their flows (Invariant 6). *(Recommended.)*
@@ -107,8 +107,12 @@ Session roles (#469/#480) already exist: `Conversation.role`, user-assigned with
    - the **system-prompt addition** and the role at creation;
    - the pinned exclusion;
    - Open Agent Profiles Folder, and the shipped examples.
+   - **Closes #668**, with one invalidation rule for every prompt built from something other than the default. An engine whose base prompt was set from custom text (a subagent's role prompt, through `setSystemPrompt`) keeps that text and rebuilds from it when invalidated, never from SOUL.md and the default skills. A profiled conversation's addition is a layer above the base, so a skill change rebuilds it with the profile still in place.
+   - **Tests:** a subagent that writes a skill still sends its role prompt on its next turn, and a profiled conversation still sends its profile's addition after a skill change.
 2. **Tools:** intersection after the sticky union and `hardStrip`, the dispatch refusal, and the Fork B exemptions.
-3. **Skills and tier:** the per-conversation skills selection (the base-prompt cache keyed by it) and the per-turn tier, which fixes #667 on the way.
+3. **Skills and tier:** the per-conversation skills selection (the base-prompt cache keyed by it) and the per-turn tier.
+   - **Closes #667:** `/model easy|medium|hard` sets *that conversation's* tier, through the same per-turn resolution, not the shared engine's. Its reply names the model the conversation will now use.
+   - **Test:** after `/model`, the next turn's request goes to that tier's model.
 
 ## Docs (Invariant 9)
 
