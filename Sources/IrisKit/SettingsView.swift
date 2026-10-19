@@ -186,8 +186,11 @@ struct SettingsView: View {
     @State private var isCheckingAPIs = false
     @State private var showSetupGuide = false
     
+    /// Which tab is showing, shared so a status light can open Settings on its own tab (#88).
+    @Bindable private var navigation = SettingsNavigation.shared
+
     var body: some View {
-        TabView {
+        TabView(selection: $navigation.selected) {
             // MARK: - General Tab
             Form {
                 Section(header: Text("Global Shortcuts").font(.headline)) {
@@ -235,6 +238,7 @@ struct SettingsView: View {
             .tabItem {
                 Label("General", systemImage: "gearshape")
             }
+            .tag(SettingsTab.general)
             
             // MARK: - Models Tab
             Form {
@@ -348,6 +352,7 @@ struct SettingsView: View {
             .tabItem {
                 Label("Models", systemImage: "cpu")
             }
+            .tag(SettingsTab.models)
             .sheet(isPresented: $showModelListSheet) {
                 ModelListSheet(
                     config: config,
@@ -560,6 +565,7 @@ struct SettingsView: View {
             .tabItem {
                 Label("Vibecop", systemImage: "eye.circle")
             }
+            .tag(SettingsTab.vibecop)
                        // MARK: - Security Tab
             Form {
                 Section(header: Text("General Protection").font(.headline)) {
@@ -743,6 +749,7 @@ struct SettingsView: View {
             .tabItem {
                 Label("Security", systemImage: "lock.shield")
             }
+            .tag(SettingsTab.security)
             
             // MARK: - Integrations Tab
             Form {
@@ -918,6 +925,7 @@ struct SettingsView: View {
             .tabItem {
                 Label("Integrations", systemImage: "link")
             }
+            .tag(SettingsTab.integrations)
             
             // MARK: - Advanced Tab
             Form {
@@ -1043,12 +1051,14 @@ struct SettingsView: View {
             .tabItem {
                 Label("Advanced", systemImage: "lock.shield")
             }
+            .tag(SettingsTab.advanced)
 
             // MARK: - Plugins Tab
             PluginsSettingsView()
             .tabItem {
                 Label("Plugins", systemImage: "puzzlepiece.extension")
             }
+            .tag(SettingsTab.plugins)
 
             // MARK: - Updates Tab
             Form {
@@ -1072,6 +1082,7 @@ struct SettingsView: View {
             .tabItem {
                 Label("Updates", systemImage: "arrow.triangle.2.circlepath")
             }
+            .tag(SettingsTab.updates)
         }
         .frame(minWidth: 600, minHeight: 600)
         .onChange(of: downloader.error) { _, newValue in
