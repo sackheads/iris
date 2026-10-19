@@ -188,6 +188,27 @@ struct GuardedSettingsTests {
         #expect(!config.refusesHostWithoutRuntime)
     }
 
+    @Test("the upgrade notice reaches the chat at launch, and a replay posts it again in the same conversation")
+    func noticeReachesTheChat() throws {
+        let (defaults, keychain, suite) = harness(); defer { teardown(suite) }
+        let conversations = try ConversationStore.inMemory()
+        let first = AppState(store: conversations, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned,
+                             guardedConfig: ConfigManager(store: defaults, guardedSecrets: keychain))
+        let id = try #require(first.selectedConversationId)
+        func count(_ state: AppState) -> Int {
+            state.conversations.first { $0.id == id }?.messages.filter { $0.content.hasPrefix(GuardedSettings.upgradeNotice) }.count ?? 0
+        }
+        #expect(count(first) == 1)
+
+        keychain.saveSecrets([:])
+        defaults.removeObject(forKey: GuardedSettings.markerKey)
+        let replayed = AppState(store: conversations, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned,
+                                guardedConfig: ConfigManager(store: defaults, guardedSecrets: keychain))
+        replayed.selectedConversationId = id
+        #expect(replayed.conversations.contains { $0.id == id })
+        #expect(count(replayed) == 2, "not swallowed by the launch-notice dedup")
+    }
+
     // MARK: the dialog hint
 
     @Test("the approval dialog warns when a command names Iris's keychain service or defaults domain")

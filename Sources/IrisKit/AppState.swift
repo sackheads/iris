@@ -1414,7 +1414,8 @@ class AppState {
          tier2Provisioning: InjectionGuard.Tier2Provisioning? = nil,
          tier3Provisioning: InjectionGuard.Tier3Provisioning? = nil,
          createIfEmpty: Bool = true,
-         emitLaunchNotices: Bool = true) {
+         emitLaunchNotices: Bool = true,
+         guardedConfig: ConfigManager = .shared) {
         self.store = store
         self.engine = IrisEngine(state: self)
         loadConversations()
@@ -1433,7 +1434,15 @@ class AppState {
         // #678: what the guarded settings' launch found (an upgrade reset, a defaults write that
         // was ignored, a missing or unreadable item).
         if let target = noticeTarget {
-            for notice in ConfigManager.shared.takeGuardedNotices() { appendLaunchNotice(notice, to: target) }
+            for notice in guardedConfig.takeGuardedNotices() {
+                // The upgrade notice is never deduplicated: a replayed upgrade posts the same text
+                // into a conversation that may already hold it, and that repeat is the signal.
+                if notice.hasPrefix(GuardedSettings.upgradeNotice) {
+                    appendMessage(role: .system, content: notice, to: target)
+                } else {
+                    appendLaunchNotice(notice, to: target)
+                }
+            }
         }
         // Every launch notice below goes through `appendLaunchNotice`, which persists it like any
         // other system message but skips it when the same wording is already in the conversation.
