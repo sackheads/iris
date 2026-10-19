@@ -10,7 +10,7 @@ Moved from the feature tour ([docs/features.md](features.md)), word for word (#5
 
 Iris supports in-app slash commands typed directly into the composer. Deterministic commands run instantly in-app without invoking the LLM (zero token cost):
 
-*   **Harness & Models:** `/model [tier|name]` (inspect/switch active model), `/mcp [reload]` (inspect/reconnect MCP servers), `/tokens` (view token usage).
+*   **Harness & Models:** `/model [easy|medium|hard|default]` (show this conversation's tier, or set it), `/mcp [reload]` (inspect/reconnect MCP servers), `/tokens` (view token usage).
 *   **Skills & Bundles:** `/skills [new <name>|reload|show <name>|curate]` (scaffold, list, reload, view, or curate skills), `/bundle [save <name> s1,s2|<name>|clear]` (manage or activate selective skill bundle filters).
 *   **Journey & Learning:** `/journey` (render chronological timeline of all learned memories, skills, and facts).
 *   **Memory & Rules:** `/rules [reload]` (inspect/reload custom rules), `/facts [all|search <q>|probe <e>]` (query SQLite FactStore; `all` includes retracted and superseded facts), `/search <query>` (full-text search across every saved conversation, archived ones included) — the same index also backs a search field in the sidebar, so conversation search isn't slash-command-only: type into it to see grouped, ranked hits and jump straight to the matching message.
@@ -32,7 +32,7 @@ The full reference follows.
 | `/journey` | `/journey` | Render chronological timeline of all learned skills, profile evolutions, and facts. |
 | `/rules` | `/rules` | View loaded custom rules from `~/.iris/rules/`. |
 | `/rules reload` | `/rules reload` | Force system prompt cache invalidation to re-read custom rule files. |
-| `/model` | `/model [fast\|medium\|heavy\|<name>]` | View active model tiers or switch active model for conversation. |
+| `/model` | `/model [easy\|medium\|hard\|default]` | Alone: which tier this conversation runs on, the model it names, and why (set by `/model`, from its [agent profile](agent_profiles.md), or the default), plus the three tiers' models. With a tier (`fast` and `heavy` also work), sets this conversation's tier from its next turn, and only this conversation's; `default` clears it. A model name isn't accepted: models are set per tier in Settings → Models. |
 | `/mcp` | `/mcp` | List connected Model Context Protocol (MCP) servers and tools. |
 | `/mcp reload` | `/mcp reload` | Reconnect MCP stdio transports and refresh registered tool schemas. |
 | `/facts` | `/facts` | View top recent facts stored in the SQLite FactStore. |
