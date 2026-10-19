@@ -20,6 +20,7 @@ You review pull requests for this repository. Read the whole diff first, ...
 - **The body** below the frontmatter is added to the system prompt, under `# Agent Profile: <name>`.
 - **Lists** can be written inline (`[a, b]`) or one `- a` per line.
 - **Errors:** a file that doesn't parse shows in the menu as unusable, with the reason.
+- **Names that match nothing:** a name in `tools:` or `skills:` that isn't one of Iris's tools, one of your MCP servers (`mcp:<name>`) or tools, or one of your skills is ignored. The menu marks such a profile "(unknown names)" and lists them on hover, and a conversation started on it says so once, so a typo doesn't quietly leave a conversation with fewer tools than you meant.
 
 The folder is one Iris protects. The agent can't write a profile without asking you, and no background job can write one at all.
 
