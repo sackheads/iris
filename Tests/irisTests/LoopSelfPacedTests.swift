@@ -72,6 +72,28 @@ struct LoopSelfPacedTests {
         #expect(low.seconds == 60 && low.result.contains("clamped") && low.result.contains("1m"))
         let high = ConversationLoop.clampedDelay(86400)
         #expect(high.seconds == 3600 && high.result.contains("clamped") && high.result.contains("1h"))
+        // Any finite number the model sends, however large, is clamped and said without trapping.
+        #expect(ConversationLoop.clampedDelay(1e30).seconds == 3600)
+        #expect(ConversationLoop.clampedDelay(1e30).result.contains("more than 3600 s"))
+        #expect(ConversationLoop.clampedDelay(-1e30).seconds == 60)
+        #expect(ConversationLoop.clampedDelay(-1e30).result.contains("less than 60 s"))
+    }
+
+    @Test("a one-word control-like prompt is refused, not started as a loop on that word")
+    func controlWords() throws {
+        for word in ["off", "OFF", "cancel", "end", "quit", "help", "start"] {
+            guard case .invalid(let why) = ConversationLoop.parse(word) else { Issue.record("/loop \(word) started a loop"); continue }
+            #expect(why.contains("/loop stop"))
+        }
+        #expect(ConversationLoop.parse("deploy") == .startSelfPaced(prompt: "deploy"), "an ordinary word is still a prompt")
+        #expect(ConversationLoop.parse("end of day summary") == .startSelfPaced(prompt: "end of day summary"))
+        let (state, id) = try app()
+        state.sendMessage("/loop watch the build")
+        state.sendMessage("/loop off")
+        #expect(state.conversations.first { $0.id == id }?.loop?.prompt == "watch the build", "the running loop is untouched")
+        state.sendMessage("/loop watch the deploy")
+        #expect(state.conversations.first { $0.id == id }?.messages.last?.content.contains("This replaces the loop that was running (self-paced: watch the build)") == true)
+        state.pauseLoop(for: id)
     }
 
     @Test("declared only while a self-paced loop is set: not with none, not with a fixed one; then it stays")
@@ -98,7 +120,7 @@ struct LoopSelfPacedTests {
         #expect(state.loopRequestedDelay[id] == nil)
     }
 
-    @Test("a call records the clamped delay, the next arm takes it once, and then the default applies")
+    @Test("a call sets the pace until the next tick starts; a tick that makes no call falls back to the default")
     func callSetsTheNextDelay() async throws {
         let (state, id) = try app()
         let loop = ConversationLoop(prompt: "p", intervalSeconds: 60, cap: 5, paused: true, selfPaced: true)
@@ -107,7 +129,14 @@ struct LoopSelfPacedTests {
         #expect(state.loopRequestedDelay[id] == 60)
         #expect(await scheduleTurn(state, id, delay: .double(900.4))?.contains("15m") == true)
         #expect(state.nextLoopDelay(for: id, loop: loop) == 900)
-        #expect(state.nextLoopDelay(for: id, loop: loop) == ConversationLoop.selfPacedDefault, "no call: 20 min, not a stop")
+        #expect(state.nextLoopDelay(for: id, loop: loop) == 900, "a chat turn's re-arm keeps the pace")
+        var running = loop
+        running.paused = false
+        try setLoop(state, id, running)
+        guard case .run = state.takeLoopTick(for: id, loopId: running.id) else { Issue.record("no tick"); return }
+        state.endEngineTurn(for: id)
+        #expect(state.nextLoopDelay(for: id, loop: running) == ConversationLoop.selfPacedDefault,
+                "the tick started with no call yet: 20 min, not a stop")
         #expect(state.nextLoopDelay(for: id, loop: ConversationLoop(prompt: "p", intervalSeconds: 600, cap: 5)) == 600,
                 "a fixed loop keeps its interval")
     }
