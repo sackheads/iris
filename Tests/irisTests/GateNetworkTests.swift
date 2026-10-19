@@ -154,6 +154,41 @@ struct GateUpgradeLaunchTests {
     }
 }
 
+/// #693 review: only a re-schedule, which shows the script, lifts a review pause. `/jobs resume`
+/// refuses, and `/jobs pause` leaves the reason alone so a later resume can't go round it.
+@MainActor
+@Suite(.timeLimit(.minutes(1)))
+struct GateReviewPauseTests {
+    private func reply(_ app: AppState, containing text: String) async -> Bool {
+        let end = TestClock.deadline(10)
+        while TestClock.now() < end {
+            if app.conversations.contains(where: { $0.messages.contains { $0.content.contains(text) } }) { return true }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return false
+    }
+
+    @Test("/jobs resume and /jobs pause leave a review pause in place")
+    func commandsKeepTheReviewPause() async throws {
+        let store = try ConversationStore.inMemory()
+        var gated = Job(name: "watch-build", prompt: "p",
+                        trigger: .poll(PollSpec(schedule: .interval(seconds: 600),
+                                                gate: .script(command: "echo CHANGED", mounts: [], timeoutSeconds: 60))))
+        gated.pausedReason = AppState.gateNeedsReviewReason
+        _ = try store.ledger.upsert(gated)
+        let app = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+
+        app.sendMessage("/jobs resume watch-build")
+        #expect(await reply(app, containing: "can't lift this pause"))
+        #expect(try store.ledger.jobs().first?.pausedReason == AppState.gateNeedsReviewReason)
+
+        app.sendMessage("/jobs pause watch-build")
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        #expect(try store.ledger.jobs().first?.pausedReason == AppState.gateNeedsReviewReason,
+                "an owner's pause never replaces the review pause")
+    }
+}
+
 private extension Result {
     var isFailure: Bool { if case .failure = self { return true } else { return false } }
 }
