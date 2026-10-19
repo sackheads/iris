@@ -69,7 +69,8 @@ struct ModelLED: View {
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
                 .foregroundColor(state == .off ? .secondary : .primary)
         }
-        .help(tooltip)
+        // No `.help` here: inside `ModelLEDBar`'s button label it never shows, so the bar puts
+        // `tooltip` on the button (#673).
     }
 
     /// Internal rather than private for the same reason the state functions are (see
