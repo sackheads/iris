@@ -10,4 +10,8 @@ void iris_stop_signal_handler(int signal);
 /// they have, otherwise from the handler of the one still on its way.
 void iris_reset_interrupt_once_delivered(long count);
 
+/// How many stopping signals the handler has been delivered so far. For tests: a signal source
+/// hears a signal when it is posted, and only this says it has been delivered (#636).
+long iris_stop_signal_deliveries(void);
+
 #endif

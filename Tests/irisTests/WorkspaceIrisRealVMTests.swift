@@ -76,3 +76,42 @@ struct WorkspaceIrisRealVMRemovalTests {
         }
     }
 }
+
+/// #623 on a real VM: a repository mounted the way Iris mounts it keeps its hooks and its `.git`
+/// itself out of the VM's reach, while everything a commit writes stays writable. Plain shell, not
+/// git: the image need not have git.
+@Suite("Workspace .git hooks are read-only in a real VM (#623)", .serialized,
+       .enabled(if: RealContainer.isAvailable, "opt-in: IRIS_REAL_VM=1, with the container runtime started and \(RealContainer.image) local"),
+       .timeLimit(.minutes(5)))
+struct WorkspaceGitRealVMTests {
+    @Test("hooks cannot be written or swapped and .git cannot be renamed; objects, refs, index, HEAD and config can be written")
+    func hooksAndMountpoint() async throws {
+        let (dir, _) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let host = dir + "/ws"
+        for item in WorkspaceIrisDir.protected(for: host) {
+            guard case .ready = WorkspaceIrisDir.prepareForMount(host, item) else { Issue.record("prepare refused \(item.relative)"); return }
+        }
+        let rt = RealContainer.runtime()
+        let name = RealContainer.uniqueName(623)
+        defer { RealContainer.delete(name) }
+        try await rt.createDetached(name: name, image: RealContainer.image,
+                                    mounts: SandboxSessionManager.mountList(workspace: ContainerMount(source: host), extra: []),
+                                    workdir: host, network: .default)
+        for command in ["mkdir -p .git/objects/aa && echo x > .git/objects/aa/bb", "echo 0 > .git/refs/heads/vm",
+                        "cp .git/index .git/index.tmp && mv .git/index.tmp .git/index", "echo 'ref: refs/heads/vm' > .git/HEAD",
+                        "echo '# vm' >> .git/config"] {
+            let r = try await rt.exec(name: name, workdir: host, command: command, timeoutSeconds: 60)
+            #expect(r.exitCode == 0, "failed in the VM: \(command): \(r.stderr)")
+        }
+        #expect(FileManager.default.fileExists(atPath: host + "/.git/objects/aa/bb"), "the host sees the VM's object")
+        // Last, because `rm -rf .git` empties what it can before the mountpoint stops it.
+        try await WorkspaceIrisVM.expectAllFail([
+            "echo x > .git/hooks/pre-commit", "touch .git/hooks/post-checkout", "chmod 777 .git/hooks",
+            "mv .git/hooks .git/h2", "rm -rf .git/hooks", "mv .git moved", "mkdir -p /tmp/g/hooks && mv -T /tmp/g .git",
+            "umount .git/hooks", "mount -o remount,rw .git/hooks", "rm -rf .git",
+        ], rt: rt, name: name, host: host)
+        #expect(FileManager.default.fileExists(atPath: host + "/.git/hooks"))
+        #expect(!FileManager.default.fileExists(atPath: host + "/.git/hooks/pre-commit"))
+    }
+}

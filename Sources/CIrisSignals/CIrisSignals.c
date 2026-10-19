@@ -24,6 +24,10 @@ void iris_stop_signal_handler(int signal) {
     if (at > 0 && delivered >= at) restore_interrupt_default();
 }
 
+long iris_stop_signal_deliveries(void) {
+    return atomic_load(&deliveries);
+}
+
 void iris_reset_interrupt_once_delivered(long count) {
     atomic_store(&interrupt_default_at, count);
     if (atomic_load(&deliveries) >= count) restore_interrupt_default();

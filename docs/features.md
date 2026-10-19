@@ -60,6 +60,10 @@ Transparently routes terminal execution through `apple/container` lightweight Li
 
 So a sandboxed command refuses to run when that workspace is your home folder or a folder above it, or is or holds a place your Mac runs programs or settings from (`~/Library/LaunchAgents`, `~/.config`, `~/bin`, `~/.local/bin`), a credential store (`~/.ssh`, `~/.aws`, the Keychains folder and the like), or Iris's own settings. Code left in any of those could run on your Mac later, even in a command you approve yourself. Nothing runs and nothing falls back to the host; the reply says why. If you do want it for one conversation, right-click it in the sidebar and choose **Let the Sandbox Write This Folder…**. After a confirmation naming what becomes writable, that conversation (and its subagents and grader) may mount exactly that folder, the row shows **home writable by the sandbox**, and Vibecop then lets only read-only commands run in its sandbox without asking. The same menu stops it. Only you can turn it on: no tool, job or message can, and a dev home seeded from the installed app does not carry it over.
 
+### Repositories in the Sandbox
+
+When a sandboxed workspace is a git repository, the VM can't choose what git on your Mac runs: its hooks are read-only in the VM, config changes that could run a program are put back, submodules the VM adds are moved aside, and Iris's own host git runs with the risky settings overridden (#623). [Details](sandbox_repositories.md)
+
 ### Workspace Binding
 
 Link chat sessions to local filesystem directories. Iris will automatically load the project's `AGENTS.md` instructions and execute terminal commands from within that project context.
