@@ -101,6 +101,8 @@ final class SubagentManager: @unchecked Sendable {
     func runSubagent(role: String, task: String, effort: String, parentConversationId: UUID,
                      unit: DelegatedUnit? = nil, background: Bool = false, turnTimeout: TimeInterval? = nil,
                      client: (any LLMClientProtocol)? = nil,
+                     route: ProviderRoute? = nil,
+                     routedClient: (any LLMClientProtocol)? = nil,
                      appState: AppState,
                      recentWrites: RecentWrites = .shared,
                      deadlineClock: UptimeClock = .live,
@@ -150,9 +152,12 @@ final class SubagentManager: @unchecked Sendable {
         }
 
         // 2. Instantiate a fresh IrisEngine linked to this conversation
+        // #239: a subagent on a named provider runs on that route; its grader (below) stays on the
+        // parent's client, so the work is judged by the parent's model, never by itself.
         let engine = IrisEngine(state: appState, tier: tier, principal: .subagent, roleLabel: role,
-                                client: client ?? LLMClient(), recentWrites: recentWrites,
-                                hooks: hooks, subagentConfig: config, repromptDelay: repromptDelay)
+                                client: route.map { _ in routedClient ?? LLMClient(route: route) } ?? client ?? LLMClient(),
+                                recentWrites: recentWrites, hooks: hooks, provider: route.map(Self.familyLabel),
+                                subagentConfig: config, repromptDelay: repromptDelay, subagentRoute: route)
 
         // 3. Craft the role-specific prompt
         let iterationCap = max(1, config.maxSubagentIterations)
@@ -359,6 +364,7 @@ final class SubagentManager: @unchecked Sendable {
             await MainActor.run { appState.unregisterLiveSubagent(subagentId) }
         }
         var rendered = result.renderedForParent()
+        if let route { rendered += "\n" + Self.ranOnNote(route) }
         if wasStopped, termination.status != .cancelled, stoppedBy != nil {
             rendered += "\n" + Self.stoppedAfterCompletionNote
         }
@@ -373,7 +379,36 @@ final class SubagentManager: @unchecked Sendable {
 
     /// The `invoke_subagent` tool schema. Declared beside the manager it drives so the contract
     /// input (slice B3) is unit-testable without standing up an engine.
-    static func toolDeclaration() -> FunctionDeclaration {
+    /// The family a route's calls speak, for pills and thinking replay: a custom endpoint is
+    /// OpenAI-compatible.
+    static func familyLabel(_ route: ProviderRoute) -> String {
+        if case .builtIn(let family) = route.target { return family.rawValue }
+        return LLMProvider.openai.rawValue
+    }
+
+    /// Where a routed subagent actually ran, from the route it was given (not the request).
+    static func ranOnNote(_ route: ProviderRoute) -> String {
+        "Ran on provider `\(route.providerId)`, model `\(route.model)`."
+    }
+
+    /// The refusal for an other-family subagent inside a job run, until its pricing is in (#689).
+    static let jobRunOtherFamilyRefusal = "Subagents on other model families can't run inside a job yet: their pricing isn't in (#689). Run it in a conversation, or use the primary."
+
+    /// `invoke_subagent`'s schema. `providers` lists the ids usable besides the primary: with any,
+    /// the `provider` and `model` arguments are declared (Invariant 6), else they are absent.
+    static func toolDeclaration(providers: [String] = []) -> FunctionDeclaration {
+        var properties = baseProperties
+        if !providers.isEmpty {
+            properties["provider"] = Schema(type: "STRING", description: "Optional. Run the subagent on another provider instead of this conversation's: one of \(providers.joined(separator: ", ")). Omit it to use this conversation's provider. Use it for an independent view from another model family, such as a review lens.")
+            properties["model"] = Schema(type: "STRING", description: "Optional, with provider. An exact model id from that provider's configured list; omit it for the provider's default. An id that isn't on the list is refused, never replaced.")
+        }
+        return FunctionDeclaration(name: "invoke_subagent", description: description, parameters: Schema(type: "OBJECT", properties: properties, required: ["role", "task", "effort"]))
+    }
+
+    private static var description: String { legacyDeclaration().description }
+    private static var baseProperties: [String: Schema] { legacyDeclaration().parameters?.properties ?? [:] }
+
+    private static func legacyDeclaration() -> FunctionDeclaration {
         FunctionDeclaration(
             name: "invoke_subagent",
             description: "Spawn an isolated subagent with a constrained persona to execute a task. The subagent works in a loop, reprompted after each turn until it calls goal_complete or reaches its iteration cap (a capped subagent comes back failed); each of its turns is a full model round, with a time limit of its own that restarts every turn (a turn past it comes back timed out). By default, this blocks until the subagent completes. Set 'background' to true to run it asynchronously and receive a notification when it finishes (not in a background job run, where it is refused). Criteria are optional; when you provide them, the run is graded by an independent evaluator and the verdict is returned to you alongside the subagent's own (unverified) summary.",

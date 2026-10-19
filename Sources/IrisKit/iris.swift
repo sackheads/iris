@@ -521,6 +521,11 @@ actor IrisEngine {
     /// Where the subagents this engine delegates to read their iteration cap (#399); injected so a
     /// test can set the cap without touching `ConfigManager.shared`.
     private let subagentConfig: ConfigManager
+    /// #239: the provider and model this subagent engine runs on, when it was sent to one. Nil for
+    /// every other engine, which runs on the primary as before.
+    let subagentRoute: ProviderRoute?
+    /// Builds a routed subagent's client; a test passes a scripted one.
+    private let routedClient: @Sendable (ProviderRoute) -> any LLMClientProtocol
     /// The pause before the goal loop's next turn. Injected only so tests that drive the loop do
     /// not wait 1.5 s a turn; the subagents this engine delegates to inherit it.
     private let repromptDelay: TimeInterval
@@ -532,12 +537,16 @@ actor IrisEngine {
     private let cacheTTLOverride: CacheTTLPolicy?
 
     init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil, hooks: HookManager = .shared, provider: String? = nil, replayThinking: Bool? = nil, subagentConfig: ConfigManager = .shared, repromptDelay: TimeInterval = 1.5,
+         subagentRoute: ProviderRoute? = nil,
+         routedClient: @escaping @Sendable (ProviderRoute) -> any LLMClientProtocol = { LLMClient(route: $0) },
          mutatingJobsAvailable: @escaping @Sendable () -> Bool = { SandboxPolicy.mutatingJobCanRun() },
          skillCheckWillClaim: (@Sendable (UUID) async -> Void)? = nil) {
         self.state = state
         self.mutatingJobsAvailable = mutatingJobsAvailable
         self.skillCheckWillClaim = skillCheckWillClaim
         self.subagentConfig = subagentConfig
+        self.subagentRoute = subagentRoute
+        self.routedClient = routedClient
         self.repromptDelay = repromptDelay
         self.recentWrites = recentWrites
         self.protectionEnabled = protectionEnabled
@@ -1783,7 +1792,10 @@ actor IrisEngine {
     private var approvalOrigin: String {
         switch principal {
         case .main: return "Main agent"
-        case .subagent: return "Subagent (\(roleLabel ?? "subagent"))"
+        case .subagent:
+            // #239: the provider and model that are asking, from the route actually used.
+            let on = subagentRoute.map { " on \($0.providerId) · \($0.model)" } ?? ""
+            return "Subagent (\(roleLabel ?? "subagent"))\(on)"
         case .evaluator: return "Evaluator"
         }
     }
@@ -1972,7 +1984,7 @@ actor IrisEngine {
 
     /// The model this turn's calls name: one seam for every read of it (the profiler, Anthropic's
     /// output cap), so a later route (#239 half 2) changes how it is computed, not each site.
-    func turnModel() -> String { ConfigManager.shared.getModel(for: currentTier) }
+    func turnModel() -> String { subagentRoute?.model ?? ConfigManager.shared.getModel(for: currentTier) }
 
     /// The profile a turn of `conversationId` runs with (main principal only), and the tool scope
     /// its `tools:` list sets. A subagent takes the scope of the conversation it works for, so
@@ -2323,7 +2335,10 @@ actor IrisEngine {
             ))
         }
         
-        toolsList.append(SubagentManager.toolDeclaration())
+        // #239: `provider`/`model` only when a provider besides the primary is usable (Invariant 6).
+        toolsList.append(SubagentManager.toolDeclaration(providers: await MainActor.run { [subagentConfig] in
+            subagentConfig.providerRegistry().filter { $0.usable && !$0.isPrimary }.map(\.id)
+        }))
 
         // Fix round 2 (#187): `principal == .main` too — appended here unconditionally for any
         // attended turn, this would re-add the tool the `removeAll` above just stripped for a
@@ -3438,6 +3453,35 @@ actor IrisEngine {
 
     private func finishLoopTick(for conversationId: UUID, token: UUID) {
         if loopTicks[conversationId]?.token == token { loopTicks[conversationId] = nil }
+    }
+
+    enum SubagentRouting { case route(ProviderRoute?), refused(String) }
+
+    /// `invoke_subagent`'s `provider`/`model`: nil route without a provider (the parent's own),
+    /// the resolved route, or a refusal naming what is configured. A route to a family other than
+    /// the primary is refused inside a job run, at any depth (a job's subagent's subagent too),
+    /// until its pricing lands (#689, planner).
+    func resolveSubagentRoute(_ args: [String: JSONValue], effort: String, conversationId: UUID) async -> SubagentRouting {
+        let provider = args["provider"]?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let model = args["model"]?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !provider.isEmpty else {
+            if let model, !model.isEmpty { return .refused("Name a `provider` with `model`; without one, the subagent runs on this conversation's own model.") }
+            return .route(nil)
+        }
+        let tier: ModelTier = effort.lowercased() == "easy" ? .easy : effort.lowercased() == "hard" ? .hard : .medium
+        let localState = state
+        let config = subagentConfig
+        return await MainActor.run {
+            switch config.subagentRoute(provider: provider, model: model, tier: tier) {
+            case .failure(let refusal):
+                return .refused(refusal.message)
+            case .success(let route):
+                let primary = ProviderSlug.id(of: LLMProvider(rawValue: config.primaryProvider) ?? .gemini)
+                let inJobRun = localState?.conversations.first { $0.id == conversationId }?.isBackground == true
+                if route.providerId != primary, inJobRun { return .refused(SubagentManager.jobRunOtherFamilyRefusal) }
+                return .route(route)
+            }
+        }
     }
 
     /// What the parent is told when a subagent spends its iteration cap without `goal_complete`.
@@ -5087,13 +5131,23 @@ actor IrisEngine {
             let unit = GoalContractParsing.unitContract(task: task, criteriaJSON: functionCall.args["criteria"])
                 .map { DelegatedUnit(contract: $0, grade: true) }
             let subagentClient = self.client
+            // #239: a named provider resolves before anything is spawned, and refuses rather than
+            // falling back (Fork D). Other families wait out a job run until their pricing (#689).
+            let route: ProviderRoute?
+            switch await resolveSubagentRoute(functionCall.args, effort: effort, conversationId: conversationId) {
+            case .refused(let message):
+                return message
+            case .route(let resolved):
+                route = resolved
+            }
+            let routed = route.map { self.routedClient($0) }
 
             // The engine holds its AppState weakly, so the nil case the manager used to guard
             // against now lives here, at the only place that knows what to say about it (#171).
             if let appState = self.state {
                 if isBackground {
                     Task {
-                        let outcome = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, background: true, client: subagentClient, appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig, repromptDelay: self.repromptDelay)
+                        let outcome = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, background: true, client: subagentClient, route: route, routedClient: routed, appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig, repromptDelay: self.repromptDelay)
                         let event = "Background subagent result:\n\(outcome.rendered)"
                         // Routed on which Stop the user pressed, not on the status (#236): a Stop
                         // accepted just after goal_complete still reads completed. The parent's own
@@ -5107,7 +5161,7 @@ actor IrisEngine {
                     }
                     result = "Subagent '\(role)' spawned in the background. You will receive a System Event when it finishes. If the user stops this conversation, the subagent is stopped too and its result appears only in the transcript, with no System Event."
                 } else {
-                    result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig, repromptDelay: self.repromptDelay).rendered
+                    result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, route: route, routedClient: routed, appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig, repromptDelay: self.repromptDelay).rendered
                 }
             } else {
                 result = "Error: AppState not available for subagent execution."
@@ -5447,7 +5501,9 @@ actor IrisEngine {
                     conversationId: conversationId, origin: approvalOrigin, inSandbox: useSandbox,
                     callerRole: principal == .evaluator ? .evaluator : .agent,
                     allowedCommands: evaluatorChecks, grantedMount: grantedMount,
-                    graderReadWalked: approvedWorkspaceRoot != nil)
+                    graderReadWalked: approvedWorkspaceRoot != nil,
+                    // #239 (Brian, "1: a"): a subagent on a custom endpoint asks Allow Once only.
+                    offersAlwaysAllow: !(subagentRoute?.isEndpoint ?? false))
                 if let source {
                     var approval = ToolApproval(source)
                     approval.hookRewrite = rewrittenByHook

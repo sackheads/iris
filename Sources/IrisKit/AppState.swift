@@ -3846,7 +3846,7 @@ class AppState {
                          inSandbox: Bool = false, callerRole: VibecopCallerRole = .agent,
                          allowedCommands: [String] = [], vibecopEnabled: Bool? = nil,
                          grantedMount: ContainerMount? = nil, humanOnly: Bool = false,
-                         graderReadWalked: Bool = false) async -> ApprovalSource? {
+                         graderReadWalked: Bool = false, offersAlwaysAllow: Bool = true) async -> ApprovalSource? {
         // No pre-granted-approval branch here, deliberately (#187 R21, 2026-09-21): a call a
         // person clicked "Approve and run" on is dispatched by `IrisEngine.executeApprovedCall`,
         // which runs the tool through the hook layer directly and never enters this function. The
@@ -3966,7 +3966,8 @@ class AppState {
         // nil — Vibecop off, failed or timed out — decides nothing: the user prompt does (#334).
 
         return await enqueueUserApproval(toolName: toolName, details: details, workspace: workspace,
-                                         conversationId: conversationId, origin: origin) ? .person : nil
+                                         conversationId: conversationId, origin: origin,
+                                         offersAlwaysAllow: offersAlwaysAllow) ? .person : nil
     }
 
     /// Vibecop, bounded by a timeout so a wedged local model can't hang the turn. nil means

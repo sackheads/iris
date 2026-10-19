@@ -41,7 +41,7 @@ Settings → Models → **Subagent providers** lists providers a subagent could 
   - A routed request follows no redirects.
   - **Check** lists the endpoint's models and marks each configured id as found or not found.
 - **Where they're kept:** the endpoint list and the switches are kept with Iris's API keys in its Keychain item (#678), so a host command's `defaults write` can't add an endpoint or turn a family on.
-- **Not yet wired up:** no subagent uses these providers yet. Dispatching a subagent to one comes with the next part of #239. See the [spec](specs/2026-10-19-multi-model-subagents.md).
+- **Using one:** the model sends a subagent to one of these with `invoke_subagent`'s `provider` and `model` arguments, which exist only while one is usable. See [delegation](delegation.md#subagents-on-other-providers) and the [spec](specs/2026-10-19-multi-model-subagents.md).
 
 ### Jobs
 

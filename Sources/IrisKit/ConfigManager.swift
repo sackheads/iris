@@ -46,6 +46,10 @@ class ConfigManager: @unchecked Sendable {
     @ObservationIgnored var guardedState: GuardedSettings.State = .normal
     /// Launch notices about the guarded settings, taken once by `AppState`.
     @ObservationIgnored var guardedNotices: [String] = []
+    /// The secrets item as read once for the subagent providers (#239): every registry, route and
+    /// blob read uses it instead of a Keychain read each time. Filled only from the item, never
+    /// from defaults; dropped after every write through this manager.
+    @ObservationIgnored var secretsCache: [String: String]?
 
     /// The backing store for every setting — see `IrisDefaults` for why it is volatile under test
     /// and under `--bench`/`--perf`. Per instance, so a test can construct a `ConfigManager` over
@@ -677,6 +681,7 @@ class ConfigManager: @unchecked Sendable {
         var secrets = KeychainManager.shared.loadSecrets()
         secrets[key] = value
         KeychainManager.shared.saveSecrets(secrets)
+        secretsCache = nil
     }
 }
 
