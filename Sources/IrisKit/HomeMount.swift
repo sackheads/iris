@@ -36,7 +36,7 @@ enum HomeMount {
     static func reason(for path: String, home: String = NSHomeDirectory(), paths: IrisPaths = .default,
                        release: IrisPaths? = BuildIdentity.current == .dev ? .release : nil) -> String? {
         let p = IrisPaths.canonicalPath(IrisEngine.expandTilde(path)).lowercased()
-        if isHomeOrAbove(p, home: home) {
+        if isHomeOrAbove(path, home: home) {
             return "it is your home folder or a folder above it, so the sandbox could rewrite your shell's startup files"
         }
         if touches(p, startupLocations, home: home) {
