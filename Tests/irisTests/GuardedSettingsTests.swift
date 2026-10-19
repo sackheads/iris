@@ -188,24 +188,30 @@ struct GuardedSettingsTests {
         #expect(!config.refusesHostWithoutRuntime)
     }
 
-    @Test("the upgrade notice reaches the chat at launch, and a replay posts it again in the same conversation")
+    @Test("the upgrade notice reaches the chat at launch")
     func noticeReachesTheChat() throws {
         let (defaults, keychain, suite) = harness(); defer { teardown(suite) }
-        let conversations = try ConversationStore.inMemory()
-        let first = AppState(store: conversations, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned,
+        let state = AppState(store: try ConversationStore.inMemory(), tier2Provisioning: .provisioned,
+                             tier3Provisioning: .provisioned,
                              guardedConfig: ConfigManager(store: defaults, guardedSecrets: keychain))
-        let id = try #require(first.selectedConversationId)
-        func count(_ state: AppState) -> Int {
-            state.conversations.first { $0.id == id }?.messages.filter { $0.content.hasPrefix(GuardedSettings.upgradeNotice) }.count ?? 0
-        }
-        #expect(count(first) == 1)
+        let id = try #require(state.selectedConversationId)
+        #expect(state.conversations.first { $0.id == id }?.messages
+            .contains { $0.role == .system && $0.content == GuardedSettings.upgradeNotice } == true)
+    }
 
-        keychain.saveSecrets([:])
-        defaults.removeObject(forKey: GuardedSettings.markerKey)
-        let replayed = AppState(store: conversations, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned,
-                                guardedConfig: ConfigManager(store: defaults, guardedSecrets: keychain))
-        #expect(replayed.selectedConversationId == id, "the same conversation, which already holds the first notice")
-        #expect(count(replayed) == 2, "not swallowed by the launch-notice dedup")
+    @Test("a replayed upgrade notice is posted again where the first one already is; other notices still dedup")
+    func upgradeNoticeNeverDeduplicated() throws {
+        let state = AppState(store: try ConversationStore.inMemory(), tier2Provisioning: .provisioned,
+                             tier3Provisioning: .provisioned, emitLaunchNotices: false)
+        let id = state.createNewConversation(select: true)
+        func count(_ text: String) -> Int {
+            state.conversations.first { $0.id == id }?.messages.filter { $0.content == text }.count ?? 0
+        }
+        let other = "A setting was changed outside Settings and was not applied: OPENAI_BASE_URL. Change it in Settings if you meant to."
+        state.postGuardedNotices([GuardedSettings.upgradeNotice, other], to: id)
+        state.postGuardedNotices([GuardedSettings.upgradeNotice, other], to: id)
+        #expect(count(GuardedSettings.upgradeNotice) == 2)
+        #expect(count(other) == 1)
     }
 
     // MARK: the dialog hint
