@@ -16,6 +16,26 @@ struct UptimeDeadlineTests {
         var clock: UptimeClock { UptimeClock { self.lock.withLock { $0 } } }
     }
 
+    /// #640: a measured duration is timed on uptime too, so a sleep is not reported as latency.
+    /// `CFAbsoluteTimeGetCurrent` is wall time; a new call to it fails here.
+    @Test("no product source times anything with CFAbsoluteTimeGetCurrent")
+    nonisolated func noWallClockDurations() throws {
+        let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Sources")
+        let files = try #require(FileManager.default.enumerator(atPath: sources.path))
+            .compactMap { $0 as? String }.filter { $0.hasSuffix(".swift") }
+        #expect(files.count > 50, "the scan found the sources")
+        var callers: [String] = []
+        for file in files {
+            let text = try String(contentsOf: sources.appendingPathComponent(file), encoding: .utf8)
+            for (n, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated()
+            where line.contains("CFAbsoluteTimeGetCurrent(") && !line.trimmingCharacters(in: .whitespaces).hasPrefix("//") {
+                callers.append("\(file):\(n + 1)")
+            }
+        }
+        #expect(callers.isEmpty, "use UptimeClock.live: \(callers)")
+    }
+
     @Test("BlockingSpawn's timeout is not spent while its clock stands still")
     func blockingSpawnStill() async {
         let still = ManualClock()
