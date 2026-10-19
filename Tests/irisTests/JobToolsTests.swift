@@ -1552,16 +1552,18 @@ struct JobToolsTests {
         private(set) var lastDetails: String?
         var resolution = true
 
-        override func requestApproval(toolName: String, details: String, args: [String: JSONValue] = [:],
-                                      workspace: String? = nil, conversationId: UUID? = nil,
-                                      origin: String = "Main agent", inSandbox: Bool = false,
-                                      callerRole: VibecopCallerRole = .agent, allowedCommands: [String] = [],
-                                      vibecopEnabled: Bool? = nil, grantedMount: ContainerMount? = nil,
-                                      humanOnly: Bool = false, graderReadWalked: Bool = false) async -> Bool {
+        /// `requestApprovalSource`, the one both entry points reach: the job-creation gate asks it
+        /// directly, to record what approved the call on its pill (#599).
+        override func requestApprovalSource(toolName: String, details: String, args: [String: JSONValue] = [:],
+                                            workspace: String? = nil, conversationId: UUID? = nil,
+                                            origin: String = "Main agent", inSandbox: Bool = false,
+                                            callerRole: VibecopCallerRole = .agent, allowedCommands: [String] = [],
+                                            vibecopEnabled: Bool? = nil, grantedMount: ContainerMount? = nil,
+                                            humanOnly: Bool = false, graderReadWalked: Bool = false) async -> ApprovalSource? {
             approvalCount += 1
             lastHumanOnly = humanOnly
             lastDetails = details
-            return resolution
+            return resolution ? .person : nil
         }
     }
 

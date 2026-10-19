@@ -189,10 +189,10 @@ struct HomeMountTests {
             return try? await value(of: task)
         }
         // Without the opt-in the VM is the safe box it was: the write runs on the APPROVE.
-        #expect(await source("rm -f x") == .vibecop)
+        #expect(await source("rm -f x") == .vibecop(reason: "routine"))
         state.setHomeWritableOptIn(for: cid, path: realHome)
         #expect(state.homeWritable(cid, workspace: realHome))
-        #expect(await source("ls -la") == .vibecop, "a read still runs in the VM")
+        #expect(await source("ls -la") == .vibecop(reason: "routine"), "a read still runs in the VM")
         #expect(await source("rm -f x") == .person, "a write asked the person")
         #expect(ReadOnlyCommand.vibecopGate(toolName: "run_command", details: "rm -f x", inSandbox: true,
                                             homeWritable: true, lookup: ReadOnlyCommand.HostLookup(

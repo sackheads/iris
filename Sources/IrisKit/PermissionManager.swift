@@ -1,8 +1,17 @@
 import Foundation
 
-struct PermissionRule: Codable, Equatable {
+struct PermissionRule: Codable, Equatable, Sendable {
     let toolName: String
     let details: String
+}
+
+/// Which part of the allowlist let a call run (#599): Iris's own folder, or a rule, with the
+/// rule's text as it was when it matched, so a rule edited later does not change the record.
+struct AllowMatch: Equatable, Sendable {
+    enum Scope: String, Codable, Sendable { case irisHome, global, project }
+    var scope: Scope
+    /// nil for `irisHome`, which no rule grants.
+    var rule: PermissionRule?
 }
 
 struct PermissionManager: Sendable {
@@ -39,6 +48,11 @@ struct PermissionManager: Sendable {
     /// `isBackground` is the unattended caller: a job run, or any subagent descended from one.
     /// It narrows the `~/.iris` carve-out to reads, because nobody is watching what it writes.
     func isAllowed(toolName: String, details: String, workspace: String?, isBackground: Bool = false) -> Bool {
+        match(toolName: toolName, details: details, workspace: workspace, isBackground: isBackground) != nil
+    }
+
+    /// `isAllowed`, saying which part of the allowlist let the call run (#599).
+    func match(toolName: String, details: String, workspace: String?, isBackground: Bool = false) -> AllowMatch? {
         let isWrite = (toolName == "write_file")
         // A write that grants permissions must not come from an auto-allow. `IrisPaths`
         // enumerates the directories that qualify (`config/`, `plugins/`) and resolves case and
@@ -46,29 +60,29 @@ struct PermissionManager: Sendable {
         // carved-out write there would grant every later call whatever it asked for. Unattended,
         // the refusal is absolute: not even an explicit rule hands a background run the keys.
         let targetsProtected = isProtectedWrite(toolName: toolName, path: details)
-        if targetsProtected && isBackground { return false }
+        if targetsProtected && isBackground { return nil }
 
         // Automatically allow access to agent's own ~/.iris directory — reads for anyone, writes
         // only for an attended caller and only outside the protected directories.
         if toolName == "read_file" || (isWrite && !isBackground && !targetsProtected) {
-            if paths.isUnderIrisDir(details) { return true }
+            if paths.isUnderIrisDir(details) { return AllowMatch(scope: .irisHome, rule: nil) }
         }
 
         // Check global
         if let globalRules = loadRules(from: globalPermissionsURL),
-           globalRules.contains(where: { Self.rule($0, matches: toolName, details, base: nil) }) {
-            return true
+           let rule = globalRules.first(where: { Self.rule($0, matches: toolName, details, base: nil) }) {
+            return AllowMatch(scope: .global, rule: rule)
         }
         
         // Check project
         if let workspace = workspace {
             if let projectRules = loadProjectRules(workspace: workspace),
-               projectRules.contains(where: { Self.rule($0, matches: toolName, details, base: workspace) }) {
-                return true
+               let rule = projectRules.first(where: { Self.rule($0, matches: toolName, details, base: workspace) }) {
+                return AllowMatch(scope: .project, rule: rule)
             }
         }
         
-        return false
+        return nil
     }
 
     /// Exact, or for a file tool the rule's path at its real location (#256), ignoring case where

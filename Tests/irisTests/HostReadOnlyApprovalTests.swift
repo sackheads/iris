@@ -196,17 +196,17 @@ struct HostReadOnlyApprovalTests {
             await state.requestApprovalSource(toolName: "run_command", details: "ls -la", workspace: nil,
                                               conversationId: cid, vibecopEnabled: true)
         }
-        #expect(read == .vibecopRestricted(path: ["/bin", "/usr/bin"]))
+        #expect(read == .vibecopRestricted(path: ["/bin", "/usr/bin"], reason: "routine"))
         let inVM = await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": vibecop]) {
             await state.requestApprovalSource(toolName: "run_command", details: "make", workspace: nil,
                                               conversationId: cid, inSandbox: true, vibecopEnabled: true)
         }
-        #expect(inVM == .vibecop)
+        #expect(inVM == .vibecop(reason: "routine"))
         let command = "make --allowed-\(UUID().uuidString)"
         state.permissions.allowGlobally(toolName: "run_command", details: command)
         let allowed = await state.requestApprovalSource(toolName: "run_command", details: command, workspace: nil,
                                                         conversationId: cid, vibecopEnabled: true)
-        #expect(allowed == .allowlist)
+        #expect(allowed == .allowlist(AllowMatch(scope: .global, rule: PermissionRule(toolName: "run_command", details: command))))
         let task = Task { @MainActor in
             await state.requestApprovalSource(toolName: "run_command", details: "make", workspace: nil,
                                               conversationId: cid, vibecopEnabled: false)

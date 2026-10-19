@@ -276,10 +276,12 @@ struct ReadOnlyCommandTests {
 
     @Test("only the gate's own approval runs restricted; a person's, the allowlist's or the VM's runs as usual")
     func onlyTheGateRestricts() {
-        #expect(IrisEngine.restrictedPath(for: .vibecopRestricted(path: ["/bin"]), tool: "run_command") == ["/bin"])
-        for source: AppState.ApprovalSource in [.person, .allowlist, .autoApprove, .grant, .graderCheck, .vibecop] {
+        #expect(IrisEngine.restrictedPath(for: .vibecopRestricted(path: ["/bin"], reason: "r"), tool: "run_command") == ["/bin"])
+        let rule = AllowMatch(scope: .global, rule: PermissionRule(toolName: "run_command", details: "ls"))
+        for source: AppState.ApprovalSource in [.person, .allowlist(rule), .autoApprove(vibecop: nil), .grant(mount: nil),
+                                                .graderCheck(.check), .vibecop(reason: "r")] {
             #expect(IrisEngine.restrictedPath(for: source, tool: "run_command") == nil, "\(source)")
         }
-        #expect(IrisEngine.restrictedPath(for: .vibecopRestricted(path: ["/bin"]), tool: "read_file") == nil)
+        #expect(IrisEngine.restrictedPath(for: .vibecopRestricted(path: ["/bin"], reason: "r"), tool: "read_file") == nil)
     }
 }
