@@ -263,7 +263,8 @@ extension ConfigManager {
     }
 
     /// The registry: the primary, every built-in family, then the custom endpoints.
-    func providerRegistry(keychain: KeychainManager = .shared) -> [RegisteredProvider] {
+    func providerRegistry(keychain explicitKeychain: KeychainManager? = nil) -> [RegisteredProvider] {
+        let keychain = explicitKeychain ?? guardedKeychain ?? .shared
         let primary = LLMProvider(rawValue: primaryProvider) ?? .gemini
         let builtIns = subagentBuiltIns
         let secrets = keychain.loadSecrets()
@@ -289,7 +290,8 @@ extension ConfigManager {
     /// True when a subagent could be sent somewhere other than the primary: the gate for
     /// declaring `invoke_subagent`'s `provider`/`model` (Invariant 6). A leftover key with its
     /// switch off doesn't count.
-    func hasUsableSubagentProviders(keychain: KeychainManager = .shared) -> Bool {
+    func hasUsableSubagentProviders(keychain explicitKeychain: KeychainManager? = nil) -> Bool {
+        let keychain = explicitKeychain ?? guardedKeychain ?? .shared
         providerRegistry(keychain: keychain).contains { $0.usable && !$0.isPrimary }
     }
 
@@ -297,7 +299,8 @@ extension ConfigManager {
     /// it can't. Refuses rather than falling back: a lens that quietly ran on the parent's model
     /// is the wrong review with the right label (Fork D).
     func subagentRoute(provider providerId: String, model requested: String?, tier: ModelTier = .medium,
-                       keychain: KeychainManager = .shared) -> Result<ProviderRoute, SubagentRouteRefusal> {
+                       keychain explicitKeychain: KeychainManager? = nil) -> Result<ProviderRoute, SubagentRouteRefusal> {
+        let keychain = explicitKeychain ?? guardedKeychain ?? .shared
         let registry = providerRegistry(keychain: keychain)
         let usable = registry.filter(\.usable).map { $0.isPrimary ? "\($0.id) (primary)" : $0.id }
         guard let entry = registry.first(where: { $0.id == providerId }) else {
@@ -338,7 +341,8 @@ extension ConfigManager {
     /// Adds or replaces `endpoint`, storing `key` when given (nil keeps the stored one). Throws a
     /// sentence when the id or URL is refused.
     func saveSubagentEndpoint(_ endpoint: ProviderEndpoint, key: String?, replacing oldId: String? = nil,
-                              keychain: KeychainManager = .shared) throws {
+                              keychain explicitKeychain: KeychainManager? = nil) throws {
+        let keychain = explicitKeychain ?? guardedKeychain ?? .shared
         var list = subagentEndpoints
         let others = Set(list.map(\.id)).subtracting([oldId ?? endpoint.id])
         if let problem = ProviderSlug.problem(with: endpoint.id, taken: others) { throw APIError(message: problem) }
@@ -374,7 +378,8 @@ extension ConfigManager {
     }
 
     /// Removes an endpoint and deletes its key from the dict.
-    func removeSubagentEndpoint(id: String, keychain: KeychainManager = .shared) {
+    func removeSubagentEndpoint(id: String, keychain explicitKeychain: KeychainManager? = nil) {
+        let keychain = explicitKeychain ?? guardedKeychain ?? .shared
         subagentEndpoints = subagentEndpoints.filter { $0.id != id }
         var secrets = keychain.loadSecrets()
         let hadKey = secrets.removeValue(forKey: ProviderSlug.secretName(id)) != nil
@@ -382,12 +387,14 @@ extension ConfigManager {
         if hadKey || hadOrigin { keychain.saveSecrets(secrets) }
     }
 
-    func subagentEndpointHasKey(_ id: String, keychain: KeychainManager = .shared) -> Bool {
+    func subagentEndpointHasKey(_ id: String, keychain explicitKeychain: KeychainManager? = nil) -> Bool {
+        let keychain = explicitKeychain ?? guardedKeychain ?? .shared
         !(keychain.loadSecrets()[ProviderSlug.secretName(id)] ?? "").isEmpty
     }
 
     /// The stored key, for Check only. Never displayed.
-    func subagentEndpointKey(_ id: String, keychain: KeychainManager = .shared) -> String {
+    func subagentEndpointKey(_ id: String, keychain explicitKeychain: KeychainManager? = nil) -> String {
+        let keychain = explicitKeychain ?? guardedKeychain ?? .shared
         keychain.loadSecrets()[ProviderSlug.secretName(id)] ?? ""
     }
 
@@ -412,7 +419,8 @@ final class NoRedirectSessionDelegate: NSObject, URLSessionTaskDelegate, Sendabl
 extension ConfigManager {
     /// Where Settings' Check may send a request for endpoint `id`: its own base URL, with its key
     /// only when the key was entered for that origin.
-    func checkTarget(for id: String, keychain: KeychainManager = .shared) -> Result<(baseURL: String, apiKey: String), SubagentRouteRefusal> {
+    func checkTarget(for id: String, keychain explicitKeychain: KeychainManager? = nil) -> Result<(baseURL: String, apiKey: String), SubagentRouteRefusal> {
+        let keychain = explicitKeychain ?? guardedKeychain ?? .shared
         guard let endpoint = subagentEndpoints.first(where: { $0.id == id }) else {
             return .failure(.unknownProvider(id, usable: []))
         }

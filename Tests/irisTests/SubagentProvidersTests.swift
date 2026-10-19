@@ -301,6 +301,53 @@ struct SubagentProvidersTests {
         }
     }
 
+    @Test("a routed client's key never reaches the request dump, the perf dump or the body (Fork B)")
+    func keyNeverDumped() async throws {
+        let sentBodies = LockedBox<[Data]>([])
+        let (session, remove) = MockURLProtocol.scopedSession { request in
+            sentBodies.withLock { $0.append(Self.bodyData(of: request)) }
+            let ok = #"{"choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(ok.utf8))
+        }
+        defer { remove() }
+        let state = AppState(store: try ConversationStore.inMemory(), tier2Provisioning: .provisioned,
+                             tier3Provisioning: .provisioned, createIfEmpty: false, emitLaunchNotices: false)
+        let id = state.createNewConversation(isBackground: false, select: true)
+        let dumped = LockedBox<[GeminiRequest]>([])
+        let route = ProviderRoute(providerId: "deepseek", target: .endpoint(baseURL: "https://api.deepseek.com/v1", apiKey: dummyKey),
+                                  model: "deepseek-v4-pro")
+        let engine = IrisEngine(state: state, tier: .medium, client: LLMClient(route: route, endpointSession: session),
+                                retryDelays: [], streamResponses: false, protectionEnabled: false, sessionPeerCount: 0,
+                                requestDumpSink: { request, _, _ in dumped.withLock { $0.append(request) } })
+        await engine.processInput("hello", source: "UI", conversationId: id)
+
+        let requests = dumped.withLock { $0 }
+        #expect(!requests.isEmpty, "the sink saw the turn")
+        for request in requests {
+            let gemini = try LLMClient.encodeGeminiBody(request)
+            let perf = try RequestDump.body(for: request, provider: LLMProvider.openai.rawValue, model: route.model, stream: false)
+            #expect(!String(decoding: gemini, as: UTF8.self).contains(dummyKey))
+            #expect(!String(decoding: perf, as: UTF8.self).contains(dummyKey))
+        }
+        let bodies = sentBodies.withLock { $0 }
+        #expect(!bodies.isEmpty && bodies.allSatisfy { !String(decoding: $0, as: UTF8.self).contains(dummyKey) },
+                "the key goes in the Authorization header only")
+    }
+
+    private static func bodyData(of request: URLRequest) -> Data {
+        var data = request.httpBody ?? Data()
+        if data.isEmpty, let stream = request.httpBodyStream {
+            stream.open(); defer { stream.close() }
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let n = stream.read(&buffer, maxLength: buffer.count)
+                if n <= 0 { break }
+                data.append(buffer, count: n)
+            }
+        }
+        return data
+    }
+
     @Test("only an unrouted client reads the primary")
     func familyResolution() {
         let endpoint = ProviderRoute(providerId: "x", target: .endpoint(baseURL: "https://x.example.com/v1", apiKey: ""), model: "m")
