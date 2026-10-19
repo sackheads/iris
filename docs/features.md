@@ -120,6 +120,10 @@ A compact, per-session activity strip below the composer — one line per runnin
 
 Right-click conversations to archive or unarchive them, copy them to your clipboard as clean, formatted Markdown, or select specific chat turns to copy just those. Archiving is refused while a turn is still running or a goal is active on that conversation, and refused outright on Iris, your pinned main conversation — `/new` there archives it for you (see Session Control under [Slash commands](#slash-commands)). Sending anything to an archived conversation — a message, a subagent post-back — brings it back automatically, with two deliberate exceptions: a message from another session is refused instead of un-archiving it, and a job's event card lands silently, because a card starts no turn and an archived conversation is meant to stay idle. A human reopening a conversation is a choice about one thing they picked; a peer doing the same would be expanding its own reach on its own initiative, so it doesn't get to. Automatically renames conversations via the `/rename` command — except Iris, which keeps its name.
 
+### Agent Profiles
+
+Start a conversation as a reviewer, researcher or writer: a profile is a Markdown file of your own that adds to the system prompt and gives the conversation its role, chosen from New Conversation's menu. A profile only adds and narrows; it never approves anything. [Details](agent_profiles.md)
+
 ### Sessions
 
 Conversations as sessions that can see and message each other, with roles, cards and limits: see [docs/sessions.md](sessions.md).
