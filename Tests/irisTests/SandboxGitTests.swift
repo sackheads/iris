@@ -253,6 +253,43 @@ struct SandboxGitTests {
         #expect(try await f.sha("refs/iris/sandbox/other") != base)
     }
 
+    @Test("in a linked worktree, host git uses the git dir Iris recorded: a .git file the VM rewrites is moved aside and steers nothing")
+    func rewrittenWorktreePointer() async throws {
+        let base = try await SyncFixture.make()
+        defer { try? FileManager.default.removeItem(atPath: base.dir) }
+        try await base.host("git worktree add -q -b wtb ../wt")
+        let wt = base.dir + "/wt"
+        let common = base.repo.hostCommonDir
+        // The copy as a first mount of the worktree would make it, holding worktrees/wt.
+        try FileManager.default.removeItem(atPath: base.repo.vmDir)
+        try SandboxGit.seed(hostCommonDir: common, vmDir: base.repo.vmDir, hostMount: common)
+        let repo = SandboxGit.Repo(source: wt, target: wt, hostCommonDir: common, hostGitDir: common + "/worktrees/wt",
+                                   isWorktree: true, vmDir: base.repo.vmDir, vmCommonDir: base.repo.vmDir, hostMount: common)
+        var vmEnv = base.env
+        vmEnv["GIT_DIR"] = base.repo.vmDir + "/worktrees/wt"
+        vmEnv["GIT_WORK_TREE"] = wt
+        let env = vmEnv
+        let sync = SandboxGitSync(repo: repo, vm: ContainerVMGit(repo: repo) { script in
+            guard case .success(let out) = await ProcessGroupRunner.capture(executable: "/bin/bash", arguments: ["-c", script],
+                                                                             environment: env, currentDirectory: wt,
+                                                                             timeoutSeconds: 30) else { return nil }
+            return (String(data: out.stdout, encoding: .utf8) ?? "", out.status)
+        }, host: SandboxHostGit(environment: base.env))
+
+        let old = try await GitFixture.sh("git rev-parse wtb", in: wt, env: base.env).out.trimmingCharacters(in: .whitespacesAndNewlines)
+        let (before, _) = await sync.before()
+        _ = try await GitFixture.sh("echo w > w.txt && git add w.txt && git commit -qm w", in: wt, env: vmEnv)
+        // The VM points the worktree's .git at a repository of its own, with a program in its config.
+        try await GitFixture.sh("git init -q evil && git -C evil config core.fsmonitor 'touch \(base.dir)/HOOK-evil'", in: base.dir, env: base.env)
+        try "gitdir: \(base.dir)/evil/.git\n".write(toFile: wt + "/.git", atomically: false, encoding: .utf8)
+        base.clearHooks()
+        let notes = await sync.after(before)
+        #expect(base.hooksFired.isEmpty, "nothing in the VM's repository ran: \(base.hooksFired)")
+        #expect(notes.contains { $0.contains("\(wt)/.git pointed git at") && $0.contains("moved it aside") }, "\(notes)")
+        let new = try await GitFixture.sh("git --git-dir=\(common)/worktrees/wt rev-parse wtb", in: wt, env: base.env).out.trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(new != old && notes.contains { $0.hasPrefix("Moved wtb") }, "synced through the recorded git dir: \(notes)")
+    }
+
     @Test("when the host moved ahead, the VM's branch and index follow before the next command")
     func reverse() async throws {
         let f = try await SyncFixture.make()
