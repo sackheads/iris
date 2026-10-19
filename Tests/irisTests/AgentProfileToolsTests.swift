@@ -22,7 +22,7 @@ struct AgentProfileToolsTests {
         }
     }
 
-    private static func reply(_ part: Part) -> GeminiResponse {
+    nonisolated private static func reply(_ part: Part) -> GeminiResponse {
         GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [part]))], usageMetadata: nil)
     }
 
@@ -69,7 +69,8 @@ struct AgentProfileToolsTests {
             lock.withLock { sent.append((text, names)) }
             let isReflection = text.contains("Reflection Trigger")
             while isReflection, !lock.withLock({ released }) { try await Task.sleep(nanoseconds: 5_000_000) }
-            return AgentProfileToolsTests.reply(Part(text: isReflection ? AppState.noConsolidationReply : "ok"))
+            // AppState.noConsolidationReply's text: that constant is main-actor isolated.
+            return AgentProfileToolsTests.reply(Part(text: isReflection ? "No memory consolidation needed at this time." : "ok"))
         }
     }
 
