@@ -35,7 +35,12 @@ A subagent can run on a different provider and model than the conversation that 
 
 - **Option 1 (lean): the primary stays as today, with subagent providers beside it.**
   - `primaryProvider` and the nine tier fields are untouched. Nothing migrates.
-  - A subagent may name any provider in the registry: the three built-in families whenever `isConfigured(provider:)` holds for them, plus **custom endpoints** the person adds. A person who already has an Anthropic key set while Gemini is primary gets Anthropic for subagents with no new setup.
+  - A subagent may name any provider in the registry that is **switched on for subagents**:
+    - a built-in family when `isConfigured(provider:)` holds *and* its "Usable by subagents" switch is on;
+    - a custom endpoint the person adds.
+  - **The switch is off by default for every non-primary built-in** (iris-dev-1's review). Having an Anthropic key set while Gemini is primary isn't consent to send a subagent's context there, or to spend on it.
+  - **A custom endpoint is on when added,** because adding it is the opt-in.
+  - **The primary needs no switch.** A subagent with no `provider` runs on it, as today.
   - A custom endpoint is `ProviderEndpoint { id, name, kind, baseURL, models: [String], needsKey: Bool }`.
     - `kind` is `openAICompatible` in v1. That covers DeepSeek, OpenRouter, Together, and Ollama's or LM Studio's local `/v1`.
     - Gemini and Anthropic don't need a custom kind: the built-in families cover them.
@@ -79,7 +84,8 @@ A subagent can run on a different provider and model than the conversation that 
   - **`effort` is unchanged.** With `provider` given, `effort` still picks the tier on a built-in family, and `model` overrides it.
 - **Option 2: named subagent definitions**, files that pin a role, prompt and model, like Hermes's `delegation:` block. That's more structure than v1 needs, and it overlaps agent profiles.
 - **Option 3: a profile's tier.** Agent profiles (#669) carry a tier, not a provider, and **never apply to subagents** (profiles spec, "What a profile never touches"). So a profile can't be the channel.
-- **How it composes with profiles later:** a profiled conversation's subagents still get part 2's tool intersection, whatever provider they run on. If a profile later wants a lens roster (for example, "reviewer" dispatching security to DeepSeek), it adds a `subagent_providers:` hint that pre-fills the arguments, and the arguments stay the one mechanism. **To check with iris-dev-1 in review.**
+- **Dropped (iris-dev-1):** a profile's body can already steer the `provider`/`model` arguments in its own words, so no frontmatter hint is needed.
+- **How it composes with profiles later (superseded by the line above):** a profiled conversation's subagents still get part 2's tool intersection, whatever provider they run on. If a profile later wants a lens roster (for example, "reviewer" dispatching security to DeepSeek), it adds a `subagent_providers:` hint that pre-fills the arguments, and the arguments stay the one mechanism. **To check with iris-dev-1 in review.**
 
 ## Fork D: precedence and failure
 
@@ -90,7 +96,7 @@ A subagent can run on a different provider and model than the conversation that 
 - **Unknown provider id:** "No provider `deepseek`. Configured for subagents: anthropic, gemini (primary), local-ollama."
 - **Missing or empty key, or a built-in family that isn't configured:** "Provider `anthropic` has no key set. Add one in Settings → Models."
 - **A model not in that provider's list:** "Model `deepseek` isn't in provider `deepseek-api`'s list: deepseek-v4-pro, deepseek-v4-flash. Use an exact id." That's the bare-alias pitfall: an alias that 404s and a lens that found nothing look the same downstream.
-  - For a built-in family, the list is its three tier models plus any model the person adds there.
+  - For a built-in family, the list is its three tier models plus an optional **extra subagent models** list. That list is kept beside the switch in the Subagent providers section, because the tier fields are the main tiers' and stay untouched.
   - For a custom endpoint, the list is the `models` field.
 
 **The Settings check.** Settings has a **Check** button per provider. For a custom endpoint it lists models through `GET /v1/models` (reusing `ModelCatalog`) and marks each configured id found or not found, so a typo shows before a dispatch.
@@ -135,12 +141,13 @@ Vibecop and the prompt-injection guard (P1 structural, P2 classifier, P3 canary)
 - Output sanitising (iris.swift:5524-5561) is keyed by the tool, not the model.
 - No path in either half lets a subagent's provider choice change a guard's model, threshold or verdict.
 
-**One dependency to state:** Vibecop's **cloud** engine calls `LLMClient().generateContent(tier: .easy, …)`, which goes through the **primary** provider (CloudAuxiliaryEngine.swift:11). It stays on the primary. A subagent provider never becomes Vibecop's judge, so the primary must stay configured for a cloud Vibecop, as today.
+**One dependency to state:** Vibecop's **cloud** engine calls `LLMClient().generateContent(tier: .easy, …)`, which goes through the **primary** provider (CloudAuxiliaryEngine.swift:11). It stays on the primary. A subagent provider never becomes Vibecop's judge, and the "Usable by subagents" switch never applies to Vibecop's cloud engine. So the primary must stay configured for a cloud Vibecop, as today.
 
 ## Half 1 (PR 1) in detail
 
 **`ConfigManager`, new fields only:**
 - `subagentProviders: [ProviderEndpoint]` (the JSON in defaults, decoded per entry);
+- `subagentBuiltIns: [String: BuiltInSubagentUse]`, keyed by `LLMProvider` raw value, holding `enabled` (default false) and `extraModels`, in the same JSON shape;
 - a pure `providerRegistry() -> [RegisteredProvider]`, which returns the built-in families that are `isConfigured` plus the custom endpoints, each with its id, kind, model list and a configured flag.
 
 It doesn't add or change any tier or model resolver. Profiles part 3 owns those.
@@ -153,7 +160,7 @@ It doesn't add or change any tier or model resolver. Profiles part 3 owns those.
 - In PR 1, nothing in the engine constructs a routed client. Settings' **Check** is the only live caller. Half 2 wires it to subagents.
 
 **`SettingsView`:** a **Subagent providers** section on the Models tab.
-- It shows the built-in families with "configured, and usable by subagents" or "no key".
+- It shows each non-primary built-in family with its key state, a **Usable by subagents** switch (off by default), and its extra subagent models.
 - It shows the custom endpoints, each with name, base URL, key (set or not set), model ids, Check and Remove.
 - **Add endpoint** offers presets that fill the base URL: DeepSeek, OpenRouter, Ollama local, and Custom.
 - It never shows a key's value.
@@ -176,7 +183,7 @@ It doesn't add or change any tier or model resolver. Profiles part 3 owns those.
 - **`invoke_subagent`:** gated `provider` and `model` arguments (Fork C), with the refusals before spawn (Fork D).
   - `SubagentManager.runSubagent` takes a `route`.
   - The subagent engine gets `client: LLMClient(route:)` and `provider: route.kind`, so pills and thinking replay are right.
-- **The global readers become route-aware for a routed engine:** the profiler's model name, `maxTokens` (Anthropic only, by the route's model), and the rotation summary. The main engine keeps reading the global, unchanged.
+- **The global readers become route-aware for a routed engine,** through profiles part 3's per-turn `turnModel` seam (iris-dev-1). Part 3 adds the seam at the profiler and `maxTokens` reads (iris.swift ~2841, ~2979), and half 2 extends how it is computed, with the route winning. The two PRs then don't each patch those lines. The readers are the profiler's model name, `maxTokens` (Anthropic only, by the route's model), and the rotation summary. The main engine keeps reading the global, unchanged.
 - **The subagent result** names its provider and model.
 - **Cost:** per-model delegated usage, priced as Brian rules on Fork E.
 - **`delegate_milestone`:** no `provider` in v2. Goal milestones stay on the parent's provider, because the grader judges them and mixing families there isn't asked for.
