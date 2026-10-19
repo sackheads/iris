@@ -647,6 +647,10 @@ final class ConversationStore: Sendable {
         m.registerMigration("v24_conversation_loop") { db in
             try db.alter(table: "conversations") { t in t.add(column: "loop", .text) }
         }
+        // #465 part 3 / #667: the conversation's own model tier, set by `/model`. NULL is none.
+        m.registerMigration("v25_conversation_tier") { db in
+            try db.alter(table: "conversations") { t in t.add(column: "modelTier", .text) }
+        }
         return m
     }
 
@@ -869,13 +873,13 @@ final class ConversationStore: Sendable {
                     isBackground = ?, isPinned = ?, sessionCard = ?, jobProfile = ?, sandboxGrant = ?,
                     hasUnattendedInput = ?, prefixMismatchBehavior = ?, role = ?, homeWritableOptIn = ?,
                     agentProfile = ?, agentProfileSnapshot = ?,
-                    loop = ?
+                    loop = ?, modelTier = ?
                 WHERE id = ?
                 """, arguments: [c.title, touched, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
                                  history, evaluation, report, c.isArchived, c.isBackground, c.isPinned, card,
                                  c.jobProfile?.rawValue, grant, c.hasUnattendedInput, c.prefixMismatchBehavior?.rawValue,
-                                 c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.id.uuidString])
+                                 c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue, c.id.uuidString])
         } else {
             let position = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(position), 0) FROM conversations") ?? 0) + 1
             try db.execute(sql: """
@@ -883,13 +887,13 @@ final class ConversationStore: Sendable {
                     messageCountSinceReflection, goalIterationCount, mainAgentSandbox, tokenUsage, goalContract,
                     subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived,
                     isBackground, isPinned, sessionCard, jobProfile, sandboxGrant, hasUnattendedInput,
-                    prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [c.id.uuidString, position, c.title, now, touched, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
                                  tokenUsage, contract, result, history, evaluation, report, c.isArchived,
                                  c.isBackground, c.isPinned, card, c.jobProfile?.rawValue, grant, c.hasUnattendedInput,
-                                 c.prefixMismatchBehavior?.rawValue, c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop])
+                                 c.prefixMismatchBehavior?.rawValue, c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue])
         }
     }
 
@@ -1277,6 +1281,14 @@ final class ConversationStore: Sendable {
                 case .text(let s):
                     do { c.loop = try decoder.decode(ConversationLoop.self, from: Data(s.utf8)) }
                     catch { localSoftLosses.append(("loop", "\(error)")) }
+                }
+                // #667: an unknown tier name drops only the tier, as a reported loss.
+                switch Self.readTextValue(row, "modelTier") {
+                case .null: break
+                case .invalid: localSoftLosses.append(("modelTier", "invalid text encoding"))
+                case .text(let s):
+                    if let tier = ModelTier(rawValue: s) { c.modelTier = tier }
+                    else { localSoftLosses.append(("modelTier", "unknown tier \(s)")) }
                 }
 
                 // Per-conversation, so the bulk breaker below can throw the lot away.

@@ -226,6 +226,9 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     var homeWritableOptIn: String?
     /// This conversation's `/loop`, if one is set (#190). Comes back paused after a relaunch.
     var loop: ConversationLoop?
+    /// This conversation's own model tier, set by `/model` (#667). Nil: its agent profile's tier,
+    /// else the engine's default.
+    var modelTier: ModelTier?
 
     /// #465: the agent profile this conversation was started with, by name: the link, with the
     /// file (`config/agent-profiles/<name>.md`) as the source. Set only at creation from the New
@@ -282,7 +285,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier
     }
 
     init(from decoder: Decoder) throws {
@@ -327,6 +330,8 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         agentProfileSnapshot = (try? container.decodeIfPresent(AgentProfileSnapshot.self, forKey: .agentProfileSnapshot)) ?? nil
         // Invariant 1: absent before #190. One that does not decode drops only the loop.
         loop = (try? container.decodeIfPresent(ConversationLoop.self, forKey: .loop)) ?? nil
+        // Invariant 1: absent before #667. An unknown tier name drops only the tier.
+        modelTier = (try? container.decodeIfPresent(ModelTier.self, forKey: .modelTier)) ?? nil
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
         // Invariant 1: a conversation persisted before this ruling has no such key, and absent
         // means "no turn here ever started without the owner present", the correct default.
@@ -5363,45 +5368,55 @@ class AppState {
         return "↻ Every \(loop.every), \(loop.ticksLeft) of \(loop.cap) ticks left\(loop.paused ? ", paused" : ""): \(loop.prompt)"
     }
 
+    /// The tier `id` runs on, and why (#667): its own (`/model`), else its agent profile's, else
+    /// the engine's default. What the engine resolves each turn; read here for display.
+    func effectiveTier(for id: UUID) -> (tier: ModelTier, source: String) {
+        let conv = conversations.first { $0.id == id }
+        if let tier = conv?.modelTier { return (tier, "set by /model") }
+        if let conv, !conv.isPinned, let name = conv.agentProfile, let tier = conv.agentProfileSnapshot?.profile.tier {
+            return (tier, "from agent profile `\(name)`")
+        }
+        return (engine?.modelTier ?? .medium, "the default")
+    }
+
+    /// `/model`: shows this conversation's tier, or sets it (#667). It sets *this* conversation's
+    /// tier from its next turn, never the shared engine's, and the reply names the model.
     private func handleModelCommand(_ trimmed: String, convId: UUID) {
         let arg = trimmed.dropFirst(6).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let config = ConfigManager.shared
-        if arg.isEmpty {
-            let easy = config.getModel(for: .easy)
-            let medium = config.getModel(for: .medium)
-            let hard = config.getModel(for: .hard)
+        func name(_ tier: ModelTier) -> String { tier.rawValue.capitalized }
+        let tier: ModelTier?
+        switch arg {
+        case "":
+            let (current, source) = effectiveTier(for: convId)
             let body = """
-            **Active Model Configuration**
+            **This conversation:** \(name(current)) (`\(config.getModel(for: current))`), \(source).
 
-            - **Easy Tier:** `\(easy)`
-            - **Medium Tier (Default):** `\(medium)`
-            - **Hard Tier:** `\(hard)`
+            - **Easy:** `\(config.getModel(for: .easy))`
+            - **Medium:** `\(config.getModel(for: .medium))`
+            - **Hard:** `\(config.getModel(for: .hard))`
+
+            `/model easy|medium|hard` sets this conversation's tier; `/model default` clears it.
             """
             emitCommandOutput(body, format: .markdown, to: convId)
-        } else {
-            Task { [weak self] in
-                guard let self = self else { return }
-                let newTier: ModelTier?
-                if arg == "easy" || arg == "fast" {
-                    newTier = .easy
-                } else if arg == "medium" {
-                    newTier = .medium
-                } else if arg == "hard" || arg == "heavy" {
-                    newTier = .hard
-                } else {
-                    newTier = nil
-                }
-
-                if let tier = newTier {
-                    let modelName = config.getModel(for: tier)
-                    await self.engine.invalidateSystemPrompt()
-                    self.emitCommandOutput("Active model tier selected: **\(tier.rawValue.capitalized)** (`\(modelName)`).", format: .markdown, to: convId)
-                } else {
-                    let customModel = String(trimmed.dropFirst(6)).trimmingCharacters(in: .whitespacesAndNewlines)
-                    self.emitCommandOutput("Custom model '\(customModel)' received. Model configurations are mapped per-tier (`easy`, `medium`, `hard`) in Iris Settings.", format: .markdown, to: convId)
-                }
-            }
+            return
+        case "easy", "fast": tier = .easy
+        case "medium": tier = .medium
+        case "hard", "heavy": tier = .hard
+        case "default", "clear", "reset": tier = nil
+        default:
+            let custom = String(trimmed.dropFirst(6)).trimmingCharacters(in: .whitespacesAndNewlines)
+            emitCommandOutput("`\(custom)` isn't a tier. Models are set per tier (`easy`, `medium`, `hard`) in Settings → Models; `/model <tier>` picks one for this conversation.", format: .markdown, to: convId)
+            return
         }
+        guard let idx = conversations.firstIndex(where: { $0.id == convId }) else { return }
+        conversations[idx].modelTier = tier
+        markChanged(convId, .metadata)
+        let (now, source) = effectiveTier(for: convId)
+        emitCommandOutput(tier == nil
+            ? "This conversation's tier is cleared: from its next turn it runs on \(name(now)) (`\(config.getModel(for: now))`), \(source)."
+            : "From its next turn this conversation runs on **\(name(now))** (`\(config.getModel(for: now))`).",
+            format: .markdown, to: convId)
     }
 
     private func handleMcpCommand(_ trimmed: String, convId: UUID) {

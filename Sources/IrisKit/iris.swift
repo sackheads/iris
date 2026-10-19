@@ -248,7 +248,14 @@ actor IrisEngine {
     private let injectedMemory: MemoryManager?
     var memory: MemoryManager { injectedMemory ?? .shared }
 
-    var systemPrompt: Content!
+    /// The default base prompt (SOUL, skills, steering, rules). Every invalidation sets it to nil,
+    /// which also drops the bases built for a profile's skills list.
+    var systemPrompt: Content! {
+        didSet { if systemPrompt == nil { profileSkillPrompts = [:] } }
+    }
+    /// The base prompt for each agent profile's `skills:` selection (#465 part 3), keyed by the
+    /// sorted list: the same base with its own `# Available Skills` block.
+    private var profileSkillPrompts: [String: Content] = [:]
 
     /// Everything that decides what the guard OUTPUTS for a given file's content, besides the
     /// content itself (5a Task 7). The cached text below is guard output, not raw file content, so
@@ -386,7 +393,7 @@ actor IrisEngine {
     /// `agentProfile` (#465) is a layer after AGENTS.md. Keyed into the cache by name, so two
     /// conversations in one workspace with different profiles keep a cache entry each.
     private func assembledSystemPrompt(workspacePath: String?, agentProfile: AgentProfile? = nil) async -> Content {
-        let base = await ensureSystemPrompt()
+        let base = await ensureSystemPrompt(skills: agentProfile?.skills)
         guard let baseText = base.parts.first?.text else { return base }
         let profileText = await guardedUserProfileText()
         let agentsText = await guardedAgentsMdText(workspacePath: workspacePath)
@@ -409,7 +416,10 @@ actor IrisEngine {
         return composed
     }
 
-    var modelTier: ModelTier
+    /// This engine's own tier: the default a conversation runs on with no `/model` and no
+    /// profile tier, and a subagent's `effort`. Fixed at creation (#667: `/model` sets a
+    /// conversation's tier, never this).
+    nonisolated let modelTier: ModelTier
     let principal: Principal
     let roleLabel: String?
     let evaluatorChecks: [String]
@@ -634,6 +644,32 @@ actor IrisEngine {
         seconds == seconds.rounded() ? "\(Int(seconds))s" : String(format: "%.1fs", seconds)
     }
     
+    /// The base for a profile's `skills:` list (#465 part 3): its skills replace the global
+    /// `/bundle` for that conversation, as a bundle of their own. An engine with its own base
+    /// (a subagent's role prompt) keeps that base whatever the list says.
+    private func ensureSystemPrompt(skills: [String]?) async -> Content {
+        guard let skills, customBasePrompt == nil else { return await ensureSystemPrompt() }
+        let key = skills.map { $0.lowercased() }.sorted().joined(separator: "\u{0}")
+        if let existing = profileSkillPrompts[key] { return existing }
+        let prompt = await buildBasePrompt(bundle: SkillBundle(name: "agent profile", description: "", skillNames: skills))
+        profileSkillPrompts[key] = prompt
+        return prompt
+    }
+
+    /// SOUL, the skills `bundle` selects (nil: every skill), the shipped steering and the custom
+    /// rules: the base every conversation's prompt is built on.
+    private func buildBasePrompt(bundle: SkillBundle?) async -> Content {
+        // `paths: memory.paths` (5a Task 7 fix round 1): a test that injects an isolated
+        // `MemoryManager(paths:)` to pin USER.md must get SOUL.md from the same root too,
+        // not from the process-global `IrisPaths.default` `loadSOUL` defaults to.
+        let soul = await manager.loadSOUL(paths: memory.paths)
+        let skills = await manager.discoverSkills(activeBundle: bundle)
+        let steering = SystemSteering.shipped()
+        let customRules = await manager.loadCustomRules()
+        let combined = "\(soul)\n\n\(skills)\n\n\(steering)\(customRules)"
+        return Content(role: "system", parts: [Part(text: combined, functionCall: nil, functionResponse: nil)])
+    }
+
     @discardableResult
     private func ensureSystemPrompt() async -> Content {
         if let existing = systemPrompt { return existing }
@@ -644,16 +680,7 @@ actor IrisEngine {
         }
         return await measure(.contextAssembly) {
             await measureSpan("assembly.systemPrompt") {
-                // `paths: memory.paths` (5a Task 7 fix round 1): a test that injects an isolated
-                // `MemoryManager(paths:)` to pin USER.md must get SOUL.md from the same root too,
-                // not from the process-global `IrisPaths.default` `loadSOUL` defaults to.
-                let soul = await manager.loadSOUL(paths: memory.paths)
-                let activeBundle = SkillBundleManager.shared.activeBundle
-                let skills = await manager.discoverSkills(activeBundle: activeBundle)
-                let steering = SystemSteering.shipped()
-                let customRules = await manager.loadCustomRules()
-                let combined = "\(soul)\n\n\(skills)\n\n\(steering)\(customRules)"
-                let prompt = Content(role: "system", parts: [Part(text: combined, functionCall: nil, functionResponse: nil)])
+                let prompt = await buildBasePrompt(bundle: SkillBundleManager.shared.activeBundle)
                 systemPrompt = prompt
                 return prompt
             }
@@ -1916,12 +1943,14 @@ actor IrisEngine {
             // bound to this turn's task tree (its tool dispatch included), so a turn running beside
             // it, or a reprompt it schedules, never reads or changes this turn's scope.
             let reflecting = Self.isReflectionTurn
-            let (agentProfile, scope) = await turnAgentProfile(for: conversationId, reflecting: reflecting)
+            let (agentProfile, scope, tier) = await turnAgentProfile(for: conversationId, reflecting: reflecting)
             await Self.$isReflectionTurn.withValue(false) {
+                await Self.$turnTier.withValue(tier) {
                 await Self.$agentToolScope.withValue(scope) {
                     await PerformanceProfiler.$currentTurnID.withValue(turnID) {
                         await processInputBody(input, source: source, conversationId: conversationId, inlineParts: inlineParts, restrictToGoalComplete: restrictToGoalComplete, turnBudget: turnBudget, usageSink: usageSink, goalFacts: goalFacts, agentProfile: agentProfile)
                     }
+                }
                 }
             }
             PerformanceProfiler.shared.endTurn(turnID, totalMs: UptimeClock.live.seconds(since: turnStart) * 1000.0)
@@ -1933,24 +1962,38 @@ actor IrisEngine {
     @TaskLocal static var isReflectionTurn = false
     /// The current turn's agent-profile tool scope (#465 part 2). nil: no profile, or no `tools:`.
     @TaskLocal static var agentToolScope: AgentToolScope?
+    /// The current turn's model tier (#465 part 3, #667): the conversation's own (`/model`), else
+    /// its agent profile's, else this engine's. Bound per turn by `processInput`, so a subagent's
+    /// turn, started inside its parent's, binds its own engine tier rather than inheriting.
+    @TaskLocal static var turnTier: ModelTier?
+
+    /// The tier this turn runs on.
+    var currentTier: ModelTier { Self.turnTier ?? modelTier }
+
+    /// The model this turn's calls name: one seam for every read of it (the profiler, Anthropic's
+    /// output cap), so a later route (#239 half 2) changes how it is computed, not each site.
+    func turnModel() -> String { ConfigManager.shared.getModel(for: currentTier) }
 
     /// The profile a turn of `conversationId` runs with (main principal only), and the tool scope
     /// its `tools:` list sets. A subagent takes the scope of the conversation it works for, so
     /// delegation cannot widen it; the evaluator keeps its own toolset.
-    private func turnAgentProfile(for conversationId: UUID, reflecting: Bool) async -> (AgentProfile?, AgentToolScope?) {
+    private func turnAgentProfile(for conversationId: UUID, reflecting: Bool) async -> (AgentProfile?, AgentToolScope?, ModelTier) {
         let localState = state
         let principal = self.principal
-        let (own, scoped) = await MainActor.run { () -> (AgentProfile?, AgentProfile?) in
+        let (own, scoped, ownTier) = await MainActor.run { () -> (AgentProfile?, AgentProfile?, ModelTier?) in
             switch principal {
             case .main:
                 let own = localState?.resolveAgentProfile(for: conversationId)
-                return (own, own)
-            case .subagent: return (nil, localState?.delegatedAgentProfile(for: conversationId))
-            case .evaluator: return (nil, nil)
+                let set = localState?.conversations.first(where: { $0.id == conversationId })?.modelTier
+                return (own, own, set)
+            case .subagent: return (nil, localState?.delegatedAgentProfile(for: conversationId), nil)
+            case .evaluator: return (nil, nil, nil)
             }
         }
-        guard let scoped, scoped.tools != nil else { return (own, nil) }
-        return (own, AgentToolScope(profile: scoped, reflecting: reflecting && principal == .main))
+        // A subagent's and the evaluator's tier is their engine's own (its `effort`).
+        let tier = ownTier ?? own?.tier ?? modelTier
+        guard let scoped, scoped.tools != nil else { return (own, nil, tier) }
+        return (own, AgentToolScope(profile: scoped, reflecting: reflecting && principal == .main), tier)
     }
 
     /// Top-k cap on the facts JIT injects into one turn.
@@ -2864,7 +2907,7 @@ actor IrisEngine {
                 let response = outcome.response
                 // What the server will expect next: the reply as it came back, not as a hook rewrote it.
                 if replaysThinking { thinkingReplay.recordReceived(response.candidates?.first?.content) }
-                let modelName = ConfigManager.shared.getModel(for: modelTier)
+                let modelName = turnModel()
                 PerformanceProfiler.shared.recordModelCall(
                     turnID: PerformanceProfiler.currentTurnID,
                     ModelCallRecord(
@@ -3002,7 +3045,7 @@ actor IrisEngine {
                     let provider = effectiveProvider
                     let budgetCapped = outputTokenCap.map { cap in
                         provider == LLMProvider.anthropic.rawValue
-                            && cap < AnthropicClient.maxTokens(for: ConfigManager.shared.getModel(for: modelTier), stream: streamed)
+                            && cap < AnthropicClient.maxTokens(for: turnModel(), stream: streamed)
                     } ?? false
                     let cause = Self.truncationCause(provider: provider, reason: reason, budgetCapped: budgetCapped)
                     if toolCalls.isEmpty {
@@ -5920,7 +5963,7 @@ actor IrisEngine {
     func consumeModelStream(request: GeminiRequest, streamed: Bool, streamer: MessageStreamer) async throws -> StreamOutcome {
         let start = MonotonicClock.nowMs()
         var assembler = StreamAssembler()
-        let client = self.client, tier = self.modelTier
+        let client = self.client, tier = currentTier
         let stream = streamed
             ? client.streamContent(request: request, tier: tier)
             : LLMStreamEvent.replay { try await client.generateContent(request: request, tier: tier) }
