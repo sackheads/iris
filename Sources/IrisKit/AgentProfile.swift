@@ -23,6 +23,8 @@ struct AgentProfile: Equatable, Sendable {
     static let flowTools: Set<String> = [
         "goal_complete", "propose_goal_contract", "rename_conversation", "reach_checkpoint",
         "amend_goal_contract", "waive_criterion", "delegate_milestone",
+        // #190 PR 2: a self-paced loop's pacing; narrowing it would leave the loop unpaceable.
+        IrisEngine.scheduleNextTickTool,
     ]
 
     /// Whether this profile offers `tool`. No `tools:` list offers everything; a list offers its

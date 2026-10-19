@@ -105,7 +105,8 @@ struct AgentProfileToolsTests {
     /// here until someone decides whether a profile narrows it.
     @Test("every sticky (state-gated) tool is classified as exempt or narrowed")
     func stickyClassified() {
-        let exempt: Set<String> = ["goal_complete", "amend_goal_contract", "reach_checkpoint", "delegate_milestone", "waive_criterion"]
+        let exempt: Set<String> = ["goal_complete", "amend_goal_contract", "reach_checkpoint", "delegate_milestone", "waive_criterion",
+                                   IrisEngine.scheduleNextTickTool]
         let narrowed: Set<String> = ["manage_fact", "list_sessions", "describe_session", "send_to_session", "set_session_card", "close_request"]
         #expect(exempt.union(narrowed) == StickyTools.eligible, "classify the new state-gated tool")
         for name in StickyTools.eligible {
