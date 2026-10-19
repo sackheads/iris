@@ -37,7 +37,7 @@ The folder is one Iris protects. The agent can't write a profile without asking 
 
 With a `tools:` list, a conversation is offered only those tools, and a call to any other is refused with a line naming the profile. Without one, it gets the usual tools.
 - **MCP and plugin tools** are named as the model sees them. `mcp:<server>` stands for every tool that server offers.
-- **Always kept:** the tools `/goal` and `/rename` work through (`goal_complete`, `propose_goal_contract`, `rename_conversation`, `reach_checkpoint`, `amend_goal_contract`, `delegate_milestone`, `waive_criterion`). They're offered only during their own flow anyway.
+- **Always kept:** the tools `/goal` and `/rename` work through (`goal_complete`, `propose_goal_contract`, `rename_conversation`, `reach_checkpoint`, `amend_goal_contract`, `delegate_milestone`, `waive_criterion`), and `schedule_next_tick`, which paces a self-paced `/loop`. They're offered only during their own flow anyway.
 - **Messaging other sessions** (`send_to_session`, `list_sessions` and the rest) isn't kept: list those tools if the profile should talk to peers.
 - **Memory reflection still works.** On the turn where Iris consolidates memory, the tools that turn uses (`update_soul`, `update_user_profile`, `update_memory`, `create_skill`, `update_skill`) stay offered. They write the same memory any conversation does.
 - **Subagents** a profiled conversation starts get the same narrowing, at any depth, so delegating can't go around it. The goal grader keeps its own tools.
