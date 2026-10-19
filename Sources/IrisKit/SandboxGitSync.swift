@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// What git in the VM reports about its copy (#658). Data from the VM: used only to notice that
 /// something changed and to name what to bundle, never as a fact the host acts on. Every SHA a
@@ -68,8 +69,18 @@ struct SandboxHostGit: Sendable {
     }()
 
     /// Whether a real git is there: with only Apple's `/usr/bin/git` placeholder, running it
-    /// opens the developer tools install dialog (#662 review), so nothing here runs it then.
-    func isInstalled() async -> Bool { await ToolExecutor.gitIsInstalled(env: environment) }
+    /// opens the developer tools install dialog (#662 review), so nothing here runs it then. A yes
+    /// is kept for the process (asking spawns `xcode-select` on the placeholder); a no is asked
+    /// again, so installing the tools takes effect without a restart.
+    func isInstalled() async -> Bool {
+        if Self.installed.withLock({ $0.contains(environment["PATH"] ?? "") }) { return true }
+        guard await ToolExecutor.gitIsInstalled(env: environment) else { return false }
+        Self.installed.withLock { _ = $0.insert(environment["PATH"] ?? "") }
+        return true
+    }
+
+    /// The `PATH`s a real git was found on.
+    private static let installed = OSAllocatedUnfairLock(initialState: Set<String>())
 
     func run(_ args: [String], in dir: String, extra: [String: String] = [:]) async -> (status: Int32, out: String) {
         var env = environment
@@ -92,6 +103,14 @@ struct SandboxGitSync: Sendable {
     let vm: any SandboxVMGit
     var host = SandboxHostGit()
 
+    /// Host git in the person's repository, named by the git dir Iris recorded, never found from
+    /// the worktree's `.git` (a file the VM can write, for a linked worktree) (#662 review).
+    private func git(_ args: [String], in dir: String, extra: [String: String] = [:]) async -> (status: Int32, out: String) {
+        var env = ["GIT_DIR": repo.hostGitDir, "GIT_WORK_TREE": repo.source]
+        env.merge(extra) { $1 }
+        return await host.run(args, in: dir, extra: env)
+    }
+
     struct Before: Sendable {
         var state: SandboxVMState?
         var worktree: [String: Data?]
@@ -99,11 +118,12 @@ struct SandboxGitSync: Sendable {
 
     func before() async -> (Before, [String]) {
         let worktree = SandboxGit.worktreeSnapshot(source: repo.source)
-        var notes: [String] = []
+        // First, so nothing below reads a pointer the VM rewrote during the last command.
+        var notes = SandboxGit.quarantinePointers(source: repo.source, commonDir: repo.hostCommonDir)
         var state = await vm.state()
         if await host.isInstalled(), let vmState = state, let branch = vmState.headBranch, let vmSha = vmState.headSha,
            await hostHeadBranch() == branch, let hostSha = await hostSha(of: branch), hostSha != vmSha,
-           await host.run(["merge-base", "--is-ancestor", vmSha, hostSha], in: repo.source).status == 0 {
+           await git(["merge-base", "--is-ancestor", vmSha, hostSha], in: repo.source).status == 0 {
             if await vm.fastForward(branch: branch, from: vmSha, to: hostSha) {
                 notes.append("Moved the sandbox's \(branch) \(short(vmSha))..\(short(hostSha)) to match your Mac.")
                 state = await vm.state()
@@ -113,12 +133,13 @@ struct SandboxGitSync: Sendable {
     }
 
     func after(_ before: Before) async -> [String] {
-        var notes: [String] = []
+        var notes = SandboxGit.quarantinePointers(source: repo.source, commonDir: repo.hostCommonDir)
         if let now = await vm.state(), let was = before.state {
             notes += await sync(now: now, was: was)
+            // Again, for the gitlinks a fast-forward just brought into the host index.
+            notes += SandboxGit.quarantinePointers(source: repo.source, commonDir: repo.hostCommonDir)
         }
         notes += SandboxGit.worktreeNotes(source: repo.source, before: before.worktree)
-        notes += SandboxGit.quarantinePointers(source: repo.source, commonDir: repo.hostCommonDir)
         return notes
     }
 
@@ -135,19 +156,19 @@ struct SandboxGitSync: Sendable {
         var known: [(String, String)] = []
         for branch in changed {
             guard let sha = now.branches[branch], Self.isSha(sha) else { continue }
-            if await host.run(["cat-file", "-e", sha + "^{commit}"], in: repo.source).status == 0 { known.append((branch, sha)) }
+            if await git(["cat-file", "-e", sha + "^{commit}"], in: repo.source).status == 0 { known.append((branch, sha)) }
             else { missing.append(branch) }
         }
         var notes: [String] = []
         var fetched: Set<String> = []
         if !missing.isEmpty {
             var excluding: [String] = []
-            if let head = await host.run(["rev-parse", "-q", "--verify", "HEAD"], in: repo.source).out.nilIfEmpty { excluding.append(head) }
+            if let head = await git(["rev-parse", "-q", "--verify", "HEAD"], in: repo.source).out.nilIfEmpty { excluding.append(head) }
             for branch in missing { if let sha = await hostSha(of: branch) { excluding.append(sha) } }
             if await vm.writeBundle(branches: missing, excluding: excluding), let copy = Self.takeBundle(vmDir: repo.vmDir) {
                 defer { try? FileManager.default.removeItem(atPath: copy) }
                 let specs = missing.map { "+refs/heads/\($0):refs/iris/sandbox/\($0)" }
-                let fetch = await host.run(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", copy] + specs, in: repo.source)
+                let fetch = await git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", copy] + specs, in: repo.source)
                 if fetch.status == 0 { fetched.formUnion(missing) }
                 else { notes.append("Iris could not bring the sandbox's commits on \(missing.joined(separator: ", ")) to your Mac; they stay in the sandbox's copy.") }
             } else {
@@ -155,13 +176,13 @@ struct SandboxGitSync: Sendable {
             }
         }
         for (branch, sha) in known
-        where await host.run(["update-ref", "refs/iris/sandbox/\(branch)", sha], in: repo.source).status == 0 {
+        where await git(["update-ref", "refs/iris/sandbox/\(branch)", sha], in: repo.source).status == 0 {
             fetched.insert(branch)
         }
 
         let headBranch = await hostHeadBranch()
         for branch in changed where fetched.contains(branch) {
-            guard let vmSha = await host.run(["rev-parse", "-q", "--verify", "refs/iris/sandbox/\(branch)"], in: repo.source).out.nilIfEmpty
+            guard let vmSha = await git(["rev-parse", "-q", "--verify", "refs/iris/sandbox/\(branch)"], in: repo.source).out.nilIfEmpty
             else { continue }
             let facts = await facts(branch: branch, vmSha: vmSha, headBranch: headBranch)
             switch SandboxSyncDecision.decide(facts) {
@@ -187,8 +208,8 @@ struct SandboxGitSync: Sendable {
                                      checkedOutElsewhere: await checkedOutElsewhere(branch),
                                      hostIsAncestor: false, worktreeMatches: false, indexClean: false)
         guard headBranch == branch, let hostSha, facts.checkedOutElsewhere == nil else { return facts }
-        facts.hostIsAncestor = await host.run(["merge-base", "--is-ancestor", hostSha, vmSha], in: repo.source).status == 0
-        facts.indexClean = await host.run(["diff", "--cached", "--quiet", "HEAD", "--"], in: repo.source).status == 0
+        facts.hostIsAncestor = await git(["merge-base", "--is-ancestor", hostSha, vmSha], in: repo.source).status == 0
+        facts.indexClean = await git(["diff", "--cached", "--quiet", "HEAD", "--"], in: repo.source).status == 0
         facts.worktreeMatches = await worktreeMatches(vmSha)
         return facts
     }
@@ -199,23 +220,23 @@ struct SandboxGitSync: Sendable {
         let scratch = (NSTemporaryDirectory() as NSString).appendingPathComponent("iris-sync-index-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(atPath: scratch) }
         let env = ["GIT_INDEX_FILE": scratch]
-        guard await host.run(["read-tree", sha], in: repo.source, extra: env).status == 0 else { return false }
-        _ = await host.run(["update-index", "-q", "--refresh"], in: repo.source, extra: env)
-        return await host.run(["diff-files", "--quiet"], in: repo.source, extra: env).status == 0
+        guard await git(["read-tree", sha], in: repo.source, extra: env).status == 0 else { return false }
+        _ = await git(["update-index", "-q", "--refresh"], in: repo.source, extra: env)
+        return await git(["diff-files", "--quiet"], in: repo.source, extra: env).status == 0
     }
 
     /// The ref moves only if it is still where it was checked (`update-ref`'s old value), then the
     /// index is rebuilt from the new commit. The worktree already holds it, so nothing is
     /// checked out and no file is written.
     private func fastForward(branch: String, from old: String, to new: String) async -> String {
-        let count = await host.run(["rev-list", "--count", "\(old)..\(new)"], in: repo.source).out
-        guard await host.run(["update-ref", "-m", "iris: from the sandbox", "refs/heads/\(branch)", new, old], in: repo.source).status == 0,
-              await host.run(["read-tree", new], in: repo.source).status == 0 else {
+        let count = await git(["rev-list", "--count", "\(old)..\(new)"], in: repo.source).out
+        guard await git(["update-ref", "-m", "iris: from the sandbox", "refs/heads/\(branch)", new, old], in: repo.source).status == 0,
+              await git(["read-tree", new], in: repo.source).status == 0 else {
             return "The sandbox's \(branch) is at refs/iris/sandbox/\(branch) (\(short(new))); Iris could not move \(branch) on your Mac."
         }
-        _ = await host.run(["update-index", "-q", "--refresh"], in: repo.source)
+        _ = await git(["update-index", "-q", "--refresh"], in: repo.source)
         // The branch holds it now; a sandbox ref left beside it would only say it twice.
-        _ = await host.run(["update-ref", "-d", "refs/iris/sandbox/\(branch)", new], in: repo.source)
+        _ = await git(["update-ref", "-d", "refs/iris/sandbox/\(branch)", new], in: repo.source)
         let n = Int(count) ?? 0
         return "Moved \(branch) \(short(old))..\(short(new)) (\(n) commit\(n == 1 ? "" : "s") from the sandbox)."
     }
@@ -239,18 +260,18 @@ struct SandboxGitSync: Sendable {
     }
 
     private func hostHeadBranch() async -> String? {
-        let ref = await host.run(["symbolic-ref", "-q", "HEAD"], in: repo.source)
+        let ref = await git(["symbolic-ref", "-q", "HEAD"], in: repo.source)
         guard ref.status == 0, ref.out.hasPrefix("refs/heads/") else { return nil }
         return String(ref.out.dropFirst("refs/heads/".count))
     }
 
     private func hostSha(of branch: String) async -> String? {
-        await host.run(["rev-parse", "-q", "--verify", "refs/heads/\(branch)"], in: repo.source).out.nilIfEmpty
+        await git(["rev-parse", "-q", "--verify", "refs/heads/\(branch)"], in: repo.source).out.nilIfEmpty
     }
 
     /// The other worktree (or main checkout) of this repository with `branch` checked out.
     private func checkedOutElsewhere(_ branch: String) async -> String? {
-        let list = await host.run(["worktree", "list", "--porcelain"], in: repo.source)
+        let list = await git(["worktree", "list", "--porcelain"], in: repo.source)
         guard list.status == 0 else { return nil }
         let here = IrisPaths.realPath(repo.source)
         var path: String?
