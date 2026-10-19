@@ -306,6 +306,12 @@ struct ToolSurfaceTrimTests {
             app.conversations[idx].goalContract = contract
         })
 
+        // schedule_next_tick needs a self-paced /loop (#190 PR 2).
+        observed.formUnion(await toolNames(prompt: "carry on") { app, id in
+            guard let idx = app.conversations.firstIndex(where: { $0.id == id }) else { return }
+            app.conversations[idx].loop = ConversationLoop(prompt: "p", intervalSeconds: 60, cap: 5, paused: true, selfPaced: true)
+        })
+
         // waive_criterion needs a locked contract with at least one failed gate attempt.
         observed.formUnion(await toolNames(prompt: "carry on") { app, id in
             guard let idx = app.conversations.firstIndex(where: { $0.id == id }) else { return }

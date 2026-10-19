@@ -625,6 +625,19 @@ actor IrisEngine {
     /// `ConversationLoop.tickText`, without `systemEventAnalysis`'s "briefly acknowledge it".
     nonisolated static let loopSource = "Loop"
 
+    /// A self-paced `/loop`'s pacing tool (#190 PR 2). Its description is agent-facing, so it says
+    /// exactly what the call does: it sets the next delay, never ends the loop, and how it ends.
+    nonisolated static let scheduleNextTickTool = "schedule_next_tick"
+    nonisolated static let scheduleNextTickDeclaration = FunctionDeclaration(
+        name: scheduleNextTickTool,
+        description: "Set how long to wait before this conversation's next /loop tick: \(Int(ConversationLoop.selfPacedMinimum)) to \(Int(ConversationLoop.selfPacedMaximum)) seconds, and a value outside that is clamped (the result says what was applied). It only sets the delay, it doesn't end the loop: the person ends it (/loop stop, /stop, or End loop), or it stops at its tick limit. Call it once per tick; without a call the next tick runs in \(Int(ConversationLoop.selfPacedDefault / 60)) minutes.",
+        parameters: Schema(type: "OBJECT", properties: [
+            "delay_seconds": Schema(type: "INTEGER", description: "Seconds until the next tick, \(Int(ConversationLoop.selfPacedMinimum))-\(Int(ConversationLoop.selfPacedMaximum))."),
+            "reason": Schema(type: "STRING", description: "Optional: one line on why this delay."),
+        ], required: ["delay_seconds"]))
+    /// What a `schedule_next_tick` call is told without a self-paced loop in its conversation.
+    nonisolated static let noSelfPacedLoopRefusal = "Not available: this conversation has no self-paced /loop, so there is no next tick to schedule. Only `/loop <prompt>` with no interval is paced this way."
+
     /// Whether this turn is the harness's own `prefix` trigger, which offers that flow's tool for
     /// one turn (invariant 6). The prefix alone is text: a job's prompt, a peer's message or a
     /// typed line could start with it, and an unattended run would then be offered
@@ -2668,6 +2681,16 @@ actor IrisEngine {
             toolsList.append(SubagentManager.milestoneDelegationDeclaration())
         }
 
+        // #190 PR 2: a self-paced loop's pacing tool, declared only while the conversation has
+        // one (Invariant 6); once declared it stays (5c §0.1), and the dispatcher refuses it
+        // without a self-paced loop.
+        let selfPacedLoop = principal == .main ? await MainActor.run {
+            localState?.conversations.first(where: { $0.id == conversationId })?.loop?.selfPaced == true
+        } : false
+        if principal == .main, selfPacedLoop || sticky.contains(Self.scheduleNextTickTool) {
+            toolsList.append(Self.scheduleNextTickDeclaration)
+        }
+
         // Slice D1's escape hatch, first offered only once a grade has actually failed — the agent
         // must try before declaring a criterion inapplicable. Once declared, stays declared (5c
         // §0.1); the dispatcher refuses a waiver without a failed grade.
@@ -3429,15 +3452,20 @@ actor IrisEngine {
     /// A paused loop, or none, schedules nothing; one with no ticks left ends with a line saying so.
     func armLoopTick(for conversationId: UUID) async {
         let localState = state
-        let loop = await MainActor.run { localState?.armableLoop(for: conversationId) }
-        guard let loop else { return }
+        // The delay is taken in the same main-actor step: a self-paced loop's is whatever the
+        // last turn asked for with `schedule_next_tick`, else the default (#190 PR 2).
+        let armed = await MainActor.run { () -> (ConversationLoop, Double)? in
+            guard let localState, let loop = localState.armableLoop(for: conversationId) else { return nil }
+            return (loop, loop.ticksLeft > 0 ? localState.nextLoopDelay(for: conversationId, loop: loop) : 0)
+        }
+        guard let (loop, delay) = armed else { return }
         guard loop.ticksLeft > 0 else {
             await MainActor.run { localState?.endLoopAtCap(for: conversationId) }
             return
         }
         let token = UUID()
         let task = Task { [weak self] in
-            await UptimeWait.seconds(loop.intervalSeconds)
+            await UptimeWait.seconds(delay)
             guard let self else { return }
             await self.runLoopTick(for: conversationId, loop: loop, token: token)
             await self.finishLoopTick(for: conversationId, token: token)
@@ -3445,7 +3473,7 @@ actor IrisEngine {
         // A running tick is the turn arming this one, finishing: replaced, not cancelled.
         if let old = loopTicks[conversationId], !old.running { old.task.cancel() }
         loopTicks[conversationId] = (token, task, false)
-        await MainActor.run { localState?.loopNextTick[conversationId] = Date().addingTimeInterval(loop.intervalSeconds) }
+        await MainActor.run { localState?.loopNextTick[conversationId] = Date().addingTimeInterval(delay) }
     }
 
     private func runLoopTick(for conversationId: UUID, loop: ConversationLoop, token: UUID) async {
@@ -3819,7 +3847,7 @@ actor IrisEngine {
     nonisolated static let mainOnlyDeclared: Set<String> =
         // The /rename and /goal trigger tools too (#581): neither flow runs in a subagent, and
         // `isTrigger` already requires the main agent; this is the backstop for a sticky set.
-        jobCreationTools.union(["rename_conversation", "propose_goal_contract",
+        jobCreationTools.union([scheduleNextTickTool, "rename_conversation", "propose_goal_contract",
                                 "amend_goal_contract", "reach_checkpoint", "delegate_milestone",
                                 "waive_criterion", "list_sessions", "describe_session", "send_to_session",
                                 "set_session_card", "close_request"])
@@ -5028,6 +5056,11 @@ actor IrisEngine {
             let readBlocked: Bool
             if case .blocked = readOutcome { readBlocked = true } else { readBlocked = false }
             result = noteBlockedResult(guardedRead, name: functionCall.name, conversationId: conversationId, blocked: readBlocked)
+        } else if functionCall.name == Self.scheduleNextTickTool {
+            let requested = functionCall.args["delay_seconds"].flatMap { Double($0.stringValue) } ?? .nan
+            let scheduled = principal == .main
+                ? await MainActor.run { localState?.scheduleNextLoopTick(for: conversationId, requested: requested) } : nil
+            result = scheduled ?? Self.noSelfPacedLoopRefusal
         } else if functionCall.name == "rename_conversation", let newTitle = functionCall.args["title"]?.stringValue {
             // Not declared on the pinned conversation's turns (above), but a forged or stale call
             // must still be refused rather than acted on (invariant 6's undeclared-but-safe half).
@@ -5710,7 +5743,7 @@ actor IrisEngine {
         "reflect", "goal_complete", "search_memory", "update_user_profile", "update_soul",
         "update_memory", "propose_goal_contract", "list_sessions", "describe_session", "send_to_session",
         "set_session_card", "close_request", "amend_goal_contract", "reach_checkpoint", "waive_criterion",
-        "invoke_subagent", "delegate_milestone",
+        "invoke_subagent", "delegate_milestone", scheduleNextTickTool,
     ]
 
     /// Every tool name the app can ever declare to any conversation (main agent, subagent or
@@ -5735,7 +5768,8 @@ actor IrisEngine {
             .subtracting(unattendedNeverDeclared)
             .subtracting(jobToolDeclarations(isPinned: true).map(\.name))
             .subtracting(["rename_conversation", "propose_goal_contract", "goal_complete",
-                          "amend_goal_contract", "reach_checkpoint", "waive_criterion", "delegate_milestone"])
+                          "amend_goal_contract", "reach_checkpoint", "waive_criterion", "delegate_milestone",
+                          scheduleNextTickTool])
 
     /// What this call actually wrote, from its arguments and the sentence the tool returned.
     ///

@@ -14,9 +14,13 @@ struct ConversationLoop: Codable, Equatable, Sendable {
     var cap: Int
     /// Paused loops schedule nothing. Every loop comes back paused after a relaunch.
     var paused: Bool
+    /// Self-paced (#190 PR 2): the model sets each next delay with `schedule_next_tick`;
+    /// `intervalSeconds` is then the first tick's delay only.
+    var selfPaced: Bool
 
-    init(prompt: String, intervalSeconds: Double, cap: Int, paused: Bool = false) {
+    init(prompt: String, intervalSeconds: Double, cap: Int, paused: Bool = false, selfPaced: Bool = false) {
         self.id = UUID()
+        self.selfPaced = selfPaced
         self.prompt = prompt
         self.intervalSeconds = intervalSeconds
         self.ticksLeft = cap
@@ -32,20 +36,30 @@ struct ConversationLoop: Codable, Equatable, Sendable {
         cap = try c.decodeIfPresent(Int.self, forKey: .cap) ?? ConfigManager.defaultLoopTickCap
         ticksLeft = try c.decodeIfPresent(Int.self, forKey: .ticksLeft) ?? cap
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? true
+        selfPaced = try c.decodeIfPresent(Bool.self, forKey: .selfPaced) ?? false
     }
 
     /// The shortest and longest interval `/loop` accepts.
     static let minimumInterval: Double = 60
     static let maximumInterval: Double = 24 * 3600
+    /// A self-paced loop's bounds for `schedule_next_tick`, and the delay when a turn ends with no
+    /// call: the loop carries on rather than stopping, since a missed call is a lapse, not a
+    /// request to end, and the tick cap still bounds it. The first tick comes at the minimum, so
+    /// the model sets its own pace from the start.
+    static let selfPacedMinimum: Double = 60
+    static let selfPacedMaximum: Double = 3600
+    static let selfPacedDefault: Double = 20 * 60
 
-    /// `/loop`'s arguments: an interval (`30s`, `5m`, `2h`, `1d`) then the prompt.
+    /// `/loop`'s arguments: an interval (`30s`, `5m`, `2h`, `1d`) then the prompt, or the prompt
+    /// alone for a self-paced loop.
     enum Parsed: Equatable {
         case start(intervalSeconds: Double, prompt: String)
+        case startSelfPaced(prompt: String)
         case stop, pause, resume, status
         case invalid(String)
     }
 
-    static let usage = "Usage: `/loop <interval> <prompt>`, for example `/loop 10m check my open PRs`. Also `/loop stop`, `/loop pause`, `/loop resume`, and `/loop` alone for its status."
+    static let usage = "Usage: `/loop <interval> <prompt>`, for example `/loop 10m check my open PRs`, or `/loop <prompt>` to let Iris pick each next tick. Also `/loop stop`, `/loop pause`, `/loop resume`, and `/loop` alone for its status."
 
     static func parse(_ arguments: String) -> Parsed {
         let trimmed = arguments.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -58,7 +72,12 @@ struct ConversationLoop: Codable, Equatable, Sendable {
         }
         let parts = trimmed.split(maxSplits: 1, whereSeparator: \.isWhitespace).map(String.init)
         guard let seconds = interval(parts[0]) else {
-            return .invalid("The interval comes first, as a number and a unit: `30s`, `5m`, `2h` or `1d`. " + usage)
+            // A first word that starts with a digit, signed or not, was meant as an interval
+            // (`10mn`, `5x`, `-5m`), so it is a typo, not the start of a self-paced prompt.
+            if parts[0].drop(while: { $0 == "-" || $0 == "+" }).first?.isNumber == true {
+                return .invalid("The interval is a number and a unit: `30s`, `5m`, `2h` or `1d`. " + usage)
+            }
+            return .startSelfPaced(prompt: trimmed)
         }
         guard parts.count == 2, !parts[1].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return .invalid("Say what each tick should do after the interval. " + usage)
@@ -91,12 +110,25 @@ struct ConversationLoop: Codable, Equatable, Sendable {
         return "\(s)s"
     }
 
-    var every: String { Self.describe(seconds: intervalSeconds) }
+    var every: String { selfPaced ? "self-paced" : Self.describe(seconds: intervalSeconds) }
+    /// "every 10m", or "self-paced": for the chip, the sidebar and the replies.
+    var cadence: String { selfPaced ? "self-paced" : "every \(every)" }
 
     /// What a tick sends the model, as source `IrisEngine.loopSource`: its own frame, without the
     /// system-event "briefly acknowledge it" suffix, and never starting with a trigger prefix.
     func tickText(number: Int) -> String {
-        "Loop tick \(number) of \(cap) (every \(every)). Do this loop's task again now: \(prompt)\n\nIf nothing has changed since the last tick, say so in one line."
+        let pacing = selfPaced
+            ? "\n\nThis loop is self-paced: call `schedule_next_tick` with how long to wait before the next tick (\(Self.describe(seconds: Self.selfPacedMinimum)) to \(Self.describe(seconds: Self.selfPacedMaximum))). Without a call, the next tick runs in \(Self.describe(seconds: Self.selfPacedDefault))."
+            : ""
+        return "Loop tick \(number) of \(cap) (\(cadence)). Do this loop's task again now: \(prompt)\n\nIf nothing has changed since the last tick, say so in one line.\(pacing)"
+    }
+
+    /// Clamps a requested delay to the self-paced bounds, and says what was applied (#190 PR 2).
+    static func clampedDelay(_ requested: Double) -> (seconds: Double, result: String) {
+        let applied = min(max(requested.rounded(), selfPacedMinimum), selfPacedMaximum)
+        let next = "Next loop tick in \(describe(seconds: applied))."
+        guard applied != requested.rounded() else { return (applied, next) }
+        return (applied, "\(next) You asked for \(Int(requested.rounded())) s; the delay is \(Int(selfPacedMinimum)) to \(Int(selfPacedMaximum)) s, so it was clamped.")
     }
 }
 

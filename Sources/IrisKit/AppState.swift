@@ -5304,6 +5304,25 @@ class AppState {
     /// When each conversation's next loop tick is due, for the chip. Wall time, for display only:
     /// the tick itself waits on uptime (`UptimeWait`).
     var loopNextTick: [UUID: Date] = [:]
+    /// A self-paced loop's next delay, set by `schedule_next_tick` and taken when the next tick is
+    /// armed (#190 PR 2). Transient: a loop comes back paused after a relaunch anyway.
+    @ObservationIgnored var loopRequestedDelay: [UUID: Double] = [:]
+
+    /// `schedule_next_tick`: records the clamped delay for this conversation's self-paced loop, or
+    /// nil when it has none (the dispatcher's refusal).
+    func scheduleNextLoopTick(for id: UUID, requested: Double) -> String? {
+        guard conversations.first(where: { $0.id == id })?.loop?.selfPaced == true else { return nil }
+        let (seconds, result) = ConversationLoop.clampedDelay(requested.isFinite ? requested : ConversationLoop.selfPacedDefault)
+        loopRequestedDelay[id] = seconds
+        return result
+    }
+
+    /// The delay before `loop`'s next tick: its interval, or for a self-paced loop the delay the
+    /// last turn asked for, else the default. Taken once.
+    func nextLoopDelay(for id: UUID, loop: ConversationLoop) -> Double {
+        guard loop.selfPaced else { return loop.intervalSeconds }
+        return loopRequestedDelay.removeValue(forKey: id) ?? ConversationLoop.selfPacedDefault
+    }
 
     private func handleLoopCommand(_ arguments: String, convId: UUID) {
         guard let idx = conversations.firstIndex(where: { $0.id == convId }) else { return }
@@ -5328,6 +5347,14 @@ class AppState {
             }
             let loop = ConversationLoop(prompt: prompt, intervalSeconds: interval, cap: max(1, ConfigManager.shared.loopTickCap))
             startLoop(loop, in: convId)
+        case .startSelfPaced(let prompt):
+            if let refusal = loopRefusal(conv) {
+                appendMessage(role: .system, content: refusal, to: convId)
+                return
+            }
+            let loop = ConversationLoop(prompt: prompt, intervalSeconds: ConversationLoop.selfPacedMinimum,
+                                        cap: max(1, ConfigManager.shared.loopTickCap), selfPaced: true)
+            startLoop(loop, in: convId)
         }
     }
 
@@ -5348,7 +5375,7 @@ class AppState {
     /// Why a goal cannot start in `id` while its loop runs, or nil.
     func goalRefusalForLoop(_ id: UUID) -> String? {
         guard let loop = conversations.first(where: { $0.id == id })?.loop else { return nil }
-        return "A loop is running in this conversation (every \(loop.every): \(loop.prompt)). `/loop stop` it first, then start the goal."
+        return "A loop is running in this conversation (\(loop.cadence): \(loop.prompt)). `/loop stop` it first, then start the goal."
     }
 
     /// Starts `loop` in `id`, replacing any loop there, and arms its first tick unless a turn is
@@ -5356,9 +5383,12 @@ class AppState {
     func startLoop(_ loop: ConversationLoop, in id: UUID) {
         guard let idx = conversations.firstIndex(where: { $0.id == id }) else { return }
         conversations[idx].loop = loop
+        // A self-paced loop's first tick comes at its first interval; later ones at what the
+        // model asks for, else the default.
+        if loop.selfPaced { loopRequestedDelay[id] = loop.intervalSeconds } else { loopRequestedDelay[id] = nil }
         markChanged(id, .metadata)
         appendMessage(role: .system, content: """
-            ↻ Looping every \(loop.every): \(loop.prompt)
+            ↻ Looping \(loop.cadence): \(loop.prompt)
             Up to \(loop.cap) ticks (Settings → Advanced → Agent Limits → Loop tick limit). Each tick sends the whole conversation so far, so each costs a little more than the last. Talk to it any time; `/loop pause`, `/loop resume` and `/loop stop` control it.
             """, to: id)
         armLoopIfIdle(id)
@@ -5377,7 +5407,7 @@ class AppState {
         guard let idx = conversations.firstIndex(where: { $0.id == id }), let loop = conversations[idx].loop else { return }
         conversations[idx].loop?.paused = false
         markChanged(id, .metadata)
-        appendMessage(role: .system, content: "Loop resumed: the next tick in \(loop.every).", to: id)
+        appendMessage(role: .system, content: "Loop resumed: the next tick in \(ConversationLoop.describe(seconds: loop.selfPaced ? loopRequestedDelay[id] ?? ConversationLoop.selfPacedDefault : loop.intervalSeconds)).", to: id)
         armLoopIfIdle(id)
     }
 
@@ -5388,6 +5418,7 @@ class AppState {
         guard let idx = conversations.firstIndex(where: { $0.id == id }), conversations[idx].loop != nil else { return false }
         conversations[idx].loop = nil
         loopNextTick[id] = nil
+        loopRequestedDelay[id] = nil
         cancelWaitingLoopTick(id)
         markChanged(id, .metadata)
         return true
@@ -5444,7 +5475,7 @@ class AppState {
 
     private func loopStatus(_ loop: ConversationLoop?) -> String {
         guard let loop else { return "No loop is running here. " + ConversationLoop.usage }
-        return "↻ Every \(loop.every), \(loop.ticksLeft) of \(loop.cap) ticks left\(loop.paused ? ", paused" : ""): \(loop.prompt)"
+        return "↻ \(loop.cadence.prefix(1).uppercased() + loop.cadence.dropFirst()), \(loop.ticksLeft) of \(loop.cap) ticks left\(loop.paused ? ", paused" : ""): \(loop.prompt)"
     }
 
     /// The tier `id` runs on, and why (#667): its own (`/model`), else its agent profile's, else

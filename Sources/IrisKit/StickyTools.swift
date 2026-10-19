@@ -10,7 +10,7 @@ struct StickyTools: Sendable {
     static let eligible: Set<String> = [
         "manage_fact", "list_sessions", "describe_session", "send_to_session", "set_session_card",
         "close_request", "amend_goal_contract", "reach_checkpoint", "delegate_milestone", "waive_criterion",
-        "goal_complete",
+        "goal_complete", IrisEngine.scheduleNextTickTool,
     ]
 
     private var byConversation: [UUID: Set<String>] = [:]
