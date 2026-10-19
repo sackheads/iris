@@ -304,11 +304,46 @@ final class GitConfigGuard: @unchecked Sendable {
     private var blocked: [String: Block] = [:]
     private let store: URL?
 
+    /// Set when the saved list could not be read in full, so a folder some VM mounted may be
+    /// missing from it: until a watch sees a folder again, host git runs with the overrides and no
+    /// hooks in every folder, and the person's global config counts as one a VM could write (#641).
+    private var unknownFolders = false
+    /// What the person is told about that, once, with the next check's result.
+    private var loadNote: String?
+    /// The unreadable list could not be moved aside, so it is never written over.
+    private var saveDisabled = false
+
+    /// An entry that fails to decode is counted and skipped, not fatal to the others.
+    private struct LossyWorkspace: Decodable {
+        var item: MountedWorkspace?
+        init(from decoder: Decoder) throws { item = try? MountedWorkspace(from: decoder) }
+    }
+
     /// `store` keeps the mounted folders across restarts; nil keeps them in memory only (tests).
     init(store: URL? = nil) {
         self.store = store
-        guard let store, let data = try? Data(contentsOf: store),
-              let saved = try? JSONDecoder().decode([MountedWorkspace].self, from: data) else { return }
+        guard let store else { return }
+        var info = stat()
+        guard lstat(store.path, &info) == 0 || errno != ENOENT else { return }
+        guard let data = try? Data(contentsOf: store),
+              let entries = try? JSONDecoder().decode([LossyWorkspace].self, from: data) else {
+            let aside = Self.setAside(store, move: true)
+            saveDisabled = aside == nil
+            unknownFolders = true
+            loadNote = "[sandbox] Iris could not read its list of the folders sandboxes have mounted"
+                + (aside.map { ", and moved it to \($0)." } ?? " (\(store.path)), and left it as it is.")
+                + Self.unknownFoldersNote
+            return
+        }
+        let saved = entries.compactMap(\.item)
+        if saved.count < entries.count {
+            let failed = entries.count - saved.count
+            let aside = Self.setAside(store, move: false)
+            unknownFolders = true
+            loadNote = "[sandbox] Iris could not read \(failed) of the \(entries.count) folders in its list of those sandboxes have mounted"
+                + (aside.map { "; the list as it was is kept at \($0)." } ?? ".")
+                + Self.unknownFoldersNote
+        }
         for item in saved {
             remember(item.path, hooks: item.hooks)
             if let block = item.blocked {
@@ -329,8 +364,33 @@ final class GitConfigGuard: @unchecked Sendable {
         }
     }
 
+    private static let unknownFoldersNote = " Until a sandbox mounts a folder again, git that Iris runs on your Mac runs no hooks"
+        + " and overrides the settings that can run programs, in every folder, and trusts none of your global git settings."
+
+    /// Moves (or copies) the unreadable list to the first free `.corrupt` name, never over one
+    /// already there; nil when it could not.
+    private static func setAside(_ store: URL, move: Bool) -> String? {
+        for n in 1...100 {
+            let aside = store.path + ".corrupt" + (n == 1 ? "" : "-\(n)")
+            do {
+                if move { try FileManager.default.moveItem(atPath: store.path, toPath: aside) }
+                else { try FileManager.default.copyItem(atPath: store.path, toPath: aside) }
+                return aside
+            } catch {
+                var info = stat()
+                if lstat(aside, &info) != 0 { return nil }   // failed for a reason other than the name
+            }
+        }
+        return nil
+    }
+
+    private func takeLoadNote() -> String? {
+        defer { loadNote = nil }
+        return loadNote
+    }
+
     private func save() {
-        guard let store else { return }
+        guard let store, !saveDisabled else { return }
         let items = trustedHooks.keys.sorted().map { MountedWorkspace(path: $0, hooks: trustedHooks[$0] ?? nil, blocked: blocked[$0]) }
         guard let data = try? JSONEncoder().encode(items) else { return }
         try? FileManager.default.createDirectory(at: store.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -386,7 +446,7 @@ final class GitConfigGuard: @unchecked Sendable {
     func check(owner: String) -> String? {
         lock.lock(); defer { lock.unlock() }
         let notes = (pending.removeValue(forKey: owner) ?? []) + checkLocked(watches[owner] ?? [])
-        return Self.notice(notes)
+        return Self.joined(takeLoadNote(), Self.notice(notes))
     }
 
     /// Every watched folder at once, for a host command: host git may read any of them. `owner`
@@ -394,7 +454,7 @@ final class GitConfigGuard: @unchecked Sendable {
     func checkAll(owner: String? = nil) -> String? {
         lock.lock(); defer { lock.unlock() }
         let notes = (owner.flatMap { pending.removeValue(forKey: $0) } ?? []) + checkLocked(states.keys.sorted())
-        return Self.notice(notes)
+        return Self.joined(takeLoadNote(), Self.notice(notes))
     }
 
     /// `owner`'s container is gone. A folder no other container mounts gets a last check, since
@@ -439,15 +499,16 @@ final class GitConfigGuard: @unchecked Sendable {
         if let covering = inside.max(by: { $0.count < $1.count }) { return .some(covered[covering] ?? nil) }
         var named = covered.keys.filter { WorkspaceGit.commandNames(command, $0) || WorkspaceGit.commandNames(command, IrisPaths.realPath($0)) }
         if named.isEmpty, let owner, let mine = watches[owner] { named = mine }
-        guard !named.isEmpty else { return nil }
+        guard !named.isEmpty else { return unknownFolders ? .some(nil) : nil }
         // A command naming more than one repository: run no hooks rather than guess whose.
         return .some(named.count == 1 ? (covered[named[0]] ?? nil) : nil)
     }
 
-    /// Every source ever watched, for deciding whether the person's global config is in reach.
+    /// Every source ever watched, for deciding whether the person's global config is in reach:
+    /// everything, when the saved list could not be read.
     func watchedSources() -> [String] {
         lock.lock(); defer { lock.unlock() }
-        return Array(trustedHooks.keys)
+        return unknownFolders ? ["/"] : Array(trustedHooks.keys)
     }
 
     /// `result` with what a check before the command found ahead of it and what one after found
@@ -676,6 +737,11 @@ final class GitConfigGuard: @unchecked Sendable {
         }
         return restored ? "\(path) was changed \(what); Iris put back the copy it had before."
                         : "\(path) was changed \(what), and Iris could not put it back. Check it before running git on your Mac."
+    }
+
+    private static func joined(_ parts: String?...) -> String? {
+        let present = parts.compactMap { $0 }
+        return present.isEmpty ? nil : present.joined(separator: "\n")
     }
 
     private static func notice(_ notes: [String]) -> String? {
