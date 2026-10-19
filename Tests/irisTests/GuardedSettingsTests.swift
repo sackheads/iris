@@ -45,15 +45,30 @@ struct GuardedSettingsTests {
         #expect(load.write?[GuardedSettings.markerKey] == "1")
         #expect(Set(load.removeFromDefaults) == Set(defaults.keys))
         #expect(load.setDefaultsMarker)
-        #expect(load.notices == ["These settings were looser than Iris's built-in values and were reset to them: OPENAI_BASE_URL, MAX_GOAL_ITERATIONS, ENABLE_PROMPT_INJECTION_PROTECTION. Set them again in Settings if you need them."])
+        #expect(load.notices == [GuardedSettings.upgradeNotice + " These were looser than Iris's built-in values and went back to them: OPENAI_BASE_URL, MAX_GOAL_ITERATIONS, ENABLE_PROMPT_INJECTION_PROTECTION."])
         #expect(!load.notices.joined().contains("proxy.example.com"), "keys are named, never values")
     }
 
     @Test("an install with no item at all gets one at the upgrade, with its values")
     func upgradeWithNoItem() {
         let load = GuardedSettings.load(item: .read([:]), defaults: ["JOB_PER_RUN_TOKEN_BUDGET": "10"], defaultsMarker: false)
-        #expect(load.state == .normal && load.notices.isEmpty)
+        #expect(load.state == .normal)
+        #expect(load.notices == [GuardedSettings.upgradeNotice], "said even with nothing reset")
         #expect(load.write?["JOB_PER_RUN_TOKEN_BUDGET"] == "10" && load.write?[GuardedSettings.markerKey] == "1")
+    }
+
+    @Test("a replay of the upgrade (item and defaults marker both deleted) is announced again")
+    func replayAnnounced() {
+        let (store, keychain, suite) = harness(); defer { teardown(suite) }
+        let first = ConfigManager(store: store, guardedSecrets: keychain)
+        #expect(first.takeGuardedNotices() == [GuardedSettings.upgradeNotice])
+        first.enableSandboxing = true
+        // Two silent shell steps: `security delete-generic-password`, `defaults delete … GUARDED_SETTINGS_V1`.
+        keychain.saveSecrets([:])
+        store.removeObject(forKey: GuardedSettings.markerKey)
+        let replayed = ConfigManager(store: store, guardedSecrets: keychain)
+        #expect(!replayed.enableSandboxing, "the documented limit: back to built-in")
+        #expect(replayed.takeGuardedNotices() == [GuardedSettings.upgradeNotice], "but never silently")
     }
 
     @Test("after the upgrade, a defaults write is ignored and named once")
@@ -165,7 +180,7 @@ struct GuardedSettingsTests {
     func freshInstall() {
         let (store, keychain, suite) = harness(); defer { teardown(suite) }
         let config = ConfigManager(store: store, guardedSecrets: keychain)
-        #expect(config.guardedState == .normal && config.takeGuardedNotices().isEmpty)
+        #expect(config.guardedState == .normal && config.takeGuardedNotices() == [GuardedSettings.upgradeNotice])
         #expect(!config.enableVibecop && !config.enableSandboxing && config.enableAdvancedPromptInjectionProtection)
         #expect(config.jobDailyTokenBudget == ConfigManager.JobDefaults.dailyTokenBudget)
         #expect(keychain.loadSecrets()[GuardedSettings.markerKey] == "1")

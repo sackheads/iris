@@ -99,6 +99,8 @@ enum GuardedSettings {
     /// In the item: guarded values have been written here. In defaults: the upgrade has run.
     static let markerKey = "GUARDED_SETTINGS_V1"
 
+    static let upgradeNotice = "Iris moved its protected settings into the Keychain (first launch of this version). If you didn't just update Iris, something reset them: check Settings → Advanced (Sandboxing, Job Limits, Agent Limits) and Settings → Vibecop."
+
     /// The approval dialog's warning when a call's text names Iris's own keychain service or
     /// defaults domain. A string match on the text: a hint to the person, never a gate. A command
     /// that builds the name at run time gets no warning.
@@ -181,8 +183,13 @@ enum GuardedSettings {
             var written = dict
             for (key, value) in values { written[key.rawValue] = value }
             written[markerKey] = "1"
-            let notices = dropped.isEmpty ? [] : [
-                "These settings were looser than Iris's built-in values and were reset to them: \(dropped.map(\.rawValue).joined(separator: ", ")). Set them again in Settings if you need them."]
+            // Always said, even with nothing reset: a person who didn't just update reads this as
+            // a reset (a deleted item plus a deleted marker replays this path, #679 review).
+            var notice = upgradeNotice
+            if !dropped.isEmpty {
+                notice += " These were looser than Iris's built-in values and went back to them: \(dropped.map(\.rawValue).joined(separator: ", "))."
+            }
+            let notices = [notice]
             return Load(values: values, state: .normal, notices: notices, write: written,
                         removeFromDefaults: present.map(\.rawValue), setDefaultsMarker: true)
         }
