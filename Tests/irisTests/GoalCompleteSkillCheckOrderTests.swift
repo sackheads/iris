@@ -166,24 +166,44 @@ struct GoalCompleteSkillCheckOrderTests {
         }
     }
 
+    /// Holds the first skill check that reaches its claim until `open`; any later one goes on.
+    final class HeldClaim: @unchecked Sendable {
+        private let lock = NSLock()
+        private var calls = 0
+        private var opened = false
+        func open() { lock.withLock { opened = true } }
+        func wait() async {
+            let first = lock.withLock { calls += 1; return calls == 1 }
+            guard first else { return }
+            let deadline = TestClock.deadline(10)
+            while !lock.withLock({ opened }), TestClock.now() < deadline { try? await Task.sleep(nanoseconds: 10_000_000) }
+        }
+    }
+
     @Test("a message typed before the check starts defers the check until after that turn")
     func userTurnInTheGapDefersTheSkillCheck() async throws {
         let (app, id) = goalApp()
         let call = FunctionCall(name: "goal_complete", args: ["summary": .string("done")], id: Self.callId)
         let client = GatedClient([reply(Part(functionCall: call)), reply(Part(text: "hello back")),
                                   reply(Part(text: "Nothing reusable to save."))], gated: 2)
+        // The first scheduled check is held at its claim until the user's turn has ended, so the
+        // order is the one a loaded run can produce, every time, rather than a 0.2 s window: the
+        // user's turn takes that check back and schedules its own, and the first, cancelled one
+        // must not take the new one's place when it finally wakes (#659).
+        let held = HeldClaim()
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
                                 retryDelays: [], protectionEnabled: false, sessionPeerCount: 0,
-                                repromptDelay: 0.2)
+                                repromptDelay: 0.2, skillCheckWillClaim: { _ in await held.wait() })
         await engine.processInput("go", source: "UI", conversationId: id)
         #expect(engine.goalLoopIsLive(for: id), "the skill check should be waiting out its delay")
 
-        // The user's turn starts inside the delay and is held well past it.
         let userTurn = Task { await engine.processInput("hello", source: "UI", conversationId: id) }
-        try await Task.sleep(nanoseconds: 700_000_000)
+        let reached = TestClock.deadline(10)
+        while client.requests.count < 2, TestClock.now() < reached { try await Task.sleep(nanoseconds: 10_000_000) }
         #expect(client.requests.count == 2, "the skill check ran beside the user's turn")
         client.release()
         try await value(of: userTurn)
+        held.open()
         try await settle(engine, id)
 
         let requests = client.requests
