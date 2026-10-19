@@ -41,6 +41,9 @@ A subagent can run on a different provider and model than the conversation that 
   - **The switch is off by default for every non-primary built-in** (iris-dev-1's review). Having an Anthropic key set while Gemini is primary isn't consent to send a subagent's context there, or to spend on it.
   - **A custom endpoint is on when added,** because adding it is the opt-in.
   - **The primary needs no switch.** A subagent with no `provider` runs on it, as today.
+  - **Ruled by the planner** (dev-1's review change; Brian gets an FYI). The switch narrows the default only. Without it, a key left over from an old setup would declare the arguments and invite the model to pick that family unprompted (#132's eagerness). Two conditions:
+    1. **The Invariant 6 gate keys on usable providers:** switched on and with a key. A leftover key with its switch off declares no `provider`/`model` arguments and costs no tokens. Tested both ways.
+    2. **The refusal for a family that's keyed but switched off names the switch:** "Anthropic is configured but not enabled for subagents: Settings → Models → Subagent providers." A bare "not configured" would be false.
   - A custom endpoint is `ProviderEndpoint { id, name, kind, baseURL, models: [String], needsKey: Bool }`.
     - `kind` is `openAICompatible` in v1. That covers DeepSeek, OpenRouter, Together, and Ollama's or LM Studio's local `/v1`.
     - Gemini and Anthropic don't need a custom kind: the built-in families cover them.
@@ -183,7 +186,7 @@ It doesn't add or change any tier or model resolver. Profiles part 3 owns those.
 - **`invoke_subagent`:** gated `provider` and `model` arguments (Fork C), with the refusals before spawn (Fork D).
   - `SubagentManager.runSubagent` takes a `route`.
   - The subagent engine gets `client: LLMClient(route:)` and `provider: route.kind`, so pills and thinking replay are right.
-- **The global readers become route-aware for a routed engine,** through profiles part 3's per-turn `turnModel` seam (iris-dev-1). Part 3 adds the seam at the profiler and `maxTokens` reads (iris.swift ~2841, ~2979), and half 2 extends how it is computed, with the route winning. The two PRs then don't each patch those lines. The readers are the profiler's model name, `maxTokens` (Anthropic only, by the route's model), and the rotation summary. The main engine keeps reading the global, unchanged.
+- **The global readers become route-aware for a routed engine,** through profiles part 3's per-turn `turnModel` seam (iris-dev-1). Part 3 adds the seam at the profiler and `maxTokens` reads (iris.swift ~2841, ~2979), and half 2 extends how it is computed, with the route winning. The two PRs then don't each patch those lines. If half 2 lands before part 3, half 2 adds the seam itself and part 3 extends it, so whichever lands second rebases onto the one seam. The readers are the profiler's model name, `maxTokens` (Anthropic only, by the route's model), and the rotation summary. The main engine keeps reading the global, unchanged.
 - **The subagent result** names its provider and model.
 - **Cost:** per-model delegated usage, priced as Brian rules on Fork E.
 - **`delegate_milestone`:** no `provider` in v2. Goal milestones stay on the parent's provider, because the grader judges them and mixing families there isn't asked for.
