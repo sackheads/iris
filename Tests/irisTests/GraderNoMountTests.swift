@@ -64,7 +64,8 @@ struct GraderNoMountTests {
     }
 
     @Test("callers hand the evaluator the raw workspace: only it and the approval resolve the cwd fallback")
-    func callersPassTheRawWorkspace() throws {
+    nonisolated func callersPassTheRawWorkspace() throws {
+        // Off the main actor: a scan of the sources held it for seconds in a parallel run (#637).
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().appendingPathComponent("Sources/IrisKit")
         var callers: [String] = []

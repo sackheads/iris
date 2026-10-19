@@ -44,7 +44,8 @@ struct RunJobURLEventsTests {
     }
 
     @Test("no URL file logs anything: a log line would keep a live token")
-    func nothingLogs() throws {
+    nonisolated func nothingLogs() throws {
+        // Off the main actor: a scan of the sources held it for seconds in a parallel run (#637).
         let sources = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/IrisKit")

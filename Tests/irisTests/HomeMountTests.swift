@@ -214,7 +214,8 @@ struct HomeMountTests {
     }
 
     @Test("only the UI sets the opt-in: no tool, system event or job reaches the setter or the field")
-    func humanOnly() throws {
+    nonisolated func humanOnly() throws {
+        // Off the main actor: a scan of the sources held it for seconds in a parallel run (#637).
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().appendingPathComponent("Sources/IrisKit")
         var setterCallers: Set<String> = [], fieldWriters: Set<String> = []
