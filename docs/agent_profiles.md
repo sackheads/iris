@@ -1,6 +1,6 @@
 # Agent Profiles
 
-An agent profile is a named starting point for a conversation: a role, some text added to its system prompt, a narrower set of tools, and (in a later build) the skills it sees and a model tier. You start a conversation on one from the profile button beside **New Conversation**, at the foot of the sidebar; **New Conversation** itself still starts an ordinary one. The menu shows each profile's role when it differs from its name.
+An agent profile is a named starting point for a conversation: a role, some text added to its system prompt, a narrower set of tools, the skills it sees, and a model tier. You start a conversation on one from the profile button beside **New Conversation**, at the foot of the sidebar; **New Conversation** itself still starts an ordinary one. The menu shows each profile's role when it differs from its name.
 
 ## The files
 
@@ -23,7 +23,14 @@ You review pull requests for this repository. Read the whole diff first, ...
 
 The folder is one Iris protects. The agent can't write a profile without asking you, and no background job can write one at all.
 
-**What applies today:** the system-prompt text, the role and `tools`. `skills` and `tier` are read and kept, and take effect in the next build.
+**What applies:** all of it: the system-prompt text, the role, `tools`, `skills` and `tier`.
+
+## Skills and tier
+
+- **`skills:`** replaces your usual skill list (and any `/bundle`) for that conversation: the model is shown only those skills. A name that isn't one of your skills is simply not listed. Without `skills:`, the conversation sees your usual skills.
+- **`tier:`** is the model tier the conversation runs on (easy, medium or hard, each the model Settings → Models names for it).
+- **`/model easy|medium|hard`** in a conversation sets that conversation's own tier, which wins over the profile's; `/model default` clears it again, back to the profile's tier or the usual default. `/model` alone says which tier the conversation is on and why. A subagent keeps the tier its delegation asked for.
+- **The PRI light's details** name the model the current conversation runs on, and where its tier came from.
 
 ## Tools
 
@@ -36,7 +43,7 @@ With a `tools:` list, a conversation is offered only those tools, and a call to 
 
 ## A profile only adds and narrows
 
-A profile adds prompt text, picks a role, narrows the tools offered, and (once that build lands) narrows the skills and picks a tier. **It never approves, allowlists, grants or unlocks anything**. A profile's tool list is for focus and token cost, not security. What runs without asking is decided only by your allowlist, Vibecop, your approvals, and a job's profile.
+A profile adds prompt text, picks a role, narrows the tools and skills offered, and picks a tier. **It never approves, allowlists, grants or unlocks anything**. A profile's tool list is for focus and token cost, not security. What runs without asking is decided only by your allowlist, Vibecop, your approvals, and a job's profile.
 
 Profiles don't apply to the pinned Iris conversation, to a subagent's own conversation, or to a job run.
 
