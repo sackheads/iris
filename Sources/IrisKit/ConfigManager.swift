@@ -392,7 +392,10 @@ class ConfigManager: @unchecked Sendable {
     ///   passes nothing and follows `IrisDefaults`.
     /// - Parameter guardedSecrets: where the guarded settings live (#678). Production passes
     ///   nothing and gets `KeychainManager.shared`; a test passes its own in-memory manager.
-    init(store storeOverride: UserDefaults? = nil, guardedSecrets: KeychainManager? = nil) {
+    /// - Parameter guardedMayChange: whether this process may complete the guarded upgrade and
+    ///   tidy defaults. Nil decides by role: only the app (and a test) does, since only the app
+    ///   announces what it did.
+    init(store storeOverride: UserDefaults? = nil, guardedSecrets: KeychainManager? = nil, guardedMayChange: Bool? = nil) {
         self.storeOverride = storeOverride
         // Bound locally because `self.store` is unreadable until every stored property is
         // initialised; it is the same store the instance property returns from here on.
@@ -415,8 +418,11 @@ class ConfigManager: @unchecked Sendable {
             catch KeychainManager.SecretsError.status(let status) { read = .unreadable(status) }
             catch { read = .unreadable(errSecInternalError) }
             if case .unreadable = read { keychain.blockWrites() }
+            let mayChange = guardedMayChange
+                ?? (ProcessRole.current == .app || NSClassFromString("XCTestCase") != nil)
             let decision = GuardedSettings.load(item: read, defaults: GuardedSettings.defaultsValues(store),
-                                                defaultsMarker: store.bool(forKey: GuardedSettings.markerKey))
+                                                defaultsMarker: store.bool(forKey: GuardedSettings.markerKey),
+                                                mayChange: mayChange)
             for key in decision.removeFromDefaults { store.removeObject(forKey: key) }
             if decision.setDefaultsMarker { store.set(true, forKey: GuardedSettings.markerKey) }
             guarded = decision.values

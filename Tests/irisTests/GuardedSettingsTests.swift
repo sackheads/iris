@@ -113,6 +113,41 @@ struct GuardedSettingsTests {
         #expect(load.values[.jobDailyTokenBudget] == GuardedKey.jobDailyTokenBudget.protective)
     }
 
+    @Test("a process that can't announce (--run-job) changes nothing, so the app still announces the upgrade")
+    func runJobChangesNothing() {
+        let (store, keychain, suite) = harness(); defer { teardown(suite) }
+        _ = ConfigManager(store: store, guardedSecrets: keychain)
+        // A replay staged for a headless run: the item and the marker deleted, defaults planted.
+        keychain.saveSecrets([:])
+        store.removeObject(forKey: GuardedSettings.markerKey)
+        store.set(false, forKey: "ENABLE_SANDBOXING")
+        store.set(999_999_999, forKey: "JOB_DAILY_TOKEN_BUDGET")
+
+        let headless = ConfigManager(store: store, guardedSecrets: keychain, guardedMayChange: false)
+        #expect(headless.guardedState == .deferredToApp)
+        #expect(headless.enableSandboxing && headless.enableVibecop, "protective for that run")
+        #expect(headless.jobDailyTokenBudget == ConfigManager.JobDefaults.dailyTokenBudget)
+        #expect(headless.refusesHostWithoutRuntime)
+        #expect(keychain.loadSecrets().isEmpty, "no item written")
+        #expect(!store.bool(forKey: GuardedSettings.markerKey), "no marker")
+        #expect(store.object(forKey: "JOB_DAILY_TOKEN_BUDGET") != nil, "defaults untouched")
+
+        let app = ConfigManager(store: store, guardedSecrets: keychain)
+        #expect(app.takeGuardedNotices().first?.hasPrefix(GuardedSettings.upgradeNotice) == true,
+                "the app's next launch does the upgrade, and says so")
+    }
+
+    @Test("a headless process never tidies defaults or posts, even after the upgrade")
+    func headlessAfterUpgrade() {
+        let (store, keychain, suite) = harness(); defer { teardown(suite) }
+        _ = ConfigManager(store: store, guardedSecrets: keychain)
+        store.set(5, forKey: "MAX_GOAL_ITERATIONS")
+        let headless = ConfigManager(store: store, guardedSecrets: keychain, guardedMayChange: false)
+        #expect(headless.guardedState == .normal && headless.maxGoalIterations == 50)
+        #expect(store.object(forKey: "MAX_GOAL_ITERATIONS") != nil, "left for the app to name")
+        #expect(ConfigManager(store: store, guardedSecrets: keychain).takeGuardedNotices().first?.contains("not applied") == true)
+    }
+
     // MARK: through ConfigManager
 
     @Test("a Settings change applies and persists; a later defaults write changes nothing")
