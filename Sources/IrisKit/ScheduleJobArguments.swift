@@ -658,14 +658,24 @@ struct GateScriptReview: Sendable {
         if decision?.decision == "DENY" {
             return .failure(ToolMessage(Self.denied(decision?.reason ?? "")))
         }
-        return await ask(subject + Self.advice(decision)) ? .success(()) : .failure(ToolMessage(Self.declined))
+        return await ask(Self.withAdvice(subject, decision)) ? .success(()) : .failure(ToolMessage(Self.declined))
+    }
+
+    /// `details` with Vibecop's view among the fixed lines, before `Script:` (#693 review): after
+    /// the script, a script ending in a forged "Vibecop's view: approve" would be read first.
+    /// `details` puts the script last, so the first `Script:` label is the fixed one.
+    static func withAdvice(_ details: String, _ decision: VibecopDecision?) -> String {
+        let advice = Self.advice(decision)
+        guard !advice.isEmpty, let label = details.range(of: "\n\nScript:\n") else { return details }
+        return details.replacingCharacters(in: label, with: advice + "\n\nScript:\n")
     }
 
     /// Vibecop's view, added below what the person reads; nothing when it gave none.
     static func advice(_ decision: VibecopDecision?) -> String {
         guard let decision else { return "" }
         let reason = decision.reason.trimmingCharacters(in: .whitespacesAndNewlines)
-        return "\n\nVibecop's view: \(decision.decision.lowercased())" + (reason.isEmpty ? "" : " \u{2014} \(reason)")
+        // Advisory, and said so: a script can talk its reviewer into a reassuring reason.
+        return "\n\nVibecop's view (advisory only; the script can sway it): \(decision.decision.lowercased())" + (reason.isEmpty ? "" : " \u{2014} \(reason)")
     }
 
     /// What the model is told when the review refused the script. The reason is quoted so the

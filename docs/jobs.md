@@ -466,12 +466,15 @@ it is fenced in:
 - it has **no internet** unless the job asks for it with `gate_network: true` (#687). "No internet"
   is the sandbox's host-only network: the script can't reach the web, but it **can still reach
   services on this Mac** that listen on all interfaces (#690). A gate created before this had the
-  network; at the first launch of this version every existing gate goes network-off, and one notice
-  names each job, with how to turn it back on (schedule it again with `gate_network: true`);
+  network. At the first launch of this version every existing gate goes network-off **and every
+  existing script-gate job pauses** (reason `gate script needs your review`): it may have been
+  created on Vibecop's review alone, and nothing recorded which. One notice names each paused job.
+  Schedule it again to resume it, adding `gate_network: true` if it needs the internet, and you're
+  shown the script once to approve;
 - **you** review it once, at creation, every time, whether or not Vibecop is on (#687): even with the
   network off it can reach your Mac's services on every tick, unattended, so a person reads every
-  gate script. Vibecop still gives its view, shown in the dialog, and a Vibecop DENY refuses without
-  asking. The dialog offers Approve and Deny only, never Always Allow, which would save the script's
+  gate script. Vibecop still gives its view, shown in the dialog above the script and labelled
+  advisory (a script can sway it), and a Vibecop DENY refuses without asking. The dialog offers Approve and Deny only, never Always Allow, which would save the script's
   text as a rule for your Mac, where you are approving it for the sandbox (#648). It shows the
   script, every mount as `source → target, read-only`, whether it has the network and what that
   means, and the timeout — the mounts and the network are the standing permission being granted,

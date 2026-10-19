@@ -1420,7 +1420,8 @@ class AppState {
          tier3Provisioning: InjectionGuard.Tier3Provisioning? = nil,
          createIfEmpty: Bool = true,
          emitLaunchNotices: Bool = true,
-         guardedConfig: ConfigManager = .shared) {
+         guardedConfig: ConfigManager = .shared,
+         runsGateUpgrade: Bool = NSClassFromString("XCTestCase") == nil) {
         self.store = store
         self.engine = IrisEngine(state: self)
         loadConversations()
@@ -1441,9 +1442,14 @@ class AppState {
         if let target = noticeTarget { postGuardedNotices(guardedConfig.takeGuardedNotices(), to: target) }
         // #687: once, the gate scripts that just lost the network. Only here, inside the notice
         // branch, so a process that announces nothing (`--run-job`) never takes the marker.
-        if let target = noticeTarget,
-           let notice = Self.gateNetworkNotice(jobs: (try? store.ledger.jobs()) ?? [], defaults: guardedConfig.store) {
-            appendLaunchNotice(notice, to: target)
+        // Off under test unless asked for: the process-global defaults would let the first state a
+        // test builds over a store with a gate pause it, and take the marker for every other test.
+        if let target = noticeTarget, runsGateUpgrade {
+            let ledger = store.ledger
+            if let notice = Self.gateNetworkNotice(jobs: (try? ledger.jobs()) ?? [], defaults: guardedConfig.store,
+                                                   pause: { id in _ = try? ledger.pauseUnlessOwnerPaused(jobId: id, reason: Self.gateNeedsReviewReason) }) {
+                appendLaunchNotice(notice, to: target)
+            }
         }
         // Every launch notice below goes through `appendLaunchNotice`, which persists it like any
         // other system message but skips it when the same wording is already in the conversation.
@@ -3113,18 +3119,24 @@ class AppState {
     /// Marks that #687's one-time notice has been considered, whether or not it named anything.
     nonisolated static let gateNetworkNoticeKey = "GATE_NETWORK_OFF_NOTICE_V1"
 
-    /// #687: every script gate is network-off from this version (a stored gate with no `network`
-    /// key decodes as off), and the person is told once which jobs that changed and how to turn
-    /// it back on. Nil when it was said before, or there is no script gate to name.
-    nonisolated static func gateNetworkNotice(jobs: [Job], defaults: UserDefaults) -> String? {
+    /// The pause reason an existing gate job gets at #687's upgrade. A re-schedule lifts it.
+    nonisolated static let gateNeedsReviewReason = "gate script needs your review"
+
+    /// #687, ruled (a): every script gate is network-off from this version (a stored gate with no
+    /// `network` key decodes as off), and every existing script-gate job is **paused**, since it
+    /// may have been created on Vibecop's APPROVE alone and nothing recorded which: an unreviewed
+    /// script doesn't run (the planner's ruling, the principle of #330's fingerprint). The person
+    /// is told once which jobs and how to resume them. Nil when it was said before, or there is no
+    /// script gate. `pause` is the ledger's `pauseUnlessOwnerPaused`, so an owner's own pause stays.
+    nonisolated static func gateNetworkNotice(jobs: [Job], defaults: UserDefaults,
+                                              pause: (UUID) -> Void) -> String? {
         guard !defaults.bool(forKey: gateNetworkNoticeKey) else { return nil }
         defaults.set(true, forKey: gateNetworkNoticeKey)
-        let names = jobs.compactMap { job -> String? in
-            if case .script = job.trigger.gate { return job.name }
-            return nil
-        }.sorted()
-        guard !names.isEmpty else { return nil }
-        return "Gate scripts no longer reach the internet unless they ask for it (#687), and you now review each one yourself. These jobs' gates are now network-off: \(names.joined(separator: ", ")). Network-off still reaches services on this Mac. If one needs the internet, schedule it again with gate_network: true; that asks you to review it."
+        let gated = jobs.filter { if case .script = $0.trigger.gate { true } else { false } }
+            .sorted { $0.name < $1.name }
+        guard !gated.isEmpty else { return nil }
+        gated.forEach { pause($0.id) }
+        return "These jobs' gate scripts are paused: \(gated.map(\.name).joined(separator: ", ")). They may have been created on Vibecop's review alone, before gate scripts needed yours, and Iris can't tell which (#687). Gate scripts now also have no internet unless they ask for it; off still reaches services on this Mac. To resume one, schedule it again (add gate_network: true if it needs the internet): that shows you the script once to approve."
     }
 
     /// #678's launch notices. The upgrade notice is never deduplicated: a replayed upgrade posts
