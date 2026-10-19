@@ -1,10 +1,10 @@
 # Agent Profiles
 
-An agent profile is a named starting point for a conversation: a role, some text added to its system prompt, and (in later builds) the skills it sees, a narrower set of tools, and a model tier. You start a conversation on one from the menu arrow on **New Conversation**. A plain click still starts an ordinary conversation.
+An agent profile is a named starting point for a conversation: a role, some text added to its system prompt, and (in later builds) the skills it sees, a narrower set of tools, and a model tier. You start a conversation on one from the profile button beside **New Conversation**, at the foot of the sidebar; **New Conversation** itself still starts an ordinary one. The menu shows each profile's role when it differs from its name.
 
 ## The files
 
-Each profile is one Markdown file in Iris's settings folder, `~/.iris/config/agent-profiles/<name>.md` (`~/.iris-dev/...` for a dev build). **Open Agent Profiles Folder** in the New Conversation menu reveals it in Finder. Iris writes three examples (reviewer, researcher, writer) the first time the folder is created, and never again: one you delete stays deleted.
+Each profile is one Markdown file in Iris's settings folder, `~/.iris/config/agent-profiles/<name>.md` (`~/.iris-dev/...` for a dev build). **Open Agent Profiles Folder** in that menu reveals it in Finder. Iris writes three examples (reviewer, researcher, writer) the first time the folder is created, and never again: one you delete stays deleted.
 
 ```markdown
 ---
