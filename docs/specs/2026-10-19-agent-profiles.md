@@ -1,6 +1,6 @@
 # Agent profiles (#465)
 
-**Status:** draft spec, iris-dev-1, 2026-10-19. Brian picked this from the list ("i like the list starting with profiles"). The planner's starting rulings are in its brief; the forks still open are marked **Fork**.
+**Status:** spec, iris-dev-1, 2026-10-19. Brian picked this from the list ("i like the list starting with profiles"). The planner's starting rulings came in its brief, and its rulings on forks A, B and C (all option 1) are recorded where each fork was.
 
 ## What it is
 
@@ -39,14 +39,13 @@ You review pull requests for this repository. Read the diff, run the touched tes
 `Conversation.agentProfile: String?` holds the **name**, not a snapshot. The file is read when it's used, so editing the file changes the conversation's next turn.
 - **Why not a snapshot:** the file is something you tune as you use it, and a snapshot would freeze every existing conversation on the old text with no way to update it.
 - **The prompt cache:** the composed prompt is keyed by the profile's name and the file's modification stamp, so an unchanged file keeps the provider prompt cache warm.
+- **Editing a profile costs a cache prefix.** Because the link is live, an edit changes the system prompt on that conversation's next turn, which starts a new prompt-cache prefix. That's expected, and `docs/agent_profiles.md` will say so, so the cost isn't a surprise.
 - **Missing or unreadable file** (deleted, renamed, broken frontmatter): the conversation runs as a conversation without a profile. The chat says so once ("Agent profile `reviewer` isn't there any more; this conversation runs without it"), and the sidebar label shows "(missing)". This is safe because v1 profiles only narrow: losing one never widens past what an ordinary conversation already has.
 
 ## Roles
 
 Session roles (#469/#480) already exist: `Conversation.role`, user-assigned with `/role`, unique among active sessions, used for peer addressing and the identity section. A profile **doesn't add a second role concept.** Its `role:` is the conversation's session role, set once at creation through the same `SessionRoles` rules.
-- **Fork A:** what happens when the role is already held by another active session?
-  - **(1)** The conversation starts with no role, and the chat says why. *(Recommended: roles are addresses, and an automatic `reviewer-2` would make peers guess.)*
-  - **(2)** Add a numeric suffix.
+- **Ruled (Fork A, option 1):** if another active session already holds the role, the conversation starts with no role. The notice names the session that holds it, and the sidebar label still shows the profile's name. Roles are unique so that `role:` addressing is never ambiguous, and an automatic suffix would quietly break that.
 - `/role` still works afterwards and changes only the role, not the profile.
 
 ## What the profile changes, and where
@@ -60,9 +59,7 @@ Session roles (#469/#480) already exist: `Conversation.role`, user-assigned with
 | **Tools** | `processInputBody`, the tool pipeline | Intersect with the profile's `tools`. This runs **after** the sticky union and `hardStrip`, so a sticky tool can't widen a profile (5c). A call to a tool outside the list is refused at dispatch, like `profileRefusal`. |
 | **Tier** | the three `modelTier` reads in `iris.swift` | Resolved per turn: the conversation's own tier (set by `/model`, #667), else the profile's, else the engine's. |
 
-- **Fork B:** tools the harness itself relies on (`goal_complete`, `propose_goal_contract`, `rename_conversation`, `reach_checkpoint`, `amend_goal_contract`, `send_to_session` replies).
-  - **(1)** Always exempt from the profile's narrowing, because `/goal`, `/rename` and the goal loop would break without them, and they're already gated to their flows (Invariant 6). *(Recommended.)*
-  - **(2)** Narrowed like any tool.
+- **Ruled (Fork B, option 1): flow tools are exempt from a profile's narrowing.** That covers `goal_complete`, `propose_goal_contract`, `rename_conversation`, `reach_checkpoint`, `amend_goal_contract` and `send_to_session` replies. They're already gated to their trigger or state (Invariant 6), so narrowing them would break `/goal` and `/rename` in a profiled chat without saving any tokens.
 - **Unknown names:** a name in `tools:` that isn't a tool is ignored and listed in the picker's details. So is a name in `skills:` that isn't a skill.
 
 ## Invariant 6 and token cost
@@ -85,9 +82,7 @@ Session roles (#469/#480) already exist: `Conversation.role`, user-assigned with
 
 - **New Conversation** becomes a split button. Clicking it starts a plain conversation, as today. Its menu triangle lists the agent profiles: name, role, and the first line of the body, plus unusable ones greyed out with their error. It ends with **Open Agent Profiles Folder**, which reveals the folder in Finder and creates it if missing.
 - **The sidebar row** gets a secondary line in the style of the "home writable by the sandbox" label: `◆ reviewer`. The role is shown after it when it differs from the profile's name, and "(missing)" when the file is gone.
-- **Fork C:** applying a profile to an *existing* conversation.
-  - **(1)** No for v1: chosen at creation only. *(Recommended: changing the prompt, tools and tier mid-history makes earlier turns misleading, and Brian's description is "when starting a conversation".)*
-  - **(2)** A context-menu item.
+- **Ruled (Fork C, option 1):** a profile is chosen at creation only in v1. Applying one to an existing conversation is filed as #670.
 
 ## Persistence (Invariant 1)
 
