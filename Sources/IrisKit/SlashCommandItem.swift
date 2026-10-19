@@ -8,6 +8,7 @@ struct SlashCommandItem: Identifiable, Sendable, Equatable {
     
     static let allCommands: [SlashCommandItem] = [
         SlashCommandItem(id: "goal", command: "/goal", usage: "/goal <description>", description: "Start an autonomous goal-driven loop"),
+        SlashCommandItem(id: "loop", command: "/loop", usage: "/loop <interval> <prompt>", description: "Re-run a prompt in this conversation every interval (stop, pause, resume)"),
         SlashCommandItem(id: "stop", command: "/stop", usage: "/stop", description: "Cancel active goal mode or subagent tasks"),
         SlashCommandItem(id: "skills", command: "/skills", usage: "/skills [reload|show <name>|curate]", description: "List, reload, view, or curate registered skills"),
         SlashCommandItem(id: "bundle", command: "/bundle", usage: "/bundle [save <name> s1,s2|<name>]", description: "List, save, or activate skill bundles"),

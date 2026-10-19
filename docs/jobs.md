@@ -826,7 +826,9 @@ never indexed for search; alongside it the card's one-line summary is appended t
 history, so the next turn *you* start reads it as context. If the destination is mid-turn, the line
 rides the steer inbox and the model sees it with its next tool results instead. A job finishing is
 news, not a request — waking the model on every run would turn a five-minute schedule into a
-five-minute agent loop. Raw run output never enters the destination's messages.
+five-minute agent loop. Raw run output never enters the destination's messages. (When a
+five-minute agent loop is what you want, in a conversation you can talk to, that is
+[`/loop`](slash_commands.md), not a job.)
 
 The menu bar item carries the same news without opening the window. A blocked run that nobody has
 acknowledged turns the icon to `!` with a count until the run is cleared: dismissed on its card

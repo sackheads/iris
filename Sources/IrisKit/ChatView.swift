@@ -381,6 +381,12 @@ struct ChatView: View {
                             .transition(Motion.slide())
                     }
 
+                    // #190: the loop's chip. One line of controls, height-capped (Invariant 8).
+                    if let loop = conv.loop {
+                        LoopChip(state: state, conversationId: conv.id, loop: loop)
+                            .transition(Motion.slide())
+                    }
+
                     // Top-level pause panel (resume controls). Gated here in ChatView — the same
                     // pattern as CompletionReportChip below, which re-renders reliably on state change.
                     if conv.goalContract?.checkpointStatus == .pausedForReview {
@@ -608,6 +614,13 @@ struct ChatView: View {
                             .foregroundColor(.orange)
                             .help("You let the sandbox write \(wp) for this conversation, so a command in it can change files your Mac runs. Right-click to stop.")
                     }
+                }
+                // #190: a conversation that loops says so in the list.
+                if let loop = conv.loop {
+                    Label(loop.paused ? "loop paused" : "every \(loop.every)", systemImage: "arrow.triangle.2.circlepath")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .help("This conversation runs a /loop: \(loop.prompt)")
                 }
             }
             Spacer()
@@ -1621,5 +1634,55 @@ struct WorkspaceRulesReview: View {
         }
         .padding(20)
         .frame(width: 560)
+    }
+}
+
+/// The composer's chip for a conversation's `/loop` (#190): its cadence, ticks left, when the
+/// next is due, and Pause/Resume and Stop. Height-capped, like the goal chips (Invariant 8).
+struct LoopChip: View {
+    let state: AppState
+    let conversationId: UUID
+    let loop: ConversationLoop
+
+    private var thinking: Bool { state.isThinking(in: conversationId) }
+
+    var body: some View {
+        ScrollView {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.triangle.2.circlepath").foregroundColor(.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(verbatim: "Looping every \(loop.every) · \(loop.ticksLeft) of \(loop.cap) ticks left")
+                        .font(.caption.bold())
+                    Text(verbatim: loop.prompt)
+                        .font(.caption2).foregroundColor(.secondary).lineLimit(2)
+                    if loop.paused {
+                        Text("Paused").font(.caption2).foregroundColor(.orange)
+                    } else if let next = state.loopNextTick[conversationId] {
+                        Text("Next tick \(next, style: .relative)").font(.caption2).foregroundColor(.secondary)
+                    } else if thinking {
+                        Text("Next tick after this turn").font(.caption2).foregroundColor(.secondary)
+                    } else {
+                        Text("Stopped: Resume, or send a message, to start it again").font(.caption2).foregroundColor(.orange)
+                    }
+                }
+                Spacer(minLength: 4)
+                if loop.paused || (!thinking && state.loopNextTick[conversationId] == nil) {
+                    Button("Resume") { state.resumeLoop(for: conversationId) }
+                } else {
+                    Button("Pause") { state.pauseLoop(for: conversationId) }
+                }
+                Button("Stop") {
+                    if state.clearLoop(for: conversationId) {
+                        state.appendMessage(role: .system, content: "Loop stopped.", to: conversationId)
+                    }
+                }
+            }
+            .padding(8)
+        }
+        .frame(maxHeight: 120)
+        .background(Color.accentColor.opacity(0.06))
+        .cornerRadius(8)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Loop, every \(loop.every), \(loop.ticksLeft) ticks left\(loop.paused ? ", paused" : "")")
     }
 }

@@ -643,6 +643,10 @@ final class ConversationStore: Sendable {
                 t.add(column: "agentProfileSnapshot", .text)
             }
         }
+        // #190: nullable JSON text; NULL is no loop.
+        m.registerMigration("v24_conversation_loop") { db in
+            try db.alter(table: "conversations") { t in t.add(column: "loop", .text) }
+        }
         return m
     }
 
@@ -855,6 +859,7 @@ final class ConversationStore: Sendable {
         let card = try c.sessionCard.map { try json($0, encoder) }
         let grant = try c.sandboxGrant.map { try json($0, encoder) }
         let profileSnapshot = try c.agentProfileSnapshot.map { try json($0, encoder) }
+        let loop = try c.loop.map { try json($0, encoder) }
         if exists {
             try db.execute(sql: """
                 UPDATE conversations SET title = ?, updatedAt = ?, workspacePath = ?, activeGoal = ?,
@@ -863,13 +868,14 @@ final class ConversationStore: Sendable {
                     lastGoalEvaluation = ?, lastGoalCompletionReport = ?, isArchived = ?,
                     isBackground = ?, isPinned = ?, sessionCard = ?, jobProfile = ?, sandboxGrant = ?,
                     hasUnattendedInput = ?, prefixMismatchBehavior = ?, role = ?, homeWritableOptIn = ?,
-                    agentProfile = ?, agentProfileSnapshot = ?
+                    agentProfile = ?, agentProfileSnapshot = ?,
+                    loop = ?
                 WHERE id = ?
                 """, arguments: [c.title, touched, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
                                  history, evaluation, report, c.isArchived, c.isBackground, c.isPinned, card,
                                  c.jobProfile?.rawValue, grant, c.hasUnattendedInput, c.prefixMismatchBehavior?.rawValue,
-                                 c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, c.id.uuidString])
+                                 c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.id.uuidString])
         } else {
             let position = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(position), 0) FROM conversations") ?? 0) + 1
             try db.execute(sql: """
@@ -877,13 +883,13 @@ final class ConversationStore: Sendable {
                     messageCountSinceReflection, goalIterationCount, mainAgentSandbox, tokenUsage, goalContract,
                     subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived,
                     isBackground, isPinned, sessionCard, jobProfile, sandboxGrant, hasUnattendedInput,
-                    prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [c.id.uuidString, position, c.title, now, touched, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
                                  tokenUsage, contract, result, history, evaluation, report, c.isArchived,
                                  c.isBackground, c.isPinned, card, c.jobProfile?.rawValue, grant, c.hasUnattendedInput,
-                                 c.prefixMismatchBehavior?.rawValue, c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot])
+                                 c.prefixMismatchBehavior?.rawValue, c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop])
         }
     }
 
@@ -1263,6 +1269,14 @@ final class ConversationStore: Sendable {
                 case .text(let s):
                     do { c.agentProfileSnapshot = try decoder.decode(AgentProfileSnapshot.self, from: Data(s.utf8)) }
                     catch { localSoftLosses.append(("agentProfileSnapshot", "\(error)")) }
+                }
+                // #190: a loop that does not decode drops only itself, as a reported loss.
+                switch Self.readTextValue(row, "loop") {
+                case .null: break
+                case .invalid: localSoftLosses.append(("loop", "invalid text encoding"))
+                case .text(let s):
+                    do { c.loop = try decoder.decode(ConversationLoop.self, from: Data(s.utf8)) }
+                    catch { localSoftLosses.append(("loop", "\(error)")) }
                 }
 
                 // Per-conversation, so the bulk breaker below can throw the lot away.

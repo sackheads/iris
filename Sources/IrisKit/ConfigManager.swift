@@ -278,6 +278,12 @@ class ConfigManager: @unchecked Sendable {
     var maxSubagentIterations: Int {
         didSet { store.set(maxSubagentIterations, forKey: "MAX_SUBAGENT_ITERATIONS") }
     }
+    /// How many ticks a `/loop` runs before it stops (#190): its spend bound, since every tick
+    /// resends the whole conversation. Re-running `/loop` renews it.
+    var loopTickCap: Int {
+        didSet { store.set(loopTickCap, forKey: "LOOP_TICK_CAP") }
+    }
+    static let defaultLoopTickCap = 50
     /// The most seconds one subagent turn may run before the subagent ends `timedOut` (#402). Per
     /// turn, reset on each reprompt: the whole subagent is bounded by this times its iteration cap,
     /// and in a job run by the run's own deadline.
@@ -539,6 +545,8 @@ class ConfigManager: @unchecked Sendable {
         // Unset (0) or a hand-edited negative is the default, as for the job limits.
         let savedSubagentIters = saved.integer(forKey: "MAX_SUBAGENT_ITERATIONS")
         self.maxSubagentIterations = savedSubagentIters <= 0 ? Self.defaultMaxSubagentIterations : savedSubagentIters
+        let savedLoopCap = saved.integer(forKey: "LOOP_TICK_CAP")
+        self.loopTickCap = savedLoopCap <= 0 ? Self.defaultLoopTickCap : savedLoopCap
         let savedTurnTimeout = saved.integer(forKey: "SUBAGENT_TURN_TIMEOUT_SECONDS")
         self.subagentTurnTimeoutSeconds = savedTurnTimeout <= 0 ? Self.defaultSubagentTurnTimeoutSeconds : savedTurnTimeout
         let savedLoop = saved.integer(forKey: "LOOP_DETECTION_THRESHOLD")
