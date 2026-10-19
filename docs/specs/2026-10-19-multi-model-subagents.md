@@ -85,7 +85,7 @@ A subagent can run on a different provider and model than the conversation that 
 - **Option 2: named subagent definitions**, files that pin a role, prompt and model, like Hermes's `delegation:` block. That's more structure than v1 needs, and it overlaps agent profiles.
 - **Option 3: a profile's tier.** Agent profiles (#669) carry a tier, not a provider, and **never apply to subagents** (profiles spec, "What a profile never touches"). So a profile can't be the channel.
 - **Dropped (iris-dev-1):** a profile's body can already steer the `provider`/`model` arguments in its own words, so no frontmatter hint is needed.
-- **How it composes with profiles later (superseded by the line above):** a profiled conversation's subagents still get part 2's tool intersection, whatever provider they run on. If a profile later wants a lens roster (for example, "reviewer" dispatching security to DeepSeek), it adds a `subagent_providers:` hint that pre-fills the arguments, and the arguments stay the one mechanism. **To check with iris-dev-1 in review.**
+- **Profiles:** a profiled conversation's subagents still get part 2's tool intersection, whatever provider they run on.
 
 ## Fork D: precedence and failure
 
