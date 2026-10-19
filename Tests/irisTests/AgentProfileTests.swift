@@ -146,6 +146,20 @@ struct AgentProfileTests {
         #expect(notes(app, id).filter { $0.contains("changed") }.count == 1)
     }
 
+    @Test("a file edited while Iris was closed is said on the first turn after the launch")
+    func editedWhileClosed() throws {
+        let (paths, root) = try home(); defer { try? FileManager.default.removeItem(at: root) }
+        try write(Self.reviewer, as: "reviewer", in: paths)
+        let store = try ConversationStore.inMemory()
+        let before = try app(paths, store: store)
+        let id = before.createNewConversation(select: false, agentProfile: "reviewer")
+        before.flushSave()
+        try write(Self.reviewer + " Be brief.", as: "reviewer", in: paths)
+        let after = try app(paths, store: store)   // a fresh launch: nothing seen yet this run
+        #expect(after.resolveAgentProfile(for: id)?.prompt.hasSuffix("Be brief.") == true)
+        #expect(notes(after, id).contains { $0.contains("changed") })
+    }
+
     @Test("a deleted or broken file falls back to the last good read, said once, never widening")
     func lastKnownGood() throws {
         let (paths, root) = try home(); defer { try? FileManager.default.removeItem(at: root) }

@@ -1738,7 +1738,9 @@ class AppState {
                 conversations[idx].agentProfileSnapshot = profile.snapshot
                 markChanged(id, .metadata)
             }
-            if let seen = agentProfileState[id], seen != profile.contentHash {
+            // Against what this launch saw, or, first thing after a launch, against the kept copy:
+            // a file edited while Iris was closed is said too.
+            if let seen = agentProfileState[id] ?? snapshot?.contentHash, seen != profile.contentHash {
                 appendMessage(role: .system, content: "[agent profile] `\(name)` changed; this turn uses the new version.", to: id)
             }
             agentProfileState[id] = profile.contentHash
