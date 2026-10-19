@@ -531,6 +531,179 @@ struct GitConfigGuardTests {
         #expect(guardian.hostRefusal(cwd: ws, command: "") != nil)
     }
 
+    @Test("a submodule planted in a repository the VM made is moved aside, and git status there runs nothing")
+    func submoduleInUntrustedRepo() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let marker = dir + "/RAN"
+        try "#!/bin/sh\ntouch \(marker)\nexit 0\n".write(toFile: dir + "/evil", atomically: false, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir + "/evil")
+        let plain = dir + "/plain"
+        try FileManager.default.createDirectory(atPath: plain, withIntermediateDirectories: true)
+        let guardian = GitConfigGuard()
+        guardian.watch(owner: "c", sources: [plain])
+        // The VM makes a repository, then plants a submodule whose repository has a filter driver
+        // and an attribute that uses it; the outer config stays clean.
+        try await GitFixture.sh("git init -q && git config user.email a@b && git config user.name a && git commit -q --allow-empty -m i", in: plain, env: env)
+        try await GitFixture.sh("""
+            git init -q \(dir)/evilrepo && cd \(dir)/evilrepo && git config filter.x.clean \(dir)/evil && git config core.fsmonitor \(dir)/evil \
+              && echo '* filter=x' > .gitattributes && echo a > f && git -c user.email=a@b -c user.name=a add . && git -c user.email=a@b -c user.name=a commit -qm e
+            """, in: plain, env: env)
+        try await GitFixture.sh("""
+            mkdir sub && echo "gitdir: \(dir)/evilrepo/.git" > sub/.git && echo b > sub/f
+            git update-index --add --cacheinfo 160000,$(git -C \(dir)/evilrepo rev-parse HEAD),sub
+            """, in: plain, env: env)
+        try await GitFixture.sh("git status", in: plain, env: env)
+        #expect(FileManager.default.fileExists(atPath: marker), "control: before the check, git status runs it")
+        try FileManager.default.removeItem(atPath: marker)
+
+        let notice = try #require(guardian.check(owner: "c"))
+        #expect(notice.contains("sub/.git"))
+        #expect(FileManager.default.fileExists(atPath: plain + "/sub/.git.iris-quarantine"))
+        try await GitFixture.sh("git status", in: plain, env: env)
+        #expect(!FileManager.default.fileExists(atPath: marker))
+    }
+
+    @Test("a folder that ends blocked keeps being checked, is never baselined again, and a clean check unblocks it")
+    func blockedFolderStays() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try await GitFixture.sh("git worktree add -q ../wt", in: dir + "/ws", env: env)
+        let wt = dir + "/wt"
+        let dotGit = try #require(GitFixture.read(wt + "/.git"))
+        let guardian = GitConfigGuard()
+        guardian.watch(owner: "a", sources: [wt])
+        // A change Iris cannot put back: the .git file replaced by a folder.
+        try FileManager.default.removeItem(atPath: wt + "/.git")
+        try FileManager.default.createDirectory(atPath: wt + "/.git", withIntermediateDirectories: true)
+        guardian.end(owner: "a")
+        #expect(guardian.hostRefusal(cwd: wt, command: "") != nil, "still blocked once its container ended")
+        _ = guardian.checkAll()
+        #expect(guardian.hostRefusal(cwd: wt, command: "") != nil, "a host command's check still finds it")
+        // A new watch joins the record: the bad state is not its baseline.
+        guardian.watch(owner: "b", sources: [wt])
+        _ = guardian.check(owner: "b")
+        #expect(guardian.hostRefusal(cwd: wt, command: "") != nil)
+        // Fixed by hand: the next check unblocks it.
+        try FileManager.default.removeItem(atPath: wt + "/.git")
+        try dotGit.write(to: URL(fileURLWithPath: wt + "/.git"))
+        _ = guardian.checkAll()
+        #expect(guardian.hostRefusal(cwd: wt, command: "") == nil)
+    }
+
+    /// A guard over `store`, as Iris has after a restart: the mounted folders and blocks it kept.
+    private func restarted(_ store: URL) -> GitConfigGuard { GitConfigGuard(store: store) }
+
+    @Test("blocked for a failed restore: still refused after a restart, cleared once the file is back")
+    func restartRestoreBlock() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try await GitFixture.sh("git worktree add -q ../wt", in: dir + "/ws", env: env)
+        let wt = dir + "/wt"
+        let dotGit = try #require(GitFixture.read(wt + "/.git"))
+        let store = URL(fileURLWithPath: dir + "/home/sw.json")
+        let first = GitConfigGuard(store: store)
+        first.watch(owner: "a", sources: [wt])
+        try FileManager.default.removeItem(atPath: wt + "/.git")
+        try FileManager.default.createDirectory(atPath: wt + "/.git", withIntermediateDirectories: true)
+        _ = first.check(owner: "a")
+        #expect(first.hostRefusal(cwd: wt, command: "") != nil)
+
+        let second = restarted(store)
+        #expect(second.hostRefusal(cwd: wt, command: "") != nil, "refused after a restart")
+        second.watch(owner: "b", sources: [wt])
+        _ = second.check(owner: "b")
+        #expect(second.hostRefusal(cwd: wt, command: "") != nil, "a watch after the restart does not baseline the bad state")
+        try FileManager.default.removeItem(atPath: wt + "/.git")
+        try dotGit.write(to: URL(fileURLWithPath: wt + "/.git"))
+        _ = second.checkAll()
+        #expect(second.hostRefusal(cwd: wt, command: "") == nil)
+        #expect(restarted(store).hostRefusal(cwd: wt, command: "") == nil, "the clear is kept too")
+    }
+
+    @Test("blocked for an unreadable index: still refused after a restart, existing submodules never moved, cleared once it reads")
+    func restartIndexBlock() async throws {
+        let (dir, _, _) = try await repoWithSubmodule()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let store = URL(fileURLWithPath: dir + "/home/sw.json")
+        let first = GitConfigGuard(store: store)
+        first.watch(owner: "a", sources: [ws])
+        let index = try #require(GitFixture.read(ws + "/.git/index"))
+        try Data(index.prefix(40)).write(to: URL(fileURLWithPath: ws + "/.git/index"))
+        _ = first.check(owner: "a")
+
+        let second = restarted(store)
+        #expect(second.checkAll() == nil)
+        #expect(second.hostRefusal(cwd: ws, command: "") != nil)
+        try index.write(to: URL(fileURLWithPath: ws + "/.git/index"))
+        _ = second.checkAll()
+        #expect(second.hostRefusal(cwd: ws, command: "") == nil)
+        #expect(FileManager.default.fileExists(atPath: ws + "/lib/sub/.git"), "the person's submodule is not moved aside")
+        #expect(FileManager.default.fileExists(atPath: ws + "/.git/modules/lib/sub"))
+        second.watch(owner: "b", sources: [ws])
+        #expect(second.check(owner: "b") == nil, "and the baseline taken now holds it as it is")
+    }
+
+    @Test("blocked for a risky key in a repository the VM made: still refused after a restart, cleared once it is gone")
+    func restartRiskyBlock() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let plain = dir + "/plain"
+        try FileManager.default.createDirectory(atPath: plain, withIntermediateDirectories: true)
+        let store = URL(fileURLWithPath: dir + "/home/sw.json")
+        let first = GitConfigGuard(store: store)
+        first.watch(owner: "a", sources: [plain])
+        try await GitFixture.sh("git init -q && git config filter.x.clean ./x", in: plain, env: env)
+        _ = first.check(owner: "a")
+        #expect(first.hostRefusal(cwd: plain, command: "") != nil)
+
+        let second = restarted(store)
+        _ = second.checkAll()
+        #expect(second.hostRefusal(cwd: plain, command: "") != nil)
+        try await GitFixture.sh("git config --unset filter.x.clean", in: plain, env: env)
+        _ = second.checkAll()
+        #expect(second.hostRefusal(cwd: plain, command: "") == nil)
+    }
+
+    @Test("blocked for a changed file Iris cannot read: still refused after a restart, cleared once it is as it was")
+    func restartUnreadableBlock() async throws {
+        let (dir, _) = try await GitFixture.repo()
+        let config = dir + "/ws/.git/config"
+        defer {
+            chmod(config, 0o644)
+            try? FileManager.default.removeItem(atPath: dir)
+        }
+        let original = try #require(GitFixture.read(config))
+        var was = stat()
+        chmod(config, 0o000)
+        #expect(lstat(config, &was) == 0)
+        let store = URL(fileURLWithPath: dir + "/home/sw.json")
+        let first = GitConfigGuard(store: store)
+        first.watch(owner: "a", sources: [dir + "/ws"])
+        // Changed in place (same file), still unreadable.
+        chmod(config, 0o644)
+        try (String(decoding: original, as: UTF8.self) + "[core]\n\tfsmonitor = x\n").write(toFile: config, atomically: false, encoding: .utf8)
+        chmod(config, 0o000)
+        _ = first.check(owner: "a")
+        #expect(first.hostRefusal(cwd: dir + "/ws", command: "") != nil)
+
+        let second = restarted(store)
+        _ = second.checkAll()
+        #expect(second.hostRefusal(cwd: dir + "/ws", command: "") != nil)
+        // Put back exactly: same bytes, same file, same times.
+        chmod(config, 0o644)
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: config))
+        try handle.truncate(atOffset: 0)
+        try handle.write(contentsOf: original)
+        try handle.close()
+        chmod(config, 0o000)
+        var times = [was.st_atimespec, was.st_mtimespec]
+        #expect(utimensat(AT_FDCWD, config, &times, 0) == 0)
+        _ = second.checkAll()
+        #expect(second.hostRefusal(cwd: dir + "/ws", command: "") == nil)
+    }
+
     @Test("a command names a folder only as a whole path")
     func namesWholePath() {
         #expect(WorkspaceGit.commandNames("git -C /x/iris status", "/x/iris"))
