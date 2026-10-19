@@ -338,8 +338,9 @@ enum WorkspaceGit {
                 let section = parts[0], name = parts.count > 1 ? parts[parts.count - 1] : ""
                 if (section == "include" || section == "includeif") && name == "path" { unsafe.append(key); continue }
                 guard parts.count > 2 else {
-                    // An empty alias fails to expand and runs nothing.
-                    if section == "alias", parts.count == 2, value.hasPrefix("!") {
+                    // Every alias, not only `!`: `-c <key>=<program>` in one is applied after these
+                    // overrides (probed). An empty alias fails to expand and runs nothing.
+                    if section == "alias", parts.count == 2 {
                         result.overrides.append((key, "")); result.found.append(key)
                     }
                     continue
@@ -353,6 +354,8 @@ enum WorkspaceGit {
                 case ("merge", "driver"): replacement = "false"
                 case ("submodule", "update") where value.hasPrefix("!"): replacement = "checkout"
                 case ("difftool", "cmd"), ("mergetool", "cmd"): replacement = "true"
+                // A built-in tool's program; empty falls back to the tool's own name on PATH.
+                case ("difftool", "path"), ("mergetool", "path"): replacement = ""
                 case ("tar", "command"): replacement = "cat"
                 case ("remote", "uploadpack"), ("remote", "receivepack"), ("remote", "vcs"):
                     unsafe.append(key); continue

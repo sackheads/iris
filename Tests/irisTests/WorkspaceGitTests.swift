@@ -1210,6 +1210,12 @@ struct GitGuardStoreTests {
         let evil = dir + "/evil"
         try "#!/bin/sh\ntouch \(dir)/RAN-$1\ncat\n".write(toFile: evil, atomically: false, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: evil)
+        // A tool's own program and a `-c` alias's program, each a single path. tkdiff, not a tool
+        // a Mac has: emptied, its path falls back to the tool's own name, which must not exist.
+        for name in ["fsmonitor", "toolpath"] {
+            try "#!/bin/sh\ntouch \(dir)/RAN-\(name)\n".write(toFile: dir + "/" + (name == "fsmonitor" ? "fsmon" : name), atomically: false, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir + "/" + (name == "fsmonitor" ? "fsmon" : name))
+        }
         let sub = dir + "/sub-" + (ws as NSString).lastPathComponent
         let setUp = """
         git init -q \(sub) && git -C \(sub) -c user.email=a@b -c user.name=a commit -q --allow-empty -m1 &&
@@ -1223,13 +1229,14 @@ struct GitGuardStoreTests {
         git config diff.d.textconv '\(evil) textconv' && git config diff.d.command '\(evil) command' &&
         git config merge.m.driver '\(evil) merge' && git config submodule.s.update '!\(evil) subupdate' &&
         git config difftool.dd.cmd '\(evil) difftool' && git config mergetool.mm.cmd '\(evil) mergetool' &&
-        git config tar.foo.command '\(evil) tar' && git config alias.zz '!\(evil) alias'
+        git config tar.foo.command '\(evil) tar' && git config alias.zz '!\(evil) alias' &&
+        git config alias.st '-c core.fsmonitor=\(dir)/fsmon status' && git config difftool.tkdiff.path '\(dir)/toolpath'
         """
         let r = try await GitFixture.sh(setUp, in: ws, env: env)
         #expect(r.status == 0, "\(r.out)")
         return """
         echo d > a.x; echo d > b.p; git status --short; git diff; git diff --textconv --no-ext-diff; git add a.x b.p;
-        echo z > a.x; echo z > b.p; git checkout -- a.x b.p; git archive --format=foo HEAD; git difftool -y -t dd HEAD~1 HEAD -- g; git zz;
+        echo z > a.x; echo z > b.p; git checkout -- a.x b.p; git archive --format=foo HEAD; git difftool -y -t dd HEAD~1 HEAD -- g; git difftool -y -t tkdiff HEAD~1 HEAD -- g; git zz; git st;
         git -c protocol.file.allow=always submodule update s; git stash -q; git merge side -m mm; git mergetool -y -t mm g; echo done
         """
     }
@@ -1247,8 +1254,8 @@ struct GitGuardStoreTests {
                                 in: control, env: env)
         let script = try await plant(dir, ws: control, env: env)
         _ = try await GitFixture.sh(script, in: control, env: env)
-        let all = ["RAN-alias", "RAN-clean", "RAN-command", "RAN-difftool", "RAN-merge", "RAN-mergetool", "RAN-process",
-                   "RAN-smudge", "RAN-subupdate", "RAN-tar", "RAN-textconv"]
+        let all = ["RAN-alias", "RAN-clean", "RAN-command", "RAN-difftool", "RAN-fsmonitor", "RAN-merge", "RAN-mergetool",
+                   "RAN-process", "RAN-smudge", "RAN-subupdate", "RAN-tar", "RAN-textconv", "RAN-toolpath"]
         #expect(ran(dir) == all, "the script reaches every driver")
         for name in ran(dir) { try FileManager.default.removeItem(atPath: dir + "/" + name) }
 
