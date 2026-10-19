@@ -292,7 +292,7 @@ extension ConfigManager {
     /// switch off doesn't count.
     func hasUsableSubagentProviders(keychain explicitKeychain: KeychainManager? = nil) -> Bool {
         let keychain = explicitKeychain ?? guardedKeychain ?? .shared
-        providerRegistry(keychain: keychain).contains { $0.usable && !$0.isPrimary }
+        return providerRegistry(keychain: keychain).contains { $0.usable && !$0.isPrimary }
     }
 
     /// Where a subagent naming `providerId` (and `model`, or the provider's default) runs, or why
@@ -389,13 +389,13 @@ extension ConfigManager {
 
     func subagentEndpointHasKey(_ id: String, keychain explicitKeychain: KeychainManager? = nil) -> Bool {
         let keychain = explicitKeychain ?? guardedKeychain ?? .shared
-        !(keychain.loadSecrets()[ProviderSlug.secretName(id)] ?? "").isEmpty
+        return !(keychain.loadSecrets()[ProviderSlug.secretName(id)] ?? "").isEmpty
     }
 
     /// The stored key, for Check only. Never displayed.
     func subagentEndpointKey(_ id: String, keychain explicitKeychain: KeychainManager? = nil) -> String {
         let keychain = explicitKeychain ?? guardedKeychain ?? .shared
-        keychain.loadSecrets()[ProviderSlug.secretName(id)] ?? ""
+        return keychain.loadSecrets()[ProviderSlug.secretName(id)] ?? ""
     }
 
     func setSubagentUse(_ use: BuiltInSubagentUse, for family: LLMProvider) {
