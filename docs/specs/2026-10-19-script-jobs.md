@@ -70,19 +70,22 @@ So a script job is mostly `runBuiltin`'s shape with `evaluateScript`'s machinery
 
 **Ruled: option 1, plus one rule** (planner).
 - **Off by default.**  A script job runs on every fire, not just as a check, so it starts where grants do: network off unless asked for with `script_network: true`, and shown in the review.  "Is the site up" needs network, so the flag is in v1.
-- **Network scripts are human-only at review.**  Read-only mounts plus network, unattended, is a way out for whatever is mounted.  So for a script with `script_network: true`:
+- **Network on is egress.**  Read-only mounts plus network, unattended, is a way out for whatever is mounted.  The review (below) is human-only for every script, so for a script with `script_network: true` too:
   - Vibecop's APPROVE doesn't count;
   - the dialog offers no Always Allow (the same flag as #652's).
 
-  With network off, Vibecop judges it as it does a gate script.  The cost is one dialog at creation, for network scripts only.  A test pins both: a network script raises the dialog even when Vibecop approves, and an offline one doesn't.
-  - **Every script job human-only?**  Both reviews (dev-3, dev-1) asked for it, since #652's human-only ask skips a read-only job outside Iris or a tainted conversation.  **Overruled for network-off scripts** (planner, reason on the #686 thread).  A read-only, network-off script reads what the job mounted and posts a line that passed the tier-3 guard.  The model can already do that with `read_file` under the same guards.
-- **"Off" isn't "no network at all"** (dev-1).  The isolated network is host-only, so the VM can still reach services on the Mac that listen on all interfaces.  Today's read-only prompt jobs have the same property, so it isn't new here, but the review and the docs say "network: off (host-only)".
+  A test pins it: a script job, and a gate script, network on or off, raises the dialog even when Vibecop approves, and neither offers Always Allow.
+- **Every script job is human-only at creation, whatever its network flag** (planner, ruling (b), revised 2026-10-19).  Vibecop advises, but its APPROVE doesn't count, and there's no Always Allow.  The same goes for gate scripts, through the #687 fold.
+  - **Why it changed.**  The earlier overrule for network-off scripts rested on "it's like `read_file`".  But "off" is the isolated network, which is host-only (#690).  So a network-off script can still POST to services on the Mac (dev servers, Ollama's API, anything listening on all interfaces) on every fire, unattended, and `read_file` can't.  dev-3 caught it.
+  - **The cost** is one dialog per new script job or gate script, at creation, never per fire.
+  - **What the dialog says** about "network off": "can still reach services on this Mac".
+  - **The way back:** if a true no-network mode passes the real-VM check (`unshare --net` in the VM, #691), a follow-up makes "off" mean off for scripts and gates alike, and network-off goes back to Vibecop review.
 - **The dialog says what the combination means.**  With network on and a mount: "This script can read <mounts> and reach the internet on every run, with no one watching: it could send what it reads anywhere, or download and run more code."  With network on and no mounts, it says the second half only.
 - **A change re-asks.**  Any change to a stored job's script, mounts or network (a later `schedule_job` with the same name, or an edit) goes through the same review, as a new job would.
 - **Gate scripts get the same treatment, in this PR** (planner's addendum, folding in #687).  Today they get network silently and a read-only job's gate is approved on Vibecop alone.  One code path serves both:
   - an isolated network by default;
   - a `gate_network` flag, shown in the review;
-  - network-on is human-only.
+  - every gate script is human-only at creation, network on or off (the same flaw, #690).
 
   **Existing gate-script jobs:**
   - On upgrade their network goes off, as a data migration on the stored gates, run once and keyed by a marker.
