@@ -259,14 +259,16 @@ struct SSELineBuffer {
 /// error, with the same `Retry-After`, as on a plain call. Cancelling the consumer cancels the
 /// task and with it the URLSession transfer.
 enum LLMStreaming {
-    static func stream<M: StreamMapper>(provider: String, mapper: M,
+    static func stream<M: StreamMapper>(provider: String, mapper: M, session: URLSession = .shared, redacting secrets: [String] = [],
                                         makeRequest: @escaping @Sendable () async throws -> URLRequest) -> AsyncThrowingStream<LLMStreamEvent, Error> {
-        stream(mapper: mapper) { (try await makeRequest(), provider) }
+        stream(mapper: mapper, session: session, redacting: secrets) { (try await makeRequest(), provider) }
     }
 
     /// The form where the request builder also names the provider, for a client whose label is
     /// only known once its transport is resolved (#181: "Anthropic (Vertex AI, us-east5)").
-    static func stream<M: StreamMapper>(mapper: M, session: URLSession = .shared,
+    /// `secrets` are scrubbed from an error body before it is logged or thrown: a provider can
+    /// echo the key it was sent (#239).
+    static func stream<M: StreamMapper>(mapper: M, session: URLSession = .shared, redacting secrets: [String] = [],
                                         makeRequest: @escaping @Sendable () async throws -> (URLRequest, String)) -> AsyncThrowingStream<LLMStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
@@ -277,6 +279,7 @@ enum LLMStreaming {
                     if http.statusCode != 200 {
                         var body = Data()
                         for try await byte in bytes { body.append(byte) }
+                        body = SecretScrub.scrub(body, secrets)
                         print("API Error (\(http.statusCode)): \(String(data: body, encoding: .utf8) ?? "<non-utf8 body>")")
                         throw APIError.http(provider: provider, statusCode: http.statusCode, body: body, headers: http.allHeaderFields)
                     }

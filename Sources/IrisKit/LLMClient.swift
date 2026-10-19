@@ -13,6 +13,43 @@ protocol LLMClientProtocol: Sendable {
 extension LLMClient: LLMClientProtocol {}
 
 struct LLMClient {
+    /// Where every call goes when set: a subagent provider (#239). Nil is today's behaviour, the
+    /// primary provider and its tier models, read on each call.
+    let route: ProviderRoute?
+    /// A routed endpoint's session: one that follows no redirect. Injectable for a test's stub.
+    let endpointSession: URLSession
+
+    init(route: ProviderRoute? = nil, endpointSession: URLSession = NoRedirectSessionDelegate.session) {
+        self.route = route
+        self.endpointSession = endpointSession
+    }
+
+    /// The family a call goes to, or nil for a custom endpoint. Only an unrouted client reads
+    /// the primary.
+    static func family(route: ProviderRoute?, primary: @autoclosure () -> String) -> String? {
+        switch route?.target {
+        case .builtIn(let family)?: family.rawValue
+        case .endpoint?: nil
+        case nil: primary()
+        }
+    }
+
+    private func family(_ config: ConfigManager) -> String? {
+        Self.family(route: route, primary: config.primaryProvider)
+    }
+
+    /// A routed endpoint's call: its own base URL and key, the no-redirect session, and the key
+    /// scrubbed from any error body.
+    private func endpointCall(_ request: GeminiRequest, model: String) -> (stream: () -> AsyncThrowingStream<LLMStreamEvent, Error>,
+                                                                        generate: () async throws -> GeminiResponse)? {
+        guard let route, case .endpoint(let baseURL, let apiKey) = route.target else { return nil }
+        let label = route.providerId
+        let keyOptional = EndpointURL.isLoopbackURL(baseURL)
+        return ({ OpenAIClient.streamContent(request: request, model: model, apiKey: apiKey, baseURL: baseURL, label: label,
+                                             session: endpointSession, keyOptional: keyOptional) },
+                { try await OpenAIClient.generateContent(request: request, model: model, apiKey: apiKey, baseURL: baseURL, label: label,
+                                                         session: endpointSession, keyOptional: keyOptional) })
+    }
     /// `streaming` swaps the generate method for the SSE one; a custom base URL is rewritten
     /// only when it names the plain method, and is otherwise taken exactly as configured.
     static func resolveGeminiRequestURL(
@@ -148,8 +185,8 @@ struct LLMClient {
 
     func streamContent(request: GeminiRequest, tier: ModelTier) -> AsyncThrowingStream<LLMStreamEvent, Error> {
         let config = ConfigManager.shared
-        let provider = config.primaryProvider
-        let modelName = config.getModel(for: tier)
+        let provider = family(config)
+        let modelName = route?.model ?? config.getModel(for: tier)
         let metricOp: MetricOperationType
         switch tier {
         case .easy: metricOp = .easy
@@ -157,7 +194,9 @@ struct LLMClient {
         case .hard: metricOp = .hard
         }
         let inner: AsyncThrowingStream<LLMStreamEvent, Error>
-        if provider == LLMProvider.anthropic.rawValue {
+        if let endpoint = endpointCall(request, model: modelName) {
+            inner = endpoint.stream()
+        } else if provider == LLMProvider.anthropic.rawValue {
             inner = AnthropicClient.streamContent(request: request, model: modelName) {
                 try await Self.anthropicTransport(config: config)
             }
@@ -197,7 +236,7 @@ struct LLMClient {
     /// model); nil is the tier's own. The tier still names the call in the metrics.
     func generateContent(request: GeminiRequest, tier: ModelTier, model: String?) async throws -> GeminiResponse {
         let config = ConfigManager.shared
-        let provider = config.primaryProvider
+        let provider = family(config)
         
         let metricOp: MetricOperationType
         switch tier {
@@ -206,13 +245,15 @@ struct LLMClient {
         case .hard: metricOp = .hard
         }
         
-        let modelName = model ?? config.getModel(for: tier)
+        let modelName = route?.model ?? model ?? config.getModel(for: tier)
         
         let startTime = UptimeClock.live.now()   // uptime: a sleep is not time spent (#640)
         
         do {
             let response: GeminiResponse
-            if provider == LLMProvider.anthropic.rawValue {
+            if let endpoint = endpointCall(request, model: modelName) {
+                response = try await endpoint.generate()
+            } else if provider == LLMProvider.anthropic.rawValue {
                 response = try await AnthropicClient.generateContent(request: request, model: modelName,
                                                                      transport: try await Self.anthropicTransport(config: config))
             } else if provider == LLMProvider.openai.rawValue {

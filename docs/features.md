@@ -30,6 +30,19 @@ Conversations live in `~/.iris/conversations.sqlite`, one row per message and pe
 
 Natively integrates with Google's Gemini REST API, Anthropic's Claude API (directly, or Claude hosted in your own Google Cloud project through Vertex AI), and OpenAI's API. Dynamically translates complex internal agent schemas and tool executions on the fly to support advanced models like `claude-sonnet-5`, `gpt-5.6-sol`, and `gemini-3.5-flash`. Settings → Models can test every configured primary-provider model at once (Easy/Medium/Hard, plus Vision when it's set to Cloud) with a per-model pass/fail, and list the models the configured account can actually reach, each one copyable or assignable straight into a tier field.
 
+### Subagent Providers
+
+Settings → Models → **Subagent providers** lists providers a subagent could run on besides the primary.
+- **Built-in families:** each family other than the primary (Gemini, Anthropic, OpenAI) has a **Usable by subagents** switch, which is off by default even when the family has a key. It can also list extra model ids for subagents. The main conversation's provider and its easy, medium and hard tiers never change.
+- **Custom endpoints:** OpenAI-compatible servers such as DeepSeek, OpenRouter, or Ollama on this Mac.
+  - Each endpoint has an id, a base URL, exact model ids, and a key.
+  - The base URL must be https, except for a server on this Mac (`localhost`, `127.0.0.1` or `::1`), which is also the only kind that can go without a key.
+  - The key goes in Iris's existing Keychain item, is never shown, and is sent only to the address it was entered for. If the address changes, the key must be entered again.
+  - A routed request follows no redirects.
+  - **Check** lists the endpoint's models and marks each configured id as found or not found.
+- **Where they're kept:** the endpoint list and the switches are kept with Iris's API keys in its Keychain item (#678), so a host command's `defaults write` can't add an endpoint or turn a family on.
+- **Not yet wired up:** no subagent uses these providers yet. Dispatching a subagent to one comes with the next part of #239. See the [spec](specs/2026-10-19-multi-model-subagents.md).
+
 ### Jobs
 
 Scheduled and folder-watching jobs, their profiles, grants, gates, limits and cards: see [docs/jobs.md](jobs.md).

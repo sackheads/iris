@@ -24,7 +24,8 @@ item holds both your API keys and the settings that guard spending, where data g
 - the provider addresses;
 - the job budgets and run limits;
 - the goal and subagent limits;
-- the sandbox, Vibecop and prompt-injection switches.
+- the sandbox, Vibecop and prompt-injection switches;
+- the providers a subagent may use besides the primary.
 
 A command can replace that item without asking you, but Iris's next read of a replaced item asks.
 Clicking Deny there leaves the item untouched, and for that launch Iris uses protective values: the
