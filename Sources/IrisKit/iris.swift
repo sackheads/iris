@@ -510,14 +510,19 @@ actor IrisEngine {
     /// The pause before the goal loop's next turn. Injected only so tests that drive the loop do
     /// not wait 1.5 s a turn; the subagents this engine delegates to inherit it.
     private let repromptDelay: TimeInterval
+    /// Awaited by a scheduled skill check after its delay, before it claims its turn: lets a test
+    /// put a turn in between at a known point rather than inside a timing window (#659).
+    private let skillCheckWillClaim: (@Sendable (UUID) async -> Void)?
     /// Perf and tests: the Anthropic TTL policy for every request, instead of the one
     /// `CacheTTLPolicy.resolve` picks (5c §0.8). Nil everywhere else.
     private let cacheTTLOverride: CacheTTLPolicy?
 
     init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil, hooks: HookManager = .shared, provider: String? = nil, replayThinking: Bool? = nil, subagentConfig: ConfigManager = .shared, repromptDelay: TimeInterval = 1.5,
-         mutatingJobsAvailable: @escaping @Sendable () -> Bool = { SandboxPolicy.mutatingJobCanRun() }) {
+         mutatingJobsAvailable: @escaping @Sendable () -> Bool = { SandboxPolicy.mutatingJobCanRun() },
+         skillCheckWillClaim: (@Sendable (UUID) async -> Void)? = nil) {
         self.state = state
         self.mutatingJobsAvailable = mutatingJobsAvailable
+        self.skillCheckWillClaim = skillCheckWillClaim
         self.subagentConfig = subagentConfig
         self.repromptDelay = repromptDelay
         self.recentWrites = recentWrites
@@ -1511,13 +1516,18 @@ actor IrisEngine {
     /// Conversations whose `goal_complete` succeeded in the turn now running: the turn's end
     /// schedules `goalCompletionSkillCheck` as a follow-up turn of its own (#474).
     private var skillCheckDue: Set<UUID> = []
-    /// Conversations whose skill check is scheduled but has not started. A UI turn that starts
-    /// first takes it back into `skillCheckDue`, so the check follows that turn instead (#474).
-    private var skillCheckScheduled: Set<UUID> = []
+    /// Conversations whose skill check is scheduled but has not started, with the token of the
+    /// task scheduled for it. A UI turn that starts first takes it back into `skillCheckDue`, so
+    /// the check follows that turn instead (#474).
+    private var skillCheckScheduled: [UUID: UUID] = [:]
 
-    /// The scheduled skill check's go-ahead: false once a UI turn has taken it back.
-    private func claimScheduledSkillCheck(_ conversationId: UUID) -> Bool {
-        skillCheckScheduled.remove(conversationId) != nil
+    /// The scheduled skill check's go-ahead: false once a UI turn has taken it back, and false for
+    /// any task but the one scheduled. A task a UI turn cancelled can wake after that turn has
+    /// scheduled the next check, and must not take the next one's place (#659).
+    private func claimScheduledSkillCheck(_ conversationId: UUID, token: UUID) -> Bool {
+        guard skillCheckScheduled[conversationId] == token else { return false }
+        skillCheckScheduled[conversationId] = nil
+        return true
     }
 
     /// Per-conversation loop detectors (reset on a fresh UI turn).
@@ -1529,7 +1539,7 @@ actor IrisEngine {
 
     /// Cancels a conversation's pending auto-reprompt, stopping its goal loop.
     func cancelReprompt(for conversationId: UUID) {
-        skillCheckScheduled.remove(conversationId)
+        skillCheckScheduled[conversationId] = nil
         goalLoop.cancelReprompt(for: conversationId)
     }
 
@@ -1993,7 +2003,7 @@ actor IrisEngine {
             // nothing in flight to queue behind, so the follow-up would run beside it on one
             // history. Cancel it: this turn's end schedules the goal's next reprompt again, and a
             // pending skill check goes back to due so it follows this turn (#474).
-            if skillCheckScheduled.remove(conversationId) != nil { skillCheckDue.insert(conversationId) }
+            if skillCheckScheduled.removeValue(forKey: conversationId) != nil { skillCheckDue.insert(conversationId) }
             goalLoop.cancelReprompt(for: conversationId)
         }
 
@@ -3153,9 +3163,10 @@ actor IrisEngine {
         // Not for an unattended run either: the run is over when this turn returns, so the check
         // would run outside its budget, and nothing would ever stop it.
         if skillCheckDue.remove(conversationId) != nil, !Task.isCancelled, !isUnattended {
+            let token = UUID()
             if scheduleReprompt(for: conversationId, afterNanoseconds: UInt64(repromptDelay * 1_000_000_000),
-                                followUp: .goalCompletionSkillCheck) {
-                skillCheckScheduled.insert(conversationId)
+                                followUp: .goalCompletionSkillCheck, token: token) {
+                skillCheckScheduled[conversationId] = token
             }
         }
     }
@@ -3185,10 +3196,9 @@ actor IrisEngine {
     /// False, with nothing scheduled, for a halted loop (a subagent stopped from outside).
     @discardableResult
     private func scheduleReprompt(for conversationId: UUID, afterNanoseconds delay: UInt64,
-                                  followUp: FollowUp = .goalReprompt) -> Bool {
+                                  followUp: FollowUp = .goalReprompt, token: UUID = UUID()) -> Bool {
         let localState = state
         let goalLoop = self.goalLoop
-        let token = UUID()
         let task = Task { [weak self] in
             // Every way out removes this task's own entry, so the loop reads as over once it is,
             // then hands anything that queued behind the follow-up (#478) to the drain: a
@@ -3199,9 +3209,10 @@ actor IrisEngine {
             }
             try? await Task.sleep(nanoseconds: delay)
             if followUp == .goalCompletionSkillCheck {
+                if let hook = self?.skillCheckWillClaim { await hook(conversationId) }
                 // Claimed on every way out, so a cancelled check leaves nothing a later UI turn
                 // could take back and run.
-                guard let self, await self.claimScheduledSkillCheck(conversationId), !Task.isCancelled else { return }
+                guard let self, await self.claimScheduledSkillCheck(conversationId, token: token), !Task.isCancelled else { return }
                 let exists = await MainActor.run {
                     localState?.conversations.contains { $0.id == conversationId } ?? false
                 }
