@@ -1071,3 +1071,109 @@ struct GitHostOverrideTests {
         #expect(guardian.hostOverrides(cwd: "/") == nil)
     }
 }
+
+@Suite("The saved list of sandboxed folders fails closed when it cannot be read (#641)", .serialized, .timeLimit(.minutes(1)))
+struct GitGuardStoreTests {
+    private func setUp() async throws -> (dir: String, store: URL, outside: String) {
+        let (dir, _) = try await GitFixture.repo()
+        let store = URL(fileURLWithPath: dir + "/home/sandbox-workspaces.json")
+        try FileManager.default.createDirectory(atPath: dir + "/home", withIntermediateDirectories: true)
+        let outside = dir + "/outside"
+        try FileManager.default.createDirectory(atPath: outside, withIntermediateDirectories: true)
+        return (dir, store, outside)
+    }
+
+    private func entry(_ path: String, hooks: String?) -> String {
+        "{\"path\":\"\(path)\"" + (hooks.map { ",\"hooks\":\"\($0)\"" } ?? "") + "}"
+    }
+
+    @Test("one entry that does not decode is skipped, the rest kept, and the list as it was is kept aside")
+    func badEntry() async throws {
+        let (dir, store, outside) = try await setUp()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let original = Data(("[" + entry(dir + "/ws", hooks: dir + "/ws/.git/hooks") + ",{\"hooks\":3},"
+                             + entry(dir + "/plain", hooks: nil) + "]").utf8)
+        try original.write(to: store)
+
+        let guardian = GitConfigGuard(store: store)
+        #expect(guardian.hostOverrides(cwd: dir + "/ws") == .some(dir + "/ws/.git/hooks"), "a good entry is kept")
+        #expect(guardian.hostOverrides(cwd: dir + "/plain") == .some(nil))
+        #expect(guardian.hostOverrides(cwd: outside) == .some(nil), "fails closed: overrides, no hooks, everywhere")
+        #expect(guardian.watchedSources() == ["/"], "the person's global config counts as reachable")
+        #expect(GitFixture.read(store.path + ".corrupt") == original)
+        let note = try #require(guardian.checkAll())
+        #expect(note.contains("1 of the 3"))
+        #expect(note.contains(store.path + ".corrupt"))
+        #expect(guardian.checkAll() == nil, "said once")
+    }
+
+    @Test("a truncated list is moved aside, every folder counts as unknown, and a watch covers its folder again")
+    func truncated() async throws {
+        let (dir, store, outside) = try await setUp()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let whole = "[" + entry(dir + "/ws", hooks: dir + "/ws/.git/hooks") + "]"
+        let original = Data(whole.prefix(whole.count / 2).utf8)
+        try original.write(to: store)
+
+        let guardian = GitConfigGuard(store: store)
+        #expect(!FileManager.default.fileExists(atPath: store.path), "moved, not left to be written over")
+        #expect(GitFixture.read(store.path + ".corrupt") == original)
+        #expect(guardian.hostOverrides(cwd: outside) == .some(nil))
+        #expect(guardian.hostOverrides(cwd: dir + "/ws") == .some(nil), "no hooks until a watch sees it again")
+        guardian.watch(owner: "c", sources: [dir + "/ws"])
+        let note = try #require(guardian.check(owner: "c"))
+        #expect(note.contains("moved it to \(store.path).corrupt"))
+        #expect(guardian.hostOverrides(cwd: dir + "/ws") == .some(dir + "/ws/.git/hooks"), "the watch saw it again")
+    }
+
+    @Test("an entry from a newer format, with fields this build does not know, is not a failure")
+    func newerFormat() async throws {
+        let (dir, store, outside) = try await setUp()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try Data(("[{\"path\":\"\(dir)/ws\",\"hooks\":\"\(dir)/ws/.git/hooks\",\"baseline\":{\"x\":1},"
+                  + "\"blocked\":{\"kind\":\"quarantine\",\"path\":\"\(dir)/gone\",\"message\":\"m\",\"since\":5}}]").utf8).write(to: store)
+
+        let guardian = GitConfigGuard(store: store)
+        #expect(guardian.hostOverrides(cwd: dir + "/ws") == .some(dir + "/ws/.git/hooks"))
+        #expect(guardian.hostOverrides(cwd: outside) == nil, "nothing unknown: ordinary git is untouched")
+        #expect(!FileManager.default.fileExists(atPath: store.path + ".corrupt"))
+        #expect(guardian.checkAll() == nil, "no notice; the cleared block ends quietly")
+    }
+
+    @Test("after an unreadable list, the next save leaves the set-aside copies alone and takes a free name")
+    func saveKeepsCorrupt() async throws {
+        let (dir, store, _) = try await setUp()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let earlier = Data("earlier".utf8)
+        try earlier.write(to: URL(fileURLWithPath: store.path + ".corrupt"))
+        let original = Data("{not json".utf8)
+        try original.write(to: store)
+
+        let guardian = GitConfigGuard(store: store)
+        guardian.watch(owner: "c", sources: [dir + "/ws"])
+        guardian.end(owner: "c")
+        #expect(GitFixture.read(store.path + ".corrupt") == earlier, "an earlier copy is never overwritten")
+        #expect(GitFixture.read(store.path + ".corrupt-2") == original)
+        let saved = try #require(GitFixture.read(store.path))
+        #expect(saved != original)
+        #expect(GitConfigGuard(store: store).hostOverrides(cwd: dir + "/ws") == .some(dir + "/ws/.git/hooks"),
+                "the new list holds the folder watched since")
+    }
+
+    @Test("a list that cannot be moved aside is never written over")
+    func cannotMoveAside() async throws {
+        let (dir, store, _) = try await setUp()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        for n in 1...100 {
+            try Data().write(to: URL(fileURLWithPath: store.path + ".corrupt" + (n == 1 ? "" : "-\(n)")))
+        }
+        let original = Data("[{".utf8)
+        try original.write(to: store)
+
+        let guardian = GitConfigGuard(store: store)
+        guardian.watch(owner: "c", sources: [dir + "/ws"])
+        let note = try #require(guardian.check(owner: "c"))
+        #expect(note.contains("left it as it is"))
+        #expect(GitFixture.read(store.path) == original)
+    }
+}
