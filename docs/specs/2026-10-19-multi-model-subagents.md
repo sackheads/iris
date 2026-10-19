@@ -120,7 +120,7 @@ A subagent can run on a different provider and model than the conversation that 
 **Brian ruled (b), per-family prices** (verbatim: "I would go for b, the price model, since it's kind of the point. We can look up those rates dynamically, and yes this is a generalized product that will run in various places."). This is half 2 work.
 
 **The planner's rulings** (no money trade-off in them):
-1. **Unit.** Budgets stay in today's weighted-token unit, so no existing job budget migrates. A subagent's usage on another family is converted to primary-equivalent weighted tokens: its dollars at its own rate, divided by the primary's rate. It uses the same `CostWeights` split: input, output and cache read.
+1. **Unit.** Budgets stay in today's weighted-token unit, so no existing job budget migrates. A subagent's usage on another family is converted to primary-equivalent weighted tokens: its dollars at its own rate, divided by the primary's rate. It uses the `CostWeights` split plus cache creation (iris-dev-2's review): input, output, cache read, and cache creation where the provider bills it. Anthropic bills a 5-minute write at 1.25x input and a 1-hour write at 2x, and LiteLLM has `cache_creation_input_token_cost`. A row without a cache creation rate prices those tokens at input.
 2. **Ledger.** Each delegated usage row records:
    - the model and its tokens;
    - the rate used;
@@ -128,7 +128,13 @@ A subagent can run on a different provider and model than the conversation that 
    - an `estimated` flag when it wasn't a known rate.
 
    `/jobs` and the run card say "estimated" when any part of the run was.
-3. **Guarding the rate.** A fetched rate is data that controls a spending cap. For any non-loopback endpoint, a rate of zero or below a sanity floor is rejected and the fallback used instead, with a log note. Otherwise a wrong 0 removes the cap.
+3. **Guarding the rate.** A fetched rate is data that controls a spending cap, and it sits on both sides of rule 1's division. **Every guess may only overcharge.**
+   - **Per field** (planner): each rate must be greater than 0, and cache read must not exceed input. A field that fails takes the bundled snapshot's value, marked estimated.
+   - **A band against the snapshot** (iris-dev-2's review): a fetched rate more than 10x above or below the snapshot's row for that model is rejected, and the snapshot's value is used, marked estimated. This holds for the primary's rate (the denominator) and for delegated rates alike. Without it, a primary rate 100x too high would make a $5 subagent cost 5 cents of budget.
+   - **An unknown primary rate** (no row, no snapshot) uses the **lowest** known rate in the primary's family, marked estimated. A small denominator overcharges.
+   - **An unknown delegated rate** is the open choice for Brian below. Its lean, (a) highest known in the family, also only overcharges.
+   - **What's left:** a rate that is wrong but nonzero, within the band, and not above input can't be caught mechanically. The docs say the caps rest on the price file's accuracy within that band.
+   - A rejected rate is logged once per refresh, with the model and the rule it broke.
 4. **Local loopback models** really cost $0. They still count tokens at the primary's weights for the budget, so a local runaway still stops.
 5. **Caching.** Rates are cached with their as-of date, refreshed at most daily and on a Settings Check. A failed refresh keeps the last good cache.
 
@@ -155,6 +161,7 @@ Lookups for the current ids:
 `claude-opus-5-5`, `claude-sonnet-5-5` and `claude-sonnet-4-6` are present too. What a lookup must handle:
 - **Keys vary by host.** The same model appears under several hosts at different prices (`azure_ai/deepseek-v4-pro`, `dashscope/deepseek-v4-pro`, Bedrock's `anthropic.claude-fable-5-1`). A lookup matches the family's own `litellm_provider` (`anthropic`, `gemini`, `openai`, `deepseek`), and an endpoint names its LiteLLM provider. A bare-id match on another host's row is never used.
 - **`sample_spec` has 0 for every rate**, an example of why rule 3's floor is needed.
+- **Cache-read ratios differ by model, and the file has them right.** `claude-fable-5-1`'s cache read is 2.5% of input (2.5e-7 against 1e-5), not the usual 10%. Anthropic's pricing page (platform.claude.com, checked 2026-10-19) lists Claude Fable 5.1 cache hits at $0.25/MTok against $10/MTok input, "0.025x on Claude Fable 5.1". Opus 5.5 and Sonnet 5.5 are 0.05x ($0.20 and $0.10), matching their rows, and Sonnet 4.6 is 0.1x. So a fixed-ratio check would have rejected correct prices, and rule 3 doesn't use one.
 - **Size.** 2.9 MB fetched at most daily is fine. The bundled snapshot keeps only the rows for the families Iris supports.
 
 **Today everything assumes one provider:**
