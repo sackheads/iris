@@ -50,6 +50,12 @@ struct AgentProfileUnknownNamesTests {
         #expect(notes(fine).isEmpty)
     }
 
+    @Test("a configured server's tool isn't unknown before it connects; another server's is")
+    func configuredServerTools() {
+        let p = profile(tools: ["github___open_issue", "slack___post"], skills: nil)
+        #expect(known.unknown(in: p).tools == ["slack___post"])
+    }
+
     @Test("before the first refresh, nothing is listed as unknown")
     func noGuessBeforeRefresh() throws {
         let app = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
