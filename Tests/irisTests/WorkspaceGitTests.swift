@@ -1319,6 +1319,8 @@ struct GitGuardStoreTests {
 
         // A bare repository's worktree is wherever git is run; git init's own `bare = false` is fine.
         #expect(WorkspaceGit.adopted(source: ws).refusal == nil)
+        try await GitFixture.sh("git config core.bare 2", in: ws, env: env)
+        #expect(WorkspaceGit.adopted(source: ws).refusal?.contains("core.bare") == true, "git reads any non-zero number as true")
         try await GitFixture.sh("git config core.bare true", in: ws, env: env)
         #expect(WorkspaceGit.adopted(source: ws).refusal?.contains("core.bare") == true)
     }

@@ -315,7 +315,8 @@ enum WorkspaceGit {
     /// git's reading of a boolean value: a bare key is true.
     private static func isTrue(_ value: String?) -> Bool {
         guard let value else { return true }
-        return ["true", "yes", "on", "1"].contains(value.lowercased())
+        if let number = Int(value) { return number != 0 }
+        return ["true", "yes", "on"].contains(value.lowercased())
     }
 
     struct Adopted {
