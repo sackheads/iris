@@ -235,6 +235,7 @@ struct AgentToolScope: Equatable, Sendable {
 /// every tool Iris can declare, the MCP servers and their tools, and the installed skills.
 struct KnownCapabilities: Equatable, Sendable {
     var tools: Set<String>
+    /// Configured MCP servers, connected or not.
     var mcpServers: Set<String>
     /// Skill names and folder names, lowercased: `discoverSkills` matches either.
     var skills: Set<String>
@@ -244,7 +245,13 @@ struct KnownCapabilities: Equatable, Sendable {
     func unknown(in profile: AgentProfile) -> (tools: [String], skills: [String]) {
         let unknownTools = (profile.tools ?? []).filter { name in
             if name.hasPrefix("mcp:") { return !mcpServers.contains(String(name.dropFirst(4))) }
-            return !tools.contains(name)
+            if tools.contains(name) { return false }
+            // A configured server's tool can't be listed until it connects, so its name is
+            // given the benefit of the doubt rather than called unknown at launch.
+            if JobProfile.isMCPTool(name), let server = name.components(separatedBy: JobProfile.mcpNameSeparator).first {
+                return !mcpServers.contains(server)
+            }
+            return true
         }
         let unknownSkills = (profile.skills ?? []).filter { !skills.contains($0.lowercased()) }
         return (unknownTools, unknownSkills)

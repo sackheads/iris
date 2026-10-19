@@ -1731,13 +1731,13 @@ class AppState {
     /// and its role when no other active session holds it (Fork A: never moved from its holder).
     /// What a profile's lists can name, as last gathered (#465). Nil until the first refresh: the
     /// picker then lists nothing as unknown rather than guessing.
-    @ObservationIgnored var knownCapabilities: KnownCapabilities?
+    var knownCapabilities: KnownCapabilities?
 
     /// Gathers the tool, MCP and skill names a profile may use. Run when the sidebar appears and
     /// after a profile starts a conversation, so a newly installed skill or server is counted.
     func refreshKnownCapabilities() async {
         let skills = await SkillManager().listSkills()
-        let servers = await MCPManager.shared.getServerNames()
+        let servers = await MCPManager.shared.configuredServerNames()
         let mcpTools = await MCPManager.shared.getGeminiTools().map(\.name)
         knownCapabilities = KnownCapabilities(
             tools: IrisEngine.allDeclaredToolNames.union(mcpTools),

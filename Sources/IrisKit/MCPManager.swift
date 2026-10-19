@@ -93,6 +93,18 @@ actor MCPManager {
         await startServers()
     }
 
+    /// Every configured server's name, connected or not (#465): the legacy file's entries and the
+    /// plugins'. A profile's `mcp:<name>` is judged against this, so a server still starting at
+    /// launch isn't called unknown.
+    func configuredServerNames() -> Set<String> {
+        var names = Set(pluginConfigs.keys)
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+           let configs = try? JSONDecoder().decode([String: MCPServerConfig].self, from: data) {
+            names.formUnion(configs.keys)
+        }
+        return names
+    }
+
     func getServerNames() async -> [String] {
         return Array(servers.keys).sorted()
     }
