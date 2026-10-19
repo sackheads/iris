@@ -85,6 +85,8 @@ struct LoopSelfPacedTests {
             guard case .invalid(let why) = ConversationLoop.parse(word) else { Issue.record("/loop \(word) started a loop"); continue }
             #expect(why.contains("/loop stop"))
         }
+        #expect(ConversationLoop.parse("status") == .status, "`/loop status` is `/loop`, never a loop on \"status\"")
+        #expect(ConversationLoop.parse(" Status ") == .status)
         #expect(ConversationLoop.parse("deploy") == .startSelfPaced(prompt: "deploy"), "an ordinary word is still a prompt")
         #expect(ConversationLoop.parse("end of day summary") == .startSelfPaced(prompt: "end of day summary"))
         let (state, id) = try app()
