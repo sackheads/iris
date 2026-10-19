@@ -128,8 +128,10 @@ struct WorkspaceIrisTrustTests {
         #expect(last.contains("`.iris/permissions.json`") && last.contains("Review Workspace Rules"))
     }
 
+    // Off the main actor: it reads every source file, which held main for seconds in a parallel
+    // run and stalled every suite waiting on it (#637).
     @Test("only the UI trusts rules: no tool, system event or job reaches the Trust action")
-    func trustIsHumanOnly() throws {
+    nonisolated func trustIsHumanOnly() throws {
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().appendingPathComponent("Sources/IrisKit")
         var trustCallers: Set<String> = [], trustReviewedCallers: Set<String> = []

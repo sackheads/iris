@@ -187,7 +187,8 @@ struct StreamingTextsTests {
     /// stays green in the observation tests above, so every call site is listed here, and a new
     /// one fails until it is added on purpose.
     @Test("the live accessors are called only where a row, copy, export, another session or the save reads")
-    func liveAccessorCallSites() throws {
+    nonisolated func liveAccessorCallSites() throws {
+        // Off the main actor: a scan of the sources held it for seconds in a parallel run (#637).
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources/IrisKit")
         let allowed: [String: Int] = [
