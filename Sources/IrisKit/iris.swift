@@ -3552,36 +3552,75 @@ actor IrisEngine {
         return denied.isEmpty ? tools : tools.filter { !denied.contains($0.name) }
     }
 
-    /// What the owner sees on the pinned conversation's approval dialog for a job-creating call
-    /// (fix round 2, #187). Before this, `details` was `args["name"] ?? args["path"] ?? toolName`,
+    /// What the owner sees on the approval dialog for a job-creating call (fix round 2, #187; every
+    /// ask since #652). Before this, `details` was `args["name"] ?? args["path"] ?? toolName`,
     /// which showed "schedule_job: schedule_job" for a call with neither — telling a reviewer
     /// nothing about what they were approving. Built from the model's raw, unvalidated arguments
     /// (the approval happens before `ScheduleJobArguments.parse`/`RegisterWatcherArguments.parse`
     /// run), so a malformed call still shows what was asked for rather than failing to build a
     /// dialog at all. Pure and `nonisolated` so it is unit-testable without an engine or a turn.
-    nonisolated static func pinnedJobApprovalDetails(
-        toolName: String, args: [String: JSONValue],
+    /// `profile` is the one the job or watch would get (`jobCreationProfile`), shown whether or not
+    /// the call named it, with the grant it carries: each mount read-write or read-only, and the
+    /// network as the run will have it (#652).
+    /// With no `profile`, the one the call names, else read-only.
+    nonisolated static func jobApprovalDetails(
+        toolName: String, args: [String: JSONValue], profile: JobProfile? = nil,
         globalRunTimeoutSeconds: Int = ConfigManager.shared.jobRunTimeoutSeconds
     ) -> String {
+        let profile = profile ?? JobProfile.asked(ScheduleJobArguments.text(args["profile"])) ?? .readOnly
         switch toolName {
-        case "schedule_job": return scheduleJobApprovalDetails(args, globalRunTimeoutSeconds: globalRunTimeoutSeconds)
-        case "register_directory_watcher": return registerWatcherApprovalDetails(args)
+        case "schedule_job": return scheduleJobApprovalDetails(args, profile: profile, globalRunTimeoutSeconds: globalRunTimeoutSeconds)
+        case "register_directory_watcher": return registerWatcherApprovalDetails(args, profile: profile)
         default: return toolName
         }
     }
 
-    private nonisolated static func scheduleJobApprovalDetails(_ args: [String: JSONValue],
+    /// The profile a job-creating call would give its job: the one it names, else for a watch the
+    /// one the watch it replaces keeps (`ToolExecutor.registerWatcher`), else read-only (#652).
+    private func jobCreationProfile(_ call: FunctionCall, conversationId: UUID?) async -> JobProfile {
+        if let asked = JobProfile.asked(ScheduleJobArguments.text(call.args["profile"])) { return asked }
+        guard call.name == "register_directory_watcher", let raw = call.args["path"]?.stringValue,
+              let path = WatchRoot.canonical(raw) else { return .readOnly }
+        let localState = state
+        let ledger = await MainActor.run { localState?.store.ledger }
+        let jobs = (try? ledger?.jobs()) ?? []
+        return ToolExecutor.existingWatch(in: jobs, canonicalPath: path, conversationId: conversationId)?.profile ?? .readOnly
+    }
+
+    /// The grant lines of the dialog: what a run of this job may touch. A read-only job has no
+    /// mounts and no network by definition; a mutating one with neither named runs with the
+    /// container's default network, which is on (`NetworkMode.forGrant`).
+    private nonisolated static func grantApprovalLines(_ args: [String: JSONValue], profile: JobProfile) -> [String] {
+        var lines = ["profile: \(profile.rawValue)"]
+        var mounts: [String] = []
+        if case .success(let named?) = ScheduleJobArguments.stringList(args["mounts"], shape: ScheduleJobArguments.mountsShape) {
+            mounts = named
+        }
+        let network: Bool?
+        if case .success(let asked?) = ScheduleJobArguments.boolean(args["network"]) { network = asked } else { network = nil }
+        guard profile == .mutating else {
+            // Named anyway, the parse refuses it after this; the dialog still shows what was asked.
+            if !mounts.isEmpty { lines.append("mounts: \(mounts.joined(separator: ", ")) (refused: read-only)") }
+            if network == true { lines.append("network: on (refused: read-only)") }
+            return lines
+        }
+        for mount in mounts {
+            let readOnly = mount.lowercased().hasSuffix(":ro")
+            lines.append("mount: \(readOnly ? "read-only" : "read-write") \(readOnly ? String(mount.dropLast(3)) : mount)")
+        }
+        if mounts.isEmpty, network == nil { lines.append("mounts: none") }
+        switch network {
+        case true?: lines.append("network: on")
+        case false?: lines.append("network: off")
+        case nil: lines.append(mounts.isEmpty ? "network: default (on)" : "network: off")
+        }
+        return lines
+    }
+
+    private nonisolated static func scheduleJobApprovalDetails(_ args: [String: JSONValue], profile: JobProfile,
                                                                globalRunTimeoutSeconds: Int) -> String {
         let name = ScheduleJobArguments.text(args["name"]) ?? "(unnamed)"
-        var lines = ["name: \(name)", "trigger: \(scheduleTriggerSummary(args))"]
-        if let profile = ScheduleJobArguments.text(args["profile"]) { lines.append("profile: \(profile)") }
-        if case .success(let mounts?) = ScheduleJobArguments.stringList(args["mounts"], shape: ScheduleJobArguments.mountsShape),
-           !mounts.isEmpty {
-            lines.append("mounts: \(mounts.joined(separator: ", "))")
-        }
-        if case .success(let network?) = ScheduleJobArguments.boolean(args["network"]) {
-            lines.append("network: \(network)")
-        }
+        var lines = ["name: \(name)", "trigger: \(scheduleTriggerSummary(args))"] + grantApprovalLines(args, profile: profile)
         if let prompt = ScheduleJobArguments.text(args["prompt"]) {
             lines.append("prompt: \(Self.truncated(prompt))")
         }
@@ -3614,21 +3653,11 @@ actor IrisEngine {
         return lines.joined(separator: "\n")
     }
 
-    private nonisolated static func registerWatcherApprovalDetails(_ args: [String: JSONValue]) -> String {
+    private nonisolated static func registerWatcherApprovalDetails(_ args: [String: JSONValue], profile: JobProfile) -> String {
         let path = ScheduleJobArguments.text(args["path"]) ?? "(no path)"
-        var lines = ["path: \(path)"]
-        if let profile = ScheduleJobArguments.text(args["profile"]) { lines.append("profile: \(profile)") }
-        // Final-review fix wave (#187): a `mutating` watch accepts the same grant fields
-        // `schedule_job` does (`ToolExecutor.getTools()`'s `register_directory_watcher` schema), and
-        // the dialog was silently dropping them — an owner approving a watch with a wide mount or
-        // network access had no way to see that from this text.
-        if case .success(let mounts?) = ScheduleJobArguments.stringList(args["mounts"], shape: ScheduleJobArguments.mountsShape),
-           !mounts.isEmpty {
-            lines.append("mounts: \(mounts.joined(separator: ", "))")
-        }
-        if case .success(let network?) = ScheduleJobArguments.boolean(args["network"]) {
-            lines.append("network: \(network)")
-        }
+        // Final-review fix wave (#187): a `mutating` watch carries the same grant fields
+        // `schedule_job` does, and an owner approving a wide mount or network must see it here.
+        var lines = ["path: \(path)"] + grantApprovalLines(args, profile: profile)
         if let instructions = ScheduleJobArguments.text(args["instructions"]) {
             lines.append("prompt: \(Self.truncated(instructions))")
         }
@@ -3696,11 +3725,10 @@ actor IrisEngine {
     static let subagentJobCreationRefusal =
         "A subagent cannot create jobs; ask the conversation that delegated to you to create it."
 
-    /// What the model is told when the owner declined a job or watch proposed from the pinned
-    /// conversation (5b §0.5). Iris reads every other chat and holds the job tools, so a standing
-    /// job created there is the one place an injection that survived the guard would outlive the
-    /// turn — the dispatcher asks a human before writing the row, same as an ordinary approval.
-    static let pinnedJobCreationDeclined = "The owner declined creating this job."
+    /// What the model is told when the person declined a job or watch (5b §0.5, #652). It names
+    /// the narrower retry, because a read-only job asks nothing in an ordinary chat and would
+    /// otherwise be the quiet way around the answer.
+    static let jobCreationDeclined = "Not created: the person declined this job. Do not create it again in another form, such as a read-only job that does less, unless they ask for that; tell them it was not created."
 
     /// §0.10: the grant is the boundary, and nothing a run does may move it.
     static let unattendedWorkspaceRefusal = "Not run: a background run cannot change its workspace; widen the job's grant instead."
@@ -4033,44 +4061,42 @@ actor IrisEngine {
             if raw.contains("\u{0}") { return ToolExecutor.nulPathRefusal(functionCall.name) }
             functionCall.args["path"] = .string(Self.decidedWatchPath(raw, cwd: workspacePath))
         }
-        // 5b §0.5, structural ruling (#187, broadened under review #340): Iris reads other chats
-        // and holds the job tools, so a standing job created there is the one place an injection
-        // that survived the guard would outlive the turn — and so is any conversation a turn was
-        // ever started on without the owner present, whether that was a peer's `send_to_session`
-        // message or a background subagent's post-back reporting in on its own schedule. Gated on
-        // `conversation.hasUnattendedInput` (`AppState.markConversationTouchedByUnattendedInput`), a
-        // sticky, persisted taint set the moment any such content reaches the conversation — not on
-        // transient per-turn state: three earlier rounds of threading a per-call `isPeer` flag
-        // through `processInput`/`executeFunctionCall` each left a path open (a restart, a nested
-        // continuation, a sibling turn clearing shared state), because the gate lived in state that
-        // didn't survive the shape of a real turn. A human says yes either way — `humanOnly` so
-        // neither the allowlist nor Vibecop's verdict can stand in for that click
-        // (`AppState.requestApproval`); headless and scenario runs set `autoApproveTools`, and
-        // `humanOnly` still honors it, since there is no human in that run to ask.
-        if Self.jobCreationTools.contains(functionCall.name), isPinned || hasUnattendedInput {
-            // Review #340, item 4 (ruling): parse and validate before the human is ever asked. A
-            // malformed call — a bad cron expression, two gates at once — is going to fail either
-            // way; asking first just spends the owner's attention on a job that was never going to
-            // be created. `GateScriptReview`'s own safety review of `gate_script` is unaffected and
-            // still runs afterward, inside `scheduleJob`/`registerWatcher` once this shape check has
-            // already passed and the human has already said yes.
-            let parseFailure: String?
-            switch functionCall.name {
-            case "schedule_job":
-                if case .failure(let message) = ScheduleJobArguments.parse(functionCall.args) { parseFailure = message.text } else { parseFailure = nil }
-            case "register_directory_watcher":
-                if case .failure(let message) = RegisterWatcherArguments.parse(functionCall.args) { parseFailure = message.text } else { parseFailure = nil }
-            default:
-                parseFailure = nil
-            }
-            if let parseFailure { return parseFailure }
+        // One ask for every job or watch a person must approve, from Brian's ruling on #652 and
+        // #340's before it, with `humanOnly` so neither the allowlist nor Vibecop's verdict can
+        // stand in for the click (`AppState.requestApprovalSource`); headless and scenario runs set
+        // `autoApproveTools`, which `humanOnly` still honors, since nobody is there to ask.
+        // - Not read-only (#652): a mutating job's grant approves every later run's file tools and
+        //   sandboxed commands, so the person sees what it may touch once, when it is made.
+        // - In Iris, or a conversation a turn was ever started on without the owner present (a
+        //   peer's message, a background subagent's post-back), every job asks (5b §0.5, #340): a
+        //   standing job is where an injection that survived the guard would outlive the turn.
+        //   `hasUnattendedInput` is a sticky, persisted taint for the reason #340 gives: three
+        //   rounds of per-call flags each left a path open.
+        if Self.jobCreationTools.contains(functionCall.name) {
+            let profile = await jobCreationProfile(functionCall, conversationId: conversationId)
+            if profile != .readOnly || isPinned || hasUnattendedInput {
+                // Review #340, item 4 (ruling): parse and validate before the human is ever asked. A
+                // malformed call is going to fail either way; asking first just spends the owner's
+                // attention on a job that was never going to be created. `GateScriptReview`'s own
+                // review of `gate_script` still runs afterward, inside `scheduleJob`/`registerWatcher`.
+                let parseFailure: String?
+                switch functionCall.name {
+                case "schedule_job":
+                    if case .failure(let message) = ScheduleJobArguments.parse(functionCall.args) { parseFailure = message.text } else { parseFailure = nil }
+                case "register_directory_watcher":
+                    if case .failure(let message) = RegisterWatcherArguments.parse(functionCall.args) { parseFailure = message.text } else { parseFailure = nil }
+                default:
+                    parseFailure = nil
+                }
+                if let parseFailure { return parseFailure }
 
-            let details = Self.pinnedJobApprovalDetails(toolName: functionCall.name, args: functionCall.args)
-            let approved = await localState?.requestApproval(
-                toolName: functionCall.name, details: details, args: functionCall.args,
-                workspace: workspacePath, conversationId: conversationId, origin: approvalOrigin,
-                humanOnly: true) ?? false
-            guard approved else { return Self.pinnedJobCreationDeclined }
+                let details = Self.jobApprovalDetails(toolName: functionCall.name, args: functionCall.args, profile: profile)
+                let approved = await localState?.requestApproval(
+                    toolName: functionCall.name, details: details, args: functionCall.args,
+                    workspace: workspacePath, conversationId: conversationId, origin: approvalOrigin,
+                    humanOnly: true) ?? false
+                guard approved else { return Self.jobCreationDeclined }
+            }
         }
         // #282 §0.10, the same shape: a background run's grant is its boundary, and `set_workspace`
         // is the tool that would move it. Undeclared to it (see `buildRequest`), refused here.

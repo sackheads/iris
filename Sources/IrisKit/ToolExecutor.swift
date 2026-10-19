@@ -344,6 +344,16 @@ struct ToolExecutor {
         return configured > 0 ? configured : ConfigManager.JobDefaults.maxRunsPerHourForWatch
     }
 
+    /// This conversation's watch on `canonicalPath`, which a re-registration replaces and whose
+    /// profile it keeps when it names none. The dispatcher's ask (#652) reads the same one.
+    static func existingWatch(in jobs: [Job], canonicalPath: String, conversationId: UUID?) -> Job? {
+        let key = canonicalPath.lowercased()
+        return jobs.first { job in
+            guard case .fsEvent(let watch) = job.trigger else { return false }
+            return watch.path.lowercased() == key && job.createdInConversationId == conversationId
+        }
+    }
+
     private func registerWatcher(_ parsed: RegisterWatcherArguments, resolved: String, conversationId: UUID?) async -> String {
         guard let tools = await jobToolsProvider?() else { return "Jobs are not available yet." }
         // The canonical spelling is what is stored and what event paths are matched against
@@ -375,10 +385,8 @@ struct ToolExecutor {
                 guard case .fsEvent(let watch) = job.trigger else { return false }
                 return watch.path.lowercased() == key
             }
-            let existing = watching.first(where: { $0.createdInConversationId == conversationId })
-            let asked = parsed.profile?.lowercased() == JobProfile.mutating.rawValue.lowercased() ? JobProfile.mutating
-                : (parsed.profile == nil ? nil : JobProfile.readOnly)
-            let profile = asked ?? existing?.profile ?? .readOnly
+            let existing = Self.existingWatch(in: jobs, canonicalPath: path, conversationId: conversationId)
+            let profile = JobProfile.asked(parsed.profile) ?? existing?.profile ?? .readOnly
             if profile == .mutating, !(mutatingJobsAvailable?() ?? SandboxPolicy.mutatingJobCanRun()) {
                 return Self.watchProfileNeedsSandbox
             }
