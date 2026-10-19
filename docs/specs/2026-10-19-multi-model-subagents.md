@@ -147,7 +147,12 @@ The analysis below stands whichever is ruled.
 
 **The trust change (iris-dev-2's review).** A subagent on a custom endpoint makes that endpoint both an injection source and the caller: the model behind it chooses the subagent's tool calls.
 - **Unchanged:** those calls go through approval and Vibecop like any subagent's, and the subagent's result reaches the parent as tool output, sanitised by P1-P3 like any tool output.
-- **Open for the planner:** whether an approval asked by a subagent on a custom endpoint may offer **Always Allow**, or only Allow Once.
+- **Ruled (planner, half 2):** every approval dialog raised by a subagent on a non-primary family names the provider and model that asked, for example "asked by subagent on DeepSeek · deepseek-v4-pro". The person can't weigh the source if the dialog hides it.
+- **Open fork, for Brian** (it changes the approval ladder and its prompt cost, as #652 did):
+  - **(a)** Custom endpoints offer Allow Once only; built-in families keep today's dialog. *(The planner's recommendation and my lean.)*
+  - **(b)** Today's dialog for everyone, with the source named.
+  - **(c)** Allow Once only for every non-primary family.
+  - Half 2 builds neither until he answers.
 
 
 Vibecop and the prompt-injection guard (P1 structural, P2 classifier, P3 canary) judge a subagent's calls and tool output **exactly as now, whatever model the subagent runs on**:
