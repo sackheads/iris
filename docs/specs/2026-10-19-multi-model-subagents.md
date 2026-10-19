@@ -134,7 +134,7 @@ A subagent can run on a different provider and model than the conversation that 
    - **A model with no snapshot row** (one released after the snapshot) is banded against its family's snapshot range (planner). It may be at most 10x the family's highest rate and at least 1/10 of its lowest. Tested with a fetched row for an id the snapshot lacks.
    - **A family with no snapshot rows at all** (for example a new custom endpoint's) gets absolute bounds (iris-dev-2's review): at least $0.01/MTok and at most $1000/MTok per field. Anything outside takes the fallback, marked estimated. Within them, the file's rate is used and marked estimated, and the docs say so.
    - **An unknown primary rate** (no row, no snapshot) uses the **lowest** known rate in the primary's family, marked estimated. A small denominator overcharges.
-   - **An unknown delegated rate** is the open choice for Brian below. Its lean, (a) highest known in the family, also only overcharges.
+   - **An unknown delegated rate** is charged at its family's highest known rate (Brian's Q2, below), which also only overcharges.
    - **What's left:** a rate that is wrong but nonzero, within the band, and not above input can't be caught mechanically. The docs say the caps rest on the price file's accuracy within that band.
    - A rejected rate is logged once per refresh, with the model and the rule it broke.
 4. **Local loopback models** really cost $0. They still count tokens at the primary's weights for the budget, so a local runaway still stops.
