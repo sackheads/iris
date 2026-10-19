@@ -152,6 +152,11 @@ Brian: "Let do it this way for now and if it becomes a hindrance we can revisit"
   3. With network off (B), `curl` fails and the run is `failed`.
   4. A read-only mount refuses a write (`touch` → non-zero exit, `failed`).
 
+## Known limits
+
+- **Changed content after review** (the planner's reason for ruling (b)).  A script judged once can run content that changes after review.  One that executes a file from a mount (`sh /mnt/repo/check.sh`) runs whatever that file holds at each fire, and with host-only network that content can reach Mac services.  The follow-up that relaxes network-off scripts to Vibecop review once there's no interface (#691) has to argue that changed content can then only read the mounts and print a guarded line, which is what `read_file` already allows.
+- **Deletion and replay.**  A script job's stored script lives in the job store like any job.  Changing it outside Iris is the same class as #678's guarded settings, and isn't addressed here.
+
 ## Scope
 
 Closes #330 and #687.
