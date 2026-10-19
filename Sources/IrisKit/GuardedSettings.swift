@@ -104,7 +104,7 @@ enum GuardedSettings {
     /// that builds the name at run time gets no warning.
     static func approvalWarning(for details: String) -> String? {
         let text = details.lowercased()
-        let named = ["com.iris.secrets", "com.bnaylor.iris"].first { text.contains($0) }
+        let named = ["com.iris.secrets", "com.bnaylor.iris", markerKey.lowercased()].first { text.contains($0) }
         guard let named else { return nil }
         return "This names Iris's own settings (`\(named)`). A command that changes them can change Iris's limits, guards or provider addresses. Deny it unless you meant to."
     }
@@ -241,6 +241,8 @@ extension ConfigManager {
         for k in GuardedKey.allCases { dict[k.rawValue] = guardedValue(k) }
         dict[GuardedSettings.markerKey] = "1"
         keychain.saveSecrets(dict)
+        // The item holds every guarded value again, so the refusal and the notice stop applying.
+        if guardedState == .missing { guardedState = .normal }
     }
 
     /// When the guarded settings fell back to protective values, a command meant for the
