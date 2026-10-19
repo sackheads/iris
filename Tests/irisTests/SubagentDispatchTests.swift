@@ -171,6 +171,31 @@ struct SubagentDispatchTests {
                 "the grandchild's result names the inherited route")
     }
 
+    @Test("a routed subagent's graded delegation: the work runs on the route, the grader on the primary")
+    func gradedNestedGradesOnPrimary() async throws {
+        let app = AppState()
+        app.autoApproveTools = true
+        let parent = app.createNewConversation(select: false)
+        let route = ProviderRoute(providerId: "local-ollama", target: .endpoint(baseURL: "http://localhost:11434/v1", apiKey: ""),
+                                  model: "gemma4:12b")
+        let criteria: JSONValue = .array([.object(["text": .string("it is done"), "kind": .string("qualitative")])])
+        let routedClient = FakeLLMClient(responses: [
+            call("invoke_subagent", ["role": .string("helper"), "task": .string("look"), "effort": .string("easy"),
+                                     "criteria": criteria]),
+            call("goal_complete", ["summary": .string("grandchild done")]),
+            call("goal_complete", ["summary": .string("child done")]),
+        ])
+        let primaryClient = FakeLLMClient(responses: [
+            call("submit_evaluation", ["evaluations": .array([])]),
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "graded")]))], usageMetadata: nil),
+        ])
+        _ = await SubagentManager.shared.runSubagent(role: "reviewer", task: "review", effort: "medium",
+                                                     parentConversationId: parent, client: primaryClient,
+                                                     route: route, routedClient: routedClient, appState: app)
+        #expect(routedClient.callCount == 3, "the child and the grandchild worked on the route")
+        #expect(primaryClient.callCount >= 1, "the grandchild's unit was graded on the primary, never on the model it grades")
+    }
+
     @Test("a subagent on a custom endpoint asks Allow Once only, and the dialog names the provider and model")
     func endpointApprovalIsAllowOnce() async throws {
         let app = AppState()
