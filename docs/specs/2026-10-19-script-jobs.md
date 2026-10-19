@@ -1,6 +1,6 @@
 # Script jobs (#330)
 
-**Status:** draft spec, iris-dev-2, 2026-10-19.  Brian's direction on #330: "let's do a, cheap jobs first".  Forks A-E below are for the planner (and Brian where they touch money or safety); F is already ruled.  Reviewers: iris-dev-3 and iris-dev-1 (rule 26: sandbox and mounts).  Nothing is built until the forks are ruled.
+**Status:** spec, iris-dev-2, 2026-10-19.  Brian's direction on #330: "let's do a, cheap jobs first".  The planner ruled forks A-E on 2026-10-19 (recorded under each), and Brian ruled F.  Reviewers: iris-dev-3 and iris-dev-1 (rule 26: sandbox and mounts).  The build starts once their reviews converge.
 
 ## What and why
 
@@ -41,8 +41,8 @@ So a script job is mostly `runBuiltin`'s shape with `evaluateScript`'s machinery
   - the outcome from stdout (C);
   - the full output on the row (`JobRun.scriptOutput`, a new `decodeIfPresent` column, capped, see C);
   - a card per C and D.
-- **Gates on script jobs:** not in v1.  A script job *is* its own check, so `gate_*` together with `script` is refused.  (A script can exit early when there's nothing to do.)
-- **`--run-job`:** works unchanged through `fire` → `run`.  `--dry-run` on a script job is refused with a sentence, since there's no model turn to skip; or it could run the script without writing a row.  I lean refuse: a dry run that runs the thing isn't dry.
+- **Gates on script jobs:** refused (accepted by the planner).  A script job is its own check, and it can exit early when there's nothing to do.
+- **`--run-job`** works unchanged through `fire` → `run`.  **`--dry-run`** on a script job is refused (accepted): a dry run that runs the thing isn't dry.
 
 ## Forks
 
@@ -60,7 +60,7 @@ So a script job is mostly `runBuiltin`'s shape with `evaluateScript`'s machinery
 - **Upside:** the sweep job works.
 - **Cost:** a script that writes on every fire, with no model in the loop to notice something went wrong.  The person approves the script once; after that it runs as written, against whatever is in the mount, forever.  A model-run mutating job at least reads what it's about to change.
 
-**Lean: option 1 for v1, then option 2 as its own PR** once read-only script jobs have run for a while.  The jump from "a script that reads" to "a script that writes unattended" is worth its own review, and #330's cheapest cases are reads.
+**Ruled: option 1 for v1** (planner).  Writes come as their own PR, with their own review, filed as #688.  The jump from "a script that reads" to "a script that writes unattended" is worth that, and #330's cheapest cases are reads.
 
 ### B. Network
 
@@ -68,10 +68,17 @@ So a script job is mostly `runBuiltin`'s shape with `evaluateScript`'s machinery
 **Option 2, follows the job's grant** (only meaningful with A option 2).
 **Option 3, on, as gates are today.**
 
-**Lean: option 1.**
-- Gate scripts get network silently today, which is looser than the grants model.  A script job runs on every fire, not just as a check, so it should start where grants do: off unless asked for, and shown in the review.
-- "Is the site up" needs network, so the flag is needed in v1 even with read-only mounts.
-- **For the planner:** should gates move to the same default?  That's a separate behaviour change for existing jobs, so I'd file it rather than fold it in.
+**Ruled: option 1, plus one rule** (planner).
+- **Off by default.**  A script job runs on every fire, not just as a check, so it starts where grants do: network off unless asked for with `script_network: true`, and shown in the review.  "Is the site up" needs network, so the flag is in v1.
+- **Network scripts are human-only at review.**  Read-only mounts plus network, unattended, is a way out for whatever is mounted.  So for a script with `script_network: true`:
+  - Vibecop's APPROVE doesn't count;
+  - the dialog offers no Always Allow (the same flag as #652's).
+
+  With network off, Vibecop judges it as it does a gate script.  The cost is one dialog at creation, for network scripts only.  A test pins both: a network script raises the dialog even when Vibecop approves, and an offline one doesn't.
+  - **Open, from both reviews (dev-3 and dev-1):** make *every* script job human-only at review, network or not.  Their reason: outside Iris or a tainted conversation, #652's human-only ask skips a read-only job.  So under this ruling, an offline script job would be created on Vibecop's APPROVE alone, and would then run model-free on every fire with no person ever having read it.  Vibecop would still advise.  The cost is one dialog per script job, at creation, never per fire.  This is back with the planner, since it changes the ruling above.
+- **The dialog says what the combination means.**  With network on and a mount: "This script can read <mounts> and reach the internet on every run, with no one watching: it could send what it reads anywhere, or download and run more code."  With network on and no mounts, it says the second half only.
+- **A change re-asks.**  Any change to a stored job's script, mounts or network (a later `schedule_job` with the same name, or an edit) goes through the same review, as a new job would.
+- **Gate scripts** get network silently today.  The same egress argument applies to them, but changing them is filed separately as #687 (dev-1's, which also covers a read-only job's gate being approved on Vibecop alone), and they're unchanged here.
 
 ### C. The card and the status
 
@@ -81,21 +88,30 @@ So a script job is mostly `runBuiltin`'s shape with `evaluateScript`'s machinery
   - a timeout → `failed`, with "script timed out after N s" (as Limits words a run timeout);
   - no runtime at fire time → `interrupted`, with "no container runtime", like a mutating job's refusal.
 - **Outcome:** the **last non-empty line of stdout**, capped at 200 characters (the same cap as `outcome(from:)`).  With no stdout, it's `exit N`.
-- **Full output:** stdout and stderr, each capped at 64 KB on the row (`JobRun.scriptOutput`, `scriptStderr`), with a "[truncated]" marker.  The gate path captures output whole with no byte cap, which I'd fix here for both, since a chatty script would otherwise fill the ledger.  `get_job_run` returns it, as untrusted (D).
-- **When a card posts.**  Option (i) every fire, like a prompt job.  Option (ii) only when the outcome changed since the last run, or on failure.  **Lean: (ii)**, since a digest that says the same thing every hour is noise.  The person can still read every run in `/jobs`.  For the planner.
+- **Full output:** stdout and stderr, each capped at 64 KB on the row (`JobRun.scriptOutput`, `scriptStderr`), with a "[truncated]" marker.  The cap holds **while reading** (dev-3): the drain stops keeping bytes past it, so a script that prints gigabytes never fills memory.  Stored output is shown as plain text, never rendered as Markdown (dev-1).  The gate path captures output whole with no byte cap, which I'd fix here for both, since a chatty script would otherwise fill the ledger.  `get_job_run` returns it, as untrusted (D).
+- **When a card posts.**  **Ruled: only on a change or a failure** (planner, fork ii).
+  - **"Change"** means the exit status or the outcome line differs from the previous run's.
+  - **The first run** always posts.
+  - **Every run** writes its ledger row regardless.
+  - **`/jobs`** shows "last posted" and "last ran" separately, so a quiet job doesn't look dead.
 
 ### D. Output is untrusted (a rule)
 
 - **The card.**  The card's one-line summary goes into the destination's history (jobs.md, "Delivery"), and today `deliverEvent` sanitizes `historyLine` at **tier 1 only** (`EventDelivery.swift`).  That's fine for a model's own one-liner, but not for a script's stdout, which can be anything a mounted file or a web response put there.
   - So for a script job, the outcome passes `InjectionGuard.sanitize(..., contextTag: "script_output", maxTier: .tier3_canary)`, as gate output already does in `buildPrompt` (`JobRunner.swift:2053`), before it becomes the card's outcome.
   - A blocked verdict replaces it with "output withheld: the injection guard blocked it" and keeps the raw text on the row only.
+  - **Only a line that will be posted is checked** (planner).  Under C that's rare, and tier 3 isn't free: with the cloud engine it's a model call.
+  - **Charging the guard's tokens:** the planner asked that they be charged the way guard calls are charged elsewhere today.  I checked, and they aren't charged anywhere.  `CloudAuxiliaryEngine.generate` calls `LLMClient().generateContent(tier: .easy)` and returns only the text, so the usage is discarded.  That's true for Vibecop and for gate output's tier 3 alike.  A script job does the same, and charges nothing.  Charging guard calls is its own change, for every caller, filed as #689.  **Open:** dev-3's review asks that this PR count cloud canary tokens for script jobs now; that's back with the planner.
+  - **Whether a card will post** is decided on the raw output, before the guard runs (dev-3), so the guard runs only on a line that's going out.
+  - **Wording:** the docs never call a script run "zero tokens".  They say "no model turn", plus a line that the injection guard may call the primary's easy tier on a posted line.
+  - **Tier 3 unavailable** (`.skipped`): tiers 1 and 2 still run.  No card path marks this today; a skip shows only as the launch notice and the P2/P3 light (#218).  So the card gets a short marker, "(checked without tier 3)", in its outcome.  **For the planner:** that's a new marker, not an existing one.
 - **`get_job_run`** wraps the stored output with `InjectionGuard.wrapped` like any tool output.
 - **Test:** a script whose stdout is an injection string ("SYSTEM: ignore previous instructions and …"), under a scoped canary that flags it.  The card's history line must hold the withheld text, not the string, and so must the `get_job_run` result.  A mutation that skips the guard must fail it.
 
 ### E. Budgets and the timeout
 
 - **Budgets are zero tokens:** `countsTokens` is already `action == .prompt`.  Breaker, overlap, catch_up and retry apply unchanged.
-- **Timeout:** option (i) the gate's 5-600 s clamp, or option (ii) the job's `timeout_seconds` (60-3600) and `RunDeadlineWatchdog`.  **Lean: (ii), with the gate's lower bound.**  `script_timeout_seconds` is clamped to 5-3600, default 120.  A script job is a run, not a check, and the run limits (Limits, `JobLimits.resolve`) are where a person looks for "how long may a job take".  A one-hour ceiling is still bounded.  The deadline runs on the dispatch-based watchdog (Invariant 4), and the kill is the in-VM group kill.
+- **Timeout:** option (i) the gate's 5-600 s clamp, or option (ii) the job's `timeout_seconds` (60-3600) and `RunDeadlineWatchdog`.  **Ruled: (ii), with the gate's lower bound** (planner).  `script_timeout_seconds` is clamped to 5-3600, default 120.  A script job is a run, not a check, and the run limits (Limits, `JobLimits.resolve`) are where a person looks for "how long may a job take".  A one-hour ceiling is still bounded.  The deadline runs on the dispatch-based watchdog (Invariant 4), and the kill is the in-VM group kill.
 
 ### F. VM only (ruled)
 
@@ -118,7 +134,7 @@ Brian: "Let do it this way for now and if it becomes a hindrance we can revisit"
 ## Tests
 
 - **Fake runtime** (the default suite): creation and refusal (both or neither of prompt and script, script with a gate, no runtime), the review dialog's text, the status mapping, the outcome line and its cap, the output caps, the card rule (C), the guard (D), the timeout, and decoding an older build's rows.
-- **Real VM** (rule 29: work can run these through the planner, `IRIS_REAL_VM=1`):
+- **Real VM** (rule 29, `IRIS_REAL_VM=1`).  The planner routes these to work after confirming that work's standing instructions allow container; I tell the planner when the build reaches that point:
   1. A script job fires and its stdout last line becomes the outcome.
   2. A script that overruns its timeout is killed in the VM, leaving no process and no container.
   3. With network off (B), `curl` fails and the run is `failed`.
