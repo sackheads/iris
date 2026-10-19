@@ -255,7 +255,7 @@ container, exactly as before this deliverable.
 **What is refused**, at creation, in this order, each with its own sentence: a grant on a read-only
 job; a malformed entry (wrong number of parts, an empty part, a relative path, a comma); a source
 that does not exist or is not a directory; a source too broad to grant — `/`, your home folder
-itself, `/System`, `/Library`, `/usr`, `/private`, `/var`, `/etc`, `/bin`, `/sbin`, `/Volumes`, and
+itself or any folder above it (`/Users`), `/System`, `/Library`, `/usr`, `/private`, `/var`, `/etc`, `/bin`, `/sbin`, `/Volumes`, and
 any volume root or mount point (a folder *inside* one of those is fine: `/private/tmp/proj`,
 `~/proj`); a path that is or contains `~/.iris` — read-only included, because even a read-only
 mount hands the container `config/permissions.json`, the plugin settings and the memory store; a
