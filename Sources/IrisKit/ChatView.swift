@@ -1647,7 +1647,19 @@ struct LoopChip: View {
     private var thinking: Bool { state.isThinking(in: conversationId) }
 
     var body: some View {
-        ScrollView {
+        // Its own height up to the cap, scrolling past it (Invariant 8). Without `fixedSize` the
+        // ScrollView takes the whole cap, a band of empty chip (#676 GUI check); ViewThatFits
+        // did the same.
+        ScrollView { content }
+            .frame(maxHeight: 120)
+            .fixedSize(horizontal: false, vertical: true)
+        .background(Color.accentColor.opacity(0.06))
+        .cornerRadius(8)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Loop, every \(loop.every), \(loop.ticksLeft) ticks left\(loop.paused ? ", paused" : "")")
+    }
+
+    private var content: some View {
             HStack(spacing: 8) {
                 Image(systemName: "arrow.triangle.2.circlepath").foregroundColor(.accentColor)
                 VStack(alignment: .leading, spacing: 2) {
@@ -1688,11 +1700,5 @@ struct LoopChip: View {
                 }
             }
             .padding(8)
-        }
-        .frame(maxHeight: 120)
-        .background(Color.accentColor.opacity(0.06))
-        .cornerRadius(8)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Loop, every \(loop.every), \(loop.ticksLeft) ticks left\(loop.paused ? ", paused" : "")")
     }
 }
