@@ -1468,6 +1468,11 @@ class AppState {
                                                    pause: { id in _ = try? ledger.pauseUnlessOwnerPaused(jobId: id, reason: Self.gateNeedsReviewReason) }) {
                 appendLaunchNotice(notice, to: target)
             }
+            // #330: every existing gate script is fingerprinted once as it stands, so a later edit
+            // of its row is caught; a gate or script job made from now on is fingerprinted at review.
+            if let keychain = guardedConfig.guardedKeychain {
+                ScriptFingerprints.upgrade(jobs: (try? ledger.jobs()) ?? [], keychain: keychain)
+            }
         }
         // Every launch notice below goes through `appendLaunchNotice`, which persists it like any
         // other system message but skips it when the same wording is already in the conversation.
@@ -3164,10 +3169,13 @@ class AppState {
 
     /// The pause reason an existing gate job gets at #687's upgrade. Only a re-schedule lifts it.
     nonisolated static let gateNeedsReviewReason = "gate script needs your review"
+    /// The pauses only a re-schedule lifts, since that is what shows the person the script: #693's
+    /// upgrade pause, and #330's "script changed since review".
+    nonisolated static let reviewPauseReasons: Set<String> = [gateNeedsReviewReason, ScriptJobs.changedSinceReview]
 
     /// What `/jobs resume` and `/jobs pause` say about a job waiting for that review.
     nonisolated static func gateNeedsReviewResume(_ name: String) -> String {
-        "**\(name)** is paused until you review its gate script. Ask Iris to schedule it again (with gate_network: true if it needs the internet); that shows you the script once to approve. `/jobs resume` can't lift this pause."
+        "**\(name)** is paused until you review its script. Ask Iris to schedule it again (with gate_network: true if it needs the internet); that shows you the script once to approve. `/jobs resume` can't lift this pause."
     }
 
     /// #687, ruled (a): every script gate is network-off from this version (a stored gate with no
@@ -5013,8 +5021,11 @@ class AppState {
             let jobs = try ledger.jobs()
             var lastRuns: [UUID: JobRun] = [:]
             var lastBursts: [UUID: WatchSummary] = [:]
+            var lastPosted: [UUID: Date] = [:]
             for job in jobs {
                 lastRuns[job.id] = try ledger.runs(jobId: job.id, limit: 1).first
+                // #330: a script job posts only on a change, so "last posted" is its own column.
+                if job.action.scriptSpec != nil { lastPosted[job.id] = try ledger.lastPosted(jobId: job.id) }
                 // Only a watch has a burst to report; the query is skipped for the rest.
                 if case .fsEvent = job.trigger {
                     lastBursts[job.id] = try ledger.lastWatchSummary(jobId: job.id)
@@ -5029,7 +5040,7 @@ class AppState {
             let body = JobsCommand.render(jobs: jobs, lastRuns: lastRuns, usage: usage,
                                           unacknowledged: try ledger.unacknowledgedFailures(),
                                           unreadableJobs: ledger.unreadableJobCount, now: now,
-                                          lastBursts: lastBursts, absorbed: absorbed)
+                                          lastBursts: lastBursts, absorbed: absorbed, lastPosted: lastPosted)
             emitCommandOutput(body, format: .markdown, to: convId)
         } catch {
             emitCommandOutput("Could not read the jobs: \(error).", format: .markdown, to: convId)
@@ -5145,7 +5156,7 @@ class AppState {
                 }
                 // #693: a gate waiting for review stays that way; an owner's pause over it would
                 // let `/jobs resume` lift it with no review.
-                if job.pausedReason == Self.gateNeedsReviewReason {
+                if Self.reviewPauseReasons.contains(job.pausedReason ?? "") {
                     emitCommandOutput(Self.gateNeedsReviewResume(job.name), format: .markdown, to: convId)
                     return
                 }
@@ -5165,7 +5176,7 @@ class AppState {
                 }
                 // #693: only a re-schedule lifts this pause, since that is what shows the person
                 // the script (ruling a: an unreviewed script doesn't run).
-                if job.pausedReason == Self.gateNeedsReviewReason {
+                if Self.reviewPauseReasons.contains(job.pausedReason ?? "") {
                     emitCommandOutput(Self.gateNeedsReviewResume(job.name), format: .markdown, to: convId)
                     return
                 }
@@ -5227,8 +5238,8 @@ class AppState {
                     updated.retryAttempt = 0
                     // #693: a review pause survives a reschedule. Replaced by "unmatchable" here, a
                     // second reschedule with a good cron would clear it with no review (dev-1).
-                    if job.pausedReason == Self.gateNeedsReviewReason {
-                        updated.pausedReason = Self.gateNeedsReviewReason
+                    if Self.reviewPauseReasons.contains(job.pausedReason ?? "") {
+                        updated.pausedReason = job.pausedReason
                     } else if updated.nextFireAt == nil {
                         updated.pausedReason = JobScheduler.unmatchableReason
                     } else if updated.pausedReason == JobScheduler.unmatchableReason {

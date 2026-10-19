@@ -56,6 +56,16 @@ public struct InjectionGuard {
     public static let sanitizationCacheCapacity = 128
     private static let cache = SanitizationCache(capacity: sanitizationCacheCapacity)
 
+    /// Whether a tier-3 check would actually run now (#330's card marker): protection on, and a
+    /// canary that is provisioned (or a test's scoped one).
+    static func tier3WillRun(protectionEnabled: Bool? = nil) -> Bool {
+        if let scoped = AuxiliaryModelManager.scopedEngines { return scoped["canary"] != nil }
+        let fingerprint = currentConfigFingerprint(protectionEnabled: protectionEnabled)
+        guard fingerprint.protectionEnabled else { return false }
+        if case .unprovisioned = fingerprint.tier3Provisioning { return false }
+        return true
+    }
+
     /// Whether a test has scoped a tier-2 model or a tier-3 canary for this task tree.
     private static var guardTierScopeActive: Bool {
         CoreMLEvaluator.scopedModel != nil || AuxiliaryModelManager.scopedEngines?["canary"] != nil

@@ -19,7 +19,7 @@ struct ScheduleJobArgumentsTests {
 
     @Test("missing prompt, and a mutating profile with nowhere safe to run it, are refused")
     func refusals() {
-        #expect(ScheduleJobArguments.parse(["hour": .int(9)]) == .failure("schedule_job needs a prompt."))
+        #expect(ScheduleJobArguments.parse(["hour": .int(9)]) == .failure("schedule_job needs a prompt, or a script for a job that runs no model."))
         // Creatable since D3 — but only where the container runtime its commands always run in exists.
         // Injected, so the answer does not depend on what this machine has installed.
         let a = try? ScheduleJobArguments.parse(["prompt": .string("p"), "hour": .int(9), "profile": .string("mutating")]).get()

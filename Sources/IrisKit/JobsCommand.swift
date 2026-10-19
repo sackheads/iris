@@ -348,7 +348,8 @@ enum JobsCommand: Equatable {
     static func render(jobs: [Job], lastRuns: [UUID: JobRun], usage: UsageSnapshot,
                        unacknowledged: [JobRun], unreadableJobs: Int, now: Date,
                        lastBursts: [UUID: WatchSummary] = [:],
-                       absorbed: [UUID: AbsorbedCounts]? = nil) -> String {
+                       absorbed: [UUID: AbsorbedCounts]? = nil,
+                       lastPosted: [UUID: Date] = [:]) -> String {
         var blocks: [String] = []
 
         if jobs.isEmpty {
@@ -373,7 +374,15 @@ enum JobsCommand: Equatable {
                 return watchLine(job: job, lastBurst: lastBursts[job.id],
                                  absorbed: absorbed?[job.id], hasCoordinator: absorbed != nil)
             }
-            let extraLines = watchLines + jobs.compactMap(grantLine(job:))
+            // #330: a script job posts only on a change, so it says when it last ran and when it
+            // last posted separately; a quiet one doesn't look dead.
+            let scriptLines = jobs.compactMap { job -> String? in
+                guard let spec = job.action.scriptSpec else { return nil }
+                let ran = lastRuns[job.id].map { $0.statusText } ?? "never"
+                let posted = lastPosted[job.id].map { relativeText($0, now: now) } ?? "never"
+                return "**\(cell(job.name))** is a script job (no model turn, network \(spec.network ? "on" : "off")): last ran \(ran), last posted \(posted)."
+            }
+            let extraLines = watchLines + scriptLines + jobs.compactMap(grantLine(job:))
             // One paragraph per line: the block is markdown, where a single newline is a space,
             // so two lines joined by one would read as a single sentence.
             for line in extraLines {
@@ -579,6 +588,15 @@ enum JobsCommand: Equatable {
     /// One unit, rounded down: "in 3 m" is read as "not for a few minutes", and a fire that is
     /// already overdue (the scheduler is between ticks, or the app was asleep) is "due" rather than
     /// a negative interval.
+    /// How long ago `date` was, for a past moment (#330's "last posted").
+    static func relativeText(_ date: Date, now: Date) -> String {
+        let delta = now.timeIntervalSince(date)
+        if delta < 60 { return "just now" }
+        if delta < 3_600 { return "\(Int(delta / 60)) m ago" }
+        if delta < 86_400 { return "\(Int(delta / 3_600)) h ago" }
+        return "\(Int(delta / 86_400)) d ago"
+    }
+
     private static func relative(from now: Date, to date: Date) -> String {
         let delta = date.timeIntervalSince(now)
         if delta <= 0 { return "due" }

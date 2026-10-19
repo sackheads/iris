@@ -656,6 +656,14 @@ final class ConversationStore: Sendable {
         m.registerMigration("v26_job_run_delegated_charges") { db in
             try db.alter(table: "job_runs") { t in t.add(column: "delegatedCharges", .text) }
         }
+        // #330: a script job's output and whether its run posted a card. NULL on every other run.
+        m.registerMigration("v27_script_jobs") { db in
+            try db.alter(table: "job_runs") { t in
+                t.add(column: "scriptOutput", .text)
+                t.add(column: "scriptStderr", .text)
+                t.add(column: "posted", .boolean)
+            }
+        }
         return m
     }
 

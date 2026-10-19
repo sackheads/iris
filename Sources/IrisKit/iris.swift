@@ -2396,11 +2396,15 @@ actor IrisEngine {
         if !isUnattended && principal == .main {
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
-            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; by default a job that was due while the app was asleep runs once on wake rather than replaying every tick it missed, which `catch_up` changes, and by default a fire that finds the previous run still going is dropped, which `overlap` changes. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris' conversation (your main conversation) — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so, unless the job was created with a grant that covers it (mounts and network, below). A job with profile 'mutating' asks the user to approve it first, showing its mounts and network; so does any job created from Iris itself, or from a conversation that has received a message from another session or a background subagent's report. If the user declines, the job is not created: say so, and do not create a narrower one (such as read-only) unless they ask. A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only, with no internet unless gate_network is true). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. A gate script is always reviewed by the user before the job is created, Vibecop or not — shown the script, the directories it may read, whether it has the network and its timeout together, so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
+            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; by default a job that was due while the app was asleep runs once on wake rather than replaying every tick it missed, which `catch_up` changes, and by default a fire that finds the previous run still going is dropped, which `overlap` changes. Each prompt job's fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris' conversation (your main conversation) — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so, unless the job was created with a grant that covers it (mounts and network, below). A job with profile 'mutating' asks the user to approve it first, showing its mounts and network; so does any job created from Iris itself, or from a conversation that has received a message from another session or a background subagent's report. If the user declines, the job is not created: say so, and do not create a narrower one (such as read-only) unless they ask. A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only, with no internet unless gate_network is true). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. A gate script is always reviewed by the user before the job is created, Vibecop or not — shown the script, the directories it may read, whether it has the network and its timeout together, so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. For a check or digest that needs no thinking, give script instead of prompt: a shell script run inside the sandbox VM on every fire with no model turn at all (script_mounts read-only, script_network off by default, script_timeout_seconds 5-3600). Its last line of output becomes the card, which posts only on the first run, a failure, or a change; the user reviews the script before the job is created; and a stored script that has changed since then never runs. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
-                    "prompt": Schema(type: "STRING", description: "What Iris should do when the job fires"),
+                    "prompt": Schema(type: "STRING", description: "What Iris should do when the job fires. Give this or script, not both."),
+                    "script": Schema(type: "STRING", description: "Instead of a prompt: a shell script run inside the sandbox VM on every fire, with no model turn (a cheap check or digest). Its last line of output is the card's outcome; a card posts only on the first run, a failure, or a change. The user reviews it before the job is created. Read-only: no profile 'mutating', no mounts/network grant, no gate."),
+                    "script_mounts": Schema(type: "ARRAY", description: "Directories the script can read, as '/host/dir' or '/host/dir:/path/in/container'. Always read-only.", items: Schema(type: "STRING")),
+                    "script_timeout_seconds": Schema(type: "INTEGER", description: "How long the script may run before it is killed and the run fails (default 120, clamped to 5-3600)."),
+                    "script_network": Schema(type: "BOOLEAN", description: "Let the script reach the internet (default false: no internet, though it can still reach services on this Mac)."),
                     "name": Schema(type: "STRING", description: "Optional short name for the job; defaults to a slug of the prompt"),
                     "cron": Schema(type: "STRING", description: "Five-field cron expression: minute hour day-of-month month day-of-week, where day-of-week is 0=Sunday … 6=Saturday. Supports lists, ranges, and steps, e.g. '0 9 * * 1-5'."),
                     "timezone": Schema(type: "STRING", description: "IANA time zone the cron expression is evaluated in (e.g. America/Los_Angeles). Defaults to the user's current zone."),
@@ -2424,7 +2428,7 @@ actor IrisEngine {
                     "mounts": Schema(type: "ARRAY", description: "Directories the job may use, as '/host/dir', '/host/dir:ro' or '/host/dir:/path/in/container'. Read-write unless ':ro'. The first read-write one is the job's working directory. Mutating jobs only. Recorded as the directory each path resolves to; the whole filesystem, the home directory, volume roots and Iris's own directory cannot be mounted.", items: Schema(type: "STRING")),
                     "network": Schema(type: "BOOLEAN", description: "true lets the job's commands reach the network from inside the VM; default false, which attaches the VM to a host-only network. Mutating jobs only.")
                 ],
-                required: ["prompt"]
+                required: []
             )
         ))
         }
@@ -3613,7 +3617,7 @@ actor IrisEngine {
             let slug = Job.slug(from: name)
             replacing = jobs.first {
                 $0.name == slug && $0.createdInConversationId == conversationId && $0.trigger.kind != Trigger.fsEventKind
-                    && $0.action == .prompt   // 5b §0.8: schedule_job never turns a built-in into a prompt job
+                    && { if case .builtin = $0.action { false } else { true } }($0)   // 5b §0.8: never a built-in
             }
             if let replacing { taken.remove(replacing.name) }
         }
@@ -3648,12 +3652,30 @@ actor IrisEngine {
                     }
                     reviewedScript = true
                 }
+                // #330: a script job's own review, human-only like a gate's: it runs in the VM on
+                // every fire with no model looking at it.
+                if case .script(let spec) = job.action, !reviewedScript {
+                    let reviewer = review ?? Self.gateScriptReview(state: state, conversationId: conversationId)
+                    if case .failure(let message) = await reviewer.review(
+                        details: ScriptJobs.reviewDetails(spec, isGate: false)) {
+                        return message.text
+                    }
+                    reviewedScript = true
+                }
                 var job = job
                 if let replacing {
                     job = Job(id: replacing.id, name: job.name, prompt: job.prompt, trigger: job.trigger,
                               profile: job.profile, destinationConversationId: replacing.destinationConversationId,
                               createdInConversationId: replacing.createdInConversationId,
-                              createdAt: replacing.createdAt, policy: job.policy)
+                              createdAt: replacing.createdAt, policy: job.policy, action: job.action)
+                }
+                // #330: what was just reviewed is fingerprinted before the row exists, in the secrets
+                // item a shell can't write; a fire whose stored script doesn't match is refused.
+                if let spec = job.action.scriptSpec ?? job.trigger.gate?.scriptSpec {
+                    let keychain = await MainActor.run { ConfigManager.shared.guardedKeychain } ?? .shared
+                    guard ScriptFingerprints.record(jobId: job.id, spec: spec, keychain: keychain) else {
+                        return ScriptJobs.couldNotRecordReview
+                    }
                 }
                 do {
                     // Stored through the scheduler, not the ledger, so the first fire is computed
@@ -4909,7 +4931,14 @@ actor IrisEngine {
                         // quote back to `/jobs` and `list_jobs`, and it is rendered escaped
                         // everywhere a person reads it.)
                         let message = await guardedJobRunField(raw, maxTier: .tier3_canary)
-                        let outcome = await guardedJobRunField(run.outcome, maxTier: .tier1_structural)
+                        // #330: a script run's outcome is the script's own stdout, not a model's
+                        // one-liner, so it and the output get the classifiers too.
+                        let isScript = run.scriptOutput != nil || run.scriptStderr != nil
+                        let outcome = await guardedJobRunField(run.outcome, maxTier: isScript ? .tier3_canary : .tier1_structural)
+                        let scriptOutput = await guardedJobRunField(run.scriptOutput.map { String($0.prefix(Self.jobRunTranscriptExcerpt)) },
+                                                                    maxTier: .tier3_canary)
+                        let scriptStderr = await guardedJobRunField(run.scriptStderr.map { String($0.prefix(Self.jobRunTranscriptExcerpt)) },
+                                                                    maxTier: .tier3_canary)
                         let failureReason = await guardedJobRunField(run.failureReason,
                                                                      maxTier: .tier1_structural)
                         // The gate signal too: a URL gate's is derived from headers a remote server
@@ -4919,7 +4948,8 @@ actor IrisEngine {
                         let gateSignal = await guardedJobRunField(run.gateSignal,
                                                                   maxTier: .tier1_structural)
                         result = Self.jobRunJSON(run, outcome: outcome, failureReason: failureReason,
-                                                 gateSignal: gateSignal, lastAgentMessage: message)
+                                                 gateSignal: gateSignal, lastAgentMessage: message,
+                                                 scriptOutput: scriptOutput, scriptStderr: scriptStderr)
                     }
                 } catch {
                     result = "Could not read the run: \(error)."
@@ -6341,9 +6371,11 @@ extension IrisEngine {
                 "policy": JobsCommand.policySummary(for: job),
                 "gateKind": job.trigger.gate?.summary ?? NSNull(),
                 "retryAttempt": job.retryAttempt,
-                // "prompt" or "builtin:<name>" (5b §0.8): a built-in runs Iris's own code with no
-                // model turn, so its zero tokens are not an idle or broken job.
-                "action": job.action.stored,
+                // "prompt", "builtin:<name>" (5b §0.8) or "script" (#330): a built-in and a script
+                // job run with no model turn, so their zero tokens are not an idle or broken job.
+                "action": job.action.scriptSpec == nil ? job.action.stored : "script",
+                "script": job.action.scriptSpec?.command ?? NSNull(),
+                "scriptNetwork": job.action.scriptSpec.map { $0.network } ?? NSNull(),
                 // D6 decision 9: whether the owner has let a link fire this job. Read-only here;
                 // the token itself is never in any tool result (decision 10).
                 "urlTrigger": job.urlTrigger,
@@ -6382,7 +6414,8 @@ extension IrisEngine {
     /// what was refused, which is what a question about the run is actually asking; the whole call
     /// is for the person reading the card.
     nonisolated static func jobRunJSON(_ run: JobRun, outcome: String?, failureReason: String?,
-                                       gateSignal: String?, lastAgentMessage: String?) -> String {
+                                       gateSignal: String?, lastAgentMessage: String?,
+                                       scriptOutput: String? = nil, scriptStderr: String? = nil) -> String {
         let iso = ISO8601DateFormatter()
         var row: [String: Any] = [
             "id": run.id.uuidString,
@@ -6416,6 +6449,10 @@ extension IrisEngine {
             "approvedAt": run.approvedAt.map { iso.string(from: $0) } ?? NSNull(),
             "parentRunId": run.parentRunId?.uuidString ?? NSNull(),
             "lastAgentMessage": lastAgentMessage ?? NSNull(),
+            // #330: a script run's output, guarded and excerpted; null on every other run.
+            "scriptOutput": scriptOutput ?? NSNull(),
+            "scriptStderr": scriptStderr ?? NSNull(),
+            "posted": run.posted,
             // As stored, all eight figures (§6) — `coalesced` is read here and on the row only.
             // Null for every run no burst started. Harness-written, so not guarded.
             "watchSummary": run.watchSummary.map(jsonObject) ?? NSNull(),

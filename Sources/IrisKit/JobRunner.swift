@@ -79,6 +79,13 @@ actor JobRunner {
     /// What asks a job's gate whether anything changed (§7). Injected so a test can answer for it
     /// without a network, a file or a VM; in the app it is `GateEvaluator` over the real three.
     private let gateEvaluator: @Sendable (Gate, String?) async -> GateResult
+    /// A script job's fire in the VM (#330); a test passes its own.
+    private let scriptRunner: @Sendable (ScriptSpec) async -> GateEvaluator.VMRun
+    /// Whether a stored script is still the one a person reviewed (#330); a test passes its own.
+    private let fingerprintCheck: @Sendable (UUID, ScriptSpec) -> ScriptFingerprints.Check
+    /// The tier-3 check a posted script line passes (#330, D): the line to post, and whether
+    /// tier 3 could not run. A test passes its own.
+    private let scriptLineGuard: @Sendable (String) async -> (line: String, withoutTier3: Bool)
     /// The ledger's own `lastGateSignal`, except where a test needs that one read to fail — the
     /// same reason `usageSource` exists. A gate whose previous signal cannot be read is a gate
     /// error like any other, and there is no other way to make only that read fail.
@@ -156,6 +163,9 @@ actor JobRunner {
          usageSource: (any JobUsageReading)? = nil,
          sandboxAvailable: (@Sendable () -> Bool)? = nil,
          gateEvaluator: (@Sendable (Gate, String?) async -> GateResult)? = nil,
+         scriptRunner: (@Sendable (ScriptSpec) async -> GateEvaluator.VMRun)? = nil,
+         fingerprintCheck: (@Sendable (UUID, ScriptSpec) -> ScriptFingerprints.Check)? = nil,
+         scriptLineGuard: (@Sendable (String) async -> (line: String, withoutTier3: Bool))? = nil,
          lastGateSignal: (@Sendable (UUID) throws -> String?)? = nil,
          approvedCallExecutor: (@Sendable (BlockedCall, UUID) async -> String)? = nil,
          watchdogSlice: TimeInterval = JobRunner.defaultWatchdogSlice,
@@ -176,6 +186,18 @@ actor JobRunner {
         self.sandboxAvailable = resolvedSandboxAvailable
         self.gateEvaluator = gateEvaluator ?? Self.liveGateEvaluator(
             sandboxAvailable: resolvedSandboxAvailable, image: { config.sandboxImage })
+        self.scriptRunner = scriptRunner ?? { spec in
+            let runtime: (any ContainerRuntime)? = resolvedSandboxAvailable() ? CLIContainerRuntime() : nil
+            return await GateEvaluator.runScriptJob(spec, runtime: runtime, image: config.sandboxImage)
+        }
+        self.fingerprintCheck = fingerprintCheck ?? { id, spec in
+            // A config with no guarded Keychain is #678's legacy mode, which only a test's own
+            // `ConfigManager(store:)` is: it keeps nothing in the item, fingerprints included.
+            // Production's `ConfigManager.shared` always has one, so it always checks.
+            guard let keychain = config.guardedKeychain else { return .matches }
+            return ScriptFingerprints.check(jobId: id, spec: spec, keychain: keychain)
+        }
+        self.scriptLineGuard = scriptLineGuard ?? { line in await ScriptJobs.guardLine(line) }
         self.lastGateSignal = lastGateSignal ?? { [ledger] in try ledger.lastGateSignal(jobId: $0) }
         self.approvedCallExecutor = approvedCallExecutor
         self.endSandboxSession = endSandboxSession ?? { await (sandboxSessions ?? .shared).closeSession($0) }
@@ -641,6 +663,19 @@ actor JobRunner {
             return .refuse(await noteGateError(detail, job: job, origin: origin, at: at, note: note))
         }
 
+        // #330: a gate script runs only as it was reviewed. Changed or missing pauses the job once,
+        // with a card; an unreadable Keychain is a gate error, which fails closed.
+        if let spec = gate.scriptSpec {
+            switch fingerprintCheck(job.id, spec) {
+            case .matches: break
+            case .changed, .missing:
+                await pause(job: job, origin: origin, reason: ScriptJobs.changedSinceReview, at: at, note: note)
+                return .refuse(.gateError(detail: ScriptJobs.changedSinceReview, paused: true))
+            case .unreadable:
+                return .refuse(await noteGateError(ScriptJobs.keychainUnreadable, job: job, origin: origin, at: at, note: note))
+            }
+        }
+
         switch await gateEvaluator(gate, previous) {
         case .changed(let signal, let payload):
             return .proceed(GateContext(signal: signal, payload: payload))
@@ -777,6 +812,88 @@ actor JobRunner {
                                 // The unknown-name pause reason already says what failed.
                                 outcome: Self.cardOutcome(builtin == nil ? "paused" : outcome,
                                                           retry: retry, now: finishedAt),
+                                startedAt: startedAt, finishedAt: finishedAt,
+                                catchUpNote: note, builtin: true), for: job)
+    }
+
+    /// A script job's fire (#330), shaped like `runBuiltin`: a row with no transcript and zero
+    /// tokens, the script in the VM in place of a turn, the retry ladder, and a card only on the
+    /// first run, a failure, or a change in status or outcome. The fingerprint is checked first: a
+    /// script that isn't the reviewed one never runs (changed or missing pauses with one card; an
+    /// unreadable Keychain refuses, fails closed, and is said once by the change rule).
+    private func runScript(_ spec: ScriptSpec, job: Job, origin: FireOrigin, note: String?,
+                           afterBegin: (() async -> Void)? = nil) async {
+        switch fingerprintCheck(job.id, spec) {
+        case .matches: break
+        case .changed, .missing:
+            await pause(job: job, origin: origin, reason: ScriptJobs.changedSinceReview, at: now(), note: note)
+            return
+        case .unreadable:
+            break   // recorded below as a refused run
+        }
+        let previous = (try? ledger.runs(jobId: job.id, limit: 1))?.first
+        let startedAt = now()
+        let run = JobRun(jobId: job.id, jobName: job.name, triggerKind: origin.triggerKind, startedAt: startedAt)
+        do { try ledger.begin(run: run) } catch {
+            print("[JobRunner] not running \(job.name): could not record the run: \(error)")
+            return
+        }
+        await afterBegin?()
+        await reportRowWritten()
+        do { try ledger.setLastRun(jobId: job.id, at: startedAt) }
+        catch { print("[JobRunner] could not stamp the last run of \(job.name): \(error)") }
+
+        let status: JobRun.Status
+        let outcome: String
+        var failureReason: String?
+        var stdout: String?, stderr: String?
+        if fingerprintCheck(job.id, spec) == .unreadable {
+            (status, outcome, failureReason) = (.interrupted, ScriptJobs.keychainUnreadable, ScriptJobs.keychainUnreadable)
+        } else {
+            switch await scriptRunner(spec) {
+            case .ran(let out, let err, let exitCode):
+                stdout = out
+                stderr = err
+                outcome = ScriptJobs.outcome(stdout: out, exitCode: exitCode)
+                if exitCode == 0 { status = .completed } else {
+                    status = .failed
+                    failureReason = "exit \(exitCode)"
+                }
+            case .timedOut(let seconds):
+                (status, outcome, failureReason) = (.failed, "script timed out after \(seconds) s", "script timed out after \(seconds) s")
+            case .failed(let detail):
+                // No runtime at fire time is the VM-only rule (F): interrupted, never the host.
+                status = detail.hasPrefix("no container runtime") ? .interrupted : .failed
+                (outcome, failureReason) = (detail, detail)
+            case .outputTooLong:
+                // #699: past the in-VM cap, so the script wrote round it; its output isn't kept.
+                let why = "the script printed more than \(GateEvaluator.outputLimitBytes / 1_024) KB on standard output"
+                (status, outcome, failureReason) = (.failed, why, why)
+            }
+        }
+        let posts = ScriptJobs.posts(status: status, outcome: outcome, previous: previous)
+        // D: only a line that will be posted is guarded, since tier 3 can be a model call.
+        var shown = outcome
+        if posts, stdout != nil {
+            let checked = await scriptLineGuard(outcome)
+            shown = checked.withoutTier3 ? checked.line + " " + ScriptJobs.withoutTier3Marker : checked.line
+        }
+        let finishedAt = now()
+        do {
+            try ledger.finish(runId: run.id, status: status, outcome: shown, failureReason: failureReason,
+                              blockedTool: nil, tokens: TokenUsage(), finishedAt: finishedAt)
+            try ledger.recordScript(runId: run.id, stdout: stdout, stderr: stderr, posted: posts)
+        } catch {
+            print("[JobRunner] could not close the run for \(job.name): \(error)")
+        }
+        await refreshAttention()
+        let retry = Self.retryDecision(status: status, attempt: job.retryAttempt, retryEnabled: job.policy.retry,
+                                       watcherFire: Self.isPathDriven(origin: origin, job: job), now: finishedAt)
+        await apply(retry, job: job, status: status)
+        guard posts else { return }
+        await deliver(EventCard(kind: "job_run", runId: run.id, jobId: job.id, jobName: job.name,
+                                status: status,
+                                outcome: Self.cardOutcome(shown, retry: retry, now: finishedAt),
                                 startedAt: startedAt, finishedAt: finishedAt,
                                 catchUpNote: note, builtin: true), for: job)
     }
@@ -1045,6 +1162,11 @@ actor JobRunner {
         // Before anything that opens a conversation: a built-in has no turn and no transcript.
         if case .builtin(let name) = job.action {
             await runBuiltin(name, job: job, origin: origin, note: note, afterBegin: afterBegin)
+            return
+        }
+        // #330: a script job runs in the VM with no conversation and no model.
+        if case .script(let spec) = job.action {
+            await runScript(spec, job: job, origin: origin, note: note, afterBegin: afterBegin)
             return
         }
         // L1: a grant on a read-only row is inert — never stamped, never checked.
