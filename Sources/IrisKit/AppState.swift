@@ -5317,11 +5317,12 @@ class AppState {
         return result
     }
 
-    /// The delay before `loop`'s next tick: its interval, or for a self-paced loop the delay the
-    /// last turn asked for, else the default. Taken once.
+    /// The delay before `loop`'s next tick: its interval, or for a self-paced loop the delay asked
+    /// for since the last tick started, else the default. Read, not taken: a chat turn between
+    /// ticks re-arms at the same pace; the request is cleared as the next tick starts (#684 review).
     func nextLoopDelay(for id: UUID, loop: ConversationLoop) -> Double {
         guard loop.selfPaced else { return loop.intervalSeconds }
-        return loopRequestedDelay.removeValue(forKey: id) ?? ConversationLoop.selfPacedDefault
+        return loopRequestedDelay[id] ?? ConversationLoop.selfPacedDefault
     }
 
     private func handleLoopCommand(_ arguments: String, convId: UUID) {
@@ -5382,13 +5383,14 @@ class AppState {
     /// running (that turn's end arms it).
     func startLoop(_ loop: ConversationLoop, in id: UUID) {
         guard let idx = conversations.firstIndex(where: { $0.id == id }) else { return }
+        let replaced = conversations[idx].loop
         conversations[idx].loop = loop
         // A self-paced loop's first tick comes at its first interval; later ones at what the
         // model asks for, else the default.
         if loop.selfPaced { loopRequestedDelay[id] = loop.intervalSeconds } else { loopRequestedDelay[id] = nil }
         markChanged(id, .metadata)
         appendMessage(role: .system, content: """
-            ↻ Looping \(loop.cadence): \(loop.prompt)
+            ↻ Looping \(loop.cadence): \(loop.prompt)\(replaced.map { "\nThis replaces the loop that was running (\($0.cadence): \($0.prompt))." } ?? "")
             Up to \(loop.cap) ticks (Settings → Advanced → Agent Limits → Loop tick limit). Each tick sends the whole conversation so far, so each costs a little more than the last. Talk to it any time; `/loop pause`, `/loop resume` and `/loop stop` control it.
             """, to: id)
         armLoopIfIdle(id)
@@ -5457,6 +5459,8 @@ class AppState {
               loop.id == loopId, !loop.paused, loop.ticksLeft > 0, loopRefusal(conversations[idx]) == nil else { return .none }
         if isThinking(in: id) { return .busy }
         conversations[idx].loop?.ticksLeft -= 1
+        // Each tick asks for its own next delay; without a call it falls back to the default.
+        loopRequestedDelay[id] = nil
         markChanged(id, .metadata)
         let number = loop.cap - loop.ticksLeft + 1
         appendMessage(role: .system, content: "↻ Loop tick \(number) of \(loop.cap)", to: id)

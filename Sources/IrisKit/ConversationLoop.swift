@@ -77,6 +77,9 @@ struct ConversationLoop: Codable, Equatable, Sendable {
             if parts[0].drop(while: { $0 == "-" || $0 == "+" }).first?.isNumber == true {
                 return .invalid("The interval is a number and a unit: `30s`, `5m`, `2h` or `1d`. " + usage)
             }
+            if parts.count == 1, controlWords.contains(parts[0].lowercased()) {
+                return .invalid("`/loop \(parts[0])` isn't a loop command. `/loop stop` ends a loop and `/loop pause` pauses it. " + usage)
+            }
             return .startSelfPaced(prompt: trimmed)
         }
         guard parts.count == 2, !parts[1].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -128,8 +131,17 @@ struct ConversationLoop: Codable, Equatable, Sendable {
         let applied = min(max(requested.rounded(), selfPacedMinimum), selfPacedMaximum)
         let next = "Next loop tick in \(describe(seconds: applied))."
         guard applied != requested.rounded() else { return (applied, next) }
-        return (applied, "\(next) You asked for \(Int(requested.rounded())) s; the delay is \(Int(selfPacedMinimum)) to \(Int(selfPacedMaximum)) s, so it was clamped.")
+        // Never `Int(requested)`: the model can send any finite number, and 1e30 traps (#684 review).
+        let asked = requested < selfPacedMinimum ? "less than \(Int(selfPacedMinimum)) s" : "more than \(Int(selfPacedMaximum)) s"
+        return (applied, "\(next) You asked for \(asked); the delay is \(Int(selfPacedMinimum)) to \(Int(selfPacedMaximum)) s, so it was clamped.")
     }
+
+    /// One-word prompts that read as a command to the loop rather than a task for it (#684
+    /// review): `/loop off` must not start a 50-tick loop whose task is "off".
+    static let controlWords: Set<String> = [
+        "off", "on", "end", "cancel", "quit", "exit", "halt", "kill", "abort", "start", "restart",
+        "help", "list", "show", "info", "enable", "disable", "unpause", "continue", "clear", "reset",
+    ]
 }
 
 /// A one-shot wait on `DispatchTime`, which is uptime: time the Mac spends asleep does not count
