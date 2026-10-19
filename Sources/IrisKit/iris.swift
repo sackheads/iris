@@ -2093,6 +2093,22 @@ actor IrisEngine {
         let agentProfile = principal == .main
             ? await MainActor.run { localState?.resolveAgentProfile(for: conversationId) } : nil
         let currentSystemPrompt = await assembledSystemPrompt(workspacePath: workspacePath, agentProfile: agentProfile)
+        // #465 part 2: what the profile's `tools:` list leaves this turn. A subagent takes the
+        // profile of the conversation it works for, so delegation cannot widen it; the evaluator
+        // keeps its own toolset. Set per turn, for the tool list below and for dispatch.
+        let scopeProfile: AgentProfile?
+        switch principal {
+        case .main: scopeProfile = agentProfile
+        case .subagent: scopeProfile = await MainActor.run { localState?.delegatedAgentProfile(for: conversationId) }
+        case .evaluator: scopeProfile = nil
+        }
+        if let scopeProfile, scopeProfile.tools != nil {
+            let reflecting = principal == .main
+                ? await MainActor.run { localState?.isReflecting(conversationId) ?? false } : false
+            agentToolScopes[conversationId] = AgentToolScope(profile: scopeProfile, reflecting: reflecting)
+        } else {
+            agentToolScopes[conversationId] = nil
+        }
 
         // Read once for the gates below that all ask about this conversation: whether it is an
         // unattended run, whether it has a goal to complete, what a job run of it may do, and
@@ -2604,6 +2620,12 @@ actor IrisEngine {
                 JobProfile.readOnlyDenies($0.name, sandboxedRunCommand: sandboxed,
                                           readOnlyMCPTools: readOnlyMCP)
             }
+        }
+
+        // #465 part 2: a profile's `tools:` list, after the sticky union and `hardStrip`, so a
+        // sticky tool cannot widen it and nothing a strip removed comes back.
+        if let scope = agentToolScopes[conversationId] {
+            toolsList = scope.narrow(toolsList)
         }
 
         // Offer an optional `intent` on every tool so the model can attach a one-line
@@ -4152,6 +4174,15 @@ actor IrisEngine {
         "Not available: this job is read-only, so `\(tool)` cannot run in it — and nor can any other tool that changes something. Do not look for another way; report what you found and finish."
     }
 
+    /// What the model is told when the conversation's agent profile does not offer a tool (#465).
+    nonisolated static func agentProfileDeniedToolResult(tool: String, profile: String) -> String {
+        "Not available: this conversation's agent profile `\(profile)` doesn't include `\(tool)`. Use the tools you have, and if the task needs this one, say so to the user."
+    }
+
+    /// Each conversation's agent-profile tool scope for its current turn (#465 part 2), set at
+    /// the turn's start. Absent: no profile, or one without a `tools:` list.
+    private var agentToolScopes: [UUID: AgentToolScope] = [:]
+
     /// The conversations whose turn met a `.profile` denial. Set by `profileRefusal`
     /// (actor-isolated, so the concurrent tool batch can write it safely), taken by the
     /// model-round loop, which ends the turn on it. The tool it names comes from the recorded
@@ -4278,6 +4309,12 @@ actor IrisEngine {
         if let refusal = await profileRefusal(for: functionCall, conversationId: conversationId,
                                               workspacePath: workspacePath, profile: jobProfile) {
             return refusal
+        }
+
+        // #465 part 2: a call outside the profile's list is refused, as the declaration above
+        // stops only a model that plays by it.
+        if let scope = agentToolScopes[conversationId], !scope.allows(functionCall.name) {
+            return Self.agentProfileDeniedToolResult(tool: functionCall.name, profile: scope.profile.name)
         }
 
         if functionCall.name == "set_workspace", let path = functionCall.args["path"]?.stringValue {

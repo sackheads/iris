@@ -1766,6 +1766,18 @@ class AppState {
         return snapshot?.profile
     }
 
+    /// The profile of the conversation `id` works for, when `id` is a delegate (a subagent, at any
+    /// depth): its tools are narrowed by that profile too, so delegation cannot go around it
+    /// (#465 part 2). Read quietly: the file if it reads, else the kept copy; the notices belong
+    /// to the root's own turns.
+    func delegatedAgentProfile(for id: UUID) -> AgentProfile? {
+        let root = delegationRoot(of: id)
+        guard root != id, let conv = conversations.first(where: { $0.id == root }), !conv.isPinned,
+              let name = conv.agentProfile else { return nil }
+        if case .loaded(let profile) = agentProfiles.load(name) { return profile }
+        return conv.agentProfileSnapshot?.profile
+    }
+
     /// Whether `id`'s profile file read last time: for the sidebar label.
     func agentProfileFileReads(_ id: UUID) -> Bool {
         !(agentProfileState[id]?.hasPrefix("unreadable:") ?? false)
@@ -1799,6 +1811,30 @@ class AppState {
     /// The automatic reflection pass, shared by the 30-message trigger and `/new`'s rotation of
     /// Iris (5b §0.4). `/reflect` asks for more (an OKF grooming pass) and keeps its own text.
     static let reflectionPrompt = IrisPaths.standard.agentFacing("System Event [Reflection Trigger]: It's time to consolidate your memories. Reflect on the recent conversation. Have you learned any new user preferences, project structures, or recurring workflows? If so, use `update_soul` to evolve your persona, `update_user_profile` to update the user profile, `update_memory` to consolidate durable facts, and `create_skill`/`update_skill` for procedural skills. When you learn something durable — a lesson, recipe, decision, or reusable artifact — archive it to your permanent library at `~/.iris/memory/library/` (see your Library Management skill). Output a transparent summary of the gist of the updates for the user. If nothing needs updating, just reply 'No memory consolidation needed at this time.'")
+
+    /// The tools the reflection prompts name, which a profile's `tools:` list never takes from a
+    /// reflection turn (#465 part 2). Kept beside the prompts; a test checks the two agree.
+    nonisolated static let reflectionTools: Set<String> = [
+        "update_soul", "update_user_profile", "update_memory", "create_skill", "update_skill",
+    ]
+
+    /// `/reflect`'s prompt: the automatic one's request plus an OKF grooming pass.
+    static let manualReflectionPrompt = IrisPaths.standard.agentFacing("""
+    System Event [Reflection Trigger]: It's time to consolidate your memories. Reflect on the recent conversation. Have you learned any new user preferences, project structures, or recurring workflows? If so, use `update_soul` to evolve your persona, `update_user_profile` to update the user profile, `update_memory` to consolidate durable facts, and `create_skill`/`update_skill` for procedural skills. When you learn something durable — a lesson, recipe, decision, or reusable artifact — archive it to your permanent library at `~/.iris/memory/library/` (see your Library Management skill).
+
+    Additionally, perform a grooming pass on your Markdown memory library. Ensure ALL memory files (`~/.iris/memory/skills/*`, `~/.iris/memory/USER.md`, `~/.iris/memory/SOUL.md`) use the Open Knowledge Format (OKF). This means each file MUST start with a YAML frontmatter block containing at least:
+    ---
+    type: [skill|profile|core|etc]
+    title: ...
+    description: ...
+    tags: [..., ...]
+    timestamp: ...
+    ---
+    For a skill, set `title`/`tags` with `update_skill`'s own `title`/`tags` parameters — not `write_file` — and only pass the field that's actually missing or stale; omitting the other leaves it as it was. Verify that your cross-links between files are still valid, and reorganize or fix any broken links. Output a transparent summary of the gist of the updates and grooming performed for the user. If nothing needs updating, just reply 'No memory consolidation needed at this time.'
+    """)
+
+    /// Whether `id`'s current turn is a memory reflection: `runReflection` holds this for its turn.
+    func isReflecting(_ id: UUID) -> Bool { reflectionSteerPoints[id] != nil }
 
     /// What a reflection says when it changed nothing (both prompts ask for exactly this). Matched
     /// as a prefix of the trimmed reply; such a reflection posts no card.
@@ -2779,22 +2815,9 @@ class AppState {
             return
         } else if trimmed.hasPrefix("/reflect") {
             appendMessage(role: .system, content: "Triggering manual memory reflection...", to: convId)
-            let reflectionPrompt = IrisPaths.standard.agentFacing("""
-            System Event [Reflection Trigger]: It's time to consolidate your memories. Reflect on the recent conversation. Have you learned any new user preferences, project structures, or recurring workflows? If so, use `update_soul` to evolve your persona, `update_user_profile` to update the user profile, `update_memory` to consolidate durable facts, and `create_skill`/`update_skill` for procedural skills. When you learn something durable — a lesson, recipe, decision, or reusable artifact — archive it to your permanent library at `~/.iris/memory/library/` (see your Library Management skill).
-
-            Additionally, perform a grooming pass on your Markdown memory library. Ensure ALL memory files (`~/.iris/memory/skills/*`, `~/.iris/memory/USER.md`, `~/.iris/memory/SOUL.md`) use the Open Knowledge Format (OKF). This means each file MUST start with a YAML frontmatter block containing at least:
-            ---
-            type: [skill|profile|core|etc]
-            title: ...
-            description: ...
-            tags: [..., ...]
-            timestamp: ...
-            ---
-            For a skill, set `title`/`tags` with `update_skill`'s own `title`/`tags` parameters — not `write_file` — and only pass the field that's actually missing or stale; omitting the other leaves it as it was. Verify that your cross-links between files are still valid, and reorganize or fix any broken links. Output a transparent summary of the gist of the updates and grooming performed for the user. If nothing needs updating, just reply 'No memory consolidation needed at this time.'
-            """)
             // Asked for here, so the reply stays here; outside Iris a card goes to Iris too (5b §0.6).
             runThinkingTask(conversationId: convId) { [self] in
-                await runReflection(reflectionPrompt, in: convId, moveReplyToIris: false)
+                await runReflection(Self.manualReflectionPrompt, in: convId, moveReplyToIris: false)
             }
             return
         } else if trimmed.hasPrefix("/vibecop init") {
