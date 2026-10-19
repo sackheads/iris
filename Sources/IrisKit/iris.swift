@@ -184,6 +184,9 @@ actor IrisEngine {
     static let goalCompletionSkillCheck = "System Event [Goal Completion Skill Check]: Evaluate the goal just completed. Did you execute a complex multi-step procedure, overcome non-obvious errors, or discover a reusable recipe? If so, call `create_skill` or `update_skill` now to save or patch it in your permanent skill library."
 
     let client: any LLMClientProtocol
+    /// Whether a mutating job or watch could run here (a VM to run it in): asked before the person
+    /// is, and by the tools that create one, so the two agree (#654). Injected for tests.
+    let mutatingJobsAvailable: @Sendable () -> Bool
     /// A value-type copy of the shared executor, plus the closure the job tools resolve their
     /// ledger and watcher callback through (`ToolExecutor.jobToolsProvider`). Built on read rather
     /// than stored in `init`, because that closure captures `self` and an actor's nonisolated
@@ -192,6 +195,7 @@ actor IrisEngine {
     var executor: ToolExecutor {
         var executor = ToolExecutor.shared
         executor.jobToolsProvider = jobToolsProvider()
+        executor.mutatingJobsAvailable = mutatingJobsAvailable
         // #489: a skill written through this engine's tools rebuilds this engine's prompt, and
         // the owner's main engine's too (plan note 14): a delegate's skill must reach the main
         // chat, whose engine caches its prompt for the life of the app. Never `AppState.shared`.
@@ -510,8 +514,10 @@ actor IrisEngine {
     /// `CacheTTLPolicy.resolve` picks (5c §0.8). Nil everywhere else.
     private let cacheTTLOverride: CacheTTLPolicy?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil, hooks: HookManager = .shared, provider: String? = nil, replayThinking: Bool? = nil, subagentConfig: ConfigManager = .shared, repromptDelay: TimeInterval = 1.5) {
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil, hooks: HookManager = .shared, provider: String? = nil, replayThinking: Bool? = nil, subagentConfig: ConfigManager = .shared, repromptDelay: TimeInterval = 1.5,
+         mutatingJobsAvailable: @escaping @Sendable () -> Bool = { SandboxPolicy.mutatingJobCanRun() }) {
         self.state = state
+        self.mutatingJobsAvailable = mutatingJobsAvailable
         self.subagentConfig = subagentConfig
         self.repromptDelay = repromptDelay
         self.recentWrites = recentWrites
@@ -4118,6 +4124,12 @@ actor IrisEngine {
                     parseFailure = nil
                 }
                 if let parseFailure { return parseFailure }
+                // #654: so is a mutating job with no VM to run in, which creation would refuse
+                // after the person had already said yes.
+                if profile == .mutating, !mutatingJobsAvailable() {
+                    return functionCall.name == "schedule_job" ? ScheduleJobArguments.noRuntimeForMutating
+                                                               : ToolExecutor.watchProfileNeedsSandbox
+                }
 
                 let details = Self.jobApprovalDetails(toolName: functionCall.name, args: functionCall.args, profile: profile)
                 let source = await localState?.requestApprovalSource(
@@ -4757,7 +4769,8 @@ actor IrisEngine {
         } else if functionCall.name == "schedule_job" {
             // Asked above unless read-only in an ordinary chat; otherwise nobody was (#599, #652).
             await recordApproval(.ungated, pillId: pillId, conversationId: conversationId)
-            result = await scheduleJob(ScheduleJobArguments.parse(functionCall.args), conversationId: conversationId)
+            result = await scheduleJob(ScheduleJobArguments.parse(functionCall.args), conversationId: conversationId,
+                                     sandboxAvailable: mutatingJobsAvailable())
         } else if functionCall.name == "save_fact", let content = functionCall.args["content"]?.stringValue {
             let category = functionCall.args["category"]?.stringValue ?? "general"
             let entity = functionCall.args["entity"]?.stringValue

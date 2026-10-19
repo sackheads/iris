@@ -239,7 +239,7 @@ defaults to `false`. Only a `mutating` job may carry a grant; a read-only job cr
 or with `network: true`, is refused with a sentence saying why — a read-only run has no mounts and
 no network by definition. The grant is made once, in the attended conversation that created the
 job, from what you asked for, and only after you approve it: creating or replacing any job or watch
-that is not read-only asks you first (#652), on a dialog that shows the profile, each mount
+that is not read-only asks you first (#652), unless it could not run here at all (no VM), which is refused before you are asked (#654), on a dialog that shows the profile, each mount
 read-write or read-only, and the network, `default (on)` for a mutating job that names none. Neither
 Vibecop nor an allowlist rule can answer it for you, and it offers no Always Allow. The result
 sentence echoes the grant back — `Grant: read-write /Users/me/proj (working directory) · read-only
