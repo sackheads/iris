@@ -22,6 +22,7 @@ enum GuardedKey: String, CaseIterable, Sendable {
     case subagentTurnTimeoutSeconds = "SUBAGENT_TURN_TIMEOUT_SECONDS"
     case maxDoneGateRetries = "MAX_DONE_GATE_RETRIES"
     case maxSessionCascade = "MAX_SESSION_CASCADE"
+    case loopTickCap = "LOOP_TICK_CAP"
     case vibecopTimeoutSeconds = "VIBECOP_TIMEOUT_SECONDS"
     case enableSandboxing = "ENABLE_SANDBOXING"
     case mainAgentSandboxDefault = "MAIN_AGENT_SANDBOX_DEFAULT"
@@ -44,6 +45,7 @@ enum GuardedKey: String, CaseIterable, Sendable {
         case .subagentTurnTimeoutSeconds: .cap(ConfigManager.defaultSubagentTurnTimeoutSeconds)
         case .maxDoneGateRetries: .cap(3)
         case .maxSessionCascade: .cap(8)
+        case .loopTickCap: .cap(ConfigManager.defaultLoopTickCap)
         case .vibecopTimeoutSeconds: .cap(5)
         case .enableSandboxing, .enableVibecop, .enablePromptInjectionProtection: .flag
         case .mainAgentSandboxDefault: .sandboxPref
@@ -251,6 +253,7 @@ extension ConfigManager {
         case .subagentTurnTimeoutSeconds: String(subagentTurnTimeoutSeconds)
         case .maxDoneGateRetries: String(maxDoneGateRetries)
         case .maxSessionCascade: String(maxSessionCascade)
+        case .loopTickCap: String(loopTickCap)
         case .vibecopTimeoutSeconds: String(vibecopTimeoutSeconds)
         case .enableSandboxing: enableSandboxing ? "true" : "false"
         case .mainAgentSandboxDefault: mainAgentSandboxDefault.rawValue
