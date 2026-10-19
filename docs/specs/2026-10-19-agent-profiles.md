@@ -40,8 +40,9 @@ You review pull requests for this repository. Read the diff, run the touched tes
 - **Why not a snapshot:** the file is something you tune as you use it, and a snapshot would freeze every existing conversation on the old text with no way to update it.
 - **The prompt cache:** the composed prompt is keyed by the profile's name and a hash of the file's content, so an unchanged file keeps the provider prompt cache warm. The modification time isn't used: it can miss an edit made within the same second.
 - **Editing a profile costs a cache prefix.** Because the link is live, an edit changes the system prompt on that conversation's next turn, which starts a new prompt-cache prefix. That's expected, and `docs/agent_profiles.md` will say so, so the cost isn't a surprise.
-- **A profile's tool list is for focus and token cost, not security.** Permissions come only from the approval ladder (allowlist, Vibecop, the person) and from job profiles. The spec and `docs/agent_profiles.md` both say so plainly, so nobody relies on `tools:` to keep a conversation from writing.
-- **Missing or unreadable file** (deleted, renamed, broken frontmatter): **the live link is the only source; there's no snapshot.** The conversation runs as a plain conversation. The chat says so once and names the parse error, for example "Agent profile `reviewer` couldn't be read (line 3: tools must be a list); this conversation runs without it until it's fixed". The sidebar label shows "(missing)" or "(unreadable)". Since the tool list was never a security boundary, a plain conversation is a fallback the person can see, not a loss of protection.
+- **A profile's tool list is for focus and token cost, not security.** Permissions come only from the approval ladder (allowlist, Vibecop, the person) and from job profiles. The spec and `docs/agent_profiles.md` both say so plainly. The last-known-good fallback below keeps a narrowed chat from widening by surprise, but it doesn't turn `tools:` into a permission.
+- **Missing or unreadable file** (deleted, renamed, broken frontmatter): **the file wins whenever it reads, and a last-known-good copy is only the fallback** (planner's ruling after dev-2's review). Each time the conversation reads its profile successfully, and the content hash differs from the stored copy, it saves the parsed profile (prompt, tools, skills, tier) on the conversation. While the file can't be read, the conversation keeps using that copy, so a narrowed chat never widens silently. The chat says so once: "Agent profile `reviewer` couldn't be read (line 3: tools must be a list); this conversation keeps using the last version it read. To drop the profile, use Clear Agent Profile." The sidebar label shows "(last known)".
+- **Clear Agent Profile** is a context-menu item on a profiled conversation. It removes the profile and its saved copy, so the conversation becomes a plain one. Widening happens only through that explicit action, and it's the only way to drop a profile whose file is gone. It's in v1 because it's narrower than Fork C (applying a profile), and without it, deleting the file would leave the copy in force for good.
 
 ## Roles
 
@@ -88,12 +89,15 @@ Session roles (#469/#480) already exist: `Conversation.role`, user-assigned with
 
 ## Persistence (Invariant 1)
 
-- **Model:** `Conversation.agentProfile: String?`, read with `decodeIfPresent`, plus a `CodingKeys` case.
+- **Model:** `Conversation.agentProfile: String?` (the name) and `Conversation.agentProfileSnapshot: AgentProfileSnapshot?` (the last-known-good parse: prompt, tools, skills, tier, content hash). Both are read with `decodeIfPresent` and have `CodingKeys` cases. The snapshot is written only when the content hash changes, not on every turn.
 - **Store:**
-  - a `ConversationStore` migration `v23_agent_profile` adding a column;
+  - a `ConversationStore` migration `v23_agent_profile` adding two columns (the name, and the snapshot as JSON text);
   - `upsertMetadata`, both the UPDATE and the INSERT;
   - `loadAll`'s row read.
-- **Test:** a round-trip test ("persists with the conversation, and a row from before #465 reads as none").
+- **Tests:**
+  - a round-trip test ("the name and snapshot persist with the conversation, and a row from before #465 reads as none");
+  - deleting the file keeps the snapshot in use with a notice;
+  - Clear Agent Profile removes both.
 
 ## Build PRs (each opened as a draft, reviewed by iris-dev-2)
 
@@ -103,7 +107,8 @@ Session roles (#469/#480) already exist: `Conversation.role`, user-assigned with
    - the persisted reference;
    - the **system-prompt addition** and the role at creation;
    - the pinned exclusion;
-   - Open Agent Profiles Folder, and the shipped examples.
+   - Open Agent Profiles Folder, and the shipped examples;
+   - the last-known-good snapshot and **Clear Agent Profile**.
    - **Closes #668**, with one invalidation rule for every prompt built from something other than the default. An engine whose base prompt was set from custom text (a subagent's role prompt, through `setSystemPrompt`) keeps that text and rebuilds from it when invalidated, never from SOUL.md and the default skills. A profiled conversation's addition is a layer above the base, so a skill change rebuilds it with the profile still in place.
    - **Tests:** a subagent that writes a skill still sends its role prompt on its next turn, and a profiled conversation still sends its profile's addition after a skill change.
 2. **Tools:** intersection after the sticky union and `hardStrip`, the dispatch refusal, and the Fork B exemptions.
