@@ -204,8 +204,7 @@ struct GuardedSettingsTests {
         defaults.removeObject(forKey: GuardedSettings.markerKey)
         let replayed = AppState(store: conversations, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned,
                                 guardedConfig: ConfigManager(store: defaults, guardedSecrets: keychain))
-        replayed.selectedConversationId = id
-        #expect(replayed.conversations.contains { $0.id == id })
+        #expect(replayed.selectedConversationId == id, "the same conversation, which already holds the first notice")
         #expect(count(replayed) == 2, "not swallowed by the launch-notice dedup")
     }
 
