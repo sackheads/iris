@@ -1430,6 +1430,11 @@ class AppState {
         // Where a launch notice goes, or nowhere. One expression rather than a condition on each
         // of the six below, so a notice added later cannot miss the switch.
         let noticeTarget = emitLaunchNotices ? selectedConversationId : nil
+        // #678: what the guarded settings' launch found (an upgrade reset, a defaults write that
+        // was ignored, a missing or unreadable item).
+        if let target = noticeTarget {
+            for notice in ConfigManager.shared.takeGuardedNotices() { appendLaunchNotice(notice, to: target) }
+        }
         // Every launch notice below goes through `appendLaunchNotice`, which persists it like any
         // other system message but skips it when the same wording is already in the conversation.
         // Several of these conditions recur on every launch until a human intervenes, so dedup by

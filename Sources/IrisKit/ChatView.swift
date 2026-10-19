@@ -1418,6 +1418,13 @@ struct ApprovalBannerView: View {
                 .padding(8)
                 .background(Color.black.opacity(0.1))
                 .cornerRadius(4)
+
+            if let warning = GuardedSettings.approvalWarning(for: request.details) {
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             
             HStack {
                 // No "Always Allow" where a rule would mean nothing or too much: a `humanOnly`
