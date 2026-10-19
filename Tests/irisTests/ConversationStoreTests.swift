@@ -71,6 +71,9 @@ struct ConversationStoreTests {
         c.isArchived = true
         c.sessionCard = SessionCard(name: "spec-writer", description: "drafting the sessions spec")
         c.role = "pr-minder"
+        // #599: a tool call's approval rides in the message's payload, so `messages ==` covers it.
+        c.messages.append(ChatMessage(role: .system, content: "[TOOL_CALL]\n{}",
+                                      approval: ToolApproval(layer: .allowlist, detail: "run_command ls", scope: "global")))
         try store.apply([Self.created(c)])
         let loaded = try store.loadAll()
         #expect(loaded.skipped.isEmpty)

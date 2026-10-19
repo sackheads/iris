@@ -2950,21 +2950,23 @@ actor IrisEngine {
                                         "name": call.name,
                                         "args": call.args.mapValues { $0.anyValue }
                                     ]
-                                    // For run_command, supply a stable UUID so the UI can key
-                                    // elapsed-time display against this exact message.
-                                    let timingId: UUID? = call.name == "run_command" ? UUID() : nil
+                                    // Every call's pill has a stable id: the dispatcher records on it
+                                    // what let the call run (#599). For run_command it also keys the
+                                    // UI's elapsed-time display against this exact message.
+                                    let pillId = UUID()
+                                    let timingId: UUID? = call.name == "run_command" ? pillId : nil
                                     if let jsonData = try? JSONSerialization.data(withJSONObject: toolCallDict, options: .prettyPrinted),
                                        let jsonString = String(data: jsonData, encoding: .utf8) {
-                                        await self.pushToUI(role: .system, text: "[TOOL_CALL]\n\(jsonString)", conversationId: conversationId, id: timingId)
+                                        await self.pushToUI(role: .system, text: "[TOOL_CALL]\n\(jsonString)", conversationId: conversationId, id: pillId)
                                     } else {
-                                        await self.pushToUI(role: .system, text: "Running tool: \(call.name)", conversationId: conversationId, id: timingId)
+                                        await self.pushToUI(role: .system, text: "Running tool: \(call.name)", conversationId: conversationId, id: pillId)
                                     }
                                     if let id = timingId {
                                         await self.recordCommandStart(id: id)
                                     }
 
                                     let cmdStart = UptimeClock.live.now()   // uptime: a sleep is not time spent (#608)
-                                    let result = await self.executeFunctionCall(call, conversationId: conversationId, workspacePath: workspacePath, restrictToGoalComplete: restrictToGoalComplete)
+                                    let result = await self.executeFunctionCall(call, conversationId: conversationId, workspacePath: workspacePath, restrictToGoalComplete: restrictToGoalComplete, pillId: pillId)
                                     let elapsed = UptimeClock.live.seconds(since: cmdStart)
                                     if let id = timingId {
                                         await self.recordCommandDuration(id: id, elapsed: elapsed)
@@ -4000,7 +4002,9 @@ actor IrisEngine {
         profileDeniedThisTurn.remove(conversationId) != nil
     }
 
-    private func executeFunctionCall(_ functionCall: FunctionCall, conversationId: UUID, workspacePath: String?, restrictToGoalComplete: Bool = false) async -> String {
+    /// `pillId` is the call's `[TOOL_CALL]` message, which is told what let the call run (#599).
+    private func executeFunctionCall(_ functionCall: FunctionCall, conversationId: UUID, workspacePath: String?, restrictToGoalComplete: Bool = false,
+                                     pillId: UUID? = nil) async -> String {
         let localState = state
         var result = ""
 
@@ -4066,11 +4070,12 @@ actor IrisEngine {
             if let parseFailure { return parseFailure }
 
             let details = Self.pinnedJobApprovalDetails(toolName: functionCall.name, args: functionCall.args)
-            let approved = await localState?.requestApproval(
+            let source = await localState?.requestApprovalSource(
                 toolName: functionCall.name, details: details, args: functionCall.args,
                 workspace: workspacePath, conversationId: conversationId, origin: approvalOrigin,
-                humanOnly: true) ?? false
-            guard approved else { return Self.pinnedJobCreationDeclined }
+                humanOnly: true)
+            guard let source else { return Self.pinnedJobCreationDeclined }
+            await recordApproval(ToolApproval(source), pillId: pillId, conversationId: conversationId)
         }
         // #282 §0.10, the same shape: a background run's grant is its boundary, and `set_workspace`
         // is the tool that would move it. Undeclared to it (see `buildRequest`), refused here.
@@ -4697,6 +4702,8 @@ actor IrisEngine {
                 result = "Could not parse the proposed goal contract (missing objective?)."
             }
         } else if functionCall.name == "schedule_job" {
+            // Asked above only in a pinned or tainted chat; otherwise nobody was (#599).
+            await recordApproval(.ungated, pillId: pillId, conversationId: conversationId)
             result = await scheduleJob(ScheduleJobArguments.parse(functionCall.args), conversationId: conversationId)
         } else if functionCall.name == "save_fact", let content = functionCall.args["content"]?.stringValue {
             let category = functionCall.args["category"]?.stringValue ?? "general"
@@ -5125,6 +5132,7 @@ actor IrisEngine {
                     allowedCommands: evaluatorChecks, grantedMount: grantedMount,
                     graderReadWalked: approvedWorkspaceRoot != nil)
                 if let source {
+                    await recordApproval(ToolApproval(source), pillId: pillId, conversationId: conversationId)
                     result = await executeToolWithHooks(name: functionCall.name, args: callArgs, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath, restrictedPath: Self.restrictedPath(for: source, tool: functionCall.name))
                     // A rule file the agent wrote is not in effect until the person reads and trusts it
                     // (#625 review): approving the write showed its path, not its rules.
@@ -5137,6 +5145,7 @@ actor IrisEngine {
                                           : Self.deniedToolResult
                 }
             } else {
+                await recordApproval(.ungated, pillId: pillId, conversationId: conversationId)
                 result = await executeToolWithHooks(name: functionCall.name, args: callArgs, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath)
             }
         }
@@ -5396,10 +5405,17 @@ actor IrisEngine {
         return file
     }
 
+    /// Puts what let a call run on its pill (#599). UI only: the model never sees it.
+    private func recordApproval(_ approval: ToolApproval, pillId: UUID?, conversationId: UUID) async {
+        guard let pillId else { return }
+        let localState = state
+        await MainActor.run { localState?.setToolApproval(messageId: pillId, in: conversationId, approval) }
+    }
+
     /// The `PATH` a call runs restricted with (#612): only a host `run_command` whose approval was
     /// the read-only gate's. A person's, the allowlist's or any other approval runs it as usual.
     nonisolated static func restrictedPath(for source: AppState.ApprovalSource, tool: String) -> [String]? {
-        guard tool == "run_command", case .vibecopRestricted(let path) = source else { return nil }
+        guard tool == "run_command", case .vibecopRestricted(let path, _) = source else { return nil }
         return path
     }
 
