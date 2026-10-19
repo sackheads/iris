@@ -150,11 +150,14 @@ A subagent can run on a different provider and model than the conversation that 
 - **Rejected:** (ii) a table Iris publishes; (b) refusing other-family subagents in job runs; (c) the primary's rate.
 
 **Typed rates (planner's revised ruling).** A rate kept in defaults can be set by one approved `defaults write` (#678's class), so a typed rate isn't trusted downward:
-- **Above:** a typed rate may be any value above the fetched or snapshot rate.
-- **Below:** it's held to the same floor and the same 1/10-of-snapshot limit as fetched rates, using the family range for an id missing from the snapshot. Settings refuses a lower value with a sentence naming the limit.
+- **The safe direction depends on the rate's side of rule 1's division** (iris-dev-2's review):
+  - **A delegated rate (the numerator)** may go up freely. Going down, it's held to the same floor and the same 1/10-of-snapshot limit as fetched rates, using the family range for an id missing from the snapshot.
+  - **The primary's rate (the denominator)** may go down freely. Going up, it's held to 10x the snapshot, or $1000/MTok for a family with no snapshot rows. Raising it would shrink every delegated charge.
+  - **The rule applies per use.** A model used both as the primary and by a subagent is bounded by whichever side it's on in that conversion.
+  - Settings refuses an out-of-bounds value with a sentence naming the limit.
 - **At use time** the rate is clamped to those bounds again, so a value written behind the UI's back is clamped too. The ledger marks it `settings (clamped)`.
 - **Storage and clearing:** typed rates live in defaults, per provider and model id, decoded with `decodeIfPresent`. Clearing one goes back to the fetched rate.
-- **Tests:** a value written straight to the store below the band is clamped at use time, and an upward override is honoured.
+- **Tests:** a delegated rate written straight to the store below the band is clamped at use time, and an upward delegated override is honoured. A primary rate written straight to the store at 100x its snapshot is clamped to 10x, and a downward primary override is honoured.
 - **Out of scope here:** protecting the settings that guard spend and egress (base URLs, budgets, rates) is #678's job, widened by the planner to cover all three.
 
 **The LiteLLM check (iris-dev-3, 2026-10-19).** `https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json` returned HTTP 200, 2.9 MB, with 4,223 entries. Each entry gives `input_cost_per_token`, `output_cost_per_token` and `cache_read_input_token_cost` in USD per token, plus `litellm_provider`.
