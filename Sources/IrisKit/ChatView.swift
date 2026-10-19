@@ -189,14 +189,21 @@ struct ChatView: View {
                     await runSidebarSearch()
                 }
 
-                Button(action: { state.createNewConversation(); composerShouldFocus = true }) {
+                // #465: a click starts a plain conversation, as before; the menu starts one on an
+                // agent profile. Read when the menu opens, so a new or edited file shows at once.
+                Menu {
+                    agentProfileMenu
+                } label: {
                     HStack {
                         Image(systemName: "plus.message.fill")
                         Text("New Conversation")
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
+                } primaryAction: {
+                    state.createNewConversation(); composerShouldFocus = true
                 }
+                .menuStyle(.button)
                 .buttonStyle(.borderedProminent)
                 .padding()
             }
@@ -520,6 +527,36 @@ struct ChatView: View {
         }
     }
     
+    /// The New Conversation menu's items (#465): each usable agent profile, the unusable ones
+    /// disabled with why, and the folder.
+    @ViewBuilder private var agentProfileMenu: some View {
+        let profiles = state.agentProfiles.list()
+        if profiles.isEmpty {
+            Text("No agent profiles yet")
+        }
+        ForEach(profiles, id: \.name) { entry in
+            switch entry.load {
+            case .loaded(let profile):
+                Button {
+                    state.createNewConversation(agentProfile: profile.name); composerShouldFocus = true
+                } label: {
+                    Text(verbatim: profile.role.map { "\(profile.name) (\($0))" } ?? profile.name)
+                }
+                .help(String(profile.prompt.prefix(200)))
+            case .unreadable(let why):
+                Button {} label: { Text(verbatim: "\(entry.name): \(why)") }.disabled(true)
+            case .missing:
+                EmptyView()
+            }
+        }
+        Divider()
+        Button("Open Agent Profiles Folder") {
+            let dir = state.agentProfiles.directory
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            NSWorkspace.shared.activateFileViewerSelecting([dir])
+        }
+    }
+
     /// Shared row body for both the Conversations and Archived sections, so archiving a
     /// conversation moves it between sections without changing how it renders (#182).
     @ViewBuilder
@@ -529,6 +566,15 @@ struct ChatView: View {
                 Text(conv.title)
                     .font(.subheadline)
                     .lineLimit(1)
+                // #465: the agent profile it started on, and its role when that differs.
+                if let profile = conv.agentProfile {
+                    let suffix = state.agentProfileFileReads(conv.id) ? "" : " (last known)"
+                    let role = conv.role.flatMap { $0 == profile ? nil : " · \($0)" } ?? ""
+                    Label { Text(verbatim: profile + role + suffix) } icon: { Image(systemName: "person.crop.square") }
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
                 if let wp = conv.workspacePath {
                     Text(wp)
                         .font(.caption2)
@@ -586,6 +632,10 @@ struct ChatView: View {
         .contextMenu {
             Button("Link to Workspace...") {
                 linkWorkspace(to: conv.id)
+            }
+            // #465: the only way a profile is dropped, so a chat widens back only by this act.
+            if conv.agentProfile != nil {
+                Button("Clear Agent Profile") { state.clearAgentProfile(for: conv.id) }
             }
             if !conv.isSubagent {
                 Toggle("Sandbox main agent", isOn: Binding(
