@@ -17,6 +17,24 @@ struct AgentProfile: Equatable, Sendable {
     /// SHA-256 of the file's bytes, so an edit made within the same second still counts.
     var contentHash: String
 
+    /// Tools a profile never narrows (#465, Fork B): each is already offered only on its own
+    /// trigger or in its own state (Invariant 6), so narrowing it would break `/goal` or `/rename`
+    /// in a profiled chat and save no tokens. `send_to_session` is not one of them.
+    static let flowTools: Set<String> = [
+        "goal_complete", "propose_goal_contract", "rename_conversation", "reach_checkpoint",
+        "amend_goal_contract", "waive_criterion", "delegate_milestone",
+    ]
+
+    /// Whether this profile offers `tool`. No `tools:` list offers everything; a list offers its
+    /// names, every tool of a server it names as `mcp:<server>`, and the flow tools.
+    func allowsTool(_ tool: String) -> Bool {
+        guard let tools else { return true }
+        if Self.flowTools.contains(tool) || tools.contains(tool) { return true }
+        guard JobProfile.isMCPTool(tool),
+              let server = tool.components(separatedBy: JobProfile.mcpNameSeparator).first else { return false }
+        return tools.contains("mcp:" + server)
+    }
+
     var snapshot: AgentProfileSnapshot {
         AgentProfileSnapshot(name: name, role: role, tier: tier?.rawValue, skills: skills, tools: tools,
                              prompt: prompt, contentHash: contentHash)
@@ -192,4 +210,23 @@ struct AgentProfileStore: Sendable {
         sentences, and explain any change that alters meaning.
         """),
     ]
+}
+
+/// What a profile's `tools:` list leaves a turn (#465 part 2): set at the start of each turn of a
+/// profiled conversation, and of each turn of a subagent working for one, then read by the tool
+/// list and by dispatch. Narrowing is for focus and token cost, not security.
+struct AgentToolScope: Equatable, Sendable {
+    let profile: AgentProfile
+    /// A memory-reflection turn (`AppState.runReflection`): the tools its prompt names stay
+    /// offered, because reflection is Iris's upkeep, not the profile's work.
+    let reflecting: Bool
+
+    func allows(_ tool: String) -> Bool {
+        profile.allowsTool(tool) || (reflecting && AppState.reflectionTools.contains(tool))
+    }
+
+    /// Only ever removes: a tool a strip or gate already took out stays out, whatever this allows.
+    func narrow(_ tools: [FunctionDeclaration]) -> [FunctionDeclaration] {
+        tools.filter { allows($0.name) }
+    }
 }
