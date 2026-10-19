@@ -4061,6 +4061,21 @@ actor IrisEngine {
         // it — the executor resolves a relative path against the workspace, and the approval below
         // used to show it raw.
         var functionCall = functionCall
+        // #647: the watcher tool's BeforeTool hooks run first, before anything below decides from
+        // its arguments whether to ask, so the person approves the path that will be watched.
+        var jobHooksFired = false
+        var jobRewrittenByHook: String?
+        if functionCall.name == "register_directory_watcher" {
+            switch await beforeToolArguments(name: functionCall.name, args: functionCall.args,
+                                             conversationId: conversationId, workspacePath: workspacePath) {
+            case .blocked(let message): return message
+            case .unchanged: break
+            case .rewritten(let args):
+                functionCall.args = args
+                jobRewrittenByHook = Self.rewriteSummary(functionCall)
+            }
+            jobHooksFired = true
+        }
         if functionCall.name == "register_directory_watcher", let raw = functionCall.args["path"]?.stringValue {
             if raw.contains("\u{0}") { return ToolExecutor.nulPathRefusal(functionCall.name) }
             functionCall.args["path"] = .string(Self.decidedWatchPath(raw, cwd: workspacePath))
@@ -4100,7 +4115,9 @@ actor IrisEngine {
                     workspace: workspacePath, conversationId: conversationId, origin: approvalOrigin,
                     humanOnly: true)
                 guard let source else { return Self.jobCreationDeclined }
-                await recordApproval(ToolApproval(source), pillId: pillId, conversationId: conversationId)
+                var approval = ToolApproval(source)
+                approval.hookRewrite = jobRewrittenByHook
+                await recordApproval(approval, pillId: pillId, conversationId: conversationId)
             }
         }
         // #282 §0.10, the same shape: a background run's grant is its boundary, and `set_workspace`
@@ -5075,6 +5092,52 @@ actor IrisEngine {
                 ? "Criterion waived with your stated reason. It will still be graded and shown to the user, but it will no longer block completion."
                 : "Waiver rejected. A waiver needs a locked contract, a non-empty reason, a criterion id that exists in the contract, and at least one failed grade — work the criterion first and let the grader judge it."
         } else {
+            // R20: a command out of an unattended run is the container's or nobody's, whatever the
+            // profile and whatever the allowlist says. The resolution answers "host" the moment the
+            // master switch is off or the runtime has gone, however the conversation is pinned, and
+            // the branch below would then hand the command to the host on the strength of an
+            // "Always allow" rule the user clicked in some attended chat months ago.
+            //
+            // Asked through the warning-free `isSandboxed` and asked FIRST, before
+            // `resolveUseSandbox` below: that one announces "running on the host WITHOUT isolation"
+            // on its way to returning false, which is a false sentence about a call that is about
+            // to be refused, and it would stand in the run's transcript above the refusal. Same
+            // rule as the read-only profile gate, which asks the warning-free question for exactly
+            // this reason.
+            //
+            // `isUnattended`, not `jobProfile != nil`: a subagent the run delegated into inherits
+            // `isBackground` but not the profile, and R20 covers what the run does through it. A
+            // `readOnly` run never reaches here for an unsandboxed `run_command` — its profile
+            // gate above refuses first — so nothing is recorded twice.
+            //
+            // Recorded as an `.approval` denial on purpose: the run ends `blockedOnApproval` with
+            // the whole call on its card, and the click re-asks whether the VM is back.
+            if isUnattended, functionCall.name == "run_command",
+               await !isSandboxed(conversationId: conversationId, workspacePath: workspacePath) {
+                let call = BlockedCall(toolName: functionCall.name, args: functionCall.args,
+                                       cwd: workspacePath, reason: .approval)
+                await MainActor.run { localState?.recordBackgroundDenial(call: call, in: conversationId) }
+                return Self.sandboxUnavailableRefusal(tool: functionCall.name)
+            }
+
+            // #647: a BeforeTool hook runs before the approval, so Vibecop, the read-only gate, the
+            // allowlist and the person judge the arguments that will run, and everything below
+            // (path resolution included) is decided on them. After the approval nothing changes
+            // them: `executeToolWithHooks` does not fire BeforeTool again for this call. The
+            // deterministic refusals above and R20 come first, so a call policy refuses anyway
+            // never fires a person's hook.
+            var rewrittenByHook: String?
+            if Self.isGatedFileOrCommand(functionCall) {
+                switch await beforeToolArguments(name: functionCall.name, args: functionCall.args,
+                                                 conversationId: conversationId, workspacePath: workspacePath) {
+                case .blocked(let message): return message
+                case .unchanged: break
+                case .rewritten(let args):
+                    functionCall.args = args
+                    rewrittenByHook = Self.rewriteSummary(functionCall)
+                }
+            }
+
             var needsApproval = false
             var details = ""
             // #256: the arguments every decision below and the executor see. A file tool's path is
@@ -5109,34 +5172,6 @@ actor IrisEngine {
                 if !walked { decidedPath = details }
             }
 
-            // R20: a command out of an unattended run is the container's or nobody's, whatever the
-            // profile and whatever the allowlist says. The resolution answers "host" the moment the
-            // master switch is off or the runtime has gone, however the conversation is pinned, and
-            // the branch below would then hand the command to the host on the strength of an
-            // "Always allow" rule the user clicked in some attended chat months ago.
-            //
-            // Asked through the warning-free `isSandboxed` and asked FIRST, before
-            // `resolveUseSandbox` below: that one announces "running on the host WITHOUT isolation"
-            // on its way to returning false, which is a false sentence about a call that is about
-            // to be refused, and it would stand in the run's transcript above the refusal. Same
-            // rule as the read-only profile gate, which asks the warning-free question for exactly
-            // this reason.
-            //
-            // `isUnattended`, not `jobProfile != nil`: a subagent the run delegated into inherits
-            // `isBackground` but not the profile, and R20 covers what the run does through it. A
-            // `readOnly` run never reaches here for an unsandboxed `run_command` — its profile
-            // gate above refuses first — so nothing is recorded twice.
-            //
-            // Recorded as an `.approval` denial on purpose: the run ends `blockedOnApproval` with
-            // the whole call on its card, and the click re-asks whether the VM is back.
-            if isUnattended, functionCall.name == "run_command",
-               await !isSandboxed(conversationId: conversationId, workspacePath: workspacePath) {
-                let call = BlockedCall(toolName: functionCall.name, args: functionCall.args,
-                                       cwd: workspacePath, reason: .approval)
-                await MainActor.run { localState?.recordBackgroundDenial(call: call, in: conversationId) }
-                return Self.sandboxUnavailableRefusal(tool: functionCall.name)
-            }
-
             let useSandbox = await resolveUseSandbox(toolName: functionCall.name, conversationId: conversationId, workspacePath: workspacePath)
             // #282 §0.13: the covering mount for a granted file-tool call is decided ONCE, here,
             // before approval, and both the gate and the executor consume this value — neither
@@ -5158,8 +5193,11 @@ actor IrisEngine {
                     allowedCommands: evaluatorChecks, grantedMount: grantedMount,
                     graderReadWalked: approvedWorkspaceRoot != nil)
                 if let source {
-                    await recordApproval(ToolApproval(source), pillId: pillId, conversationId: conversationId)
-                    result = await executeToolWithHooks(name: functionCall.name, args: callArgs, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath, restrictedPath: Self.restrictedPath(for: source, tool: functionCall.name))
+                    var approval = ToolApproval(source)
+                    approval.hookRewrite = rewrittenByHook
+                    await recordApproval(approval, pillId: pillId, conversationId: conversationId)
+                    result = await executeToolWithHooks(name: functionCall.name, args: callArgs, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath, restrictedPath: Self.restrictedPath(for: source, tool: functionCall.name),
+                                                        beforeToolFired: Self.isGatedFileOrCommand(functionCall))
                     // A rule file the agent wrote is not in effect until the person reads and trusts it
                     // (#625 review): approving the write showed its path, not its rules.
                     if functionCall.name == "write_file", result.hasPrefix("Successfully wrote to "),
@@ -5172,7 +5210,8 @@ actor IrisEngine {
                 }
             } else {
                 await recordApproval(.ungated, pillId: pillId, conversationId: conversationId)
-                result = await executeToolWithHooks(name: functionCall.name, args: callArgs, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath)
+                result = await executeToolWithHooks(name: functionCall.name, args: callArgs, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath,
+                                                    beforeToolFired: jobHooksFired)
             }
         }
         
@@ -5431,6 +5470,51 @@ actor IrisEngine {
         return file
     }
 
+    /// The tools whose approval the dispatcher's gate decides, by their own arguments: the ones a
+    /// BeforeTool hook must run ahead of (#647).
+    nonisolated static func isGatedFileOrCommand(_ call: FunctionCall) -> Bool {
+        switch call.name {
+        case "run_command": return call.args["command"]?.stringValue != nil
+        case "read_file", "write_file": return call.args["path"]?.stringValue != nil
+        default: return false
+        }
+    }
+
+    enum BeforeToolOutcome: Equatable { case unchanged, rewritten([String: JSONValue]), blocked(String) }
+
+    /// Runs a call's BeforeTool hooks ahead of its approval (#647).
+    private func beforeToolArguments(name: String, args: [String: JSONValue], conversationId: UUID,
+                                     workspacePath: String?) async -> BeforeToolOutcome {
+        let hooksSandbox = await isSandboxed(conversationId: conversationId, workspacePath: workspacePath)
+        let decision = await hooks.fireBeforeTool(toolName: name, args: args, useSandbox: hooksSandbox)
+        if case .block(let reason) = decision { return .blocked(Self.hookBlockedResult(reason)) }
+        let merged = Self.merging(decision, into: args)
+        return merged == args ? .unchanged : .rewritten(merged)
+    }
+
+    /// A BeforeTool hook's `modifiedData` laid over the call's arguments, key by key.
+    nonisolated static func merging(_ decision: HookDecision, into args: [String: JSONValue]) -> [String: JSONValue] {
+        guard case .proceed(let modifiedData) = decision, let data = modifiedData,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let updatedArgsData = try? JSONSerialization.data(withJSONObject: json),
+              let updatedArgs = try? JSONDecoder().decode([String: JSONValue].self, from: updatedArgsData) else { return args }
+        var merged = args
+        for (k, v) in updatedArgs { merged[k] = v }
+        return merged
+    }
+
+    nonisolated static func hookBlockedResult(_ reason: String) -> String {
+        "System Hook blocked execution: \(reason)"
+    }
+
+    /// What a hook rewrote, in full, for the pill: the command or the path that will run.
+    nonisolated static func rewriteSummary(_ call: FunctionCall) -> String {
+        call.args["command"]?.stringValue ?? call.args["path"]?.stringValue ?? call.name
+    }
+
+    /// Said when something would change an approved call's arguments after its approval (#647).
+    static let approvedCallRewrittenRefusal = "Not run: a BeforeTool hook changed this call's arguments after it was approved, and an approved call runs exactly as it was approved. On an event card's Approve and run, your hooks run at the click, after the approval; run the call again from a conversation, where hooks run before anyone is asked (see Tool Hooks in the docs, and #653)."
+
     /// Puts what let a call run on its pill (#599). UI only: the model never sees it.
     private func recordApproval(_ approval: ToolApproval, pillId: UUID?, conversationId: UUID) async {
         guard let pillId else { return }
@@ -5457,7 +5541,10 @@ actor IrisEngine {
         }
     }
 
-    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil, approvedWorkspaceRoot: String? = nil, decidedPath: String? = nil, restrictedPath: [String]? = nil) async -> String {
+    /// `beforeToolFired`: the dispatcher already ran this call's BeforeTool hooks, before its
+    /// approval (#647), so they are not run again and `args` are exactly what was approved.
+    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil, approvedWorkspaceRoot: String? = nil, decidedPath: String? = nil, restrictedPath: [String]? = nil,
+                                      beforeToolFired: Bool = false) async -> String {
         var execArgs: [String: JSONValue] = args
 
         // Session strip activity (#217/#19): the detail is derived from the tool's own arguments
@@ -5473,19 +5560,22 @@ actor IrisEngine {
         // specific tool's own host/sandbox routing.
         let hooksSandbox = conversationId == nil ? false : await isSandboxed(conversationId: conversationId!, workspacePath: cwd)
 
-        let beforeDecision = await hooks.fireBeforeTool(toolName: name, args: execArgs, useSandbox: hooksSandbox)
-        if case .block(let reason) = beforeDecision {
-            return "System Hook blocked execution: \(reason)"
-        }
-        
-        if case .proceed(let modifiedData) = beforeDecision, let data = modifiedData, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            // Re-encode and decode via JSONValue to keep it simple, or map manually
-            if let updatedArgsData = try? JSONSerialization.data(withJSONObject: json),
-               let updatedArgs = try? JSONDecoder().decode([String: JSONValue].self, from: updatedArgsData) {
-                for (k, v) in updatedArgs {
-                    execArgs[k] = v
-                }
+        if !beforeToolFired {
+            let beforeDecision = await hooks.fireBeforeTool(toolName: name, args: execArgs, useSandbox: hooksSandbox)
+            if case .block(let reason) = beforeDecision {
+                return Self.hookBlockedResult(reason)
             }
+            execArgs = Self.merging(beforeDecision, into: execArgs)
+        }
+        // #647: an approved call runs exactly as approved. On a card's Approve and run the hooks
+        // still fire here, after the person's click, so a rewrite is refused rather than run.
+        if origin == .approvedCall, execArgs != args {
+            return Self.approvedCallRewrittenRefusal
+        }
+        // And for a model's call, whose hooks ran before its approval, nothing may have changed
+        // the arguments since; nothing does, and this keeps it so.
+        if beforeToolFired, execArgs != args {
+            return Self.approvedCallRewrittenRefusal
         }
 
         // R10, on the arguments that are actually about to run. A `BeforeTool` hook may have
