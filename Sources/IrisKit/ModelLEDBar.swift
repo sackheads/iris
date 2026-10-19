@@ -144,11 +144,13 @@ struct ModelLEDBar: View {
     private func led(_ kind: LEDKind) -> some View {
         let failure = failure(of: kind)
         let state = state(of: kind, failure: failure)
+        let light = ModelLED(label: kind.label, state: state, tierNumber: kind.tierNumber, failure: failure)
         return Button { shown = kind } label: {
-            ModelLED(label: kind.label, state: state, tierNumber: kind.tierNumber, failure: failure)
-                .contentShape(Rectangle())
+            light.contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // On the button: the light's own `.help` inside a button's label never showed (#673 GUI check).
+        .help(light.tooltip)
         .accessibilityLabel("\(kind.label), \(state.spoken)")
         .accessibilityHint("Show details")
         .popover(isPresented: Binding(get: { shown == kind }, set: { if !$0 { shown = nil } }),
