@@ -5236,7 +5236,7 @@ class AppState {
         markChanged(id, .metadata)
         appendMessage(role: .system, content: """
             ↻ Looping every \(loop.every): \(loop.prompt)
-            Up to \(loop.cap) ticks (Settings → Agent Limits → Loop tick limit). Each tick sends the whole conversation so far, so each costs a little more than the last. Talk to it any time; `/loop pause`, `/loop resume` and `/loop stop` control it.
+            Up to \(loop.cap) ticks (Settings → Advanced → Agent Limits → Loop tick limit). Each tick sends the whole conversation so far, so each costs a little more than the last. Talk to it any time; `/loop pause`, `/loop resume` and `/loop stop` control it.
             """, to: id)
         armLoopIfIdle(id)
     }

@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import SwiftUI
 @testable import IrisKit
 
 /// #190: `/loop` re-runs a prompt in the same visible conversation on a cadence, on `/goal`'s
@@ -244,6 +245,20 @@ struct LoopTests {
         #expect(!IrisEngine.isTrigger(IrisEngine.renameTriggerPrefix, input: tick, source: IrisEngine.loopSource, principal: .main))
         #expect(!IrisEngine.isTrigger(IrisEngine.renameTriggerPrefix, input: loop.prompt, source: IrisEngine.loopSource, principal: .main),
                 "not even the bare prompt, under the loop's source")
+    }
+
+    @Test("the chip takes its own height, not the whole cap, and never more than the cap")
+    func chipHeight() throws {
+        let (state, id) = try app()
+        let loop = ConversationLoop(prompt: "watch", intervalSeconds: 3600, cap: 5)
+        let short = NSHostingController(rootView: LoopChip(state: state, conversationId: id, loop: loop))
+            .sizeThatFits(in: CGSize(width: 700, height: 600))
+        #expect(short.height > 20 && short.height < 100, "its content's height, not the 120 pt cap: \(short.height)")
+        var long = loop
+        long.prompt = String(repeating: "a very long loop prompt ", count: 80)
+        let capped = NSHostingController(rootView: LoopChip(state: state, conversationId: id, loop: long).frame(width: 120))
+            .sizeThatFits(in: CGSize(width: 120, height: 600))
+        #expect(capped.height <= 120.5, "never past the cap: \(capped.height)")
     }
 
     // MARK: persistence and relaunch

@@ -94,7 +94,7 @@ A compact row of retro LED indicators sits between the chat area and input bar, 
 
 ### Loops
 
-`/loop 10m check my open PRs` re-runs a prompt in the same conversation on a cadence, with ticks you can watch, interrupt and talk back to.  A chip above the composer shows the cadence, the ticks left and when the next is due, with Pause, Resume and Stop.  Ticks run attended (an approval waits for you, as under `/goal`), each one resends the conversation so far, and a loop stops at the Loop tick limit (Settings → Agent Limits, default 50).  It comes back paused after a relaunch.  For work that should run with nobody watching, use a [job](jobs.md).  Details: [slash commands](slash_commands.md), [spec](specs/2026-10-19-loop.md).
+`/loop 10m check my open PRs` re-runs a prompt in the same conversation on a cadence, with ticks you can watch, interrupt and talk back to.  A chip above the composer shows the cadence, the ticks left and when the next is due, with Pause, Resume and Stop.  Ticks run attended (an approval waits for you, as under `/goal`), each one resends the conversation so far, and a loop stops at the Loop tick limit (Settings → Advanced → Agent Limits, default 50).  It comes back paused after a relaunch.  For work that should run with nobody watching, use a [job](jobs.md).  Details: [slash commands](slash_commands.md), [spec](specs/2026-10-19-loop.md).
 
 ### Goal Workspaces
 
