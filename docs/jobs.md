@@ -462,8 +462,9 @@ it is fenced in:
   removed and symlinks are followed, so what you are shown at creation is what will actually be
   read. The same check runs on every tick — a source that has since been pointed somewhere else,
   or is no longer a directory, is a gate failure and nothing is started;
-- it is reviewed once, at creation, by Vibecop, with the ordinary approval dialog for anything
-  Vibecop escalates or cannot answer. With Vibecop off, every gate script goes to the dialog. Both are shown the same thing: the script, every mount as
+- it is reviewed once, at creation, by Vibecop, with the approval dialog for anything Vibecop
+  escalates or cannot answer. That dialog offers Approve and Deny only, never Always Allow, which
+  would save the script's text as a rule for your Mac, where you are approving it for the sandbox (#648). With Vibecop off, every gate script goes to the dialog. Both are shown the same thing: the script, every mount as
   `source → target, read-only`, and the timeout — the mounts are the standing permission being
   granted, and the script is only what is done with them. That review is the last time a human sees
   it, which is why the sandbox, the read-only mounts and the timeout are not negotiable.

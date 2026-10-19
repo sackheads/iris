@@ -3375,9 +3375,11 @@ actor IrisEngine {
                 // time to reach the same escalation. `schedule_job` is never offered to a
                 // background run, so there is always someone to answer this.
                 guard let state else { return false }
+                // No Always Allow (#648): its rule would match the composed gate text as a host
+                // command, where the person is approving it for the sandbox.
                 return await state.enqueueUserApproval(
                     toolName: "run_command", details: details, workspace: nil,
-                    conversationId: conversationId, origin: "Gate script")
+                    conversationId: conversationId, origin: "Gate script", offersAlwaysAllow: false)
             })
     }
 

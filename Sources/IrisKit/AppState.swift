@@ -363,20 +363,25 @@ struct ToolApprovalRequest: Identifiable {
     let workspace: String?
     let conversationId: UUID?
     let origin: String
-    /// Fix round 2 (#187): true for a `humanOnly` request (the pinned conversation's job-creation
-    /// gate) — one that bypassed the deterministic allowlist on the way in specifically so neither
-    /// it nor Vibecop could stand in for a human click. "Always Allow" would write a `PermissionRule`
-    /// a `humanOnly` call never reads (it skips `permissions.isAllowed` entirely), so the dialog
-    /// must not offer a choice that looks like it changes future behavior but cannot. Not
-    /// `Codable` — `ToolApprovalRequest` holds a `CheckedContinuation` and is never persisted, only
-    /// ever constructed fresh by `enqueueUserApproval` for the lifetime of one pending ask.
+    /// Fix round 2 (#187): true for a `humanOnly` request (the job-creation gate) — one that
+    /// bypassed the deterministic allowlist on the way in specifically so neither it nor Vibecop
+    /// could stand in for a human click. Not `Codable` — `ToolApprovalRequest` holds a
+    /// `CheckedContinuation` and is never persisted, only ever constructed fresh by
+    /// `enqueueUserApproval` for the lifetime of one pending ask.
     let humanOnly: Bool
+    /// Whether the dialog offers "Always Allow", which writes a `PermissionRule`. Off for a
+    /// `humanOnly` request, whose call never reads the allowlist, and for a gate script's
+    /// escalation (#648): Vibecop has already ruled on that one, and a rule written from its
+    /// composed text would let the same text run on the host unasked, where the person approved
+    /// it for the sandbox. Off means no button and, in `resolveApproval`, no rule.
+    let offersAlwaysAllow: Bool
     let continuation: CheckedContinuation<Bool, Never>
     /// When the ask was raised, so `list_sessions` can say how long a peer has waited (#418).
     let requestedAt: Date
 
     init(id: UUID, toolName: String, details: String, workspace: String?, conversationId: UUID?, origin: String,
-         humanOnly: Bool = false, requestedAt: Date = Date(), continuation: CheckedContinuation<Bool, Never>) {
+         humanOnly: Bool = false, offersAlwaysAllow: Bool = true, requestedAt: Date = Date(),
+         continuation: CheckedContinuation<Bool, Never>) {
         self.id = id
         self.requestedAt = requestedAt
         self.toolName = toolName
@@ -385,6 +390,7 @@ struct ToolApprovalRequest: Identifiable {
         self.conversationId = conversationId
         self.origin = origin
         self.humanOnly = humanOnly
+        self.offersAlwaysAllow = offersAlwaysAllow && !humanOnly
         self.continuation = continuation
     }
 }
@@ -3897,7 +3903,8 @@ class AppState {
     /// Appends an approval request and awaits the user's decision. The queue/continuation seam,
     /// separated from `requestApproval`'s permission/Vibecop fast paths so it is unit-testable.
     func enqueueUserApproval(toolName: String, details: String, workspace: String?,
-                             conversationId: UUID?, origin: String, humanOnly: Bool = false) async -> Bool {
+                             conversationId: UUID?, origin: String, humanOnly: Bool = false,
+                             offersAlwaysAllow: Bool = true) async -> Bool {
         // If our task was already cancelled (e.g. a subagent torn down while we were suspended
         // in the Vibecop/timeout window), do NOT enqueue a request nobody will resolve — the
         // teardown's denyPendingApprovals already ran and would miss a late append.
@@ -3911,7 +3918,8 @@ class AppState {
             await withCheckedContinuation { continuation in
                 pendingApprovals.append(ToolApprovalRequest(
                     id: requestId, toolName: toolName, details: details, workspace: workspace,
-                    conversationId: conversationId, origin: origin, humanOnly: humanOnly, continuation: continuation))
+                    conversationId: conversationId, origin: origin, humanOnly: humanOnly,
+                    offersAlwaysAllow: offersAlwaysAllow, continuation: continuation))
             }
         } onCancel: {
             Task { @MainActor [weak self] in self?.denyApproval(id: requestId) }
@@ -4181,13 +4189,14 @@ class AppState {
             // stand in for a human's click on THIS job (`AppState.requestApproval`); persisting a
             // rule here would let that same click silently approve every future one, which is the
             // exact thing `humanOnly` was built to prevent. This call is still honored — the human
-            // did approve it — only the standing rule is refused.
-            if !pending.humanOnly {
+            // did approve it — only the standing rule is refused. The same for a gate script
+            // (#648): `offersAlwaysAllow` is off for both.
+            if pending.offersAlwaysAllow {
                 permissions.allowGlobally(toolName: pending.toolName, details: pending.details)
             }
             approved = true
         case .alwaysAllowProject:
-            if !pending.humanOnly {
+            if pending.offersAlwaysAllow {
                 if let workspace = pending.workspace {
                     permissions.allowInProject(toolName: pending.toolName, details: pending.details, workspace: workspace)
                 } else {
