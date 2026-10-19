@@ -25,7 +25,8 @@ struct MotionTests {
     /// Every SwiftUI animation and transition goes through `Motion`, so a new one that does not
     /// fails here until it is routed, or allowlisted on purpose with a reason.
     @Test("no withAnimation, .animation or .transition outside Motion.swift")
-    func everySiteGoesThroughMotion() throws {
+    nonisolated func everySiteGoesThroughMotion() throws {
+        // Off the main actor: a scan of the sources held it for seconds in a parallel run (#637).
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources/IrisKit")
         let raw = [
