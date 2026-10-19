@@ -71,6 +71,15 @@ struct ReadOnlyCommandTests {
         // Options that are not on a program's list, however harmless some look: the list decides.
         "grep -Z x f", "grep -z x f", "grep -J x f", "grep --decompress x f", "rg --pr=x foo", "ls -laz",
         "head -n", "rg -g", "rg --glob", "cat --show-all a", "find . -ls", "find . -name", "find '-exec' rm x +",
+        // `date` (#682): an operand that is not `+FORMAT` sets the clock; only `-u` and `-R`, as
+        // words of their own; one format, last; and the shell's operators refused as for any program.
+        // Formats are quoted, so each row is refused by `date`'s grammar and not by the tokenizer's
+        // refusal of a bare `%`; the last two rows are the tokenizer's.
+        "date 1019160000", "date 10191600", "date 0000", "date -u 1019160000", "date '+%s' 1019160000",
+        "date -f '%s' 0", "date -j 1019160000", "date -n 1019160000", "date -v+1d", "date -r f", "date -s now",
+        "date -d now", "date -t x", "date -uR", "date -- '+%s'", "date -u -- '+%s'", "date '+%s' '+%Y'",
+        "date '+%s' -u", "date ; rm x", "date | sh", "date '+%s'; rm x", "date --utc", "date -",
+        "date +$(rm x)", "date +%s",
         // Nothing at all.
         "", "   ",
     ]
@@ -82,6 +91,8 @@ struct ReadOnlyCommandTests {
         "basename /a/b", "dirname /a/b", "whoami", "uname -a", "echo hello", "file a", "file -b a", "rg foo",
         "rg -n 'x' Sources", "find . -name '*.swift'", "find . -type f -newer a", "cat HEAD~1",
         "ls  -la", " ls ",
+        "date", "date -u", "date -R", "date -R -u", "date -u -R", "date '+%Y-%m-%d'", "date \"+%H:%M:%S %Z\"",
+        "date -u '+%s'", "date -R -u '+%a, %d %b'", "date +'%s'",
     ]
 
     @Test("every trick in the refusal table is may-write", arguments: refused)
