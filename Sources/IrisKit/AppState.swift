@@ -5115,7 +5115,11 @@ class AppState {
                     // dropped with the old cadence: its time belonged to the schedule just replaced.
                     updated.nextFireAt = JobScheduler.nextFire(for: trigger, after: Date())
                     updated.retryAttempt = 0
-                    if updated.nextFireAt == nil {
+                    // #693: a review pause survives a reschedule. Replaced by "unmatchable" here, a
+                    // second reschedule with a good cron would clear it with no review (dev-1).
+                    if job.pausedReason == Self.gateNeedsReviewReason {
+                        updated.pausedReason = Self.gateNeedsReviewReason
+                    } else if updated.nextFireAt == nil {
                         updated.pausedReason = JobScheduler.unmatchableReason
                     } else if updated.pausedReason == JobScheduler.unmatchableReason {
                         updated.pausedReason = nil
