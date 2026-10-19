@@ -346,6 +346,9 @@ struct SettingsView: View {
                         .foregroundColor(.secondary)
                 }
                 .padding(.bottom)
+
+                // #239: providers a subagent may run on besides the primary.
+                SubagentProvidersSection(config: config)
             }
             .formStyle(.grouped)
             .padding(20)

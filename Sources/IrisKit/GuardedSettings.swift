@@ -28,8 +28,12 @@ enum GuardedKey: String, CaseIterable, Sendable {
     case mainAgentSandboxDefault = "MAIN_AGENT_SANDBOX_DEFAULT"
     case enableVibecop = "ENABLE_VIBECOP"
     case enablePromptInjectionProtection = "ENABLE_PROMPT_INJECTION_PROTECTION"
+    /// #239: the custom endpoints (where a subagent's context goes) and the built-in families'
+    /// "Usable by subagents" switches, as JSON text. Empty is none.
+    case subagentProviders = "SUBAGENT_PROVIDERS"
+    case subagentBuiltIns = "SUBAGENT_BUILTINS"
 
-    enum Kind { case url, cap(Int), flag, sandboxPref }
+    enum Kind { case url, cap(Int), flag, sandboxPref, blob }
 
     var kind: Kind {
         switch self {
@@ -49,13 +53,14 @@ enum GuardedKey: String, CaseIterable, Sendable {
         case .vibecopTimeoutSeconds: .cap(5)
         case .enableSandboxing, .enableVibecop, .enablePromptInjectionProtection: .flag
         case .mainAgentSandboxDefault: .sandboxPref
+        case .subagentProviders, .subagentBuiltIns: .blob
         }
     }
 
     /// What a fresh install gets.
     var builtIn: String {
         switch kind {
-        case .url: ""
+        case .url, .blob: ""
         case .cap(let n): String(n)
         case .sandboxPref: SandboxPref.host.rawValue
         case .flag: self == .enablePromptInjectionProtection ? "true" : "false"
@@ -66,7 +71,7 @@ enum GuardedKey: String, CaseIterable, Sendable {
     /// endpoints, built-in caps, every guard on.
     var protective: String {
         switch kind {
-        case .url, .cap: builtIn
+        case .url, .cap, .blob: builtIn
         case .flag: "true"
         case .sandboxPref: SandboxPref.sandboxed.rawValue
         }
@@ -76,6 +81,7 @@ enum GuardedKey: String, CaseIterable, Sendable {
     func isValid(_ value: String) -> Bool {
         switch kind {
         case .url: value.isEmpty || URL(string: value)?.scheme != nil
+        case .blob: value.isEmpty || (try? JSONSerialization.jsonObject(with: Data(value.utf8))) != nil
         case .cap: Int(value).map { $0 >= 0 } ?? false
         case .flag: value == "true" || value == "false"
         case .sandboxPref: SandboxPref(rawValue: value) != nil
@@ -89,7 +95,7 @@ enum GuardedKey: String, CaseIterable, Sendable {
     func carriesOver(_ value: String) -> Bool {
         guard isValid(value) else { return false }
         switch kind {
-        case .url: return value.isEmpty
+        case .url, .blob: return value.isEmpty
         case .cap(let builtIn): return (Int(value) ?? 0) <= builtIn
         case .sandboxPref: return true
         case .flag: return self == .enablePromptInjectionProtection ? value == "true" : true
@@ -265,6 +271,7 @@ extension ConfigManager {
         case .mainAgentSandboxDefault: mainAgentSandboxDefault.rawValue
         case .enableVibecop: enableVibecop ? "true" : "false"
         case .enablePromptInjectionProtection: enableAdvancedPromptInjectionProtection ? "true" : "false"
+        case .subagentProviders, .subagentBuiltIns: guardedBlob(key)
         }
     }
 
@@ -290,5 +297,28 @@ extension ConfigManager {
     func takeGuardedNotices() -> [String] {
         defer { guardedNotices = [] }
         return guardedNotices
+    }
+}
+
+extension ConfigManager {
+    /// A blob-kind guarded value (#239's endpoints and switches), which has no stored property:
+    /// read from the item each time. Protective (none) unless the item read normally at launch.
+    func guardedBlob(_ key: GuardedKey) -> String {
+        guard let keychain = guardedKeychain else { return store.string(forKey: key.rawValue) ?? "" }
+        guard guardedState == .normal else { return "" }
+        let value = keychain.loadSecrets()[key.rawValue] ?? ""
+        return key.isValid(value) ? value : ""
+    }
+
+    /// Saves a blob-kind guarded value with every other guarded value, as `persistGuarded` does.
+    func setGuardedBlob(_ key: GuardedKey, _ value: String) {
+        guard let keychain = guardedKeychain else { store.set(value, forKey: key.rawValue); return }
+        guard !keychain.areWritesBlocked else { return }
+        var dict = keychain.loadSecrets()
+        for k in GuardedKey.allCases { dict[k.rawValue] = guardedValue(k) }
+        dict[key.rawValue] = value
+        dict[GuardedSettings.markerKey] = "1"
+        keychain.saveSecrets(dict)
+        if guardedState == .missing { guardedState = .normal }
     }
 }

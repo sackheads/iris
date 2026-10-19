@@ -2,8 +2,10 @@ import Foundation
 
 struct OpenAIClient {
     /// The full request for one call. `stream` adds the provider's streaming switches and nothing else.
-    static func makeURLRequest(request: GeminiRequest, model: String, apiKey: String, baseURL: String = "", stream: Bool) throws -> URLRequest {
-        guard !apiKey.isEmpty else {
+    /// `keyOptional`: a loopback endpoint that takes no key (#239); no Authorization is sent.
+    static func makeURLRequest(request: GeminiRequest, model: String, apiKey: String, baseURL: String = "", stream: Bool,
+                               keyOptional: Bool = false) throws -> URLRequest {
+        guard !apiKey.isEmpty || keyOptional else {
             throw URLError(.userAuthenticationRequired)
         }
         
@@ -187,7 +189,7 @@ struct OpenAIClient {
         }
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
-        urlRequest.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if !apiKey.isEmpty { urlRequest.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
         urlRequest.addValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
 
@@ -196,28 +198,36 @@ struct OpenAIClient {
     }
 
     /// One streamed call: the same request with the streaming switches on, mapped to stream events.
-    static func streamContent(request: GeminiRequest, model: String, apiKey: String, baseURL: String = "") -> AsyncThrowingStream<LLMStreamEvent, Error> {
-        LLMStreaming.stream(provider: "OpenAI", mapper: OpenAIStreamMapper()) {
-            try makeURLRequest(request: request, model: model, apiKey: apiKey, baseURL: baseURL, stream: true)
+    /// `label` names the provider in errors; `session` is a routed endpoint's no-redirect one.
+    static func streamContent(request: GeminiRequest, model: String, apiKey: String, baseURL: String = "",
+                              label: String = "OpenAI", session: URLSession = .shared,
+                              keyOptional: Bool = false) -> AsyncThrowingStream<LLMStreamEvent, Error> {
+        LLMStreaming.stream(provider: label, mapper: OpenAIStreamMapper(), session: session, redacting: [apiKey]) {
+            try makeURLRequest(request: request, model: model, apiKey: apiKey, baseURL: baseURL, stream: true, keyOptional: keyOptional)
         }
     }
 
-    static func generateContent(request: GeminiRequest, model: String, apiKey: String, baseURL: String = "") async throws -> GeminiResponse {
-        let urlRequest = try makeURLRequest(request: request, model: model, apiKey: apiKey, baseURL: baseURL, stream: false)
-        let (data, response) = try await URLSession.shared.data(for: urlRequest)
+    static func generateContent(request: GeminiRequest, model: String, apiKey: String, baseURL: String = "",
+                                label: String = "OpenAI", session: URLSession = .shared,
+                                keyOptional: Bool = false) async throws -> GeminiResponse {
+        let urlRequest = try makeURLRequest(request: request, model: model, apiKey: apiKey, baseURL: baseURL, stream: false,
+                                            keyOptional: keyOptional)
+        let (rawData, response) = try await session.data(for: urlRequest)
         
         guard let httpResponse = response as? HTTPURLResponse else {
-            throw APIError(message: "Invalid response from OpenAI API")
+            throw APIError(message: "Invalid response from \(label) API")
         }
         
         if httpResponse.statusCode != 200 {
+            // A provider can echo the key it was sent (#239).
+            let data = SecretScrub.scrub(rawData, [apiKey])
             print("API Error (\(httpResponse.statusCode)): \(String(data: data, encoding: .utf8) ?? "<non-utf8 body>")")
-            throw APIError.http(provider: "OpenAI", statusCode: httpResponse.statusCode, body: data,
+            throw APIError.http(provider: label, statusCode: httpResponse.statusCode, body: data,
                                 headers: httpResponse.allHeaderFields)
         }
         
         // Parse OpenAI response back to GeminiResponse
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+        let json = try JSONSerialization.jsonObject(with: rawData) as? [String: Any] ?? [:]
         return try parseResponse(json)
     }
 
