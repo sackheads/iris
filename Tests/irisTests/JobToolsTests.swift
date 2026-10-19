@@ -1442,6 +1442,10 @@ struct JobToolsTests {
         #expect(!full.contains(String(repeating: "c", count: 301)), "gate_script must be cut, not merely marked")
         #expect(full.contains("gate_mounts: /Users/me/project, /data:ro"))
         #expect(full.contains("gate_timeout_seconds: 30"))
+        #expect(full.contains("gate_network: off (host-only: still reaches services on this Mac)"))
+        let yes = IrisEngine.jobApprovalDetails(toolName: "schedule_job", args: [
+            "prompt": .string("p"), "intervalSeconds": .int(60), "gate_script": .string("x"), "gate_network": .string("yes")])
+        #expect(yes.contains("gate_network: on (internet)"), "shown as the parse reads it")
 
         // None given: no gate_* line appears at all, same omission shape as the base fields.
         let noGate = IrisEngine.jobApprovalDetails(toolName: "schedule_job", args: [

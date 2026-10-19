@@ -98,9 +98,9 @@ enum GateEvaluator {
         case .pathChanged(let path):
             return evaluatePath(path, previous: previous, fileManager: fileManager,
                                 entryLimit: directoryEntryLimit)
-        case .script(let command, let mounts, let timeoutSeconds):
+        case .script(let command, let mounts, let timeoutSeconds, let network):
             return await evaluateScript(command, mounts: mounts, timeoutSeconds: timeoutSeconds,
-                                        runtime: runtime,
+                                        network: network, runtime: runtime,
                                         image: image ?? ConfigManager.shared.sandboxImage,
                                         createCeiling: createCeilingSeconds,
                                         fileManager: fileManager)
@@ -268,6 +268,7 @@ enum GateEvaluator {
     private struct CreateTimedOut: Error {}
 
     private static func evaluateScript(_ command: String, mounts: [String], timeoutSeconds: Int,
+                                       network: Bool,
                                        runtime: (any ContainerRuntime)?, image: String,
                                        createCeiling: Int,
                                        fileManager: FileManager) async -> GateResult {
@@ -288,9 +289,21 @@ enum GateEvaluator {
         guard await GateContainerRegistry.shared.register(name) else {
             return .error(LiveContainerNames.exitingError)
         }
+        // #687: off is the isolated network, made first if it is missing. On is the default one.
+        let networkMode: NetworkMode
+        if network {
+            networkMode = .default
+        } else {
+            do { try await runtime.ensureIsolatedNetwork(named: NetworkMode.isolatedNetworkName) }
+            catch {
+                await GateContainerRegistry.shared.unregister(name)
+                return .error("the gate's isolated network could not be set up: \(describe(error))")
+            }
+            networkMode = .isolated
+        }
         do {
             try await createWithinCeiling(runtime, name: name, image: image,
-                                          mounts: readOnly(mounts), seconds: createCeiling)
+                                          mounts: readOnly(mounts), network: networkMode, seconds: createCeiling)
         } catch is CreateTimedOut {
             // Not a hang: a bounded failure that lands on the ordinary error path, so it is
             // counted towards the three-error pause and somebody is eventually told. The remove
@@ -328,11 +341,12 @@ enum GateEvaluator {
     /// this returns, which is what makes "the gate did not start a container" true rather than
     /// hopeful.
     private static func createWithinCeiling(_ runtime: any ContainerRuntime, name: String,
-                                            image: String, mounts: [String], seconds: Int) async throws {
+                                            image: String, mounts: [String], network: NetworkMode,
+                                            seconds: Int) async throws {
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
                 try await runtime.createDetached(name: name, image: image, mounts: mounts,
-                                                 workdir: workdir)
+                                                 workdir: workdir, network: network)
             }
             group.addTask {
                 try await Task.sleep(nanoseconds: UInt64(max(1, seconds)) * 1_000_000_000)

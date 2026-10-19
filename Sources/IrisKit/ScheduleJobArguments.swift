@@ -34,6 +34,8 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// A script gate's inputs, `source[:target]` — always mounted read-only, whatever was written.
     let gateMounts: [String]?
     let gateTimeoutSeconds: Int?
+    /// #687: whether the gate script may reach the network. `nil` is off.
+    var gateNetwork: Bool? = nil
     /// The two policy fields a model may set at creation (#187 §3). `nil` is "say nothing", which
     /// is not the same as asking for the default: it leaves `JobPolicy`'s own default in place, so
     /// a later change to that default reaches every job that never had an opinion.
@@ -121,11 +123,16 @@ struct ScheduleJobArguments: Equatable, Sendable {
         case .failure(let message): return .failure(message)
         case .success(let value): network = value
         }
+        let gateNetwork: Bool?
+        switch boolean(args["gate_network"]) {
+        case .failure: return .failure("gate_network must be true or false.")
+        case .success(let value): gateNetwork = value
+        }
         return .success(ScheduleJobArguments(
             prompt: prompt, name: text(args["name"]), alias: alias, profile: text(args["profile"]),
             gateURL: text(args["gate_url"]), gatePath: text(args["gate_path"]),
             gateScript: text(args["gate_script"]), gateMounts: gateMounts,
-            gateTimeoutSeconds: integer(args["gate_timeout_seconds"]),
+            gateTimeoutSeconds: integer(args["gate_timeout_seconds"]), gateNetwork: gateNetwork,
             overlap: overlap, catchUp: catchUp, runTimeoutSeconds: runTimeout, mounts: mounts,
             network: network, notes: notes))
     }
@@ -217,7 +224,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
         guard asked.count <= 1 else { return .failure(ToolMessage(Self.oneGateOnly)) }
         // The two script-only options, given without one — or beside a gate that cannot use them.
         // Ignoring them would store a gate the user thinks has inputs and a deadline of its own.
-        guard gateScript != nil || (gateMounts == nil && gateTimeoutSeconds == nil) else {
+        guard gateScript != nil || (gateMounts == nil && gateTimeoutSeconds == nil && gateNetwork == nil) else {
             return .failure(ToolMessage(Self.gateOptionsNeedAScript))
         }
         if let gateURL {
@@ -264,7 +271,8 @@ struct ScheduleJobArguments: Equatable, Sendable {
             command: gateScript,
             mounts: GateEvaluator.readOnly(resolved),
             timeoutSeconds: GateEvaluator.clampedTimeout(gateTimeoutSeconds
-                ?? GateEvaluator.defaultTimeoutSeconds)))
+                ?? GateEvaluator.defaultTimeoutSeconds),
+            network: gateNetwork ?? false))
     }
 
     /// The refusal a `mutating` job gets when the VM its commands would run in is unavailable —
@@ -352,7 +360,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
 
     static let catchUpShape: ToolMessage = "catch_up must be 'coalesce' (one fire on wake, whatever was missed), 'skip' (no fire; jump to the next occurrence), or 'replay' to run the most recent missed occurrences one at a time — with a cap, if you want one other than 5, as 'replay:3' (100 is the most a job may replay)."
 
-    static let gateOptionsNeedAScript = "gate_mounts and gate_timeout_seconds only apply to gate_script."
+    static let gateOptionsNeedAScript = "gate_mounts, gate_timeout_seconds and gate_network only apply to gate_script."
 
     static let timeoutShape: ToolMessage = "timeout_seconds must be a whole number of seconds, 60-3600."
     static let gateMountsShape: ToolMessage = "gate_mounts must be a directory path, or a list of them."
@@ -606,7 +614,7 @@ struct GateScriptReview: Sendable {
     /// unremarkable until `/in` turns out to be the home directory, so a reviewer shown the script
     /// alone is reviewing the wrong half. Each mount is rendered as the resolved source and the
     /// path the script will see it at, because that is what will actually be bound.
-    static func details(script: String, mounts: [String], timeoutSeconds: Int) -> String {
+    static func details(script: String, mounts: [String], timeoutSeconds: Int, network: Bool = false) -> String {
         let rendered = mounts.map { entry -> String in
             let parts = GateEvaluator.mountParts(entry)
             return "  \(parts.source) \u{2192} \(parts.target), read-only"
@@ -617,10 +625,19 @@ struct GateScriptReview: Sendable {
         // free text, and one that ended with a forged "What it can read: (none)" would otherwise
         // sit exactly where the real list is expected. Put the fixed part where nothing the model
         // wrote can precede it.
+        let reach: String
+        switch (network, mounts.isEmpty) {
+        case (true, false):
+            reach = "Network: on. It can read the folders above and reach the internet on every run, with no one watching: it could send what it reads anywhere, or download and run more code."
+        case (true, true):
+            reach = "Network: on. It can reach the internet on every run, with no one watching: it could download and run more code."
+        case (false, _):
+            reach = "Network: off (host-only): no internet, but it can still reach services on this Mac."
+        }
         return """
             This script runs unattended inside the sandbox VM every time the job's schedule comes \
             round, for as long as the job exists. What it can read:
-            """ + "\n" + inputs + "\n" + "It is stopped after \(timeoutSeconds) seconds." + "\n\nScript:\n" + script
+            """ + "\n" + inputs + "\n" + reach + "\n" + "It is stopped after \(timeoutSeconds) seconds." + "\n\nScript:\n" + script
     }
 
     /// `APPROVE` creates the job; `DENY` refuses it and says why; anything else — an `ESCALATE`, a
@@ -631,17 +648,24 @@ struct GateScriptReview: Sendable {
     /// Both halves see the same text, mounts and timeout included: an escalation is a second
     /// opinion on what Vibecop was asked about, and showing the person less than the model was
     /// shown is how an authorisation gets given without sight of what it authorises.
-    func review(script: String, mounts: [String], timeoutSeconds: Int) async -> Result<Void, ToolMessage> {
-        let subject = Self.details(script: script, mounts: mounts, timeoutSeconds: timeoutSeconds)
+    /// #687 (planner's ruling b, #690): human-only. Vibecop's APPROVE no longer creates the job:
+    /// even network off, the VM reaches services on the Mac, every tick, unattended, so a person
+    /// reads every gate script once. Vibecop still advises, shown in the dialog, and a DENY still
+    /// refuses without asking.
+    func review(script: String, mounts: [String], timeoutSeconds: Int, network: Bool = false) async -> Result<Void, ToolMessage> {
+        let subject = Self.details(script: script, mounts: mounts, timeoutSeconds: timeoutSeconds, network: network)
         let decision = await verdict(subject)
-        switch decision?.decision {
-        case "APPROVE":
-            return .success(())
-        case "DENY":
+        if decision?.decision == "DENY" {
             return .failure(ToolMessage(Self.denied(decision?.reason ?? "")))
-        default:
-            return await ask(subject) ? .success(()) : .failure(ToolMessage(Self.declined))
         }
+        return await ask(subject + Self.advice(decision)) ? .success(()) : .failure(ToolMessage(Self.declined))
+    }
+
+    /// Vibecop's view, added below what the person reads; nothing when it gave none.
+    static func advice(_ decision: VibecopDecision?) -> String {
+        guard let decision else { return "" }
+        let reason = decision.reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "\n\nVibecop's view: \(decision.decision.lowercased())" + (reason.isEmpty ? "" : " \u{2014} \(reason)")
     }
 
     /// What the model is told when the review refused the script. The reason is quoted so the

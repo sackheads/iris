@@ -42,7 +42,7 @@ struct GateScriptAlwaysAllowTests {
         let (request, approved) = try await ask(state, "gate script: test -f /in/x && echo CHANGED", in: id, answer: .approve)
         let shown = try #require(request)
         #expect(!shown.offersAlwaysAllow)
-        #expect(!shown.humanOnly, "only the dialog changes: Vibecop already ruled, and nothing about the ladder moves")
+        #expect(shown.humanOnly, "#687: a person approves every gate script; nothing stands in for the click")
         #expect(approved)
     }
 
