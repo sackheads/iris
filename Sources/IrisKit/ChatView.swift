@@ -409,7 +409,8 @@ struct ChatView: View {
                     // its slot in the stack and give the space back to nothing.
                     if config.showModelLEDs {
                         ModelLEDBar(isThinking: state.isThinking(in: conv.id),
-                                    openSettings: { SettingsNavigation.shared.show($0) { openSettings() } })
+                                    openSettings: { SettingsNavigation.shared.show($0) { openSettings() } },
+                                    conversationTier: state.effectiveTier(for: conv.id))
                     }
 
                     messageInputBar

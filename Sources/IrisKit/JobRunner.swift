@@ -1077,7 +1077,7 @@ actor JobRunner {
         // 5c §0.6: whose prices this run's spend is weighed at, for as long as the row exists.
         // Only here: every other row (gate, built-in, stillborn, approved call) spends nothing.
         run.provider = config.primaryProvider
-        let tier = await engine?.modelTier
+        let tier = engine?.modelTier   // a job run has no /model or profile tier: the engine's own
         run.tier = tier?.rawValue
         // #370: the id the client resolves for this tier, through the same config, so cache reads
         // price at this model's ratio rather than the provider's.

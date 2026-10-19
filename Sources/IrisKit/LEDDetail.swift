@@ -91,14 +91,18 @@ extension ModelLEDBar {
                   action: action(for: kind, state: state))
     }
 
-    /// The models PRI stands for. These are the configured defaults: once a conversation can have
-    /// its own tier (agent profiles part 3, #669/#667), this is the seam that must take the
-    /// conversation's resolved tier and say so, or the popover names the wrong model there.
+    /// The models PRI stands for: the current conversation's, when the bar is given it (its own
+    /// tier, its profile's, or the default, #667), then the configured defaults.
     func primaryModelFacts() -> [LEDDetail.Fact] {
-        [.init(label: "Provider", value: config.primaryProvider),
-         .init(label: "Default model", value: orNotSet(config.getModel(for: .medium))),
-         .init(label: "Default easy model", value: orNotSet(config.getModel(for: .easy))),
-         .init(label: "Default hard model", value: orNotSet(config.getModel(for: .hard)))]
+        var facts: [LEDDetail.Fact] = [.init(label: "Provider", value: config.primaryProvider)]
+        if let conversationTier {
+            facts.append(.init(label: "This conversation",
+                               value: "\(orNotSet(config.getModel(for: conversationTier.tier))) (\(conversationTier.tier.rawValue), \(conversationTier.source))"))
+        }
+        return facts + [
+            .init(label: "Default model", value: orNotSet(config.getModel(for: .medium))),
+            .init(label: "Default easy model", value: orNotSet(config.getModel(for: .easy))),
+            .init(label: "Default hard model", value: orNotSet(config.getModel(for: .hard)))]
     }
 
     private func facts(for kind: LEDKind) -> [LEDDetail.Fact] {

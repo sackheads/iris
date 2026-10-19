@@ -117,6 +117,8 @@ struct ModelLEDBar: View {
     /// Opens Settings on a tab, from a popover's action. `ChatView` passes the scene's
     /// `openSettings` through `SettingsNavigation`; the default does nothing, for previews.
     var openSettings: (SettingsTab) -> Void = { _ in }
+    /// The conversation's tier and why, for PRI's details (#667). Nil: show only the defaults.
+    var conversationTier: (tier: ModelTier, source: String)? = nil
     /// The light whose details popover is open, if any (#88).
     @State private var shown: LEDKind?
 

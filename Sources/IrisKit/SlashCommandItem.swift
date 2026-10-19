@@ -15,7 +15,7 @@ struct SlashCommandItem: Identifiable, Sendable, Equatable {
         SlashCommandItem(id: "jobs", command: "/jobs", usage: "/jobs [ack <run id>|pause|resume|enable|disable|run|delete <name>|reschedule <name> <cron> [timezone]|url <name> [on|off]]", description: "List background jobs, acknowledge a failed run, pause, resume, enable, disable, run, reschedule, or delete a job, or turn a job's link on or off"),
         SlashCommandItem(id: "journey", command: "/journey", usage: "/journey", description: "View chronological learning journey timeline"),
         SlashCommandItem(id: "rules", command: "/rules", usage: "/rules [reload]", description: "View loaded system rules or force reload"),
-        SlashCommandItem(id: "model", command: "/model", usage: "/model [fast|medium|heavy|<name>]", description: "View or switch active model for conversation"),
+        SlashCommandItem(id: "model", command: "/model", usage: "/model [easy|medium|hard|default]", description: "Show or set this conversation's model tier"),
         SlashCommandItem(id: "mcp", command: "/mcp", usage: "/mcp [reload]", description: "List connected MCP tools or reload transport"),
         SlashCommandItem(id: "facts", command: "/facts", usage: "/facts [all|search <q>|probe <e>]", description: "Inspect or search SQLite FactStore memories"),
         SlashCommandItem(id: "search", command: "/search", usage: "/search <query>", description: "Full-text search across saved conversations"),
