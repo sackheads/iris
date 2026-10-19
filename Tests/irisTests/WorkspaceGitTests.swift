@@ -1071,3 +1071,284 @@ struct GitHostOverrideTests {
         #expect(guardian.hostOverrides(cwd: "/") == nil)
     }
 }
+
+@Suite("The saved list of sandboxed folders fails closed when it cannot be read (#641)", .serialized, .timeLimit(.minutes(1)))
+struct GitGuardStoreTests {
+    private func setUp() async throws -> (dir: String, store: URL, outside: String) {
+        let (dir, _) = try await GitFixture.repo()
+        let store = URL(fileURLWithPath: dir + "/home/sandbox-workspaces.json")
+        try FileManager.default.createDirectory(atPath: dir + "/home", withIntermediateDirectories: true)
+        let outside = dir + "/outside"
+        try FileManager.default.createDirectory(atPath: outside, withIntermediateDirectories: true)
+        return (dir, store, outside)
+    }
+
+    private func entry(_ path: String, hooks: String?) -> String {
+        "{\"path\":\"\(path)\"" + (hooks.map { ",\"hooks\":\"\($0)\"" } ?? "") + "}"
+    }
+
+    @Test("one entry that does not decode is skipped, the rest kept, and the list as it was is kept aside")
+    func badEntry() async throws {
+        let (dir, store, outside) = try await setUp()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let original = Data(("[" + entry(dir + "/ws", hooks: dir + "/ws/.git/hooks") + ",{\"hooks\":3},"
+                             + entry(dir + "/plain", hooks: nil) + "]").utf8)
+        try original.write(to: store)
+
+        let guardian = GitConfigGuard(store: store)
+        #expect(guardian.hostOverrides(cwd: dir + "/ws") == .some(dir + "/ws/.git/hooks"), "a good entry is kept")
+        #expect(guardian.hostOverrides(cwd: dir + "/plain") == .some(nil))
+        #expect(guardian.hostOverrides(cwd: outside) == .some(nil), "fails closed: overrides, no hooks, everywhere")
+        #expect(guardian.watchedSources() == ["/"], "the person's global config counts as reachable")
+        #expect(GitFixture.read(store.path + ".corrupt") == original)
+        let note = try #require(guardian.checkAll())
+        #expect(note.contains("1 of the 3"))
+        #expect(note.contains(store.path + ".corrupt"))
+        #expect(guardian.checkAll() == nil, "said once")
+    }
+
+    @Test("a truncated list is moved aside, every folder counts as unknown, and a watch covers its folder again")
+    func truncated() async throws {
+        let (dir, store, outside) = try await setUp()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let whole = "[" + entry(dir + "/ws", hooks: dir + "/ws/.git/hooks") + "]"
+        let original = Data(whole.prefix(whole.count / 2).utf8)
+        try original.write(to: store)
+
+        let guardian = GitConfigGuard(store: store)
+        #expect(!FileManager.default.fileExists(atPath: store.path), "moved, not left to be written over")
+        #expect(GitFixture.read(store.path + ".corrupt") == original)
+        #expect(guardian.hostOverrides(cwd: outside) == .some(nil))
+        #expect(guardian.hostOverrides(cwd: dir + "/ws") == .some(nil), "no hooks until a watch sees it again")
+        guardian.watch(owner: "c", sources: [dir + "/ws"])
+        let note = try #require(guardian.check(owner: "c"))
+        #expect(note.contains("moved it to \(store.path).corrupt"))
+        #expect(note.contains("Delete \(store.path).corrupt to end this"))
+        #expect(guardian.hostOverrides(cwd: dir + "/ws") == .some(nil), "adopted: watched again, but its hooks never run")
+    }
+
+    @Test("an entry from a newer format, with fields this build does not know, is not a failure")
+    func newerFormat() async throws {
+        let (dir, store, outside) = try await setUp()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try Data(("[{\"path\":\"\(dir)/ws\",\"hooks\":\"\(dir)/ws/.git/hooks\",\"baseline\":{\"x\":1},"
+                  + "\"blocked\":{\"kind\":\"quarantine\",\"path\":\"\(dir)/gone\",\"message\":\"m\",\"since\":5}}]").utf8).write(to: store)
+
+        let guardian = GitConfigGuard(store: store)
+        #expect(guardian.hostOverrides(cwd: dir + "/ws") == .some(dir + "/ws/.git/hooks"))
+        #expect(guardian.hostOverrides(cwd: outside) == nil, "nothing unknown: ordinary git is untouched")
+        #expect(!FileManager.default.fileExists(atPath: store.path + ".corrupt"))
+        #expect(guardian.checkAll() == nil, "no notice; the cleared block ends quietly")
+    }
+
+    @Test("after an unreadable list, the next save leaves the set-aside copies alone and takes a free name")
+    func saveKeepsCorrupt() async throws {
+        let (dir, store, _) = try await setUp()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let earlier = Data("earlier".utf8)
+        try earlier.write(to: URL(fileURLWithPath: store.path + ".corrupt"))
+        let original = Data("{not json".utf8)
+        try original.write(to: store)
+
+        let guardian = GitConfigGuard(store: store)
+        guardian.watch(owner: "c", sources: [dir + "/ws"])
+        guardian.end(owner: "c")
+        #expect(GitFixture.read(store.path + ".corrupt") == earlier, "an earlier copy is never overwritten")
+        #expect(GitFixture.read(store.path + ".corrupt-2") == original)
+        let saved = try #require(GitFixture.read(store.path))
+        #expect(saved != original)
+        let later = GitConfigGuard(store: store)
+        #expect(later.hostOverrides(cwd: dir + "/ws") == .some(nil), "the new list holds the folder, still adopted")
+        #expect(later.checkAll()?.contains("Delete \(store.path).corrupt and \(store.path).corrupt-2 to end this") == true,
+                "said again at the next launch")
+    }
+
+    @Test("a list that cannot be moved aside is never written over")
+    func cannotMoveAside() async throws {
+        let (dir, store, _) = try await setUp()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        for n in 1...100 {
+            try Data().write(to: URL(fileURLWithPath: store.path + ".corrupt" + (n == 1 ? "" : "-\(n)")))
+        }
+        let original = Data("[{".utf8)
+        try original.write(to: store)
+
+        let guardian = GitConfigGuard(store: store)
+        guardian.watch(owner: "c", sources: [dir + "/ws"])
+        let note = try #require(guardian.check(owner: "c"))
+        #expect(note.contains("left it as it is"))
+        #expect(GitFixture.read(store.path) == original)
+    }
+
+    @Test("a list with an unreadable entry that cannot be copied aside is never written over")
+    func cannotCopyAside() async throws {
+        let (dir, store, _) = try await setUp()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        for n in 1...100 {
+            try Data().write(to: URL(fileURLWithPath: store.path + ".corrupt" + (n == 1 ? "" : "-\(n)")))
+        }
+        let original = Data(("[" + entry(dir + "/ws", hooks: dir + "/ws/.git/hooks") + ",{\"hooks\":3}]").utf8)
+        try original.write(to: store)
+
+        let guardian = GitConfigGuard(store: store)
+        guardian.watch(owner: "c", sources: [dir + "/plain"])
+        guardian.end(owner: "c")
+        #expect(GitFixture.read(store.path) == original, "the bad entry's only copy is kept")
+    }
+
+    /// A list that is lost, so the next watch adopts its folder.
+    private func lostList(_ store: URL) throws { try Data("[{".utf8).write(to: store) }
+
+    private func ran(_ dir: String) -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).filter { $0.hasPrefix("RAN-") }.sorted()
+    }
+
+    /// Drivers of every kind the VM could have planted before the restart, with a git script that
+    /// reaches each one: filters (clean, smudge, process), diff (textconv, command), a merge
+    /// driver, a `!` submodule update, difftool and mergetool commands, a tar command, a `!` alias.
+    private func plant(_ dir: String, ws: String, env: [String: String]) async throws -> String {
+        let evil = dir + "/evil"
+        try "#!/bin/sh\ntouch \(dir)/RAN-$1\ncat\n".write(toFile: evil, atomically: false, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: evil)
+        // A tool's own program and a `-c` alias's program, each a single path. tkdiff, not a tool
+        // a Mac has: emptied, its path falls back to the tool's own name, which must not exist.
+        for name in ["fsmonitor", "toolpath"] {
+            try "#!/bin/sh\ntouch \(dir)/RAN-\(name)\n".write(toFile: dir + "/" + (name == "fsmonitor" ? "fsmon" : name), atomically: false, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir + "/" + (name == "fsmonitor" ? "fsmon" : name))
+        }
+        let sub = dir + "/sub-" + (ws as NSString).lastPathComponent
+        let setUp = """
+        git init -q \(sub) && git -C \(sub) -c user.email=a@b -c user.name=a commit -q --allow-empty -m1 &&
+        git -C \(sub) -c user.email=a@b -c user.name=a commit -q --allow-empty -m2 &&
+        printf '*.x filter=f diff=d merge=m\\n*.p filter=p\\n' > .gitattributes && echo a > a.x && echo a > b.p && echo a > g &&
+        git -c protocol.file.allow=always submodule -q add \(sub) s && git add -A && git commit -qm base &&
+        git checkout -qb side && echo side > a.x && echo side > g && git commit -qam side && git checkout -q - &&
+        echo main > a.x && echo main > g && git commit -qam main && git -C s checkout -q HEAD~1 &&
+        git config filter.f.clean '\(evil) clean' && git config filter.f.smudge '\(evil) smudge' && git config filter.f.required true &&
+        git config filter.p.process '\(evil) process' &&
+        git config diff.d.textconv '\(evil) textconv' && git config diff.d.command '\(evil) command' &&
+        git config merge.m.driver '\(evil) merge' && git config submodule.s.update '!\(evil) subupdate' &&
+        git config difftool.dd.cmd '\(evil) difftool' && git config mergetool.mm.cmd '\(evil) mergetool' &&
+        git config tar.foo.command '\(evil) tar' && git config alias.zz '!\(evil) alias' &&
+        git config alias.st '-c core.fsmonitor=\(dir)/fsmon status' && git config difftool.tkdiff.path '\(dir)/toolpath'
+        """
+        let r = try await GitFixture.sh(setUp, in: ws, env: env)
+        #expect(r.status == 0, "\(r.out)")
+        return """
+        echo d > a.x; echo d > b.p; git status --short; git diff; git diff --textconv --no-ext-diff; git add a.x b.p;
+        echo z > a.x; echo z > b.p; git checkout -- a.x b.p; git archive --format=foo HEAD; git difftool -y -t dd HEAD~1 HEAD -- g; git difftool -y -t tkdiff HEAD~1 HEAD -- g; git zz; git st;
+        git -c protocol.file.allow=always submodule update s; git stash -q; git merge side -m mm; git mergetool -y -t mm g; echo done
+        """
+    }
+
+    @Test("a folder first watched after the list was lost runs none of the drivers its config planted in host run_command")
+    func adoptedDriversDontRun() async throws {
+        let (dir, store, _) = try await setUp()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let env = GitFixture.environment(home: dir + "/home")
+
+        // Control: the same script with no guard reaches every planted program.
+        let control = dir + "/control"
+        try FileManager.default.createDirectory(atPath: control, withIntermediateDirectories: true)
+        try await GitFixture.sh("git init -q && git config user.email a@b && git config user.name a && echo a > f && git add f && git commit -qm i",
+                                in: control, env: env)
+        let script = try await plant(dir, ws: control, env: env)
+        _ = try await GitFixture.sh(script, in: control, env: env)
+        let all = ["RAN-alias", "RAN-clean", "RAN-command", "RAN-difftool", "RAN-fsmonitor", "RAN-merge", "RAN-mergetool",
+                   "RAN-process", "RAN-smudge", "RAN-subupdate", "RAN-tar", "RAN-textconv", "RAN-toolpath"]
+        #expect(ran(dir) == all, "the script reaches every driver")
+        for name in ran(dir) { try FileManager.default.removeItem(atPath: dir + "/" + name) }
+
+        let ws = dir + "/ws"
+        let script2 = try await plant(dir, ws: ws, env: env)
+        try lostList(store)
+        let guardian = GitConfigGuard(store: store)
+        guardian.watch(owner: "c", sources: [ws])
+        let note = try #require(guardian.check(owner: "c"))
+        #expect(note.contains("filter.f.clean") && note.contains("alias.zz"), "names what it found: \(note)")
+        #expect(note.contains("not protected"))
+        var executor = ToolExecutor()
+        executor.gitGuard = guardian
+        let result = await executor.runCommand(script2, cwd: ws, timeoutSeconds: 60)
+        #expect(result.contains("done"), "\(result)")
+        #expect(ran(dir) == [], "nothing planted ran")
+        #expect(guardian.hostRefusal(cwd: ws, command: "git status") == nil, "neutralised, not refused")
+    }
+
+    @Test("git-lfs's exact values are kept; any other value under filter.lfs is neutralised")
+    func lfsExemption() async throws {
+        let (dir, _, _) = try await setUp()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let env = GitFixture.environment(home: dir + "/home")
+        let ws = dir + "/ws"
+        try await GitFixture.sh("""
+            git config filter.lfs.clean 'git-lfs clean -- %f' && git config filter.lfs.smudge 'git-lfs smudge -- %f' &&
+            git config filter.lfs.process 'git-lfs filter-process' && git config filter.lfs.required true
+            """, in: ws, env: env)
+        #expect(WorkspaceGit.adopted(source: ws).overrides.isEmpty, "LFS as git-lfs writes it works in Iris's git")
+        try await GitFixture.sh("git config filter.lfs.clean '\(dir)/evil clean'", in: ws, env: env)
+        let changed = WorkspaceGit.adopted(source: ws).overrides.map { "\($0.key)=\($0.value)" }
+        #expect(changed == ["filter.lfs.clean=", "filter.lfs.required=false"])
+    }
+
+    @Test("an include or a key no override can stop refuses host commands there until it is removed")
+    func adoptedRefusals() async throws {
+        let (dir, store, _) = try await setUp()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let env = GitFixture.environment(home: dir + "/home")
+        let ws = dir + "/ws"
+        try await GitFixture.sh("git config include.path \(dir)/inc && git config remote.o.uploadpack \(dir)/evil && git config core.worktree \(dir)/outside",
+                                in: ws, env: env)
+        try lostList(store)
+        let guardian = GitConfigGuard(store: store)
+        guardian.watch(owner: "c", sources: [ws])
+        let note = try #require(guardian.check(owner: "c"))
+        #expect(note.contains("core.worktree, include.path, remote.o.uploadpack"), "\(note)")
+        let refusal = try #require(guardian.hostRefusal(cwd: ws, command: "git status"))
+        #expect(refusal.contains("remove them from \(ws)/.git/config to end this"), "\(refusal)")
+        #expect(GitConfigGuard(store: store).hostRefusal(cwd: ws, command: "") != nil, "still refused after a restart")
+        // Removed while the folder is still watched: kept, not put back, and the refusal ends.
+        try await GitFixture.sh("git config --unset include.path && git config --unset remote.o.uploadpack && git config --unset core.worktree",
+                                in: ws, env: env)
+        _ = guardian.checkAll()
+        #expect(guardian.hostRefusal(cwd: ws, command: "") == nil, "a clean check clears it")
+        #expect(WorkspaceGit.adopted(source: ws).refusal == nil, "the removal was kept")
+        try await GitFixture.sh("git config core.worktree \(ws)/sub", in: ws, env: env)
+        #expect(WorkspaceGit.adopted(source: ws).refusal == nil, "a worktree inside the folder is fine")
+        try await GitFixture.sh("git config --unset core.worktree", in: ws, env: env)
+
+        // A bare repository's worktree is wherever git is run; git init's own `bare = false` is fine.
+        #expect(WorkspaceGit.adopted(source: ws).refusal == nil)
+        try await GitFixture.sh("git config core.bare 2", in: ws, env: env)
+        #expect(WorkspaceGit.adopted(source: ws).refusal?.contains("core.bare") == true, "git reads any non-zero number as true")
+        try await GitFixture.sh("git config core.bare true", in: ws, env: env)
+        #expect(WorkspaceGit.adopted(source: ws).refusal?.contains("core.bare") == true)
+    }
+
+    @Test("an adopted folder stays adopted across a restart, and deleting the copies ends it at the next launch")
+    func adoptedSurvivesRestart() async throws {
+        let (dir, store, outside) = try await setUp()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let env = GitFixture.environment(home: dir + "/home")
+        let ws = dir + "/ws"
+        try await GitFixture.sh("git config diff.d.textconv \(dir)/evil", in: ws, env: env)
+        try lostList(store)
+        let first = GitConfigGuard(store: store)
+        first.watch(owner: "c", sources: [ws])
+        first.end(owner: "c")
+
+        let second = GitConfigGuard(store: store)
+        #expect(second.hostOverrides(cwd: ws) == .some(nil), "its hooks still never run")
+        #expect(second.adoptedOverrides(cwd: ws).map(\.key) == ["diff.d.textconv"], "its drivers still neutralised")
+        #expect(second.hostOverrides(cwd: outside) == .some(nil), "fail-closed while the copy is kept")
+        #expect(second.checkAll()?.contains("Delete \(store.path).corrupt to end this") == true, "said once per launch")
+        #expect(second.checkAll() == nil)
+
+        try FileManager.default.removeItem(atPath: store.path + ".corrupt")
+        let third = GitConfigGuard(store: store)
+        #expect(third.hostOverrides(cwd: ws) == .some(ws + "/.git/hooks"), "trusted once the copy is deleted")
+        #expect(third.adoptedOverrides(cwd: ws).isEmpty)
+        #expect(third.hostOverrides(cwd: outside) == nil, "fail-closed ended")
+        #expect(third.checkAll() == nil, "nothing to say")
+    }
+}

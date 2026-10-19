@@ -593,10 +593,11 @@ struct ToolExecutor {
                 return GitConfigGuard.withNotices(refusal, before: gitBefore, after: nil)
             }
             var base = ProcessInfo.processInfo.environment
-            if let hooks = gitGuard.hostOverrides(cwd: directory, command: command,
-                                                  owner: conversationId.map(SandboxSessionManager.containerName(for:))) {
+            let gitOwner = conversationId.map(SandboxSessionManager.containerName(for:))
+            if let hooks = gitGuard.hostOverrides(cwd: directory, command: command, owner: gitOwner) {
                 base.merge(await Self.gitOverrideEnvironment(hooks: hooks ?? "/dev/null", base: base,
-                                                             vmWritable: gitGuard.watchedSources())) { $1 }
+                                                             vmWritable: gitGuard.watchedSources(),
+                                                             extra: gitGuard.adoptedOverrides(cwd: directory, command: command, owner: gitOwner))) { $1 }
             }
             (executable, arguments, environment) = Self.hostSpawn(command, restrictedPath: restrictedPath, base: base)
         }
@@ -689,7 +690,8 @@ struct ToolExecutor {
     /// `WorkspaceGit.hostEnvironment` with the person's own global and system values, read with
     /// the git and `PATH` the command will use, from `/` so no repository's config is read. Their
     /// global config is left out when it sits in a folder a VM can write (`vmWritable`).
-    static func gitOverrideEnvironment(hooks: String, base: [String: String], vmWritable: [String]) async -> [String: String] {
+    static func gitOverrideEnvironment(hooks: String, base: [String: String], vmWritable: [String],
+                                       extra: [(key: String, value: String)] = []) async -> [String: String] {
         var env = BinaryResolver.commandEnvironment(base: base)
         for key in env.keys where key.hasPrefix("GIT_") { env[key] = nil }
         var listing = ""
@@ -704,7 +706,7 @@ struct ToolExecutor {
             vmWritable.contains { WorkspaceGit.relative(file, inside: $0) != nil }
         }
         return WorkspaceGit.hostEnvironment(hooks: hooks, personal: WorkspaceGit.personalValues(listing: listing, trustGlobal: !globalReachable),
-                                            proxyCommand: base["GIT_PROXY_COMMAND"])
+                                            proxyCommand: base["GIT_PROXY_COMMAND"], extra: extra)
     }
 
     /// What a command that outlived its deadline reports. One sentence for both routes: a command
