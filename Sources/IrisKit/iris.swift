@@ -524,6 +524,10 @@ actor IrisEngine {
     /// #239: the provider and model this subagent engine runs on, when it was sent to one. Nil for
     /// every other engine, which runs on the primary as before.
     let subagentRoute: ProviderRoute?
+    /// The unrouted client this engine's delegation hands down: the primary's, even in a routed
+    /// subagent whose own `client` is the route's, so a grader is never driven by the model it
+    /// grades (#697 review).
+    private let primaryClient: any LLMClientProtocol
     /// Builds a routed subagent's client; a test passes a scripted one.
     private let routedClient: @Sendable (ProviderRoute) -> any LLMClientProtocol
     /// The pause before the goal loop's next turn. Injected only so tests that drive the loop do
@@ -538,6 +542,7 @@ actor IrisEngine {
 
     init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil, hooks: HookManager = .shared, provider: String? = nil, replayThinking: Bool? = nil, subagentConfig: ConfigManager = .shared, repromptDelay: TimeInterval = 1.5,
          subagentRoute: ProviderRoute? = nil,
+         primaryClient: (any LLMClientProtocol)? = nil,
          routedClient: @escaping @Sendable (ProviderRoute) -> any LLMClientProtocol = { LLMClient(route: $0) },
          mutatingJobsAvailable: @escaping @Sendable () -> Bool = { SandboxPolicy.mutatingJobCanRun() },
          skillCheckWillClaim: (@Sendable (UUID) async -> Void)? = nil) {
@@ -546,6 +551,7 @@ actor IrisEngine {
         self.skillCheckWillClaim = skillCheckWillClaim
         self.subagentConfig = subagentConfig
         self.subagentRoute = subagentRoute
+        self.primaryClient = primaryClient ?? client
         self.routedClient = routedClient
         self.repromptDelay = repromptDelay
         self.recentWrites = recentWrites
@@ -3466,7 +3472,9 @@ actor IrisEngine {
         let model = args["model"]?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !provider.isEmpty else {
             if let model, !model.isEmpty { return .refused("Name a `provider` with `model`; without one, the subagent runs on this conversation's own model.") }
-            return .route(nil)
+            // A routed subagent's own delegation stays on its route (#697 review): its approvals,
+            // its "Ran on" note and its model all follow, and its grader stays on the primary.
+            return .route(subagentRoute)
         }
         let tier: ModelTier = effort.lowercased() == "easy" ? .easy : effort.lowercased() == "hard" ? .hard : .medium
         let localState = state
@@ -5130,7 +5138,8 @@ actor IrisEngine {
             // client through so the subagent and its grader are driven by the same client the parent is.
             let unit = GoalContractParsing.unitContract(task: task, criteriaJSON: functionCall.args["criteria"])
                 .map { DelegatedUnit(contract: $0, grade: true) }
-            let subagentClient = self.client
+            // The primary's client, for the grader and for an unrouted subagent (#697 review).
+            let subagentClient = self.primaryClient
             // #239: a named provider resolves before anything is spawned, and refuses rather than
             // falling back (Fork D). Other families wait out a job run until their pricing (#689).
             let route: ProviderRoute?
@@ -5140,7 +5149,8 @@ actor IrisEngine {
             case .route(let resolved):
                 route = resolved
             }
-            let routed = route.map { self.routedClient($0) }
+            // The same route as this engine's own reuses its client; any other gets a new one.
+            let routed = route.map { $0 == self.subagentRoute ? self.client : self.routedClient($0) }
 
             // The engine holds its AppState weakly, so the nil case the manager used to guard
             // against now lives here, at the only place that knows what to say about it (#171).
