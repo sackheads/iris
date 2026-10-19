@@ -1087,7 +1087,7 @@ A hand-started fire of a watch job does not retry either, for the same reason.
 not the next day, not a restart. `/jobs resume <name>` clears the pause *and* the retry ladder and
 recomputes the next fire from the job's own schedule.
 
-The five global numbers are `ConfigManager` keys — `JOB_MAX_RUNS_PER_HOUR`,
+These global numbers are stored with Iris's API keys in its Keychain item, not in the defaults domain (#678), so a host command's `defaults write` doesn't change them; only Settings does. See [install.md](install.md) for what a Keychain prompt at launch means. The five are `ConfigManager` keys — `JOB_MAX_RUNS_PER_HOUR`,
 `JOB_DAILY_TOKEN_BUDGET`, `JOB_GLOBAL_DAILY_TOKEN_BUDGET`, `JOB_PER_RUN_TOKEN_BUDGET` and
 `JOB_RUN_TIMEOUT_SECONDS` — and **Settings → Advanced → Job Limits** has a stepper for each. A
 stepper wound down to zero reads as "default": the figure above is what the runner then uses, and

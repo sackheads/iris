@@ -18,7 +18,7 @@ public final class KeychainManager: @unchecked Sendable {
     /// so its presence is a reliable "running under tests" signal. `HeadlessMode` extends the
     /// same in-memory behavior to the `--bench` CLI and `--perf run`'s fake lane, both identically
     /// ad-hoc-signed `swift run` binaries that would otherwise block on a Keychain prompt.
-    let usesInMemoryStore = NSClassFromString("XCTestCase") != nil || HeadlessMode.isEnabled || KeychainManager.headlessBypassRequested
+    let usesInMemoryStore: Bool
 
     /// Set by `--perf` for a real-lane run whose provider needs no Keychain secret (Gemini over
     /// ADC gets its token from gcloud). The Keychain ACL is per binary identity, so every rebuilt
@@ -35,9 +35,23 @@ public final class KeychainManager: @unchecked Sendable {
     /// build the suffixed name themselves (Task 3 of the dev/release separation plan).
     private let serviceSuffix: String
 
-    init(serviceSuffix: String) {
+    /// `inMemory` forces the in-memory store: a test's own manager, never the process's (#678).
+    init(serviceSuffix: String, inMemory: Bool = false) {
         self.serviceSuffix = serviceSuffix
+        self.usesInMemoryStore = inMemory || NSClassFromString("XCTestCase") != nil || HeadlessMode.isEnabled
+            || KeychainManager.headlessBypassRequested
     }
+
+    /// Set when the secrets item could not be read (a denied prompt, a damaged item): from then
+    /// on this manager never writes it, because a write after a failed read would replace what
+    /// is there with only what this process knows (#678).
+    private let blockLock = NSLock()
+    private var writesBlocked = false
+    /// Test-only, in-memory managers: make every throwing read fail, as a denied prompt does.
+    private var simulatedReadFailure: OSStatus?
+    func simulateReadFailure(_ status: OSStatus?) { blockLock.withLock { simulatedReadFailure = status } }
+    func blockWrites() { blockLock.withLock { writesBlocked = true } }
+    var areWritesBlocked: Bool { blockLock.withLock { writesBlocked } }
 
     /// The service name actually used for Keychain/in-memory storage for a given base name.
     func resolvedService(_ base: String) -> String { base + serviceSuffix }
@@ -66,6 +80,10 @@ public final class KeychainManager: @unchecked Sendable {
     }
 
     public func saveSecrets(_ secrets: [String: String], service: String) {
+        if service == Self.legacyService, areWritesBlocked {
+            print("Not saving secrets: the secrets item could not be read at launch, so it is left as it is (#678).")
+            return
+        }
         let service = resolvedService(service)
         if usesInMemoryStore {
             inMemoryLock.withLock { inMemorySecrets[service] = secrets }
@@ -114,6 +132,9 @@ public final class KeychainManager: @unchecked Sendable {
     /// coming back as the same empty dictionary an absent item would.
     func secretsOrThrow(service: String) throws -> [String: String] {
         let service = resolvedService(service)
+        if usesInMemoryStore, let status = blockLock.withLock({ simulatedReadFailure }) {
+            throw SecretsError.status(status)
+        }
         if usesInMemoryStore {
             return inMemoryLock.withLock { inMemorySecrets[service] ?? [:] }
         }
@@ -138,6 +159,7 @@ public final class KeychainManager: @unchecked Sendable {
     /// `saveSecrets(_:service:)`, but a non-success status throws instead of only printing —
     /// used wherever a silently dropped secret would strand the caller.
     func saveSecretsOrThrow(_ secrets: [String: String], service: String) throws {
+        if service == Self.legacyService, areWritesBlocked { throw SecretsError.status(errSecWrPerm) }
         let service = resolvedService(service)
         if usesInMemoryStore {
             inMemoryLock.withLock { inMemorySecrets[service] = secrets }

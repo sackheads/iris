@@ -18,6 +18,28 @@ builds moved to their own `.dev` ones. The installed app's first use of each suc
 once; choose "Always Allow" (one per item) so you aren't asked again. A fresh install has none and
 shows no prompts.
 
+**On a release build, a Keychain prompt for Iris at launch means something else changed its item:
+click Deny.** After the first Always Allow, Iris never asks for its own item again. Since #678 that
+item holds both your API keys and the settings that guard spending, where data goes, and safety:
+- the provider addresses;
+- the job budgets and run limits;
+- the goal and subagent limits;
+- the sandbox, Vibecop and prompt-injection switches.
+
+A command can replace that item without asking you, but Iris's next read of a replaced item asks.
+Clicking Deny there leaves the item untouched, and for that launch Iris uses protective values: the
+official provider addresses, built-in limits, and the sandbox, Vibecop and prompt-injection
+protection on. With the sandbox on and no container runtime, it refuses commands rather than running
+them on the host. A launch notice says what happened.
+
+- **Dev builds:** they prompt routinely (each rebuilt binary is a new identity, #578), so there a
+  prompt is a much weaker signal, and an Allow given out of habit accepts whatever the item holds.
+- **No saved keys:** on a Mac with no saved keys (for example Gemini through `gcloud`), a command
+  that deletes the item and plants old-style settings can reset a choice stricter than the built-in
+  one (sandbox on, lower budgets) back to built-in, without a prompt. It can't loosen anything past
+  built-in.
+- **The full fix** is moving to the data protection keychain (#681).
+
 The installed app checks for updates once a day and installs them through [Sparkle](https://sparkle-project.org) when you accept them; check
 by hand with **Iris > Check for Updates…** or `/update`. See [Updates](#updates) below for detail.
 
@@ -28,7 +50,7 @@ app's `~/.iris`, so the two never collide. See [Building from source](building.m
 ## Signing in to a provider
 
 When started, Iris launches as a native macOS App. If you haven't configured your API keys or authentication method, the **Settings Window** will automatically pop up. 
-All keys are saved securely to your local Keychain and `UserDefaults`. Gemini supports both standard API Keys and **Application Default Credentials (ADC)** via `gcloud`, and Anthropic supports an API key or **Vertex AI (ADC)**, which calls Claude models hosted in a Google Cloud project you name (the location defaults to `global`; a dated Anthropic model id is sent to Vertex in its `@`-dated spelling). See [docs/Google_ADC_credentials.md](Google_ADC_credentials.md) for step-by-step setup and GCP project configuration.
+All keys are saved securely to your local Keychain, and so are the settings that guard spending, where data goes, and safety (see above); the rest of Iris's settings live in `UserDefaults`. Gemini supports both standard API Keys and **Application Default Credentials (ADC)** via `gcloud`, and Anthropic supports an API key or **Vertex AI (ADC)**, which calls Claude models hosted in a Google Cloud project you name (the location defaults to `global`; a dated Anthropic model id is sent to Vertex in its `@`-dated spelling). See [docs/Google_ADC_credentials.md](Google_ADC_credentials.md) for step-by-step setup and GCP project configuration.
 
 ## Updates
 

@@ -1784,6 +1784,8 @@ actor IrisEngine {
         case .sandboxed:
             return true
         case .host(let warn):
+            // Refused below rather than run on the host, so no "running on the host" notice (#678).
+            if warn, ConfigManager.shared.refusesHostWithoutRuntime { return false }
             if warn, !warnedNoRuntime.contains(conversationId) {
                 warnedNoRuntime.insert(conversationId)
                 await pushToUI(role: .system,
@@ -5321,6 +5323,12 @@ actor IrisEngine {
             }
 
             let useSandbox = await resolveUseSandbox(toolName: functionCall.name, conversationId: conversationId, workspacePath: workspacePath)
+            // #678: with the guarded settings fallen back to protective values, a command meant
+            // for the sandbox is refused when there's no container runtime, never run on the host.
+            if functionCall.name == "run_command", !useSandbox, ConfigManager.shared.refusesHostWithoutRuntime,
+               await sandboxDecision(conversationId: conversationId, workspacePath: workspacePath) == .host(warnNoRuntime: true) {
+                return Self.protectedSettingsHostRefusal
+            }
             // #282 §0.13: the covering mount for a granted file-tool call is decided ONCE, here,
             // before approval, and both the gate and the executor consume this value — neither
             // recomputes it: a command the run left running in the container can swap a component
@@ -5469,6 +5477,10 @@ actor IrisEngine {
     /// running on the host — the approved-call path and the ordinary fire both (R20). Carries
     /// `JobRunner.sandboxUnavailableReason`'s words so a person seeing this on a card and in
     /// `/jobs` reads the same phrase for the same thing.
+    /// #678: the sandbox is on because Iris couldn't read its protected settings, and there's no
+    /// container runtime, so the command isn't run on the host instead.
+    static let protectedSettingsHostRefusal = "Not run: Iris couldn't read its protected settings, so the sandbox is on, and there is no container runtime to run this command in. It isn't run on the host instead. See the notice at launch; changing a setting in Settings → Sandboxing saves the settings again."
+
     static func sandboxUnavailableRefusal(tool: String) -> String {
         "Not run: `\(tool)` from a background job runs in the container or not at all (sandbox unavailable)."
     }
