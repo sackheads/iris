@@ -110,6 +110,19 @@ struct LEDDetailTests {
         #expect(facts.contains(.init(label: "Engine", value: "Cloud (primary provider)")))
     }
 
+    @Test("every light's summary is a whole sentence in every state")
+    func summariesAreWhole() {
+        let (config, suite) = harness(); defer { teardown(suite) }
+        let bar = ModelLEDBar(config: config)
+        for kind in LEDKind.allCases {
+            for state in ModelLED.LEDState.allCases {
+                let summary = bar.detail(for: kind, state: state, failure: nil).summary
+                #expect(!summary.contains("  ") && !summary.hasPrefix(" ") && summary.hasSuffix("."),
+                        "\(kind) \(state): \(summary)")
+            }
+        }
+    }
+
     @Test("each state has its own spoken words")
     func spoken() {
         let words = ModelLED.LEDState.allCases.map(\.spoken)

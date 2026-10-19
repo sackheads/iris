@@ -150,8 +150,11 @@ extension ModelLEDBar {
         case .downloading:
             return "The model is downloading."
         case .unprovisioned:
+            // Only P2 and P3 reach this and `.error` today; the plain sentence is for any other light.
+            guard kind.tierNumber != nil else { return "The model isn't downloaded." }
             return "The model isn't downloaded, so \(tier.lowercased()) is skipped and checks nothing until it is."
         case .error:
+            guard kind.tierNumber != nil else { return "The model is failing." }
             // No "installed": tier 3 fails this way for cloud, Ollama and MLX too (see the tooltip).
             return "The model is failing, so \(tier.lowercased()) is blocking guarded output rather than checking it."
         }
