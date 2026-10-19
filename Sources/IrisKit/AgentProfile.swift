@@ -237,6 +237,9 @@ struct KnownCapabilities: Equatable, Sendable {
     var tools: Set<String>
     /// Configured MCP servers, connected or not.
     var mcpServers: Set<String>
+    /// The ones connected now, whose tools are in `tools`: a tool name on one of these is judged
+    /// against its real list; on a configured server not yet connected, it's taken as known.
+    var connectedServers: Set<String> = []
     /// Skill names and folder names, lowercased: `discoverSkills` matches either.
     var skills: Set<String>
 
@@ -246,10 +249,10 @@ struct KnownCapabilities: Equatable, Sendable {
         let unknownTools = (profile.tools ?? []).filter { name in
             if name.hasPrefix("mcp:") { return !mcpServers.contains(String(name.dropFirst(4))) }
             if tools.contains(name) { return false }
-            // A configured server's tool can't be listed until it connects, so its name is
-            // given the benefit of the doubt rather than called unknown at launch.
+            // A configured server's tool can't be listed until it connects, so until then its name
+            // is given the benefit of the doubt; once connected, `tools` holds its real list.
             if JobProfile.isMCPTool(name), let server = name.components(separatedBy: JobProfile.mcpNameSeparator).first {
-                return !mcpServers.contains(server)
+                return !mcpServers.contains(server) || connectedServers.contains(server)
             }
             return true
         }

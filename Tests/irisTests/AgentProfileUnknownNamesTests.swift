@@ -50,10 +50,13 @@ struct AgentProfileUnknownNamesTests {
         #expect(notes(fine).isEmpty)
     }
 
-    @Test("a configured server's tool isn't unknown before it connects; another server's is")
+    @Test("a configured server's tool isn't unknown before it connects; once connected it's checked; another server's is unknown")
     func configuredServerTools() {
-        let p = profile(tools: ["github___open_issue", "slack___post"], skills: nil)
-        #expect(known.unknown(in: p).tools == ["slack___post"])
+        let p = profile(tools: ["github___open_issue", "github___list_prs", "slack___post"], skills: nil)
+        #expect(known.unknown(in: p).tools == ["slack___post"], "github not connected yet")
+        var connected = known
+        connected.connectedServers = ["github"]
+        #expect(connected.unknown(in: p).tools == ["github___open_issue", "slack___post"], "a typo on a connected server is caught")
     }
 
     @Test("before the first refresh, nothing is listed as unknown")

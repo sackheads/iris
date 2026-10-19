@@ -1738,10 +1738,13 @@ class AppState {
     func refreshKnownCapabilities() async {
         let skills = await SkillManager().listSkills()
         let servers = await MCPManager.shared.configuredServerNames()
+        let connected = await MCPManager.shared.serverStatuses().compactMap { name, status -> String? in
+            if case .running = status { return name } else { return nil }
+        }
         let mcpTools = await MCPManager.shared.getGeminiTools().map(\.name)
         knownCapabilities = KnownCapabilities(
             tools: IrisEngine.allDeclaredToolNames.union(mcpTools),
-            mcpServers: Set(servers),
+            mcpServers: Set(servers), connectedServers: Set(connected),
             skills: Set(skills.flatMap { [$0.name.lowercased(), $0.folderName.lowercased()] }))
     }
 
