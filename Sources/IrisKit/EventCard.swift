@@ -555,14 +555,18 @@ extension ChatMessage {
     /// still interpolated `content` directly, so an `.event` row exported as raw card JSON under
     /// an "Event" heading. Whole-block, one definition, four call sites.
     func exportLine(format: ExportFormat) -> String {
+        // What let a tool call run (#599), under its call, as the pill shows it.
+        let approvalLine = approval?.line
         switch format {
         case .markdown:
             // `.system` and `.event` render as compact one-line cards in the transcript, so they
             // export as inline code rather than as a paragraph of prose.
             let body = (role == .system || role == .event) ? "`\(exportText)`" : exportText
-            return "### \(exportRoleName)\n\(body)"
+            // Inline code too: a Vibecop reason is a model's words and must not render as Markdown.
+            let approval = approvalLine.map { "\n`\($0.replacingOccurrences(of: "`", with: "'"))`" } ?? ""
+            return "### \(exportRoleName)\n\(body)\(approval)"
         case .plainText:
-            return "\(exportRoleName):\n\(exportText)"
+            return "\(exportRoleName):\n\(exportText)" + (approvalLine.map { "\n\($0)" } ?? "")
         }
     }
 }

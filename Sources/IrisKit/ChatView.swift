@@ -952,7 +952,7 @@ struct MessageView: View {
                 }
 
                 if message.role == .system {
-                    SystemMessageContent(text: message.content)
+                    SystemMessageContent(text: message.content, approval: message.approval)
                         .textSelection(.enabled)
                 } else if message.role == .user {
                     VStack(alignment: .trailing, spacing: 6) {
@@ -1129,7 +1129,8 @@ struct SystemGroupView: View {
                             SystemMessageContent(
                                 text: msg.content,
                                 commandStartTime: appState.commandStartTimes[msg.id],
-                                commandDuration: appState.commandDurations[msg.id]
+                                commandDuration: appState.commandDurations[msg.id],
+                                approval: msg.approval
                             )
                             .textSelection(.enabled)
                         }
@@ -1153,6 +1154,8 @@ struct SystemMessageContent: View {
     let text: String
     var commandStartTime: Date? = nil
     var commandDuration: TimeInterval? = nil
+    /// What let a tool call run, said under its pill (#599).
+    var approval: ToolApproval? = nil
     @State private var isDetailExpanded = false
 
     var body: some View {
@@ -1230,7 +1233,15 @@ struct SystemMessageContent: View {
                     .foregroundColor(.secondary)
                     .padding(.leading, call.command != nil ? 14 : 0)
             }
+            if let line = approval?.line {
+                // Plain text, never Markdown: a Vibecop reason is a model's words.
+                Label { Text(verbatim: line) } icon: { Image(systemName: "checkmark.shield") }
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, call.command != nil ? 14 : 0)
+            }
         }
+        .help(approval?.line ?? "")
         .padding(.vertical, 4)
         .padding(.horizontal, 10)
         .frame(maxWidth: .infinity, alignment: .leading)

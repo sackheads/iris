@@ -18,16 +18,21 @@ struct ChatMessage: Identifiable, Codable, Sendable, Equatable {
     let role: ChatRole
     var content: String
     var attachments: [FileAttachment] = []
+    /// On a tool call's pill message: what let it run (#599). nil on every other message, and on
+    /// a call from before #599.
+    var approval: ToolApproval? = nil
 
     enum CodingKeys: String, CodingKey {
-        case id, role, content, attachments
+        case id, role, content, attachments, approval
     }
 
-    init(id: UUID = UUID(), role: ChatRole, content: String, attachments: [FileAttachment] = []) {
+    init(id: UUID = UUID(), role: ChatRole, content: String, attachments: [FileAttachment] = [],
+         approval: ToolApproval? = nil) {
         self.id = id
         self.role = role
         self.content = content
         self.attachments = attachments
+        self.approval = approval
     }
 
     init(from decoder: Decoder) throws {
@@ -36,6 +41,8 @@ struct ChatMessage: Identifiable, Codable, Sendable, Equatable {
         role = try container.decode(ChatRole.self, forKey: .role)
         content = try container.decode(String.self, forKey: .content)
         attachments = try container.decodeIfPresent([FileAttachment].self, forKey: .attachments) ?? []
+        // Supplementary: one that does not decode leaves the message without it, not unreadable.
+        approval = (try? container.decodeIfPresent(ToolApproval.self, forKey: .approval)) ?? nil
     }
 }
 
@@ -2968,6 +2975,18 @@ class AppState {
         markChanged(conversationId, .messageUpdated(id: id))
     }
 
+    /// Records on a tool call's pill message what let the call run (#599). The first record
+    /// stands: a call the person approved and that then reaches an ungated branch (the watcher
+    /// tool runs through the executor's generic path) keeps the person's. A message that is gone
+    /// (cleared, or the conversation deleted) is left alone: there is nothing to annotate.
+    func setToolApproval(messageId: UUID, in conversationId: UUID, _ approval: ToolApproval) {
+        guard let c = conversations.firstIndex(where: { $0.id == conversationId }),
+              let m = conversations[c].messages.firstIndex(where: { $0.id == messageId }),
+              conversations[c].messages[m].approval == nil else { return }
+        conversations[c].messages[m].approval = approval
+        markChanged(conversationId, .messageUpdated(id: messageId))
+    }
+
     func updateHistory(for conversationId: UUID, history: [Content]) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].history = history
@@ -3567,14 +3586,26 @@ class AppState {
     /// a stronger claim than the switch already means).
     /// Which layer approved a call, or nil when it is not to run (#612, and #599's data). Only
     /// `.vibecopRestricted` changes how the call runs; every other source runs it as usual.
+    /// Each carries why, for the call's pill (#599, `ToolApproval`).
     enum ApprovalSource: Equatable, Sendable {
-        case person, allowlist, autoApprove, grant, graderCheck
+        case person
+        /// `vibecop` is the verdict `vibecopUnderAutoApprove` asked for and did not use.
+        case autoApprove(vibecop: String?)
+        case allowlist(AllowMatch)
+        /// A job run's grant: the granted mount a file tool is inside, or nil for a command it
+        /// runs because it is sandboxed.
+        case grant(mount: String?)
+        case graderCheck(GraderApproval)
         /// A Vibecop APPROVE that runs the call as usual: in the VM, or a file read.
-        case vibecop
+        case vibecop(reason: String)
         /// A Vibecop APPROVE of a host read: it runs only as `ReadOnlyCommand` judged it,
         /// `zsh -f` with this `PATH` and nothing else from the environment.
-        case vibecopRestricted(path: [String])
+        case vibecopRestricted(path: [String], reason: String)
     }
+
+    /// What a grader's pre-approval was for: a check the person approved, or a read inside the
+    /// workspace they approved it in.
+    enum GraderApproval: String, Equatable, Sendable { case check, read }
 
     /// `requestApprovalSource`, for callers that only need yes or no.
     func requestApproval(toolName: String, details: String, args: [String: JSONValue] = [:],
@@ -3616,7 +3647,10 @@ class AppState {
         let irisWrite = permissions.writesWorkspaceIris(toolName: toolName, details: details, workspace: workspace,
                                                         inSandbox: inSandbox)
         if let id = conversationId, let conversation = conversations.first(where: { $0.id == id }), conversation.isBackground {
-            if irisWrite {
+            // A call that only a person may approve has nobody to ask here, and the allowlist
+            // below must not stand in for them (#599). Its one caller refuses unattended
+            // conversations before it asks; this keeps the ladder right without relying on that.
+            if irisWrite || humanOnly {
                 recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval), in: id)
                 return nil
             }
@@ -3640,15 +3674,15 @@ class AppState {
             let grant = conversation.sandboxGrant
             let isGrantedFileTool = grant != nil && (toolName == "write_file" || toolName == "read_file")
             if isGrantedFileTool {
-                if grantedMount != nil { return .grant }
+                if let grantedMount { return .grant(mount: grantedMount.source) }
             } else if let grant, grant.allows(toolName: toolName, details: details, cwd: workspace, sandboxed: inSandbox) {
                 // `inSandbox` is `resolveUseSandbox`'s answer for this call (IrisEngine's dispatcher):
                 // the conversation's resolution for a `run_command` — the parameter §0.4 asks for.
-                return .grant
+                return .grant(mount: nil)   // the file tools are the branch above: this is a sandboxed command
             }
             if !isGrantedFileTool,
-               permissions.isAllowed(toolName: toolName, details: details, workspace: workspace, isBackground: true) {
-                return .allowlist
+               let match = permissions.match(toolName: toolName, details: details, workspace: workspace, isBackground: true) {
+                return .allowlist(match)
             }
             recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval,
                                                      grantNearest: isGrantedFileTool ? grant?.nearest(to: details, cwd: workspace) : nil),
@@ -3657,11 +3691,13 @@ class AppState {
         }
         // Headless drivers auto-approve so a scenario run never blocks on a human or a local model.
         if autoApproveTools {
-            if vibecopUnderAutoApprove {
-                _ = await consultVibecop(toolName: toolName, details: details, workspace: workspace, inSandbox: inSandbox,
-                                         callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: vibecopEnabled)
+            var verdict: String?
+            if vibecopUnderAutoApprove,
+               let decision = await consultVibecop(toolName: toolName, details: details, workspace: workspace, inSandbox: inSandbox,
+                                                   callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: vibecopEnabled) {
+                verdict = "\(decision.decision): \(decision.reason)"
             }
-            return .autoApprove
+            return .autoApprove(vibecop: verdict)
         }
         // `humanOnly`: straight to the prompt, bypassing the allowlist below (a standing "yes"
         // from some earlier, different call). Vibecop needs no bypass of its own any more — `#336`
@@ -3672,8 +3708,8 @@ class AppState {
                                              conversationId: conversationId, origin: origin, humanOnly: true) ? .person : nil
         }
         // Fast path: deterministic permissions.
-        if permissions.isAllowed(toolName: toolName, details: details, workspace: workspace) {
-            return .allowlist
+        if let match = permissions.match(toolName: toolName, details: details, workspace: workspace) {
+            return .allowlist(match)
         }
         // Deterministic too, and only for the grader, never the agent or subagents: exactly a check
         // the human approved when locking this contract, run where they approved it (#334), and a
@@ -3681,7 +3717,7 @@ class AppState {
         if callerRole == .evaluator, let id = conversationId,
            let contract = conversations.first(where: { $0.id == id })?.goalContract {
             if toolName == "run_command", contract.isHumanApprovedCheck(details, workingDirectory: workspace) {
-                return .graderCheck
+                return .graderCheck(.check)
             }
             // `graderReadWalked` is the dispatcher's word that the executor walks this read from
             // the approved root (#339). It decided that on the model's spelling, which `details`
@@ -3689,7 +3725,7 @@ class AppState {
             // workspace must still ask, and must never be opened by path on this pre-approval.
             if toolName == "read_file", graderReadWalked,
                contract.isHumanApprovedRead(ToolExecutor.resolvePath(details, cwd: workspace)) {
-                return .graderCheck
+                return .graderCheck(.read)
             }
         }
 
@@ -3701,8 +3737,8 @@ class AppState {
                 switch ReadOnlyCommand.vibecopGate(toolName: toolName, details: details, inSandbox: inSandbox,
                                                    homeWritable: homeWritable(conversationId, workspace: workspace),
                                                    cwd: workspace, lookup: hostLookup()) {
-                case .run: return .vibecop
-                case .runRestricted(let path): return .vibecopRestricted(path: path)
+                case .run: return .vibecop(reason: decision.reason)
+                case .runRestricted(let path): return .vibecopRestricted(path: path, reason: decision.reason)
                 case .ask: break
                 }
             }
