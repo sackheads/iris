@@ -1608,7 +1608,8 @@ struct JobToolsTests {
     /// Drives one engine turn with the model issuing `call` against a `CountingApprovalAppState`,
     /// reading back the model's result and how many approval requests the dispatcher made.
     private func runJobCreationCall(_ call: FunctionCall, on app: CountingApprovalAppState,
-                                    as conversationId: UUID, resolution: Bool) async -> (result: String, approvalCount: Int, humanOnly: Bool?) {
+                                    as conversationId: UUID, resolution: Bool,
+                                    mutatingJobsAvailable: Bool = true) async -> (result: String, approvalCount: Int, humanOnly: Bool?) {
         app.autoApproveTools = false
         app.resolution = resolution
         let first = GeminiResponse(candidates: [Candidate(content: Content(
@@ -1617,7 +1618,8 @@ struct JobToolsTests {
             role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil)
         let client = FakeLLMClient(responses: [first, final])
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
-                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
+                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0,
+                                mutatingJobsAvailable: { mutatingJobsAvailable })
         await engine.processInput("go", source: "UI", conversationId: conversationId)
         let history = app.conversations.first { $0.id == conversationId }?.history ?? []
         let result = history.flatMap { $0.parts }.compactMap { part -> String? in
@@ -2145,6 +2147,45 @@ struct JobToolsTests {
         #expect(try app.store.ledger.jobs().isEmpty)
     }
 
+    /// #654: a mutating job with no VM to run in is refused before the person is asked, with the
+    /// sentence creation would have given after their yes.
+    @Test("a mutating schedule_job on a Mac with no VM is refused without asking")
+    func mutatingJobWithNoVMRefusedBeforeAsking() async throws {
+        let (app, id) = plainCountingApp()
+        let (result, approvalCount, _) = await runJobCreationCall(
+            FunctionCall(name: "schedule_job", args: Self.mutatingSweep, id: "c1"), on: app, as: id,
+            resolution: true, mutatingJobsAvailable: false)
+        #expect(approvalCount == 0, "a job that cannot run never costs a prompt")
+        #expect(result == ScheduleJobArguments.noRuntimeForMutating)
+        #expect(try app.store.ledger.jobs().isEmpty)
+    }
+
+    @Test("a mutating watch on a Mac with no VM is refused without asking")
+    func mutatingWatchWithNoVMRefusedBeforeAsking() async throws {
+        let (app, id) = plainCountingApp()
+        let dir = try scratchDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (result, approvalCount, _) = await runJobCreationCall(
+            FunctionCall(name: "register_directory_watcher",
+                         args: ["path": .string(dir.path), "instructions": .string("rebuild"), "profile": .string("mutating")], id: "c1"),
+            on: app, as: id, resolution: true, mutatingJobsAvailable: false)
+        #expect(approvalCount == 0)
+        #expect(result == ToolExecutor.watchProfileNeedsSandbox)
+        #expect(try app.store.ledger.jobs().isEmpty)
+    }
+
+    /// With a VM, the person's yes now creates the mutating job: the engine's answer reaches
+    /// `scheduleJob` too, so the two cannot disagree.
+    @Test("a mutating schedule_job, approved, is created when a VM is available")
+    func mutatingJobApprovedIsCreated() async throws {
+        let (app, id) = plainCountingApp()
+        let (_, approvalCount, _) = await runJobCreationCall(
+            FunctionCall(name: "schedule_job", args: Self.mutatingSweep, id: "c1"), on: app, as: id,
+            resolution: true, mutatingJobsAvailable: true)
+        #expect(approvalCount == 1)
+        #expect(try app.store.ledger.jobs().first?.profile == .mutating)
+    }
+
     private final class AlwaysApprove: AuxiliaryInferenceEngine, @unchecked Sendable {
         private let lock = NSLock()
         private var count = 0
@@ -2166,7 +2207,8 @@ struct JobToolsTests {
         let final = GeminiResponse(candidates: [Candidate(content: Content(
             role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil)
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: FakeLLMClient(responses: [first, final]),
-                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
+                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0,
+                                mutatingJobsAvailable: { true })
         async let turn: Void = engine.processInput("go", source: "UI", conversationId: conversationId)
         var queued = false
         var humanOnly: Bool?
