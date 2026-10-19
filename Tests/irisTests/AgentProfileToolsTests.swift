@@ -45,6 +45,34 @@ struct AgentProfileToolsTests {
         return (app, root)
     }
 
+    /// Denies every approval as it is asked, so a call the profile failed to refuse ends at once
+    /// with the human-denial result instead of waiting out the time limit.
+    private func denyApprovals(_ app: AppState) -> Task<Void, Never> {
+        Task { @MainActor in
+            while !Task.isCancelled {
+                for pending in app.pendingApprovals { app.resolveApproval(id: pending.id, .deny) }
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+        }
+    }
+
+    /// Holds the reflection's model call until released, so a turn can run beside it.
+    private final class HeldReflectionClient: LLMClientProtocol, @unchecked Sendable {
+        private let lock = NSLock()
+        private var sent: [(text: String, names: Set<String>)] = []
+        private var released = false
+        var requests: [(text: String, names: Set<String>)] { lock.withLock { sent } }
+        func release() { lock.withLock { released = true } }
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            let text = request.contents.last?.parts.compactMap(\.text).joined() ?? ""
+            let names = Set(request.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? [])
+            lock.withLock { sent.append((text, names)) }
+            let isReflection = text.contains("Reflection Trigger")
+            while isReflection, !lock.withLock({ released }) { try await Task.sleep(nanoseconds: 5_000_000) }
+            return AgentProfileToolsTests.reply(Part(text: isReflection ? AppState.noConsolidationReply : "ok"))
+        }
+    }
+
     private func profile(_ tools: [String]?) -> AgentProfile {
         AgentProfile(name: "p", role: nil, tier: nil, skills: nil, tools: tools, prompt: "x", contentHash: "h")
     }
@@ -133,6 +161,7 @@ struct AgentProfileToolsTests {
         let call = FunctionCall(name: "write_file", args: ["path": .string(root.appendingPathComponent("x").path), "content": .string("x")])
         let client = ScriptedClient([Self.reply(Part(functionCall: call)), Self.reply(Part(text: "ok"))])
         let engine = IrisEngine(state: app, client: client, retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
+        let denier = denyApprovals(app); defer { denier.cancel() }
         await engine.processInput("go", source: "UI", conversationId: id)
         #expect(lastToolResult(app, id) == IrisEngine.agentProfileDeniedToolResult(tool: "write_file", profile: "reviewer"))
         #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("x").path))
@@ -151,6 +180,25 @@ struct AgentProfileToolsTests {
         #expect(AppState.reflectionTools.isSubset(of: reflection), "\(reflection)")
         #expect(!reflection.contains("write_file"), "only the prompt's tools come back")
         #expect(AppState.reflectionTools.isDisjoint(with: next), "the next turn is narrowed again")
+    }
+
+    @Test("a turn running beside a reflection is narrowed as usual; only the reflection's own turn is exempt")
+    func besideReflection() async throws {
+        let (app, root) = try setUp(); defer { try? FileManager.default.removeItem(at: root) }
+        let id = app.createNewConversation(select: false, agentProfile: "reviewer")
+        let client = HeldReflectionClient()
+        let engine = IrisEngine(state: app, client: client, retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
+        app.installEngine(engine)
+        let reflection = Task { await app.runReflection(AppState.reflectionPrompt, in: id, moveReplyToIris: false) }
+        for _ in 0..<1000 where client.requests.isEmpty { try await Task.sleep(nanoseconds: 5_000_000) }
+        try #require(client.requests.count == 1, "the reflection's call is held")
+        await engine.processInput("beside", source: "UI", conversationId: id)
+        client.release()
+        _ = try await value(of: reflection)
+        let held = try #require(client.requests.first { $0.text.contains("Reflection Trigger") })
+        let beside = try #require(client.requests.first { $0.text.contains("beside") })
+        #expect(AppState.reflectionTools.isSubset(of: held.names))
+        #expect(AppState.reflectionTools.isDisjoint(with: beside.names), "\(beside.names)")
     }
 
     @Test("the reflection text alone, typed as a message, is no reflection turn")
@@ -175,6 +223,7 @@ struct AgentProfileToolsTests {
         let client = ScriptedClient([Self.reply(Part(functionCall: call)), Self.reply(Part(text: "ok"))])
         let engine = IrisEngine(state: app, principal: .subagent, roleLabel: "helper", client: client,
                                 retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
+        let denier = denyApprovals(app); defer { denier.cancel() }
         await engine.processInput("go", source: "System", conversationId: grandchild)
         #expect(!client.declared[0].contains("run_command") && client.declared[0].contains("read_file"))
         #expect(lastToolResult(app, grandchild) == IrisEngine.agentProfileDeniedToolResult(tool: "run_command", profile: "reviewer"))
