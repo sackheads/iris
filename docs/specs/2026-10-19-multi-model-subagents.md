@@ -1,6 +1,6 @@
 # Subagents on other model families (#239)
 
-**Status:** draft spec, iris-dev-3, 2026-10-19. Reviewers: iris-dev-1 first (it owns the resolver that agent profiles part 3 changes), iris-dev-2 second. The planner rules the forks; anything about Brian's money or credentials goes to Brian through the Overseer.
+**Status:** spec, iris-dev-3, 2026-10-19, with the planner's rulings on forks A-F folded in. Fork E's option goes to Brian. Reviewers: iris-dev-1 first (it owns the resolver that agent profiles part 3 changes), iris-dev-2 second. The planner rules the forks; anything about Brian's money or credentials goes to Brian through the Overseer.
 
 ## What and why
 
@@ -26,6 +26,13 @@ A subagent can run on a different provider and model than the conversation that 
 
 ## Fork A: registry shape
 
+**Ruled: option 1**, with these conditions on custom endpoints:
+- **Settings only:** an endpoint is set in Settings, never by a tool or the model.
+- **https only,** except loopback (`localhost`, `127.0.0.1`, `::1`) for a local Ollama or LM Studio. Any other `http:` URL is refused at save, with the reason.
+- **The row says where content goes:** a subagent's whole context, workspace content included, is sent to that endpoint.
+- **Storage:** the URL goes in defaults, and the key goes in the secret store (Fork B).
+
+
 - **Option 1 (lean): the primary stays as today, with subagent providers beside it.**
   - `primaryProvider` and the nine tier fields are untouched. Nothing migrates.
   - A subagent may name any provider in the registry: the three built-in families whenever `isConfigured(provider:)` holds for them, plus **custom endpoints** the person adds. A person who already has an Anthropic key set while Gemini is primary gets Anthropic for subagents with no new setup.
@@ -39,6 +46,13 @@ A subagent can run on a different provider and model than the conversation that 
   - It's more general, but it breaks the fence and Brian's "main tiers behave exactly as today" for no v1 gain.
 
 ## Fork B: credentials
+
+**Ruled: option 1** (planner; not a question for Brian, since it adds no storage class and no prompts). Conditions:
+- **Removal:** removing an endpoint deletes its key from the dict.
+- **Masking:** the key field in Settings is a masked field.
+- **No leaks:** no key appears in a log, an error string, a test fixture or a request dump. PR 1 checks `requestDumpSink` and the perf dumps, and adds a test for it.
+- **A validated slug for `<id>`:** lowercase letters, digits and `-`, 1 to 32 characters. The key's name comes from the slug, never from the display name, and its prefix `PROVIDER_` keeps every endpoint key apart from `GEMINI_API_KEY` and its siblings. A test adds an endpoint named "GEMINI" and checks that `GEMINI_API_KEY` is untouched.
+
 
 - **Option 1 (my lean; it differs from the brief's): keys go in the existing secrets dict.**
   - A custom endpoint's key is stored in the same `com.iris.secrets` item, under `PROVIDER_<id>_API_KEY`. That's the same read-modify-write `updateSecret` that already holds three provider keys.
@@ -56,6 +70,9 @@ A subagent can run on a different provider and model than the conversation that 
 
 ## Fork C: how a subagent names its model
 
+**Ruled: option 1, on `invoke_subagent`.** The arguments are declared only when a provider besides the primary is usable, with a test both ways. The profile hint is out of v1.
+
+
 - **Option 1 (lean, v1): `invoke_subagent` gets optional `provider` and `model` arguments.**
   - **Gated (Invariant 6, the credential prerequisite):** both are declared only when the registry holds at least one usable provider besides the primary. `provider`'s description lists the registry's ids, and `model`'s says "an exact model id from that provider's list".
   - **Precedence:** a per-call `provider`/`model` wins. Next comes the provider's default model, which is the provider's medium tier model for a built-in family and the first listed model for a custom endpoint. Last is today's behaviour: no `provider` means the parent's provider and the `effort` tier.
@@ -65,6 +82,9 @@ A subagent can run on a different provider and model than the conversation that 
 - **How it composes with profiles later:** a profiled conversation's subagents still get part 2's tool intersection, whatever provider they run on. If a profile later wants a lens roster (for example, "reviewer" dispatching security to DeepSeek), it adds a `subagent_providers:` hint that pre-fills the arguments, and the arguments stay the one mechanism. **To check with iris-dev-1 in review.**
 
 ## Fork D: precedence and failure
+
+**Ruled as written.** Check calls only the provider the person clicked, on demand, never at launch.
+
 
 **Refuse before spawn, never fall back.** A "security lens on DeepSeek" that quietly ran on the parent's model is the wrong review with the right label. Each of these refuses the `invoke_subagent` call before any subagent exists, with one sentence that names what *is* configured:
 - **Unknown provider id:** "No provider `deepseek`. Configured for subagents: anthropic, gemini (primary), local-ollama."
@@ -80,6 +100,14 @@ A subagent can run on a different provider and model than the conversation that 
 **Every subagent result names its provider and model**, so the parent and the person can see which model produced which finding.
 
 ## Fork E: cost attribution
+
+**For Brian (the planner is asking him now; it's half 2's question).** The options:
+- **(a)** Count delegated tokens from another family at the run's own weights. A budget then caps weighted tokens, not dollars, and the docs say so. The ledger still shows tokens per model. *(Planner's recommendation.)*
+- **(b)** Per-family weights, which need a price table someone keeps current.
+- **(c)** Refuse other-family subagents inside job runs in v1.
+
+The analysis below stands whichever is ruled.
+
 
 **Today everything assumes one provider:**
 - `TokenUsage` has no provider field.
@@ -98,6 +126,9 @@ A subagent can run on a different provider and model than the conversation that 
 **Attended conversations:** `TokenUsage` on the conversation keeps its total. The subagent's own conversation row records its provider and model, so the split can be read from there. No new field on the attended path in v1.
 
 ## Fork F: the guard tiers don't change
+
+**Ruled as written.** Half 2 states this in `docs/delegation.md` as well, when subagents can first use another provider.
+
 
 Vibecop and the prompt-injection guard (P1 structural, P2 classifier, P3 canary) judge a subagent's calls and tool output **exactly as now, whatever model the subagent runs on**:
 - Approval is `executeFunctionCall` → `requestApprovalSource(callerRole: .agent)` in the shared dispatch.
@@ -147,9 +178,9 @@ It doesn't add or change any tier or model resolver. Profiles part 3 owns those.
   - The subagent engine gets `client: LLMClient(route:)` and `provider: route.kind`, so pills and thinking replay are right.
 - **The global readers become route-aware for a routed engine:** the profiler's model name, `maxTokens` (Anthropic only, by the route's model), and the rotation summary. The main engine keeps reading the global, unchanged.
 - **The subagent result** names its provider and model.
-- **Cost:** per-model delegated usage (Fork E).
+- **Cost:** per-model delegated usage, priced as Brian rules on Fork E.
 - **`delegate_milestone`:** no `provider` in v2. Goal milestones stay on the parent's provider, because the grader judges them and mixing families there isn't asked for.
-- **Docs and agent-facing strings (Invariant 9):** `invoke_subagent`'s description and the subagent section of the system prompt.
+- **Docs and agent-facing strings (Invariant 9):** `invoke_subagent`'s description, the subagent section of the system prompt, and `docs/delegation.md` (including Fork F's guard statement).
 
 ## Out of scope
 
