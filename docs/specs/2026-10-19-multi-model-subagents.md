@@ -1,6 +1,6 @@
 # Subagents on other model families (#239)
 
-**Status:** spec, iris-dev-3, 2026-10-19, with the planner's rulings on forks A-F folded in. Fork E's option goes to Brian. Reviewers: iris-dev-1 first (it owns the resolver that agent profiles part 3 changes), iris-dev-2 second. The planner rules the forks; anything about Brian's money or credentials goes to Brian through the Overseer.
+**Status:** spec, iris-dev-3, 2026-10-19, with the planner's rulings on forks A-F folded in. Brian ruled Fork E and the Always Allow fork. Reviewers: iris-dev-1 first (it owns the resolver that agent profiles part 3 changes), iris-dev-2 second. The planner rules the forks; anything about Brian's money or credentials goes to Brian through the Overseer.
 
 ## What and why
 
@@ -196,11 +196,7 @@ Lookups for the current ids:
 **The trust change (iris-dev-2's review).** A subagent on a custom endpoint makes that endpoint both an injection source and the caller: the model behind it chooses the subagent's tool calls.
 - **Unchanged:** those calls go through approval and Vibecop like any subagent's, and the subagent's result reaches the parent as tool output, sanitised by P1-P3 like any tool output.
 - **Ruled (planner, half 2):** every approval dialog raised by a subagent on a non-primary family names the provider and model that asked, for example "asked by subagent on DeepSeek · deepseek-v4-pro". The person can't weigh the source if the dialog hides it.
-- **Open fork, for Brian** (it changes the approval ladder and its prompt cost, as #652 did):
-  - **(a)** Custom endpoints offer Allow Once only; built-in families keep today's dialog. *(The planner's recommendation and my lean.)*
-  - **(b)** Today's dialog for everyone, with the source named.
-  - **(c)** Allow Once only for every non-primary family.
-  - Half 2 builds neither until he answers.
+- **Brian ruled (a)** (verbatim: "1: a"): an approval asked for by a subagent on a **custom endpoint** offers **Allow Once only**, with no Always Allow. Subagents on a **built-in family** keep today's dialog, with the source named as above. The options he didn't choose were (b), today's dialog for everyone, and (c), Allow Once only for every non-primary family. This is half 2 work, with a test that a custom-endpoint subagent's dialog has no Always Allow and a built-in family's does.
 
 
 Vibecop and the prompt-injection guard (P1 structural, P2 classifier, P3 canary) judge a subagent's calls and tool output **exactly as now, whatever model the subagent runs on**:
