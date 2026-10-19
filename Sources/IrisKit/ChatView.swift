@@ -189,22 +189,32 @@ struct ChatView: View {
                     await runSidebarSearch()
                 }
 
-                // #465: a click starts a plain conversation, as before; the menu starts one on an
-                // agent profile. Read when the menu opens, so a new or edited file shows at once.
-                Menu {
-                    agentProfileMenu
-                } label: {
-                    HStack {
-                        Image(systemName: "plus.message.fill")
-                        Text("New Conversation")
+                // #465: the button starts a plain conversation, as before; the menu beside it starts
+                // one on an agent profile, read when it opens so a new or edited file shows at once.
+                // Two controls, not one Menu with primaryAction: as a button-style menu it dropped
+                // the prominent style and the full-width label, which truncated to "New C...".
+                HStack(spacing: 6) {
+                    Button(action: { state.createNewConversation(); composerShouldFocus = true }) {
+                        HStack {
+                            Image(systemName: "plus.message.fill")
+                            Text("New Conversation")
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-                } primaryAction: {
-                    state.createNewConversation(); composerShouldFocus = true
+                    .buttonStyle(.borderedProminent)
+                    Menu {
+                        agentProfileMenu
+                    } label: {
+                        Image(systemName: "person.crop.square")
+                            .padding(.vertical, 8)
+                    }
+                    .menuStyle(.button)
+                    .buttonStyle(.bordered)
+                    .fixedSize()
+                    .help("New conversation on an agent profile")
+                    .accessibilityLabel("New conversation on an agent profile")
                 }
-                .menuStyle(.button)
-                .buttonStyle(.borderedProminent)
                 .padding()
             }
             .navigationTitle("Iris")
@@ -540,7 +550,7 @@ struct ChatView: View {
                 Button {
                     state.createNewConversation(agentProfile: profile.name); composerShouldFocus = true
                 } label: {
-                    Text(verbatim: profile.role.map { "\(profile.name) (\($0))" } ?? profile.name)
+                    Text(verbatim: profile.role.flatMap { $0 == profile.name ? nil : "\(profile.name) (\($0))" } ?? profile.name)
                 }
                 .help(String(profile.prompt.prefix(200)))
             case .unreadable(let why):
