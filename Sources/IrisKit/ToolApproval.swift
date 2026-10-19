@@ -19,6 +19,9 @@ struct ToolApproval: Codable, Equatable, Sendable {
     var detail: String?
     /// For `allowlist`: `irisHome`, `global` or `project`.
     var scope: String?
+    /// The command or path a BeforeTool hook rewrote the call to, before its approval (#647): what
+    /// was approved and what ran, in full.
+    var hookRewrite: String?
 
     init(layer: Layer, detail: String? = nil, scope: String? = nil) {
         self.layer = layer
@@ -31,6 +34,7 @@ struct ToolApproval: Codable, Equatable, Sendable {
         layer = (try? c.decodeIfPresent(Layer.self, forKey: .layer)) ?? .unknown
         detail = try c.decodeIfPresent(String.self, forKey: .detail)
         scope = try c.decodeIfPresent(String.self, forKey: .scope)
+        hookRewrite = try c.decodeIfPresent(String.self, forKey: .hookRewrite)
     }
 
     static let ungated = ToolApproval(layer: .ungated)
@@ -63,9 +67,15 @@ struct ToolApproval: Codable, Equatable, Sendable {
         return flat.count > Self.reasonLimit ? String(flat.prefix(Self.reasonLimit)) + "…" : flat
     }
 
-    /// The one sentence the pill, its tooltip and an export say. nil for a person's approval: the
-    /// dialog they answered is its record.
+    /// What the pill, its tooltip and an export say. nil for a person's approval of a call no hook
+    /// rewrote: the dialog they answered is its record.
     var line: String? {
+        let rewrite = hookRewrite.map { "Your BeforeTool hook changed this call before it was approved; it ran: \($0)" }
+        guard let base = layerLine else { return rewrite }
+        return rewrite.map { base + " " + $0 } ?? base
+    }
+
+    private var layerLine: String? {
         switch layer {
         case .person:
             return nil
