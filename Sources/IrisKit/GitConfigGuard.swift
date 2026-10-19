@@ -169,13 +169,73 @@ final class GitConfigGuard: @unchecked Sendable {
         var path: String
         /// The hooks folder of the repository that was there before any VM could write it.
         var hooks: String?
+        /// Why host commands there were refused when Iris last ran, kept so a restart cannot
+        /// take the bad state as a fresh baseline.
+        var blocked: Block?
 
-        init(path: String, hooks: String?) { self.path = path; self.hooks = hooks }
+        init(path: String, hooks: String?, blocked: Block? = nil) { self.path = path; self.hooks = hooks; self.blocked = blocked }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             path = try c.decode(String.self, forKey: .path)
             hooks = try c.decodeIfPresent(String.self, forKey: .hooks)
+            blocked = try c.decodeIfPresent(Block.self, forKey: .blocked)
+        }
+    }
+
+    /// Why a folder's host commands are refused: what failed, and where, so that after a restart
+    /// (when no baseline survives) exactly that condition can be re-tested.
+    struct Block: Codable, Equatable {
+        enum Kind: String, Codable {
+            /// A file could not be put back, or a folder on its way was swapped: clears when the
+            /// file is a plain file again (or gone) and inside the mount.
+            case restore
+            /// A submodule's `.git` or module repository could not be moved aside: clears when
+            /// it is gone.
+            case quarantine
+            /// The index could not be read: clears when it reads.
+            case index
+            /// A repository the VM made sets a key that runs a program: clears when it does not.
+            case risky
+            /// A file Iris could not read changed: clears when it is as it was (`detail`).
+            case unreadable
+        }
+        var kind: Kind
+        var path: String
+        var detail: String?
+        var message: String
+
+        init(_ kind: Kind, _ path: String, _ message: String, detail: String? = nil) {
+            self.kind = kind; self.path = path; self.message = message; self.detail = detail
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            kind = try c.decode(Kind.self, forKey: .kind)
+            path = try c.decode(String.self, forKey: .path)
+            detail = try c.decodeIfPresent(String.self, forKey: .detail)
+            message = try c.decode(String.self, forKey: .message)
+        }
+
+        /// Whether the condition that set this block is gone.
+        func isCleared(source: String) -> Bool {
+            var info = stat()
+            switch kind {
+            case .restore:
+                guard WorkspaceGit.relative(path, inside: source) != nil else { return false }
+                if lstat(path, &info) != 0 { return errno == ENOENT }
+                return info.st_mode & S_IFMT == S_IFREG
+            case .quarantine:
+                return lstat(path, &info) != 0 && errno == ENOENT
+            case .index:
+                return WorkspaceGit.gitlinks(index: path, sha256: false) != nil
+                    || WorkspaceGit.gitlinks(index: path, sha256: true) != nil
+            case .risky:
+                return GitConfigGuard.untrustedRisk(path, kind: .config) == nil
+            case .unreadable:
+                if case .other(let now) = GitConfigGuard.read(path) { return now == detail }
+                return false
+            }
         }
     }
 
@@ -221,6 +281,9 @@ final class GitConfigGuard: @unchecked Sendable {
         var files: [String: Record] = [:]
         var submodules: Submodules?
         var owners: Set<String> = []
+        /// Blocked when Iris last ran, so no baseline: only the block's own condition is checked,
+        /// and a baseline is taken once it clears.
+        var awaitingClear = false
     }
 
     private let lock = NSLock()
@@ -238,7 +301,7 @@ final class GitConfigGuard: @unchecked Sendable {
 
     /// Folders whose repository holds a change Iris could not put back, or that the VM made with
     /// settings that run programs, with why. A host command there is refused until a clean check.
-    private var blocked: [String: String] = [:]
+    private var blocked: [String: Block] = [:]
     private let store: URL?
 
     /// `store` keeps the mounted folders across restarts; nil keeps them in memory only (tests).
@@ -246,7 +309,13 @@ final class GitConfigGuard: @unchecked Sendable {
         self.store = store
         guard let store, let data = try? Data(contentsOf: store),
               let saved = try? JSONDecoder().decode([MountedWorkspace].self, from: data) else { return }
-        for item in saved { remember(item.path, hooks: item.hooks) }
+        for item in saved {
+            remember(item.path, hooks: item.hooks)
+            if let block = item.blocked {
+                blocked[item.path] = block
+                states[item.path] = SourceState(awaitingClear: true)
+            }
+        }
     }
 
     private func remember(_ source: String, hooks: String?) {
@@ -262,7 +331,7 @@ final class GitConfigGuard: @unchecked Sendable {
 
     private func save() {
         guard let store else { return }
-        let items = trustedHooks.keys.sorted().map { MountedWorkspace(path: $0, hooks: trustedHooks[$0] ?? nil) }
+        let items = trustedHooks.keys.sorted().map { MountedWorkspace(path: $0, hooks: trustedHooks[$0] ?? nil, blocked: blocked[$0]) }
         guard let data = try? JSONEncoder().encode(items) else { return }
         try? FileManager.default.createDirectory(at: store.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: store, options: .atomic)
@@ -281,18 +350,23 @@ final class GitConfigGuard: @unchecked Sendable {
                 save()
             }
             var state = SourceState(owners: [owner])
-            let untrusted = trustedHooks[source] == .some(nil)
-            if !untrusted, case .layout(let layout) = WorkspaceGit.entry(at: source) {
-                let links = WorkspaceGit.gitlinks(index: (layout.gitDir as NSString).appendingPathComponent("index"),
-                                                  sha256: Self.isSHA256(layout)) ?? []
-                state.submodules = Submodules(
-                    links: Dictionary(links.filter(WorkspaceGit.isPlainRelative).map { ($0, WorkspaceGit.pointerSignature(source: source, link: $0)) },
-                                      uniquingKeysWith: { a, _ in a }),
-                    modules: Set(WorkspaceGit.modules(commonDir: layout.commonDir)))
-            }
-            addFiles(source, &state, untrusted: untrusted)
+            baseline(source, &state)
             states[source] = state
         }
+    }
+
+    /// Records what `source` holds now as what later checks compare against.
+    private func baseline(_ source: String, _ state: inout SourceState) {
+        let untrusted = trustedHooks[source] == .some(nil)
+        if !untrusted, case .layout(let layout) = WorkspaceGit.entry(at: source) {
+            let links = WorkspaceGit.gitlinks(index: (layout.gitDir as NSString).appendingPathComponent("index"),
+                                              sha256: Self.isSHA256(layout)) ?? []
+            state.submodules = Submodules(
+                links: Dictionary(links.filter(WorkspaceGit.isPlainRelative).map { ($0, WorkspaceGit.pointerSignature(source: source, link: $0)) },
+                                  uniquingKeysWith: { a, _ in a }),
+                modules: Set(WorkspaceGit.modules(commonDir: layout.commonDir)))
+        }
+        addFiles(source, &state, untrusted: untrusted)
     }
 
     /// Records the repository files of `source` not yet recorded. For a trusted repository that
@@ -346,9 +420,8 @@ final class GitConfigGuard: @unchecked Sendable {
             states[source]?.owners.remove(owner)
             if states[source]?.owners.isEmpty == true { last.append(source) }
         }
-        let notes = checkLocked(last)
-        for source in last { states[source] = nil }
-        return notes
+        // `checkLocked` ends the record of each that is clean; a blocked one stays.
+        return checkLocked(last)
     }
 
     /// The overrides for a host command: when `owner` (its conversation's container) is watched,
@@ -387,24 +460,46 @@ final class GitConfigGuard: @unchecked Sendable {
         var notes: [String] = []
         for source in sources {
             guard var state = states[source] else { continue }
-            var failure: String?
+            var failure: Block?
             notes += checkSource(source, &state, failure: &failure)
             states[source] = state
             // A folder is cleared only by a check that found nothing it could not fix.
-            blocked[source] = failure
+            if blocked[source] != failure {
+                blocked[source] = failure
+                save()
+            }
+            // A blocked folder keeps its record after its last container ends, so every host
+            // command's check keeps looking at it, and a later watch joins it rather than taking
+            // the bad state as a baseline. Clean and unwatched, it ends.
+            if failure == nil, state.owners.isEmpty { states[source] = nil }
         }
         return notes
     }
 
-    private func checkSource(_ source: String, _ state: inout SourceState, failure: inout String?) -> [String] {
+    private func checkSource(_ source: String, _ state: inout SourceState, failure: inout Block?) -> [String] {
         var notes: [String] = []
-        if trustedHooks[source] == .some(nil) { addFiles(source, &state, untrusted: true) }
+        if state.awaitingClear {
+            // After a restart: never an empty baseline here, which would move the person's own
+            // submodules aside; only the block's condition, until it is gone.
+            if let block = blocked[source], !block.isCleared(source: source) { failure = block; return [] }
+            state.awaitingClear = false
+            baseline(source, &state)
+            return []
+        }
+        if trustedHooks[source] == .some(nil) {
+            addFiles(source, &state, untrusted: true)
+            // A repository the VM made has no baseline: every submodule in it is the VM's, so the
+            // scan runs against an empty one and moves aside whatever it finds (Brian's "b").
+            if state.submodules == nil, case .layout = WorkspaceGit.entry(at: source) {
+                state.submodules = Submodules(links: [:], modules: [])
+            }
+        }
         for path in state.files.keys.sorted() {
             guard var record = state.files[path] else { continue }
             defer { state.files[path] = record }
             if record.untrusted {
-                if let note = judgeUntrusted(path, &record) { failure = note; notes.append(note) }
-                else if let still = Self.untrustedRisk(path, kind: record.kind) { failure = still }
+                if let note = judgeUntrusted(path, &record) { failure = Block(.risky, path, note); notes.append(note) }
+                else if let still = Self.untrustedRisk(path, kind: record.kind) { failure = Block(.risky, path, still) }
                 continue
             }
             let now = Self.read(path)
@@ -413,7 +508,7 @@ final class GitConfigGuard: @unchecked Sendable {
             // put the path, and a restore through it, outside the mount.
             if WorkspaceGit.relative(path, inside: source) == nil || Self.folder(of: path) != record.folder {
                 let note = "The folder holding \(path) was replaced; Iris did not write through it. Check the repository before running git on your Mac."
-                failure = note
+                failure = Block(.restore, path, note)
                 notes.append(note)
                 continue
             }
@@ -427,7 +522,7 @@ final class GitConfigGuard: @unchecked Sendable {
                 // Never written over: what was there could not be read, so it cannot be put back.
                 // Refused until it is back as it was, and said once.
                 let note = "\(path) changed, and Iris cannot check it (it is too large or not a plain file). Check it before running git on your Mac."
-                failure = note
+                if case .other(let was) = record.snapshot { failure = Block(.unreadable, path, note, detail: was) }
                 if !record.noted { notes.append(note); record.noted = true }
                 continue
             }
@@ -442,13 +537,11 @@ final class GitConfigGuard: @unchecked Sendable {
             }
             let restored = Self.restore(root: record.root, relative: record.relative, to: restorable)
             let note = Self.describe(path: path, kind: record.kind, keys: keys, restored: restored)
-            if !restored { failure = note }
+            if !restored { failure = Block(.restore, path, note) }
             notes.append(note)
         }
         if state.submodules != nil {
-            var failed: [String: String] = [:]
-            if let note = checkSubmodules(source, &state.submodules!, failed: &failed) { notes.append(note) }
-            if let why = failed[source] { failure = why }
+            if let note = checkSubmodules(source, &state.submodules!, failure: &failure) { notes.append(note) }
         }
         return notes
     }
@@ -457,13 +550,13 @@ final class GitConfigGuard: @unchecked Sendable {
     /// index that was not there, or whose `.git` changed, has that `.git` renamed (never deleted),
     /// and a module repository new under `.git/modules` likewise. The index is not edited: a
     /// gitlink with nothing behind it runs nothing. An index that cannot be read fails closed.
-    private func checkSubmodules(_ source: String, _ base: inout Submodules, failed: inout [String: String]) -> String? {
+    private func checkSubmodules(_ source: String, _ base: inout Submodules, failure: inout Block?) -> String? {
         guard case .layout(let layout) = WorkspaceGit.entry(at: source) else { return nil }
         let root = IrisPaths.realPath(source)
-        guard let links = WorkspaceGit.gitlinks(index: (layout.gitDir as NSString).appendingPathComponent("index"),
-                                                sha256: Self.isSHA256(layout)) else {
+        let index = (layout.gitDir as NSString).appendingPathComponent("index")
+        guard let links = WorkspaceGit.gitlinks(index: index, sha256: Self.isSHA256(layout)) else {
             let why = "The index of \(source) is too large or malformed, so Iris cannot tell which submodules the sandbox added."
-            failed[source] = why
+            failure = Block(.index, index, why)
             defer { base.indexFailed = true }
             return base.indexFailed ? nil : why
         }
@@ -477,7 +570,7 @@ final class GitConfigGuard: @unchecked Sendable {
                 notes.append("\(path) belongs to a submodule the sandbox added or repointed; Iris moved it aside to \(moved) rather than delete it, so git on your Mac does not use it. If you trust it, rename it back to .git once the sandbox session has ended.")
             } else {
                 let why = "\(path) belongs to a submodule the sandbox added or repointed, and Iris could not move it aside."
-                failed[source] = why
+                failure = Block(.quarantine, path, why)
                 notes.append(why)
             }
         }
@@ -487,7 +580,7 @@ final class GitConfigGuard: @unchecked Sendable {
                 notes.append("\(module), a submodule repository the sandbox made, was moved aside to \(moved), so a later `git submodule update` does not reattach to it.")
             } else {
                 let why = "\(module), a submodule repository the sandbox made, could not be moved aside."
-                failed[source] = why
+                failure = Block(.quarantine, module, why)
                 notes.append(why)
             }
         }
@@ -532,7 +625,7 @@ final class GitConfigGuard: @unchecked Sendable {
 
     /// What makes a file of a repository the VM made unsafe for host git, or nil: a config key
     /// outside the allow-list and `git init`'s own, or a config Iris cannot read.
-    private static func untrustedRisk(_ path: String, kind: WorkspaceGit.FileKind) -> String? {
+    static func untrustedRisk(_ path: String, kind: WorkspaceGit.FileKind) -> String? {
         guard kind == .config else { return nil }
         switch read(path) {
         case .absent: return nil
@@ -561,7 +654,7 @@ final class GitConfigGuard: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         let real = cwd.map(IrisPaths.realPath)
         for source in blocked.keys.sorted() {
-            guard let why = blocked[source] else { continue }
+            guard let why = blocked[source]?.message else { continue }
             let roots = [source] + covered.keys.filter { covered[$0] == trustedHooks[source] && trustedHooks[source] != .some(nil) }
             let hit = roots.contains { root in
                 let r = IrisPaths.realPath(root)
