@@ -1297,18 +1297,30 @@ struct GitGuardStoreTests {
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let env = GitFixture.environment(home: dir + "/home")
         let ws = dir + "/ws"
-        try await GitFixture.sh("git config include.path \(dir)/inc && git config remote.o.uploadpack \(dir)/evil", in: ws, env: env)
+        try await GitFixture.sh("git config include.path \(dir)/inc && git config remote.o.uploadpack \(dir)/evil && git config core.worktree \(dir)/outside",
+                                in: ws, env: env)
         try lostList(store)
         let guardian = GitConfigGuard(store: store)
         guardian.watch(owner: "c", sources: [ws])
         let note = try #require(guardian.check(owner: "c"))
-        #expect(note.contains("include.path, remote.o.uploadpack"), "\(note)")
+        #expect(note.contains("core.worktree, include.path, remote.o.uploadpack"), "\(note)")
         let refusal = try #require(guardian.hostRefusal(cwd: ws, command: "git status"))
         #expect(refusal.contains("remove them from \(ws)/.git/config to end this"), "\(refusal)")
         #expect(GitConfigGuard(store: store).hostRefusal(cwd: ws, command: "") != nil, "still refused after a restart")
-        try await GitFixture.sh("git config --unset include.path && git config --unset remote.o.uploadpack", in: ws, env: env)
+        // Removed while the folder is still watched: kept, not put back, and the refusal ends.
+        try await GitFixture.sh("git config --unset include.path && git config --unset remote.o.uploadpack && git config --unset core.worktree",
+                                in: ws, env: env)
         _ = guardian.checkAll()
         #expect(guardian.hostRefusal(cwd: ws, command: "") == nil, "a clean check clears it")
+        #expect(WorkspaceGit.adopted(source: ws).refusal == nil, "the removal was kept")
+        try await GitFixture.sh("git config core.worktree \(ws)/sub", in: ws, env: env)
+        #expect(WorkspaceGit.adopted(source: ws).refusal == nil, "a worktree inside the folder is fine")
+        try await GitFixture.sh("git config --unset core.worktree", in: ws, env: env)
+
+        // A bare repository's worktree is wherever git is run; git init's own `bare = false` is fine.
+        #expect(WorkspaceGit.adopted(source: ws).refusal == nil)
+        try await GitFixture.sh("git config core.bare true", in: ws, env: env)
+        #expect(WorkspaceGit.adopted(source: ws).refusal?.contains("core.bare") == true)
     }
 
     @Test("an adopted folder stays adopted across a restart, and deleting the copies ends it at the next launch")

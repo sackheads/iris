@@ -302,6 +302,22 @@ enum WorkspaceGit {
     /// A folder adopted after Iris lost its list of sandboxed folders (#641): the overrides that
     /// stop each program-running key with a name of the repository's choosing that its config
     /// holds now, and why host commands must be refused there, if a key cannot be overridden.
+    /// Whether `value`, read as git does (relative to the folder holding `config`), names a folder
+    /// inside `source`.
+    private static func worktreeInside(_ value: String, config: String, source: String) -> Bool {
+        let base = (config as NSString).deletingLastPathComponent
+        let target = value.hasPrefix("/") ? value : (base as NSString).appendingPathComponent(value)
+        let real = IrisPaths.realPath(URL(fileURLWithPath: target).standardized.path)
+        let root = IrisPaths.realPath(source)
+        return real == root || real.hasPrefix(root.hasSuffix("/") ? root : root + "/")
+    }
+
+    /// git's reading of a boolean value: a bare key is true.
+    private static func isTrue(_ value: String?) -> Bool {
+        guard let value else { return true }
+        return ["true", "yes", "on", "1"].contains(value.lowercased())
+    }
+
     struct Adopted {
         var overrides: [(key: String, value: String)] = []
         /// The keys found that run a program, for the notice.
@@ -337,6 +353,10 @@ enum WorkspaceGit {
                 let parts = key.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
                 let section = parts[0], name = parts.count > 1 ? parts[parts.count - 1] : ""
                 if (section == "include" || section == "includeif") && name == "path" { unsafe.append(key); continue }
+                // Either can point git's worktree outside the folder, so clean, checkout and reset act
+                // there. A submodule's own `core.worktree`, its checkout inside the folder, is fine.
+                if key == "core.worktree", !worktreeInside(value, config: path, source: source) { unsafe.append(key); continue }
+                if key == "core.bare", isTrue(last[key] ?? nil) { unsafe.append(key); continue }
                 guard parts.count > 2 else {
                     // Every alias, not only `!`: `-c <key>=<program>` in one is applied after these
                     // overrides (probed). An empty alias fails to expand and runs nothing.

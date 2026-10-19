@@ -634,9 +634,6 @@ final class GitConfigGuard: @unchecked Sendable {
             baseline(source, &state)
             return []
         }
-        if adopted[source] != nil, let refusal = WorkspaceGit.adopted(source: source).refusal {
-            failure = Block(.adopted, source, refusal)
-        }
         if trustedHooks[source] == .some(nil) {
             addFiles(source, &state, untrusted: true)
             // A repository the VM made has no baseline: every submodule in it is the VM's, so the
@@ -681,7 +678,9 @@ final class GitConfigGuard: @unchecked Sendable {
             if record.kind == .config, case .bytes(let new) = now, let newEntries = GitConfigFile.parse(new),
                let oldEntries = restorable == nil ? [] : GitConfigFile.parse(restorable!) {
                 keys = GitConfigFile.disallowedKeys(from: oldEntries, to: newEntries)
-                if keys.isEmpty {
+                // In an adopted folder the baseline may be what a VM planted, so removing entries
+                // from it is kept: that is how the person ends a refusal there (#641).
+                if keys.isEmpty || adopted[source] != nil && Set(newEntries).isSubset(of: Set(oldEntries)) {
                     record.snapshot = now
                     continue
                 }
@@ -693,6 +692,10 @@ final class GitConfigGuard: @unchecked Sendable {
         }
         if state.submodules != nil {
             if let note = checkSubmodules(source, &state.submodules!, failure: &failure) { notes.append(note) }
+        }
+        // Judged after any restore above, on the config as it now stands.
+        if adopted[source] != nil, let refusal = WorkspaceGit.adopted(source: source).refusal {
+            failure = Block(.adopted, source, refusal)
         }
         return notes
     }
