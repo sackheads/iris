@@ -21,16 +21,24 @@ final class GateRuntime: ContainerRuntime, @unchecked Sendable {
     /// by the time the cleanup runs.
     var execAwaitsCancellation = false
 
+    /// The network each create asked for, and each isolated network ensured (#687).
+    private(set) var networks: [NetworkMode] = []
+    private(set) var ensuredNetworks: [String] = []
+    var networkError: Error?
+
     func createDetached(name: String, image: String, mounts: [String], workdir: String, network: NetworkMode) async throws {
-        lock.withLock { creates.append((name, image, mounts, workdir)) }
+        lock.withLock { creates.append((name, image, mounts, workdir)); networks.append(network) }
         if let createDelaySeconds {
             try await Task.sleep(nanoseconds: UInt64(createDelaySeconds * 1_000_000_000))
         }
         if let createError { throw createError }
     }
 
-    /// A gate never asks for the isolated network.
-    func ensureIsolatedNetwork(named name: String) async throws {}
+    /// A network-off gate asks for the isolated network first (#687).
+    func ensureIsolatedNetwork(named name: String) async throws {
+        lock.withLock { ensuredNetworks.append(name) }
+        if let networkError { throw networkError }
+    }
 
     func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?) async throws
         -> (stdout: String, stderr: String, exitCode: Int32) {

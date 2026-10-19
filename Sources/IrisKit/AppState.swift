@@ -1439,6 +1439,12 @@ class AppState {
         // #678: what the guarded settings' launch found (an upgrade reset, a defaults write that
         // was ignored, a missing or unreadable item).
         if let target = noticeTarget { postGuardedNotices(guardedConfig.takeGuardedNotices(), to: target) }
+        // #687: once, the gate scripts that just lost the network. Only here, inside the notice
+        // branch, so a process that announces nothing (`--run-job`) never takes the marker.
+        if let target = noticeTarget,
+           let notice = Self.gateNetworkNotice(jobs: (try? store.ledger.jobs()) ?? [], defaults: guardedConfig.store) {
+            appendLaunchNotice(notice, to: target)
+        }
         // Every launch notice below goes through `appendLaunchNotice`, which persists it like any
         // other system message but skips it when the same wording is already in the conversation.
         // Several of these conditions recur on every launch until a human intervenes, so dedup by
@@ -3102,6 +3108,23 @@ class AppState {
             self.appendLaunchNotice(text, to: target)
             return true
         }
+    }
+
+    /// Marks that #687's one-time notice has been considered, whether or not it named anything.
+    nonisolated static let gateNetworkNoticeKey = "GATE_NETWORK_OFF_NOTICE_V1"
+
+    /// #687: every script gate is network-off from this version (a stored gate with no `network`
+    /// key decodes as off), and the person is told once which jobs that changed and how to turn
+    /// it back on. Nil when it was said before, or there is no script gate to name.
+    nonisolated static func gateNetworkNotice(jobs: [Job], defaults: UserDefaults) -> String? {
+        guard !defaults.bool(forKey: gateNetworkNoticeKey) else { return nil }
+        defaults.set(true, forKey: gateNetworkNoticeKey)
+        let names = jobs.compactMap { job -> String? in
+            if case .script = job.trigger.gate { return job.name }
+            return nil
+        }.sorted()
+        guard !names.isEmpty else { return nil }
+        return "Gate scripts no longer reach the internet unless they ask for it (#687), and you now review each one yourself. These jobs' gates are now network-off: \(names.joined(separator: ", ")). Network-off still reaches services on this Mac. If one needs the internet, schedule it again with gate_network: true; that asks you to review it."
     }
 
     /// #678's launch notices. The upgrade notice is never deduplicated: a replayed upgrade posts

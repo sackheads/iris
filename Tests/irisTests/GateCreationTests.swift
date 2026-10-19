@@ -68,7 +68,7 @@ struct GateCreationTests {
                             "gate_script": .string("diff -q /in/a /in/b >/dev/null && echo UNCHANGED || echo CHANGED"),
                             "gate_mounts": .array([.string("\(dir.path):/in")]),
                             "gate_timeout_seconds": .int(45)]).get()
-        guard case .script(let command, let mounts, let timeout) = gate(of: job) else {
+        guard case .script(let command, let mounts, let timeout, _) = gate(of: job) else {
             Issue.record("expected a script gate"); return
         }
         #expect(command.hasPrefix("diff -q"))
@@ -94,7 +94,7 @@ struct GateCreationTests {
                             "gate_script": .string("ls /in >/dev/null; echo UNCHANGED"),
                             "gate_mounts": .array([.string("\(link.path):/in")]),
                             "gate_timeout_seconds": .int(30)]).get()
-        guard case .script(let command, let mounts, let timeout) = gate(of: job) else {
+        guard case .script(let command, let mounts, let timeout, _) = gate(of: job) else {
             Issue.record("expected a script gate"); return
         }
         let resolved = IrisPaths.canonicalPath(real.path)
@@ -135,14 +135,14 @@ struct GateCreationTests {
     func scriptTimeoutDefaults() throws {
         let plain = try make(["prompt": .string("p"), "intervalSeconds": .int(60),
                               "gate_script": .string("echo UNCHANGED")]).get()
-        if case .script(_, _, let timeout) = gate(of: plain) {
+        if case .script(_, _, let timeout, _) = gate(of: plain) {
             #expect(timeout == GateEvaluator.defaultTimeoutSeconds)
         } else { Issue.record("expected a script gate") }
 
         let silly = try make(["prompt": .string("p"), "intervalSeconds": .int(60),
                               "gate_script": .string("echo UNCHANGED"),
                               "gate_timeout_seconds": .int(99_999)]).get()
-        if case .script(_, _, let timeout) = gate(of: silly) {
+        if case .script(_, _, let timeout, _) = gate(of: silly) {
             #expect(timeout == GateEvaluator.maxTimeoutSeconds)
         } else { Issue.record("expected a script gate") }
     }
@@ -226,7 +226,7 @@ struct GateCreationTests {
         let job = try make(["prompt": .string("p"), "intervalSeconds": .int(60),
                             "gate_script": .string("echo UNCHANGED"),
                             "gate_mounts": .array([])]).get()
-        guard case .script(_, let mounts, _) = gate(of: job) else {
+        guard case .script(_, let mounts, _, _) = gate(of: job) else {
             Issue.record("expected a script gate"); return
         }
         #expect(mounts.isEmpty)
@@ -307,13 +307,24 @@ struct GateCreationTests {
                          ask: { _ in asked.mutate { $0 += 1 }; return answer })
     }
 
-    @Test("Vibecop's APPROVE creates the job without troubling anyone")
-    func reviewApproves() async {
+    @Test("Vibecop's APPROVE is advice: the person is still asked, network on or off (#687)")
+    func reviewApproveStillAsks() async {
+        for network in [false, true] {
+            let asked = Locked(0)
+            let shown = Locked("")
+            let outcome = await GateScriptReview(
+                verdict: { _ in VibecopDecision(decision: "APPROVE", reason: "harmless") },
+                ask: { text in asked.mutate { $0 += 1 }; shown.mutate { $0 = text }; return true })
+                .review(script: "echo CHANGED", mounts: [], timeoutSeconds: 60, network: network)
+            #expect(outcome.failureText == nil)
+            #expect(asked.value == 1, "network \(network): Vibecop's APPROVE alone creates nothing")
+            #expect(shown.value.contains("Vibecop's view: approve \u{2014} harmless"))
+        }
+        // And the person's No is final, whatever Vibecop said.
         let asked = Locked(0)
-        let outcome = await review(VibecopDecision(decision: "APPROVE", reason: "harmless"), asked: asked)
+        let outcome = await review(VibecopDecision(decision: "APPROVE", reason: "harmless"), asked: asked, answer: false)
             .review(script: "echo CHANGED", mounts: [], timeoutSeconds: 60)
-        #expect(outcome.failureText == nil)
-        #expect(asked.value == 0)
+        #expect(outcome.failureText == GateScriptReview.declined)
     }
 
     @Test("a DENY refuses creation and says why")
@@ -443,17 +454,19 @@ struct GateScriptCreationWiringTests {
     func approvedScriptIsStoredOnce() async throws {
         let (store, _, engine, conversation) = try harness()
         let reviews = Locked(0)
+        let asks = Locked(0)
         let review = GateScriptReview(
             verdict: { _ in
                 reviews.mutate { $0 += 1 }
                 return VibecopDecision(decision: "APPROVE", reason: "reads a directory")
             },
-            ask: { _ in Issue.record("an approved script needs no dialog"); return true })
+            ask: { _ in asks.mutate { $0 += 1 }; return true })
 
         let answer = await engine.scheduleJob(arguments(), conversationId: conversation,
                                               review: review, sandboxAvailable: true)
 
         #expect(reviews.value == 1, "one creation is one dialog's worth of asking")
+        #expect(asks.value == 1, "#687: the person approves every gate script")
         #expect(answer.contains("Next check"))
         let stored = try #require(try store.ledger.jobs().first)
         #expect(stored.trigger.gate?.kind == "script")

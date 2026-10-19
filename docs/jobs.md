@@ -463,12 +463,20 @@ it is fenced in:
   removed and symlinks are followed, so what you are shown at creation is what will actually be
   read. The same check runs on every tick — a source that has since been pointed somewhere else,
   or is no longer a directory, is a gate failure and nothing is started;
-- it is reviewed once, at creation, by Vibecop, with the approval dialog for anything Vibecop
-  escalates or cannot answer. That dialog offers Approve and Deny only, never Always Allow, which
-  would save the script's text as a rule for your Mac, where you are approving it for the sandbox (#648). With Vibecop off, every gate script goes to the dialog. Both are shown the same thing: the script, every mount as
-  `source → target, read-only`, and the timeout — the mounts are the standing permission being
-  granted, and the script is only what is done with them. That review is the last time a human sees
-  it, which is why the sandbox, the read-only mounts and the timeout are not negotiable.
+- it has **no internet** unless the job asks for it with `gate_network: true` (#687). "No internet"
+  is the sandbox's host-only network: the script can't reach the web, but it **can still reach
+  services on this Mac** that listen on all interfaces (#690). A gate created before this had the
+  network; at the first launch of this version every existing gate goes network-off, and one notice
+  names each job, with how to turn it back on (schedule it again with `gate_network: true`);
+- **you** review it once, at creation, every time, whether or not Vibecop is on (#687): even with the
+  network off it can reach your Mac's services on every tick, unattended, so a person reads every
+  gate script. Vibecop still gives its view, shown in the dialog, and a Vibecop DENY refuses without
+  asking. The dialog offers Approve and Deny only, never Always Allow, which would save the script's
+  text as a rule for your Mac, where you are approving it for the sandbox (#648). It shows the
+  script, every mount as `source → target, read-only`, whether it has the network and what that
+  means, and the timeout — the mounts and the network are the standing permission being granted,
+  and the script is only what is done with them. That review is the last time a human sees it,
+  which is why the sandbox, the read-only mounts and the timeout are not negotiable.
 
 What each answer costs:
 
@@ -816,10 +824,8 @@ inside the owner's own turn, so it needs no taint — the owner is already there
 Every other, ordinarily-driven conversation creates a job or watch without that extra ask — except
 a subagent, which is refused both tools outright (declaration and dispatch) and cannot create one
 at all, however it was asked. Review is not all-or-nothing either way: a `schedule_job` carrying
-`gate_script` is reviewed once before the job exists, in whichever conversation asked for it —
-Vibecop judges the script and what it may read when it is on, and escalates to the ordinary
-approval dialog if it cannot decide; with Vibecop off, the default, every gate script goes to that
-same dialog instead (see "Gates" above). It is never created unreviewed.
+`gate_script` is reviewed by you once before the job exists, in whichever conversation asked for
+it, whether or not Vibecop is on (see "Gates" above). It is never created unreviewed.
 
 Delivery never wakes a model turn. The card is a `ChatRole.event` message, drawn as a card and
 never indexed for search; alongside it the card's one-line summary is appended to the destination's

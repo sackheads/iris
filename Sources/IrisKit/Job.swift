@@ -140,9 +140,11 @@ enum Gate: Codable, Equatable, Sendable {
     case urlChanged(url: String)
     /// A file's mtime or hash, or the newest mtime under a directory, changed since the last signal.
     case pathChanged(path: String)
-    case script(command: String, mounts: [String], timeoutSeconds: Int)
+    /// `network` off is the isolated network (#687), which is host-only (#690): no internet, but
+    /// it still reaches services on the Mac. A gate stored before #687 decodes as off.
+    case script(command: String, mounts: [String], timeoutSeconds: Int, network: Bool = false)
 
-    private enum CodingKeys: String, CodingKey { case kind, url, path, command, mounts, timeoutSeconds }
+    private enum CodingKeys: String, CodingKey { case kind, url, path, command, mounts, timeoutSeconds, network }
 
     var kind: String {
         switch self {
@@ -170,10 +172,11 @@ enum Gate: Codable, Equatable, Sendable {
             try container.encode(url, forKey: .url)
         case .pathChanged(let path):
             try container.encode(path, forKey: .path)
-        case .script(let command, let mounts, let timeoutSeconds):
+        case .script(let command, let mounts, let timeoutSeconds, let network):
             try container.encode(command, forKey: .command)
             try container.encode(mounts, forKey: .mounts)
             try container.encode(timeoutSeconds, forKey: .timeoutSeconds)
+            try container.encode(network, forKey: .network)
         }
     }
 
@@ -193,7 +196,9 @@ enum Gate: Codable, Equatable, Sendable {
                 command: try container.decode(String.self, forKey: .command),
                 mounts: try container.decodeIfPresent([String].self, forKey: .mounts) ?? [],
                 timeoutSeconds: try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds)
-                    ?? PollSpec.legacyGateTimeoutSeconds)
+                    ?? PollSpec.legacyGateTimeoutSeconds,
+                // Invariant 1, and #687's migration: a gate from before has no key, and is off.
+                network: try container.decodeIfPresent(Bool.self, forKey: .network) ?? false)
         case let other:
             throw DecodingError.dataCorrupted(.init(
                 codingPath: decoder.codingPath, debugDescription: "unknown gate kind '\(other)'"))
