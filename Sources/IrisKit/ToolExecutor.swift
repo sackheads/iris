@@ -49,6 +49,10 @@ struct ToolExecutor {
     /// `ConfigManager.shared` is allowed — invariant 7 forbids *mutating* it — but a test that
     /// depended on its value would pass or fail by the developer's settings.
     var watchBreakerProvider: (@Sendable () -> Int)?
+    static func oneOffRepositoryRefusal(_ path: String) -> String {
+        "Not run: \(path) holds a git repository, and a sandboxed command there needs a conversation, so its commits can be brought back to your Mac after it runs."
+    }
+
     static let watchProfileNeedsSandbox = "A mutating watch's commands always run in the apple/container VM, and that VM is not available: install the runtime and turn sandboxing on in Settings → Sandboxing, or leave the watch read-only."
 
     /// How the sandboxed branch of `run_command` reaches the container session. Injectable so a
@@ -57,6 +61,11 @@ struct ToolExecutor {
     /// case everywhere in the app, means the one `SandboxSessionManager` the process shares.
     var sandboxSession: (@Sendable (_ command: String, _ conversationId: UUID, _ workspace: ContainerMount?,
                                     _ extraMounts: [String], _ network: NetworkMode, _ timeoutSeconds: Int) async -> String)?
+
+    /// Posts what the sandbox's git sync did into a conversation, for the person (#658): a branch
+    /// moved, commits kept aside, a pointer moved aside. nil drops the note; the model still reads
+    /// it in the result.
+    var postSandboxNote: (@Sendable (UUID, String) async -> Void)?
 
     /// Where the no-conversation sandboxed branch of `run_command` finds the `container` CLI, or
     /// nil for "not installed". Injectable so a test can drive that branch against a stub binary
@@ -531,9 +540,11 @@ struct ToolExecutor {
             guard SandboxingManager.shared.isContainerInstalled else {
                 return "Error: sandboxing is on but the container runtime isn't installed. Open Iris Settings → Sandboxing to install it, or turn sandboxing off."
             }
+            let post = postSandboxNote
             return await SandboxSessionManager.shared.run(command: command, conversationId: conversationId,
                                                           workspace: workspace, extraMounts: extraMounts,
-                                                          network: network, timeoutSeconds: deadline)
+                                                          network: network, timeoutSeconds: deadline,
+                                                          onNote: { await post?(conversationId, $0) })
         }
         let executable: String
         let arguments: [String]
@@ -558,6 +569,11 @@ struct ToolExecutor {
                 // #611: read-write here too; no conversation means no opt-in.
                 if let reason = HomeMount.reason(for: expandedPath), !HomeMount.isCovered(expandedPath, by: homeWritableOptIn) {
                     return HomeMount.refusal(path: expandedPath, reason: reason)
+                }
+                // #658: a repository's commits reach the host by a sync after the command, which
+                // needs the container still there; this one is gone when the command returns.
+                if WorkspaceGit.entry(at: expandedPath) != .none {
+                    return Self.oneOffRepositoryRefusal(expandedPath)
                 }
                 // `-v`, where the session path uses `--mount` (see `ContainerMount`). The CLI
                 // lowers both to the same virtiofs bind; this one is the ephemeral no-conversation
@@ -588,7 +604,10 @@ struct ToolExecutor {
             directory = cwd.map { IrisEngine.expandTilde($0) }   // #275: never `expandingTildeInPath` on a decider
             // #623: host git reads repositories a VM may have written; check them first, and in one
             // a VM can write, run git with the keys that run programs overridden.
-            gitBefore = gitGuard.checkAll(owner: conversationId.map(SandboxSessionManager.containerName(for:)))
+            // #658: and each `.git` pointer in a sandboxed repository's worktree, which the VM can write.
+            let checked = [gitGuard.checkAll(owner: conversationId.map(SandboxSessionManager.containerName(for:))),
+                           SandboxGit.checkHostPointers()].compactMap { $0 }
+            gitBefore = checked.isEmpty ? nil : checked.joined(separator: "\n")
             if let refusal = gitGuard.hostRefusal(cwd: directory, command: command) {
                 return GitConfigGuard.withNotices(refusal, before: gitBefore, after: nil)
             }

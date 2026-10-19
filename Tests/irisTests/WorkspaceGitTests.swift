@@ -151,58 +151,56 @@ private final class WritingRuntime: ContainerRuntime, @unchecked Sendable {
     func list(prefix: String) async -> [String] { [] }
 }
 
-@Suite("Sandboxed repositories: hooks mounted read-only, config put back (#623)", .serialized, .timeLimit(.minutes(1)))
+@Suite("Sandboxed repositories: the sandbox's own git dir, config put back (#623, #658)", .serialized, .timeLimit(.minutes(1)))
 struct GitConfigGuardTests {
-    @Test("a repository at a mount's root gets its .git as a mountpoint and its hooks read-only; none, nothing")
+    @Test("a repository at a mount's root gets the sandbox's own git dir over its .git and the host's read-only; none, nothing")
     func protectedMounts() async throws {
         let (dir, _) = try await GitFixture.repo()
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let ws = dir + "/ws"
-        let items = WorkspaceIrisDir.protected(for: ws)
-        #expect(items.map(\.relative) == [".iris", ".git", ".git/hooks"])
-        #expect(items.map(\.readOnly) == [true, false, true])
-        let list = SandboxSessionManager.mountList(workspace: ContainerMount(source: ws), extra: [])
-        #expect(list == ["\(ws):\(ws)", "\(ws)/.iris:\(ws)/.iris:ro", "\(ws)/.git:\(ws)/.git", "\(ws)/.git/hooks:\(ws)/.git/hooks:ro"])
-        #expect(WorkspaceIrisDir.protected(for: dir + "/home").map(\.relative) == [".iris"])
-
-        // A hooks folder that is a link cannot be mounted read-only as itself: the run refuses.
-        try FileManager.default.removeItem(atPath: ws + "/.git/hooks")
-        try FileManager.default.createSymbolicLink(atPath: ws + "/.git/hooks", withDestinationPath: dir + "/home")
-        guard case .refused(let why) = WorkspaceIrisDir.prepareForMount(ws, items[2]) else { Issue.record("a linked hooks folder passed"); return }
-        #expect(why.contains("repository's hooks"))
-        // A missing one is made before the container is, so the VM cannot make it.
-        try FileManager.default.removeItem(atPath: ws + "/.git/hooks")
-        #expect(WorkspaceIrisDir.prepareForMount(ws, items[2]) == .ready(ws + "/.git/hooks"))
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/home/iris"))
+        #expect(WorkspaceIrisDir.protected(for: ws).map(\.relative) == [".iris"], "the person's .git is no longer mounted read-write")
+        guard case .repo(let repo) = SandboxGit.prepare(source: ws, target: ws, paths: paths) else { Issue.record("no copy"); return }
+        #expect(repo.vmCommonDir == ws + "/.git", "the copy sits where the VM's git looks")
+        #expect(repo.mounts == ["\(repo.vmDir):\(ws)/.git", "\(ws)/.git:\(repo.hostMount):ro"])
+        #expect(repo.vmDir.hasPrefix(paths.root.path + "/sandbox-git/"))
+        #expect(SandboxGit.prepare(source: dir + "/home", target: dir + "/home", paths: paths) == .none)
     }
 
-    @Test("a .git that is a link refuses; a worktree whose common dir is elsewhere mounts nothing extra")
+    @Test("a .git that is a link refuses; a worktree's copy is mounted at its common dir's own path")
     func layouts() async throws {
         let (dir, env) = try await GitFixture.repo()
         defer { try? FileManager.default.removeItem(atPath: dir) }
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/home/iris"))
         try FileManager.default.createDirectory(atPath: dir + "/linked", withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(atPath: dir + "/linked/.git", withDestinationPath: dir + "/ws/.git")
-        let linked = WorkspaceIrisDir.protected(for: dir + "/linked")
-        guard case .refused = WorkspaceIrisDir.prepareForMount(dir + "/linked", linked[1]) else { Issue.record("a linked .git passed"); return }
+        guard case .refused = SandboxGit.prepare(source: dir + "/linked", target: dir + "/linked", paths: paths) else {
+            Issue.record("a linked .git passed"); return
+        }
 
         try await GitFixture.sh("git worktree add -q ../wt", in: dir + "/ws", env: env)
-        #expect(WorkspaceIrisDir.protected(for: dir + "/wt").map(\.relative) == [".iris"])
+        guard case .repo(let wt) = SandboxGit.prepare(source: dir + "/wt", target: dir + "/wt", paths: paths),
+              case .repo(let main) = SandboxGit.prepare(source: dir + "/ws", target: dir + "/ws", paths: paths) else {
+            Issue.record("no copy"); return
+        }
+        #expect(wt.isWorktree && wt.vmCommonDir == dir + "/ws/.git", "the path the worktree's .git file names")
+        #expect(wt.vmDir == main.vmDir, "one copy per repository, shared by its worktrees")
         let files = WorkspaceGit.watchedFiles(for: dir + "/wt")
         #expect(files[dir + "/wt/.git"] == .pointer, "the worktree's .git file is watched")
         #expect(files.keys.allSatisfy { $0.hasPrefix(dir + "/wt/") }, "nothing outside the mount: \(files.keys.sorted())")
-        // The main repository, mounted, watches its linked worktree's commondir.
-        let main = WorkspaceGit.watchedFiles(for: dir + "/ws")
-        #expect(main[dir + "/ws/.git/worktrees/wt/commondir"] == .pointer)
-        #expect(main[dir + "/ws/.git/config"] == .config)
+        let mainFiles = WorkspaceGit.watchedFiles(for: dir + "/ws")
+        #expect(mainFiles[dir + "/ws/.git/worktrees/wt/commondir"] == .pointer)
+        #expect(mainFiles[dir + "/ws/.git/config"] == .config)
     }
 
-    @Test("a .git file naming a git dir inside the mount gets that dir and its hooks protected, and the file watched")
+    @Test("a .git file naming a git dir inside the mount gets its copy at that dir's path, and the file watched")
     func gitDirInside() async throws {
         let dir = try GitFixture.temp("sep")
         defer { try? FileManager.default.removeItem(atPath: dir) }
         try await GitFixture.sh("mkdir inner && git init -q --separate-git-dir=inner/gitdir", in: dir, env: GitFixture.environment(home: dir))
-        let items = WorkspaceGit.protected(for: dir)
-        #expect(items.map(\.relative) == ["inner/gitdir", "inner/gitdir/hooks"])
-        #expect(items.map(\.readOnly) == [false, true])
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/iris-home"))
+        guard case .repo(let repo) = SandboxGit.prepare(source: dir, target: "/work", paths: paths) else { Issue.record("no copy"); return }
+        #expect(repo.vmCommonDir == "/work/inner/gitdir", "mapped through the mount's target")
         let files = WorkspaceGit.watchedFiles(for: dir)
         #expect(files[dir + "/.git"] == .pointer)
         #expect(files[dir + "/inner/gitdir/config"] == .config)
@@ -364,15 +362,20 @@ struct GitConfigGuardTests {
         #expect(GitFixture.read(dir + "/root/.git/config") == Data("y".utf8))
     }
 
-    @Test("an existing submodule's config is watched and its hooks are read-only")
+    @Test("an existing submodule's config is watched, and the sandbox's copy has its repository with alternates onto the host's")
     func submodules() async throws {
         let (dir, env) = try await GitFixture.repo()
         defer { try? FileManager.default.removeItem(atPath: dir) }
         try await GitFixture.sh("git init -q ../sub && git -C ../sub commit -q --allow-empty -m s", in: dir + "/ws", env: env)
         let add = try await GitFixture.sh("git -c protocol.file.allow=always submodule add -q ../sub lib/sub", in: dir + "/ws", env: env)
         #expect(add.status == 0, "\(add.out)")
-        let items = WorkspaceGit.protected(for: dir + "/ws").map(\.relative)
-        #expect(items == [".git", ".git/hooks", ".git/modules/lib/sub/hooks"])
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/iris-home"))
+        guard case .repo(let repo) = SandboxGit.prepare(source: dir + "/ws", target: dir + "/ws", paths: paths) else {
+            Issue.record("no copy"); return
+        }
+        let alternates = try String(contentsOfFile: repo.vmDir + "/modules/lib/sub/objects/info/alternates", encoding: .utf8)
+        #expect(alternates == repo.hostMount + "/modules/lib/sub/objects\n")
+        #expect(!FileManager.default.fileExists(atPath: repo.vmDir + "/modules/lib/sub/hooks/pre-commit.sample"), "no hooks copied")
         let module = dir + "/ws/.git/modules/lib/sub/config"
         #expect(WorkspaceGit.watchedFiles(for: dir + "/ws")[module] == .config)
         let before = try #require(GitFixture.read(module))
@@ -824,14 +827,18 @@ struct GitConfigGuardTests {
             try? (String(decoding: before, as: UTF8.self) + "[core]\n\tfsmonitor = ./x\n").write(toFile: config, atomically: false, encoding: .utf8)
         }
         let guardian = GitConfigGuard()
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/iris-home"))
         let manager = SandboxSessionManager(runtime: runtime, image: { "img" }, startContainerSystem: { true },
-                                            live: LiveContainerNames(), gitGuard: guardian)
+                                            live: LiveContainerNames(), gitGuard: guardian, paths: paths)
         let result = await manager.run(command: "x", conversationId: UUID(), workspace: ContainerMount(source: ws))
         #expect(result.hasPrefix("ran"))
         #expect(result.contains("core.fsmonitor"))
         #expect(GitFixture.read(config) == before)
-        #expect(runtime.mounts.first?.contains("\(ws)/.git/hooks:\(ws)/.git/hooks:ro") == true)
-        #expect(runtime.mounts.first?.contains("\(ws)/.git:\(ws)/.git") == true)
+        // #658: the sandbox's own git dir over `.git`, the person's only read-only.
+        let key = SandboxGit.key(IrisPaths.realPath(ws + "/.git"))
+        #expect(runtime.mounts.first?.contains("\(paths.root.path)/sandbox-git/\(key):\(ws)/.git") == true, "\(runtime.mounts)")
+        #expect(runtime.mounts.first?.contains("\(IrisPaths.realPath(ws + "/.git")):/iris-host-git/\(key):ro") == true)
+        #expect(runtime.mounts.first?.contains("\(ws)/.git:\(ws)/.git") == false, "the person's .git is never mounted read-write")
     }
 }
 

@@ -5,12 +5,11 @@ import Foundation
 /// `core.hooksPath`, `core.fsmonitor`, `diff.external`, filter drivers and more. So a command the
 /// VM ran without a prompt could choose what the person's next host `git commit` runs.
 ///
-/// Three layers. In the VM, the repository's `.git` is a mountpoint of its own (it cannot be
-/// renamed or removed) and its `hooks/` is read-only (`protected(for:)`). Its config files, which
-/// the runtime cannot mount alone, are checked by `GitConfigGuard` before and after every in-VM
-/// command and before every host one, and put back when a change could run a program. And a host
-/// `run_command` in a sandboxed workspace runs git with the risky fixed-name keys overridden
-/// (`hostEnvironment`), which covers a write that lands between a check and git reading the file.
+/// Since #658 the VM has a git dir of its own (`SandboxGit`) and the person's is mounted only
+/// read-only, so these files are no longer the VM's to write. `GitConfigGuard` still checks them
+/// before and after every in-VM command and before every host one, and a host `run_command` in a
+/// sandboxed workspace still runs git with the risky fixed-name keys overridden
+/// (`hostEnvironment`); both go when the second #658 change retires them.
 enum WorkspaceGit {
     /// Where the repository at `source` keeps what git reads. `dotGit` is `<source>/.git`, a
     /// directory, or for a worktree a file naming its `gitDir`; `commonDir` holds the shared
@@ -48,29 +47,6 @@ enum WorkspaceGit {
             return .layout(Layout(dotGitIsFile: true, gitDir: gitDir, commonDir: commonDir))
         default:
             return .unsupported
-        }
-    }
-
-    /// The directories a read-write mount of `source` carries for its repository: the common dir
-    /// read-write over itself, so the VM cannot swap in a repository of its own, then its `hooks/`
-    /// read-only. Only what sits inside `source`; a worktree's common dir elsewhere is out of the
-    /// VM's reach already. A `.git` link is listed so that preparing it refuses.
-    static func protected(for source: String) -> [WorkspaceIrisDir.Protected] {
-        switch entry(at: source) {
-        case .none: return []
-        case .unsupported:
-            var info = stat()
-            let dotGit = (source as NSString).appendingPathComponent(".git")
-            // A worktree's `.git` file that does not parse is guarded as a file; a link refuses.
-            if lstat(dotGit, &info) == 0, info.st_mode & S_IFMT == S_IFREG { return [] }
-            return [.init(relative: ".git", createIfMissing: false, readOnly: false, holds: "the repository")]
-        case .layout(let layout):
-            guard let relative = relative(layout.commonDir, inside: source) else { return [] }
-            let hooks = ([layout.commonDir] + modules(commonDir: layout.commonDir)).compactMap { dir -> WorkspaceIrisDir.Protected? in
-                guard let r = self.relative(dir, inside: source) else { return nil }
-                return .init(relative: (r as NSString).appendingPathComponent("hooks"), holds: "the repository's hooks")
-            }
-            return [.init(relative: relative, createIfMissing: false, readOnly: false, holds: "the repository")] + hooks
         }
     }
 
