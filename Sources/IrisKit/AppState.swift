@@ -225,6 +225,14 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// is no opt-in.
     var homeWritableOptIn: String?
 
+    /// #465: the agent profile this conversation was started with, by name: the link, with the
+    /// file (`config/agent-profiles/<name>.md`) as the source. Set only at creation from the New
+    /// Conversation menu, cleared only by Clear Agent Profile; never by a tool, never on Iris.
+    var agentProfile: String?
+    /// #465: the last version of that profile that read cleanly, the fallback while its file is
+    /// missing or broken. Written only when the profile's content hash changes.
+    var agentProfileSnapshot: AgentProfileSnapshot?
+
     /// Sticky taint (#187 §0.5, structural ruling, renamed from `hasPeerContent` under review #340):
     /// true once this conversation has had a turn started on it by content that was NOT the owner
     /// present and typing — a peer's `send_to_session` delivery (idle, or queued behind a busy turn
@@ -272,7 +280,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, prefixMismatchBehavior, role, homeWritableOptIn
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot
     }
 
     init(from decoder: Decoder) throws {
@@ -311,6 +319,10 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         role = try container.decodeIfPresent(String.self, forKey: .role)
         // Invariant 1: absent on every conversation persisted before #611, and absent is no opt-in.
         homeWritableOptIn = try container.decodeIfPresent(String.self, forKey: .homeWritableOptIn)
+        // Invariant 1: absent before #465, and absent is no profile. A snapshot that does not
+        // decode drops only itself; the link stays and the file is read again.
+        agentProfile = try container.decodeIfPresent(String.self, forKey: .agentProfile)
+        agentProfileSnapshot = (try? container.decodeIfPresent(AgentProfileSnapshot.self, forKey: .agentProfileSnapshot)) ?? nil
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
         // Invariant 1: a conversation persisted before this ruling has no such key, and absent
         // means "no turn here ever started without the owner present", the correct default.
@@ -473,6 +485,11 @@ class AppState {
     /// The deterministic allowlist every approval consults. Injectable so a test can point it at
     /// a temp `IrisPaths` instead of the machine's real `~/.iris/config/permissions.json`.
     var permissions: PermissionManager = .shared
+    /// Where agent profiles are read from (#465). Injected so a test reads only its own.
+    @ObservationIgnored var agentProfiles = AgentProfileStore()
+    /// What each profiled conversation's file read last time, so a change of state is said once,
+    /// not on every turn. Transient: a launch says it again.
+    @ObservationIgnored private var agentProfileState: [UUID: String] = [:]
     var commandStartTimes: [UUID: Date] = [:]
 
     /// Agent replies still streaming in (#541): see `StreamingTexts`. A `let`, so reading the
@@ -1662,7 +1679,7 @@ class AppState {
     /// Pass `false` explicitly to create a conversation without disturbing the selection.
     @discardableResult
     func createNewConversation(id: UUID = UUID(), isSubagent: Bool = false, isBackground: Bool = false,
-                               title: String? = nil, select: Bool? = nil) -> UUID {
+                               title: String? = nil, select: Bool? = nil, agentProfile: String? = nil) -> UUID {
         var newConv = Conversation(id: id, title: title ?? Conversation.defaultTitle)
         newConv.isSubagent = isSubagent
         newConv.isBackground = isBackground
@@ -1671,11 +1688,87 @@ class AppState {
             selectedConversationId = newConv.id
         }
         markChanged(newConv.id, .created)
+        // #465: only the person's New Conversation menu passes a profile, and only for a session
+        // of their own: never a subagent's thread or a job run.
+        if let agentProfile, !isSubagent, !isBackground { applyAgentProfile(agentProfile, to: newConv.id) }
 
         Task {
             _ = await HookManager.shared.fireSessionStart(conversationId: newConv.id)
         }
         return newConv.id
+    }
+
+    // MARK: Agent profiles (#465)
+
+    /// Starts `id` on the profile named `name`: the link, its first good read as the fallback,
+    /// and its role when no other active session holds it (Fork A: never moved from its holder).
+    private func applyAgentProfile(_ name: String, to id: UUID) {
+        guard let idx = conversations.firstIndex(where: { $0.id == id }), !conversations[idx].isPinned else { return }
+        guard case .loaded(let profile) = agentProfiles.load(name) else {
+            appendMessage(role: .system, content: "[agent profile] `\(name)` couldn't be read, so this conversation started without it.", to: id)
+            return
+        }
+        conversations[idx].agentProfile = name
+        conversations[idx].agentProfileSnapshot = profile.snapshot
+        agentProfileState[id] = profile.contentHash
+        if let role = profile.role, SessionRoles.mayHoldRole(conversations[idx]) {
+            if let holder = SessionRoles.holder(of: role, in: conversations), holder != id {
+                let other = conversations.first { $0.id == holder }.map { $0.sessionCard?.name ?? $0.title } ?? "another session"
+                appendMessage(role: .system, content: "[agent profile] The role `\(role)` is held by \(other), so this conversation has no role. `/role` sets one.", to: id)
+            } else {
+                conversations[idx].role = role
+            }
+        }
+        markChanged(id, .metadata)
+    }
+
+    /// The profile `id` runs with this turn, or nil. The file wins whenever it reads; while it
+    /// does not, the last good read stands in, so a narrowed chat never widens silently. Each
+    /// change of state is said once in the chat. Never for Iris.
+    func resolveAgentProfile(for id: UUID) -> AgentProfile? {
+        guard let idx = conversations.firstIndex(where: { $0.id == id }), !conversations[idx].isPinned,
+              let name = conversations[idx].agentProfile else { return nil }
+        let snapshot = conversations[idx].agentProfileSnapshot
+        let why: String
+        switch agentProfiles.load(name) {
+        case .missing: why = "isn't there any more"
+        case .unreadable(let reason): why = "couldn't be read (\(reason))"
+        case .loaded(let profile):
+            if snapshot?.contentHash != profile.contentHash {
+                conversations[idx].agentProfileSnapshot = profile.snapshot
+                markChanged(id, .metadata)
+            }
+            if let seen = agentProfileState[id], seen != profile.contentHash {
+                appendMessage(role: .system, content: "[agent profile] `\(name)` changed; this turn uses the new version.", to: id)
+            }
+            agentProfileState[id] = profile.contentHash
+            return profile
+        }
+        let state = "unreadable:" + why
+        if agentProfileState[id] != state {
+            agentProfileState[id] = state
+            appendMessage(role: .system, content: snapshot == nil
+                ? "[agent profile] `\(name)` \(why), and no earlier version was kept, so this conversation runs without it. Clear Agent Profile in the sidebar menu removes the link."
+                : "[agent profile] `\(name)` \(why); this conversation keeps using the last version it read. Clear Agent Profile in the sidebar menu drops the profile.", to: id)
+        }
+        return snapshot?.profile
+    }
+
+    /// Whether `id`'s profile file read last time: for the sidebar label.
+    func agentProfileFileReads(_ id: UUID) -> Bool {
+        !(agentProfileState[id]?.hasPrefix("unreadable:") ?? false)
+    }
+
+    /// The person's Clear Agent Profile: the link and the last good read both go, so the
+    /// conversation widens back to an ordinary one only by this explicit act.
+    func clearAgentProfile(for id: UUID) {
+        guard let idx = conversations.firstIndex(where: { $0.id == id }), conversations[idx].agentProfile != nil else { return }
+        let name = conversations[idx].agentProfile ?? ""
+        conversations[idx].agentProfile = nil
+        conversations[idx].agentProfileSnapshot = nil
+        agentProfileState[id] = nil
+        markChanged(id, .metadata)
+        appendMessage(role: .system, content: "[agent profile] `\(name)` was cleared; this conversation runs without a profile from its next turn.", to: id)
     }
 
     /// #187/5b — the pinned conversation: the owner's main conversation, where event cards are

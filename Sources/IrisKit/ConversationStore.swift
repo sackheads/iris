@@ -636,6 +636,13 @@ final class ConversationStore: Sendable {
                 t.add(column: "homeWritableOptIn", .text)
             }
         }
+        // #465: nullable; NULL is no agent profile, and no last-known-good copy of one.
+        m.registerMigration("v23_agent_profile") { db in
+            try db.alter(table: "conversations") { t in
+                t.add(column: "agentProfile", .text)
+                t.add(column: "agentProfileSnapshot", .text)
+            }
+        }
         return m
     }
 
@@ -847,6 +854,7 @@ final class ConversationStore: Sendable {
         // NULL when absent, like `goalContract` a few lines above (#185).
         let card = try c.sessionCard.map { try json($0, encoder) }
         let grant = try c.sandboxGrant.map { try json($0, encoder) }
+        let profileSnapshot = try c.agentProfileSnapshot.map { try json($0, encoder) }
         if exists {
             try db.execute(sql: """
                 UPDATE conversations SET title = ?, updatedAt = ?, workspacePath = ?, activeGoal = ?,
@@ -854,13 +862,14 @@ final class ConversationStore: Sendable {
                     tokenUsage = ?, goalContract = ?, subagentResult = ?, checkpointHistory = ?,
                     lastGoalEvaluation = ?, lastGoalCompletionReport = ?, isArchived = ?,
                     isBackground = ?, isPinned = ?, sessionCard = ?, jobProfile = ?, sandboxGrant = ?,
-                    hasUnattendedInput = ?, prefixMismatchBehavior = ?, role = ?, homeWritableOptIn = ?
+                    hasUnattendedInput = ?, prefixMismatchBehavior = ?, role = ?, homeWritableOptIn = ?,
+                    agentProfile = ?, agentProfileSnapshot = ?
                 WHERE id = ?
                 """, arguments: [c.title, touched, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
                                  history, evaluation, report, c.isArchived, c.isBackground, c.isPinned, card,
                                  c.jobProfile?.rawValue, grant, c.hasUnattendedInput, c.prefixMismatchBehavior?.rawValue,
-                                 c.role, c.homeWritableOptIn, c.id.uuidString])
+                                 c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, c.id.uuidString])
         } else {
             let position = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(position), 0) FROM conversations") ?? 0) + 1
             try db.execute(sql: """
@@ -868,13 +877,13 @@ final class ConversationStore: Sendable {
                     messageCountSinceReflection, goalIterationCount, mainAgentSandbox, tokenUsage, goalContract,
                     subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived,
                     isBackground, isPinned, sessionCard, jobProfile, sandboxGrant, hasUnattendedInput,
-                    prefixMismatchBehavior, role, homeWritableOptIn)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [c.id.uuidString, position, c.title, now, touched, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
                                  tokenUsage, contract, result, history, evaluation, report, c.isArchived,
                                  c.isBackground, c.isPinned, card, c.jobProfile?.rawValue, grant, c.hasUnattendedInput,
-                                 c.prefixMismatchBehavior?.rawValue, c.role, c.homeWritableOptIn])
+                                 c.prefixMismatchBehavior?.rawValue, c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot])
         }
     }
 
@@ -1240,6 +1249,20 @@ final class ConversationStore: Sendable {
                 case .null: break
                 case .invalid: localSoftLosses.append(("homeWritableOptIn", "invalid text encoding"))
                 case .text(let s): c.homeWritableOptIn = s
+                }
+                // #465: the link degrades to none plus a reported loss; a snapshot that does not
+                // decode drops only itself, like `checkpointHistory`, and the link still stands.
+                switch Self.readTextValue(row, "agentProfile") {
+                case .null: break
+                case .invalid: localSoftLosses.append(("agentProfile", "invalid text encoding"))
+                case .text(let s): c.agentProfile = s
+                }
+                switch Self.readTextValue(row, "agentProfileSnapshot") {
+                case .null: break
+                case .invalid: localSoftLosses.append(("agentProfileSnapshot", "invalid text encoding"))
+                case .text(let s):
+                    do { c.agentProfileSnapshot = try decoder.decode(AgentProfileSnapshot.self, from: Data(s.utf8)) }
+                    catch { localSoftLosses.append(("agentProfileSnapshot", "\(error)")) }
                 }
 
                 // Per-conversation, so the bulk breaker below can throw the lot away.

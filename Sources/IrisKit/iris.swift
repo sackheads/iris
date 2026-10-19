@@ -299,7 +299,7 @@ actor IrisEngine {
     /// Keyed on the three already-deduplicated inputs rather than re-deriving a stamp of its own:
     /// concatenation is pure, so equal inputs guarantee an equal result, and this layer can never
     /// drift from what `guardedUserProfileText`/`guardedAgentsMdText` already decided was unchanged.
-    private var composedPromptCache: [String: (base: String, profile: String, agents: String?, content: Content)] = [:]
+    private var composedPromptCache: [String: (base: String, profile: String, agents: String?, agentProfile: String?, content: Content)] = [:]
 
     /// Sentinel key for `composedPromptCache`/`agentsStamp` when a conversation has no bound
     /// workspace — distinct from any real path, including the empty string.
@@ -383,15 +383,18 @@ actor IrisEngine {
     /// bound workspace's `AGENTS.md`, both re-read only when they actually change (5a Task 7). The
     /// composed result is itself cached per workspace so two unchanged turns hand back the identical
     /// `Content` value — what keeps the provider's prompt cache hitting (5a §0.2).
-    private func assembledSystemPrompt(workspacePath: String?) async -> Content {
+    /// `agentProfile` (#465) is a layer after AGENTS.md. Keyed into the cache by name, so two
+    /// conversations in one workspace with different profiles keep a cache entry each.
+    private func assembledSystemPrompt(workspacePath: String?, agentProfile: AgentProfile? = nil) async -> Content {
         let base = await ensureSystemPrompt()
         guard let baseText = base.parts.first?.text else { return base }
         let profileText = await guardedUserProfileText()
         let agentsText = await guardedAgentsMdText(workspacePath: workspacePath)
-        let key = workspacePath ?? Self.noWorkspaceCacheKey
+        let agentText = agentProfile.map { "# Agent Profile: \($0.name)\n" + $0.prompt }
+        let key = (workspacePath ?? Self.noWorkspaceCacheKey) + "\u{0}" + (agentProfile?.name ?? "")
 
         if let cached = composedPromptCache[key], cached.base == baseText,
-           cached.profile == profileText, cached.agents == agentsText {
+           cached.profile == profileText, cached.agents == agentsText, cached.agentProfile == agentText {
             return cached.content
         }
 
@@ -399,9 +402,10 @@ actor IrisEngine {
         if let agentsText {
             text += "\n\n# Project Workspace Rules (AGENTS.md)\n" + agentsText
         }
+        if let agentText { text += "\n\n" + agentText }
         var composed = base
         composed.parts[0].text = text
-        composedPromptCache[key] = (baseText, profileText, agentsText, composed)
+        composedPromptCache[key] = (baseText, profileText, agentsText, agentText, composed)
         return composed
     }
 
@@ -570,9 +574,16 @@ actor IrisEngine {
         }
     }
 
+    /// The default prompt is rebuilt on the next turn. An engine given its own base with
+    /// `setSystemPrompt` (a subagent's role prompt) rebuilds from that base, never from SOUL.md
+    /// and the default skills (#668); a conversation's agent profile is a layer above the base, so
+    /// it survives either way (#465).
     func invalidateSystemPrompt() {
         systemPrompt = nil
     }
+
+    /// The base `setSystemPrompt` set, which invalidation keeps (#668).
+    private var customBasePrompt: String?
 
     /// Prefix of the system event that asks the model to rename the conversation.
     nonisolated static let renameTriggerPrefix = "System Event [Rename Trigger]"
@@ -622,6 +633,11 @@ actor IrisEngine {
     @discardableResult
     private func ensureSystemPrompt() async -> Content {
         if let existing = systemPrompt { return existing }
+        if let customBasePrompt {
+            let prompt = Content(role: "system", parts: [Part(text: customBasePrompt, functionCall: nil, functionResponse: nil)])
+            systemPrompt = prompt
+            return prompt
+        }
         return await measure(.contextAssembly) {
             await measureSpan("assembly.systemPrompt") {
                 // `paths: memory.paths` (5a Task 7 fix round 1): a test that injects an isolated
@@ -641,6 +657,7 @@ actor IrisEngine {
     }
     
     func setSystemPrompt(text: String) {
+        customBasePrompt = text
         systemPrompt = Content(role: "system", parts: [Part(text: text, functionCall: nil, functionResponse: nil)])
     }
     
@@ -2059,7 +2076,11 @@ actor IrisEngine {
         // guard tier's provisioning state (5a Task 7). An unchanged turn gets back the identical
         // `Content` it got last time, keeping the system prompt byte-stable for the provider's
         // prompt cache (5a §0.2).
-        let currentSystemPrompt = await assembledSystemPrompt(workspacePath: workspacePath)
+        // #465: the conversation's agent profile, resolved each turn from its file (or its last
+        // good read). Only the main principal's own conversations have one.
+        let agentProfile = principal == .main
+            ? await MainActor.run { localState?.resolveAgentProfile(for: conversationId) } : nil
+        let currentSystemPrompt = await assembledSystemPrompt(workspacePath: workspacePath, agentProfile: agentProfile)
 
         // Read once for the gates below that all ask about this conversation: whether it is an
         // unattended run, whether it has a goal to complete, what a job run of it may do, and
