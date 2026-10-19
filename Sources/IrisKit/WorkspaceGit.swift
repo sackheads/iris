@@ -277,7 +277,7 @@ enum WorkspaceGit {
          ("gpg.ssh.program", "ssh-keygen"),
          ("gpg.x509.program", "gpgsm"),
          // Not empty: git runs an empty one and fails. This is git's own diff of the two files.
-         ("diff.external", #"f() { git diff --no-index --no-ext-diff -- "$2" "$5"; true; }; f"#),
+         ("diff.external", externalDiff),
          ("core.alternateRefsCommand", ""),
          // Empty: git fails to run "" and signs with no default key rather than run the repo's.
          ("gpg.ssh.defaultKeyCommand", ""),
@@ -286,13 +286,97 @@ enum WorkspaceGit {
          ("protocol.file.allow", "user")]
     }
 
+    /// git's own diff of the two files, for an external diff driver. Not empty: git runs an empty
+    /// one and fails.
+    static let externalDiff = #"f() { git diff --no-index --no-ext-diff -- "$2" "$5"; true; }; f"#
+
     static let multiValued: Set<String> = ["credential.helper"]
+
+    /// git-lfs's own values, kept so LFS works in a folder whose drivers are neutralised. Matched
+    /// on the exact value: `filter.lfs.clean = <anything else>` is neutralised like any driver.
+    static let lfsValues: [String: String] = ["filter.lfs.clean": "git-lfs clean -- %f",
+                                              "filter.lfs.smudge": "git-lfs smudge -- %f",
+                                              "filter.lfs.process": "git-lfs filter-process",
+                                              "filter.lfs.required": "true"]
+
+    /// A folder adopted after Iris lost its list of sandboxed folders (#641): the overrides that
+    /// stop each program-running key with a name of the repository's choosing that its config
+    /// holds now, and why host commands must be refused there, if a key cannot be overridden.
+    struct Adopted {
+        var overrides: [(key: String, value: String)] = []
+        /// The keys found that run a program, for the notice.
+        var found: [String] = []
+        var refusal: String?
+    }
+
+    /// Reads every config of `source`'s repository. Only the names present now are needed: a key
+    /// the VM adds later is a change, and the per-command check puts it back. Each override was
+    /// probed on git 2.54 to run nothing: the value must win over the repository's (a multi-valued
+    /// key such as `remote.<x>.uploadpack` uses the first value given, the repository's, and an
+    /// empty `remote.<x>.vcs` is ignored, so those refuse), and includes cannot be switched off.
+    static func adopted(source: String) -> Adopted {
+        var result = Adopted()
+        var refusals: [String] = []
+        for (path, kind) in watchedFiles(for: source).sorted(by: { $0.key < $1.key }) where kind == .config {
+            var info = stat()
+            if lstat(path, &info) != 0, errno == ENOENT { continue }
+            guard let data = readSmall(path), let entries = GitConfigFile.parse(data) else {
+                refusals.append("Iris cannot read \(path); fix or remove it to end this.")
+                continue
+            }
+            var last: [String: String?] = [:]
+            var order: [String] = []
+            for e in entries {
+                if last[e.key] == nil { order.append(e.key) }
+                last[e.key] = .some(e.value)
+            }
+            var filters: Set<String> = []
+            var unsafe: [String] = []
+            for key in order {
+                let value = (last[key] ?? nil) ?? ""
+                let parts = key.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+                let section = parts[0], name = parts.count > 1 ? parts[parts.count - 1] : ""
+                if (section == "include" || section == "includeif") && name == "path" { unsafe.append(key); continue }
+                guard parts.count > 2 else {
+                    // An empty alias fails to expand and runs nothing.
+                    if section == "alias", parts.count == 2, value.hasPrefix("!") {
+                        result.overrides.append((key, "")); result.found.append(key)
+                    }
+                    continue
+                }
+                var replacement: String?
+                switch (section, name) {
+                case ("filter", "clean"), ("filter", "smudge"), ("filter", "process"):
+                    if lfsValues[key] != value { replacement = ""; filters.insert(String(key.dropLast(name.count + 1))) }
+                case ("diff", "textconv"): replacement = "cat"
+                case ("diff", "command"): replacement = externalDiff
+                case ("merge", "driver"): replacement = "false"
+                case ("submodule", "update") where value.hasPrefix("!"): replacement = "checkout"
+                case ("difftool", "cmd"), ("mergetool", "cmd"): replacement = "true"
+                case ("tar", "command"): replacement = "cat"
+                case ("remote", "uploadpack"), ("remote", "receivepack"), ("remote", "vcs"):
+                    unsafe.append(key); continue
+                default: break
+                }
+                if let replacement { result.overrides.append((key, replacement)); result.found.append(key) }
+            }
+            // A required filter whose program is emptied would fail every checkout.
+            for filter in filters.sorted() { result.overrides.append((filter + ".required", "false")) }
+            if !unsafe.isEmpty {
+                refusals.append("\(path) sets \(unsafe.joined(separator: ", ")), which Iris cannot override; remove "
+                                + (unsafe.count == 1 ? "it" : "them") + " from \(path) to end this.")
+            }
+        }
+        result.refusal = refusals.isEmpty ? nil : refusals.joined(separator: " ")
+        return result
+    }
 
     /// The environment additions for a host command: each override, except that a key the person
     /// set in their own global or system config keeps their value, so their signing program,
     /// credential helper or editor still work. `personal` maps a lowercased key to its values in
     /// the order git read them. `proxyCommand` is the person's own `GIT_PROXY_COMMAND`, kept.
-    static func hostEnvironment(hooks: String, personal: [String: [String]], proxyCommand: String? = nil) -> [String: String] {
+    static func hostEnvironment(hooks: String, personal: [String: [String]], proxyCommand: String? = nil,
+                                extra: [(key: String, value: String)] = []) -> [String: String] {
         var pairs: [(String, String)] = []
         for (key, value) in overrides(hooks: hooks) {
             let mine = personal[key.lowercased()] ?? []
@@ -303,6 +387,8 @@ enum WorkspaceGit {
                 pairs.append((key, mine.last ?? value))
             }
         }
+        // An adopted folder's neutralised drivers: last, so they win over every other value.
+        pairs += extra.map { ($0.key, $0.value) }
         // `core.gitProxy` set on the command line does not win over the repository's (probed, git
         // 2.54); the environment variable does, and empty connects directly.
         var env: [String: String] = ["GIT_CONFIG_COUNT": String(pairs.count), "GIT_PAGER": "cat",

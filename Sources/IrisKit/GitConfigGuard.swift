@@ -172,15 +172,26 @@ final class GitConfigGuard: @unchecked Sendable {
         /// Why host commands there were refused when Iris last ran, kept so a restart cannot
         /// take the bad state as a fresh baseline.
         var blocked: Block?
+        /// For a folder first watched while the list was unreadable (#641): the overrides that stop
+        /// the drivers its config named then. Its hooks never run in Iris's host git.
+        var adopted: [Override]?
 
-        init(path: String, hooks: String?, blocked: Block? = nil) { self.path = path; self.hooks = hooks; self.blocked = blocked }
+        init(path: String, hooks: String?, blocked: Block? = nil, adopted: [Override]? = nil) {
+            self.path = path; self.hooks = hooks; self.blocked = blocked; self.adopted = adopted
+        }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             path = try c.decode(String.self, forKey: .path)
             hooks = try c.decodeIfPresent(String.self, forKey: .hooks)
             blocked = try c.decodeIfPresent(Block.self, forKey: .blocked)
+            adopted = try c.decodeIfPresent([Override].self, forKey: .adopted)
         }
+    }
+
+    struct Override: Codable, Equatable {
+        var key: String
+        var value: String
     }
 
     /// Why a folder's host commands are refused: what failed, and where, so that after a restart
@@ -199,6 +210,9 @@ final class GitConfigGuard: @unchecked Sendable {
             case risky
             /// A file Iris could not read changed: clears when it is as it was (`detail`).
             case unreadable
+            /// A folder adopted after the list was lost sets a key no override can stop (an
+            /// include, `remote.<x>.uploadpack`): clears when it does not.
+            case adopted
         }
         var kind: Kind
         var path: String
@@ -235,6 +249,8 @@ final class GitConfigGuard: @unchecked Sendable {
             case .unreadable:
                 if case .other(let now) = GitConfigGuard.read(path) { return now == detail }
                 return false
+            case .adopted:
+                return WorkspaceGit.adopted(source: source).refusal == nil
             }
         }
     }
@@ -304,10 +320,19 @@ final class GitConfigGuard: @unchecked Sendable {
     private var blocked: [String: Block] = [:]
     private let store: URL?
 
-    /// Set when the saved list could not be read in full, so a folder some VM mounted may be
-    /// missing from it: until a watch sees a folder again, host git runs with the overrides and no
-    /// hooks in every folder, and the person's global config counts as one a VM could write (#641).
+    /// Set while a copy of a list Iris could not read in full is kept beside it, on this launch or
+    /// an earlier one, so a folder some VM mounted may be missing from the list: host git runs
+    /// with the overrides and no hooks in every folder not watched since, the person's global
+    /// config counts as one a VM could write, and a folder first watched meanwhile is adopted
+    /// (#641). Deleting the copies ends it at the next launch.
     private var unknownFolders = false
+    /// Those copies.
+    private var corruptCopies: [String] = []
+    /// Folders first watched while `unknownFolders`, with the overrides for the drivers their
+    /// config named then. Kept across restarts while the copies are.
+    private var adopted: [String: [Override]] = [:]
+    /// The watched source each covered folder belongs to.
+    private var coveredBy: [String: String] = [:]
     /// What the person is told about that, once, with the next check's result.
     private var loadNote: String?
     /// The unreadable list could not be moved aside, so it is never written over.
@@ -323,31 +348,39 @@ final class GitConfigGuard: @unchecked Sendable {
     init(store: URL? = nil) {
         self.store = store
         guard let store else { return }
+        var saved: [MountedWorkspace] = []
+        var lost: String?
         var info = stat()
-        guard lstat(store.path, &info) == 0 || errno != ENOENT else { return }
-        guard let data = try? Data(contentsOf: store),
-              let entries = try? JSONDecoder().decode([LossyWorkspace].self, from: data) else {
-            let aside = Self.setAside(store, move: true)
-            saveDisabled = aside == nil
-            unknownFolders = true
-            loadNote = "[sandbox] Iris could not read its list of the folders sandboxes have mounted"
-                + (aside.map { ", and moved it to \($0)." } ?? " (\(store.path)), and left it as it is.")
-                + Self.unknownFoldersNote
-            return
+        if lstat(store.path, &info) == 0 || errno != ENOENT {
+            if let data = try? Data(contentsOf: store),
+               let entries = try? JSONDecoder().decode([LossyWorkspace].self, from: data) {
+                saved = entries.compactMap(\.item)
+                if saved.count < entries.count {
+                    let aside = Self.setAside(store, move: false)
+                    // With no copy kept, the next save would write the list without them over the only one.
+                    saveDisabled = aside == nil
+                    lost = "Iris could not read \(entries.count - saved.count) of the \(entries.count) folders in its list of those sandboxes have mounted"
+                        + (aside.map { "; the list as it was is kept at \($0)." } ?? " (\(store.path)), and left it as it is.")
+                }
+            } else {
+                let aside = Self.setAside(store, move: true)
+                saveDisabled = aside == nil
+                lost = "Iris could not read its list of the folders sandboxes have mounted"
+                    + (aside.map { ", and moved it to \($0)." } ?? " (\(store.path)), and left it as it is.")
+            }
         }
-        let saved = entries.compactMap(\.item)
-        if saved.count < entries.count {
-            let failed = entries.count - saved.count
-            let aside = Self.setAside(store, move: false)
-            // With no copy kept, the next save would write the list without them over the only one.
-            saveDisabled = aside == nil
-            unknownFolders = true
-            loadNote = "[sandbox] Iris could not read \(failed) of the \(entries.count) folders in its list of those sandboxes have mounted"
-                + (aside.map { "; the list as it was is kept at \($0)." } ?? ".")
+        corruptCopies = Self.corruptCopies(of: store)
+        unknownFolders = lost != nil || !corruptCopies.isEmpty
+        if unknownFolders {
+            loadNote = "[sandbox] " + (lost ?? "Iris could not read its list of the folders sandboxes have mounted on an earlier launch.")
                 + Self.unknownFoldersNote
+                + (corruptCopies.isEmpty ? "" : " Delete \(corruptCopies.joined(separator: " and ")) to end this.")
         }
         for item in saved {
-            remember(item.path, hooks: item.hooks)
+            // An adopted folder stays adopted while the copies are kept; deleting them trusts it.
+            let adoptedHere = unknownFolders ? item.adopted : nil
+            remember(item.path, hooks: item.hooks, runHooks: adoptedHere == nil)
+            if let adoptedHere { adopted[item.path] = adoptedHere }
             if let block = item.blocked {
                 blocked[item.path] = block
                 states[item.path] = SourceState(awaitingClear: true)
@@ -355,19 +388,32 @@ final class GitConfigGuard: @unchecked Sendable {
         }
     }
 
-    private func remember(_ source: String, hooks: String?) {
+    /// The set-aside copies of the list beside `store`, by name.
+    private static func corruptCopies(of store: URL) -> [String] {
+        let dir = store.deletingLastPathComponent().path
+        let prefix = store.lastPathComponent + ".corrupt"
+        return ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [])
+            .filter { $0 == prefix || $0.hasPrefix(prefix + "-") }.sorted()
+            .map { (dir as NSString).appendingPathComponent($0) }
+    }
+
+    /// `runHooks` false: an adopted folder, whose hooks Iris's host git never runs.
+    private func remember(_ source: String, hooks: String?, runHooks: Bool = true) {
         trustedHooks[source] = .some(hooks)
-        covered[source] = .some(hooks)
+        covered[source] = .some(runHooks ? hooks : nil)
+        coveredBy[source] = source
         if let hooks {
             let common = (hooks as NSString).deletingLastPathComponent
             for worktree in WorkspaceGit.linkedWorktrees(commonDir: common) where covered[worktree] == nil {
-                covered[worktree] = .some(hooks)
+                covered[worktree] = .some(runHooks ? hooks : nil)
+                coveredBy[worktree] = source
             }
         }
     }
 
     private static let unknownFoldersNote = " Until a sandbox mounts a folder again, git that Iris runs on your Mac runs no hooks"
         + " and overrides the settings that can run programs, in every folder, and trusts none of your global git settings."
+        + " A folder a sandbox mounts meanwhile is checked from then on, but Iris's git never runs its hooks or the programs its config names."
 
     /// Moves (or copies) the unreadable list to the first free `.corrupt` name, never over one
     /// already there; nil when it could not.
@@ -393,7 +439,9 @@ final class GitConfigGuard: @unchecked Sendable {
 
     private func save() {
         guard let store, !saveDisabled else { return }
-        let items = trustedHooks.keys.sorted().map { MountedWorkspace(path: $0, hooks: trustedHooks[$0] ?? nil, blocked: blocked[$0]) }
+        let items = trustedHooks.keys.sorted().map {
+            MountedWorkspace(path: $0, hooks: trustedHooks[$0] ?? nil, blocked: blocked[$0], adopted: adopted[$0])
+        }
         guard let data = try? JSONEncoder().encode(items) else { return }
         try? FileManager.default.createDirectory(at: store.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: store, options: .atomic)
@@ -407,14 +455,34 @@ final class GitConfigGuard: @unchecked Sendable {
             if !(watches[owner] ?? []).contains(source) { watches[owner, default: []].append(source) }
             if states[source] != nil { states[source]!.owners.insert(owner); continue }
             if trustedHooks[source] == nil {
-                if case .layout(let layout) = WorkspaceGit.entry(at: source) { remember(source, hooks: layout.hooks) }
-                else { remember(source, hooks: nil) }
+                if case .layout(let layout) = WorkspaceGit.entry(at: source) {
+                    if unknownFolders { adopt(source, layout: layout, owner: owner) }
+                    else { remember(source, hooks: layout.hooks) }
+                } else {
+                    remember(source, hooks: nil)
+                }
                 save()
             }
             var state = SourceState(owners: [owner])
             baseline(source, &state)
             states[source] = state
         }
+    }
+
+    /// A repository first seen while the list is lost may be one a VM made or changed before:
+    /// what it holds now is the baseline (so nothing of the person's is moved or put back), but
+    /// Iris's host git runs none of its hooks, and none of the programs its config names (#641).
+    private func adopt(_ source: String, layout: WorkspaceGit.Layout, owner: String) {
+        let found = WorkspaceGit.adopted(source: source)
+        remember(source, hooks: layout.hooks, runHooks: false)
+        adopted[source] = found.overrides.map { Override(key: $0.key, value: $0.value) }
+        var note = "[sandbox] \(source) was first mounted while Iris's list of sandboxed folders was lost, so it may hold a repository a sandbox changed before."
+            + " Git that Iris runs on your Mac there runs none of its hooks"
+            + (found.found.isEmpty ? "." : ", and none of the programs its config names (\(found.found.joined(separator: ", "))), except git-lfs's own.")
+        if let refusal = found.refusal { note += " Host commands there are refused: " + refusal }
+        note += " Git run from your own terminal there is not protected."
+            + (corruptCopies.isEmpty ? "" : " Delete \(corruptCopies.joined(separator: " and ")) to end this.")
+        pending[owner, default: []].append(note)
     }
 
     /// Records what `source` holds now as what later checks compare against.
@@ -492,18 +560,35 @@ final class GitConfigGuard: @unchecked Sendable {
     /// ordinary git is untouched. The hooks folder to run, or nil for none.
     func hostOverrides(cwd: String?, command: String = "", owner: String? = nil) -> String?? {
         lock.lock(); defer { lock.unlock() }
+        let matched = matchedLocked(cwd: cwd, command: command, owner: owner)
+        guard !matched.isEmpty else { return unknownFolders ? .some(nil) : nil }
+        // A command naming more than one repository: run no hooks rather than guess whose.
+        return .some(matched.count == 1 ? (covered[matched[0]] ?? nil) : nil)
+    }
+
+    /// The overrides for the drivers of each adopted folder the same command reaches.
+    func adoptedOverrides(cwd: String?, command: String = "", owner: String? = nil) -> [(key: String, value: String)] {
+        lock.lock(); defer { lock.unlock() }
+        var seen: Set<String> = []
+        return matchedLocked(cwd: cwd, command: command, owner: owner).compactMap { coveredBy[$0] }
+            .flatMap { adopted[$0] ?? [] }
+            .filter { seen.insert($0.key).inserted }
+            .map { ($0.key, $0.value) }
+    }
+
+    /// The covered folder a host command runs in (the innermost), or else the ones it names, or
+    /// else its conversation's own.
+    private func matchedLocked(cwd: String?, command: String, owner: String?) -> [String] {
         let real = cwd.map(IrisPaths.realPath)
         let inside = covered.keys.filter { root in
             guard let real else { return false }
             let r = IrisPaths.realPath(root)
             return real == r || real.hasPrefix(r.hasSuffix("/") ? r : r + "/")
         }
-        if let covering = inside.max(by: { $0.count < $1.count }) { return .some(covered[covering] ?? nil) }
-        var named = covered.keys.filter { WorkspaceGit.commandNames(command, $0) || WorkspaceGit.commandNames(command, IrisPaths.realPath($0)) }
-        if named.isEmpty, let owner, let mine = watches[owner] { named = mine }
-        guard !named.isEmpty else { return unknownFolders ? .some(nil) : nil }
-        // A command naming more than one repository: run no hooks rather than guess whose.
-        return .some(named.count == 1 ? (covered[named[0]] ?? nil) : nil)
+        if let covering = inside.max(by: { $0.count < $1.count }) { return [covering] }
+        let named = covered.keys.filter { WorkspaceGit.commandNames(command, $0) || WorkspaceGit.commandNames(command, IrisPaths.realPath($0)) }
+        if named.isEmpty, let owner, let mine = watches[owner] { return mine }
+        return named
     }
 
     /// Every source ever watched, for deciding whether the person's global config is in reach:
@@ -548,6 +633,9 @@ final class GitConfigGuard: @unchecked Sendable {
             state.awaitingClear = false
             baseline(source, &state)
             return []
+        }
+        if adopted[source] != nil, let refusal = WorkspaceGit.adopted(source: source).refusal {
+            failure = Block(.adopted, source, refusal)
         }
         if trustedHooks[source] == .some(nil) {
             addFiles(source, &state, untrusted: true)
@@ -718,7 +806,7 @@ final class GitConfigGuard: @unchecked Sendable {
         let real = cwd.map(IrisPaths.realPath)
         for source in blocked.keys.sorted() {
             guard let why = blocked[source]?.message else { continue }
-            let roots = [source] + covered.keys.filter { covered[$0] == trustedHooks[source] && trustedHooks[source] != .some(nil) }
+            let roots = [source] + covered.keys.filter { $0 != source && coveredBy[$0] == source }
             let hit = roots.contains { root in
                 let r = IrisPaths.realPath(root)
                 if let real, real == r || real.hasPrefix(r.hasSuffix("/") ? r : r + "/") { return true }
