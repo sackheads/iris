@@ -13,6 +13,13 @@ import Foundation
 enum JobProfile: String, Codable, Sendable {
     case readOnly
     case mutating
+
+    /// The profile a tool call asked for: only the word `mutating` (any case) is mutating, any
+    /// other value is read-only, and nil means the call named none.
+    static func asked(_ text: String?) -> JobProfile? {
+        guard let text else { return nil }
+        return text.lowercased() == mutating.rawValue.lowercased() ? .mutating : .readOnly
+    }
 }
 
 extension JobProfile {

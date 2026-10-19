@@ -319,7 +319,7 @@ struct ToolExecutor {
     /// The declaration, two sentences (invariant 6): what the tool does and that its own runs'
     /// writes are safe — only those (R-D4-1), so the sentence must not say "Iris's". The built-in ignore set, the ×10 ceiling and the never-concurrent rule are said once,
     /// in the result the model reads after calling it, not paid for on every turn.
-    static let watchDescription = "Watch a directory for file changes and run your instructions once it has been quiet for a few seconds (default 3). It ignores its own file-tool writes, so a run can safely write into the folder. Calling it from Iris, or a conversation a peer or a background subagent reached, asks the user first."
+    static let watchDescription = "Watch a directory for changes and run your instructions once it has been quiet for a few seconds (default 3). It ignores its own file-tool writes, so a run can write into the folder. A 'mutating' watch, or any from Iris or a peer-reached chat, asks the user first; if declined, don't retry narrower."
 
     static let allIgnoredRefusal = "that ignore list would ignore every change; drop the pattern or watch a narrower path"
 
@@ -342,6 +342,16 @@ struct ToolExecutor {
     private var watchBreakerDefault: Int {
         let configured = watchBreakerProvider?() ?? ConfigManager.shared.jobMaxRunsPerHourForWatch
         return configured > 0 ? configured : ConfigManager.JobDefaults.maxRunsPerHourForWatch
+    }
+
+    /// This conversation's watch on `canonicalPath`, which a re-registration replaces and whose
+    /// profile it keeps when it names none. The dispatcher's ask (#652) reads the same one.
+    static func existingWatch(in jobs: [Job], canonicalPath: String, conversationId: UUID?) -> Job? {
+        let key = canonicalPath.lowercased()
+        return jobs.first { job in
+            guard case .fsEvent(let watch) = job.trigger else { return false }
+            return watch.path.lowercased() == key && job.createdInConversationId == conversationId
+        }
     }
 
     private func registerWatcher(_ parsed: RegisterWatcherArguments, resolved: String, conversationId: UUID?) async -> String {
@@ -375,10 +385,8 @@ struct ToolExecutor {
                 guard case .fsEvent(let watch) = job.trigger else { return false }
                 return watch.path.lowercased() == key
             }
-            let existing = watching.first(where: { $0.createdInConversationId == conversationId })
-            let asked = parsed.profile?.lowercased() == JobProfile.mutating.rawValue.lowercased() ? JobProfile.mutating
-                : (parsed.profile == nil ? nil : JobProfile.readOnly)
-            let profile = asked ?? existing?.profile ?? .readOnly
+            let existing = Self.existingWatch(in: jobs, canonicalPath: path, conversationId: conversationId)
+            let profile = JobProfile.asked(parsed.profile) ?? existing?.profile ?? .readOnly
             if profile == .mutating, !(mutatingJobsAvailable?() ?? SandboxPolicy.mutatingJobCanRun()) {
                 return Self.watchProfileNeedsSandbox
             }

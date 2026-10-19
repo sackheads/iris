@@ -1371,12 +1371,12 @@ struct JobToolsTests {
     /// Before this, `details` on the pinned gate's `requestApproval` call was
     /// `args["name"] ?? args["path"] ?? toolName` — a `schedule_job` with neither showed the owner
     /// "schedule_job: schedule_job" on the approval dialog, telling them nothing about what they
-    /// were approving. `pinnedJobApprovalDetails` is pure and built from the model's raw,
+    /// were approving. `jobApprovalDetails` is pure and built from the model's raw,
     /// unvalidated arguments (the approval happens before either tool's `parse`), so a malformed
     /// call still shows what was asked for.
     @Test("schedule_job's approval details show the name, trigger, profile, grant and a truncated prompt")
     func scheduleJobApprovalDetailsShowWhatIsBeingCreated() {
-        let full = IrisEngine.pinnedJobApprovalDetails(toolName: "schedule_job", args: [
+        let full = IrisEngine.jobApprovalDetails(toolName: "schedule_job", args: [
             "name": .string("nightly-sweep"),
             "cron": .string("0 9 * * 1-5"),
             "timezone": .string("America/Los_Angeles"),
@@ -1388,25 +1388,26 @@ struct JobToolsTests {
         #expect(full.contains("name: nightly-sweep"))
         #expect(full.contains("trigger: cron '0 9 * * 1-5' (America/Los_Angeles)"))
         #expect(full.contains("profile: mutating"))
-        #expect(full.contains("mounts: /repo, /data:ro"))
-        #expect(full.contains("network: true"))
+        #expect(full.contains("mount: read-write /repo"))
+        #expect(full.contains("mount: read-only /data"))
+        #expect(full.contains("network: on"))
         #expect(full.contains("prompt: " + String(repeating: "a", count: 300) + "…"))
         #expect(!full.contains(String(repeating: "a", count: 301)), "the prompt must be cut, not merely marked")
 
         // Minimal call: an interval schedule, no name, no grant, no profile — the fallbacks and the
         // omitted optional sections, not the gate's full shape.
-        let minimal = IrisEngine.pinnedJobApprovalDetails(toolName: "schedule_job", args: [
+        let minimal = IrisEngine.jobApprovalDetails(toolName: "schedule_job", args: [
             "prompt": .string("sweep"), "intervalSeconds": .int(3600),
         ])
         #expect(minimal.contains("name: (unnamed)"))
         #expect(minimal.contains("trigger: every 3600s"))
-        #expect(!minimal.contains("profile:"))
-        #expect(!minimal.contains("mounts:"))
+        #expect(minimal.contains("profile: readOnly"), "the profile is shown even when the call names none (#652)")
+        #expect(!minimal.contains("mount"))
         #expect(!minimal.contains("network:"))
         #expect(minimal.contains("prompt: sweep"))
 
         // The loose hour/minute/weekdays form, with no cron and no interval given.
-        let loose = IrisEngine.pinnedJobApprovalDetails(toolName: "schedule_job", args: [
+        let loose = IrisEngine.jobApprovalDetails(toolName: "schedule_job", args: [
             "prompt": .string("digest"), "hour": .int(9), "minute": .int(30),
             "weekdays": .array([.int(2), .int(3), .int(4), .int(5), .int(6)]),
         ])
@@ -1414,7 +1415,7 @@ struct JobToolsTests {
 
         // Nothing resolvable at all — a malformed or empty call must still produce SOME dialog text
         // rather than an empty or crashing one.
-        let empty = IrisEngine.pinnedJobApprovalDetails(toolName: "schedule_job", args: [:])
+        let empty = IrisEngine.jobApprovalDetails(toolName: "schedule_job", args: [:])
         #expect(empty.contains("name: (unnamed)"))
         #expect(empty.contains("trigger: no schedule given"))
     }
@@ -1427,7 +1428,7 @@ struct JobToolsTests {
     /// carries it. `gate_script` is truncated the same way `prompt` already is.
     @Test("schedule_job's approval details show every gate_* field when given, gate_script truncated")
     func scheduleJobApprovalDetailsShowGateFields() {
-        let full = IrisEngine.pinnedJobApprovalDetails(toolName: "schedule_job", args: [
+        let full = IrisEngine.jobApprovalDetails(toolName: "schedule_job", args: [
             "prompt": .string("sweep"), "intervalSeconds": .int(60),
             "gate_url": .string("https://example.com/status"),
             "gate_path": .string("/Users/me/project/VERSION"),
@@ -1443,7 +1444,7 @@ struct JobToolsTests {
         #expect(full.contains("gate_timeout_seconds: 30"))
 
         // None given: no gate_* line appears at all, same omission shape as the base fields.
-        let noGate = IrisEngine.pinnedJobApprovalDetails(toolName: "schedule_job", args: [
+        let noGate = IrisEngine.jobApprovalDetails(toolName: "schedule_job", args: [
             "prompt": .string("sweep"), "intervalSeconds": .int(60),
         ])
         #expect(!noGate.contains("gate_url:"))
@@ -1455,7 +1456,7 @@ struct JobToolsTests {
 
     @Test("register_directory_watcher's approval details show the path, profile and a truncated prompt")
     func registerWatcherApprovalDetailsShowWhatIsBeingCreated() {
-        let full = IrisEngine.pinnedJobApprovalDetails(toolName: "register_directory_watcher", args: [
+        let full = IrisEngine.jobApprovalDetails(toolName: "register_directory_watcher", args: [
             "path": .string("/Users/me/project"),
             "instructions": .string(String(repeating: "b", count: 400)),
             "profile": .string("mutating"),
@@ -1464,16 +1465,16 @@ struct JobToolsTests {
         #expect(full.contains("profile: mutating"))
         #expect(full.contains("prompt: " + String(repeating: "b", count: 300) + "…"))
 
-        let minimal = IrisEngine.pinnedJobApprovalDetails(toolName: "register_directory_watcher", args: [
+        let minimal = IrisEngine.jobApprovalDetails(toolName: "register_directory_watcher", args: [
             "path": .string("/tmp"), "instructions": .string("watch it"),
         ])
         #expect(minimal.contains("path: /tmp"))
-        #expect(!minimal.contains("profile:"))
-        #expect(!minimal.contains("mounts:"))
+        #expect(minimal.contains("profile: readOnly"))
+        #expect(!minimal.contains("mount"))
         #expect(!minimal.contains("network:"))
         #expect(minimal.contains("prompt: watch it"))
 
-        let empty = IrisEngine.pinnedJobApprovalDetails(toolName: "register_directory_watcher", args: [:])
+        let empty = IrisEngine.jobApprovalDetails(toolName: "register_directory_watcher", args: [:])
         #expect(empty.contains("path: (no path)"))
     }
 
@@ -1483,20 +1484,43 @@ struct JobToolsTests {
     /// a wide mount or network access had no way to see that from the dialog.
     @Test("register_directory_watcher's approval details show mounts and network when given")
     func registerWatcherApprovalDetailsShowGrant() {
-        let details = IrisEngine.pinnedJobApprovalDetails(toolName: "register_directory_watcher", args: [
+        let details = IrisEngine.jobApprovalDetails(toolName: "register_directory_watcher", args: [
             "path": .string("/repo"),
             "instructions": .string("rebuild on change"),
             "profile": .string("mutating"),
             "mounts": .array([.string("/repo"), .string("/data:ro")]),
             "network": .bool(true),
         ])
-        #expect(details.contains("mounts: /repo, /data:ro"))
-        #expect(details.contains("network: true"))
+        #expect(details.contains("mount: read-write /repo"))
+        #expect(details.contains("mount: read-only /data"))
+        #expect(details.contains("network: on"))
+    }
+
+    /// #652: what a run may touch is on the dialog even when the call left it to the defaults. A
+    /// mutating job naming neither mounts nor network runs with the container's default network.
+    @Test("a mutating job's dialog says what its network will be when the call does not")
+    func approvalDetailsNameTheNetworkDefault() {
+        let bare = IrisEngine.jobApprovalDetails(toolName: "schedule_job", args: [
+            "prompt": .string("sweep"), "intervalSeconds": .int(60), "profile": .string("mutating"),
+        ])
+        #expect(bare.contains("mounts: none"))
+        #expect(bare.contains("network: default (on)"))
+        let mounted = IrisEngine.jobApprovalDetails(toolName: "schedule_job", args: [
+            "prompt": .string("sweep"), "intervalSeconds": .int(60), "profile": .string("mutating"),
+            "mounts": .array([.string("/repo")]),
+        ])
+        #expect(mounted.contains("network: off"), "a grant with mounts and no network is off (JobGrant.resolve)")
+        // The engine passes the profile it decided, which for a watch may be the one it replaces.
+        let kept = IrisEngine.jobApprovalDetails(toolName: "register_directory_watcher",
+                                                 args: ["path": .string("/repo"), "instructions": .string("x")],
+                                                 profile: .mutating)
+        #expect(kept.contains("profile: mutating"))
+        #expect(kept.contains("network: default (on)"))
     }
 
     @Test("an unknown tool name falls back to itself rather than crashing")
     func unknownToolApprovalDetailsFallsBack() {
-        #expect(IrisEngine.pinnedJobApprovalDetails(toolName: "mystery_tool", args: [:]) == "mystery_tool")
+        #expect(IrisEngine.jobApprovalDetails(toolName: "mystery_tool", args: [:]) == "mystery_tool")
     }
 
     // MARK: Creating a job from Iris asks first (5b §0.5, #187)
@@ -1710,7 +1734,7 @@ struct JobToolsTests {
             on: app, as: id, resolution: false)
         #expect(approvalCount == 1)
         #expect(humanOnly == true, "the pinned gate must ask humanOnly, not whatever requestApproval defaults to")
-        #expect(result == IrisEngine.pinnedJobCreationDeclined)
+        #expect(result == IrisEngine.jobCreationDeclined)
         #expect(try app.store.ledger.jobs().isEmpty)
     }
 
@@ -1722,7 +1746,7 @@ struct JobToolsTests {
             on: app, as: id, resolution: true)
         #expect(approvalCount == 1)
         #expect(humanOnly == true, "the pinned gate must ask humanOnly, not whatever requestApproval defaults to")
-        #expect(result != IrisEngine.pinnedJobCreationDeclined)
+        #expect(result != IrisEngine.jobCreationDeclined)
         #expect(try app.store.ledger.jobs().count == 1)
     }
 
@@ -1741,7 +1765,7 @@ struct JobToolsTests {
             on: app, as: id, resolution: true)
         #expect(approvalCount == 0, "a malformed call must never reach the human prompt")
         #expect(result.contains("needs a prompt"), "the model must see the real parse error, not the approval decline")
-        #expect(result != IrisEngine.pinnedJobCreationDeclined)
+        #expect(result != IrisEngine.jobCreationDeclined)
         #expect(try app.store.ledger.jobs().isEmpty)
     }
 
@@ -1754,7 +1778,7 @@ struct JobToolsTests {
             FunctionCall(name: "register_directory_watcher", args: ["instructions": .string("watch it")], id: "c1"),
             on: app, as: id, resolution: true)
         #expect(approvalCount == 0, "a malformed call must never reach the human prompt")
-        #expect(result != IrisEngine.pinnedJobCreationDeclined)
+        #expect(result != IrisEngine.jobCreationDeclined)
         #expect(try app.store.ledger.jobs().isEmpty)
     }
 
@@ -1765,7 +1789,7 @@ struct JobToolsTests {
             FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1"),
             on: app, as: id, resolution: true)
         #expect(approvalCount == 0, "a non-pinned conversation must never ask approval for job creation")
-        #expect(result != IrisEngine.pinnedJobCreationDeclined)
+        #expect(result != IrisEngine.jobCreationDeclined)
         #expect(try app.store.ledger.jobs().count == 1)
     }
 
@@ -1778,7 +1802,7 @@ struct JobToolsTests {
             on: app, as: id, resolution: false)
         #expect(approvalCount == 1)
         #expect(humanOnly == true, "the pinned gate must ask humanOnly, not whatever requestApproval defaults to")
-        #expect(result == IrisEngine.pinnedJobCreationDeclined)
+        #expect(result == IrisEngine.jobCreationDeclined)
         #expect(try app.store.ledger.jobs().isEmpty)
     }
 
@@ -1793,7 +1817,7 @@ struct JobToolsTests {
             on: app, as: id, resolution: true)
         #expect(approvalCount == 1)
         #expect(humanOnly == true, "the pinned gate must ask humanOnly, not whatever requestApproval defaults to")
-        #expect(result != IrisEngine.pinnedJobCreationDeclined)
+        #expect(result != IrisEngine.jobCreationDeclined)
         #expect(try app.store.ledger.jobs().count == 1)
     }
 
@@ -1828,7 +1852,7 @@ struct JobToolsTests {
                         args: ["path": .string(dir.path), "instructions": .string("watch it")], id: "c1"),
             on: app, as: id, resolution: true)
         #expect(approvalCount == 0, "a non-pinned conversation must never ask approval for job creation")
-        #expect(result != IrisEngine.pinnedJobCreationDeclined)
+        #expect(result != IrisEngine.jobCreationDeclined)
         #expect(try app.store.ledger.jobs().count == 1)
     }
 
@@ -1844,7 +1868,7 @@ struct JobToolsTests {
             FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1"),
             on: app, as: id, resolution: .approve)
         #expect(queued, "humanOnly must skip the allowlist and Vibecop, not stand in for the human's click")
-        #expect(result != IrisEngine.pinnedJobCreationDeclined)
+        #expect(result != IrisEngine.jobCreationDeclined)
         #expect(try app.store.ledger.jobs().count == 1)
     }
 
@@ -1856,18 +1880,18 @@ struct JobToolsTests {
                         args: ["path": .string("/tmp"), "instructions": .string("watch it")], id: "c1"),
             on: app, as: id, resolution: .deny)
         #expect(queued, "humanOnly must skip the allowlist and Vibecop, not stand in for the human's click")
-        #expect(result == IrisEngine.pinnedJobCreationDeclined)
+        #expect(result == IrisEngine.jobCreationDeclined)
         #expect(try app.store.ledger.jobs().isEmpty)
     }
 
     /// Final-review fix wave (#187): the first version of this test stored a rule for the bare
     /// string `"sweep"`, but the dispatcher's `details` for the `humanOnly` call is
-    /// `IrisEngine.pinnedJobApprovalDetails(toolName:args:)`'s multi-line rendering — `"name:
+    /// `IrisEngine.jobApprovalDetails(toolName:args:)`'s multi-line rendering — `"name:
     /// sweep\ntrigger: ...\nprompt: sweep"` — never the bare name. `PermissionManager.isAllowed`
     /// matches `details` by exact string equality, so that rule could never have matched the real
     /// call at all; the test could not have told "humanOnly skipped a matching rule" apart from "the
     /// rule just never matched anything", which is also green with `humanOnly` deleted. The rule is
-    /// now built from the SAME `pinnedJobApprovalDetails` call with the SAME args the dispatcher
+    /// now built from the SAME `jobApprovalDetails` call with the SAME args the dispatcher
     /// uses, so it is a real match — and `isAllowed` is checked strictly before Vibecop in
     /// `requestApproval`'s own source order, so a correctly-matching rule makes this test's
     /// redness-without-`humanOnly` attributable to the allowlist specifically, not to Vibecop's
@@ -1878,7 +1902,7 @@ struct JobToolsTests {
         let paths = try tempIrisPaths()
         defer { try? FileManager.default.removeItem(at: paths.root) }
         let args: [String: JSONValue] = ["name": .string("sweep"), "prompt": .string("sweep"), "intervalSeconds": .int(60)]
-        let expectedDetails = IrisEngine.pinnedJobApprovalDetails(toolName: "schedule_job", args: args)
+        let expectedDetails = IrisEngine.jobApprovalDetails(toolName: "schedule_job", args: args)
         try JSONEncoder().encode([PermissionRule(toolName: "schedule_job", details: expectedDetails)])
             .write(to: paths.permissionsJSON)
         app.permissions = PermissionManager(paths: paths)
@@ -1891,7 +1915,7 @@ struct JobToolsTests {
             FunctionCall(name: "schedule_job", args: args, id: "c1"),
             on: app, as: id, resolution: .approve)
         #expect(queued, "a matching allowlist rule must not bypass the human-only gate")
-        #expect(result != IrisEngine.pinnedJobCreationDeclined)
+        #expect(result != IrisEngine.jobCreationDeclined)
         #expect(try app.store.ledger.jobs().count == 1)
     }
 
@@ -1912,7 +1936,7 @@ struct JobToolsTests {
             FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1"),
             on: app, as: id, resolution: .approve)
         #expect(queued, "a conversation tainted by peer content must ask a human before creating a job, same as the pinned conversation")
-        #expect(result != IrisEngine.pinnedJobCreationDeclined)
+        #expect(result != IrisEngine.jobCreationDeclined)
         #expect(try app.store.ledger.jobs().count == 1)
     }
 
@@ -1925,7 +1949,7 @@ struct JobToolsTests {
                         args: ["path": .string("/tmp"), "instructions": .string("watch it")], id: "c1"),
             on: app, as: id, resolution: .deny)
         #expect(queued, "a conversation tainted by peer content must ask a human before creating a job, same as the pinned conversation")
-        #expect(result == IrisEngine.pinnedJobCreationDeclined)
+        #expect(result == IrisEngine.jobCreationDeclined)
         #expect(try app.store.ledger.jobs().isEmpty)
     }
 
@@ -1940,7 +1964,7 @@ struct JobToolsTests {
             FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1"),
             on: app, as: id)
         #expect(!sawApproval, "an untainted conversation must not ask for job creation")
-        #expect(result != IrisEngine.pinnedJobCreationDeclined)
+        #expect(result != IrisEngine.jobCreationDeclined)
         #expect(try app.store.ledger.jobs().count == 1)
     }
 
@@ -2011,6 +2035,158 @@ struct JobToolsTests {
         let id = UUID()
         app.createNewConversation(id: id)
         return (app, id)
+    }
+
+    // MARK: A job that is not read-only asks the person once, in any attended conversation (#652)
+
+    private static let mutatingSweep: [String: JSONValue] = [
+        "prompt": .string("sweep"), "intervalSeconds": .int(60), "profile": .string("mutating"),
+    ]
+
+    @Test("a mutating schedule_job in an ordinary conversation asks the person, humanOnly, and a denial creates nothing")
+    func mutatingJobAsksInOrdinaryConversation() async throws {
+        let (app, id) = plainCountingApp()
+        let (result, approvalCount, humanOnly) = await runJobCreationCall(
+            FunctionCall(name: "schedule_job", args: Self.mutatingSweep, id: "c1"), on: app, as: id, resolution: false)
+        #expect(approvalCount == 1)
+        #expect(humanOnly == true, "neither Vibecop nor the allowlist may stand in for this click")
+        #expect(result == IrisEngine.jobCreationDeclined)
+        #expect(try app.store.ledger.jobs().isEmpty)
+        #expect(app.lastDetails?.contains("profile: mutating") == true)
+        #expect(app.lastDetails?.contains("network: default (on)") == true)
+    }
+
+    @Test("a read-only schedule_job in an ordinary conversation creates the job without asking")
+    func readOnlyJobStaysSilentInOrdinaryConversation() async throws {
+        let (app, id) = plainCountingApp()
+        let (_, approvalCount, _) = await runJobCreationCall(
+            FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60),
+                                                      "profile": .string("readOnly")], id: "c1"),
+            on: app, as: id, resolution: false)
+        #expect(approvalCount == 0)
+        #expect(try app.store.ledger.jobs().count == 1)
+    }
+
+    /// The fold kept #340: in a tainted conversation a read-only job asks too.
+    @Test("a read-only schedule_job in a tainted conversation still asks")
+    func readOnlyJobAsksInTaintedConversation() async throws {
+        let (app, id) = plainCountingApp()
+        app.markConversationTouchedByUnattendedInput(id)
+        let (result, approvalCount, humanOnly) = await runJobCreationCall(
+            FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60),
+                                                      "profile": .string("readOnly")], id: "c1"),
+            on: app, as: id, resolution: false)
+        #expect(approvalCount == 1)
+        #expect(humanOnly == true)
+        #expect(result == IrisEngine.jobCreationDeclined)
+        #expect(try app.store.ledger.jobs().isEmpty)
+    }
+
+    @Test("replacing a read-only job with a mutating one asks, and a denial leaves the job as it was")
+    func replacingWithMutatingAsks() async throws {
+        let (app, id) = plainCountingApp()
+        _ = await runJobCreationCall(
+            FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60),
+                                                      "name": .string("nightly")], id: "c1"),
+            on: app, as: id, resolution: false)
+        #expect(app.approvalCount == 0)
+        var replacement = Self.mutatingSweep
+        replacement["name"] = .string("nightly")
+        let (result, approvalCount, _) = await runJobCreationCall(
+            FunctionCall(name: "schedule_job", args: replacement, id: "c2"), on: app, as: id, resolution: false)
+        #expect(approvalCount == 1)
+        #expect(result == IrisEngine.jobCreationDeclined)
+        let jobs = try app.store.ledger.jobs()
+        #expect(jobs.count == 1)
+        #expect(jobs.first?.profile == .readOnly)
+    }
+
+    /// A re-registration that names no profile keeps the watch's own (`ToolExecutor.registerWatcher`),
+    /// so the ask judges that one: replacing a mutating watch's instructions is not a read-only act.
+    @Test("re-registering a mutating watch without naming a profile asks")
+    func reRegisteringMutatingWatchAsks() async throws {
+        let (app, id) = plainCountingApp()
+        let dir = try scratchDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = try #require(WatchRoot.canonical(dir.path))
+        try app.store.ledger.upsert(Job(name: "watch", prompt: "rebuild", trigger: .fsEvent(FSWatch(path: path)),
+                                        profile: .mutating, createdInConversationId: id))
+        let (result, approvalCount, _) = await runJobCreationCall(
+            FunctionCall(name: "register_directory_watcher",
+                         args: ["path": .string(dir.path), "instructions": .string("now something else")], id: "c1"),
+            on: app, as: id, resolution: false)
+        #expect(approvalCount == 1)
+        #expect(app.lastDetails?.contains("profile: mutating") == true)
+        #expect(result == IrisEngine.jobCreationDeclined)
+        #expect(try app.store.ledger.jobs().first?.prompt == "rebuild")
+    }
+
+    /// The real ladder, not the counting override: an allowlist rule for this exact call and a
+    /// Vibecop that approves everything are both in place, and the person is still asked, with no
+    /// Always Allow on the dialog.
+    @Test("neither an allowlist rule nor a Vibecop APPROVE stands in for the person on a mutating job")
+    func allowlistAndVibecopDoNotStandIn() async throws {
+        let (app, id) = plainApp()
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("iris-652-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        app.permissions = PermissionManager(paths: IrisPaths(root: home))
+        let details = IrisEngine.jobApprovalDetails(toolName: "schedule_job", args: Self.mutatingSweep, profile: .mutating)
+        app.permissions.allowGlobally(toolName: "schedule_job", details: details)
+        app.vibecopEnabledOverride = true
+        let approver = AlwaysApprove()
+        let (result, queued, humanOnly) = await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": approver]) {
+            await runJobCreationCallCapturingDialog(FunctionCall(name: "schedule_job", args: Self.mutatingSweep, id: "c1"),
+                                                    on: app, as: id)
+        }
+        #expect(queued, "the person was asked")
+        #expect(humanOnly == true, "the dialog offers no Always Allow")
+        #expect(approver.calls == 0, "Vibecop is never consulted for this call")
+        #expect(result == IrisEngine.jobCreationDeclined)
+        #expect(try app.store.ledger.jobs().isEmpty)
+    }
+
+    private final class AlwaysApprove: AuxiliaryInferenceEngine, @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        var calls: Int { lock.withLock { count } }
+        func loadModel(config: AuxiliaryModelConfig) async throws {}
+        func unloadModel() async {}
+        func generate(prompt: String, jsonSchema: String?) async throws -> String {
+            lock.withLock { count += 1 }
+            return #"{"decision":"APPROVE","reason":"routine"}"#
+        }
+    }
+
+    /// `runJobCreationCallThroughRealQueue`, denying, and reporting whether the dialog was `humanOnly`.
+    private func runJobCreationCallCapturingDialog(_ call: FunctionCall, on app: AppState,
+                                                   as conversationId: UUID) async -> (result: String, queued: Bool, humanOnly: Bool?) {
+        app.autoApproveTools = false
+        let first = GeminiResponse(candidates: [Candidate(content: Content(
+            role: "model", parts: [Part(functionCall: call)]))], usageMetadata: nil)
+        let final = GeminiResponse(candidates: [Candidate(content: Content(
+            role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil)
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: FakeLLMClient(responses: [first, final]),
+                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
+        async let turn: Void = engine.processInput("go", source: "UI", conversationId: conversationId)
+        var queued = false
+        var humanOnly: Bool?
+        for _ in 0..<80 {
+            if let request = app.pendingApprovals.first {
+                queued = true
+                humanOnly = request.humanOnly
+                app.resolveApproval(id: request.id, .deny)
+                break
+            }
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        if !queued { app.denyPendingApprovals(for: conversationId) }
+        await turn
+        let history = app.conversations.first { $0.id == conversationId }?.history ?? []
+        let result = history.flatMap { $0.parts }.compactMap { part -> String? in
+            guard case .string(let s)? = part.functionResponse?.response["result"] else { return nil }
+            return s
+        }.last ?? ""
+        return (result, queued, humanOnly)
     }
 
     // MARK: Continuations inherit the sticky taint for free (sticky-taint ruling, #187 §0.5)

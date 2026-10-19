@@ -100,11 +100,11 @@ struct JobRunTimeoutTests {
 
     @Test("the pinned/tainted approval dialog shows the clamped timeout beside the global")
     func approvalLine() {
-        let details = IrisEngine.pinnedJobApprovalDetails(toolName: "schedule_job", args: [
+        let details = IrisEngine.jobApprovalDetails(toolName: "schedule_job", args: [
             "prompt": .string("p"), "intervalSeconds": .int(3600), "timeout_seconds": .int(99_999),
         ], globalRunTimeoutSeconds: 600)
         #expect(details.contains("Run timeout: 60 min (global 10 min)."))
-        let none = IrisEngine.pinnedJobApprovalDetails(toolName: "schedule_job", args: [
+        let none = IrisEngine.jobApprovalDetails(toolName: "schedule_job", args: [
             "prompt": .string("p"), "intervalSeconds": .int(3600),
         ], globalRunTimeoutSeconds: 600)
         #expect(!none.contains("Run timeout"))
