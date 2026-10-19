@@ -1089,6 +1089,17 @@ struct SettingsView: View {
             .tag(SettingsTab.updates)
         }
         .frame(minWidth: 600, minHeight: 600)
+        // #678: with the Keychain item unreadable, nothing guarded or secret is saved, so say so
+        // beside the fields rather than only in a conversation (iris-dev-1's #679 review).
+        .safeAreaInset(edge: .top) {
+            if let warning = GuardedSettings.settingsBanner(for: config.guardedState) {
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundColor(.orange)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 8)
+            }
+        }
         .onChange(of: downloader.error) { _, newValue in
             if newValue != nil {
                 showingDownloadError = true
