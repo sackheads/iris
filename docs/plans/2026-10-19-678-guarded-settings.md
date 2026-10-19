@@ -20,6 +20,7 @@ A setting that guards spend, or where data goes, can't be changed by a host comm
   - `MAX_SUBAGENT_ITERATIONS` and `SUBAGENT_TURN_TIMEOUT_SECONDS`: a subagent's rounds, charged to whoever delegated it, and their length.
   - `MAX_DONE_GATE_RETRIES`: graded retries.
   - `MAX_SESSION_CASCADE`: the hop depth of a peer-message chain, where each hop is a turn somewhere.
+  - `LOOP_TICK_CAP`: a `/loop`'s ticks, each a full model round (#676 merged it after this note; iris-dev-1's review).
   - **Left out**, as neither spend nor egress: `REPLAY_THINKING_WITHIN_TURN` (behaviour) and `SANDBOX_IDLE_TIMEOUT_MINUTES` (when an idle container stops). `VIBECOP_TIMEOUT_SECONDS` sets a guard's timing, so it waits on Brian with the guard switches.
 - **Waiting on Brian:** `ENABLE_SANDBOXING`, `ENABLE_VIBECOP`, `ENABLE_PROMPT_INJECTION_PROTECTION`. The mechanism is a generic set, so each is one line once he answers.
 

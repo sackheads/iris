@@ -168,6 +168,8 @@ struct GuardedSettingsTests {
         #expect(next.jobDailyTokenBudget == 1234)
         #expect(next.enableSandboxing)
         #expect(next.openAIBaseURL == "")
+        store.set(10_000, forKey: "LOOP_TICK_CAP")   // #676's tick cap is a spend cap too
+        #expect(ConfigManager(store: store, guardedSecrets: keychain).loopTickCap == ConfigManager.defaultLoopTickCap)
         #expect(next.takeGuardedNotices().first?.contains("not applied") == true)
         #expect(next.takeGuardedNotices().isEmpty, "said once")
     }
