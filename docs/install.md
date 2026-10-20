@@ -33,6 +33,11 @@ official provider addresses, built-in limits, and the sandbox, Vibecop and promp
 protection on. With the sandbox on and no container runtime, it refuses commands rather than running
 them on the host. A launch notice says what happened.
 
+One of these settings found in the defaults domain (a `defaults write`, or an older version of Iris
+writing back what it read) is ignored and deleted. If its value differs from yours, a launch notice
+names it once, with the ignored value (endpoint lists are named only); one that matches yours is
+deleted without a notice (#706).
+
 - **Dev builds:** they prompt routinely (each rebuilt binary is a new identity, #578), so there a
   prompt is a much weaker signal, and an Allow given out of habit accepts whatever the item holds.
 - **No saved keys:** on a Mac with no saved keys (for example Gemini through `gcloud`), a command
