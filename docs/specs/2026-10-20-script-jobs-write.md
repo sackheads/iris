@@ -39,7 +39,7 @@ This spec adds a script job on a **mutating job's grant**: read-write mounts, un
 - **A sentence for writes, always:** "This script can change and delete files in <read-write mounts> on every run, with no one watching. A mistake repeats on every fire until you pause the job."
 - **With network on, added:** "It can also reach the internet, so it could download something and write it into those folders, or send what's in them anywhere."
 - **With network off:** "It can still reach services on this Mac" (#690's wording from #330).
-- **The disk floor** from fork 4, as one line: "It won't run while the disk holding these folders has less than N GB free."
+- **The disk floor** from fork 4, as one line: "It won't run while the disk holding these folders has less than 5 GB free." And a note for any mount too large to measure (fork 4).
 
 **Ruled: as above** (planner). The point is that the person reads "change and delete" next to the folder names before they click, and not only a grant table.
 
@@ -77,16 +77,22 @@ The danger is a script that fills the disk (a loop that appends, or a `cp` into 
 - **Frequency:** the breaker (runs per hour), overlap (never concurrent with itself) and the retry ladder.
 - **Reach:** the grant's mounts only, never the host. The rules refuse home, startup locations, credential stores, the login PATH and Iris's folders.
 
-**There's no per-run quota mechanism.** Writes cross virtiofs straight onto the host volume, so the VM can't cap them and the host can't account for them per container. Options:
-- **(a) A free-space floor, checked before every fire.** Each read-write mount's volume (`statfs`) must have at least `max(5 GB, 5%)` free, or the fire is `interrupted` with "the disk holding <mount> has only X free". This bounds the damage across fires, not within one.
-- **(b) A growth check after every run.** If a read-write mount's volume lost more than `max(2 GB, 2%)` during the run, the job **pauses** with a card ("this run used X of disk; paused so you can look"). It needs a human resume.
-- **(c) A watchdog that polls free space during the run** and kills it below the floor. This bounds a single run, but it's a new poller beside the deadline, and it would have to sit on the dispatch clock per Invariant 4.
+**There's no per-run quota mechanism.** Writes cross virtiofs straight onto the host volume, so the VM can't cap them, and the host can't account for them per container.
 
-**Ruled: (a) plus (b), plus (d)** (planner):
-- **(d) A shrink check after every run, the mirror of (b).** If a read-write mount's volume *gained* more than `max(1 GB, 10%)` of free space during the run, the run probably deleted a lot, so the job **pauses** with a card: "this run freed X GB; it may have deleted files in <mounts>". It's the same two `statfs` readings, so it costs nothing, and it's the only bound on a destructive script short of backups. **It's a heuristic:** an unrelated cleanup elsewhere on that volume during the run can trip it, and that's acceptable for a pause, which a person resumes.
+**Why not the volume** (dev-3, the planner's revision): volume-wide free space moves for reasons that have nothing to do with the job. This Mac went from 28 to 64 GB free during one night's cleanup, Time Machine thinning and purgeable space free gigabytes on their own, and a Swift build takes 9 GB. Pausing on volume deltas would stop healthy writers over and over, which is the notice fatigue #706 removed. A percentage floor fails the same way: 5% of a 1 TB disk is 50 GB, more than this Mac often has free.
 
-(a) and (b) are cheap: two `statfs` calls per fire, no new timer, and the kill machinery is untouched. With the timeout as the within-run bound, one run can't outlast an hour, and the next can't start into a disk that's nearly full. (c) is the follow-up if a measured case shows one run doing real harm in under an hour.
-- **Deletion** is bounded only roughly, by (d): a large delete pauses the job after the run that did it. Its other bounds are the grant rules, the dialog's "change and delete" sentence, and the person's backups. The docs say so plainly. There's no delete counter: the VM's deletes aren't visible to the host per run without a full scan.
+**Ruled (planner, revised 2026-10-20):**
+- **A fixed volume floor, before every fire.** Each read-write mount's volume (`statfs`) must have at least **5 GB** free, or the fire is `interrupted` with "the disk holding <mount> has only X free".
+- **A capped walk of each read-write mount, before and after the run.** It counts files and sums bytes, follows no symlinks and stays on one filesystem. It stops at **200,000 entries or 2 s**, whichever comes first. This measures the job's own folders, so nothing else on the volume moves the figures.
+- **Pause, with a card, when a run:**
+  - grew a mount by more than `max(2 GB, 100%)` ("this run added X to <mount>; paused so you can look");
+  - shrank its bytes by more than `max(1 GB, 20%)`, or dropped its file count by more than `max(1000, 20%)` ("this run removed N files (X) from <mount>; it may have deleted more than it should"). The file count is the better deletion signal, since a delete of many small files barely moves the bytes.
+
+  A paused job needs a human resume.
+- **A walk that hits its cap** skips that mount's growth and shrink checks for that run. The creation dialog runs one trial walk per read-write mount and says so once ("<mount> is too large to measure quickly, so Iris won't notice if a run fills or empties it"). A later run that's capped for the first time says it once on its card.
+- **The figures go on the run's ledger row:** each mount's before and after entry count and bytes, or "capped". That's a new `JobRun` field, read with `decodeIfPresent` (Invariant 1), and it lets a person see after the fact what a run did to its folders.
+- **Within one run,** the bound is still the timeout (at most an hour). A watchdog that polls during the run is the follow-up if a measured case shows a single run doing real harm in under an hour.
+- **Deletion** is bounded roughly by the shrink and count checks, which catch a large delete after the run that did it. Its other bounds are the grant rules, the dialog's "change and delete" sentence, and the person's backups. The docs say so plainly.
 
 ### 5. #690's host-only network, combined with writes
 
@@ -99,8 +105,8 @@ The danger is a script that fills the disk (a loop that appends, or a `cp` into 
 
 ## Invariants
 
-- **Invariant 4.** Unchanged from #330: the container joins `LiveContainerNames`, the deadline is the dispatch watchdog, the kill happens in the VM, and the sweep runs on every exit. The `GitConfigGuard` `end` rides the sweep.
-- **Invariant 1.** No new persisted field beyond #330's. The profile and grant are existing `Job` fields. The fingerprint's new inputs (the read-only flags, the profile) change its *value*, not a schema.
+- **Invariant 4.** Unchanged from #330: the container joins `LiveContainerNames`, the deadline is the dispatch watchdog, the kill happens in the VM, and the sweep runs on every exit. The `GitConfigGuard` `end` rides the sweep. The fork 4 walks are blocking file I/O, so they run off the cooperative pool (`OffPool`), each bounded by its own 2 s cap, before the container is created and after it's swept, so no walk sits inside the run's deadline.
+- **Invariant 1.** One new persisted field, the run's mount figures (fork 4): a `job_runs` column added by a migration numbered in merge order, and read with `decodeIfPresent`. Otherwise nothing beyond #330's. The profile and grant are existing `Job` fields. The fingerprint's new inputs (the read-only flags, the profile) change its *value*, not a schema.
   - **Upgrading changes nothing.** The new inputs are written only away from their defaults, so every #698 script job, all of them read-only, hashes as it did. Nothing is re-asked, and there is no marker or re-fingerprint pass, which would be #698's trust-on-first-use replay (dev-2 and dev-3).
 - **Invariant 6.** No new tool and no new argument.
 - **Invariant 9**, the sentences to search for when it's built:
@@ -116,8 +122,8 @@ The danger is a script that fills the disk (a loop that appends, or a `cp` into 
   - the dialog text for each network and mount combination;
   - human-only with no Always Allow, even when Vibecop approves;
   - the fingerprint covering read-only flags and the profile (flipping a flag in the row pauses the next fire);
-  - the disk floor (an injected `statfs`) refusing a fire;
-  - the growth check pausing the job; the shrink check (d) pausing it with the "freed" card;
+  - the 5 GB floor (an injected `statfs`) refusing a fire;
+  - the capped walk (injected entries and clock): growth, byte shrink and file-count drop each pausing with their card, a capped walk skipping the checks and saying so once, and the figures on the row;
   - a git-guard finding failing the run and posting;
   - the card rules unchanged;
   - an older build's rows still decoding.
