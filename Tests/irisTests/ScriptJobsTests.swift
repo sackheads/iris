@@ -242,6 +242,23 @@ struct ScriptJobRunTests {
         #expect(try store.ledger.runs(jobId: job.id, limit: 1).first?.posted == true, "a new raw line, though both withheld")
     }
 
+    @Test("the canary's call on a posted line is charged to the script run's row (#689)")
+    func guardCallCharged() async throws {
+        let (store, state, engine, config, teardown) = try harness(); defer { teardown() }
+        let job = Job(name: "disk", prompt: "", trigger: .schedule(.interval(seconds: 600)), action: .script(spec))
+        try store.ledger.upsert(job)
+        let r = runner(store, state, engine, config, vm: { _ in .ran(stdout: "42% used\n", stderr: "", exitCode: 0) },
+                       guardLine: { line in
+                           await GuardUsage.report(UsageMetadata(promptTokenCount: 120, candidatesTokenCount: 30, totalTokenCount: 150),
+                                                   role: "canary")
+                           return (line, false)
+                       })
+        _ = await r.fire(job: job, origin: .cadence(kind: "schedule"))
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(run.posted == true)
+        #expect(run.promptTokens == 120 && run.candidateTokens == 30, "the guard's tokens, kept past finish")
+    }
+
     @Test("/jobs delete forgets the script's fingerprint in the injected Keychain")
     func deleteForgets() async throws {
         let store = try ConversationStore.inMemory()
