@@ -10,6 +10,8 @@ struct CloudAuxiliaryEngine: AuxiliaryInferenceEngine {
     /// blank is the easy tier.
     var model: @Sendable () -> String? = { ConfigManager.shared.vibecopCloudModel }
     var send: Send = { request, model in try await LLMClient().generateContent(request: request, tier: .easy, model: model) }
+    /// Which guard this engine serves ("vibecop", "canary"), for the unattributed-usage log.
+    var role = "guard"
     var notice: @Sendable (String) async -> Void = { text in
         await MainActor.run { _ = GuardTierHealth.shared.announce?(text) }
     }
@@ -54,6 +56,9 @@ struct CloudAuxiliaryEngine: AuxiliaryInferenceEngine {
             response = try await send(request, nil)
         }
         
+        // #689: the call's tokens go to whoever caused it, not nowhere.
+        await GuardUsage.report(response.usageMetadata, role: role)
+
         guard let candidate = response.candidates?.first, 
               let content = candidate.content,
               let part = content.parts.first, 

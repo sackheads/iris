@@ -46,7 +46,9 @@ final class AuxiliaryModelManager: @unchecked Sendable {
                     case .mlx:
                         engine = MLXEngine.shared
                     case .cloud:
-                        engine = CloudAuxiliaryEngine()
+                        var cloud = CloudAuxiliaryEngine()
+                        cloud.role = role
+                        engine = cloud
                     }
                     
                     try await engine.loadModel(config: config)
