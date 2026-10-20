@@ -98,6 +98,10 @@ struct TranscriptFocusAnchorTests {
         #expect(window.firstResponder === composer, "a click in the composer leaves it focused")
         click(NSPoint(x: 400, y: 50), NSPoint(x: 400, y: 300))
         #expect(window.firstResponder === composer, "a drag from the composer that ends in the transcript isn't a click there")
+        anchor.enabled = false
+        click(NSPoint(x: 400, y: 300), NSPoint(x: 400, y: 300))
+        #expect(window.firstResponder === composer, "an empty conversation's welcome doesn't take focus")
+        anchor.enabled = true
         click(NSPoint(x: 400, y: 300), NSPoint(x: 400, y: 300))
         #expect(window.firstResponder === transcript)
 
