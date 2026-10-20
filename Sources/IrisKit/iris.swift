@@ -721,7 +721,7 @@ actor IrisEngine {
         let wasArchived = await MainActor.run { localState?.unarchiveConversation(activeId) ?? false }
 
         // Sanitize incoming system events (especially those from subagents) to prevent injection
-        let safeMessage = await sanitizeArrival(message, source: source)
+        let safeMessage = await sanitizeArrival(message, source: source, chargeTo: activeId)
         // Review #340: `handleSystemEvent`'s only caller is a background subagent's post-back
         // (`invoke_subagent background: true`, reporting back whenever it finishes — independent of
         // whatever the owner is doing by then). That starts a turn on this conversation without the
@@ -789,7 +789,7 @@ actor IrisEngine {
     /// the parent's history, routed as an event line is (`deliverEvent`), so it starts no turn. A
     /// turn still unwinding from the same Stop picks it up at its end.
     func deliverStoppedSubagentResult(_ message: String, conversationId: UUID) async {
-        let safeMessage = await sanitizeArrival(message, source: "SubagentManager")
+        let safeMessage = await sanitizeArrival(message, source: "SubagentManager", chargeTo: conversationId)
         let localState = state
         await MainActor.run {
             guard let localState, localState.conversations.contains(where: { $0.id == conversationId }) else { return }
@@ -806,9 +806,15 @@ actor IrisEngine {
     /// `handleSystemEvent` because `deliverPeerMessage`'s busy path bypasses `handleSystemEvent`
     /// entirely (it enqueues instead of calling `processInput`) and must still run identical
     /// sanitisation rather than a second, driftable copy of these two lines.
-    private func sanitizeArrival(_ message: String, source: String) async -> String {
+    /// `chargeTo`: the conversation the arrival is for, which a cloud guard call on it is charged
+    /// to (#689, #700 review). The arrival is checked before any turn there binds its own sink.
+    private func sanitizeArrival(_ message: String, source: String, chargeTo conversationId: UUID) async -> String {
         let structuralSafeEvent = PromptInjectionGuard.sanitizeUntrustedInput(message)
-        return await InjectionGuard.sanitize(structuralSafeEvent, contextTag: "system_event_\(source)", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
+        let sink = await MainActor.run { [state] in GuardUsage.charging(conversationId, in: state) }
+        return await GuardUsage.$sink.withValue(sink) {
+            await InjectionGuard.sanitize(structuralSafeEvent, contextTag: "system_event_\(source)", maxTier: .tier3_canary,
+                                          protectionEnabled: protectionEnabled)
+        }
     }
 
     /// #185 §5.0 — the label a peer message arrives under. A CONSTANT: `processInputBody` renders
@@ -857,7 +863,7 @@ actor IrisEngine {
         // inbox, skipping sanitisation and any marker distinguishing it from a message the user
         // typed — `takePendingSteers`' consumer renders queued text as `"User (mid-task): …"`, the
         // system's highest trust label. The `isPeer` flag on the queued entry is what stops that.
-        let safe = await sanitizeArrival(attributed, source: Self.peerSource)
+        let safe = await sanitizeArrival(attributed, source: Self.peerSource, chargeTo: targetId)
         // §5.2: a second turn on one history produces empty or rejected provider responses, so a
         // busy target takes the same #172 inbox a user message would. Peer messaging must not make
         // that hazard agent-triggerable.
