@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import GRDB
 @testable import IrisKit
 
 /// #330: a script job runs a shell script in the sandbox VM on each fire with no model turn,
@@ -253,16 +254,15 @@ struct ScriptJobRunTests {
                                                    role: "canary")
                            return (line, false)
                        })
+        // Every write that touches a run row's tokens, counted at the database (planner: the row is
+        // written once, by `finish`, with the totals; nothing patches it afterwards).
+        let writes = TokenColumnWrites()
+        store.writer.add(transactionObserver: writes, extent: .observerLifetime)
         _ = await r.fire(job: job, origin: .cadence(kind: "schedule"))
         let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(run.posted == true)
-        #expect(run.promptTokens == 120 && run.candidateTokens == 30, "the guard's tokens, in finish's one write")
-        // Written once, by `finish`: nothing patches the row afterwards (planner).
-        let source = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .appendingPathComponent("../../Sources/IrisKit/JobRunner.swift").standardized, encoding: .utf8)
-        let runScript = try #require(source.range(of: "private func runScript(")).upperBound
-        let body = source[runScript...].prefix(6_000)
-        #expect(!body.contains("addUsage("), "runScript writes its tokens only through finish")
+        #expect(run.promptTokens == 120 && run.candidateTokens == 30, "the guard's tokens")
+        #expect(writes.count == 1, "one write of the run's tokens, finish's")
     }
 
     @Test("/jobs delete forgets the script's fingerprint in the injected Keychain")
@@ -362,4 +362,18 @@ struct ScriptJobRunTests {
         #expect(evaluated.value == 0, "the unverified gate script never ran")
         #expect(try store.ledger.jobs().first?.pausedReason == ScriptJobs.needsReview, "never reviewed: a one-time review")
     }
+}
+
+/// Counts updates to `job_runs.promptTokens` (#698): how many times a run row's tokens are written.
+final class TokenColumnWrites: TransactionObserver, @unchecked Sendable {
+    private let lock = NSLock()
+    private var n = 0
+    var count: Int { lock.withLock { n } }
+    func observes(eventsOfKind eventKind: DatabaseEventKind) -> Bool {
+        if case .update(let table, let columns) = eventKind { return table == "job_runs" && columns.contains("promptTokens") }
+        return false
+    }
+    func databaseDidChange(with event: DatabaseEvent) { lock.withLock { n += 1 } }
+    func databaseDidCommit(_ db: Database) {}
+    func databaseDidRollback(_ db: Database) {}
 }
