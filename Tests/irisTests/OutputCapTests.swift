@@ -227,4 +227,30 @@ struct OutputCapTests {
         #expect(!outcome.contains(marker), "the middle the canary never saw went through")
         #expect(outcome.contains("[output truncated:"))
     }
+
+    /// A tier-2 model that flags exactly the text holding `marker`.
+    private struct MarkerModel: CoreMLModelProtocol {
+        let marker: String
+        func evaluate(text: String) async throws -> Double { text.contains(marker) ? 0.99 : 0.01 }
+    }
+
+    @Test("both fire: a capped result keeps file line numbers in its cut line, and tier 2 withholds a flagged tail line by its line in the output shown")
+    func capAndWithheldTogether() async throws {
+        let marker = "PLANTED-\(UUID().uuidString)"
+        var lines = (1...5000).map { "line \($0) " + String(repeating: "x", count: 40) }
+        lines[4994] = "line 4995 " + marker          // in the kept tail
+        let capped = OutputCap.cap(lines.joined(separator: "\n") + "\n", advice: .readFile(startLine: 1))
+        let shown = capped.split(separator: "\n", omittingEmptySubsequences: false)
+        let plantedAt = try #require(shown.firstIndex { $0.contains(marker) }) + 1   // 1-based, in the output shown
+        let outcome = await CoreMLEvaluator.$scopedModel.withValue(.init(MarkerModel(marker: marker))) {
+            await InjectionGuard.sanitize(capped, contextTag: "tool_output_read_file", maxTier: .tier2_coreML, protectionEnabled: true)
+        }
+        #expect(!outcome.contains(marker), "the flagged line was withheld")
+        // #723's marker counts lines of the output shown (the planted line and one either side)...
+        #expect(outcome.contains("[lines \(plantedAt - 1)-\(plantedAt + 1) of this output withheld by the injection guard"), "\(outcome.suffix(600))")
+        // ...while the cap's line still names file lines, which read_file can fetch.
+        let headLines = try #require(Int(try #require(shown.first { $0.hasPrefix("[output truncated:") }).split(separator: " ")[5]))
+        #expect(outcome.contains("read_file start_line=\(headLines + 1)"))
+        #expect(plantedAt != 4995, "the two numberings differ in the tail, which is the point")
+    }
 }
