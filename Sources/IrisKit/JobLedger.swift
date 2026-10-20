@@ -492,6 +492,25 @@ extension JobLedger {
     ///
     /// Never lowers a figure: several engines of one run (its own and its parallel subagents,
     /// #313) report the running total, and their writes can land out of order.
+    /// Adds a guard call's tokens to a run that may already be closed (#689): Vibecop's verdict on
+    /// a blocked run's card is taken after the run's row is finished, and is still the run's spend.
+    func addUsage(runId: UUID, usage: UsageMetadata) throws {
+        try writer.write { db in
+            try db.execute(sql: """
+                UPDATE job_runs SET promptTokens = promptTokens + ?, candidateTokens = candidateTokens + ?,
+                    totalTokens = totalTokens + ?,
+                    cacheReadTokens = COALESCE(cacheReadTokens, 0) + ?,
+                    cacheWriteTokens = COALESCE(cacheWriteTokens, 0) + ?,
+                    cacheWrite1hTokens = COALESCE(cacheWrite1hTokens, 0) + ?
+                WHERE id = ?
+                """, arguments: [
+                    usage.promptTokenCount ?? 0, usage.candidatesTokenCount ?? 0, usage.totalTokenCount ?? 0,
+                    usage.cacheReadTokens ?? 0, usage.cacheWriteTokens ?? 0, usage.cacheWrite1hTokens ?? 0,
+                    runId.uuidString,
+                ])
+        }
+    }
+
     func recordUsage(runId: UUID, tokens: TokenUsage) throws {
         try writer.write { db in
             try db.execute(sql: """

@@ -1062,9 +1062,12 @@ actor JobRunner {
         // build's — how many paths got past the cap, and whether the guard withheld the block —
         // and a row inserted first would have to be updated with them a moment later. One write,
         // so a crash between the two cannot leave a run row whose summary contradicts its prompt.
-        let promptBuild = await Self.buildPrompt(job: job, changedPaths: origin.paths,
-                                                 gateOutput: gate?.payload,
-                                                 protectionEnabled: protectionEnabled)
+        // #689: the tier-3 canary on the gate's output is this run's spend, through its conversation.
+        let guardSink = await MainActor.run { [state] in GuardUsage.charging(conversationId, in: state) }
+        let promptBuild = await GuardUsage.$sink.withValue(guardSink) {
+            await Self.buildPrompt(job: job, changedPaths: origin.paths, gateOutput: gate?.payload,
+                                   protectionEnabled: protectionEnabled)
+        }
         var summary = watch
         summary?.delivered = promptBuild.delivered
         summary?.pathsWithheld = promptBuild.pathsWithheld
@@ -1344,7 +1347,13 @@ actor JobRunner {
         let card = makeCard(decided ?? .nothing)
         let destination = await deliverAndSave(card, for: job)
         if decided == nil, let blockedCall {
-            let verdict = await verdictOffer(for: blockedCall)
+            // #689: the row is closed by now, so Vibecop's cloud call is added to it directly.
+            let ledger = self.ledger
+            let runId = run.id
+            let verdict = await GuardUsage.$sink.withValue(GuardUsage.Sink { usage in
+                do { try ledger.addUsage(runId: runId, usage: usage) }
+                catch { print("[JobRunner] could not charge a guard call to the run: \(error)") }
+            }) { await verdictOffer(for: blockedCall) }
             await attachVerdict(to: card, as: makeCard(verdict), in: destination)
         }
         await close(conversationId, status: card.statusText, forStop: true)

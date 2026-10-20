@@ -1962,6 +1962,10 @@ actor IrisEngine {
             // it, or a reprompt it schedules, never reads or changes this turn's scope.
             let reflecting = Self.isReflectionTurn
             let (agentProfile, scope, tier) = await turnAgentProfile(for: conversationId, reflecting: reflecting)
+            // #689: a cloud guard call during this turn (Vibecop on an approval, the tier-3 canary
+            // on a tool's output) is charged to this conversation, and so to its job run.
+            let guardSink = await MainActor.run { [state] in GuardUsage.charging(conversationId, in: state) }
+            await GuardUsage.$sink.withValue(guardSink) {
             await Self.$isReflectionTurn.withValue(false) {
                 await Self.$turnTier.withValue(tier) {
                 await Self.$agentToolScope.withValue(scope) {
@@ -1970,6 +1974,7 @@ actor IrisEngine {
                     }
                 }
                 }
+            }
             }
             PerformanceProfiler.shared.endTurn(turnID, totalMs: UptimeClock.live.seconds(since: turnStart) * 1000.0)
         }

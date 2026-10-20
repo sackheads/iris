@@ -1060,7 +1060,11 @@ under it is stopped the same way, so none outlives its run. So is a goal evaluat
 a subagent's work for the run (#464): its model call is cancelled and its grade comes back
 `grading stopped`, never as a verdict. A subagent's goal loop reprompts it after any turn that ends without `goal_complete`, up to its
 iteration cap (10 by default), and each reprompt is a round like any other: charged to the run and
-checked against its budget first. Each of its turns also has a time limit of its own (#402),
+checked against its budget first. So are the run's cloud guard calls (#689): Vibecop on its cloud
+engine, and the tier-3 canary when it runs on the primary provider, whether on a tool's output, a
+gate's output, or the verdict on a blocked run's card (that one is added to the run's row after it
+closes). A local guard engine (llama.cpp, MLX, Ollama) costs no tokens. A guard call with nothing
+to charge it to is logged once ("unattributed guard usage"), never silently dropped. Each of its turns also has a time limit of its own (#402),
 restarted every turn: 15 minutes by default (Settings → Agent Limits → Subagent turn timeout),
 past which the subagent ends `timed out`. That is longer than the run's own 10 minutes by default, so in a run
 the run's deadline is what stops a subagent that takes too long. A subagent whose next round the run's
