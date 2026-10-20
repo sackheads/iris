@@ -34,7 +34,8 @@ enum HomeMount {
     /// `release`: in a dev build, the installed app's settings are guarded too, as `JobGrant`
     /// guards its home.
     static func reason(for path: String, home: String = NSHomeDirectory(), paths: IrisPaths = .default,
-                       release: IrisPaths? = BuildIdentity.current == .dev ? .release : nil) -> String? {
+                       release: IrisPaths? = BuildIdentity.current == .dev ? .release : nil,
+                       loginPath: [String] = BinaryResolver.defaultSearchDirs()) -> String? {
         let p = IrisPaths.canonicalPath(IrisEngine.expandTilde(path)).lowercased()
         if isHomeOrAbove(path, home: home) {
             return "it is your home folder or a folder above it, so the sandbox could rewrite your shell's startup files"
@@ -44,6 +45,11 @@ enum HomeMount {
         }
         if JobGrant.isCredentialStore(p, home: home) {
             return "it is or holds a credential store (~/.ssh, ~/.aws, the Keychains folder and the like)"
+        }
+        // #616 review: a workspace at, inside or holding a login-PATH folder (`/opt/homebrew/bin` is
+        // the person's own on Apple silicon) lets the VM leave a program their Terminal then runs.
+        if let entry = JobGrant.loginPathEntry(touching: IrisPaths.canonicalPath(IrisEngine.expandTilde(path)), loginPath: loginPath) {
+            return "it is, holds or sits inside \(entry), a folder on your login PATH, so the sandbox could leave a program your Terminal then runs"
         }
         let guarded = [paths] + (release.map { [$0] } ?? [])
         for dir in guarded.flatMap({ [$0.configDir.path, $0.pluginsDir.path] }) {
