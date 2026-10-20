@@ -225,6 +225,42 @@ struct ScriptJobRunTests {
         #expect(cards(state).last?.outcome?.contains("new check in this version") == true)
     }
 
+    @Test("with the guard withholding every run, a new raw line still posts and the same one doesn't (#698 review)")
+    func withheldRunsStillPostChanges() async throws {
+        let (store, state, engine, config, teardown) = try harness(); defer { teardown() }
+        let job = Job(name: "disk", prompt: "", trigger: .schedule(.interval(seconds: 600)), action: .script(spec))
+        try store.ledger.upsert(job)
+        let line = Locked("first line")
+        let r = runner(store, state, engine, config, vm: { _ in .ran(stdout: line.value + "\n", stderr: "", exitCode: 0) },
+                       guardLine: { _ in (ScriptJobs.withheldOutcome, false) })
+        _ = await r.fire(job: job, origin: .cadence(kind: "schedule"))
+        #expect(try store.ledger.runs(jobId: job.id, limit: 1).first?.posted == true, "first run")
+        _ = await r.fire(job: job, origin: .cadence(kind: "schedule"))
+        #expect(try store.ledger.runs(jobId: job.id, limit: 1).first?.posted == false, "the same raw line, withheld both times")
+        line.mutate { $0 = "second line" }
+        _ = await r.fire(job: job, origin: .cadence(kind: "schedule"))
+        #expect(try store.ledger.runs(jobId: job.id, limit: 1).first?.posted == true, "a new raw line, though both withheld")
+    }
+
+    @Test("/jobs delete forgets the script's fingerprint in the injected Keychain")
+    func deleteForgets() async throws {
+        let store = try ConversationStore.inMemory()
+        let keychain = KeychainManager(serviceSuffix: ".del-\(UUID().uuidString)", inMemory: true)
+        let name = "iris-330d-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name); IrisDefaults.removeSuiteFile(named: name, in: IrisDefaults.preferencesDirectory) }
+        let state = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned,
+                             guardedConfig: ConfigManager(store: defaults, guardedSecrets: keychain))
+        let job = Job(name: "disk", prompt: "", trigger: .schedule(.interval(seconds: 600)), action: .script(spec))
+        try store.ledger.upsert(job)
+        #expect(ScriptFingerprints.record(jobId: job.id, spec: spec, keychain: keychain))
+        state.sendMessage("/jobs delete disk")
+        let end = TestClock.deadline(10)
+        while TestClock.now() < end, (try? store.ledger.jobs())?.isEmpty == false { try? await Task.sleep(nanoseconds: 20_000_000) }
+        #expect(try store.ledger.jobs().isEmpty)
+        #expect(ScriptFingerprints.check(jobId: job.id, spec: spec, keychain: keychain) == .missing)
+    }
+
     @Test("an unreadable Keychain refuses the fire, closed")
     func unreadableKeychain() async throws {
         let (store, state, engine, config, teardown) = try harness(); defer { teardown() }

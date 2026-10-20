@@ -3672,7 +3672,7 @@ actor IrisEngine {
                 // #330: what was just reviewed is fingerprinted before the row exists, in the secrets
                 // item a shell can't write; a fire whose stored script doesn't match is refused.
                 if let spec = job.action.scriptSpec ?? job.trigger.gate?.scriptSpec {
-                    let keychain = await MainActor.run { ConfigManager.shared.guardedKeychain } ?? .shared
+                    let keychain = await MainActor.run { localState?.scriptKeychain ?? ConfigManager.shared.guardedKeychain } ?? .shared
                     guard ScriptFingerprints.record(jobId: job.id, spec: spec, keychain: keychain) else {
                         return ScriptJobs.couldNotRecordReview
                     }

@@ -164,7 +164,9 @@ struct HookManager {
             guard let containerPath = SandboxingManager.shared.containerBinaryPath else {
                 return .block(reason: "Sandboxing enabled but container missing for hook execution.")
             }
-            let name = "\(SandboxSessionManager.namePrefix)hook-\(UUID().uuidString.lowercased())"
+            guard let name = ContainerNames.make(prefix: SandboxSessionManager.namePrefix, kind: "hook") else {
+                return .block(reason: ContainerNames.tooLong(prefix: SandboxSessionManager.namePrefix, kind: "hook"))
+            }
             ephemeralContainer = (containerPath, name)
             executable = containerPath
             arguments = ["run", "--rm", "--name", name, ConfigManager.shared.sandboxImage, "bash", "-c", hook.command]

@@ -1,5 +1,41 @@
 import Foundation
 
+/// Every container name Iris builds (#698's real-VM run): apple/container 1.1.0 refuses an id
+/// over 64 characters ("container id length 65 exceeds maximum of 64 characters").
+enum ContainerNames {
+    static let maxLength = 64
+
+    /// `prefix`, then `kind-` when there is one, then a fresh uuid; nil when that won't fit.
+    static func make(prefix: String, kind: String? = nil, id: UUID = UUID()) -> String? {
+        let name = prefix + (kind.map { $0 + "-" } ?? "") + id.uuidString.lowercased()
+        return name.count <= maxLength ? name : nil
+    }
+
+    static func tooLong(prefix: String, kind: String?) -> String {
+        "Iris couldn't name the \(kind ?? "session") container: \(prefix)\(kind.map { $0 + "-" } ?? "")<id> would be over the container runtime's \(maxLength)-character limit."
+    }
+}
+
+/// One `ensureIsolatedNetwork` at a time per network name, in the whole process (#698's real-VM
+/// run): two gates or script jobs firing at once both listed it as absent and both created it,
+/// and the loser's create failed with something other than "already exists".
+actor IsolatedNetworkSetup {
+    static let shared = IsolatedNetworkSetup()
+    /// The last setup queued for each name. Each caller chains behind it, so they run in order,
+    /// one at a time, with no waiter looping on a finished task the owner hasn't cleared yet.
+    private var tail: [String: Task<Void, Never>] = [:]
+
+    func run(_ name: String, _ body: @escaping @Sendable () async throws -> Void) async throws {
+        let previous = tail[name]
+        let task = Task<Void, any Error> {
+            await previous?.value
+            try await body()
+        }
+        tail[name] = Task { _ = try? await task.value }
+        try await task.value
+    }
+}
+
 enum ContainerRuntimeError: Error, Equatable {
     case launchFailed(String)
     case createFailed(String)
@@ -742,8 +778,20 @@ struct CLIContainerRuntime: ContainerRuntime {
         // somebody else is holding either.
         let r = try await launch(args, Self.createTimeoutSeconds)
         if r.exitCode != 0 {
-            throw ContainerRuntimeError.createFailed((r.stdout + r.stderr).trimmingCharacters(in: .whitespacesAndNewlines))
+            throw ContainerRuntimeError.createFailed(Self.failure(stdout: r.stdout, stderr: r.stderr))
         }
+    }
+
+    /// The CLI's own failure, in its words, without the progress lines a create prints on its way
+    /// there (`[5/6] Unpacking init image`): its `Error:` lines first, so the one line a gate or
+    /// card quotes is the error (#698's real-VM run carried only the progress).
+    static func failure(stdout: String, stderr: String) -> String {
+        let lines = (stderr + "\n" + stdout).split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && $0.range(of: #"\[\d+/\d+\]"#, options: .regularExpression) == nil }
+        let errors = lines.filter { $0.range(of: "error", options: .caseInsensitive) != nil }
+        let ordered = errors + lines.filter { !errors.contains($0) }
+        return ordered.isEmpty ? (stdout + stderr).trimmingCharacters(in: .whitespacesAndNewlines) : ordered.joined(separator: "\n")
     }
 
     /// Measured 2026-09-23 (CLI 1.1.0): `network ls --format json` is an array of objects with a
@@ -752,15 +800,26 @@ struct CLIContainerRuntime: ContainerRuntime {
     /// fires racing to create the same network must not fail each other — and a listing that fails
     /// is a network nobody can vouch for, so it fails closed.
     func ensureIsolatedNetwork(named name: String) async throws {
-        let listed = try await launch(["network", "ls", "--format", "json"], Self.housekeepingTimeoutSeconds)
+        let launch = launchKillable
+        try await IsolatedNetworkSetup.shared.run(name) {
+            try await Self.ensureNetwork(named: name, launch: launch)
+        }
+    }
+
+    private static func ensureNetwork(named name: String, launch: Launch) async throws {
+        let list = ["network", "ls", "--format", "json"]
+        let listed = try await launch(list, housekeepingTimeoutSeconds, nil)
         guard listed.exitCode == 0 else {
-            throw ContainerRuntimeError.networkFailed((listed.stdout + listed.stderr).trimmingCharacters(in: .whitespacesAndNewlines))
+            throw ContainerRuntimeError.networkFailed(failure(stdout: listed.stdout, stderr: listed.stderr))
         }
-        if Self.networkNames(in: listed.stdout).contains(name) { return }
-        let created = try await launch(["network", "create", "--internal", name], Self.housekeepingTimeoutSeconds)
-        guard created.exitCode == 0 || created.stderr.contains("already exists") else {
-            throw ContainerRuntimeError.networkFailed((created.stdout + created.stderr).trimmingCharacters(in: .whitespacesAndNewlines))
-        }
+        if networkNames(in: listed.stdout).contains(name) { return }
+        let created = try await launch(["network", "create", "--internal", name], housekeepingTimeoutSeconds, nil)
+        if created.exitCode == 0 || created.stderr.contains("already exists") { return }
+        // Another process (the other home's Iris, a test run) may have made it meanwhile, whatever
+        // the loser's create said: a listing that now shows it is success.
+        let relisted = try await launch(list, housekeepingTimeoutSeconds, nil)
+        if relisted.exitCode == 0, networkNames(in: relisted.stdout).contains(name) { return }
+        throw ContainerRuntimeError.networkFailed(failure(stdout: created.stdout, stderr: created.stderr))
     }
 
     /// Both spellings the CLI uses for a network's name.

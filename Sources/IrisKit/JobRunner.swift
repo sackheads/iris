@@ -666,10 +666,11 @@ actor JobRunner {
         // #330: a gate script runs only as it was reviewed. Changed or never reviewed pauses the job
         // once, with a card; an unreadable Keychain is a gate error, which fails closed.
         if let spec = gate.scriptSpec {
-            switch fingerprintCheck(job.id, spec) {
+            let check = fingerprintCheck(job.id, spec)
+            switch check {
             case .matches: break
             case .changed, .missing:
-                let reason = ScriptJobs.pauseReason(for: fingerprintCheck(job.id, spec))
+                let reason = ScriptJobs.pauseReason(for: check)
                 await pause(job: job, origin: origin, reason: reason, at: at, note: note)
                 return .refuse(.gateError(detail: reason, paused: true))
             case .unreadable:
@@ -824,11 +825,11 @@ actor JobRunner {
     /// unreadable Keychain refuses, fails closed, and is said once by the change rule).
     private func runScript(_ spec: ScriptSpec, job: Job, origin: FireOrigin, note: String?,
                            afterBegin: (() async -> Void)? = nil) async {
-        switch fingerprintCheck(job.id, spec) {
+        let check = fingerprintCheck(job.id, spec)
+        switch check {
         case .matches: break
         case .changed, .missing:
-            await pause(job: job, origin: origin, reason: ScriptJobs.pauseReason(for: fingerprintCheck(job.id, spec)),
-                        at: now(), note: note)
+            await pause(job: job, origin: origin, reason: ScriptJobs.pauseReason(for: check), at: now(), note: note)
             return
         case .unreadable:
             break   // recorded below as a refused run
@@ -849,7 +850,7 @@ actor JobRunner {
         let outcome: String
         var failureReason: String?
         var stdout: String?, stderr: String?
-        if fingerprintCheck(job.id, spec) == .unreadable {
+        if check == .unreadable {
             (status, outcome, failureReason) = (.interrupted, ScriptJobs.keychainUnreadable, ScriptJobs.keychainUnreadable)
         } else {
             switch await scriptRunner(spec) {

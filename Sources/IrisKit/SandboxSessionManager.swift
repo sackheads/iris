@@ -108,6 +108,7 @@ actor SandboxSessionManager {
     private func name(for id: UUID) -> String { Self.containerName(for: id) }
 
     /// A conversation's session container name, which is also its `GitConfigGuard` owner.
+    /// Always within `ContainerNames.maxLength`: the prefix is fixed-length (`ContainerNameLengthTests`).
     static func containerName(for id: UUID) -> String { "\(namePrefix)\(id.uuidString.lowercased())" }
 
     private static let resetNotice = """
