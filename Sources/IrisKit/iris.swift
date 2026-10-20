@@ -5610,6 +5610,18 @@ actor IrisEngine {
         return result
     }
     
+    /// What #709's truncation line advises: `read_file` names the lines to read next, counted in the
+    /// file (so from the call's own `start_line`), and `run_command` says to redirect to a file.
+    nonisolated static func outputCapAdvice(name: String, args: [String: JSONValue]) -> OutputCap.Advice {
+        switch name {
+        case "read_file":
+            let start = (try? LineRange.parse(start: args["start_line"], count: nil).get())??.start ?? 1
+            return .readFile(startLine: start)
+        case "run_command": return .runCommand
+        default: return .none
+        }
+    }
+
     /// The one path a `read_file`/`write_file` call is approved, allowlisted, protected-checked and
     /// executed by (#256): tilde expanded and a relative path joined onto the workspace, as the
     /// executor would, then — unless the call is `walked` from a root by descriptor, which follows
@@ -6032,6 +6044,15 @@ actor IrisEngine {
         // and would only wrap the outcome a human reads on the card. See `executeApprovedCall`.
         if origin == .approvedCall { return result }
 
+        // #709: what the model sees, at one size. Cut here, after every hook and before every
+        // guard tier and the first-party read below (the model reads that too), so the guard
+        // judges exactly what the model will read, and a large result costs tier 3 (a cloud model,
+        // on the cloud engine) no more than a small one. `search_web` is cut after its per-result
+        // filter, which needs the whole JSON; it never reaches tier 3.
+        if name != "search_web" {
+            result = OutputCap.cap(result, advice: Self.outputCapAdvice(name: name, args: execArgs))
+        }
+
         // First-party trust: reading a file under ~/.iris/ returns Iris's OWN content
         // (SOUL, USER, memory.md, skills, artifacts, library, rules, configs) — not untrusted external data.
         // Return it raw, bypassing the guard, so the same `---`-stripping / <untrusted_context>
@@ -6057,7 +6078,7 @@ actor IrisEngine {
         // the whole search came back as one blocked marker and the agent just searched again.
         // A payload that is not a JSON array of results (the script's `{"error": ...}`) falls
         // through to the whole-output path below rather than going unscored.
-        let sanitizedResult: String
+        var sanitizedResult: String
         var fullyBlockedSearch = false
 
         if name == "search_web",
@@ -6089,6 +6110,7 @@ actor IrisEngine {
             // Tier 2 & 3 Sanitization: Active heuristic and canary detection (skipped for trusted tools)
             sanitizedResult = await InjectionGuard.sanitize(structuralSafeResult, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled)
         }
+        if name == "search_web" { sanitizedResult = OutputCap.cap(sanitizedResult) }
 
         // A guard-blocked result reads to the model like an empty one, so it rephrases and calls
         // again (#235). Say plainly that the content was withheld, outside the untrusted wrapper

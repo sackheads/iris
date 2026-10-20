@@ -63,6 +63,14 @@ final class MockRuntime: ContainerRuntime, @unchecked Sendable {
     /// child for a caller that has already given up, so a cleanup that goes down the ordinary path
     /// from a cancelled create spawns neither `stop` nor `delete`.
     /// `failRemove`: the delete exits non-zero, so the container is still there.
+    /// The output limit each capped exec asked for (#709).
+    private var limits: [Int] = []
+    var execLimits: [Int] { lock.withLock { limits } }
+    func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?, outputLimit: Int) async throws -> ExecOutput {
+        lock.withLock { limits.append(outputLimit) }
+        return ExecOutput.capping(try await exec(name: name, workdir: workdir, command: command, timeoutSeconds: timeoutSeconds),
+                                  at: outputLimit)
+    }
     func remove(name: String) async -> Bool {
         guard !Task.isCancelled else { return false }
         lock.withLock { removed.append(name) }

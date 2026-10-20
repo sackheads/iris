@@ -28,6 +28,46 @@ final class ProcessGroupRunner: @unchecked Sendable {
         var timedOut = false
         /// The kill ladder ran — `terminate()` or `timeoutSeconds` — and `onKilled` was called.
         var killed = false
+        /// Bytes of each stream read and dropped past `outputLimit` (#709): the middle of a long
+        /// output, between the head kept and the rolling tail.
+        var droppedStdout = 0
+        var droppedStderr = 0
+    }
+
+    /// One stream held to a limit (#709): the first `limit - tailLimit` bytes, and a rolling last
+    /// `tailLimit`, so a long output keeps its real end; what falls between is counted, not kept.
+    struct BoundedStream: Sendable {
+        let limit: Int?
+        let tailLimit: Int
+        private(set) var head = Data()
+        private(set) var tail = Data()
+        private(set) var dropped = 0
+
+        init(limit: Int?, tailLimit: Int) {
+            self.limit = limit
+            self.tailLimit = limit.map { min(tailLimit, $0) } ?? 0
+        }
+
+        mutating func append(_ bytes: UnsafeRawBufferPointer) {
+            guard let limit else { head.append(contentsOf: bytes); return }
+            var bytes = bytes[...]
+            let headRoom = max(0, limit - tailLimit - head.count)
+            if headRoom > 0 {
+                let taken = bytes.prefix(headRoom)
+                head.append(contentsOf: taken)
+                bytes = bytes.dropFirst(taken.count)
+            }
+            guard !bytes.isEmpty else { return }
+            tail.append(contentsOf: bytes)
+            if tail.count > tailLimit {
+                let excess = tail.count - tailLimit
+                dropped += excess
+                tail.removeFirst(excess)
+            }
+        }
+
+        /// The bytes kept: the head, then the tail. With nothing dropped they're the whole stream.
+        var kept: Data { head + tail }
     }
 
     /// How long SIGTERM gets before SIGKILL, once `terminate()` is called.
@@ -43,7 +83,15 @@ final class ProcessGroupRunner: @unchecked Sendable {
     private let queue = DispatchQueue(label: "iris.process-group")
     private let registry: LiveProcessGroups
 
-    init(registry: LiveProcessGroups = .shared) { self.registry = registry }
+    /// The most of each stream kept, or nil for all of it (#709).
+    private let outputLimit: Int?
+
+    init(registry: LiveProcessGroups = .shared, outputLimit: Int? = nil) {
+        self.registry = registry
+        self.outputLimit = outputLimit
+        out = BoundedStream(limit: outputLimit, tailLimit: OutputCap.tailBytes)
+        err = BoundedStream(limit: outputLimit, tailLimit: OutputCap.tailBytes)
+    }
 
     // Everything below is read and written on `queue` only.
     private var pid: pid_t = 0
@@ -56,8 +104,8 @@ final class ProcessGroupRunner: @unchecked Sendable {
     private var pendingInput = Data()
     private var inputOffset = 0
     private var inSource: DispatchSourceWrite?
-    private var out = Data()
-    private var err = Data()
+    private var out: BoundedStream
+    private var err: BoundedStream
     private var outSource: DispatchSourceRead?
     private var errSource: DispatchSourceRead?
     private var continuation: CheckedContinuation<Result<Output, Error>, Never>?
@@ -281,7 +329,10 @@ final class ProcessGroupRunner: @unchecked Sendable {
             while true {
                 let n = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
                 if n > 0 {
-                    if isStdout { out.append(buffer, count: n) } else { err.append(buffer, count: n) }
+                    buffer.withUnsafeBytes { raw in
+                        let read = UnsafeRawBufferPointer(rebasing: raw[..<n])
+                        if isStdout { out.append(read) } else { err.append(read) }
+                    }
                     continue
                 }
                 if n < 0, errno == EINTR { continue }
@@ -351,7 +402,8 @@ final class ProcessGroupRunner: @unchecked Sendable {
         let status = signal == 0 ? (raw >> 8) & 0xff : 128 + signal
         if terminating { onKilled?() }
         onKilled = nil
-        resume(.success(Output(stdout: out, stderr: err, status: status, timedOut: timedOut, killed: terminating)))
+        resume(.success(Output(stdout: out.kept, stderr: err.kept, status: status, timedOut: timedOut, killed: terminating,
+                               droppedStdout: out.dropped, droppedStderr: err.dropped)))
     }
 
     private func resume(_ result: Result<Output, Error>) {

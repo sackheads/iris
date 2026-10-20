@@ -299,13 +299,11 @@ struct CLIProcessRunner: Sendable {
         private let lock = NSLock()
         private var continuation: CheckedContinuation<Output, Error>?
         private var answered = false
-        private var out = Data()
-        private var err = Data()
+        private var out: ProcessGroupRunner.BoundedStream
+        private var err: ProcessGroupRunner.BoundedStream
         private var outOpen = true
         private var errOpen = true
         private var status: Int32?
-        private var outDropped = 0
-        private var errDropped = 0
         private let limit: Int?
         private let outHandle: FileHandle
         private let errHandle: FileHandle
@@ -318,6 +316,12 @@ struct CLIProcessRunner: Sendable {
             errHandle = stderr.fileHandleForReading
             self.queue = queue
             self.limit = limit
+            // A limit large enough keeps a rolling tail as well as the head, as the host drain does
+            // (#709): a long build's last lines, where its error is, survive. A small limit keeps
+            // its head only.
+            let tail = limit.map { $0 >= 4 * OutputCap.tailBytes ? OutputCap.tailBytes : 0 } ?? 0
+            out = ProcessGroupRunner.BoundedStream(limit: limit, tailLimit: tail)
+            err = ProcessGroupRunner.BoundedStream(limit: limit, tailLimit: tail)
         }
 
         /// Call inside the continuation body, before the process is launched: both the drain and
@@ -358,11 +362,9 @@ struct CLIProcessRunner: Sendable {
                 }
                 // Past the limit the bytes are read and dropped, never left in the pipe: a child
                 // blocked on a full pipe would never exit (#699).
-                let held = isStdout ? out.count : err.count
-                let room = limit.map { max(0, $0 - held) } ?? data.count
-                let kept = data.prefix(room)
-                if isStdout { out.append(kept); outDropped += data.count - kept.count }
-                else { err.append(kept); errDropped += data.count - kept.count }
+                data.withUnsafeBytes { bytes in
+                    if isStdout { out.append(bytes) } else { err.append(bytes) }
+                }
             }
             if isStdout, !lock.withLock({ outOpen }) { outHandle.readabilityHandler = nil }
             if !isStdout, !lock.withLock({ errOpen }) { errHandle.readabilityHandler = nil }
@@ -402,8 +404,8 @@ struct CLIProcessRunner: Sendable {
         }
 
         private func output(_ status: Int32) -> Output {
-            ExecOutput(stdout: CLIProcessRunner.text(out, cut: outDropped > 0), stderr: CLIProcessRunner.text(err, cut: errDropped > 0),
-                       exitCode: status, droppedStdout: outDropped, droppedStderr: errDropped)
+            ExecOutput(stdout: CLIProcessRunner.text(out.kept, cut: out.dropped > 0), stderr: CLIProcessRunner.text(err.kept, cut: err.dropped > 0),
+                       exitCode: status, droppedStdout: out.dropped, droppedStderr: err.dropped)
         }
     }
 

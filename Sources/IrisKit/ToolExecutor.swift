@@ -88,7 +88,7 @@ struct ToolExecutor {
         var tools = [
             FunctionDeclaration(
             name: "run_command",
-            description: "Executes a shell command. Use this for standard operations. When the command exits on the host, any background process still holding its output pipes is killed; redirect its output (`cmd > log 2>&1 &`) to keep it running.",
+            description: "Executes a shell command. Use this for standard operations. When the command exits on the host, any background process still holding its output pipes is killed; redirect its output (`cmd > log 2>&1 &`) to keep it running. Output over 32 KB keeps its first 24 KB and last 8 KB; for all of it, redirect to a file and read it in parts with read_file's start_line and line_count.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -100,11 +100,13 @@ struct ToolExecutor {
         ),
         FunctionDeclaration(
             name: "read_file",
-            description: "Reads the contents of a file. Given a directory, lists its entries instead: one level, sorted, one per line, directories ending in `/`, capped in size.",
+            description: "Reads the contents of a file. Given a directory, lists its entries instead: one level, sorted, one per line, directories ending in `/`, capped in size. A result over 32 KB keeps its first 24 KB and last 8 KB, with a line saying which lines were left out; read those with start_line and line_count.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
-                    "path": Schema(type: "STRING", description: "Absolute, tilde (~), or workspace-relative path to the file or directory. A relative path resolves against the conversation's bound workspace, not the app's directory.")
+                    "path": Schema(type: "STRING", description: "Absolute, tilde (~), or workspace-relative path to the file or directory. A relative path resolves against the conversation's bound workspace, not the app's directory."),
+                    "start_line": Schema(type: "INTEGER", description: "Optional. The first line to return, counting from 1. Default 1."),
+                    "line_count": Schema(type: "INTEGER", description: "Optional. How many lines to return from start_line. Default: to the end of the file.")
                 ],
                 required: ["path"]
             )
@@ -241,29 +243,13 @@ struct ToolExecutor {
                                     homeWritableOptIn: homeWritableOptIn)
         case "read_file":
             guard let path = args["path"]?.stringValue else { return "Error: Missing path" }
-            if let grant {
-                // §0.13: under a grant there is no Foundation branch. A nil decision is a refusal,
-                // because it may have been made while a component was a link.
-                guard let grantedMount else { return Self.notDecidedInsideGrant("read_file") }
-                guard let relative = Self.grantedComponents(of: path, cwd: cwd, grant: grant, decided: grantedMount) else {
-                    return Self.notUnderGrantedDirectory(grantedMount.source)
-                }
-                return await readFile(grantRoot: grantedMount.source, relative: relative)
+            let range: LineRange?
+            switch LineRange.parse(start: args["start_line"], count: args["line_count"]) {
+            case .failure(let message): return message.text
+            case .success(let parsed): range = parsed
             }
-            if let approvedWorkspaceRoot {
-                // The post-hook path: a `BeforeTool` rewrite out of the workspace is refused, not
-                // opened by path on the strength of an approval given to another one.
-                guard let relative = GoalContract.workspaceComponents(of: Self.resolvePath(path, cwd: cwd),
-                                                                      under: approvedWorkspaceRoot) else {
-                    return "Error: the path is not inside the approved workspace \(approvedWorkspaceRoot); nothing was read."
-                }
-                return await readFile(approvedWorkspace: approvedWorkspaceRoot, relative: relative)
-            }
-            if let decidedPath {
-                if let refusal = Self.decidedPathRefusal("read_file", path: path, cwd: cwd, decided: decidedPath) { return refusal }
-                return await readFile(decided: decidedPath)
-            }
-            return await readFile(path, cwd: cwd)
+            return LineRange.apply(range, to: await readFileWhole(path: path, cwd: cwd, grant: grant, grantedMount: grantedMount,
+                                                                  approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath))
         case "write_file":
             guard let path = args["path"]?.stringValue, let content = args["content"]?.stringValue else { return "Error: Missing path or content" }
             if let grant {
@@ -636,7 +622,8 @@ struct ToolExecutor {
         // orphan that inherited the pipes holds them open. After a normal exit, a background job
         // still holding the pipes is killed rather than waited on, so it cannot block the answer
         // (invariant 4); one that redirected its output is left running.
-        let runner = ProcessGroupRunner()
+        // #709: at most `drainBytes` of each stream in memory, its head and its real end.
+        let runner = ProcessGroupRunner(outputLimit: OutputCap.drainBytes)
         let registry = ephemeralRegistry
         // Killing the client leaves the container running, so the runner's ladder deletes it once
         // the client is dead — on the runner's queue, not in a `Task` here, which would wait for
@@ -673,12 +660,16 @@ struct ToolExecutor {
                     case .failure(let error): return "Error executing command: \(error.localizedDescription)"
                     }
                     var result = ""
-                    if let outputStr = String(data: output.stdout, encoding: .utf8), !outputStr.isEmpty {
-                        result += outputStr
-                    }
-                    if let errorStr = String(data: output.stderr, encoding: .utf8), !errorStr.isEmpty {
-                        result += "\nStderr: " + errorStr
-                    }
+                    // A stream the drain cut can join its head and tail inside a character: decoded
+                    // lossily then, rather than lost whole.
+                    let outputStr = output.droppedStdout > 0 ? String(decoding: output.stdout, as: UTF8.self)
+                                                             : String(data: output.stdout, encoding: .utf8)
+                    let errorStr = output.droppedStderr > 0 ? String(decoding: output.stderr, as: UTF8.self)
+                                                            : String(data: output.stderr, encoding: .utf8)
+                    if let outputStr, !outputStr.isEmpty { result += outputStr }
+                    if let errorStr, !errorStr.isEmpty { result += "\nStderr: " + errorStr }
+                    let dropped = output.droppedStdout + output.droppedStderr
+                    if dropped > 0 { result = OutputCap.cap(result, advice: .runCommand, droppedBytes: dropped) }
                     // When sandboxing is on and the `container` runtime failed to start the command
                     // (not provisioned: services down or no VM kernel), it emits opaque errors like
                     // "unauthorized request". Rewrite those to an actionable message so the model and
@@ -784,6 +775,35 @@ struct ToolExecutor {
         guard !(expanded as NSString).isAbsolutePath, let cwd = cwd else { return expanded }
         let base = IrisEngine.expandTilde(cwd)
         return URL(fileURLWithPath: base).appendingPathComponent(expanded).path
+    }
+
+    /// `read_file`'s four routes, unchanged by #709's range: a grant's walk, an approved
+    /// workspace's walk, the decided path's walk, or the plain read.
+    private func readFileWhole(path: String, cwd: String?, grant: JobGrant?, grantedMount: ContainerMount?,
+                               approvedWorkspaceRoot: String?, decidedPath: String?) async -> String {
+        if let grant {
+            // §0.13: under a grant there is no Foundation branch. A nil decision is a refusal,
+            // because it may have been made while a component was a link.
+            guard let grantedMount else { return Self.notDecidedInsideGrant("read_file") }
+            guard let relative = Self.grantedComponents(of: path, cwd: cwd, grant: grant, decided: grantedMount) else {
+                return Self.notUnderGrantedDirectory(grantedMount.source)
+            }
+            return await readFile(grantRoot: grantedMount.source, relative: relative)
+        }
+        if let approvedWorkspaceRoot {
+            // The post-hook path: a `BeforeTool` rewrite out of the workspace is refused, not
+            // opened by path on the strength of an approval given to another one.
+            guard let relative = GoalContract.workspaceComponents(of: Self.resolvePath(path, cwd: cwd),
+                                                                  under: approvedWorkspaceRoot) else {
+                return "Error: the path is not inside the approved workspace \(approvedWorkspaceRoot); nothing was read."
+            }
+            return await readFile(approvedWorkspace: approvedWorkspaceRoot, relative: relative)
+        }
+        if let decidedPath {
+            if let refusal = Self.decidedPathRefusal("read_file", path: path, cwd: cwd, decided: decidedPath) { return refusal }
+            return await readFile(decided: decidedPath)
+        }
+        return await readFile(path, cwd: cwd)
     }
 
     private func readFile(_ path: String, cwd: String? = nil) async -> String {
