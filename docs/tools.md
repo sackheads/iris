@@ -18,4 +18,4 @@ Every tool result the model sees is held to **32 KB** (#709). A longer one keeps
 - after `read_file`, the line names the lines to read next (`read_file start_line=N line_count=M`);
 - after `run_command`, it says to redirect the output to a file and read that in parts.
 
-The cap is applied before the prompt-injection guard, so the guard judges exactly what the model will read. The tier-3 canary, which may be a cloud model, is never sent more than this, however long the result was. These are fixed sizes, not settings.
+The cap is applied before the prompt-injection guard, so the guard judges exactly what the model will read. The tier-3 canary, which may be a cloud model, is never sent more than this, however long the result was, and when tier 2 has no model yet, a longer input from elsewhere (a system event, a peer's message) is cut to what the canary judged, so no unjudged middle reaches the model. Because tool results arrive at this size, tier 2's own bounds (its window cap and its limit on lines judged alone) never bind on them; they bind only on those longer inputs. These are fixed sizes, not settings.

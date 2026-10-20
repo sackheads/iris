@@ -378,6 +378,11 @@ public struct InjectionGuard {
             // disk the key changes and a stale skip can never be served.
             break
         }
+        // #709: tier 3 judges at most the cap. With tier 2 skipped (no model yet, #210) nothing
+        // would judge a longer text's middle, so the text itself is cut to what the canary judges:
+        // the model reads exactly what was judged. A tool result is already this size; this binds
+        // the inputs that don't pass the choke point (system events, peer messages).
+        if case .skipped = tier2, maxTier == .tier3_canary { clean = OutputCap.cap(clean) }
 
         if maxTier == .tier2_coreML {
             let passed = GuardOutcome.passed(clean: clean)
