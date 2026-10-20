@@ -23,7 +23,8 @@ This spec adds a script job on a **mutating job's grant**: read-write mounts, un
 - **Git in a writable mount.** Like a sandbox session (#623), the run's container joins `GitConfigGuard`:
   - `watch(owner:sources:)` on the read-write mounts before the exec, and `check(owner:)` after it;
   - a disallowed change is put back, and that run is `failed` with the guard's notice as its outcome;
-  - the container's `end(owner:)` is on the sweep.
+  - the check runs on **every exit**, including a timeout kill and a cancel: it rides the sweep, before the guard's `end(owner:)`, and a finding on a killed run is reported with the timeout;
+  - **nested repositories** under a read-write mount: the guard and the read-only `.git/hooks` overlay cover the repository at the mount's root, as for a sandbox session. A nested one's hooks are writable, which is the dialog's "a nested repository's hooks" in fork 2's warning. It doesn't list them, since a scan could be large. docs/jobs.md says to mount the repository itself, not a folder of them, when its hooks matter.
 
   There's no `SandboxGitSync`: a script job's commits stay in the mount, where the script made them. Host git there is held to the guard's rules, as it is after any sandboxed write.
 
@@ -51,11 +52,13 @@ This spec adds a script job on a **mutating job's grant**: read-write mounts, un
 - **The mounts are the input.** "Sweep `.dmg` files older than a week" is meant to act on whatever is there. Reviewing the script is reviewing what it does to any content, which is what a person can judge.
 - **The real hole is narrower**, and it's #330's known limit made worse: a script that **executes a file from a read-write mount** (`sh /mnt/repo/tidy.sh`) runs whatever that file holds, and the script can rewrite that file itself. So what runs on the next fire can be content no one reviewed.
   - I don't propose to parse shell to catch it.
-  - The dialog adds, when any mount is read-write: "If this script runs a file from these folders, that file can change between runs, and it will run as it is then." docs/jobs.md says the same, with the advice to keep the logic in the script itself.
+  - The dialog adds, when any mount is read-write: "If this script runs, or reads instructions from, a file in these folders (`sh`, `source`, `python`, `make`, a nested repository's hooks), that file can change between runs, and it will be used as it is then." docs/jobs.md says the same, with the advice to keep the logic in the script itself.
 
 **Ruled: no content re-review; the fingerprint gains each mount's read-only flag and the profile** (planner).
 
-**What the fingerprint must gain:** each mount's read-only flag and the job's profile. Then turning a read-only mount read-write, outside Iris or through a re-schedule, is "changed since review", never a silent widening. A test pins it: flipping one mount's flag in the stored row pauses the next fire.
+**What the fingerprint must gain** (dev-2 and dev-3, #721 review): a writing job's folders come from the grant, which #698 doesn't fingerprint at all, so the fingerprint takes **the grant's mounts (source, target, read-only) and its network, plus the profile**. A read-only job's `script_mounts` strings already carry `:ro`, so they need nothing new.
+- **The encoding is additive.** Each new input is written only when it differs from its default (no grant, profile `readOnly`). So a read-only script job with no grant hashes **byte-identically** to #698's v1, nothing is re-asked on upgrade, and there's no re-fingerprint pass to replay (#698's TOFU hazard).
+- A test pins the byte-identical v1 hash for a read-only job. Then turning a read-only mount read-write, outside Iris or through a re-schedule, is "changed since review", never a silent widening. A test pins it: flipping one mount's flag in the stored row pauses the next fire.
 
 ### 3. Do #330's card rules still fit?
 
@@ -98,8 +101,7 @@ The danger is a script that fills the disk (a loop that appends, or a `cp` into 
 
 - **Invariant 4.** Unchanged from #330: the container joins `LiveContainerNames`, the deadline is the dispatch watchdog, the kill happens in the VM, and the sweep runs on every exit. The `GitConfigGuard` `end` rides the sweep.
 - **Invariant 1.** No new persisted field beyond #330's. The profile and grant are existing `Job` fields. The fingerprint's new inputs (the read-only flags, the profile) change its *value*, not a schema.
-  - **What upgrading does:** a script job fingerprinted by #698 reads as "changed since review" once and asks again.
-  - **Better, since every #698 script job is read-only:** a one-time re-fingerprint under the old inputs' meaning, keyed by a marker, so no one is re-asked for a job that didn't change. I lean that way, and the reviewers should weigh it.
+  - **Upgrading changes nothing.** The new inputs are written only away from their defaults, so every #698 script job, all of them read-only, hashes as it did. Nothing is re-asked, and there is no marker or re-fingerprint pass, which would be #698's trust-on-first-use replay (dev-2 and dev-3).
 - **Invariant 6.** No new tool and no new argument.
 - **Invariant 9**, the sentences to search for when it's built:
   - #330's "script jobs are read-only" lines in docs/jobs.md;
