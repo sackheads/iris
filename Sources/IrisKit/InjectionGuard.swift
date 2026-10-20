@@ -34,7 +34,12 @@ public struct InjectionGuard {
     /// cached, so a transient model outage does not pin content as blocked for the process.
     /// `skipped` means the tier was never evaluated because its model is unprovisioned; the call
     /// site treats it exactly like `safe` for wrapping and caching (earlier tiers already ran).
-    enum TierVerdict { case safe, malicious, error, skipped }
+    enum TierVerdict: Equatable {
+        case safe, malicious, error, skipped
+        /// Tier 2 flagged some lines, not all (#725 ruling (d)): the text with those withheld,
+        /// which the later tiers judge in place of the original.
+        case partial(redacted: String)
+    }
 
     /// The tier verdict for one payload, *before* the `<untrusted_context>` wrapper is applied
     /// (#235). `sanitize` is `classify` + wrapping; callers that score many small payloads and
@@ -326,7 +331,7 @@ public struct InjectionGuard {
                                                     tier2ModelsDir: tier2ModelsDir, tier3ModelsDir: tier3ModelsDir)
 
         // Tier 1: Strict Structural Isolation & Text Normalization
-        let clean = measureSpanSync("guard.tier1") { executeTier1(rawInput) }
+        var clean = measureSpanSync("guard.tier1") { executeTier1(rawInput) }
 
         if maxTier == .tier1_structural {
             // Never reaches `cache` at all (see below) — but it is a pure function of `rawInput`
@@ -362,6 +367,10 @@ public struct InjectionGuard {
             let blocked = GuardOutcome.blocked(marker: "[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]")
             cache?.set(key, blocked)
             return (blocked, true)
+        case .partial(let redacted):
+            // The flagged lines are withheld and the rest goes on (#725 ruling (d)): tier 3, and
+            // the result, see the redacted text.
+            clean = redacted
         case .safe, .skipped:
             // A tier-2 skip (unprovisioned/notConfigured) IS cached, exactly like `.safe` — same
             // reasoning as tier 3's cache (#210 mirrors #202 fix round 2): `tier2Provisioning`
@@ -385,7 +394,7 @@ public struct InjectionGuard {
             let blocked = GuardOutcome.blocked(marker: "[CONTENT BLOCKED BY TIER 3 CANARY GUARD]")
             cache?.set(key, blocked)
             return (blocked, true)
-        case .safe, .skipped:
+        case .safe, .skipped, .partial:   // tier 3 never withholds part; it judges the whole
             // #202 fix round 2 (reversing fix round 1): a skip IS cached, exactly like `.safe`.
             // Static context (USER.md, AGENTS.md, plugin rules) being re-sanitized through tiers
             // 1/2 on every turn is the exact cost #130 measured and this cache exists to avoid —
@@ -485,7 +494,10 @@ public struct InjectionGuard {
 
         let startTime = UptimeClock.live.now()   // uptime: a sleep is not time spent (#608)
         do {
-            let probability = try await CoreMLEvaluator.shared.evaluate(text: input)
+            // #722, #725 (d): judged in windows of whole lines; only a flagged window's lines are
+            // withheld, and a text whose every line is flagged is blocked as before.
+            let judgement = try await CoreMLEvaluator.shared.judge(text: input)
+            let probability = judgement.highest
             let durationMs = UptimeClock.live.seconds(since: startTime) * 1000
             // A tier that reached a verdict is working, whatever the verdict says about the
             // content (#218). Cleared here rather than on `.safe` alone: `.malicious` is the tier
@@ -496,9 +508,14 @@ public struct InjectionGuard {
             await MainActor.run { GuardTierHealth.current.clearTier2() }
             await MetricsManager.shared.trackLatency(operation: .promptGuardTier2, modelName: "CoreML", durationMs: durationMs, success: true)
 
-            if probability > 0.9 {
+            if judgement.allWithheld {
                 print("[InjectionGuard] Tier 2 CoreML flagged injection (source: \(source)) with probability: \(probability)")
                 return .malicious
+            }
+            if !judgement.withheld.isEmpty {
+                let lines = judgement.withheld.reduce(0) { $0 + $1.count }
+                print("[InjectionGuard] Tier 2 CoreML withheld \(lines) of \(judgement.lineCount) lines (source: \(source)), highest probability \(probability) (#725).")
+                return .partial(redacted: judgement.redacting(input))
             }
             return .safe
         } catch {

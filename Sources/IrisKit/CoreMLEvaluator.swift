@@ -1,8 +1,18 @@
 import Foundation
+import os
 import CoreML
 
 public protocol CoreMLModelProtocol: Sendable {
     func evaluate(text: String) async throws -> Double
+    /// How many tokens `text` is, without the tokenizer's own markers (#722): what decides how
+    /// many lines fit one window.
+    func tokenCount(_ text: String) -> Int
+}
+
+extension CoreMLModelProtocol {
+    /// A character a token: never fewer tokens than a real tokenizer gives for dense text, so a
+    /// model that can't count (a test's stand-in) is given windows that surely fit.
+    public func tokenCount(_ text: String) -> Int { text.count }
 }
 
 public final class CoreMLEvaluator: @unchecked Sendable {
@@ -113,7 +123,292 @@ public final class CoreMLEvaluator: @unchecked Sendable {
             return 0.0
         }
         
-        return try await m.evaluate(text: text)
+        // #722: the model judges the whole text, in overlapping token windows (`TokenWindows`);
+        // here it is only held to a character bound, so tokenizing it stays cheap.
+        return try await m.evaluate(text: Self.bounded(Self.collapsingRepeatedLines(text)))
+    }
+
+    /// Runs of identical lines, collapsed to one line marked with its count (#725). Repetitive
+    /// output (build and test logs, `yes`) is ordinary, and the model scored 36 copies of one plain
+    /// sentence at 0.999; with windows judged by their maximum (#722) that would block such output
+    /// whole. A different line ends a run, so nothing can hide inside a collapse, and a repeated
+    /// injection line is still judged, once.
+    static func collapsingRepeatedLines(_ text: String) -> String {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        guard lines.count > 2 else { return text }
+        var out: [String] = []
+        out.reserveCapacity(lines.count)
+        var index = 0
+        while index < lines.count {
+            var end = index + 1
+            while end < lines.count, lines[end] == lines[index] { end += 1 }
+            let run = end - index
+            out.append(run > 1 ? "\(lines[index]) \u{00D7}\(run)" : String(lines[index]))
+            index = end
+        }
+        return out.count == lines.count ? text : out.joined(separator: "\n")
+    }
+
+    /// What tier 2 decided about one text, line by line (#722, #725 ruling (d)).
+    struct Judgement: Equatable, Sendable {
+        /// The highest probability any window scored.
+        var highest: Double
+        /// The text's lines (0-based) that a flagged window held, merged into ranges.
+        var withheld: [ClosedRange<Int>]
+        var lineCount: Int
+        /// Withheld ranges the inference budget left at a whole window, unnarrowed.
+        var unnarrowed: [ClosedRange<Int>] = []
+        /// Withheld ranges past the bounds on the whole-text pass: never judged at all.
+        var unjudged: [ClosedRange<Int>] = []
+
+        /// What a range withheld unjudged says in its marker, and what `unjudgedLines(in:)` finds.
+        static let notJudgedNote = "; too long to judge whole, so not judged"
+
+        /// The 1-based line ranges ("a-b", or "a") a guarded text says were withheld unjudged.
+        static func unjudgedLines(in text: String) -> [String] {
+            let pattern = #"\[lines? (\d+(?:-\d+)?) of this output withheld by the injection guard"# + NSRegularExpression.escapedPattern(for: notJudgedNote) + #"\]"#
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+            return regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap {
+                Range($0.range(at: 1), in: text).map { String(text[$0]) }
+            }
+        }
+
+        var allWithheld: Bool { lineCount > 0 && withheld.reduce(0) { $0 + $1.count } >= lineCount }
+
+        /// `text` with each withheld range replaced by one marker naming its lines, 1-based and
+        /// counted in the text the guard was given, which is the output as shown (agreed with
+        /// #709, whose cap line names file lines for what it hid, since only those can be re-read).
+        func redacting(_ text: String) -> String {
+            guard !withheld.isEmpty else { return text }
+            let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+            var out: [String] = []
+            var index = 0
+            for range in withheld {
+                out += lines[index..<range.lowerBound].map(String.init)
+                let coarse = unjudged.contains { $0.overlaps(range) } ? Judgement.notJudgedNote
+                    : unnarrowed.contains { $0.overlaps(range) } ? "; not narrowed further, to bound the guard's work" : ""
+                out.append(range.count == 1 ? "[line \(range.lowerBound + 1) of this output withheld by the injection guard\(coarse)]"
+                                            : "[lines \(range.lowerBound + 1)-\(range.upperBound + 1) of this output withheld by the injection guard\(coarse)]")
+                index = range.upperBound + 1
+            }
+            out += lines[index...].map(String.init)
+            return out.joined(separator: "\n")
+        }
+    }
+
+    /// The probability over which a window is withheld; `InjectionGuard`'s tier-2 threshold.
+    static let flagThreshold = 0.9
+    /// Tokens a window may hold. 128, not the models' full 512 (planner, #723): on typical test
+    /// output, a 500-token window scored ~0.95 though no part of it flagged alone, and the whole
+    /// window was withheld (398 of 471 lines); at 128 none was, and it ran faster.
+    static let windowTokens = 128
+    /// Tokens of trailing lines a window repeats from the one before, so an instruction across a
+    /// line break is judged whole once: a quarter of the window.
+    static let overlapTokens = 32
+
+    /// Judges `text` in windows of whole lines and reports which lines a flagged window held
+    /// (#725 ruling (d)): only those are withheld, not the whole text. Runs of identical lines are
+    /// judged once, as one counted line, and withheld whole when flagged. A line longer than a
+    /// window is judged alone, in the model's own token windows.
+    func judge(text: String) async throws -> Judgement {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        guard let m = effectiveModel else {
+            print("[CoreMLEvaluator] No model loaded. Defaulting to 0.0 (safe).")
+            return Judgement(highest: 0, withheld: [], lineCount: lines.count)
+        }
+        var highest = 0.0
+        var flagged: [ClosedRange<Int>] = []
+        var unnarrowed: [ClosedRange<Int>] = []
+        var unjudged: [ClosedRange<Int>] = []
+        // Past `maxCharacters` of collapsed text (#723 review), the head and the tail are judged and
+        // the lines between are withheld unjudged, which fails closed: only a caller past #709's
+        // cap gets here. Measured after collapsing, so 1 MB of one repeated line is judged whole.
+        var runs = Self.lineRuns(lines)
+        if runs.reduce(0, { $0 + $1.text.count + 1 }) > Self.maxCharacters, runs.count > 2 {
+            var head = 0, headChars = 0
+            while head < runs.count - 1, headChars + runs[head].text.count + 1 <= Self.maxCharacters / 2 { headChars += runs[head].text.count + 1; head += 1 }
+            var tail = runs.count, tailChars = 0
+            while tail - 1 > head, tailChars + runs[tail - 1].text.count + 1 <= Self.maxCharacters / 2 { tail -= 1; tailChars += runs[tail].text.count + 1 }
+            if tail > head {
+                let middle = runs[head].lines.lowerBound...runs[tail - 1].lines.upperBound
+                flagged.append(middle)
+                unjudged.append(middle)
+                runs.removeSubrange(head..<tail)
+            }
+        }
+        let costs = runs.map { m.tokenCount($0.text) + 1 }
+        // The whole-text windows always run, uncounted, so every line is judged; narrowing spends
+        // the budget, and a flagged window past it is withheld whole (planner, #723). At 128-token
+        // windows the whole-text pass is itself ~100 calls on 32 KB (#723 review), so it can't share.
+        var calls = 0
+        func score(_ text: String) async throws -> Double {
+            calls += 1
+            return try await m.evaluate(text: text)
+        }
+        var windows = runs.isEmpty ? [] : Self.windows(costs, in: 0...(runs.count - 1), size: Self.windowTokens, overlap: Self.overlapTokens)
+        // The whole-text pass is bounded too (planner, #723): a caller in front of no output cap (a
+        // 5 MB tool result on main, an event, memory) would otherwise cost thousands of calls. Past
+        // `maxWindows`, the first and last halves are judged and the lines between are withheld,
+        // unjudged: shown unjudged, they'd be exactly the gap this exists to close.
+        if windows.count > Self.maxWindows {
+            let keep = Self.maxWindows / 2
+            let firstSkipped = windows[keep - 1].upperBound + 1, lastSkipped = windows[windows.count - keep].lowerBound - 1
+            if firstSkipped <= lastSkipped {
+                let middle = runs[firstSkipped].lines.lowerBound...runs[lastSkipped].lines.upperBound
+                flagged.append(middle)
+                unjudged.append(middle)
+                print("[CoreMLEvaluator] Tier 2: \(windows.count) windows is over \(Self.maxWindows); lines \(middle.lowerBound + 1)-\(middle.upperBound + 1) withheld unjudged (#723).")
+            }
+            windows = Array(windows.prefix(keep)) + Array(windows.suffix(keep))
+        }
+        for window in windows {
+            let windowScore = try await m.evaluate(text: runs[window].map(\.text).joined(separator: "\n"))
+            highest = max(highest, windowScore)
+            guard windowScore > Self.flagThreshold else { continue }
+            let span = runs[window.lowerBound].lines.lowerBound...runs[window.upperBound].lines.upperBound
+            guard calls < Self.inferenceBudget else {
+                flagged.append(span)
+                unnarrowed.append(span)
+                continue
+            }
+            // Narrowed to the small windows that flag on their own, so a warning costs its own
+            // lines and not the 60 around it. When none does, the signal needed the whole window,
+            // and the whole window is withheld.
+            var narrowed: [ClosedRange<Int>] = []
+            if window.count > 1 {
+                for small in Self.windows(costs, in: window, size: Self.narrowTokens, overlap: Self.narrowOverlapTokens) {
+                    guard calls < Self.inferenceBudget else { narrowed += [small]; continue }
+                    guard try await score(runs[small].map(\.text).joined(separator: "\n")) > Self.flagThreshold else { continue }
+                    // And to the single lines that flag on their own, if any; else the small window.
+                    var single: [ClosedRange<Int>] = []
+                    if small.count > 1, calls + small.count <= Self.inferenceBudget {
+                        // With its neighbour either side (#723 review): an injection's other lines
+                        // may not flag alone, and they are the payload around the one that does.
+                        for run in small where try await score(runs[run].text) > Self.flagThreshold {
+                            single.append(run...run)
+                        }
+                    }
+                    narrowed += single.isEmpty ? [small] : single
+                }
+            }
+            for runRange in narrowed.isEmpty ? [window] : narrowed {
+                let span = runs[runRange.lowerBound].lines.lowerBound...runs[runRange.upperBound].lines.upperBound
+                // With one original line either side (#723 review): an injection's other lines may
+                // not flag alone, and they are the payload around the one that does.
+                flagged.append(max(0, span.lowerBound - 1)...min(lines.count - 1, span.upperBound + 1))
+            }
+        }
+        if calls >= Self.inferenceBudget {
+            print("[CoreMLEvaluator] Tier 2 reached its budget of \(Self.inferenceBudget) model calls on one text; flagged windows past it are withheld whole (#723).")
+        }
+        return Judgement(highest: highest, withheld: Self.merged(flagged), lineCount: lines.count,
+                         unnarrowed: Self.merged(unnarrowed), unjudged: Self.merged(unjudged))
+    }
+
+    /// The most whole-text windows one text is judged in (planner, #723): 256, about 24k tokens of
+    /// distinct lines, or roughly 5 s on the local model.
+    static let maxWindows = 256
+
+    /// The most model calls narrowing may spend on one text (planner, #723). The whole-text windows
+    /// always run and aren't counted: a 32 KB tool result is about 100 of them at 128 tokens.
+    static let inferenceBudget = 128
+
+    /// The small windows a flagged window is narrowed to.
+    static let narrowTokens = 64
+    static let narrowOverlapTokens = 16
+
+    /// Windows over `range` of runs, each at most `size` tokens (a run alone may be more) and
+    /// repeating up to `overlap` tokens of the one before, always moving on.
+    static func windows(_ costs: [Int], in range: ClosedRange<Int>, size: Int, overlap: Int) -> [ClosedRange<Int>] {
+        var out: [ClosedRange<Int>] = []
+        var start = range.lowerBound
+        while start <= range.upperBound {
+            var end = start
+            var tokens = costs[start]
+            while end + 1 <= range.upperBound, tokens + costs[end + 1] <= size {
+                end += 1
+                tokens += costs[end]
+            }
+            out.append(start...end)
+            guard end < range.upperBound else { break }
+            var next = end + 1
+            var carried = 0
+            while next - 1 > start, carried + costs[next - 1] <= overlap {
+                next -= 1
+                carried += costs[next]
+            }
+            start = next
+        }
+        return out
+    }
+
+    /// Consecutive identical lines as one counted line, with the original lines it stands for.
+    static func lineRuns(_ lines: [Substring]) -> [(text: String, lines: ClosedRange<Int>)] {
+        var runs: [(text: String, lines: ClosedRange<Int>)] = []
+        var index = 0
+        while index < lines.count {
+            var end = index + 1
+            while end < lines.count, lines[end] == lines[index] { end += 1 }
+            let count = end - index
+            runs.append((count > 1 ? "\(lines[index]) \u{00D7}\(count)" : String(lines[index]), index...(end - 1)))
+            index = end
+        }
+        return runs
+    }
+
+    static func merged(_ ranges: [ClosedRange<Int>]) -> [ClosedRange<Int>] {
+        var out: [ClosedRange<Int>] = []
+        for range in ranges.sorted(by: { $0.lowerBound < $1.lowerBound }) {
+            if let last = out.last, range.lowerBound <= last.upperBound + 1 {
+                out[out.count - 1] = last.lowerBound...max(last.upperBound, range.upperBound)
+            } else {
+                out.append(range)
+            }
+        }
+        return out
+    }
+
+    /// The most characters handed to a model. Guarded text is bounded upstream far below this
+    /// (#709's 32 KB at the tool-result choke point, #724 for artifacts); past it, the head and the
+    /// tail are kept and that is logged once.
+    static let maxCharacters = 200_000
+    private static let loggedBound = OSAllocatedUnfairLock(initialState: false)
+
+    static func bounded(_ text: String) -> String {
+        guard text.count > maxCharacters else { return text }
+        if loggedBound.withLock({ let first = !$0; $0 = true; return first }) {
+            print("[CoreMLEvaluator] A text of \(text.count) characters is over \(maxCharacters); tier 2 judges its first and last \(maxCharacters / 2) (#722).")
+        }
+        return String(text.prefix(maxCharacters / 2)) + "\n" + String(text.suffix(maxCharacters / 2))
+    }
+}
+
+/// The token windows a tier-2 model judges one text in (#722). The models read 512 tokens; a
+/// window counted in characters still loses most of itself in CJK, base64 or minified code, where
+/// a character is about a token, so the text is encoded once and cut in tokens. Each window keeps
+/// the encoding's first and last tokens (the tokenizer's [CLS] and [SEP]) around its slice.
+enum TokenWindows {
+    static let overlap = 128
+    static let maxWindows = 64
+    private static let loggedSpread = OSAllocatedUnfairLock(initialState: false)
+
+    static func windows(_ tokens: [Int], sequenceLength: Int, overlap: Int = overlap,
+                        maxWindows: Int = maxWindows) -> [[Int]] {
+        guard tokens.count > sequenceLength, tokens.count >= 2, sequenceLength > 2 else { return [tokens] }
+        let first = tokens[0], last = tokens[tokens.count - 1]
+        let body = Array(tokens[1..<(tokens.count - 1)])
+        let size = sequenceLength - 2
+        let stride = max(1, size - overlap)
+        let lastStart = body.count - size
+        var starts = Array(Swift.stride(from: 0, to: lastStart, by: stride)) + [lastStart]
+        if starts.count > maxWindows {
+            // Evenly across the whole text, the first and last windows always included.
+            starts = (0..<maxWindows).map { lastStart * $0 / (maxWindows - 1) }
+            if loggedSpread.withLock({ let was = !$0; $0 = true; return was }) {
+                print("[TokenWindows] \(body.count) tokens need more than \(maxWindows) overlapping windows; sampled in \(maxWindows) evenly spread ones (#722).")
+            }
+        }
+        return starts.map { [first] + body[$0..<($0 + size)] + [last] }
     }
 }
 
@@ -155,12 +450,20 @@ public final class LiveCoreMLModel: CoreMLModelProtocol, @unchecked Sendable {
             return 0.0
         }
 
-        // Defensively truncate the raw text to prevent massive CPU spikes during tokenization
-        // if the input is a massive string (e.g. 10MB of scraped web HTML).
-        // 2000 characters is plenty to reach 512 tokens.
-        let safeText = String(text.prefix(2000))
-        
-        let tokens = tokenizer.encode(text: safeText)
+        // #722: encoded whole (the evaluator bounds its length) and judged in overlapping
+        // windows of the model's sequence length; the highest probability is the verdict, and
+        // a window past the guard's threshold ends it early.
+        var highest = 0.0
+        for window in TokenWindows.windows(tokenizer.encode(text: text), sequenceLength: sequenceLength) {
+            highest = max(highest, try await evaluate(window: window))
+            if highest > 0.9 { break }
+        }
+        return highest
+    }
+
+    public func tokenCount(_ text: String) -> Int { max(0, tokenizer.encode(text: text).count - 2) }
+
+    private func evaluate(window tokens: [Int]) async throws -> Double {
         var inputIds = tokens.map { Int32($0) }
         var attentionMask = [Int32](repeating: 1, count: inputIds.count)
         

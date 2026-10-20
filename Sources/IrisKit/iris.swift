@@ -337,7 +337,22 @@ actor IrisEngine {
             profileStamp = (path, stamp)
             cachedProfileText = safeUserProfile
         }
+        noteUnjudged(safeUserProfile, file: "USER.md")
         return safeUserProfile
+    }
+
+    /// The person's own files the guard couldn't judge whole this turn (planner, #723): said once
+    /// per file per change, since this runs only when the file was re-guarded, not on a cache hit.
+    private var pendingGuardNotices: [String] = []
+
+    private func noteUnjudged(_ guarded: String, file: String) {
+        let ranges = CoreMLEvaluator.Judgement.unjudgedLines(in: guarded)
+        guard !ranges.isEmpty else { return }
+        pendingGuardNotices.append(Self.unjudgedFileNotice(file: file, ranges: ranges))
+    }
+
+    nonisolated static func unjudgedFileNotice(file: String, ranges: [String]) -> String {
+        "\(file) is too long for the injection guard to judge whole; lines \(ranges.joined(separator: ", ")) weren't sent to the model. Shorten it to have them sent."
     }
 
     /// Clears the USER.md guard-output cache. Called by the `update_user_profile` handler so the
@@ -383,6 +398,7 @@ actor IrisEngine {
             agentsStamp[wp] = stamp
             cachedAgentsText[wp] = safeAgentsMd
         }
+        noteUnjudged(safeAgentsMd, file: "AGENTS.md")
         return safeAgentsMd
     }
 
@@ -2208,6 +2224,10 @@ actor IrisEngine {
         // `Content` it got last time, keeping the system prompt byte-stable for the provider's
         // prompt cache (5a §0.2).
         let currentSystemPrompt = await assembledSystemPrompt(workspacePath: workspacePath, agentProfile: agentProfile)
+        for notice in pendingGuardNotices {
+            await pushToUI(role: .system, text: notice, conversationId: conversationId)
+        }
+        pendingGuardNotices.removeAll()
 
         // Read once for the gates below that all ask about this conversation: whether it is an
         // unattended run, whether it has a goal to complete, what a job run of it may do, and
