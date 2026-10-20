@@ -99,6 +99,8 @@ Follow-ups that grew out of the epic, each tracked on its own:
 - **Command output caps** (#709): `run_command` output bounded on both routes, a memory cap and a much smaller head and tail the model sees. Planned.
 - **Run Log refusal filter** (#567) and **`ScheduleJobArguments` cleanup** (#517): in review.
 - **Job safety fixes in review:** gate mounts that contain Iris's home (#711, for #695); a job written only with the profile its approval decided (#712, for #660); folders a sandbox could write kept off a silent read's `PATH` (#710, for #616); an event card running a call as its hooks left it when recorded (#716, for #653); a guarded setting noticed only when it differs (#707, for #706).
+- **A gate script's creation verdict on its cards** (#650): the verdict recorded on the job and shown on its gate's event cards. Open.
+- **Script jobs that write** (#688): a script job on a mutating job's grant, with read-write mounts. Spec in progress; built after #330.
 - **Follow-ups filed from those reviews:** #713 (a watch's ledger read and write in one transaction), #714 (Approve and run for a job creation carries no decided profile), #717 (the writable-roots record: a deleted file reads as empty, and a broad login-PATH entry refuses everything).
 - **Agent profiles** (#465): done (#669, #671, #680, #692, #694); see `docs/agent_profiles.md`.
 
