@@ -287,10 +287,20 @@ struct DelegatedCharge: Codable, Equatable, Sendable {
 /// Where prices come from at charge time: the app's fetched cache when there is one, else the
 /// bundled snapshot. Read once per process and on `reload()`.
 final class PriceBook: Sendable {
-    static let shared = PriceBook(feed: ModelPriceFeed(paths: .default, keychain: KeychainManager.shared))
+    /// The process's book: the cached prices and the typed rates as this launch read them. The app
+    /// and a `--run-job` both charge with it; Settings hands it each save (#239 3c).
+    static let shared: PriceBook = {
+        let book = PriceBook(feed: ModelPriceFeed(paths: .default, keychain: KeychainManager.shared))
+        book.setTyped(ConfigManager.shared.subagentRates)
+        return book
+    }()
 
     private let feed: ModelPriceFeed?
     private let state: OSAllocatedUnfairLock<ModelPriceFeed.Cached?>
+    /// Rates typed in Settings (#239 3c), set at launch and on every save.
+    private let typed = OSAllocatedUnfairLock<[String: TokenRates]>(initialState: [:])
+
+    func setTyped(_ rates: [String: TokenRates]) { typed.withLock { $0 = rates } }
 
     init(feed: ModelPriceFeed?) {
         self.feed = feed
@@ -302,7 +312,13 @@ final class PriceBook: Sendable {
 
     func reload() { let fresh = feed?.cached(); state.withLock { $0 = fresh } }
 
-    func resolve(family: String?, model: String, side: PriceSide, loopback: Bool = false, endpointName: String? = nil) -> ResolvedRate {
+    func resolve(family: String?, model: String, side: PriceSide, loopback: Bool = false, endpointName: String? = nil,
+                 typedKey: String? = nil) -> ResolvedRate {
+        if !loopback, let typedKey, let rate = typed.withLock({ $0[typedKey] }) {
+            let row = family.flatMap { PriceTable.snapshot.rate(family: $0, model: model) }
+            let (rates, clamped) = TypedRates.clamp(rate, side: side, snapshotRow: row)
+            return ResolvedRate(rates: rates, source: clamped ? .settingsClamped : .settings, asOf: nil, estimated: false)
+        }
         let cached = state.withLock { $0 }
         return ModelPricing.resolve(family: family, model: model, side: side, loopback: loopback,
                                     fetched: cached.map { PriceTable(rows: $0.rows) }, fetchedAsOf: cached?.asOf,
@@ -313,9 +329,11 @@ final class PriceBook: Sendable {
     /// is `primaryProvider`/`primaryModel` (an `LLMProvider` raw value and a model id).
     func charge(_ usage: UsageComponents, pricing: DelegatedPricing, primaryProvider: String?, primaryModel: String?) -> DelegatedCharge {
         let delegated = resolve(family: pricing.family, model: pricing.model, side: .delegated, loopback: pricing.loopback,
-                                endpointName: pricing.family == nil ? pricing.endpointName : nil)
+                                endpointName: pricing.family == nil ? pricing.endpointName : nil,
+                                typedKey: TypedRates.key(providerId: pricing.providerId, model: pricing.model))
         let primaryFamily = primaryProvider.flatMap(LLMProvider.init(rawValue:)).map(PriceFamily.of)
-        let primary = resolve(family: primaryFamily, model: primaryModel ?? "", side: .primary)
+        let primary = resolve(family: primaryFamily, model: primaryModel ?? "", side: .primary,
+                              typedKey: TypedRates.primaryKey(model: primaryModel ?? ""))
         var charge = DelegatedCharge(providerId: pricing.providerId, model: pricing.model)
         charge.prompt = usage.prompt
         charge.output = usage.output
@@ -329,4 +347,47 @@ final class PriceBook: Sendable {
         charge.note = delegated.note ?? (charge.estimated && !pricing.loopback ? primary.note : nil)
         return charge
     }
+}
+
+/// Rates typed in Settings (#239 3c), kept in the guarded secrets item (`SUBAGENT_RATES`). A typed
+/// rate may move a charge freely toward overcharging; the other way it is bounded (planner): a
+/// delegated rate no lower than a tenth of its snapshot row, a primary rate no higher than ten
+/// times it, and for a model with no row the absolute bounds. A clamped rate says so.
+enum TypedRates {
+    static func key(providerId: String, model: String) -> String { providerId + "|" + model }
+    static func primaryKey(model: String) -> String { "primary|" + model }
+
+    static func decode(_ text: String) -> [String: TokenRates] {
+        guard !text.isEmpty, let data = text.data(using: .utf8),
+              let rows = try? JSONDecoder().decode([String: TokenRates].self, from: data) else { return [:] }
+        return rows.filter { PriceGuards.fieldsValid($0.value) }
+    }
+
+    static func encode(_ rates: [String: TokenRates]) -> String {
+        guard !rates.isEmpty, let data = try? JSONEncoder().encode(rates) else { return "" }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// `typed`, held to its bounds: the rate a charge uses, and whether a bound moved it.
+    static func clamp(_ typed: TokenRates, side: PriceSide, snapshotRow: TokenRates?) -> (rates: TokenRates, clamped: Bool) {
+        let band = PriceGuards.band
+        func bound(_ x: Double, _ ref: Double?) -> Double {
+            switch side {
+            case .delegated: max(x, ref.map { $0 / band } ?? PriceGuards.absoluteFloor)
+            case .primary: min(x, ref.map { $0 * band } ?? PriceGuards.absoluteCeiling)
+            }
+        }
+        let out = TokenRates(input: bound(typed.input, snapshotRow?.input), output: bound(typed.output, snapshotRow?.output),
+                             cacheRead: bound(typed.cacheRead, snapshotRow?.cacheRead),
+                             cacheWrite: typed.cacheWrite.map { bound($0, snapshotRow?.cacheWrite ?? snapshotRow?.input) })
+        return (out, out != typed)
+    }
+
+    /// Settings' warning (planner): a typed delegated rate below a tenth of its family's lowest.
+    static func lowersBudgetUse(_ typed: TokenRates, family: String?, snapshot: PriceTable = .snapshot) -> Bool {
+        guard let family, let rows = snapshot.rows[family], !rows.isEmpty else { return false }
+        let lowest = PriceGuards.extreme(Array(rows.values), side: .primary)!
+        return typed.input < lowest.input / PriceGuards.band || typed.output < lowest.output / PriceGuards.band
+    }
+    static let lowersBudgetWarning = "This lowers how much of the budget this model uses."
 }

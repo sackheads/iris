@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Settings → Models → Subagent providers (#239): the built-in families' switches and the
-/// custom OpenAI-compatible endpoints. Never shows a key's value.
+/// custom OpenAI-compatible endpoints. Never shows a key's value, only `KeyHint`'s suffix (#702).
 struct SubagentProvidersSection: View {
     @Bindable var config: ConfigManager
     var keychain: KeychainManager = .shared
@@ -51,6 +51,7 @@ struct SubagentProvidersSection: View {
                 }
             }
         }
+        ModelRatesSection(config: config, registry: registry)
         .sheet(item: $editing) { draft in
             EndpointEditor(draft: draft, taken: Set(config.subagentEndpoints.map(\.id))) { saved, key in
                 try config.saveSubagentEndpoint(saved, key: key, replacing: draft.originalId, keychain: keychain)
@@ -71,6 +72,9 @@ struct SubagentProvidersSection: View {
                 Text("\(family.rawValue): usable by subagents")
             }
             .disabled(entry?.hasKey != true)
+            if let key = Self.builtInKey(family, config: config) {
+                Text("Key: " + KeyHint.text(key)).font(.caption).foregroundColor(.secondary)
+            }
             Text(entry?.hasKey == true
                  ? "Its tier models, plus any extra models below. Subagents sent here send their whole context to \(family.rawValue)."
                  : "No key set for \(family.rawValue). Add one under LLM Providers to use it for subagents.")
@@ -117,7 +121,16 @@ struct SubagentProvidersSection: View {
     private func keyLine(_ endpoint: ProviderEndpoint, _ entry: RegisteredProvider?) -> String {
         if !endpoint.needsKey { return "No key (a server on this Mac)." }
         if entry?.originChanged == true { return "Key set for a different address: re-enter it with Edit." }
-        return entry?.hasKey == true ? "Key set." : "No key set."
+        return "Key: " + KeyHint.text(config.subagentEndpointKey(endpoint.id, keychain: keychain))
+    }
+
+    /// A built-in family's key as this launch loaded it; nil when it signs in with no key (ADC, Vertex).
+    static func builtInKey(_ family: LLMProvider, config: ConfigManager) -> String? {
+        switch family {
+        case .gemini: config.geminiAuthMode == GeminiAuthMode.adc.rawValue ? nil : config.geminiAPIKey
+        case .anthropic: config.anthropicAuthMode == AnthropicAuthMode.vertex.rawValue ? nil : config.anthropicAPIKey
+        case .openai: config.openAIAPIKey
+        }
     }
 
     @ViewBuilder private func checkLine(_ id: String) -> some View {
@@ -186,11 +199,13 @@ struct EndpointDraft: Identifiable {
     var models = ""
     var needsKey = true
     var key = ""
+    /// Where its prices come from (#239 3c), set by the preset and kept on an edit.
+    var priceFamily: String?
 
     init(preset: Preset) {
         switch preset {
-        case .deepseek: (slug, name, baseURL) = ("deepseek", "DeepSeek", "https://api.deepseek.com/v1")
-        case .openRouter: (slug, name, baseURL) = ("openrouter", "OpenRouter", "https://openrouter.ai/api/v1")
+        case .deepseek: (slug, name, baseURL, priceFamily) = ("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "deepseek")
+        case .openRouter: (slug, name, baseURL, priceFamily) = ("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "openrouter")
         case .ollama: (slug, name, baseURL, needsKey) = ("local-ollama", "Ollama", "http://localhost:11434/v1", false)
         case .custom: break
         }
@@ -203,6 +218,7 @@ struct EndpointDraft: Identifiable {
         baseURL = endpoint.baseURL
         models = endpoint.models.joined(separator: ", ")
         needsKey = endpoint.needsKey
+        priceFamily = endpoint.priceFamily
     }
 
     static func split(_ text: String) -> [String] {
@@ -211,7 +227,7 @@ struct EndpointDraft: Identifiable {
 
     var endpoint: ProviderEndpoint {
         ProviderEndpoint(id: slug.trimmingCharacters(in: .whitespaces), name: name, baseURL: baseURL,
-                         models: Self.split(models), needsKey: needsKey)
+                         models: Self.split(models), needsKey: needsKey, priceFamily: priceFamily)
     }
 }
 
@@ -252,5 +268,14 @@ private struct EndpointEditor: View {
         }
         .padding(20)
         .frame(width: 480)
+    }
+}
+
+/// How Settings shows a saved key (#702): never the key, only its last four characters, and not
+/// even those for a key too short to spare them. Read from what this launch already loaded.
+enum KeyHint {
+    static func text(_ key: String?) -> String {
+        guard let key, !key.isEmpty else { return "not set" }
+        return key.count < 8 ? "set" : "\u{2022}\u{2022}\u{2022}\u{2022}" + String(key.suffix(4))
     }
 }

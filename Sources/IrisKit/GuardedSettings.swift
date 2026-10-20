@@ -32,6 +32,9 @@ enum GuardedKey: String, CaseIterable, Sendable {
     /// "Usable by subagents" switches, as JSON text. Empty is none.
     case subagentProviders = "SUBAGENT_PROVIDERS"
     case subagentBuiltIns = "SUBAGENT_BUILTINS"
+    /// #239 3c: rates typed in Settings, JSON keyed `providerId|model` (a subagent's) or
+    /// `primary|model`. Guarded because a lower rate loosens a job's budget.
+    case subagentRates = "SUBAGENT_RATES"
 
     enum Kind { case url, cap(Int), flag, sandboxPref, blob }
 
@@ -53,7 +56,7 @@ enum GuardedKey: String, CaseIterable, Sendable {
         case .vibecopTimeoutSeconds: .cap(5)
         case .enableSandboxing, .enableVibecop, .enablePromptInjectionProtection: .flag
         case .mainAgentSandboxDefault: .sandboxPref
-        case .subagentProviders, .subagentBuiltIns: .blob
+        case .subagentProviders, .subagentBuiltIns, .subagentRates: .blob
         }
     }
 
@@ -301,7 +304,7 @@ extension ConfigManager {
         case .mainAgentSandboxDefault: mainAgentSandboxDefault.rawValue
         case .enableVibecop: enableVibecop ? "true" : "false"
         case .enablePromptInjectionProtection: enableAdvancedPromptInjectionProtection ? "true" : "false"
-        case .subagentProviders, .subagentBuiltIns: guardedBlob(key)
+        case .subagentProviders, .subagentBuiltIns, .subagentRates: guardedBlob(key)
         }
     }
 

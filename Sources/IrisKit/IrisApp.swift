@@ -20,6 +20,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         MainActor.assumeIsolated {
             // Sparkle wants its scheduled checks started after launch, not at construction.
             UpdaterController.shared?.start()
+            // #239 3c: the app keeps the price list fresh, at most daily; a `--run-job` never fetches.
+            ModelPriceRefresher.shared.start()
             // #463 decision 11: `finishLaunch` (startOnce, then the held links) runs once both this
             // and `openStore()` have happened, whichever is later. The gate also activates Iris,
             // except for a link launch while it waits (decision 13), and alerts a refused launch.
