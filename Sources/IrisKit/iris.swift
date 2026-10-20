@@ -3600,7 +3600,9 @@ actor IrisEngine {
         else { return "Jobs are not available yet." }
         let scheduler = schedulerForJobWrites(ledger: ledger)
 
-        var taken = Set(((try? ledger.jobs()) ?? []).map(\.name))
+        // One read for both the names in use and the job this call may replace (#517).
+        let jobs = (try? ledger.jobs()) ?? []
+        var taken = Set(jobs.map(\.name))
         // §0.1: an explicit name that this conversation already used is a re-schedule, and a
         // re-schedule replaces — the schedule, the prompt, the profile and the grant alike. Another
         // conversation's job of that name is not ours to replace and still gets a suffix. So does a
@@ -3609,7 +3611,7 @@ actor IrisEngine {
         var replacing: Job?
         if let name = args.name, let conversationId {
             let slug = Job.slug(from: name)
-            replacing = ((try? ledger.jobs()) ?? []).first {
+            replacing = jobs.first {
                 $0.name == slug && $0.createdInConversationId == conversationId && $0.trigger.kind != Trigger.fsEventKind
                     && $0.action == .prompt   // 5b §0.8: schedule_job never turns a built-in into a prompt job
             }
