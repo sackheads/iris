@@ -15,27 +15,39 @@ struct TranscriptFocusAnchor: NSViewRepresentable {
     func updateNSView(_ nsView: AnchorView, context: Context) {}
 
     final class AnchorView: NSView {
-        private var monitor: Any?
+        nonisolated(unsafe) private var monitor: Any?
+        /// The last mouse-down in this window was inside the transcript: a click, not the end of a
+        /// drag that began elsewhere (a composer text selection, the sidebar divider, the window).
+        private var downInside = false
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             if let monitor { NSEvent.removeMonitor(monitor); self.monitor = nil }
             guard window != nil else { return }
-            // On the mouse-up, and after AppKit has handled it: a row's button, link or menu has
+            // Acted on after AppKit has handled the event: a row's button, link or menu has
             // finished its own click by then, and the event itself always goes on unchanged.
-            monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp]) { [weak self] event in
                 if let self, event.window === self.window {
                     let point = event.locationInWindow
-                    DispatchQueue.main.async { self.focusTable(clickedAt: point) }
+                    let isDown = event.type == .leftMouseDown
+                    DispatchQueue.main.async { isDown ? self.mouseWentDown(at: point) : self.focusTable(clickedAt: point) }
                 }
                 return event
             }
         }
 
+        func mouseWentDown(at point: NSPoint) {
+            downInside = convert(bounds, to: nil).contains(point)
+        }
+
+        /// A mouse-up at `point`: focuses the table only when the mouse-down was inside too.
         func focusTable(clickedAt point: NSPoint) {
-            guard let window, let root = window.contentView,
+            defer { downInside = false }
+            guard downInside, let window, let root = window.contentView,
                   convert(bounds, to: nil).contains(point),
                   let table = Self.table(containing: point, in: root),
                   window.firstResponder !== table else { return }
