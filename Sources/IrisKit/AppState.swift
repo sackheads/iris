@@ -2650,6 +2650,13 @@ class AppState {
         return .allowed(target: target, depth: depth)
     }
 
+    /// #469 §7.5: removes artifacts no conversation has referenced for the grace period. At launch,
+    /// and daily through the maintenance hook.
+    func sweepArtifacts(now: Date = Date()) {
+        guard let referenced = try? store.artifacts.referencedHashes() else { return }
+        ArtifactStore(paths: IrisPaths.default).sweep(referenced: referenced, now: now)
+    }
+
     func deleteConversation(_ id: UUID) {
         for (messageId, _) in streaming.boxes(in: id) { streaming.remove(messageId) }   // #541
         clearUnread(id)   // #592
@@ -2659,6 +2666,8 @@ class AppState {
         // conversation's name for the event line it sends to each sender it closes out.
         closeRequestsToGone(id, verb: "deleted")
         try? store.peers.deleteMessages(involving: id)
+        // #469 §7.5: a deleted conversation no longer keeps its artifacts; the sweep frees them.
+        try? store.artifacts.deleteRefs(involving: id)
 
         // Its delegates go with it (#291): a background subagent is reached by no cancellation of
         // this conversation's tasks, and would go on working, asking and holding its container.
@@ -4855,6 +4864,7 @@ class AppState {
             // launch, rather than growing the ledger forever. An open request is kept regardless
             // of age. Best-effort; a failure here must not stop the app from finishing its load.
             try? store.peers.prune(before: Date().addingTimeInterval(-30 * 86_400))
+            sweepArtifacts()
         } catch {
             print("Failed to load conversations: \(error)")
             loadFailureHeadline = "\(error)"

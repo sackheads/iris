@@ -200,6 +200,8 @@ final class ConversationStore: Sendable {
     let ledger: JobLedger
     /// Peer messages ledger for correlation and open requests (#469).
     let peers: PeerLedger
+    /// Session artifacts' references (#469 §7): who may read each, and what keeps it.
+    let artifacts: ArtifactLedger
 
     private init(writer: any DatabaseWriter, path: URL?, alreadyMigrated: Bool = false,
                  openFailure: String? = nil) throws {
@@ -209,6 +211,7 @@ final class ConversationStore: Sendable {
         if !alreadyMigrated { try Self.migrator.migrate(writer) }
         self.ledger = JobLedger(writer: writer)
         self.peers = PeerLedger(writer: writer)
+        self.artifacts = ArtifactLedger(writer: writer)
     }
 
     static func inMemory() throws -> ConversationStore {
@@ -667,6 +670,21 @@ final class ConversationStore: Sendable {
         // #688: after #708's v28 (the order the overseer set); renumbered if that changes.
         m.registerMigration("v29_script_mount_figures") { db in
             try db.alter(table: "job_runs") { t in t.add(column: "mountFigures", .text) }
+        }
+        // #469 §7.6 B: who may read an artifact, and what keeps it. v28 by the overseer's numbering,
+        // registered after #739's v29, which landed first: migrations are applied by name, so a store
+        // that already has v29 gets this one next.
+        m.registerMigration("v28_artifact_refs") { db in
+            try db.create(table: "artifact_refs") { t in
+                t.column("sha256", .text).notNull()
+                t.column("conversationId", .text).notNull()
+                t.column("msgId", .text).notNull()
+                t.column("sent", .boolean).notNull()
+                t.column("bytes", .integer).notNull()
+                t.column("createdAt", .datetime).notNull()
+                t.primaryKey(["sha256", "conversationId", "msgId"])
+            }
+            try db.create(index: "artifact_refs_conversation", on: "artifact_refs", columns: ["conversationId"])
         }
         return m
     }

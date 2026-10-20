@@ -189,7 +189,18 @@ struct IrisPaths: Sendable {
     ///
     /// `rules/` is deliberately NOT here: it is prompt persistence, which the guard already treats
     /// as untrusted content, not a way to make something execute.
-    var protectedWriteDirs: [URL] { [configDir, pluginsDir] }
+    /// Session artifacts (#469 §7): content-addressed, written only by the harness.
+    var exchangeDir: URL { root.appendingPathComponent("exchange") }
+
+    var protectedWriteDirs: [URL] { [configDir, pluginsDir, exchangeDir] }
+
+    /// True if `rawPath` resolves inside the exchange (#469 §7.6 B): read only through
+    /// `iris-artifact://`, which checks the reader's reference and the content's hash.
+    func isUnderExchangeDir(_ rawPath: String) -> Bool {
+        let base = Self.realPath(exchangeDir.path).lowercased()
+        let target = Self.realPath(rawPath).lowercased()
+        return target == base || target.hasPrefix(base + "/")
+    }
 
     /// True if `rawPath` resolves to a location inside one of `protectedWriteDirs`.
     ///

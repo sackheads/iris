@@ -623,14 +623,15 @@ enum GateEvaluator {
         guard source != "/" else {
             return "the mount source \(source) is the whole filesystem, which is too much for a gate to read — name the directory the script actually looks at"
         }
-        // The same two directories `PermissionManager` will not let a write into: the allowlist,
-        // the hook definitions and the plugins are how Iris decides what anything may do, and a
-        // gate script reading them on a cadence puts them in a model's context forever. In a dev
+        // The directories `PermissionManager` will not let a write into: the allowlist, the hook
+        // definitions and the plugins are how Iris decides what anything may do, and a gate script
+        // reading them on a cadence puts them in a model's context forever; the attachment exchange
+        // (#469) is read only through its URI, which checks who may read each artifact. In a dev
         // process the installed app's own config and plugins are off limits too, the same
         // injectable identity/release pattern `PermissionManager.isProtectedWrite` uses.
         guard !paths.isUnderProtectedWriteDir(source),
               !(identity == .dev && release.isUnderProtectedWriteDir(source)) else {
-            return "the mount source \(source) is part of Iris's own configuration, which a gate may not read — name a directory outside it"
+            return "the mount source \(source) is part of Iris's own configuration or its attachment exchange, which a gate may not read — name a directory outside it"
         }
         // Nor a directory that *contains* Iris's home (#695): `~` or `~/.iris` read-only takes in
         // `config/` and `exchange/` with everything else, which is the rule job grants already
