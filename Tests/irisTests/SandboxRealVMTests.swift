@@ -36,7 +36,11 @@ enum RealContainer {
             launch: { args, timeout, onKill in
                 try await CLIProcessRunner(executable: binary).run(args, timeoutSeconds: timeout, onKill: onKill)
             },
-            fire: { args, timeout in BlockingSpawn.detached(binary, args, timeoutSeconds: Double(timeout)) })
+            fire: { args, timeout in BlockingSpawn.detached(binary, args, timeoutSeconds: Double(timeout)) },
+            // The bounded drain itself, not the after-the-fact cap a test launcher gets (#699).
+            launchCapped: { args, timeout, limit, onKill in
+                try await CLIProcessRunner(executable: binary).run(args, timeoutSeconds: timeout, outputLimit: limit, onKill: onKill)
+            })
     }
 
     /// Whether a process whose argv starts with `pattern` is running in `name`. Plain syscalls and
