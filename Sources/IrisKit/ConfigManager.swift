@@ -250,6 +250,12 @@ class ConfigManager: @unchecked Sendable {
         didSet { store.set(sandboxImage, forKey: "SANDBOX_IMAGE") }
     }
 
+    /// The session-attachment exchange's ceiling in megabytes (#469 §7.6 J). Disk, not spend,
+    /// egress or safety, so it lives in defaults (§7.6 H).
+    var artifactExchangeCapMB: Int {
+        didSet { store.set(artifactExchangeCapMB, forKey: "ARTIFACT_EXCHANGE_CAP_MB") }
+    }
+
     var sandboxIdleTimeoutMinutes: Int {
         didSet { store.set(sandboxIdleTimeoutMinutes, forKey: "SANDBOX_IDLE_TIMEOUT_MINUTES") }
     }
@@ -571,6 +577,8 @@ class ConfigManager: @unchecked Sendable {
         self.googleTokenExpiry = saved.double(forKey: "GOOGLE_TOKEN_EXPIRY")
         self.enableSandboxing = guardedBool(.enableSandboxing, "ENABLE_SANDBOXING")
         self.sandboxImage = saved.string(forKey: "SANDBOX_IMAGE") ?? "ubuntu:latest"
+        let savedExchangeCap = saved.integer(forKey: "ARTIFACT_EXCHANGE_CAP_MB")
+        self.artifactExchangeCapMB = savedExchangeCap <= 0 ? ArtifactLimits.defaultExchangeCapMB : savedExchangeCap
         let savedIdle = saved.integer(forKey: "SANDBOX_IDLE_TIMEOUT_MINUTES")
         self.sandboxIdleTimeoutMinutes = savedIdle == 0 ? 30 : savedIdle
 

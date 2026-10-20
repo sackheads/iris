@@ -1056,6 +1056,7 @@ struct SettingsView: View {
                 }
 
                 GoalWorkspacesSection(state: state)
+                SessionAttachmentsSection()
             }
             .formStyle(.grouped)
             .padding(20)

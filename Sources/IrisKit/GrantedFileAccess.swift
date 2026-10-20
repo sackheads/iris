@@ -122,6 +122,39 @@ struct GrantedFileAccess: Sendable {
         return text
     }
 
+    /// A regular file's bytes, walked from the root with no link followed (#469 §7.6 D), refused
+    /// over `maxBytes` rather than cut: an attachment is the whole file or nothing.
+    func readData(relative: [String], maxBytes: Int) throws -> Data {
+        try Self.validate(relative)
+        guard let name = relative.last else { throw GrantedFileError.notARegularFile(component: "/") }
+        let rootFD = try openRoot()
+        defer { close(rootFD) }
+        let dirFD = try descend(relative.dropLast(), from: rootFD)
+        defer { if dirFD != rootFD { close(dirFD) } }
+        let fd = openat(dirFD, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard fd >= 0 else { throw Self.error(errno, at: name, call: "openat") }
+        defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0 else { throw GrantedFileError.io(call: "fstat", errno: errno) }
+        guard (st.st_mode & S_IFMT) == S_IFREG else { throw GrantedFileError.notARegularFile(component: name) }
+        guard Int(st.st_size) <= maxBytes else { throw GrantedFileError.io(call: "size", errno: EFBIG) }
+        let flags = fcntl(fd, F_GETFL)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == 0 else {
+            throw GrantedFileError.io(call: "fcntl", errno: errno)
+        }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 65_536)
+        while true {
+            let n = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+            if n < 0 { throw GrantedFileError.io(call: "read", errno: errno) }
+            if n == 0 { break }
+            data.append(contentsOf: buffer[0..<n])
+            // A file that grows past the cap while being read is refused too.
+            if data.count > maxBytes { throw GrantedFileError.io(call: "size", errno: EFBIG) }
+        }
+        return data
+    }
+
     func write(relative: [String], content: String, shouldCommit: () -> Bool = { true }) throws {
         guard let name = relative.last else { throw GrantedFileError.emptyPath }
         try Self.validate(relative)
