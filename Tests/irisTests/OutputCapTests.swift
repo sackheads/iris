@@ -249,7 +249,8 @@ struct OutputCapTests {
         // #723's marker counts lines of the output shown (the planted line and one either side)...
         #expect(outcome.contains("[lines \(plantedAt - 1)-\(plantedAt + 1) of this output withheld by the injection guard"), "\(outcome.suffix(600))")
         // ...while the cap's line still names file lines, which read_file can fetch.
-        let headLines = try #require(Int(try #require(shown.first { $0.hasPrefix("[output truncated:") }).split(separator: " ")[5]))
+        let cutLine = try #require(shown.first { $0.hasPrefix("[output truncated:") })
+        let headLines = try #require(Int(cutLine.split(separator: " ")[5]))
         #expect(outcome.contains("read_file start_line=\(headLines + 1)"))
         #expect(plantedAt != 4995, "the two numberings differ in the tail, which is the point")
     }
