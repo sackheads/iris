@@ -64,7 +64,7 @@ final class RunLogModel {
     var jobFilter: UUID? {
         didSet { if jobFilter != oldValue { reload() } }
     }
-    var statusFilter: JobRun.Status? {
+    var statusFilter: JobLedger.RunLogStatus? {
         didSet { if statusFilter != oldValue { reload() } }
     }
     var showGateChecks = false {

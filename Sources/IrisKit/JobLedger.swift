@@ -758,8 +758,26 @@ extension JobLedger {
     /// The run log, newest first, with every kind of row: running rows, built-ins, and the
     /// stillborn skip and pause rows that `recentRuns` hides. Gate-unchanged completions are left
     /// out unless `includeGateUnchanged`, matched by prefix as `recentRuns` matches them.
+    /// What the Run Log's Status filter offers: the stored statuses, with `blockedOnApproval` split
+    /// the way the Status column words it (#553, #567), with no schema change.
+    enum RunLogStatus: Hashable, CaseIterable, Sendable {
+        case running, completed, failed, awaitingApproval, refusedByProfile, interrupted
+
+        var stored: JobRun.Status {
+            switch self {
+            case .running: return .running
+            case .completed: return .completed
+            case .failed: return .failed
+            case .awaitingApproval, .refusedByProfile: return .blockedOnApproval
+            case .interrupted: return .interrupted
+            }
+        }
+
+        var text: String { self == .refusedByProfile ? JobRun.Status.refusedByProfileText : stored.text }
+    }
+
     func runLog(limit: Int, before: RunLogCursor? = nil, jobId: UUID? = nil,
-                status: JobRun.Status? = nil, includeGateUnchanged: Bool = false) throws -> RunLogPage {
+                status: RunLogStatus? = nil, includeGateUnchanged: Bool = false) throws -> RunLogPage {
         // `prefix` traps on a negative count, and a page of nothing would never move on.
         let limit = max(limit, 1)
         var conditions: [String] = []
@@ -774,7 +792,17 @@ extension JobLedger {
         }
         if let status {
             conditions.append("status = ?")
-            arguments += [status.rawValue]
+            arguments += [status.stored.rawValue]
+            // #567: a profile refusal is stored as `blockedOnApproval` and told apart by its call's
+            // reason, read the way `BlockedCall` decodes it: anything but `approval` (missing or
+            // unknown included) is a refusal. A row with no call, or one that isn't JSON, reads
+            // `blocked on approval`, as its label does.
+            let refused = "(blockedCall IS NOT NULL AND json_valid(blockedCall) AND COALESCE(json_extract(blockedCall, '$.reason'), '') != 'approval')"
+            switch status {
+            case .awaitingApproval: conditions.append("NOT \(refused)")
+            case .refusedByProfile: conditions.append(refused)
+            default: break
+            }
         }
         if !includeGateUnchanged {
             conditions.append("NOT (status = ? AND outcome IS NOT NULL AND outcome LIKE ?)")

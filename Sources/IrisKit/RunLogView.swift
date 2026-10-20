@@ -30,7 +30,6 @@ struct RunLogView: View {
     static let defaultWidth: CGFloat = 1240
     static let defaultHeight: CGFloat = 480
 
-    private static let statuses: [JobRun.Status] = [.running, .completed, .failed, .blockedOnApproval, .interrupted]
 
     init(state: AppState) {
         self.state = state
@@ -93,9 +92,9 @@ struct RunLogView: View {
             }
             .frame(maxWidth: 240)
             Picker("Status", selection: $model.statusFilter) {
-                Text("Any status").tag(JobRun.Status?.none)
-                ForEach(Self.statuses, id: \.self) { status in
-                    Text(verbatim: status.text).tag(JobRun.Status?.some(status))
+                Text("Any status").tag(JobLedger.RunLogStatus?.none)
+                ForEach(JobLedger.RunLogStatus.allCases, id: \.self) { status in
+                    Text(verbatim: status.text).tag(JobLedger.RunLogStatus?.some(status))
                 }
             }
             .frame(maxWidth: 220)

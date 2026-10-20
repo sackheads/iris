@@ -114,4 +114,40 @@ struct RunLogQueryTests {
             #expect(page.next != nil)
         }
     }
+
+    @Test("blocked on approval and refused by profile filter apart, matching the Status column's words (#567)")
+    func refusalFilter() throws {
+        let store = try ConversationStore.inMemory()
+        let ledger = store.ledger
+        let j = job()
+        try ledger.upsert(j)
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        func blocked(_ offset: Double, _ call: BlockedCall?) throws -> JobRun {
+            let run = try row(j, at: base.addingTimeInterval(offset), status: .blockedOnApproval, ledger: ledger)
+            try ledger.setBlockedCall(runId: run.id, call)
+            return run
+        }
+        let waiting = try blocked(0, BlockedCall(toolName: "run_command", args: [:], cwd: nil, reason: .approval))
+        let refused = try blocked(1, BlockedCall(toolName: "write_file", args: [:], cwd: nil, reason: .profile))
+        let noCall = try blocked(2, nil)
+        // A call written with no reason decodes as a refusal (`BlockedCall`'s fail-closed read), and
+        // one that isn't JSON doesn't decode at all, so it keeps `blocked on approval`.
+        let noReason = try blocked(3, nil), garbled = try blocked(4, nil)
+        try store.writer.write { db in
+            try db.execute(sql: "UPDATE job_runs SET blockedCall = ? WHERE id = ?", arguments: [#"{"toolName":"x"}"#, noReason.id.uuidString])
+            try db.execute(sql: "UPDATE job_runs SET blockedCall = ? WHERE id = ?", arguments: ["not json", garbled.id.uuidString])
+        }
+        try row(j, at: base.addingTimeInterval(5), status: .failed, ledger: ledger)
+
+        let runs = try ledger.runLog(limit: 20).runs
+        func ids(_ status: JobLedger.RunLogStatus) throws -> Set<UUID> { Set(try ledger.runLog(limit: 20, status: status).runs.map(\.id)) }
+        #expect(try ids(.refusedByProfile) == [refused.id, noReason.id])
+        #expect(try ids(.awaitingApproval) == [waiting.id, noCall.id, garbled.id])
+        // Each filter is exactly the rows whose Status column reads its words.
+        for status in [JobLedger.RunLogStatus.refusedByProfile, .awaitingApproval] {
+            #expect(try ids(status) == Set(runs.filter { $0.statusText == status.text }.map(\.id)), "\(status)")
+        }
+        #expect(JobLedger.RunLogStatus.refusedByProfile.text == "refused by profile")
+        #expect(JobLedger.RunLogStatus.awaitingApproval.text == "blocked on approval")
+    }
 }
