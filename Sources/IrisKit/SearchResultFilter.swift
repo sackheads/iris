@@ -19,14 +19,15 @@ enum SearchResultFilter {
     /// normalized. The URL is never scored — a query string full of tracking parameters looks
     /// like an injection to a token classifier and carries no prose to judge.
     ///
-    /// `PromptInjectionGuard.sanitizeUntrustedInput` runs here, on the joined text, for the same
-    /// reason the whole-output path runs it before scoring: without the NFKC fold and the
-    /// control-character strip, a zero-width character or a homoglyph in a snippet is enough to
-    /// walk a real injection past the classifier. Joined rather than per-field so a pattern
+    /// `PromptInjectionGuard.normalize` runs here, on the joined text, for the same reason the
+    /// whole-output path runs it before scoring: without the NFKC fold and the control-character
+    /// strip, a zero-width character or a homoglyph in a snippet is enough to walk a real injection
+    /// past the classifier. Role delimiters are left for `InjectionGuard.classifyUntrusted` to strip,
+    /// so it can score the lines they were on alone (#727). Joined rather than per-field so a pattern
     /// straddling the newline is caught too. The stored result keeps its original title, url and
     /// snippet — normalization is what gets *scored*, not what gets returned.
     static func scoringText(title: String, snippet: String) -> String {
-        PromptInjectionGuard.sanitizeUntrustedInput("\(title)\n\(snippet)")
+        PromptInjectionGuard.normalize("\(title)\n\(snippet)")
     }
 
     /// Scores each result and re-serializes the survivors.

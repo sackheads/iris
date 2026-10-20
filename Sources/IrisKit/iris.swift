@@ -326,8 +326,7 @@ actor IrisEngine {
         }
         let userProfile = manager.getUserProfile()
         let (safeUserProfile, cacheable) = await measureSpan("assembly.userProfile") {
-            let structural = PromptInjectionGuard.sanitizeUntrustedInput(userProfile)
-            return await InjectionGuard.sanitizeCacheable(structural, contextTag: "user_profile", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
+            await InjectionGuard.sanitizeUntrustedCacheable(userProfile, contextTag: "user_profile", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
         }
         // A transient guard error (fix round 1) is shown for THIS turn but never cached: caching it
         // would pin the user's profile as blocked for every later turn of a long-lived main engine
@@ -389,8 +388,7 @@ actor IrisEngine {
             return nil
         }
         let (safeAgentsMd, cacheable) = await measureSpan("assembly.agentsMd") {
-            let structural = PromptInjectionGuard.sanitizeUntrustedInput(agentsMdContent)
-            return await InjectionGuard.sanitizeCacheable(structural, contextTag: "workspace_rules", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
+            await InjectionGuard.sanitizeUntrustedCacheable(agentsMdContent, contextTag: "workspace_rules", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
         }
         // Same rule as `guardedUserProfileText`: a transient error is shown this turn but never
         // recorded, so the next turn retries instead of serving a permanently-blocked workspace.
@@ -838,10 +836,9 @@ actor IrisEngine {
     /// `chargeTo`: the conversation the arrival is for, which a cloud guard call on it is charged
     /// to (#689, #700 review). The arrival is checked before any turn there binds its own sink.
     private func sanitizeArrival(_ message: String, source: String, chargeTo conversationId: UUID) async -> String {
-        let structuralSafeEvent = PromptInjectionGuard.sanitizeUntrustedInput(message)
         let sink = await MainActor.run { [state] in GuardUsage.charging(conversationId, in: state) }
         return await GuardUsage.$sink.withValue(sink) {
-            await InjectionGuard.sanitize(structuralSafeEvent, contextTag: "system_event_\(source)", maxTier: .tier3_canary,
+            await InjectionGuard.sanitizeUntrusted(message, contextTag: "system_event_\(source)", maxTier: .tier3_canary,
                                           protectionEnabled: protectionEnabled)
         }
     }
@@ -5036,8 +5033,8 @@ actor IrisEngine {
             // words and get mistaken for a block that never happened. `wrapped` then does exactly
             // what `sanitize` would have, from the same classification, so the guard runs once.
             let searchTag = "tool_output_search_conversations"
-            let searchOutcome = await InjectionGuard.classify(
-                PromptInjectionGuard.sanitizeUntrustedInput(body),
+            let searchOutcome = await InjectionGuard.classifyUntrusted(
+                body,
                 contextTag: searchTag, maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
             let guardedSearch = InjectionGuard.wrapped(searchOutcome, contextTag: searchTag)
             let searchBlocked: Bool
@@ -5090,15 +5087,15 @@ actor IrisEngine {
             }
             let rawFrom = ScheduleJobArguments.integer(functionCall.args["from"]) ?? 0
             let rawCount = ScheduleJobArguments.integer(functionCall.args["count"]) ?? ConversationReader.maxMessages
-            // Each visible message's content is sanitized as `page` assembles the "#n speaker:"
-            // lines, so another conversation's text can't forge "user:"/"assistant:"/"system:"/
-            // "model:" role labels of its own (same reasoning as search_conversations's hit-field
-            // flattening) — and only the messages this call actually considers emitting are run
-            // through it, not the whole conversation's history. `ConversationReader.page`
+            // Each visible message's content is normalized as `page` assembles the "#n speaker:"
+            // lines, and the page's role labels ("user:"/"assistant:"/"system:"/"model:") are
+            // stripped by `classifyUntrusted` below, which scores each line it stripped one from
+            // alone (#727), so another conversation's text can't forge one of its own (same reasoning
+            // as search_conversations's hit-field flattening). `ConversationReader.page`
             // separately neutralizes a body line that imitates "#12 owner:" or "(more from #N)"
             // itself, by quoting continuation lines.
             let (body, _) = ConversationReader.page(target.messages, from: rawFrom, count: rawCount) {
-                PromptInjectionGuard.sanitizeUntrustedInput($0)
+                PromptInjectionGuard.normalize($0)
             }
             // This branch returns its own result directly, so it never passes through
             // `executeToolWithHooks`'s guard — another conversation's text is guarded exactly as
@@ -5110,7 +5107,7 @@ actor IrisEngine {
             // string — a planted or quoted copy of that marker inside another chat, passed
             // through cleanly, would otherwise be mistaken for a block that never happened.
             let readTag = "tool_output_read_conversation"
-            let readOutcome = await InjectionGuard.classify(
+            let readOutcome = await InjectionGuard.classifyUntrusted(
                 body, contextTag: readTag, maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
             let guardedRead = InjectionGuard.wrapped(readOutcome, contextTag: readTag)
             let readBlocked: Bool
@@ -5213,8 +5210,8 @@ actor IrisEngine {
             // `executeToolWithHooks`, where the only other tool-output guard call lives. Message
             // snippets are raw composer and paste content, so the guard is applied here
             // explicitly (#177 review round 1) — facts included, which were unguarded before too.
-            result = await InjectionGuard.sanitize(
-                PromptInjectionGuard.sanitizeUntrustedInput(blocks.joined(separator: "\n\n")),
+            result = await InjectionGuard.sanitizeUntrusted(
+                blocks.joined(separator: "\n\n"),
                 contextTag: "tool_output_search_memory", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
         } else if functionCall.name == "update_user_profile", let content = functionCall.args["content"]?.stringValue {
             memory.updateUserProfile(content: content)
@@ -6136,7 +6133,7 @@ actor IrisEngine {
                // built to judge large blobs, while the token classifier is exactly the tool for a
                // prompt-sized title and snippet. If that is the wrong call, the cost is that
                // search snippets get tier 2 only.
-               if case .passed = await InjectionGuard.classify(text, contextTag: "tool_output_search_web_result",
+               if case .passed = await InjectionGuard.classifyUntrusted(text, contextTag: "tool_output_search_web_result",
                                                                maxTier: .tier2_coreML, protectionEnabled: protectionEnabled) {
                    return true
                }
@@ -6152,11 +6149,9 @@ actor IrisEngine {
             sanitizedResult = await InjectionGuard.sanitize(structuralSafeJSON, contextTag: "tool_output_search_web",
                                                             maxTier: .tier1_structural, protectionEnabled: protectionEnabled)
         } else {
-            // Tier 1 Sanitization: Apply structural isolation to prevent prompt injection from tool outputs
-            let structuralSafeResult = PromptInjectionGuard.sanitizeUntrustedInput(result)
-
-            // Tier 2 & 3 Sanitization: Active heuristic and canary detection (skipped for trusted tools)
-            sanitizedResult = await InjectionGuard.sanitize(structuralSafeResult, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled)
+            // Structural isolation, then tiers 2 and 3 (skipped for trusted tools), with the lines a
+            // role delimiter was stripped from scored alone (#727).
+            sanitizedResult = await InjectionGuard.sanitizeUntrusted(result, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled)
         }
         if name == "search_web" { sanitizedResult = OutputCap.cap(sanitizedResult) }
 
@@ -6477,7 +6472,7 @@ extension IrisEngine {
     /// `nil` — an absent field should read as absent, not as an empty untrusted wrapper.
     func guardedJobRunField(_ raw: String?, maxTier: InjectionGuard.SanitizationTier) async -> String? {
         guard let raw, !raw.isEmpty else { return nil }
-        return await InjectionGuard.sanitize(PromptInjectionGuard.sanitizeUntrustedInput(raw),
+        return await InjectionGuard.sanitizeUntrusted(raw,
                                              contextTag: "tool_output_get_job_run", maxTier: maxTier,
                                              protectionEnabled: protectionEnabled)
     }

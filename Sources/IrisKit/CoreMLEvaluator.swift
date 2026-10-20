@@ -206,7 +206,7 @@ public final class CoreMLEvaluator: @unchecked Sendable {
     /// was 96 of 127 matches in Iris's own docs, nearly all descriptive (planner, #730).
     /// Phrases that mark a line as a likely injection, judged alone whatever its window scored
     /// (#726), so benign padding can't dilute it. Matched on the tier-1 text, which has already
-    /// stripped role delimiters like `system:` (scoring those lines alone is #727).
+    /// stripped role delimiters like `system:`; `judge(text:delimiterLines:)` scores those lines alone (#727).
     static let injectionMarkers = try! NSRegularExpression(pattern:
         #"ignore\s+(all\s+)?(the\s+)?(previous|prior|above)|disregard\s+(all\s+)?(previous|prior|your|the)|you\s+are\s+now|new\s+instructions|(reveal|print|show|repeat|output|ignore|override|disregard|leak|dump)\s+(\w+\s+)?(your|the)\s+(\w+\s+)?system\s+prompt|<\|im_(start|end)\|>|\[/?INST\]|\[TOOL_CALL\]|developer\s+mode"#,
         options: [.caseInsensitive])
@@ -228,7 +228,10 @@ public final class CoreMLEvaluator: @unchecked Sendable {
     /// (#725 ruling (d)): only those are withheld, not the whole text. Runs of identical lines are
     /// judged once, as one counted line, and withheld whole when flagged. A line longer than a
     /// window is judged alone, in the model's own token windows.
-    func judge(text: String) async throws -> Judgement {
+    /// `delimiterLines` (#727): lines a role delimiter was stripped from, keyed by 0-based line,
+    /// with the line as it read before the strip. Each is scored alone, as it read, whatever its
+    /// window scored, like a phrase-marked line.
+    func judge(text: String, delimiterLines: [Int: String] = [:]) async throws -> Judgement {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
         guard let m = effectiveModel else {
             print("[CoreMLEvaluator] No model loaded. Defaulting to 0.0 (safe).")
@@ -360,6 +363,32 @@ public final class CoreMLEvaluator: @unchecked Sendable {
         }
         for run in marked.prefix(Self.maxMarkedLines) {
             let alone = try await m.evaluate(text: runs[run].text)
+            highest = max(highest, alone)
+            if alone > Self.flagThreshold {
+                let span = runs[run].lines
+                flagged.append(max(0, span.lowerBound - 1)...min(lines.count - 1, span.upperBound + 1))
+            }
+        }
+        // #727: a line a role delimiter was stripped from is scored alone as it read, delimiter
+        // and all, since the strip removed the strongest signal there is. Past the cap the rest
+        // are left to their windows, as before #727: `user:` is an everyday YAML key, so failing
+        // closed here would withhold ordinary config files.
+        let phraseMarked = Set(marked)
+        let coveredNow = Self.merged(flagged)
+        let stripped = runs.indices.compactMap { run -> (Int, String)? in
+            guard !phraseMarked.contains(run),
+                  !coveredNow.contains(where: { $0.contains(runs[run].lines.lowerBound) }),
+                  let line = runs[run].lines.lazy.compactMap({ delimiterLines[$0] }).first else { return nil }
+            return (run, line)
+        }
+        // Strongest first, then in file order (planner, #735): padding with weak `user:` lines can't
+        // push a `system:` or chat-template line past the cap.
+        let byStrength = stripped.enumerated()
+            .sorted { (PromptInjectionGuard.delimiterStrength($0.element.1), $0.offset)
+                    < (PromptInjectionGuard.delimiterStrength($1.element.1), $1.offset) }
+            .map(\.element)
+        for (run, line) in byStrength.prefix(Self.maxMarkedLines) {
+            let alone = try await m.evaluate(text: line)
             highest = max(highest, alone)
             if alone > Self.flagThreshold {
                 let span = runs[run].lines

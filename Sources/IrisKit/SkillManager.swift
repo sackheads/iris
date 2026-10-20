@@ -54,9 +54,8 @@ struct SkillManager {
         for fileURL in pluginRules {
             if let content = try? String(contentsOf: fileURL, encoding: .utf8),
                !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let structuralSafe = PromptInjectionGuard.sanitizeUntrustedInput(content)
-                let safe = await InjectionGuard.sanitize(
-                    structuralSafe, contextTag: "plugin_rule_\(fileURL.lastPathComponent)",
+                let safe = await InjectionGuard.sanitizeUntrusted(
+                    content, contextTag: "plugin_rule_\(fileURL.lastPathComponent)",
                     maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
                 rulesContent += "\n\n# Rule (plugin): \(fileURL.lastPathComponent)\n\(safe)\n"
             }

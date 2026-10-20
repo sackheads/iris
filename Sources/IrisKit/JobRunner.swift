@@ -2175,11 +2175,11 @@ actor JobRunner {
             let sorted = changedPaths.sorted()
             let shown = sorted.prefix(WatchCoordinator.maxDeliveredPaths)
             var block = "Changed paths:\n" + shown
-                .map { "- " + PromptInjectionGuard.sanitizeUntrustedInput($0) }
+                .map { "- " + $0 }
                 .joined(separator: "\n")
             let withheld = sorted.count - shown.count
             if withheld > 0 { block += "\nand \(withheld) more changed paths" }
-            let outcome = await InjectionGuard.classify(block, contextTag: "fs_event_paths",
+            let outcome = await InjectionGuard.classifyUntrusted(block, contextTag: "fs_event_paths",
                                                         maxTier: .tier3_canary,
                                                         protectionEnabled: protectionEnabled)
             if case .passed = outcome { delivered = shown.count } else { pathsWithheld = true }
