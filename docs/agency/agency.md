@@ -2,6 +2,8 @@
 
 *Authors: Scromp (draft), Rune (review), Clomp (review), Claude Fable 5.1 (review and synthesis). The individual documents are `01`–`04` in this directory; this one is the proposal.*
 
+**Status (2026-10-20): done.** All six deliverables have landed (see [Deliverables](#deliverables-in-order)), and #187 is closed. The proposal below is kept as written, so its "does not yet" and "already exists" describe Iris before the epic. What grew out of it is under [What's left](#whats-left). The features themselves are documented in `docs/jobs.md`.
+
 ## What
 
 Iris has a good harness for a conversation and a long detour into `/goal` land. It does not yet act on its own. This epic gives Iris a background: jobs and watches that run without a conversation open, results that reach me without burying the conversation I use every day, and one pinned "main" conversation that knows what the rest of Iris has been doing.
@@ -75,18 +77,28 @@ Lands after `#163` and `#177`.
 
 ## Deliverables, in order
 
-1. **Policies and model.** Write the two decisions above into the spec; define the unified trigger, profile, and ledger schema; drop the old `UserDefaults` records (decision: no importer — nothing real existed to carry over, and the two keys are deleted, with a count logged, on first launch of a build with migration v9). Adopt a cron subset with lists, ranges, steps, and a timezone per job (closes `#156` properly). — landed: see `docs/specs/2026-09-21-agency-model-and-ledger.md`; PR pending
-2. **Ledger and delivery.** `job_runs` beside the conversation store; background conversations hidden from the sidebar; event cards; steer-inbox delivery; `get_job_run`; stop writing job output into `messages`. — landed: see `docs/specs/2026-09-21-agency-model-and-ledger.md`; PR pending
-3. **Runtime.** Gate execution, background profile, fail-closed approvals with proposal cards, budgets, breaker, overlap policy, retry and pause, sleep assertion and `catchUp`, `iris --run-job`. — landed: see `docs/specs/2026-09-21-agency-runtime.md` and `docs/jobs.md`; final PR pending
-4. **Watches.** Fold `WatcherManager` onto the trigger model; quiet window; self-write filter; poll trigger. — landed: see `docs/specs/2026-09-22-agency-watches.md` and `docs/jobs.md` (the poll trigger landed with deliverable 3)
-4½. **Job grants.** `mounts` and `network` on a mutating job; the file tools allowed inside the grant, through a descriptor walk; the isolated network (host still reachable); credential stores refused by name; `set_workspace` refused unattended; re-checked every fire. — landed: see `docs/specs/2026-09-23-agency-job-grants.md` and `docs/jobs.md` (Grants)
+1. **Policies and model.** Write the two decisions above into the spec; define the unified trigger, profile, and ledger schema; drop the old `UserDefaults` records (decision: no importer — nothing real existed to carry over, and the two keys are deleted, with a count logged, on first launch of a build with migration v9). Adopt a cron subset with lists, ranges, steps, and a timezone per job (closes `#156` properly). — done (2026-09-21): #249 (spec), #252. See `docs/specs/2026-09-21-agency-model-and-ledger.md`.
+2. **Ledger and delivery.** `job_runs` beside the conversation store; background conversations hidden from the sidebar; event cards; steer-inbox delivery; `get_job_run`; stop writing job output into `messages`. — done (2026-09-21): #253. See `docs/specs/2026-09-21-agency-model-and-ledger.md`.
+3. **Runtime.** Gate execution, background profile, fail-closed approvals with proposal cards, budgets, breaker, overlap policy, retry and pause, sleep assertion and `catchUp`, `iris --run-job`. — done (2026-09-22): #254 (spec), #257, #260, #262, #264. See `docs/specs/2026-09-21-agency-runtime.md` and `docs/jobs.md`.
+4. **Watches.** Fold `WatcherManager` onto the trigger model; quiet window; self-write filter; poll trigger. — done (2026-09-23): #268 (spec), #270 (plan), #279, #280; the poll trigger landed with deliverable 3. See `docs/specs/2026-09-22-agency-watches.md` and `docs/jobs.md`.
+4½. **Job grants.** `mounts` and `network` on a mutating job; the file tools allowed inside the grant, through a descriptor walk; the isolated network (host still reachable); credential stores refused by name; `set_workspace` refused unattended; re-checked every fire. — done (2026-09-26): #297. See `docs/specs/2026-09-23-agency-job-grants.md` and `docs/jobs.md` (Grants).
 5. **Main conversation**, in two parts. After `#163` and `#177`.
-   - **5a. Cacheable, measurable prompts.** Sorted-key encoding; per-turn content (the fact block, the peer count) moved from the system prompt to a turn-context block that is sent but never saved; cache read and write counts per provider; a multi-turn perf rung. First, because the briefing is volatile per-turn content and the survey found the cache already failing unmeasured: see `docs/specs/2026-09-30-agency-cacheable-prompts.md`.
+   - **5a. Cacheable, measurable prompts.** Done (2026-10-02): #310 (spec), #311 (plan), #312, #320. Sorted-key encoding; per-turn content (the fact block, the peer count) moved from the system prompt to a turn-context block that is sent but never saved; cache read and write counts per provider; a multi-turn perf rung. First, because the briefing is volatile per-turn content and the survey found the cache already failing unmeasured: see `docs/specs/2026-09-30-agency-cacheable-prompts.md`.
    - **5b. The main conversation.** Done (2026-10-04): #340, #344, #346, #347, #348. The pinned conversation is **Iris**, exempt from rename and archive, and creating a job there (or in any conversation a peer or background subagent has written to) asks the owner. A harness-owned Recent Activity briefing rides 5a's turn-context block. `search_conversations` and `read_conversation` reach live and archived chats. `/new` reflects, moves the pin, summarizes and archives, and Iris suggests it past ~150k tokens. Reflection elsewhere reports to Iris as a card. Model-free built-in jobs, and a 10:00 daily digest (`/jobs reschedule` moves it). See `docs/specs/2026-10-01-agency-main-conversation.md`.
    - **5c. Cost policy.** Done (2026-10-06): #350 (spec), #356 (plan), #361, #363, #367, #369. State-gated tools stay declared once they appear, with dispatch refusals in their off state; budgets count weighted tokens from stored usage components and each run's provider; a 1-hour cache TTL in Iris and on the shared background prefix; OpenAI `prompt_cache_key` by prefix identity. Measured on Opus 5.5: the 1-hour TTL roughly halves to near-zeroes warm-turn cost in Iris and for a 15-minute job; sticky declarations are 8–31% cheaper than gating. See `docs/specs/2026-10-04-agency-cost-policy.md`.
-6. **Native surfaces.** Notifications, status item, URL scheme, run log view. — spec proposed: see `docs/specs/2026-10-09-agency-native-surfaces.md` (no notification approves; URL triggers are a per-job owner opt-in fired by a secret token; the status item uses SwiftUI's `MenuBarExtra`)
+6. **Native surfaces.** Notifications, status item, URL scheme, run log view. — done (2026-10-11): #462 (spec), #468 (plan), #473 (attention and the status item), #481 (the Run Log window), #482 (notifications), #479 and #484 (the URL trigger and the `iris://` scheme). See `docs/specs/2026-10-09-agency-native-surfaces.md`: no notification approves; a URL trigger is a per-job owner opt-in fired by a secret token; the status item uses SwiftUI's `MenuBarExtra`.
 
-Each is an issue with its own spec and measured verification; this document is the epic they hang from.
+Each is an issue with its own spec and measured verification; this document is the epic they hang from. All six are done, so #187 is closed.
+
+### What's left
+
+Follow-ups that grew out of the epic, each tracked on its own:
+
+- **Script jobs** (#330): a model-free job that runs a reviewed shell script in the sandbox VM and posts its output as the card. In review.
+- **Bounded output** (#699): container exec output held to a byte limit on the host, so a script can't write around a cap inside the VM. In review; script jobs adopt it once both land.
+- **Command output caps** (#709): `run_command` output bounded on both routes, a memory cap and a much smaller head and tail the model sees. Planned.
+- **Run Log refusal filter** (#567) and **`ScheduleJobArguments` cleanup** (#517): in review.
+- **Agent profiles** (#465): done (#669, #671, #680, #692, #694); see `docs/agent_profiles.md`.
 
 ## Decided in review
 
