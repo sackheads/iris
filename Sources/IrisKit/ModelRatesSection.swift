@@ -25,12 +25,16 @@ struct ModelRatesSection: View {
         var id: String { key }
     }
 
+    /// The sentence the editor shows when a typed rate couldn't be kept.
+    static let notSaved = "Not saved: Iris couldn't read its Keychain item at launch, so it can't keep a typed rate. The price list's rate still applies."
+
     var body: some View {
         let _ = revision
+        let typed = config.subagentRates
         Section(header: Text("Prices").font(.headline)) {
             Text("In a job run, a subagent on another model is charged at that model's price, converted to the primary's weighted tokens. Prices come from LiteLLM's public list, fetched daily, or the copy bundled with Iris; a rate you type here replaces them.")
                 .font(.caption).foregroundColor(.secondary)
-            ForEach(rows()) { row in rateRow(row) }
+            ForEach(rows()) { row in rateRow(row, typed: typed) }
             HStack {
                 Button(checking ? "Checking prices…" : "Check prices now") { checkNow() }
                     .disabled(checking)
@@ -43,8 +47,12 @@ struct ModelRatesSection: View {
                 var all = config.subagentRates
                 all[draft.row.key] = rates
                 config.subagentRates = all
+                // Read back (#733 review): with the Keychain item unreadable the guarded write is
+                // blocked, and closing as if it were set would leave the price list's rate in force.
+                guard config.subagentRates[draft.row.key] == rates else { return Self.notSaved }
                 book.setTyped(config.subagentRates)
                 revision += 1
+                return nil
             }
         }
     }
@@ -69,7 +77,7 @@ struct ModelRatesSection: View {
         return out
     }
 
-    private func rateRow(_ row: Row) -> some View {
+    private func rateRow(_ row: Row, typed: [String: TokenRates]) -> some View {
         let rate = book.resolve(family: row.family, model: row.model, side: row.side, loopback: row.loopback,
                                 endpointName: row.family == nil ? row.label : nil, typedKey: row.key)
         return VStack(alignment: .leading, spacing: 2) {
@@ -78,8 +86,8 @@ struct ModelRatesSection: View {
                 Text(row.model).font(.caption.monospaced())
                 Spacer()
                 if !row.loopback {
-                    Button("Set rate…") { editing = RateDraft(row: row, current: config.subagentRates[row.key] ?? rate.rates) }
-                    if config.subagentRates[row.key] != nil {
+                    Button("Set rate…") { editing = RateDraft(row: row, current: typed[row.key] ?? rate.rates) }
+                    if typed[row.key] != nil {
                         Button("Clear") {
                             var all = config.subagentRates
                             all[row.key] = nil
@@ -167,8 +175,10 @@ struct RateDraft: Identifiable {
 
 private struct RateEditor: View {
     @State var draft: RateDraft
-    let save: (TokenRates) -> Void
+    /// Saves, or says why it couldn't; the sheet stays open then.
+    let save: (TokenRates) -> String?
     @Environment(\.dismiss) private var dismiss
+    @State private var refusal: String?
 
     var body: some View {
         Form {
@@ -190,11 +200,16 @@ private struct RateEditor: View {
                 Text("Every rate must be a number above zero, and cache read no more than input.")
                     .font(.caption).foregroundColor(.red)
             }
+            if let refusal {
+                Text(refusal).font(.caption).foregroundColor(.red).fixedSize(horizontal: false, vertical: true)
+            }
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
                 Button("Save") {
-                    if let rates = draft.rates { save(rates); dismiss() }
+                    guard let rates = draft.rates else { return }
+                    refusal = save(rates)
+                    if refusal == nil { dismiss() }
                 }
                 .disabled(draft.rates == nil)
                 .keyboardShortcut(.defaultAction)
