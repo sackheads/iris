@@ -257,6 +257,76 @@ struct HookOrderingTests {
         #expect(!FileManager.default.fileExists(atPath: target.path) && !FileManager.default.fileExists(atPath: elsewhere.path))
     }
 
+    @Test("a card whose call went through its hooks when recorded runs exactly that at the click; no hook runs again (#653)")
+    func hookedCardRunsAsRecorded() async throws {
+        let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
+        let target = f.workspace.appendingPathComponent("card.txt")
+        let elsewhere = f.workspace.appendingPathComponent("elsewhere.txt")
+        let hooks = try hooks(f, tool: "write_file", output: ["path": elsewhere.path])   // always rewrites
+        let state = try app(f)
+        let iris = IrisEngine(state: state, tier: .medium, client: FakeLLMClient(responses: [text("unused")]),
+                              retryDelays: [], protectionEnabled: false, sessionPeerCount: 0, hooks: hooks)
+        let clickId = state.createNewConversation(isBackground: true, select: false)
+        let card = BlockedCall(toolName: "write_file", args: ["path": .string(target.path), "content": .string("x")],
+                               cwd: f.workspace.path, hooksFired: true)
+        let result = await iris.executeApprovedCall(card, conversationId: clickId)
+        #expect(result.hasPrefix("Successfully wrote to "), "\(result)")
+        #expect(FileManager.default.fileExists(atPath: target.path), "the recorded path, as the card showed it")
+        #expect(!FileManager.default.fileExists(atPath: elsewhere.path), "the hook's rewrite at the click is ignored")
+    }
+
+    @Test("an unattended turn's blocked call is recorded with its hooked arguments, marked as hooked (#653)")
+    func unattendedTurnRecordsHooked() async throws {
+        let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
+        let target = f.workspace.appendingPathComponent("asked.txt")
+        let hooked = f.workspace.appendingPathComponent("hooked.txt")
+        let hooks = try hooks(f, tool: "write_file", output: ["path": hooked.path])
+        let state = try app(f)
+        state.vibecopEnabledOverride = false
+        let iris = IrisEngine(state: state, tier: .medium,
+                              client: FakeLLMClient(responses: [call("write_file", ["path": .string(target.path), "content": .string("x")]),
+                                                                text("done.")]),
+                              retryDelays: [], protectionEnabled: false, sessionPeerCount: 0, hooks: hooks)
+        let id = state.createNewConversation(isBackground: true, select: false)
+        state.setWorkspace(for: id, path: f.workspace.path)
+        await iris.processInput("go", source: "UI", conversationId: id)
+        let blocked = try #require(state.firstBackgroundDenial(for: id))
+        #expect(blocked.hooksFired, "recorded after its hooks ran")
+        #expect(blocked.args["path"]?.stringValue.hasSuffix("hooked.txt") == true, "the hooked path, as the card will show it")
+        #expect(!FileManager.default.fileExists(atPath: hooked.path) && !FileManager.default.fileExists(atPath: target.path))
+    }
+
+    @Test("a deny hook added after a hooked card was recorded still refuses the click (#653, planner)")
+    func hookedCardStillDenied() async throws {
+        let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
+        let target = f.workspace.appendingPathComponent("card.txt")
+        let hooks = try hooks(f, tool: "write_file", output: nil, status: 2)
+        let state = try app(f)
+        let iris = IrisEngine(state: state, tier: .medium, client: FakeLLMClient(responses: [text("unused")]),
+                              retryDelays: [], protectionEnabled: false, sessionPeerCount: 0, hooks: hooks)
+        let clickId = state.createNewConversation(isBackground: true, select: false)
+        let card = BlockedCall(toolName: "write_file", args: ["path": .string(target.path), "content": .string("x")],
+                               cwd: f.workspace.path, hooksFired: true)
+        let result = await iris.executeApprovedCall(card, conversationId: clickId)
+        #expect(result.hasPrefix("System Hook blocked execution"), "\(result)")
+        #expect(!FileManager.default.fileExists(atPath: target.path))
+    }
+
+    @Test("an unattended run records its blocked call as hooked, and an older row reads as not (#653)")
+    func recordedAsHooked() async throws {
+        let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
+        let state = try app(f)
+        let runId = state.createNewConversation(isBackground: true, select: false)
+        let source = await state.requestApprovalSource(toolName: "run_command", details: "make it", args: ["command": .string("make it")],
+                                                       conversationId: runId, beforeToolFired: true)
+        #expect(source == nil, "nobody to ask: recorded for its card")
+        #expect(state.firstBackgroundDenial(for: runId)?.hooksFired == true)
+
+        let old = #"{"toolName":"run_command","args":{"command":"x"},"reason":"approval","at":0}"#
+        let decoded = try JSONDecoder().decode(BlockedCall.self, from: Data(old.utf8))
+        #expect(!decoded.hooksFired, "a row from before #653 has its hooks run at the click, as before")
+    }
+
     @Test("a hook that changes nothing leaves an approved card's call to run as approved")
     func approvedCardWithoutRewriteRuns() async throws {
         let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }

@@ -167,8 +167,10 @@ struct BlockedCall: Codable, Equatable, Sendable {
     enum Reason: String, Codable, Sendable { case approval, profile }
 
     let toolName: String
-    /// Exactly what the model sent, unaltered — this is what gets re-dispatched on approval.
-    /// One exception: `DevHomeSeeder` re-points absolute paths under the release home to the dev
+    /// What gets re-dispatched on approval, exactly. For a call whose BeforeTool hooks ran before
+    /// it was recorded (`hooksFired`), that is the hooked arguments, the path resolved: what the
+    /// card shows and the person approves is what runs (#647, #653). Otherwise what the model
+    /// sent. One exception: `DevHomeSeeder` re-points absolute paths under the release home to the dev
     /// home when it copies a conversation's store, so a seeded dev copy's `args` can differ from
     /// what the model actually sent.
     let args: [String: JSONValue]
@@ -178,18 +180,24 @@ struct BlockedCall: Codable, Equatable, Sendable {
     /// The granted directory nearest the call's path (#282 §5), so the card can say where the grant
     /// is; set only for a denial inside a granted run, nil for an ungranted one.
     let grantNearest: String?
+    /// The BeforeTool hooks already ran on `args` when the call was recorded (#653), so the click
+    /// runs them as they are: its hooks run again only to honour a denial, never to rewrite. False for a call recorded before its hooks
+    /// (a policy denial), and for a row written before this field: those fire at the click, as
+    /// they always did.
+    let hooksFired: Bool
 
     init(toolName: String, args: [String: JSONValue] = [:], cwd: String? = nil,
-         reason: Reason = .approval, at: Date = Date(), grantNearest: String? = nil) {
+         reason: Reason = .approval, at: Date = Date(), grantNearest: String? = nil, hooksFired: Bool = false) {
         self.toolName = toolName
         self.args = args
         self.cwd = cwd
         self.reason = reason
         self.at = at
         self.grantNearest = grantNearest
+        self.hooksFired = hooksFired
     }
 
-    private enum CodingKeys: String, CodingKey { case toolName, args, cwd, reason, at, grantNearest }
+    private enum CodingKeys: String, CodingKey { case toolName, args, cwd, reason, at, grantNearest, hooksFired }
 
     /// Invariant 1 throughout, and an unrecognized `reason` reads as `.profile` — the fail-closed
     /// direction, because `reason` is what three layers ask "can a click run this?" and `.profile`
@@ -204,6 +212,7 @@ struct BlockedCall: Codable, Equatable, Sendable {
         reason = Reason(rawValue: try c.decodeIfPresent(String.self, forKey: .reason) ?? "") ?? .profile
         at = try c.decodeIfPresent(Date.self, forKey: .at) ?? Date(timeIntervalSince1970: 0)
         grantNearest = try c.decodeIfPresent(String.self, forKey: .grantNearest)
+        hooksFired = try c.decodeIfPresent(Bool.self, forKey: .hooksFired) ?? false
     }
 
     /// The one string that says what a call would actually do — the command, the path — and `nil`
