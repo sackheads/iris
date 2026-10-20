@@ -16,3 +16,4 @@ When the main agent delegates a unit of work, it can hand the subagent a scoped 
 - **Approvals:** an approval a routed subagent asks for names its provider and model. One on a custom endpoint offers **Allow Once** only, never Always Allow.
 - **The guards don't change.** Vibecop and the prompt-injection guard (P1 to P3) judge a subagent's calls and tool output exactly as before, whatever model it runs on. Vibecop's cloud engine stays on the primary provider.
 
+**Attachments and subagents.** A subagent works on its parent's behalf, so it can open the [session attachments](sessions.md#attachments) its parent sent or received. A subagent running on another provider (Settings → Models → Subagent providers) sends what it reads there, an attachment included: switching that provider on for subagents is what allows that.
