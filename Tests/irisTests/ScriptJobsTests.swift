@@ -79,6 +79,11 @@ struct ScriptJobsTests {
             }
             #expect(message.text.contains(text), "\(message.text)")
         }
+        // #695 (#711): a script mount that is, holds or sits inside Iris's home is refused, as a gate's is.
+        try FileManager.default.createDirectory(at: IrisPaths.default.root, withIntermediateDirectories: true)
+        refused(["script": .string("ls"), "script_mounts": .array([.string(IrisPaths.default.root.path)])], "Iris's own directory")
+        refused(["script": .string("ls"), "script_mounts": .array([.string(IrisPaths.default.root.deletingLastPathComponent().path)])],
+                "Iris's own directory")
         refused(["script": .string("x"), "prompt": .string("p")], "not both")
         refused([:], "needs a prompt, or a script")
         refused(["script": .string("x"), "gate_url": .string("https://e.com")], "its own check")
