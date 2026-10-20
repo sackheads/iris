@@ -79,6 +79,22 @@ extension JobGrant {
         "the mount source \(source) is or contains a folder your Mac runs programs or settings from (~/Library/LaunchAgents, ~/.config, ~/bin, ~/.local/bin), which a job may not mount."
     }
 
+    static func loginPathRefusal(_ source: String, entry: String) -> String {
+        "the mount source \(source) is, holds or sits inside \(entry), a folder on your login PATH: a sandbox that can write there could leave a program your Mac then runs. Mount it read-only, or use a folder made for the job."
+    }
+
+    /// #616: the login-PATH folder a read-write mount at `canonical` is, sits inside or holds, by
+    /// real path, or nil. `restrictedPath` already drops a writable folder from a silent read's
+    /// PATH; this keeps a sandbox from being able to write one at all.
+    static func loginPathEntry(touching canonical: String, loginPath: [String]) -> String? {
+        let lowered = canonical.lowercased()
+        for entry in loginPath where entry.hasPrefix("/") {
+            let place = IrisPaths.canonicalPath(entry).lowercased()
+            if lowered == place || lowered.hasPrefix(place + "/") || place.hasPrefix(lowered + "/") { return entry }
+        }
+        return nil
+    }
+
     static func isCredentialStore(_ canonicalSource: String, home: String) -> Bool {
         let lowered = canonicalSource.lowercased()
         return credentialStores.contains { entry in
@@ -97,7 +113,8 @@ extension JobGrant {
                         home: String = NSHomeDirectory(),
                         isVolume: (String) throws -> Bool = { try WatchRoot.isMountPoint($0) },
                         identity: BuildIdentity = .current,
-                        release: IrisPaths = .release) -> Result<JobGrant?, ToolMessage> {
+                        release: IrisPaths = .release,
+                        loginPath: [String] = BinaryResolver.defaultSearchDirs()) -> Result<JobGrant?, ToolMessage> {
         let entries = mounts ?? []
         guard !entries.isEmpty || network != nil else { return .success(nil) }
         guard profile == .mutating else {
@@ -138,6 +155,9 @@ extension JobGrant {
             if HomeMount.touches(source, HomeMount.startupLocations, home: home) {
                 return .failure(ToolMessage(startupLocationRefusal(source)))
             }
+            if !parsed.readOnly, let entry = loginPathEntry(touching: source, loginPath: loginPath) {
+                return .failure(ToolMessage(loginPathRefusal(source, entry: entry)))
+            }
             // An unnamed target is identity to the *stored* source — what "recorded as the directory
             // each path resolves to" promises — not to the spelling: `/private/tmp/x` would otherwise
             // store as `/tmp/x:/private/tmp/x`, and every command would see a path `write_file`
@@ -152,6 +172,10 @@ extension JobGrant {
         var seen: Set<String> = []
         for mount in resolved where !seen.insert(mount.source).inserted {
             return .failure(ToolMessage(duplicate(mount.source)))
+        }
+        // #616: recorded before the grant is stored or used. A grant that can't be recorded isn't given.
+        guard WritableRootsRecord(paths: paths).record(resolved.filter { !$0.readOnly }.map(\.source)) else {
+            return .failure(ToolMessage(WritableRootsRecord.refusal))
         }
         return .success(JobGrant(mounts: resolved, network: network ?? false))
     }
@@ -186,8 +210,14 @@ extension JobGrant {
     /// canonicalise to itself and be a directory — `GateEvaluator.mountDrift`'s rule, with the
     /// grant's sentence. The stored source is already canonical, so any difference is a change made
     /// since the grant was given.
-    static func drift(_ grant: JobGrant, fileManager: FileManager = .default) -> String? {
+    static func drift(_ grant: JobGrant, fileManager: FileManager = .default,
+                      loginPath: [String] = BinaryResolver.defaultSearchDirs()) -> String? {
         for mount in grant.mounts {
+            // #616, re-checked at every fire: a grant stored before the rule, or a PATH that
+            // gained this folder since, is refused the same way.
+            if !mount.readOnly, let entry = loginPathEntry(touching: mount.source, loginPath: loginPath) {
+                return loginPathReason(mount.source, entry: entry)
+            }
             guard IrisPaths.canonicalPath(mount.source) == mount.source else {
                 return sourceUnavailableReason(mount.source)
             }
@@ -201,6 +231,9 @@ extension JobGrant {
 
     /// The run row's reason when `drift` finds a source changed since the grant was given.
     static func sourceUnavailableReason(_ path: String) -> String { "grant source unavailable: \(path)" }
+
+    /// The run row's reason when a read-write grant mount touches a login-PATH folder (#616).
+    static func loginPathReason(_ path: String, entry: String) -> String { "grant mount on the login PATH: \(path) (\(entry))" }
 }
 
 extension JobGrant {

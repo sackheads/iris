@@ -1440,6 +1440,8 @@ class AppState {
         // #678: what the guarded settings' launch found (an upgrade reset, a defaults write that
         // was ignored, a missing or unreadable item).
         if let target = noticeTarget { postGuardedNotices(guardedConfig.takeGuardedNotices(), to: target) }
+        seedWritableRoots()
+        if emitLaunchNotices { _ = writableRootsDamaged() }
         // #687: once, the gate scripts that just lost the network. Only here, inside the notice
         // branch, so a process that announces nothing (`--run-job`) never takes the marker.
         // Off under test unless asked for: the process-global defaults would let the first state a
@@ -2169,6 +2171,7 @@ class AppState {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return nil }
         let old = conversations[idx].homeWritableOptIn
         let new = path.map { IrisPaths.canonicalPath(IrisEngine.expandTilde($0)) }
+        if let new { writableRoots.record([new]) }   // #616
         conversations[idx].homeWritableOptIn = new
         markChanged(conversationId, .metadata)
         guard let old, old != new else { return nil }
@@ -2187,6 +2190,7 @@ class AppState {
 
     func setWorkspace(for conversationId: UUID, path: String) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
+            writableRoots.record([path])   // #616: a sandbox in this conversation can write it
             conversations[idx].workspacePath = path
             markChanged(conversationId, .metadata)
             // #625: rules Iris did not write are not in effect; say so where the person can act.
@@ -2231,6 +2235,7 @@ class AppState {
     /// a relaunch still says what the run was allowed to touch.
     func setSandboxGrant(for conversationId: UUID, _ grant: JobGrant?) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
+            writableRoots.record(grant?.mounts.filter { !$0.readOnly }.map(\.source) ?? [])   // #616
             conversations[idx].sandboxGrant = grant
             markChanged(conversationId, .metadata)
         }
@@ -3978,7 +3983,11 @@ class AppState {
                                                    homeWritable: homeWritable(conversationId, workspace: workspace),
                                                    cwd: workspace, lookup: hostLookup()) {
                 case .run: return .vibecop(reason: decision.reason)
-                case .runRestricted(let path): return .vibecopRestricted(path: path, reason: decision.reason)
+                case .runRestricted(let path):
+                    // #616: a damaged record may have lost a root, so a silent restricted read can't
+                    // be vouched for; the person is asked until it's repaired.
+                    if writableRootsDamaged() { break }
+                    return .vibecopRestricted(path: path, reason: decision.reason)
                 case .ask: break
                 }
             }
@@ -4394,9 +4403,41 @@ class AppState {
     /// Every folder a sandbox mount can write (#612): each conversation's workspace, whether or
     /// not it is sandboxed now (that can change), and each grant's read-write mounts.
     func sandboxWritableRoots() -> [String] {
+        liveWritableRoots() + writableRoots.all()
+    }
+
+    /// The writable roots the loaded conversations name now. #616 adds every one ever recorded,
+    /// since a conversation deleted, unloaded or re-linked keeps what its VM wrote.
+    func liveWritableRoots() -> [String] {
         conversations.flatMap { c in
             [c.workspacePath].compactMap { $0 } + (c.sandboxGrant?.mounts.filter { !$0.readOnly }.map(\.source) ?? [])
+                + [c.homeWritableOptIn].compactMap { $0 }
         }
+    }
+
+    /// #616: what's writable now, recorded at launch, so an install from before the record has its
+    /// existing roots covered from day one: the loaded conversations and every job's grant.
+    func seedWritableRoots() {
+        let jobs = (try? store.ledger.jobs()) ?? []
+        writableRoots.record(liveWritableRoots() + jobs.flatMap { $0.policy.grants?.mounts.filter { !$0.readOnly }.map(\.source) ?? [] })
+    }
+
+    /// Where #616's record lives. Injectable for tests.
+    @ObservationIgnored var writableRoots = WritableRootsRecord()
+    @ObservationIgnored private var writableRootsDamageNoticed = false
+
+    nonisolated static func writableRootsDamagedNotice(_ path: String) -> String {
+        "Iris's record of the folders a sandbox could write (\(path)) is damaged, so Vibecop can't approve host reads on its own until it's repaired: you'll be asked for each one. Delete the file's broken line, or the file, to repair it; a root lost with it is the risk."
+    }
+
+    /// #616: whether the record is damaged. The first time this process finds it so, says so once.
+    func writableRootsDamaged() -> Bool {
+        guard writableRoots.contents() == .damaged else { return false }
+        if !writableRootsDamageNoticed, let target = selectedConversationId {
+            writableRootsDamageNoticed = true
+            appendLaunchNotice(Self.writableRootsDamagedNotice(writableRoots.url.path), to: target)
+        }
+        return true
     }
 
     func commandDenied(in conversationId: UUID?) -> Bool {

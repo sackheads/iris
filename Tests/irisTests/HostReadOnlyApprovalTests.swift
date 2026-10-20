@@ -186,6 +186,20 @@ struct HostReadOnlyApprovalTests {
         #expect(try await call(state, "ls", in: cid, engine: vibecop) == .silent(true))
     }
 
+    @Test("a damaged writable-roots record turns the silent restricted read off: the person is asked, and told once (#616)")
+    func damagedRecordAsks() async throws {
+        let (state, home) = try app()
+        defer { try? FileManager.default.removeItem(at: home) }
+        state.writableRoots = WritableRootsRecord(paths: IrisPaths(root: home))
+        try FileManager.default.createDirectory(at: home.appendingPathComponent("config"), withIntermediateDirectories: true)
+        try Data("\"/ok\"\n\"/torn".utf8).write(to: state.writableRoots.url)   // a write cut short
+        let cid = state.createNewConversation(isBackground: false, select: true)
+        #expect(try await call(state, "ls", in: cid, engine: Approver()) == .asked)
+        _ = state.writableRootsDamaged()
+        let notice = AppState.writableRootsDamagedNotice(state.writableRoots.url.path)
+        #expect(state.conversations.first { $0.id == cid }?.messages.filter { $0.content == notice }.count == 1)
+    }
+
     @Test("the approval names its source: a host read is restricted to the judged PATH, the person's click is the person's")
     func sources() async throws {
         let (state, home) = try app()
