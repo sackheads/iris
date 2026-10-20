@@ -61,7 +61,7 @@ struct SessionArtifactTests {
                                                   "attachments": .array([.object(["path": .string(path)])])], on: app, as: a)
         #expect(sent.hasPrefix("Sent msg"), "\(sent)")
         let received = peerText(app, b)
-        #expect(received.contains("Attachment: report.md (text/markdown"))
+        #expect(received.contains("Attachment: \"report.md\" (text/markdown"))
         let link = try #require(uri(in: received))
         let sha = String(link.dropFirst(ArtifactURI.scheme.count))
         #expect(try app.store.artifacts.hasRef(sha: sha, conversationId: a))
@@ -172,7 +172,7 @@ struct SessionArtifactTests {
         let ok = await call("send_to_session", ["to": .string(b.uuidString), "message": .string("counts"),
                                                 "attachments": .array([.object(["name": .string("totals"), "data": .string(#"{"b":2,"a":1}"#)])])], on: app, as: a)
         #expect(ok.hasPrefix("Sent msg"), "\(ok)")
-        #expect(peerText(app, b).contains("Data totals:\n{\n  \"a\" : 1,\n  \"b\" : 2\n}"))
+        #expect(peerText(app, b).contains("Data \"totals\":\n{\n  \"a\" : 1,\n  \"b\" : 2\n}"))
         let bad = await call("send_to_session", ["to": .string(b.uuidString), "message": .string("x"),
                                                  "attachments": .array([.object(["name": .string("n"), "data": .string("{nope")])])], on: app, as: a)
         #expect(bad == "Not sent: data for n isn't valid JSON.")
