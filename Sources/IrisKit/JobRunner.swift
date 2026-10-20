@@ -878,8 +878,8 @@ actor JobRunner {
         let posts = ScriptJobs.posts(status: status, outcome: outcome, previous: previous)
         // D: only a line that will be posted is guarded, since tier 3 can be a model call.
         var shown = outcome
-        // #689: the canary's call on the line is the run's spend. Collected here and added once the
-        // row is closed, since `finish` writes the run's own (zero) tokens.
+        // #689: the canary's call on the line is the run's spend, collected before the row is
+        // closed so `finish` writes the true total in its one write.
         let guardSpend = GuardSpend()
         if posts, stdout != nil {
             let checked = await GuardUsage.$sink.withValue(GuardUsage.Sink { guardSpend.add($0) }) {
@@ -890,9 +890,8 @@ actor JobRunner {
         let finishedAt = now()
         do {
             try ledger.finish(runId: run.id, status: status, outcome: shown, failureReason: failureReason,
-                              blockedTool: nil, tokens: TokenUsage(), finishedAt: finishedAt)
+                              blockedTool: nil, tokens: guardSpend.total, finishedAt: finishedAt)
             try ledger.recordScript(runId: run.id, stdout: stdout, stderr: stderr, posted: posts)
-            for usage in guardSpend.all { try ledger.addUsage(runId: run.id, usage: usage) }
         } catch {
             print("[JobRunner] could not close the run for \(job.name): \(error)")
         }
@@ -2720,5 +2719,17 @@ final class GuardSpend: @unchecked Sendable {
     private let lock = NSLock()
     private var items: [UsageMetadata] = []
     func add(_ usage: UsageMetadata) { lock.withLock { items.append(usage) } }
-    var all: [UsageMetadata] { lock.withLock { items } }
+    /// Everything reported, as the run's tokens.
+    var total: TokenUsage {
+        lock.withLock {
+            items.reduce(into: TokenUsage()) { t, u in
+                t.promptTokenCount += u.promptTokenCount ?? 0
+                t.candidatesTokenCount += u.candidatesTokenCount ?? 0
+                t.totalTokenCount += u.totalTokenCount ?? 0
+                if let r = u.cacheReadTokens { t.cacheReadTokenCount = (t.cacheReadTokenCount ?? 0) + r }
+                if let w = u.cacheWriteTokens { t.cacheWriteTokenCount = (t.cacheWriteTokenCount ?? 0) + w }
+                if let w = u.cacheWrite1hTokens { t.cacheWrite1hTokenCount = (t.cacheWrite1hTokenCount ?? 0) + w }
+            }
+        }
+    }
 }
