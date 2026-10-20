@@ -84,6 +84,32 @@ struct GuardUsageTests {
         #expect(usage.candidatesTokenCount == 30)
     }
 
+    @Test("the tier-3 canary on an arriving message is charged to the conversation it arrives in")
+    func canaryOnArrival() async throws {
+        let state = AppState(store: try ConversationStore.inMemory(), tier2Provisioning: .provisioned,
+                             tier3Provisioning: .provisioned, createIfEmpty: false, emitLaunchNotices: false)
+        let id = state.createNewConversation(isBackground: false, select: true)
+        let engine = IrisEngine(state: state, client: FakeLLMClient(responses: [text("noted")]), retryDelays: [],
+                                protectionEnabled: true, sessionPeerCount: 0)
+        let arrival = "Background subagent result: done \(UUID().uuidString)"
+        let prompts = LockedPrompts()
+        var canary = cloudEngine("SAFE", role: "canary")
+        let answer = canary.send
+        canary.send = { request, model in
+            prompts.add(request.contents.flatMap(\.parts).compactMap(\.text).joined())
+            return try await answer(request, model)
+        }
+        await AuxiliaryModelManager.$scopedEngines.withValue(["canary": canary]) {
+            await CoreMLEvaluator.$scopedModel.withValue(.init(MockCoreMLModel(probability: 0.0))) {
+                await engine.handleSystemEvent(arrival, source: "SubagentManager", conversationId: id)
+            }
+        }
+        #expect(prompts.all.contains { $0.contains(arrival) }, "the arrival went through the canary")
+        let usage = try #require(state.conversations.first { $0.id == id }?.tokenUsage)
+        // The turn makes canary calls of its own; every one of them, the arrival's included, is here.
+        #expect(usage.promptTokenCount == 120 * prompts.all.count)
+    }
+
     @Test("Vibecop's verdict on a blocked job run's card is charged to that run, though its row is closed")
     func vibecopOnJobRunCard() async throws {
         let store = try ConversationStore.inMemory()
@@ -143,4 +169,11 @@ final class LockedUsage: @unchecked Sendable {
     }
     var prompt: Int { lock.withLock { p } }
     var output: Int { lock.withLock { o } }
+}
+
+final class LockedPrompts: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [String] = []
+    func add(_ s: String) { lock.withLock { items.append(s) } }
+    var all: [String] { lock.withLock { items } }
 }
