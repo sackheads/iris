@@ -1,6 +1,6 @@
 # Script jobs that write (#688)
 
-**Status:** spec, iris-dev-1, 2026-10-20, from the planner's brief. This is spec only: the build starts after #698 (script jobs, #330) merges, and builds on it. Reviewers: iris-dev-2 and iris-dev-3 (sandbox, mounts and approvals).
+**Status:** spec, iris-dev-1, 2026-10-20, from the planner's brief. The planner ruled forks 1-5 and the one-resolver question on 2026-10-20; the rulings are recorded under each. This is spec only: the build starts after #698 (script jobs, #330) merges, and builds on it. Reviewers: iris-dev-2 and iris-dev-3 (sandbox, mounts and approvals).
 
 ## What and why
 
@@ -12,7 +12,7 @@ This spec adds a script job on a **mutating job's grant**: read-write mounts, un
 
 - **Creating one.** `schedule_job` with `script` and `profile: "mutating"`, plus the grant's own `mounts` and `network`, the same arguments a mutating prompt job takes (Grants, `docs/jobs.md`). No new argument.
   - `script_mounts` and `script_network` stay the read-only job's arguments. Given together with `profile: "mutating"`, they're refused with one sentence: "a writing script job takes its folders and network from `mounts` and `network`, as any mutating job does".
-  - One resolver means one set of rules: `JobGrant.resolve`, never a second copy.
+  - One resolver means one set of rules: `JobGrant.resolve`, never a second copy. **Ruled (planner): one resolver.** A mutating script job takes its grant's `mounts` and `network`.
 - **What the grant already enforces**, unchanged and in force for scripts:
   - a read-write mount's own `.iris/` mounted read-only over it (#617), and so is the `.git/hooks` of a repository at its root (#623);
   - credential stores, startup locations, home and above, and Iris's own folders refused;
@@ -40,7 +40,7 @@ This spec adds a script job on a **mutating job's grant**: read-write mounts, un
 - **With network off:** "It can still reach services on this Mac" (#690's wording from #330).
 - **The disk floor** from fork 4, as one line: "It won't run while the disk holding these folders has less than N GB free."
 
-**Lean: as above.** The point is that the person reads "change and delete" next to the folder names before they click, and not only a grant table.
+**Ruled: as above** (planner). The point is that the person reads "change and delete" next to the folder names before they click, and not only a grant table.
 
 ### 2. Should a mounted file changing force a re-review?
 
@@ -53,13 +53,15 @@ This spec adds a script job on a **mutating job's grant**: read-write mounts, un
   - I don't propose to parse shell to catch it.
   - The dialog adds, when any mount is read-write: "If this script runs a file from these folders, that file can change between runs, and it will run as it is then." docs/jobs.md says the same, with the advice to keep the logic in the script itself.
 
+**Ruled: no content re-review; the fingerprint gains each mount's read-only flag and the profile** (planner).
+
 **What the fingerprint must gain:** each mount's read-only flag and the job's profile. Then turning a read-only mount read-write, outside Iris or through a re-schedule, is "changed since review", never a silent widening. A test pins it: flipping one mount's flag in the stored row pauses the next fire.
 
 ### 3. Do #330's card rules still fit?
 
 #330 C posts a card on a change or a failure, judged on the exit status and the outcome line. The first run always posts.
 
-**Lean: keep them.** A writing job's outcome line is its own summary ("moved 3 files", "rotated 2 logs"), so a run that did something different prints a different line and posts. A sweep that finds nothing to do stays quiet, which is the point of the rule. Two additions:
+**Ruled: keep them** (planner). A writing job's outcome line is its own summary ("moved 3 files", "rotated 2 logs"), so a run that did something different prints a different line and posts. A sweep that finds nothing to do stays quiet, which is the point of the rule. Two additions:
 - **A git-guard finding** (above) is a failure, so it always posts.
 - **A disk-floor refusal** (fork 4) is `interrupted` with its reason, and it posts the first time, like the "no container runtime" refusal.
 
@@ -77,14 +79,17 @@ The danger is a script that fills the disk (a loop that appends, or a `cp` into 
 - **(b) A growth check after every run.** If a read-write mount's volume lost more than `max(2 GB, 2%)` during the run, the job **pauses** with a card ("this run used X of disk; paused so you can look"). It needs a human resume.
 - **(c) A watchdog that polls free space during the run** and kills it below the floor. This bounds a single run, but it's a new poller beside the deadline, and it would have to sit on the dispatch clock per Invariant 4.
 
-**Lean: (a) plus (b).** They're cheap: two `statfs` calls per fire, no new timer, and the kill machinery is untouched. With the timeout as the within-run bound, one run can't outlast an hour, and the next can't start into a disk that's nearly full. (c) is the follow-up if a measured case shows one run doing real harm in under an hour.
-- **Deletion** isn't bounded by any of these. Its bounds are the grant rules, the dialog's "change and delete" sentence, and the person's backups. The docs say so plainly, and I don't propose a delete counter: the VM's deletes aren't visible to the host per run without a full scan.
+**Ruled: (a) plus (b), plus (d)** (planner):
+- **(d) A shrink check after every run, the mirror of (b).** If a read-write mount's volume *gained* more than `max(1 GB, 10%)` of free space during the run, the run probably deleted a lot, so the job **pauses** with a card: "this run freed X GB; it may have deleted files in <mounts>". It's the same two `statfs` readings, so it costs nothing, and it's the only bound on a destructive script short of backups. **It's a heuristic:** an unrelated cleanup elsewhere on that volume during the run can trip it, and that's acceptable for a pause, which a person resumes.
+
+(a) and (b) are cheap: two `statfs` calls per fire, no new timer, and the kill machinery is untouched. With the timeout as the within-run bound, one run can't outlast an hour, and the next can't start into a disk that's nearly full. (c) is the follow-up if a measured case shows one run doing real harm in under an hour.
+- **Deletion** is bounded only roughly, by (d): a large delete pauses the job after the run that did it. Its other bounds are the grant rules, the dialog's "change and delete" sentence, and the person's backups. The docs say so plainly. There's no delete counter: the VM's deletes aren't visible to the host per run without a full scan.
 
 ### 5. #690's host-only network, combined with writes
 
 "Network off" is the isolated network, which can still reach services on the Mac (#690). For a read-only script that's a way to *send* (#330 B's reason for human-only review). With writes, it's also a way to *receive*: a script could fetch from a local service and write the result into a mounted repository, where the person's tools later run it.
 
-**Lean: no new rule.**
+**Ruled: no new rule** (planner).
 - **The review is already human-only**, and the dialog's network-off line says "can still reach services on this Mac". This spec adds "and write what it gets into these folders" when a mount is read-write.
 - **The content is the reviewed script's choice.** A local service can feed only a script written to ask it, and the person read that script.
 - **When #691** (a true no-network mode via `unshare --net` in the VM) passes the real-VM check, "off" means off for writing scripts too. Nothing here depends on it.
@@ -110,7 +115,7 @@ The danger is a script that fills the disk (a loop that appends, or a `cp` into 
   - human-only with no Always Allow, even when Vibecop approves;
   - the fingerprint covering read-only flags and the profile (flipping a flag in the row pauses the next fire);
   - the disk floor (an injected `statfs`) refusing a fire;
-  - the growth check pausing the job;
+  - the growth check pausing the job; the shrink check (d) pausing it with the "freed" card;
   - a git-guard finding failing the run and posting;
   - the card rules unchanged;
   - an older build's rows still decoding.
