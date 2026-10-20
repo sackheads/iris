@@ -192,8 +192,11 @@ enum GuardedSettings {
                     let stored = dict[key.rawValue]
                     values[key] = stored.flatMap { key.isValid($0) ? $0 : nil } ?? (stored == nil ? key.builtIn : key.protective)
                 }
-                let notices = present.isEmpty ? [] : [
-                    "A setting was changed outside Settings and was not applied: \(present.map(\.rawValue).joined(separator: ", ")). Change it in Settings if you meant to."]
+                // Every reappearing key is deleted, so it is reported once; only one whose value
+                // differs from the guarded one is reported at all (#706): an older Iris writing
+                // back what it read is the common case, and noticing it trains people to ignore this.
+                let differing = present.filter { defaults[$0.rawValue] != values[$0] }
+                let notices = differing.isEmpty ? [] : [changedOutsideNotice(differing, defaults: defaults)]
                 return Load(values: values, state: .normal, notices: notices, write: nil,
                             removeFromDefaults: present.map(\.rawValue), setDefaultsMarker: !defaultsMarker)
             }
@@ -231,6 +234,33 @@ enum GuardedSettings {
     }
 
     /// The defaults domain's guarded keys, read as strings the way `ConfigManager` stored them.
+    /// The notice for guarded keys found in defaults with a value other than the guarded one. Each
+    /// is listed with the value that was ignored, except the JSON blobs (endpoints, switches,
+    /// rates), which are named only. The value was written from outside Iris by definition, and
+    /// the notice is a persisted message a person and the model both read, so it goes in quoted:
+    /// one line, no control characters, capped, and a URL without its user info (#707 review).
+    static func changedOutsideNotice(_ keys: [GuardedKey], defaults: [String: String]) -> String {
+        let listed = keys.map { key -> String in
+            if case .blob = key.kind { return key.rawValue }
+            return "\(key.rawValue) (ignored, written outside Iris: \(shownValue(defaults[key.rawValue] ?? "", kind: key.kind)))"
+        }
+        return "A setting was changed outside Settings and was not applied: \(listed.joined(separator: ", ")). If you ran an older version of Iris, that's the likely cause; otherwise check Settings."
+    }
+
+    /// An ignored value as the notice shows it.
+    static func shownValue(_ value: String, kind: GuardedKey.Kind) -> String {
+        var value = value
+        // A URL keeps only its scheme, host and path: user info (`user:secret@`) and the query and
+        // fragment (`?api_key=…`) can each hold a key, whether or not the rest parses (#707 review).
+        if case .url = kind {
+            value = value.replacingOccurrences(of: #"(?<=://)[^/@\s]*@"#, with: "", options: .regularExpression)
+            value = value.replacingOccurrences(of: #"(?s)[?#].*$"#, with: "", options: .regularExpression)
+        }
+        // A system notice reads to the model with Iris's own authority, so text written outside
+        // Iris is neutralised as untrusted input before it goes in (#707 review, as Briefing does).
+        return GateEvaluator.quoted(PromptInjectionGuard.sanitizeUntrustedInput(value)).map { "\"\($0)\"" } ?? "empty"
+    }
+
     static func defaultsValues(_ store: UserDefaults) -> [String: String] {
         var out: [String: String] = [:]
         for key in GuardedKey.allCases {
