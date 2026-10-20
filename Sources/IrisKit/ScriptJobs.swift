@@ -56,7 +56,8 @@ enum ScriptJobs {
     static let defaultTimeoutSeconds = 120
     static func clampedTimeout(_ seconds: Int) -> Int { min(max(seconds, minTimeoutSeconds), maxTimeoutSeconds) }
 
-    /// Kept of each stream, on the row and over the pipe from the VM (#330, C).
+    /// Kept of each stream on the row, and the in-VM cap of an ordinary script's output (#330, C;
+    /// not a bound against a hostile one, #699).
     static let outputLimit = 64 * 1_024
     static let truncatedMarker = "[truncated]"
     /// The card's outcome line, like a prompt run's.
@@ -67,6 +68,12 @@ enum ScriptJobs {
     static let withoutTier3Marker = "(checked without tier 3)"
     static let withheldOutcome = "output withheld: the injection guard blocked it"
     static let changedSinceReview = "script changed since review"
+    /// A gate or script job with no fingerprint at all: one made before fingerprints existed, or
+    /// whose Keychain record is gone. Never trusted; re-scheduling it is the review.
+    static let needsReview = "script needs your review (new check in this version)"
+    static func pauseReason(for check: ScriptFingerprints.Check) -> String {
+        check == .missing ? needsReview : changedSinceReview
+    }
     static let keychainUnreadable = "Iris couldn't read its Keychain item, so it can't check this script is the one you reviewed; it won't run until it can"
     static let couldNotRecordReview = "Iris couldn't save the record of this review in its Keychain item (it may be unreadable), so the job wasn't created: a script job or gate it can't verify never runs."
 
@@ -84,7 +91,14 @@ enum ScriptJobs {
     static func posts(status: JobRun.Status, outcome: String?, previous: JobRun?) -> Bool {
         guard let previous else { return true }
         if status != .completed { return true }
-        return previous.status != status || previous.outcome != outcome
+        return previous.status != status || rawOutcome(of: previous) != outcome
+    }
+
+    /// The line a run printed, before the guard: from its stored output when it has some, since
+    /// the stored outcome may be the withheld text (#698 review).
+    static func rawOutcome(of run: JobRun) -> String? {
+        guard let stdout = run.scriptOutput, !stdout.isEmpty else { return run.outcome }
+        return outcome(stdout: stdout, exitCode: 0)
     }
 
     /// The tier-3 guard on a line about to be posted (#330, D): the line, or the withheld text when
@@ -99,9 +113,12 @@ enum ScriptJobs {
         }
     }
 
-    /// The script wrapped so at most `limit` bytes of each stream ever leave the VM: written to the
-    /// container's `/tmp`, then the head of each sent back, with a marker past the cap. The script
-    /// travels as base64, so no quoting in it can break the wrapper. Exit status is the script's.
+    /// The script wrapped so an ordinary script's output is capped at `limit` bytes per stream in the
+    /// VM: written to the container's `/tmp`, then the head of each sent back, with a marker past the
+    /// cap. Not a bound against a script written to get round it: it can write to its parent's
+    /// stdout (`/proc/$PPID/fd/1`) past the cap, and the host reads `container exec` output in full
+    /// until the timeout (#699, a host-side bounded drain). The script travels as base64, so no
+    /// quoting in it can break the wrapper. Exit status is the script's.
     static func cappedCommand(_ script: String, limit: Int = outputLimit) -> String {
         let encoded = Data(script.utf8).base64EncodedString()
         return """
@@ -145,12 +162,11 @@ enum ScriptJobs {
 /// The fingerprints of reviewed scripts (#330 ruling, #678's lesson for the job store). The job
 /// row is in the conversation database, which one approved shell command can edit; a fingerprint
 /// is kept beside the API keys in the secrets item, which it cannot, and a fire whose stored script
-/// no longer matches is refused. Written only by the review at creation and by the one-time upgrade
-/// pass; a missing fingerprint refuses the fire, never "trust and record".
+/// no longer matches is refused. Written only by the review at creation, never by an upgrade pass (a
+/// silent item delete would replay one and bless edited rows, #698 review); a missing fingerprint
+/// pauses the job for review, never "trust and record".
 enum ScriptFingerprints {
     static func key(_ jobId: UUID) -> String { "SCRIPT_FP_" + jobId.uuidString }
-    /// In the same item: the upgrade pass has run, so it cannot run twice.
-    static let upgradeMarker = "SCRIPT_FP_UPGRADE_V1"
 
     enum Check: Equatable { case matches, changed, missing, unreadable }
 
@@ -176,29 +192,6 @@ enum ScriptFingerprints {
         try? keychain.saveSecretsOrThrow(secrets, service: KeychainManager.legacyService)
     }
 
-    /// The one-time upgrade pass: every existing script gate's stored script is fingerprinted as it
-    /// stands (trust on first use, ruled: a row tampered before the upgrade was exposed already).
-    /// Script jobs postdate this pass, so each was fingerprinted at its review. Returns how many it
-    /// recorded, or nil when it already ran or the item cannot be read or written. Only the app runs
-    /// it (#679's rule), and its marker is in the same item, so it cannot run twice.
-    ///
-    /// Known limit: deleting the item and replaying #678's upgrade also replays this pass. That
-    /// replay is announced (#679), so the person sees it.
-    @discardableResult
-    static func upgrade(jobs: [Job], keychain: KeychainManager) -> Int? {
-        guard !keychain.areWritesBlocked,
-              var secrets = try? keychain.secretsOrThrow(service: KeychainManager.legacyService),
-              secrets[upgradeMarker] == nil else { return nil }
-        var recorded = 0
-        for job in jobs {
-            guard let spec = job.trigger.gate?.scriptSpec else { continue }
-            secrets[key(job.id)] = spec.fingerprint
-            recorded += 1
-        }
-        secrets[upgradeMarker] = "1"
-        guard (try? keychain.saveSecretsOrThrow(secrets, service: KeychainManager.legacyService)) != nil else { return nil }
-        return recorded
-    }
 }
 
 extension JobAction {

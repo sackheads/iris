@@ -40,20 +40,12 @@ struct ScriptJobsTests {
         #expect(!ScriptFingerprints.record(jobId: UUID(), spec: spec, keychain: keychain))
     }
 
-    @Test("the upgrade fingerprints every gate script once, and never again")
-    func upgradeOnce() {
-        let keychain = KeychainManager(serviceSuffix: ".script-\(UUID().uuidString)", inMemory: true)
-        let gated = Job(name: "g", prompt: "p", trigger: .poll(PollSpec(schedule: .interval(seconds: 600),
-            gate: .script(command: "echo CHANGED", mounts: [], timeoutSeconds: 60))))
-        let plain = Job(name: "p", prompt: "p", trigger: .schedule(.interval(seconds: 600)))
-        #expect(ScriptFingerprints.upgrade(jobs: [gated, plain], keychain: keychain) == 1)
-        let gateSpec = gated.trigger.gate!.scriptSpec!
-        #expect(ScriptFingerprints.check(jobId: gated.id, spec: gateSpec, keychain: keychain) == .matches)
-        let later = Job(name: "later", prompt: "p", trigger: .poll(PollSpec(schedule: .interval(seconds: 600),
-            gate: .script(command: "x", mounts: [], timeoutSeconds: 60))))
-        #expect(ScriptFingerprints.upgrade(jobs: [later], keychain: keychain) == nil, "the marker is in the item")
-        #expect(ScriptFingerprints.check(jobId: later.id, spec: later.trigger.gate!.scriptSpec!, keychain: keychain) == .missing,
-                "a missing fingerprint is never trust-and-record")
+    @Test("the two pause reasons read differently: a one-time review vs a detected change; both block resume")
+    func pauseReasons() {
+        #expect(ScriptJobs.pauseReason(for: .missing) == "script needs your review (new check in this version)")
+        #expect(ScriptJobs.pauseReason(for: .changed) == "script changed since review")
+        #expect(ScriptJobs.needsReview != ScriptJobs.changedSinceReview)
+        #expect(AppState.reviewPauseReasons.isSuperset(of: [ScriptJobs.needsReview, ScriptJobs.changedSinceReview]))
     }
 
     @Test("the action round-trips through its stored text, and a bad one is unreadable")
@@ -114,6 +106,13 @@ struct ScriptJobsTests {
         #expect(ScriptJobs.posts(status: .failed, outcome: "42% used", previous: previous), "a failure")
         previous.status = .failed
         #expect(ScriptJobs.posts(status: .completed, outcome: "42% used", previous: previous), "a recovery")
+        // Compared on the raw line: a stored outcome the guard withheld still tells repeat from change.
+        var withheld = JobRun(jobId: UUID(), jobName: "j", triggerKind: "schedule", startedAt: Date())
+        withheld.status = .completed
+        withheld.outcome = ScriptJobs.withheldOutcome
+        withheld.scriptOutput = "header\nsame line\n"
+        #expect(!ScriptJobs.posts(status: .completed, outcome: "same line", previous: withheld), "the same raw line")
+        #expect(ScriptJobs.posts(status: .completed, outcome: "new line", previous: withheld), "a new raw line")
     }
 
     @Test("the capped command carries the script as base64 and caps both streams")
@@ -212,6 +211,20 @@ struct ScriptJobRunTests {
         #expect(AppState.reviewPauseReasons.contains(ScriptJobs.changedSinceReview), "/jobs resume can't lift it")
     }
 
+    @Test("a script job with no fingerprint never runs and pauses for a one-time review, not a change")
+    func neverReviewed() async throws {
+        let (store, state, engine, config, teardown) = try harness(); defer { teardown() }
+        let job = Job(name: "disk", prompt: "", trigger: .schedule(.interval(seconds: 600)), action: .script(spec))
+        try store.ledger.upsert(job)
+        let ran = Locked(0)
+        let r = runner(store, state, engine, config, vm: { _ in ran.mutate { $0 += 1 }; return .ran(stdout: "x", stderr: "", exitCode: 0) },
+                       check: .missing)
+        _ = await r.fire(job: job, origin: .cadence(kind: "schedule"))
+        #expect(ran.value == 0)
+        #expect(try store.ledger.jobs().first?.pausedReason == ScriptJobs.needsReview)
+        #expect(cards(state).last?.outcome?.contains("new check in this version") == true)
+    }
+
     @Test("an unreadable Keychain refuses the fire, closed")
     func unreadableKeychain() async throws {
         let (store, state, engine, config, teardown) = try harness(); defer { teardown() }
@@ -288,6 +301,6 @@ struct ScriptJobRunTests {
                           fingerprintCheck: { _, _ in .missing })
         _ = await r.fire(job: job, origin: .cadence(kind: "poll"))
         #expect(evaluated.value == 0, "the unverified gate script never ran")
-        #expect(try store.ledger.jobs().first?.pausedReason == ScriptJobs.changedSinceReview)
+        #expect(try store.ledger.jobs().first?.pausedReason == ScriptJobs.needsReview, "never reviewed: a one-time review")
     }
 }

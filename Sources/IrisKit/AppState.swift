@@ -1468,11 +1468,6 @@ class AppState {
                                                    pause: { id in _ = try? ledger.pauseUnlessOwnerPaused(jobId: id, reason: Self.gateNeedsReviewReason) }) {
                 appendLaunchNotice(notice, to: target)
             }
-            // #330: every existing gate script is fingerprinted once as it stands, so a later edit
-            // of its row is caught; a gate or script job made from now on is fingerprinted at review.
-            if let keychain = guardedConfig.guardedKeychain {
-                ScriptFingerprints.upgrade(jobs: (try? ledger.jobs()) ?? [], keychain: keychain)
-            }
         }
         // Every launch notice below goes through `appendLaunchNotice`, which persists it like any
         // other system message but skips it when the same wording is already in the conversation.
@@ -3171,7 +3166,8 @@ class AppState {
     nonisolated static let gateNeedsReviewReason = "gate script needs your review"
     /// The pauses only a re-schedule lifts, since that is what shows the person the script: #693's
     /// upgrade pause, and #330's "script changed since review".
-    nonisolated static let reviewPauseReasons: Set<String> = [gateNeedsReviewReason, ScriptJobs.changedSinceReview]
+    nonisolated static let reviewPauseReasons: Set<String> = [gateNeedsReviewReason, ScriptJobs.changedSinceReview,
+                                                               ScriptJobs.needsReview]
 
     /// What `/jobs resume` and `/jobs pause` say about a job waiting for that review.
     nonisolated static func gateNeedsReviewResume(_ name: String) -> String {
@@ -5280,6 +5276,8 @@ class AppState {
                 // card they are still reading.
                 let runCount = try ledger.runCount(jobId: job.id)
                 try ledger.delete(jobId: job.id)
+                // #330: its fingerprint goes with it, so the item doesn't collect dead ones.
+                if let keychain = ConfigManager.shared.guardedKeychain { ScriptFingerprints.forget(jobId: job.id, keychain: keychain) }
                 refreshLedgerAttention()
                 withdrawRevealedURLTrigger(jobId: job.id)
                 forgetURLState(jobId: job.id)
