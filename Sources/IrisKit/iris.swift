@@ -3564,11 +3564,18 @@ actor IrisEngine {
                      review: GateScriptReview? = nil,
                      sandboxAvailable: Bool = SandboxPolicy.mutatingJobCanRun(),
                      paths: IrisPaths = .default, home: String = NSHomeDirectory(),
-                     globalRunTimeoutSeconds: Int = ConfigManager.shared.jobRunTimeoutSeconds) async -> String {
+                     globalRunTimeoutSeconds: Int = ConfigManager.shared.jobRunTimeoutSeconds,
+                     decidedProfile: JobProfile? = nil) async -> String {
         let args: ScheduleJobArguments
         switch parsed {
         case .failure(let message): return message.text
         case .success(let parsedArgs): args = parsedArgs
+        }
+        // #660: the profile this write would store must be the one the gate decided. Both come from
+        // the same arguments today, so this is a forward guard: it fails if either side changes how
+        // it reads a profile (the watcher's write, which reads the ledger too, is the live check).
+        if let decidedProfile, decidedProfile != (JobProfile.asked(args.profile) ?? .readOnly) {
+            return ToolExecutor.profileChangedSinceApproval
         }
 
         // The ledger reference comes off the main actor; the query itself does not — `JobLedger`
@@ -4412,8 +4419,12 @@ actor IrisEngine {
         //   standing job is where an injection that survived the guard would outlive the turn.
         //   `hasUnattendedInput` is a sticky, persisted taint for the reason #340 gives: three
         //   rounds of per-call flags each left a path open.
+        // #660: the profile the gate decided, and the person approved when asked, goes with the call
+        // to the write, which refuses rather than writing a profile its own read disagrees with.
+        var decidedJobProfile: JobProfile?
         if Self.jobCreationTools.contains(functionCall.name) {
             let profile = await jobCreationProfile(functionCall, conversationId: conversationId)
+            decidedJobProfile = profile
             if profile != .readOnly || isPinned || hasUnattendedInput {
                 // Review #340, item 4 (ruling): parse and validate before the human is ever asked. A
                 // malformed call is going to fail either way; asking first just spends the owner's
@@ -5086,7 +5097,7 @@ actor IrisEngine {
             // Asked above unless read-only in an ordinary chat; otherwise nobody was (#599, #652).
             await recordApproval(.ungated, pillId: pillId, conversationId: conversationId)
             result = await scheduleJob(ScheduleJobArguments.parse(functionCall.args), conversationId: conversationId,
-                                     sandboxAvailable: mutatingJobsAvailable())
+                                     sandboxAvailable: mutatingJobsAvailable(), decidedProfile: decidedJobProfile)
         } else if functionCall.name == "save_fact", let content = functionCall.args["content"]?.stringValue {
             let category = functionCall.args["category"]?.stringValue ?? "general"
             let entity = functionCall.args["entity"]?.stringValue
@@ -5562,7 +5573,7 @@ actor IrisEngine {
                     var approval = ToolApproval(source)
                     approval.hookRewrite = rewrittenByHook
                     await recordApproval(approval, pillId: pillId, conversationId: conversationId)
-                    result = await executeToolWithHooks(name: functionCall.name, args: callArgs, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath, restrictedPath: Self.restrictedPath(for: source, tool: functionCall.name),
+                    result = await executeToolWithHooks(name: functionCall.name, args: callArgs, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath, decidedJobProfile: decidedJobProfile, restrictedPath: Self.restrictedPath(for: source, tool: functionCall.name),
                                                         beforeToolFired: Self.isGatedFileOrCommand(functionCall))
                     // A rule file the agent wrote is not in effect until the person reads and trusts it
                     // (#625 review): approving the write showed its path, not its rules.
@@ -5576,7 +5587,7 @@ actor IrisEngine {
                 }
             } else {
                 await recordApproval(.ungated, pillId: pillId, conversationId: conversationId)
-                result = await executeToolWithHooks(name: functionCall.name, args: callArgs, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath,
+                result = await executeToolWithHooks(name: functionCall.name, args: callArgs, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath, decidedJobProfile: decidedJobProfile,
                                                     beforeToolFired: jobHooksFired)
             }
         }
@@ -5914,7 +5925,7 @@ actor IrisEngine {
 
     /// `beforeToolFired`: the dispatcher already ran this call's BeforeTool hooks, before its
     /// approval (#647), so they are not run again and `args` are exactly what was approved.
-    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil, approvedWorkspaceRoot: String? = nil, decidedPath: String? = nil, restrictedPath: [String]? = nil,
+    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil, approvedWorkspaceRoot: String? = nil, decidedPath: String? = nil, decidedJobProfile: JobProfile? = nil, restrictedPath: [String]? = nil,
                                       beforeToolFired: Bool = false) async -> String {
         var execArgs: [String: JSONValue] = args
 
@@ -5971,7 +5982,7 @@ actor IrisEngine {
 
         var result = await executor.execute(name: name, args: execArgs, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox, grant: grant, grantedMount: grantedMount,
                                               approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath, restrictedPath: restrictedPath,
-                                              homeWritableOptIn: await homeWritableOptIn(for: conversationId))
+                                              homeWritableOptIn: await homeWritableOptIn(for: conversationId), decidedJobProfile: decidedJobProfile)
 
         if name == "write_file", result.hasPrefix("Successfully wrote to "),
            let cid = conversationId, let path = execArgs["path"]?.stringValue {

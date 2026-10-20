@@ -299,6 +299,28 @@ struct RegisterWatcherTests {
         #expect(again.id == job.id && again.profile == .mutating && again.policy.grants == nil)
     }
 
+    @Test("a re-registration whose profile, read again at the write, isn't the one the gate decided is refused, and nothing changes (#660)")
+    func profileChangedSinceApproval() async throws {
+        let f = try fixture(); defer { f.tearDown() }
+        let conversation = UUID()
+        // The watch exists as mutating; the gate decided (and showed) read-only, as it would have had
+        // the watch been removed or changed between its read and this write.
+        _ = await f.register(["profile": .string("mutating")], conversationId: conversation)
+        let before = try f.watch().job
+        #expect(before.profile == .mutating)
+        let args: [String: JSONValue] = ["path": .string(f.notes.path), "instructions": .string("changed")]
+        let result = await f.executor.execute(name: "register_directory_watcher", args: args, conversationId: conversation,
+                                              decidedJobProfile: .readOnly)
+        #expect(result == ToolExecutor.profileChangedSinceApproval)
+        #expect(try f.watch().job == before, "nothing is written")
+
+        // The same call with the profile the gate decided goes through.
+        let agreed = await f.executor.execute(name: "register_directory_watcher", args: args, conversationId: conversation,
+                                              decidedJobProfile: .mutating)
+        let profile = try f.watch().job.profile
+        #expect(agreed != ToolExecutor.profileChangedSinceApproval && profile == .mutating)
+    }
+
     /// #287. `JobGrant.resolve`'s `malformed(entry, reason)` quotes the raw mount string the
     /// model sent, and that message reaches this tool's result through `grantRefusal`. A relative
     /// mount is the easiest way to fail `ContainerMount(parsing:)`, and its `entry` can carry
