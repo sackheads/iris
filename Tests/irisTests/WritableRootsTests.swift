@@ -64,6 +64,15 @@ struct WritableRootsTests {
         #expect(record.contents() == .damaged, "unparseable line")
         try good.write(to: record.url)
         #expect(record.contents() == .roots([IrisPaths.canonicalPath("/iris616/a")]))
+
+        // A root recorded after a torn line lands on a line of its own: deleting the broken line repairs it.
+        try (good + Data("\"/iris616/torn".utf8)).write(to: record.url)
+        #expect(record.record(["/iris616/c"]))
+        let lines = try String(contentsOf: record.url, encoding: .utf8).split(separator: "\n").map(String.init)
+        let lastRoot = try lines.last.map { try JSONDecoder().decode(String.self, from: Data($0.utf8)) }
+        #expect(lastRoot == IrisPaths.canonicalPath("/iris616/c"), "its own line, which decodes")
+        try (lines.filter { !$0.contains("torn") }.joined(separator: "\n") + "\n").write(to: record.url, atomically: true, encoding: .utf8)
+        #expect(record.contents() == .roots([IrisPaths.canonicalPath("/iris616/a"), IrisPaths.canonicalPath("/iris616/c")]))
     }
 
     @Test("a workspace bind is recorded, and its folder stays writable after the conversation is deleted")
@@ -166,6 +175,17 @@ struct WritableRootsTests {
             guard case .failure(let why) = r else { Issue.record("/opt/homebrew/bin was granted"); return }
             #expect(why.text.contains("login PATH"))
         }
+    }
+
+    @Test("a sandbox workspace at, inside or holding a login-PATH folder needs the opt-in, like home (#616 review)")
+    func workspaceOnLoginPath() throws {
+        let prefix = try tempDir("wsbrew")
+        let bin = prefix.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: bin.appendingPathComponent("x"), withIntermediateDirectories: true)
+        for path in [bin.path, bin.appendingPathComponent("x").path, prefix.path] {
+            #expect(HomeMount.reason(for: path, loginPath: [bin.path])?.contains("login PATH") == true, "\(path)")
+        }
+        #expect(HomeMount.reason(for: try tempDir("plain").path, loginPath: [bin.path]) == nil)
     }
 
     @Test("at fire, a stored read-write grant on a login-PATH folder is refused")

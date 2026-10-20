@@ -45,9 +45,19 @@ struct WritableRootsRecord: Sendable {
             guard (try? FileManager.default.createDirectory(at: paths.configDir, withIntermediateDirectories: true)) != nil else {
                 return false
             }
-            let fd = open(url.path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o600)
+            let fd = open(url.path, O_RDWR | O_APPEND | O_CREAT | O_CLOEXEC, 0o600)
             guard fd >= 0 else { return false }
             defer { close(fd) }
+            // After a torn last line (#616 review), a newline first, so the new root is a line of
+            // its own rather than merged into the broken one the notice says to delete.
+            var st = stat()
+            guard fstat(fd, &st) == 0 else { return false }
+            var last: UInt8 = 0x0A
+            if st.st_size > 0, pread(fd, &last, 1, st.st_size - 1) != 1 { return false }
+            if last != 0x0A {
+                var newline: UInt8 = 0x0A
+                guard Darwin.write(fd, &newline, 1) == 1 else { return false }
+            }
             for root in fresh {
                 guard var line = try? JSONEncoder().encode(root) else { return false }
                 line.append(0x0A)
