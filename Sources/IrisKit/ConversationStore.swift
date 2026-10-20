@@ -681,6 +681,7 @@ final class ConversationStore: Sendable {
                 t.column("msgId", .text).notNull()
                 t.column("sent", .boolean).notNull()
                 t.column("bytes", .integer).notNull()
+                t.column("name", .text).notNull()
                 t.column("createdAt", .datetime).notNull()
                 t.primaryKey(["sha256", "conversationId", "msgId"])
             }

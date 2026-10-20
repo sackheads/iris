@@ -2654,7 +2654,9 @@ class AppState {
     /// and daily through the maintenance hook.
     func sweepArtifacts(now: Date = Date()) {
         guard let referenced = try? store.artifacts.referencedHashes() else { return }
-        ArtifactStore(paths: IrisPaths.default).sweep(referenced: referenced, now: now)
+        // The directory walk and removals are file I/O: off the main actor (#708 review).
+        let paths = IrisPaths.default
+        Task.detached(priority: .utility) { ArtifactStore(paths: paths).sweep(referenced: referenced, now: now) }
     }
 
     func deleteConversation(_ id: UUID) {
