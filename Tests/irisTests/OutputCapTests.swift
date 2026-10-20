@@ -43,6 +43,19 @@ struct OutputCapTests {
         #expect(capped.hasPrefix("a\u{e9}") && capped.hasSuffix("\u{e9}b"))
     }
 
+    @Test("a cut moves to a line boundary only when one is near: a short line and a huge one keep a full head and tail")
+    func snapIsBounded() {
+        let huge = String(repeating: "z", count: 2_000_000)
+        let headFirst = OutputCap.cap("ab\n" + huge)
+        let kept = headFirst.split(separator: "\n", omittingEmptySubsequences: false)
+        #expect(headFirst.utf8.count > OutputCap.limitBytes - OutputCap.snapBytes, "the head wasn't cut back to the first line")
+        #expect(kept.first == "ab")
+        let tailLast = OutputCap.cap(huge + "\n" + "y")
+        #expect(tailLast.hasSuffix(String(repeating: "z", count: 1000) + "\ny") || tailLast.utf8.count > OutputCap.limitBytes - OutputCap.snapBytes,
+                "the tail wasn't cut forward to the last line")
+        #expect(tailLast.utf8.count > OutputCap.limitBytes - OutputCap.snapBytes)
+    }
+
     @Test("read_file's advice names the lines left out, counted in the file from the call's own start_line")
     func readFileAdvice() throws {
         let capped = OutputCap.cap(numbered(5000), advice: .readFile(startLine: 1))
@@ -74,7 +87,6 @@ struct OutputCapTests {
         #expect(LineRange.apply(range, to: text) == "b\nc\n")
         #expect(LineRange.apply(LineRange(start: 3, count: nil), to: text) == "c\nd\n")
         #expect(LineRange.apply(LineRange(start: 9, count: nil), to: text).contains("has 4 lines"))
-        #expect(LineRange.apply(range, to: "Error reading file: nope") == "Error reading file: nope")
         #expect(try LineRange.parse(start: nil, count: nil).get() == nil)
         #expect(try LineRange.parse(start: .string("3"), count: nil).get() == LineRange(start: 3, count: nil))
         #expect(throws: ToolMessage.self) { try LineRange.parse(start: .int(0), count: nil).get() }
@@ -93,6 +105,13 @@ struct OutputCapTests {
         try "one\ntwo\nthree\nfour\n".write(to: file, atomically: true, encoding: .utf8)
         let out = await ToolExecutor().execute(name: "read_file", args: ["path": .string(file.path), "start_line": .int(2), "line_count": .int(2)])
         #expect(out == "two\nthree\n")
+        // A file whose text happens to look like a failure is still content, and still ranged.
+        let lookalike = dir.appendingPathComponent("g.txt")
+        try "Error: not really\nsecond\n".write(to: lookalike, atomically: true, encoding: .utf8)
+        #expect(await ToolExecutor().execute(name: "read_file", args: ["path": .string(lookalike.path), "start_line": .int(2)]) == "second\n")
+        // And a real failure isn't ranged.
+        let missing = await ToolExecutor().execute(name: "read_file", args: ["path": .string(dir.appendingPathComponent("nope").path), "start_line": .int(2)])
+        #expect(missing.hasPrefix("Error reading file:"))
     }
 
     // MARK: The drain
