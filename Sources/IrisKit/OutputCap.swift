@@ -48,20 +48,26 @@ enum OutputCap {
             + String(decoding: tail, as: UTF8.self)
     }
 
-    /// Where the head ends: just after the last newline within `limit` bytes, or else at the last
-    /// character boundary, so a single long line is still cut cleanly.
+    /// How far a cut moves to reach a line boundary (#731 review). Farther than this, it stays
+    /// where it is, on a character boundary: snapping to a newline at any distance turned a short
+    /// first line and one huge line into a two-byte head.
+    static let snapBytes = 1024
+
+    /// Where the head ends: just after the last newline in the `snapBytes` before `limit`, or else
+    /// at the last character boundary, so a long line is still cut cleanly.
     private static func cutBack(_ bytes: [UInt8], from limit: Int) -> Int {
-        if let newline = bytes[..<limit].lastIndex(of: 0x0A) { return newline + 1 }
+        if let newline = bytes[max(0, limit - snapBytes)..<limit].lastIndex(of: 0x0A) { return newline + 1 }
         var end = limit
         while end > 0, bytes[end] & 0xC0 == 0x80 { end -= 1 }
         return end
     }
 
-    /// Where the tail starts: just after the first newline at or past `start`, or else at the
-    /// first character boundary; never before the head's end.
+    /// Where the tail starts: just after the first newline in the `snapBytes` from `start`, or else
+    /// at the first character boundary; never before the head's end.
     private static func cutForward(_ bytes: [UInt8], from start: Int, notBefore floor: Int) -> Int {
         let start = max(start, floor)
-        if let newline = bytes[start...].firstIndex(of: 0x0A), newline + 1 < bytes.count { return newline + 1 }
+        if let newline = bytes[start..<min(bytes.count, start + snapBytes)].firstIndex(of: 0x0A),
+           newline + 1 < bytes.count { return newline + 1 }
         var begin = start
         while begin < bytes.count, bytes[begin] & 0xC0 == 0x80 { begin += 1 }
         return begin
@@ -119,10 +125,12 @@ struct LineRange: Equatable, Sendable {
         return .success(LineRange(start: first ?? 1, count: length))
     }
 
-    /// The lines of a read's result, or the result unchanged when there's no range or the read
-    /// failed. A start past the end says how many lines there are.
+    /// The lines of a read's text (never a failure's sentence: the caller only hands it content),
+    /// or the text unchanged with no range. A start past the end says how many lines there are.
+    /// The read itself is whole, so a range bounds what the model sees, not what's read; the read
+    /// routes' own limits are what bound memory.
     static func apply(_ range: LineRange?, to text: String) -> String {
-        guard let range, !isReadError(text) else { return text }
+        guard let range else { return text }
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
         // A file ending in a newline has no line after it.
         let total = text.hasSuffix("\n") ? lines.count - 1 : lines.count
@@ -132,10 +140,5 @@ struct LineRange: Equatable, Sendable {
         let end = range.count.map { min(total, range.start - 1 + $0) } ?? total
         let picked = lines[(range.start - 1)..<end].joined(separator: "\n")
         return end < total || text.hasSuffix("\n") ? picked + "\n" : picked
-    }
-
-    /// The read routes' failure sentences, which a range leaves alone.
-    static func isReadError(_ text: String) -> Bool {
-        ["Error reading file:", "Error reading directory:", "Error: "].contains { text.hasPrefix($0) }
     }
 }

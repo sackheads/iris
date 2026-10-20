@@ -248,8 +248,11 @@ struct ToolExecutor {
             case .failure(let message): return message.text
             case .success(let parsed): range = parsed
             }
-            return LineRange.apply(range, to: await readFileWhole(path: path, cwd: cwd, grant: grant, grantedMount: grantedMount,
-                                                                  approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath))
+            switch await readFileWhole(path: path, cwd: cwd, grant: grant, grantedMount: grantedMount,
+                                       approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath) {
+            case .failure(let why): return why
+            case .content(let text): return LineRange.apply(range, to: text)
+            }
         case "write_file":
             guard let path = args["path"]?.stringValue, let content = args["content"]?.stringValue else { return "Error: Missing path or content" }
             if let grant {
@@ -780,48 +783,56 @@ struct ToolExecutor {
     /// `read_file`'s four routes, unchanged by #709's range: a grant's walk, an approved
     /// workspace's walk, the decided path's walk, or the plain read.
     private func readFileWhole(path: String, cwd: String?, grant: JobGrant?, grantedMount: ContainerMount?,
-                               approvedWorkspaceRoot: String?, decidedPath: String?) async -> String {
+                               approvedWorkspaceRoot: String?, decidedPath: String?) async -> ReadResult {
         if let grant {
             // §0.13: under a grant there is no Foundation branch. A nil decision is a refusal,
             // because it may have been made while a component was a link.
-            guard let grantedMount else { return Self.notDecidedInsideGrant("read_file") }
+            guard let grantedMount else { return .failure(Self.notDecidedInsideGrant("read_file")) }
             guard let relative = Self.grantedComponents(of: path, cwd: cwd, grant: grant, decided: grantedMount) else {
-                return Self.notUnderGrantedDirectory(grantedMount.source)
+                return .failure(Self.notUnderGrantedDirectory(grantedMount.source))
             }
-            return await readFile(grantRoot: grantedMount.source, relative: relative)
+            return await readFileResult(grantRoot: grantedMount.source, relative: relative)
         }
         if let approvedWorkspaceRoot {
             // The post-hook path: a `BeforeTool` rewrite out of the workspace is refused, not
             // opened by path on the strength of an approval given to another one.
             guard let relative = GoalContract.workspaceComponents(of: Self.resolvePath(path, cwd: cwd),
                                                                   under: approvedWorkspaceRoot) else {
-                return "Error: the path is not inside the approved workspace \(approvedWorkspaceRoot); nothing was read."
+                return .failure("Error: the path is not inside the approved workspace \(approvedWorkspaceRoot); nothing was read.")
             }
-            return await readFile(approvedWorkspace: approvedWorkspaceRoot, relative: relative)
+            return await readFileResult(approvedWorkspace: approvedWorkspaceRoot, relative: relative)
         }
         if let decidedPath {
-            if let refusal = Self.decidedPathRefusal("read_file", path: path, cwd: cwd, decided: decidedPath) { return refusal }
-            return await readFile(decided: decidedPath)
+            if let refusal = Self.decidedPathRefusal("read_file", path: path, cwd: cwd, decided: decidedPath) { return .failure(refusal) }
+            return await readFileResult(decided: decidedPath)
         }
         return await readFile(path, cwd: cwd)
     }
 
-    private func readFile(_ path: String, cwd: String? = nil) async -> String {
+    /// A read's text, or why there is none (#709): a range applies to text, never to a failure's
+    /// sentence, whatever the file happens to start with.
+    enum ReadResult: Sendable, Equatable {
+        case content(String)
+        case failure(String)
+        var text: String { switch self { case .content(let t), .failure(let t): return t } }
+    }
+
+    private func readFile(_ path: String, cwd: String? = nil) async -> ReadResult {
         let expandedPath = Self.resolvePath(path, cwd: cwd)
-        return await OffPool.run(cancelled: Self.readCancelled) { _ in
+        return await OffPool.run(cancelled: ReadResult.failure(Self.readCancelled)) { _ in
             // A directory gets its listing (#337). `O_NONBLOCK` so a FIFO is not opened blocking
             // here; it fails `O_DIRECTORY` and falls through to the read, as before.
             let dirFD = open(expandedPath, O_RDONLY | O_DIRECTORY | O_NONBLOCK | O_CLOEXEC)
             if dirFD >= 0 {
                 defer { close(dirFD) }
-                do { return try DirectoryListing.list(directory: dirFD) }
-                catch let error as GrantedFileError { return "Error reading directory: \(error.message)" }
-                catch { return "Error reading directory: \(error.localizedDescription)" }
+                do { return .content(try DirectoryListing.list(directory: dirFD)) }
+                catch let error as GrantedFileError { return .failure("Error reading directory: \(error.message)") }
+                catch { return .failure("Error reading directory: \(error.localizedDescription)") }
             }
             do {
-                return try String(contentsOfFile: expandedPath, encoding: .utf8)
+                return .content(try String(contentsOfFile: expandedPath, encoding: .utf8))
             } catch {
-                return "Error reading file: \(error.localizedDescription)"
+                return .failure("Error reading file: \(error.localizedDescription)")
             }
         }
     }
@@ -933,20 +944,28 @@ struct ToolExecutor {
 
     /// A granted run's read (#282 §0.13): the same walk the write takes, from the covering mount's root.
     func readFile(grantRoot: String, relative: [String]) async -> String {
-        await OffPool.run(cancelled: Self.readCancelled) { _ in
-            do { return try GrantedFileAccess(root: grantRoot).read(relative: relative) }
-            catch let error as GrantedFileError { return "Error reading file: \(error.message)" }
-            catch { return "Error reading file: \(error.localizedDescription)" }
+        await readFileResult(grantRoot: grantRoot, relative: relative).text
+    }
+
+    func readFileResult(grantRoot: String, relative: [String]) async -> ReadResult {
+        await OffPool.run(cancelled: ReadResult.failure(Self.readCancelled)) { _ in
+            do { return .content(try GrantedFileAccess(root: grantRoot).read(relative: relative)) }
+            catch let error as GrantedFileError { return .failure("Error reading file: \(error.message)") }
+            catch { return .failure("Error reading file: \(error.localizedDescription)") }
         }
     }
 
     /// A grader's pre-approved read in its approved workspace (#339): the granted-run walk, from
     /// the approved root.
     func readFile(approvedWorkspace root: String, relative: [String]) async -> String {
-        await OffPool.run(cancelled: Self.readCancelled) { _ in
-            do { return try GrantedFileAccess(root: root).read(relative: relative) }
-            catch let error as GrantedFileError { return "Error reading file: \(error.message(for: .approvedWorkspace))" }
-            catch { return "Error reading file: \(error.localizedDescription)" }
+        await readFileResult(approvedWorkspace: root, relative: relative).text
+    }
+
+    func readFileResult(approvedWorkspace root: String, relative: [String]) async -> ReadResult {
+        await OffPool.run(cancelled: ReadResult.failure(Self.readCancelled)) { _ in
+            do { return .content(try GrantedFileAccess(root: root).read(relative: relative)) }
+            catch let error as GrantedFileError { return .failure("Error reading file: \(error.message(for: .approvedWorkspace))") }
+            catch { return .failure("Error reading file: \(error.localizedDescription)") }
         }
     }
 
@@ -1000,13 +1019,17 @@ struct ToolExecutor {
     /// in after the approval, and is refused rather than followed — atomically, per component, with
     /// no window between a check and the open.
     func readFile(decided: String) async -> String {
+        await readFileResult(decided: decided).text
+    }
+
+    func readFileResult(decided: String) async -> ReadResult {
         guard let relative = Self.decidedComponents(decided) else {
-            return "Error reading file: the path is not the one that was approved; nothing was done"
+            return .failure("Error reading file: the path is not the one that was approved; nothing was done")
         }
-        return await OffPool.run(cancelled: Self.readCancelled) { _ in
-            do { return try GrantedFileAccess(root: "/").read(relative: relative) }
-            catch let error as GrantedFileError { return "Error reading file: \(error.message(for: .approvedPath))" }
-            catch { return "Error reading file: \(error.localizedDescription)" }
+        return await OffPool.run(cancelled: ReadResult.failure(Self.readCancelled)) { _ in
+            do { return .content(try GrantedFileAccess(root: "/").read(relative: relative)) }
+            catch let error as GrantedFileError { return .failure("Error reading file: \(error.message(for: .approvedPath))") }
+            catch { return .failure("Error reading file: \(error.localizedDescription)") }
         }
     }
 
