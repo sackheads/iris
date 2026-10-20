@@ -94,6 +94,23 @@ struct TypedRatesTests {
         #expect(next.subagentRates == [key: perM(2, 4, 0.1)])
     }
 
+    @Test("with the Keychain item unreadable, a typed rate isn't kept, and reading it back says so (#733 review)")
+    func unreadableItemKeepsNothing() {
+        let (store, keychain, suite) = { () -> (UserDefaults, KeychainManager, String) in
+            let suite = "iris-typedrates-\(UUID().uuidString)"
+            let store = UserDefaults(suiteName: suite)!
+            return (store, KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true), suite)
+        }()
+        defer { teardown(suite) }
+        keychain.saveSecrets([GuardedSettings.markerKey: "1"])
+        keychain.simulateReadFailure(-25293)
+        let config = ConfigManager(store: store, guardedSecrets: keychain)
+        let key = TypedRates.key(providerId: "deepseek", model: "deepseek-v4-pro")
+        config.subagentRates = [key: perM(2, 4, 0.1)]
+        #expect(config.subagentRates[key] == nil, "what the editor reads back, and refuses on")
+        #expect(ModelRatesSection.notSaved.hasPrefix("Not saved"))
+    }
+
     @Test("Settings warns when a typed rate is under a tenth of its family's lowest")
     func warning() {
         #expect(TypedRates.lowersBudgetUse(perM(0.0001, 0.0001, 0.00001), family: "anthropic"))
