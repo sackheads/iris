@@ -299,6 +299,47 @@ An artifact is kept while any non-deleted conversation — archived ones include
 that references it (`artifact_refs`, §8). When the last reference goes, it is swept after a 7-day
 grace. Settings shows the exchange directory's total size; there is no hard cap yet.
 
+### 7.6 Rulings for PR 3 (planner, 2026-10-19)
+
+The build of §7 (#469 PR 3) re-read this section against what landed after it: agent profiles,
+#678's guarded settings, the host-only sandbox network (#690), per-provider subagents (#239) and
+script jobs (#330). The rulings below amend §7.1-7.5 where they differ.
+
+- **Where (A).** `<IrisPaths>/exchange`, added to `protectedWriteDirs` (and, in a dev process, the
+  release home's too, as for `config/`). Only the harness writes it. Because an approved host
+  `run_command` can still write there, **every read verifies the file's sha256 against its name**;
+  a mismatch is refused: "artifact <hash> is corrupt or was replaced". Content addressing then
+  enforces immutability rather than claiming it. The exchange is already off limits as a mount
+  (Iris's own directory).
+- **Who may read (B).** Only a conversation with an `artifact_refs` row for that artifact. A row is
+  written at send for the sender and at delivery for each receiver, and by nothing else: a
+  forwarded message that carries a hash grants nothing. `read_file` on a direct path into
+  `exchange/` is refused and points at the URI. This is containment, not a new confidentiality
+  boundary: `read_conversation` already crosses conversations.
+- **A sandboxed receiver (C).** Materialize on read: the harness verifies the hash, then copies that
+  one artifact into the session container at `/tmp/iris-artifacts/<sha>` through a bounded exec on
+  stdin (`ProcessGroupRunner` and its kill ladder, Invariant 4), and the read answers with that
+  path. No exception to the mount rule. The VM may change its own copy; that is the receiver's
+  business.
+- **A sandboxed sender (D).** A path under a workspace mount maps to its host source, and
+  `read_file`'s host checks apply to the host path with the same no-follow resolution (#256); a
+  symlink is never resolved VM-side and then trusted. Anywhere else in the VM, a bounded
+  `container exec cat` under the same runner reads it, capped at 50 MB: over the cap refuses, never
+  truncates. The sidecar records the origin, `vm:<path>` or the host path. If the exec read slips
+  the PR, a sandboxed sender's `{path}` attachment is refused instead.
+- **Profiles (E).** A `{path}` attachment also needs `read_file` in the sender's tool scope, since
+  attaching is reading; opening a received artifact is `read_file`, so a profile without it can't.
+- **Routed subagents (F).** A subagent on another provider that reads an artifact sends it there;
+  allowed, because switching that provider on for subagents is the opt-in. `docs/delegation.md`
+  says so.
+- **Script jobs (G)** are out of scope: job runs can't use the session tools.
+- **Settings (H).** Size and retention knobs stay in defaults: disk, not spend, egress or safety.
+- **Network (I).** Not affected: artifacts never cross the network in v1.
+- **Caps and retention (J).** 10 per send, 50 MB per file, 64 KB per data part, a per-session limit
+  of 200 MB of new artifact bytes a day, and a **global cap of 2 GB** for the whole exchange
+  (default): a new artifact over either is refused visibly, naming the limit and Settings.
+  Retention as §7.5, swept at launch and daily through the daily maintenance hook.
+
 ## 8. Persistence
 
 Every field below needs `decodeIfPresent` and a store column, or it vanishes on load

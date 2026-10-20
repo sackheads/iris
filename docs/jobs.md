@@ -972,8 +972,9 @@ it is the run that ends `blocked on approval` and the run's card that names the 
 
 The allowlist has one carve-out — the agent's own `~/.iris` directory — and it stops short of two
 things. Nothing auto-allows a *write* into a protected directory: `config/`, which holds the file
-that grants permissions along with the hook and plugin settings, and `plugins/`, where a plugin
-with an `mcp` component becomes a command spawned at the next launch. That check is canonical —
+that grants permissions along with the hook and plugin settings, `plugins/`, where a plugin
+with an `mcp` component becomes a command spawned at the next launch, and `exchange/`, where
+session attachments are kept and only Iris writes ([Sessions](sessions.md#attachments)). That check is canonical —
 case-insensitive, with symlinks resolved — so `~/.iris/CONFIG/permissions.json` or a link planted
 under `memory/` is the same refusal. (`rules/` is not protected: it is prompt text, which the guard
 already treats as untrusted, not a way to make something run.) And a background run gets no write
@@ -1043,7 +1044,7 @@ the first, by the ledger) if one is reached another way:
 
 - a call a **read-only** job's profile refused. It was not stopped for want of a human, so no human
   can grant it; the job would have to be created `mutating`.
-- a **write into a protected directory** (`~/.iris/config`, `~/.iris/plugins`). A write there grants
+- a **write into a protected directory** (`~/.iris/config`, `~/.iris/plugins`, `~/.iris/exchange`). A write there grants
   further permission rather than editing a file, and a click says a person vouches for the call —
   it does not change what may be written. Make that change yourself if you want it.
 - a **file-tool call outside the job's grant** (`write_file` or `read_file` from a granted run,
