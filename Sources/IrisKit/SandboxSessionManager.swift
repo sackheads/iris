@@ -233,7 +233,7 @@ actor SandboxSessionManager {
         }
         do {
             let r = try await runtime.exec(name: name(for: id), workdir: workdir, command: command,
-                                           timeoutSeconds: timeoutSeconds)
+                                           timeoutSeconds: timeoutSeconds, outputLimit: OutputCap.drainBytes)
             sessions[id]?.lastUsed = Date()
             return await noted(decorate(format(r), notice: wasLost && created, for: id))
         } catch {
@@ -263,7 +263,7 @@ actor SandboxSessionManager {
                 try await ensureSession(id, workspace: workspace, mounts: mounts, network: network)
                 gitGuard.watch(owner: owner, sources: sources)
                 let r = try await runtime.exec(name: name(for: id), workdir: workdir, command: command,
-                                               timeoutSeconds: timeoutSeconds)
+                                               timeoutSeconds: timeoutSeconds, outputLimit: OutputCap.drainBytes)
                 sessions[id]?.lastUsed = Date()
                 return await noted(decorate(format(r), notice: true, for: id))
             } catch {
@@ -553,10 +553,13 @@ actor SandboxSessionManager {
         }
     }
 
-    private func format(_ r: (stdout: String, stderr: String, exitCode: Int32)) -> String {
+    private func format(_ r: ExecOutput) -> String {
         var result = r.stdout
         if !r.stderr.isEmpty { result += "\nStderr: " + r.stderr }
         if r.exitCode != 0, let hint = ToolExecutor.sandboxSetupHint(for: result) { return hint }
+        // #709: a drain that dropped part of a stream says so, with the totals, as the host does.
+        let dropped = r.droppedStdout + r.droppedStderr
+        if dropped > 0 { result = OutputCap.cap(result, advice: .runCommand, droppedBytes: dropped) }
         return result.isEmpty ? "Success" : result
     }
 

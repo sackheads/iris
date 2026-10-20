@@ -80,4 +80,14 @@ struct BoundedDrainTests {
             Issue.record("a long stderr doesn't touch the verdict, which is stdout's last line"); return
         }
     }
+
+    @Test("a large limit also keeps a rolling tail, so a long output's last line survives (#709)")
+    func keepsRollingTail() async throws {
+        let limit = 4 * OutputCap.tailBytes
+        let r = try await sh.run(["-c", "head -c 3000000 /dev/zero | tr '\\0' a; echo; echo LAST-LINE"],
+                                 timeoutSeconds: 30, outputLimit: limit)
+        #expect(r.stdout.utf8.count == limit)
+        #expect(r.stdout.hasSuffix("LAST-LINE\n"))
+        #expect(r.droppedStdout == 3_000_000 + 1 + 10 - limit)
+    }
 }
