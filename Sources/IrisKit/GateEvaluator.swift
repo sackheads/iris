@@ -33,10 +33,9 @@ enum GateResult: Equatable, Sendable {
 enum GateEvaluator {
     /// How much of a script gate's output is carried into the run's prompt (spec §7).
     static let payloadLimit = 4_000
-    /// The most of each stream a gate script's output Iris holds (#699): drained past this on the
-    /// host, so a script can't grow Iris's memory by writing around a cap inside the VM.
-    /// What the host keeps of each stream (#699): above the in-VM cap (`ScriptJobs.outputLimit`,
-    /// 64 KB) and its marker, so only a script that gets round that cap reaches it.
+    /// What the host keeps of each stream of a gate or script job (#699): drained past this, so a
+    /// script can't grow Iris's memory by writing round the in-VM cap (`ScriptJobs.outputLimit`,
+    /// 64 KB); set above that cap and its marker, so only such a script reaches it.
     static let outputLimitBytes = 128 * 1_024
     static let outputLimitMessage = "the script printed more than 128 KB on standard output; a gate's last line must be \(changedToken) or \(unchangedToken)"
     /// What a gate script gets when it declared no deadline of its own.
@@ -317,8 +316,8 @@ enum GateEvaluator {
     /// One script in a fresh container, for a gate or a script job (#330): registered with
     /// `LiveContainerNames` before the create, on the isolated network unless `network` (#687),
     /// created within `createCeiling`, run under `timeoutSeconds` with the in-VM group kill, and
-    /// always swept. An ordinary script's output is capped in the VM (`ScriptJobs.cappedCommand`);
-    /// the host-side bound is #699.
+    /// always swept. Output is capped in the VM (`ScriptJobs.cappedCommand`) and, for a script that
+    /// gets round that, on the host by #699's bounded drain (`outputLimitBytes`).
     static func runInVM(_ command: String, mounts: [String], timeoutSeconds seconds: Int, network: Bool,
                         runtime: any ContainerRuntime, image: String, createCeiling: Int,
                         kind: String, namePrefix: String = SandboxSessionManager.namePrefix,

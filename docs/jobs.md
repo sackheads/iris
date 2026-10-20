@@ -446,7 +446,7 @@ runs once and records its baseline.
 "identical" and `grep -q` returns 0 for "found", so any exit-code convention makes a plausible gate
 fire every tick or never. Everything the script printed before that line is the gate's payload: the
 first 4,000 characters of it go into the run's prompt as untrusted context, wrapped and tagged
-`gate_output` like any other text Iris did not write. Iris holds at most 1 MB of each of the
+`gate_output` like any other text Iris did not write. Iris holds at most 128 KB of each of the
 script's output streams; a script that prints more on standard output has lost its last line, so
 that tick is a gate error, never a verdict read from cut output.
 
@@ -492,7 +492,7 @@ What each answer costs:
 | --- | --- |
 | changed | The job runs, and the signal is recorded on that run's row |
 | nothing changed | A `completed` row with the outcome `gate: no change`, and **no card** — cards are for things that happened, and a five-minute poll would otherwise bury Iris, the pinned conversation. It costs no model turn and does not count towards the breaker |
-| it could not tell (a 404 or 5xx, a response with none of the three headers, a missing path, a mount that has moved, a non-zero exit, a timeout, over 1 MB of output, or any other last line — and a ledger Iris could not read the last signal out of) | An `interrupted` row whose reason starts `gate error`. Three of those **in a row** pause the job with the reason `gate failing`, and that pause gets a card |
+| it could not tell (a 404 or 5xx, a response with none of the three headers, a missing path, a mount that has moved, a non-zero exit, a timeout, over 128 KB of output, or any other last line — and a ledger Iris could not read the last signal out of) | An `interrupted` row whose reason starts `gate error`. Three of those **in a row** pause the job with the reason `gate failing`, and that pause gets a card |
 
 If a job's gate is ever changed — no tool does this today — the signals its runs recorded are
 dropped: a signal is a reading taken by one particular gate, and an ETag cannot answer for an
@@ -798,8 +798,8 @@ Schedule it again to approve it. If the Keychain item can't be read, no script r
 ladder applies as for any job), and the outcome is the **last non-empty line of its output**, cut
 at 200 characters (`exit N` if it printed nothing). At most 64 KB of each of stdout and stderr is
 kept on the row, and an ordinary script's output is cut to that inside the VM. A script written
-to get round the cap can still send more, which Iris reads in full until the timeout; a host-side
-bound is #699. **A card posts only when something
+to get round that cap is held on the host too: Iris keeps at most 128 KB of each stream, and a run
+that prints more on standard output fails (#699). **A card posts only when something
 happened**: the first run, any failure, or a run whose status or outcome differs from the last
 one's. Every run writes its row either way, and `/jobs` shows a script job's *last ran* and
 *last posted* separately so a quiet one doesn't look dead. A posted line is untrusted script
