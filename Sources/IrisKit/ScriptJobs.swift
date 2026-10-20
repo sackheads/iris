@@ -57,7 +57,7 @@ enum ScriptJobs {
     static func clampedTimeout(_ seconds: Int) -> Int { min(max(seconds, minTimeoutSeconds), maxTimeoutSeconds) }
 
     /// Kept of each stream on the row, and the in-VM cap of an ordinary script's output (#330, C;
-    /// not a bound against a hostile one, #699).
+    /// a hostile one is held by the host's bounded drain, `GateEvaluator.outputLimitBytes`, #699).
     static let outputLimit = 64 * 1_024
     static let truncatedMarker = "[truncated]"
     /// The card's outcome line, like a prompt run's.
@@ -115,9 +115,9 @@ enum ScriptJobs {
 
     /// The script wrapped so an ordinary script's output is capped at `limit` bytes per stream in the
     /// VM: written to the container's `/tmp`, then the head of each sent back, with a marker past the
-    /// cap. Not a bound against a script written to get round it: it can write to its parent's
-    /// stdout (`/proc/$PPID/fd/1`) past the cap, and the host reads `container exec` output in full
-    /// until the timeout (#699, a host-side bounded drain). The script travels as base64, so no
+    /// cap. A script written to get round it (writing to its parent's stdout, `/proc/$PPID/fd/1`)
+    /// is held on the host instead: the bounded drain (#699) keeps `GateEvaluator.outputLimitBytes`
+    /// and fails the run. The script travels as base64, so no
     /// quoting in it can break the wrapper. Exit status is the script's.
     static func cappedCommand(_ script: String, limit: Int = outputLimit) -> String {
         let encoded = Data(script.utf8).base64EncodedString()
