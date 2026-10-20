@@ -58,6 +58,7 @@ This spec adds a script job on a **mutating job's grant**: read-write mounts, un
 
 **What the fingerprint must gain** (dev-2 and dev-3, #721 review): a writing job's folders come from the grant, which #698 doesn't fingerprint at all, so the fingerprint takes **the grant's mounts (source, target, read-only) and its network, plus the profile**. A read-only job's `script_mounts` strings already carry `:ro`, so they need nothing new.
 - **The encoding is additive.** Each new input is written only when it differs from its default (no grant, profile `readOnly`). So a read-only script job with no grant hashes **byte-identically** to #698's v1, nothing is re-asked on upgrade, and there's no re-fingerprint pass to replay (#698's TOFU hazard).
+- **Each optional section is tagged** (dev-3): `add("grant")`, then the mount count and each mount's source, target and flag, then the network; `add("profile")`, then its value. So no mix of present and absent sections can produce the same bytes as another.
 - A test pins the byte-identical v1 hash for a read-only job. Then turning a read-only mount read-write, outside Iris or through a re-schedule, is "changed since review", never a silent widening. A test pins it: flipping one mount's flag in the stored row pauses the next fire.
 
 ### 3. Do #330's card rules still fit?
