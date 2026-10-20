@@ -210,6 +210,13 @@ extension ConfigManager {
         }
     }
 
+    /// #239 3c: rates typed in Settings, guarded. The app hands them to `PriceBook.shared` at launch
+    /// and on each save in Settings; nothing here touches it, so a test's own config can't.
+    var subagentRates: [String: TokenRates] {
+        get { TypedRates.decode(guardedBlob(.subagentRates)) }
+        set { setGuardedBlob(.subagentRates, TypedRates.encode(newValue.filter { PriceGuards.fieldsValid($0.value) })) }
+    }
+
     var undecodableSubagentEndpoints: Int {
         Self.decodeEndpoints(Data(guardedBlob(.subagentProviders).utf8)).dropped
     }

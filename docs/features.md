@@ -37,10 +37,13 @@ Settings → Models → **Subagent providers** lists providers a subagent could 
 - **Custom endpoints:** OpenAI-compatible servers such as DeepSeek, OpenRouter, or Ollama on this Mac.
   - Each endpoint has an id, a base URL, exact model ids, and a key.
   - The base URL must be https, except for a server on this Mac (`localhost`, `127.0.0.1` or `::1`), which is also the only kind that can go without a key.
-  - The key goes in Iris's existing Keychain item, is never shown, and is sent only to the address it was entered for. If the address changes, the key must be entered again.
+  - The key goes in Iris's existing Keychain item and is sent only to the address it was entered for. Settings shows only `••••` and its last four characters (just "set" for a key under 8 characters), from what Iris loaded at launch, and never logs it. If the address changes, the key must be entered again.
   - A routed request follows no redirects.
   - **Check** lists the endpoint's models and marks each configured id as found or not found.
-- **Where they're kept:** the endpoint list and the switches are kept with Iris's API keys in its Keychain item (#678), so a host command's `defaults write` can't add an endpoint or turn a family on.
+- **Prices:** in a job run, a subagent on another model is charged at that model's price ([delegation](delegation.md#subagents-on-other-providers)). Each model shows its price per million tokens and where it came from: the price list fetched daily, the copy bundled with Iris, or a rate you typed.
+  - **Set rate…** types a rate for one model. Raising a subagent's rate is free. Lowering it is held to a tenth of the bundled price, or for a model with no bundled price, to $0.01 per million tokens. The primary's rate works the other way round, since a charge divides by it. A rate that was held says so, and one below a tenth of its family's cheapest warns that it lowers how much of the budget the model uses.
+  - **Check prices now** fetches the price list at once.
+- **Where they're kept:** the endpoint list, the switches and your typed rates are kept with Iris's API keys in its Keychain item (#678), so a host command's `defaults write` can't add an endpoint, turn a family on, or lower a rate.
 - **Using one:** the model sends a subagent to one of these with `invoke_subagent`'s `provider` and `model` arguments, which exist only while one is usable. See [delegation](delegation.md#subagents-on-other-providers) and the [spec](specs/2026-10-19-multi-model-subagents.md).
 
 ### Jobs
