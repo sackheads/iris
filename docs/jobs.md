@@ -457,8 +457,9 @@ it is fenced in:
   job that goes quiet with nobody to notice;
 - its mounts are **always read-only**, whatever was written, and each one is checked when the job is
   created: an absolute path, no commas, and an existing directory (a single file cannot be mounted
-  — give its directory). Neither `/` nor Iris's own `config/` and `plugins/` can be one, however
-  they are spelled;
+  — give its directory). Neither `/`, nor Iris's own directory (`~/.iris`) or anything in it, nor a
+  directory that contains it (`~`, a parent of it) can be one, however they are spelled: those would
+  take in `config/`, `plugins/` and the session attachments (#695);
 - a mount is recorded as the directory it **resolves to**, not the name it was given: `..` is
   removed and symlinks are followed, so what you are shown at creation is what will actually be
   read. The same check runs on every tick — a source that has since been pointed somewhere else,

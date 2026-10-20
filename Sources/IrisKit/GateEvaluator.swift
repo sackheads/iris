@@ -424,7 +424,8 @@ enum GateEvaluator {
     /// otherwise be bound without anybody having looked at it. Resolving to something other than
     /// the stored path is the whole test — the stored path is already canonical, so any difference
     /// is a change made since.
-    static func mountDrift(_ mounts: [String], fileManager: FileManager = .default) -> String? {
+    static func mountDrift(_ mounts: [String], fileManager: FileManager = .default, paths: IrisPaths = .default,
+                           identity: BuildIdentity = .current, release: IrisPaths = .release) -> String? {
         for entry in mounts {
             let source = mountParts(entry).source
             guard !source.isEmpty else { continue }
@@ -436,6 +437,11 @@ enum GateEvaluator {
             guard fileManager.fileExists(atPath: source, isDirectory: &isDirectory),
                   isDirectory.boolValue else {
                 return "the gate's mount \(source) is no longer a directory"
+            }
+            // A gate made before a rule existed is held to it too (#695): an existing gate on `~`
+            // errors each tick, so after three in a row the job pauses with this sentence.
+            if let refusal = mountRefusal(entry, fileManager: fileManager, paths: paths, identity: identity, release: release) {
+                return refusal
             }
         }
         return nil
@@ -503,7 +509,24 @@ enum GateEvaluator {
               !(identity == .dev && release.isUnderProtectedWriteDir(source)) else {
             return "the mount source \(source) is part of Iris's own configuration, which a gate may not read — name a directory outside it"
         }
+        // Nor a directory that *contains* Iris's home (#695): `~` or `~/.iris` read-only takes in
+        // `config/` and `exchange/` with everything else, which is the rule job grants already
+        // hold (`WatchRoot.breadthProblem`, "is or contains Iris's own directory").
+        if Self.isOrContains(source, paths.root.path) {
+            return IrisPaths.standard.agentFacing("the mount source \(source) is or contains Iris's own directory (~/.iris), which a gate may not read — name a directory outside it")
+        }
+        if identity == .dev, Self.isOrContains(source, release.root.path) {
+            return "the mount source \(source) is or contains the installed Iris app's directory (~/.iris), which a gate may not read — name a directory outside it"
+        }
         return nil
+    }
+
+    /// Whether `source` is `iris` or a directory above it, compared canonically and case-insensitively
+    /// as `WatchRoot.breadthProblem` does.
+    static func isOrContains(_ source: String, _ iris: String) -> Bool {
+        let root = IrisPaths.canonicalPath(source).lowercased()
+        let home = IrisPaths.canonicalPath(iris).lowercased()
+        return root == home || root.hasPrefix(home + "/") || home.hasPrefix(root + "/")
     }
 
     /// One line of a runtime failure, in the words the CLI used rather than Swift's.
