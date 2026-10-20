@@ -202,4 +202,29 @@ struct OutputCapTests {
         _ = await manager.run(command: "echo hi", conversationId: UUID(), workspace: "/ws")
         #expect(runtime.execLimits == [OutputCap.drainBytes])
     }
+
+    /// A canary that flags any prompt holding `marker`.
+    private final class MarkerCanary: AuxiliaryInferenceEngine, @unchecked Sendable {
+        let marker: String
+        init(_ marker: String) { self.marker = marker }
+        func loadModel(config: AuxiliaryModelConfig) async throws {}
+        func unloadModel() async {}
+        func generate(prompt: String, jsonSchema: String?) async throws -> String {
+            prompt.contains(marker) ? "MALICIOUS" : "SAFE"
+        }
+    }
+
+    @Test("with tier 2 skipped, a long input is cut to what tier 3 judged, so its unjudged middle never reaches the model (#731 review)")
+    func skippedTier2CutsToJudged() async {
+        let marker = "PLANTED-\(UUID().uuidString)"
+        let filler = String(repeating: "an ordinary line of a long system event.\n", count: 1300)   // about 50 KB
+        let text = filler + marker + "\n" + filler
+        let outcome = await CoreMLEvaluator.$scopedModel.withValue(.init(nil)) {
+            await AuxiliaryModelManager.$scopedEngines.withValue(["canary": MarkerCanary(marker)]) {
+                await InjectionGuard.sanitize(text, contextTag: "system_event_x", maxTier: .tier3_canary, protectionEnabled: true)
+            }
+        }
+        #expect(!outcome.contains(marker), "the middle the canary never saw went through")
+        #expect(outcome.contains("[output truncated:"))
+    }
 }
