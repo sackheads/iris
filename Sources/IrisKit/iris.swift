@@ -4466,7 +4466,7 @@ actor IrisEngine {
                 let source = await localState?.requestApprovalSource(
                     toolName: functionCall.name, details: details, args: functionCall.args,
                     workspace: workspacePath, conversationId: conversationId, origin: approvalOrigin,
-                    humanOnly: true)
+                    humanOnly: true, beforeToolFired: jobHooksFired)
                 guard let source else { return Self.jobCreationDeclined }
                 var approval = ToolApproval(source)
                 approval.hookRewrite = jobRewrittenByHook
@@ -5583,7 +5583,9 @@ actor IrisEngine {
                     allowedCommands: evaluatorChecks, grantedMount: grantedMount,
                     graderReadWalked: approvedWorkspaceRoot != nil,
                     // #239 (Brian, "1: a"): a subagent on a custom endpoint asks Allow Once only.
-                    offersAlwaysAllow: !(subagentRoute?.isEndpoint ?? false))
+                    offersAlwaysAllow: !(subagentRoute?.isEndpoint ?? false),
+                    // #653: a call recorded for a card here already went through its hooks.
+                    beforeToolFired: Self.isGatedFileOrCommand(functionCall))
                 if let source {
                     var approval = ToolApproval(source)
                     approval.hookRewrite = rewrittenByHook
@@ -5701,10 +5703,22 @@ actor IrisEngine {
         let decidedPath: String? = grant == nil && (call.toolName == "read_file" || call.toolName == "write_file")
             ? call.args["path"].map { IrisPaths.throughPrivate(ToolExecutor.resolvePath($0.stringValue, cwd: call.cwd)) }
             : nil
+        // #653: hooks that ran when the call was recorded have already rewritten it; the click runs
+        // what the card showed. They run again here for a denial only (planner): `hooksFired` is a
+        // flag on a row a host shell can edit, and it must not switch off a deny hook the person set
+        // up. A call recorded before its hooks has them fire inside `executeToolWithHooks`, as before.
+        if call.hooksFired {
+            switch await beforeToolArguments(name: call.toolName, args: call.args, conversationId: conversationId,
+                                             workspacePath: call.cwd) {
+            case .blocked(let message): return message
+            case .rewritten: print("[Hooks] a BeforeTool hook would have rewritten an approved card's call at the click; it runs as recorded (#653).")
+            case .unchanged: break
+            }
+        }
         return await executeToolWithHooks(name: call.toolName, args: call.args, cwd: call.cwd,
                                           conversationId: conversationId, useSandbox: useSandbox,
                                           origin: .approvedCall, grant: grant, grantedMount: grantedMount,
-                                          decidedPath: decidedPath)
+                                          decidedPath: decidedPath, beforeToolFired: call.hooksFired)
     }
 
     /// What an approved call that turns out to target a protected directory returns instead of
@@ -5922,7 +5936,7 @@ actor IrisEngine {
     }
 
     /// Said when something would change an approved call's arguments after its approval (#647).
-    static let approvedCallRewrittenRefusal = "Not run: a BeforeTool hook changed this call's arguments after it was approved, and an approved call runs exactly as it was approved. On an event card's Approve and run, your hooks run at the click, after the approval; run the call again from a conversation, where hooks run before anyone is asked (see Tool Hooks in the docs, and #653)."
+    static let approvedCallRewrittenRefusal = "Not run: a BeforeTool hook changed this call's arguments after it was approved, and an approved call runs exactly as it was approved. This card's call was recorded before its hooks ran (by an older version, or by a policy that refused it first), so they ran at the click, after the approval; run the call again from a conversation, where hooks run before anyone is asked (see Tool Hooks in the docs)."
 
     /// Puts what let a call run on its pill (#599). UI only: the model never sees it.
     private func recordApproval(_ approval: ToolApproval, pillId: UUID?, conversationId: UUID) async {

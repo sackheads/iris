@@ -3902,7 +3902,8 @@ class AppState {
                          inSandbox: Bool = false, callerRole: VibecopCallerRole = .agent,
                          allowedCommands: [String] = [], vibecopEnabled: Bool? = nil,
                          grantedMount: ContainerMount? = nil, humanOnly: Bool = false,
-                         graderReadWalked: Bool = false, offersAlwaysAllow: Bool = true) async -> ApprovalSource? {
+                         graderReadWalked: Bool = false, offersAlwaysAllow: Bool = true,
+                         beforeToolFired: Bool = false) async -> ApprovalSource? {
         // No pre-granted-approval branch here, deliberately (#187 R21, 2026-09-21): a call a
         // person clicked "Approve and run" on is dispatched by `IrisEngine.executeApprovedCall`,
         // which runs the tool through the hook layer directly and never enters this function. The
@@ -3925,7 +3926,7 @@ class AppState {
             // below must not stand in for them (#599). Its one caller refuses unattended
             // conversations before it asks; this keeps the ladder right without relying on that.
             if irisWrite || humanOnly {
-                recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval), in: id)
+                recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval, hooksFired: beforeToolFired), in: id)
                 return nil
             }
             // R10 first and on its own (#282 §3): a write into a protected directory is refused
@@ -3933,7 +3934,7 @@ class AppState {
             // resolved against the run's directory; `isProtectedWrite` judges it by real path (§0.9).
             let resolvedPath = ToolExecutor.resolvePath(details, cwd: workspace)
             if permissions.isProtectedWrite(toolName: toolName, path: resolvedPath) {
-                recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval), in: id)
+                recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval, hooksFired: beforeToolFired), in: id)
                 return nil
             }
             // §0.4, §0.5: inside the grant, no human is needed. A `run_command` reaching here has
@@ -3959,7 +3960,8 @@ class AppState {
                 return .allowlist(match)
             }
             recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval,
-                                                     grantNearest: isGrantedFileTool ? grant?.nearest(to: details, cwd: workspace) : nil),
+                                                     grantNearest: isGrantedFileTool ? grant?.nearest(to: details, cwd: workspace) : nil,
+                                                     hooksFired: beforeToolFired),
                                    in: id)
             return nil
         }
