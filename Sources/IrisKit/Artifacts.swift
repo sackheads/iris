@@ -113,16 +113,16 @@ struct ArtifactStore: Sendable {
     func put(_ data: Data, name: String, sender: UUID?, origin: String, capBytes: Int64,
              now: Date = Date()) throws -> ArtifactSidecar {
         let sha = Self.sha256(data)
-        if let existing = try? sidecar(sha), (try? Data(contentsOf: fileURL(sha))).map(Self.sha256) == sha {
-            return existing
-        }
+        // This send's own values, never a stored sidecar's: the sidecar isn't hash-covered, so a
+        // writer of exchange/ could have planted one (#708 review).
+        let side = ArtifactSidecar(sha256: sha, name: name, mimeType: Self.mimeType(forName: name), size: data.count,
+                                   senderSession: sender, createdAt: now, origin: origin)
+        if (try? Data(contentsOf: fileURL(sha))).map(Self.sha256) == sha { return side }
         let total = totalBytes()
         guard total + Int64(data.count) <= capBytes else { throw ArtifactError.exchangeFull(totalBytes: total, capBytes: capBytes) }
         let fm = FileManager.default
         try fm.createDirectory(at: fileURL(sha).deletingLastPathComponent(), withIntermediateDirectories: true)
         try data.write(to: fileURL(sha), options: .atomic)
-        let side = ArtifactSidecar(sha256: sha, name: name, mimeType: Self.mimeType(forName: name), size: data.count,
-                                   senderSession: sender, createdAt: now, origin: origin)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         try encoder.encode(side).write(to: sidecarURL(sha), options: .atomic)
@@ -204,12 +204,22 @@ final class ArtifactLedger: Sendable {
 
     init(writer: any DatabaseWriter) { self.writer = writer }
 
-    func insert(sha: String, conversationId: UUID, msgId: String, sent: Bool, bytes: Int, at date: Date = Date()) throws {
+    func insert(sha: String, conversationId: UUID, msgId: String, sent: Bool, bytes: Int, name: String,
+                at date: Date = Date()) throws {
         try writer.write { db in
             try db.execute(sql: """
-                INSERT OR IGNORE INTO artifact_refs (sha256, conversationId, msgId, sent, bytes, createdAt)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """, arguments: [sha, conversationId.uuidString, msgId, sent, bytes, date])
+                INSERT OR IGNORE INTO artifact_refs (sha256, conversationId, msgId, sent, bytes, name, createdAt)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, arguments: [sha, conversationId.uuidString, msgId, sent, bytes, name, date])
+        }
+    }
+
+    /// The name this conversation's most recent reference gave the artifact: each sender's own name
+    /// for it, not the first sender's (#708 review). Nil without a reference.
+    func name(sha: String, conversationId: UUID) throws -> String? {
+        try writer.read { db in
+            try String.fetchOne(db, sql: "SELECT name FROM artifact_refs WHERE sha256 = ? AND conversationId = ? ORDER BY createdAt DESC LIMIT 1",
+                                arguments: [sha, conversationId.uuidString])
         }
     }
 

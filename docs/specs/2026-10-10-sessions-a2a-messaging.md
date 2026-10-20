@@ -310,7 +310,10 @@ script jobs (#330). The rulings below amend §7.1-7.5 where they differ.
   `run_command` can still write there, **every read verifies the file's sha256 against its name**;
   a mismatch is refused: "artifact <hash> is corrupt or was replaced". Content addressing then
   enforces immutability rather than claiming it. The exchange is already off limits as a mount
-  (Iris's own directory).
+  (Iris's own directory). The sidecar beside each file is *not* hash-covered, so nothing the model
+  reads comes from it: a read's name is the one the reading conversation's sender gave it
+  (`artifact_refs.name`), its type follows from that name, its size is the bytes read, and the name
+  is judged by the injection guard with the body (#708 review).
 - **Who may read (B).** Only a conversation with an `artifact_refs` row for that artifact. A row is
   written at send for the sender and at delivery for each receiver, and by nothing else: a
   forwarded message that carries a hash grants nothing. `read_file` on a direct path into
