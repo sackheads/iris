@@ -651,6 +651,11 @@ final class ConversationStore: Sendable {
         m.registerMigration("v25_conversation_tier") { db in
             try db.alter(table: "conversations") { t in t.add(column: "modelTier", .text) }
         }
+        // #239 3b: what a run's subagents on other models spent, per model, as JSON
+        // (`DelegatedCharge`). NULL (every earlier row) is none.
+        m.registerMigration("v26_job_run_delegated_charges") { db in
+            try db.alter(table: "job_runs") { t in t.add(column: "delegatedCharges", .text) }
+        }
         return m
     }
 

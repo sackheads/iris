@@ -1331,9 +1331,8 @@ actor JobRunner {
                              blockedTool: blockedTool,
                              startedAt: startedAt, finishedAt: finishedAt,
                              totalTokens: turn.tokens.totalTokenCount,
-                             weightedTokens: CostWeights.weighted(turn.tokens.components,
-                                                                  provider: run.provider,
-                                                                  model: run.model),
+                             weightedTokens: turn.tokens.weighted(provider: run.provider, model: run.model),
+                             costNote: DelegatedCharge.estimatedNote(turn.tokens.delegatedCharges),
                              transcriptConversationId: conversationId,
                              // The card keeps a display copy: the ledger holds the call that
                              // gets re-dispatched, and a long body belongs in one place only.

@@ -37,6 +37,8 @@ struct JobRun: Identifiable, Equatable, Sendable {
     var cacheWrite1hTokens: Int = 0
     /// The share of `cacheReadTokens` its delegated subagents read (#370, v17). 0 on earlier rows.
     var delegatedCacheReadTokens: Int = 0
+    /// #239 3b: what its subagents on other models spent, per model (`job_runs.delegatedCharges`).
+    var delegatedCharges: [DelegatedCharge] = []
     /// Whose prices apply to this run: `LLMProvider.rawValue` and `ModelTier.rawValue`, stamped on
     /// a model-turn run at `begin`. nil on a row that spent nothing, and on every pre-5c row,
     /// which `CostWeights` then prices at its plain total.
@@ -100,6 +102,12 @@ struct JobRun: Identifiable, Equatable, Sendable {
 
 extension JobRun {
     /// This row as the weight table prices it; the same split as `TokenUsage.components`.
+    /// Its spend as a budget reads it: its own tokens at its provider and model, plus the other
+    /// models' charges, converted when they were charged.
+    var weighted: Int {
+        CostWeights.weighted(components, provider: provider, model: model) + delegatedCharges.reduce(0) { $0 + $1.weighted }
+    }
+
     var components: UsageComponents {
         UsageComponents(prompt: promptTokens, output: max(candidateTokens, totalTokens - promptTokens),
                         cacheRead: cacheReadTokens, cacheWrite: cacheWriteTokens,

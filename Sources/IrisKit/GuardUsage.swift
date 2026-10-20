@@ -30,11 +30,13 @@ enum GuardUsage {
     static func wasUnattributed(_ role: String) -> Bool { unattributed.withLock { $0.contains(role) } }
 
     /// The sink for a conversation: its tokens, and through them its job run's budget, as any of
-    /// the conversation's own model rounds are charged (`AppState.updateTokenUsage`).
+    /// the conversation's own model rounds are charged (`AppState.updateTokenUsage`). A guard call
+    /// runs on the primary's provider even in a routed subagent's conversation, so it is charged
+    /// at the run's weights, never at the subagent's model's price (#705 review).
     @MainActor
     static func charging(_ conversationId: UUID, in state: AppState?) -> Sink {
         Sink { [weak state] usage in
-            await MainActor.run { state?.updateTokenUsage(for: conversationId, usage: usage) }
+            await MainActor.run { state?.updateTokenUsage(for: conversationId, usage: usage, onPrimary: true) }
         }
     }
 }
