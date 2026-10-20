@@ -878,8 +878,13 @@ actor JobRunner {
         let posts = ScriptJobs.posts(status: status, outcome: outcome, previous: previous)
         // D: only a line that will be posted is guarded, since tier 3 can be a model call.
         var shown = outcome
+        // #689: the canary's call on the line is the run's spend. Collected here and added once the
+        // row is closed, since `finish` writes the run's own (zero) tokens.
+        let guardSpend = GuardSpend()
         if posts, stdout != nil {
-            let checked = await scriptLineGuard(outcome)
+            let checked = await GuardUsage.$sink.withValue(GuardUsage.Sink { guardSpend.add($0) }) {
+                await scriptLineGuard(outcome)
+            }
             shown = checked.withoutTier3 ? checked.line + " " + ScriptJobs.withoutTier3Marker : checked.line
         }
         let finishedAt = now()
@@ -887,6 +892,7 @@ actor JobRunner {
             try ledger.finish(runId: run.id, status: status, outcome: shown, failureReason: failureReason,
                               blockedTool: nil, tokens: TokenUsage(), finishedAt: finishedAt)
             try ledger.recordScript(runId: run.id, stdout: stdout, stderr: stderr, posted: posts)
+            for usage in guardSpend.all { try ledger.addUsage(runId: run.id, usage: usage) }
         } catch {
             print("[JobRunner] could not close the run for \(job.name): \(error)")
         }
@@ -2707,4 +2713,12 @@ struct JobLimits: Equatable, Sendable {
     private static func global(_ value: Int, default fallback: Int) -> Int {
         value > 0 ? value : fallback
     }
+}
+
+/// A script run's guard usage, gathered from a `@Sendable` sink (#689, #698).
+final class GuardSpend: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [UsageMetadata] = []
+    func add(_ usage: UsageMetadata) { lock.withLock { items.append(usage) } }
+    var all: [UsageMetadata] { lock.withLock { items } }
 }
