@@ -81,7 +81,7 @@ struct TranscriptFocusAnchorTests {
         #expect(find(NSPoint(x: 400, y: 50), root) == nil, "the composer's strip, below the transcript")
     }
 
-    @Test("a click inside the anchor's frame hands focus from a text view to the table; outside, it doesn't")
+    @Test("a click inside the transcript hands focus from a text view to the table; outside it, or a drag that ends inside, doesn't")
     func handsFocus() throws {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600), styleMask: [.titled],
                               backing: .buffered, defer: false)
@@ -93,16 +93,19 @@ struct TranscriptFocusAnchorTests {
         let composer = NSTextView(frame: NSRect(x: 200, y: 0, width: 600, height: 80))
         root.addSubview(composer)
         #expect(window.makeFirstResponder(composer))
-        anchor.focusTable(clickedAt: NSPoint(x: 400, y: 50))
+        func click(_ down: NSPoint, _ up: NSPoint) { anchor.mouseWentDown(at: down); anchor.focusTable(clickedAt: up) }
+        click(NSPoint(x: 400, y: 50), NSPoint(x: 400, y: 50))
         #expect(window.firstResponder === composer, "a click in the composer leaves it focused")
-        anchor.focusTable(clickedAt: NSPoint(x: 400, y: 300))
+        click(NSPoint(x: 400, y: 50), NSPoint(x: 400, y: 300))
+        #expect(window.firstResponder === composer, "a drag from the composer that ends in the transcript isn't a click there")
+        click(NSPoint(x: 400, y: 300), NSPoint(x: 400, y: 300))
         #expect(window.firstResponder === transcript)
 
         // A text field inside the transcript that the click focused keeps its focus.
         let field = NSTextView(frame: NSRect(x: 10, y: 10, width: 200, height: 30))
         transcript.addSubview(field)
         #expect(window.makeFirstResponder(field))
-        anchor.focusTable(clickedAt: NSPoint(x: 400, y: 300))
+        click(NSPoint(x: 400, y: 300), NSPoint(x: 400, y: 300))
         #expect(window.firstResponder === field, "a row's own control isn't robbed of focus")
     }
 }
