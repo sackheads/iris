@@ -61,6 +61,15 @@ struct TokenUsage: Codable, Equatable, Sendable {
     /// The share of `cacheReadTokenCount` a run's delegated subagents read (#370), set only by
     /// `runUsage(for:)`. Transient: left out of `CodingKeys`, so it is never persisted.
     var delegatedCacheReadTokenCount: Int = 0
+    /// What a run's subagents on other models spent, per model (#239 3b), set only by
+    /// `runUsage(for:)`. Transient like the field above.
+    var delegatedCharges: [DelegatedCharge] = []
+
+    /// The weighted figure a budget reads: this usage at `provider`/`model`'s weights, plus the
+    /// other models' charges, already converted to the primary's weighted tokens.
+    func weighted(provider: String?, model: String?) -> Int {
+        CostWeights.weighted(components, provider: provider, model: model) + delegatedCharges.reduce(0) { $0 + $1.weighted }
+    }
 
     enum CodingKeys: String, CodingKey {
         case promptTokenCount, candidatesTokenCount, totalTokenCount, cacheReadTokenCount, cacheWriteTokenCount
@@ -777,6 +786,13 @@ class AppState {
     /// `updateTokenUsage` only while the run is registered in `activeRuns`, and dropped with the
     /// run's denials. Transient: never persisted, never on a `Codable` type.
     @ObservationIgnored private var backgroundRunDelegatedUsage: [UUID: TokenUsage] = [:]
+    /// #239 3b: a routed subagent's pricing, by its conversation, set when it is spawned.
+    @ObservationIgnored private var delegatedPricing: [UUID: DelegatedPricing] = [:]
+    /// #239 3b: what a run's routed subagents spent, by run, then by `providerId|model`. Kept as
+    /// raw tokens and priced when read, so a rate refreshed mid-run applies to the whole run.
+    @ObservationIgnored private var backgroundRunOtherModels: [UUID: [String: (DelegatedPricing, UsageComponents)]] = [:]
+    /// Where a routed subagent's tokens are priced. Injectable for tests.
+    @ObservationIgnored var priceBook: PriceBook = .shared
     /// What a job run in flight is held to and where its spend is written (#313), registered by
     /// `JobRunner` for the run's conversation and dropped at the drain. Every engine working for
     /// the run — the run's own and any subagent or evaluator linked to it — checks this budget and
@@ -3269,7 +3285,9 @@ class AppState {
         }
     }
     
-    func updateTokenUsage(for conversationId: UUID, usage: UsageMetadata) {
+    /// `onPrimary`: the call ran on the primary's provider whatever the conversation's own model,
+    /// as a guard call does (#689), so it is never priced at a routed subagent's rate (#705 review).
+    func updateTokenUsage(for conversationId: UUID, usage: UsageMetadata, onPrimary: Bool = false) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].tokenUsage.promptTokenCount += usage.promptTokenCount ?? 0
             conversations[idx].tokenUsage.candidatesTokenCount += usage.candidatesTokenCount ?? 0
@@ -3292,7 +3310,18 @@ class AppState {
         // the run, never by the descendant, so each token lands on exactly one run row.
         // Only into a registered run: a subagent orphaned by a drain can still link a child of
         // its own, under a root nothing will ever drain.
-        if let run = backgroundRunAncestor[conversationId], activeRuns[run] != nil {
+        if let run = backgroundRunAncestor[conversationId], activeRuns[run] != nil, !onPrimary,
+           let pricing = delegatedPricing[conversationId] {
+            // #239 3b: a subagent on another model is priced at its own rate, per model, not at the
+            // run's weights.
+            let key = pricing.providerId + "|" + pricing.model
+            var (_, spent) = backgroundRunOtherModels[run]?[key] ?? (pricing, UsageComponents())
+            spent.prompt += usage.promptTokenCount ?? 0
+            spent.output += max(usage.candidatesTokenCount ?? 0, (usage.totalTokenCount ?? 0) - (usage.promptTokenCount ?? 0))
+            spent.cacheRead += usage.cacheReadTokens ?? 0
+            spent.cacheWrite += usage.cacheWriteTokens ?? 0
+            backgroundRunOtherModels[run, default: [:]][key] = (pricing, spent)
+        } else if let run = backgroundRunAncestor[conversationId], activeRuns[run] != nil {
             var delegated = backgroundRunDelegatedUsage[run] ?? TokenUsage()
             delegated.promptTokenCount += usage.promptTokenCount ?? 0
             delegated.candidatesTokenCount += usage.candidatesTokenCount ?? 0
@@ -4223,11 +4252,14 @@ class AppState {
     func takeBackgroundDenials(for conversationId: UUID) -> [BlockedCall] {
         let denials = backgroundDenials[conversationId] ?? []
         backgroundDenials.removeValue(forKey: conversationId)
+        // Its subagents' pricing goes with it (#705 review): a subagent outlives no run's accounting.
+        for (child, run) in backgroundRunAncestor where run == conversationId { delegatedPricing.removeValue(forKey: child) }
         // The run is over, so nothing it spawned can be refused anything more.
         backgroundRunAncestor = backgroundRunAncestor.filter { $0.value != conversationId }
         // And nothing it spawned is charged to it any more (#313): a subagent that outlives its
         // run spends against nobody's row. Callers read `runUsage` before draining.
         backgroundRunDelegatedUsage.removeValue(forKey: conversationId)
+        backgroundRunOtherModels.removeValue(forKey: conversationId)
         let wasActive = activeRuns.removeValue(forKey: conversationId) != nil
         // And nothing it spawned goes on working (#323). Cancelling the run's turn reaches a
         // subagent it is still waiting on through structured cancellation; this is the backstop
@@ -4377,7 +4409,19 @@ class AppState {
                 usage.cacheWrite1hTokenCount = (usage.cacheWrite1hTokenCount ?? 0) + write1h
             }
         }
+        if let others = backgroundRunOtherModels[runConversationId], !others.isEmpty {
+            let budget = activeRuns[runConversationId]?.budget
+            usage.delegatedCharges = others.keys.sorted().compactMap { key in
+                others[key].map { priceBook.charge($0.1, pricing: $0.0, primaryProvider: budget?.provider, primaryModel: budget?.model) }
+            }
+        }
         return usage
+    }
+
+    /// #239 3b: `subagentId` runs on `pricing`'s model, other than its run's primary, so what it
+    /// spends inside a job run is priced at that model's rate.
+    func setDelegatedPricing(_ pricing: DelegatedPricing, for subagentId: UUID) {
+        delegatedPricing[subagentId] = pricing
     }
 
     /// The background run `id` belongs to — itself when it is the run, or when nothing linked it.

@@ -45,7 +45,7 @@ struct RunLogRow: Identifiable, Equatable, Sendable {
             duration: run.finishedAt.map { $0.timeIntervalSince(run.startedAt) },
             jobName: run.jobName, triggerKind: run.triggerKind, status: run.status,
             statusText: run.statusText,
-            weightedTokens: CostWeights.weighted(run.components, provider: run.provider, model: run.model),
+            weightedTokens: run.weighted,
             outcome: run.detailText, canAcknowledge: waits && run.acknowledgedAt == nil,
             opensCard: run.status == .blockedOnApproval, transcript: transcript)
     }

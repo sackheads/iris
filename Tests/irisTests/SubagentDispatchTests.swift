@@ -102,27 +102,22 @@ struct SubagentDispatchTests {
         #expect(route.providerId == "local-ollama" && route.model == "qwen3:8b")
     }
 
-    @Test("another family is refused inside a job run, at any depth; the primary is not")
-    func jobRunRefusal() async throws {
+    @Test("another family resolves inside a job run too, at any depth, now that it is priced (#239 3b)")
+    func jobRunAllowed() async throws {
         let (config, _, suite) = try harness(endpoint: true)
         defer { teardown(suite) }
         let state = AppState(store: try ConversationStore.inMemory(), tier2Provisioning: .provisioned,
                              tier3Provisioning: .provisioned, createIfEmpty: false, emitLaunchNotices: false)
         let job = state.createNewConversation(isBackground: true, select: false)
-        // A job's subagent's subagent: background by inheritance, as `runSubagent` creates it.
         let nested = state.createNewConversation(isSubagent: true, isBackground: true, select: false)
         let engine = IrisEngine(state: state, client: FakeLLMClient(responses: []), subagentConfig: config)
         for conversation in [job, nested] {
-            guard case .refused(let message) = await engine.resolveSubagentRoute(["provider": .string("local-ollama")], effort: "medium",
-                                                                                conversationId: conversation) else {
-                Issue.record("another family must be refused in a job run"); continue
+            guard case .route(let route?) = await engine.resolveSubagentRoute(["provider": .string("local-ollama")], effort: "medium",
+                                                                             conversationId: conversation) else {
+                Issue.record("another family must resolve in a job run"); continue
             }
-            #expect(message == SubagentManager.jobRunOtherFamilyRefusal)
+            #expect(route.providerId == "local-ollama")
         }
-        guard case .route(let primary?) = await engine.resolveSubagentRoute(["provider": .string("gemini")], effort: "easy", conversationId: job) else {
-            Issue.record("the primary stays allowed in a job run"); return
-        }
-        #expect(primary.target == .builtIn(.gemini) && primary.model == config.geminiModelEasy)
     }
 
     // MARK: running on the route

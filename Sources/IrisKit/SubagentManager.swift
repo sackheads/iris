@@ -129,6 +129,10 @@ final class SubagentManager: @unchecked Sendable {
             appState.linkDelegate(subagentId, of: parentConversationId)   // #418: its asks are the parent's
             appState.updateConversationTitle(id: subagentId, title: "Subagent: \(role)")
             appState.registerSubagent(id: subagentId, role: role)
+            // #239 3b: on another family, what it spends in a job run is priced at its own rate.
+            if let route, route.providerId != ProviderSlug.id(of: LLMProvider(rawValue: config.primaryProvider) ?? .gemini) {
+                appState.setDelegatedPricing(DelegatedPricing(route: route, endpoints: config.subagentEndpoints), for: subagentId)
+            }
             // Delegation must not drop the workspace the parent is bound to. Without this the
             // subagent's run_command inherits the process cwd (the Iris repo) while the parent
             // works somewhere else — and a unit contract's executable `check` would then be graded
@@ -393,7 +397,6 @@ final class SubagentManager: @unchecked Sendable {
     }
 
     /// The refusal for an other-family subagent inside a job run, until its pricing is in (#689).
-    static let jobRunOtherFamilyRefusal = "Subagents on other model families can't run inside a job yet: their pricing isn't in (#689). Run it in a conversation, or use the primary."
 
     /// `invoke_subagent`'s schema. `providers` lists the ids usable besides the primary: with any,
     /// the `provider` and `model` arguments are declared (Invariant 6), else they are absent.

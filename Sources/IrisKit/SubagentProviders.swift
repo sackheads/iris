@@ -14,13 +14,17 @@ struct ProviderEndpoint: Codable, Equatable, Hashable, Sendable, Identifiable {
     var models: [String]
     /// False for a local server that takes no key (Ollama, LM Studio).
     var needsKey: Bool
+    /// The LiteLLM family its prices come from (#239 3b), set by its preset. nil falls back to its
+    /// host's family (`PriceFamily.forHost`), else to the highest known rate.
+    var priceFamily: String?
 
-    init(id: String, name: String, baseURL: String, models: [String], needsKey: Bool = true) {
+    init(id: String, name: String, baseURL: String, models: [String], needsKey: Bool = true, priceFamily: String? = nil) {
         self.id = id
         self.name = name
         self.baseURL = baseURL
         self.models = models
         self.needsKey = needsKey
+        self.priceFamily = priceFamily
     }
 
     init(from decoder: Decoder) throws {
@@ -30,6 +34,7 @@ struct ProviderEndpoint: Codable, Equatable, Hashable, Sendable, Identifiable {
         baseURL = try c.decode(String.self, forKey: .baseURL)
         models = try c.decodeIfPresent([String].self, forKey: .models) ?? []
         needsKey = try c.decodeIfPresent(Bool.self, forKey: .needsKey) ?? true
+        priceFamily = try c.decodeIfPresent(String.self, forKey: .priceFamily)
     }
 }
 

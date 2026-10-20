@@ -36,6 +36,9 @@ struct EventCard: Codable, Equatable, Sendable {
     /// was written. nil on every card written before 5c, which then shows its raw `totalTokens` as
     /// "tokens" — true when it was written (plan ruling 10).
     let weightedTokens: Int?
+    /// #239 3b: set when part of `weightedTokens` is a guess at another model's price, with why
+    /// ("estimated: set a rate for My Server in Settings for an accurate charge").
+    let costNote: String?
     /// The background conversation the run's turn happened in, if it still had one when the card
     /// was written. There is no foreign key — transcripts are pruned on their own schedule, so
     /// this can name a conversation that is already gone (the card then says "transcript pruned"
@@ -88,6 +91,7 @@ struct EventCard: Codable, Equatable, Sendable {
          finishedAt: Date,
          totalTokens: Int = 0,
          weightedTokens: Int? = nil,
+         costNote: String? = nil,
          transcriptConversationId: UUID? = nil,
          blockedCall: BlockedCall? = nil,
          vibecopVerdict: String? = nil,
@@ -110,6 +114,7 @@ struct EventCard: Codable, Equatable, Sendable {
         self.finishedAt = finishedAt
         self.totalTokens = totalTokens
         self.weightedTokens = weightedTokens
+        self.costNote = costNote
         self.transcriptConversationId = transcriptConversationId
         self.blockedCall = blockedCall
         self.vibecopVerdict = vibecopVerdict
@@ -156,6 +161,7 @@ struct EventCard: Codable, Equatable, Sendable {
         finishedAt = try container.decodeIfPresent(Date.self, forKey: .finishedAt) ?? startedAt
         totalTokens = try container.decodeIfPresent(Int.self, forKey: .totalTokens) ?? 0
         weightedTokens = try container.decodeIfPresent(Int.self, forKey: .weightedTokens)
+        costNote = try container.decodeIfPresent(String.self, forKey: .costNote)
         transcriptConversationId = try container.decodeIfPresent(UUID.self, forKey: .transcriptConversationId)
         // A blocked call this build cannot read is no blocked call: "there is something here and I
         // do not know what it is" must never become a button. Same direction `JobLedger`'s
@@ -466,7 +472,9 @@ struct EventCard: Codable, Equatable, Sendable {
     /// construction, so a token figure there says nothing.
     var tokensText: String? {
         if builtin { return nil }
-        if let weightedTokens { return "\(SessionActivity.formatTokenCount(weightedTokens)) weighted tokens" }
+        if let weightedTokens {
+            return "\(SessionActivity.formatTokenCount(weightedTokens)) weighted tokens" + (costNote.map { " (\($0))" } ?? "")
+        }
         return "\(SessionActivity.formatTokenCount(totalTokens)) tokens"
     }
 

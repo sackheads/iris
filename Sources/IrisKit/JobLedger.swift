@@ -468,14 +468,14 @@ extension JobLedger {
                     status = ?, outcome = ?, failureReason = ?, blockedTool = ?,
                     promptTokens = ?, candidateTokens = ?, totalTokens = ?,
                     cacheReadTokens = ?, cacheWriteTokens = ?, cacheWrite1hTokens = ?,
-                    delegatedCacheReadTokens = ?, finishedAt = ?
+                    delegatedCacheReadTokens = ?, delegatedCharges = ?, finishedAt = ?
                 WHERE id = ?
                 """, arguments: [
                     status.rawValue, trimmed, failureReason, blockedTool,
                     tokens.promptTokenCount, tokens.candidatesTokenCount, tokens.totalTokenCount,
                     tokens.cacheReadTokenCount ?? 0, tokens.cacheWriteTokenCount ?? 0,
                     tokens.cacheWrite1hTokenCount ?? 0, tokens.delegatedCacheReadTokenCount,
-                    finishedAt, runId.uuidString,
+                    DelegatedCharge.encode(tokens.delegatedCharges), finishedAt, runId.uuidString,
                 ])
             guard db.changesCount > 0 else { throw JobLedgerError.unknownRun(runId) }
         }
@@ -527,6 +527,16 @@ extension JobLedger {
                     tokens.cacheWrite1hTokenCount ?? 0, tokens.delegatedCacheReadTokenCount,
                     runId.uuidString, JobRun.Status.running.rawValue,
                 ])
+            // The other models' charges, never lowered either: replaced only by a larger total.
+            if !tokens.delegatedCharges.isEmpty {
+                let stored = DelegatedCharge.decode(try String.fetchOne(db, sql: "SELECT delegatedCharges FROM job_runs WHERE id = ? AND status = ?",
+                                                                       arguments: [runId.uuidString, JobRun.Status.running.rawValue]))
+                if tokens.delegatedCharges.reduce(0, { $0 + $1.weighted }) >= stored.reduce(0, { $0 + $1.weighted }) {
+                    try db.execute(sql: "UPDATE job_runs SET delegatedCharges = ? WHERE id = ? AND status = ?",
+                                   arguments: [DelegatedCharge.encode(tokens.delegatedCharges), runId.uuidString,
+                                               JobRun.Status.running.rawValue])
+                }
+            }
         }
     }
 
@@ -895,7 +905,7 @@ extension JobLedger {
         guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return 0 }
         let columns = """
             SELECT provider, model, promptTokens, candidateTokens, totalTokens,
-                   cacheReadTokens, cacheWriteTokens, cacheWrite1hTokens, delegatedCacheReadTokens FROM job_runs
+                   cacheReadTokens, cacheWriteTokens, cacheWrite1hTokens, delegatedCacheReadTokens, delegatedCharges FROM job_runs
             """
         let rows: [Row]
         if let jobId {
@@ -917,8 +927,10 @@ extension JobLedger {
                 run.cacheWriteTokens = try r.read("cacheWriteTokens", Int.self) ?? 0
                 run.cacheWrite1hTokens = try r.read("cacheWrite1hTokens", Int.self) ?? 0
                 run.delegatedCacheReadTokens = try r.read("delegatedCacheReadTokens", Int.self) ?? 0
-                return sum + CostWeights.weighted(run.components, provider: try r.read("provider", String.self),
-                                                  model: try r.read("model", String.self))
+                run.delegatedCharges = DelegatedCharge.decode(try r.read("delegatedCharges", String.self))
+                run.provider = try r.read("provider", String.self)
+                run.model = try r.read("model", String.self)
+                return sum + run.weighted
             } catch {
                 skipped += 1
                 return sum
@@ -1025,6 +1037,7 @@ extension JobLedger {
         run.tier = try r.read("tier", String.self)
         run.model = try r.read("model", String.self)
         run.delegatedCacheReadTokens = try r.read("delegatedCacheReadTokens", Int.self) ?? 0
+        run.delegatedCharges = DelegatedCharge.decode(try r.read("delegatedCharges", String.self))
         run.costMicros = try r.read("costMicros", Int64.self)
         run.gateSignal = try r.read("gateSignal", String.self)
         run.acknowledgedAt = try r.read("acknowledgedAt", Date.self)

@@ -2893,8 +2893,7 @@ actor IrisEngine {
             }
             var outputTokenCap: Int?
             if let budget {
-                let spent = CostWeights.weighted(usage.components, provider: budget.provider,
-                                                 model: budget.model)
+                let spent = usage.weighted(provider: budget.provider, model: budget.model)
                 outputTokenCap = budget.outputTokenCap(weightedTokens: spent)
                 if let reason = budget.stopReason(weightedTokens: spent) {
                     turnFinished = true
@@ -3536,16 +3535,12 @@ actor IrisEngine {
             return .route(subagentRoute)
         }
         let tier: ModelTier = effort.lowercased() == "easy" ? .easy : effort.lowercased() == "hard" ? .hard : .medium
-        let localState = state
         let config = subagentConfig
         return await MainActor.run {
             switch config.subagentRoute(provider: provider, model: model, tier: tier) {
             case .failure(let refusal):
                 return .refused(refusal.message)
             case .success(let route):
-                let primary = ProviderSlug.id(of: LLMProvider(rawValue: config.primaryProvider) ?? .gemini)
-                let inJobRun = localState?.conversations.first { $0.id == conversationId }?.isBackground == true
-                if route.providerId != primary, inJobRun { return .refused(SubagentManager.jobRunOtherFamilyRefusal) }
                 return .route(route)
             }
         }
@@ -5216,7 +5211,7 @@ actor IrisEngine {
             // The primary's client, for the grader and for an unrouted subagent (#697 review).
             let subagentClient = self.primaryClient
             // #239: a named provider resolves before anything is spawned, and refuses rather than
-            // falling back (Fork D). Other families wait out a job run until their pricing (#689).
+            // falling back (Fork D). In a job run, another family is charged at its own price (#239 3b).
             let route: ProviderRoute?
             switch await resolveSubagentRoute(functionCall.args, effort: effort, conversationId: conversationId) {
             case .refused(let message):
@@ -6207,7 +6202,7 @@ extension IrisEngine {
         return [
             FunctionDeclaration(
                 name: "list_jobs",
-                description: "List the background jobs: their name, trigger, whether they are enabled, when each next fires, why one is paused, and how the last run ended, plus what each has spent today in weighted tokens (an uncached input token is 1, an output token 5, cache writes at the provider's ratio and cache reads at the run's model's ratio, or the provider's for a model Iris has no figure for; its runs' subagents included, their cache reads at the higher of the run's model's ratio and the provider's, never at their own model's) and how hard it has been running — `weightedTokensToday` against `dailyBudget`, `runsLastHour` against `maxRunsPerHour` (the breaker), `retryAttempt` out of three, and `policy`, `gateKind` and `profile`, `action` — `prompt` for a model turn, `builtin:<name>` for Iris's own code run with no model, such as the daily digest — `urlTrigger` — whether the owner has let a link fire the job (only the owner can turn it on, and changing the job's prompt, profile or policy turns it off) — and `grants` — the directories and network a mutating job was created with, null when it has none — with `weightedTokensTodayAllJobs` against `globalDailyBudget` for every background run together, and `unreadableJobs` — how many stored jobs could not be read at all. A figure that is null could not be read, which is not the same as zero. Use it to answer what is scheduled, how much a job has spent, or to find the job behind a run you are being asked about; say so if `unreadableJobs` is not zero, because the list is then incomplete.",
+                description: "List the background jobs: their name, trigger, whether they are enabled, when each next fires, why one is paused, and how the last run ended, plus what each has spent today in weighted tokens (an uncached input token is 1, an output token 5, cache writes at the provider's ratio and cache reads at the run's model's ratio, or the provider's for a model Iris has no figure for; its runs' subagents included, their cache reads at the higher of the run's model's ratio and the provider's, never at their own model's; a subagent on another model family is instead charged at that model's own price, converted to the run's weighted tokens) and how hard it has been running — `weightedTokensToday` against `dailyBudget`, `runsLastHour` against `maxRunsPerHour` (the breaker), `retryAttempt` out of three, and `policy`, `gateKind` and `profile`, `action` — `prompt` for a model turn, `builtin:<name>` for Iris's own code run with no model, such as the daily digest — `urlTrigger` — whether the owner has let a link fire the job (only the owner can turn it on, and changing the job's prompt, profile or policy turns it off) — and `grants` — the directories and network a mutating job was created with, null when it has none — with `weightedTokensTodayAllJobs` against `globalDailyBudget` for every background run together, and `unreadableJobs` — how many stored jobs could not be read at all. A figure that is null could not be read, which is not the same as zero. Use it to answer what is scheduled, how much a job has spent, or to find the job behind a run you are being asked about; say so if `unreadableJobs` is not zero, because the list is then incomplete.",
                 parameters: Schema(type: "OBJECT", properties: [:], required: [])),
             FunctionDeclaration(
                 name: "get_job_run",
@@ -6375,7 +6370,7 @@ extension IrisEngine {
             "provider": run.provider ?? NSNull(),
             "model": run.model ?? NSNull(),
             // Priced at read time from the row's own components, provider and model (5c §0.6, #370).
-            "weightedTokens": CostWeights.weighted(run.components, provider: run.provider, model: run.model),
+            "weightedTokens": run.weighted,
             "costMicros": run.costMicros ?? NSNull(),
             "gateSignal": gateSignal ?? NSNull(),
             "transcriptConversationId": run.transcriptConversationId?.uuidString ?? NSNull(),
