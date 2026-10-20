@@ -47,17 +47,21 @@ public final class LiveONNXModel: CoreMLModelProtocol, @unchecked Sendable {
             return 0.0
         }
 
-        // Defensively truncate the raw text to prevent massive CPU spikes during tokenization
-        // if the input is a massive string (e.g. 10MB of scraped web HTML).
-        // 2000 characters is plenty to reach 512 tokens.
-        let safeText = String(text.prefix(2000))
-        
-        // The tokenizer already inserts [CLS]/[SEP]. The ONNX graph has dynamic sequence
-        // length, so we feed the real token count (capped) with no padding.
-        var inputIds = tokenizer.encode(text: safeText).map { Int64($0) }
-        if inputIds.count > maxSequenceLength {
-            inputIds = Array(inputIds.prefix(maxSequenceLength))
+        // #722: encoded whole (the evaluator bounds its length) and judged in overlapping
+        // windows; the tokenizer already inserts [CLS]/[SEP], which each window keeps.
+        var highest = 0.0
+        for window in TokenWindows.windows(tokenizer.encode(text: text), sequenceLength: maxSequenceLength) {
+            highest = max(highest, try evaluate(window: window))
+            if highest > 0.9 { break }
         }
+        return highest
+    }
+
+    public func tokenCount(_ text: String) -> Int { max(0, tokenizer.encode(text: text).count - 2) }
+
+    private func evaluate(window: [Int]) throws -> Double {
+        // The ONNX graph has dynamic sequence length, so the window's real count goes in, unpadded.
+        let inputIds = window.map { Int64($0) }
         let attentionMask = [Int64](repeating: 1, count: inputIds.count)
         let shape: [NSNumber] = [1, NSNumber(value: inputIds.count)]
 
