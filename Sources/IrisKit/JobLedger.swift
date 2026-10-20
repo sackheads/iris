@@ -786,7 +786,9 @@ extension JobLedger {
             // #567: a profile refusal is stored as `blockedOnApproval` and told apart by its call's
             // reason, read the way `BlockedCall` decodes it: anything but `approval` (missing or
             // unknown included) is a refusal. A row with no call, or one that isn't JSON, reads
-            // `blocked on approval`, as its label does.
+            // `blocked on approval`, as its label does. One corner differs: JSON the decoder rejects
+            // (a `reason` that isn't a string) is labelled `blocked on approval` but filters as a
+            // refusal. Only a damaged row has one (#718 review).
             let refused = "(blockedCall IS NOT NULL AND json_valid(blockedCall) AND COALESCE(json_extract(blockedCall, '$.reason'), '') != 'approval')"
             switch status {
             case .awaitingApproval: conditions.append("NOT \(refused)")
