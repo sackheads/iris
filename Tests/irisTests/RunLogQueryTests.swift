@@ -133,16 +133,20 @@ struct RunLogQueryTests {
         // A call written with no reason decodes as a refusal (`BlockedCall`'s fail-closed read), and
         // one that isn't JSON doesn't decode at all, so it keeps `blocked on approval`.
         let noReason = try blocked(3, nil), garbled = try blocked(4, nil)
+        // Valid JSON the decoder rejects: not an object, or a reason that isn't a string (#718 review).
+        let array = try blocked(6, nil), numericReason = try blocked(7, nil)
         try store.writer.write { db in
-            try db.execute(sql: "UPDATE job_runs SET blockedCall = ? WHERE id = ?", arguments: [#"{"toolName":"x"}"#, noReason.id.uuidString])
-            try db.execute(sql: "UPDATE job_runs SET blockedCall = ? WHERE id = ?", arguments: ["not json", garbled.id.uuidString])
+            for (json, run) in [(#"{"toolName":"x"}"#, noReason), ("not json", garbled), ("[]", array),
+                                (#"{"toolName":"x","reason":5}"#, numericReason)] {
+                try db.execute(sql: "UPDATE job_runs SET blockedCall = ? WHERE id = ?", arguments: [json, run.id.uuidString])
+            }
         }
         try row(j, at: base.addingTimeInterval(5), status: .failed, ledger: ledger)
 
         let runs = try ledger.runLog(limit: 20).runs
         func ids(_ status: JobLedger.RunLogStatus) throws -> Set<UUID> { Set(try ledger.runLog(limit: 20, status: status).runs.map(\.id)) }
         #expect(try ids(.refusedByProfile) == [refused.id, noReason.id])
-        #expect(try ids(.awaitingApproval) == [waiting.id, noCall.id, garbled.id])
+        #expect(try ids(.awaitingApproval) == [waiting.id, noCall.id, garbled.id, array.id, numericReason.id])
         // Each filter is exactly the rows whose Status column reads its words.
         for status in [JobLedger.RunLogStatus.refusedByProfile, .awaitingApproval] {
             #expect(try ids(status) == Set(runs.filter { $0.statusText == status.text }.map(\.id)), "\(status)")
