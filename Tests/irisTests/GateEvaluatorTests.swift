@@ -589,6 +589,17 @@ struct GateEvaluatorTests {
         #expect(GateEvaluator.mountRefusal(home.configDir.path, paths: home) != nil)
         #expect(GateEvaluator.mountRefusal(home.pluginsDir.path, paths: home) != nil)
         #expect(GateEvaluator.mountRefusal(dir.path, paths: home) == nil, "and anything else is fine")
+        // #695: nor Iris's home itself, nor any directory that contains it (`~/.iris`, `~`, a parent).
+        #expect(GateEvaluator.mountRefusal(home.root.path, paths: home)?.contains("is or contains Iris's own directory") == true)
+        #expect(GateEvaluator.mountRefusal(home.root.deletingLastPathComponent().path, paths: home)?
+            .contains("is or contains Iris's own directory") == true, "a parent of the home, as `~` is of `~/.iris`")
+        let exchange = home.root.appendingPathComponent("exchange")
+        try FileManager.default.createDirectory(at: exchange, withIntermediateDirectories: true)
+        #expect(GateEvaluator.mountRefusal(exchange.path, paths: home) != nil, "anything under the home too")
+        // An existing gate made before #695 is refused at its next tick, not only at creation.
+        let parent = IrisPaths.canonicalPath(home.root.deletingLastPathComponent().path)
+        #expect(GateEvaluator.mountDrift([parent + ":ro"], paths: home)?.contains("is or contains Iris's own directory") == true)
+        #expect(GateEvaluator.mountDrift([IrisPaths.canonicalPath(dir.path) + ":ro"], paths: home) == nil)
 
         // In a dev process a gate mount of the installed app's own config/plugins is refused too —
         // the same injectable identity/release pattern `PermissionManager.isProtectedWrite` uses.
@@ -599,6 +610,8 @@ struct GateEvaluatorTests {
         #expect(GateEvaluator.mountRefusal(release.configDir.path, paths: home, identity: .dev, release: release) != nil)
         #expect(GateEvaluator.mountRefusal(release.pluginsDir.path, paths: home, identity: .dev, release: release) != nil)
         // The release build never applies the dev carve-out to its own home.
+        #expect(GateEvaluator.mountRefusal(release.root.path, paths: home, identity: .dev, release: release)?
+            .contains("installed Iris app's directory") == true, "in a dev process, the installed app's home and its parents too")
         #expect(GateEvaluator.mountRefusal(release.configDir.path, paths: home, identity: .release, release: release) == nil)
         #expect(GateEvaluator.mountRefusal(dir.path, paths: home, identity: .dev, release: release) == nil,
                 "an ordinary directory stays fine even with a release home injected")
