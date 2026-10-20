@@ -49,6 +49,17 @@ struct ScriptJobsTests {
         #expect(AppState.reviewPauseReasons.isSuperset(of: [ScriptJobs.needsReview, ScriptJobs.changedSinceReview]))
     }
 
+    @Test("v27_script_jobs is registered after #705's v26, and a store has both migrations' columns")
+    func migrationOrder() throws {
+        let names = ConversationStore.migrator.migrations
+        let v26 = try #require(names.firstIndex(of: "v26_job_run_delegated_charges"))
+        let v27 = try #require(names.firstIndex(of: "v27_script_jobs"))
+        #expect(v27 == v26 + 1 && v27 == names.count - 1, "the last, right after v26")
+        let store = try ConversationStore.inMemory()
+        let columns = try store.writer.read { db in try db.columns(in: "job_runs").map(\.name) }
+        #expect(Set(["delegatedCharges", "scriptOutput", "scriptStderr", "posted"]).isSubset(of: columns))
+    }
+
     @Test("the action round-trips through its stored text, and a bad one is unreadable")
     func actionStorage() {
         let action = JobAction.script(spec)
