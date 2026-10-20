@@ -478,7 +478,7 @@ enum GateEvaluator {
         return parts.readOnly ? "\(resolved):\(parts.target):ro" : "\(resolved):\(parts.target)"
     }
 
-    /// Why this gate's mounts cannot be used *now*, or `nil` when they are still what was stored.
+    /// Why a gate's or script job's mounts cannot be used *now*, or `nil` when they are still what was stored.
     ///
     /// Asked at every evaluation, not only at creation. A mount is a standing read capability over
     /// a directory that is not ours, granted once by a review and then used unattended for as long
@@ -493,12 +493,12 @@ enum GateEvaluator {
             guard !source.isEmpty else { continue }
             let resolved = IrisPaths.canonicalPath(source)
             guard resolved == source else {
-                return "the gate's mount \(source) now resolves to \(resolved), which is not what was approved"
+                return "the mount \(source) now resolves to \(resolved), which is not what was approved"
             }
             var isDirectory: ObjCBool = false
             guard fileManager.fileExists(atPath: source, isDirectory: &isDirectory),
                   isDirectory.boolValue else {
-                return "the gate's mount \(source) is no longer a directory"
+                return "the mount \(source) is no longer a directory"
             }
             // A gate made before a rule existed is held to it too (#695): an existing gate on `~`
             // errors each tick, so after three in a row the job pauses with this sentence.
