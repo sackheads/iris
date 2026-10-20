@@ -155,6 +155,10 @@ protocol ContainerRuntime: Sendable {
     /// `timeoutSeconds` is a wall-clock deadline for the whole command; past it the CLI process is
     /// killed and `ContainerRuntimeError.timedOut` is thrown. `nil` means no deadline.
     func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?) async throws -> (stdout: String, stderr: String, exitCode: Int32)
+    /// `exec`, keeping at most `outputLimit` bytes of each stream in memory (#699). What a command
+    /// writes past that is drained and discarded, so it never blocks on a full pipe, and counted
+    /// in the result. The limit is enforced on the host: a cap inside the VM can be written past.
+    func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?, outputLimit: Int) async throws -> ExecOutput
     /// `container stop <name>` then `container delete <name>` — best-effort, never throws. True
     /// when the delete exited 0, so the caller knows the container is gone (#463).
     @discardableResult
@@ -163,7 +167,38 @@ protocol ContainerRuntime: Sendable {
     func list(prefix: String) async -> [String]
 }
 
+/// A command's output with each stream held to a byte limit (#699): the bytes kept, and how many
+/// more were written and discarded.
+struct ExecOutput: Sendable, Equatable {
+    var stdout: String
+    var stderr: String
+    var exitCode: Int32
+    var droppedStdout: Int = 0
+    var droppedStderr: Int = 0
+
+    var truncated: Bool { droppedStdout > 0 || droppedStderr > 0 }
+
+    var tuple: (stdout: String, stderr: String, exitCode: Int32) { (stdout, stderr, exitCode) }
+
+    /// An already-collected result held to `limit` bytes a stream: for a runtime that has no
+    /// bounded drain of its own (a test's fake), so callers see one shape.
+    static func capping(_ r: (stdout: String, stderr: String, exitCode: Int32), at limit: Int) -> ExecOutput {
+        let out = Data(r.stdout.utf8), err = Data(r.stderr.utf8)
+        return ExecOutput(stdout: CLIProcessRunner.text(out.prefix(limit), cut: out.count > limit),
+                          stderr: CLIProcessRunner.text(err.prefix(limit), cut: err.count > limit),
+                          exitCode: r.exitCode,
+                          droppedStdout: max(0, out.count - limit), droppedStderr: max(0, err.count - limit))
+    }
+}
+
 extension ContainerRuntime {
+    /// No bounded drain: collects everything, then caps. Only a runtime that never runs a real
+    /// command (a test's fake) should rely on this; `CLIContainerRuntime` drains bounded.
+    func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?, outputLimit: Int) async throws -> ExecOutput {
+        ExecOutput.capping(try await exec(name: name, workdir: workdir, command: command, timeoutSeconds: timeoutSeconds),
+                           at: outputLimit)
+    }
+
     /// The pre-grant form: the default network. Every caller that is not a granted run.
     func createDetached(name: String, image: String, mounts: [String], workdir: String) async throws {
         try await createDetached(name: name, image: image, mounts: mounts, workdir: workdir, network: .default)
@@ -259,7 +294,7 @@ struct CLIProcessRunner: Sendable {
     /// "Exactly once" is the other half: the deadline resumes the caller itself when the ordinary
     /// path has not, and a late exit must then find the answer already given.
     private final class Collector: @unchecked Sendable {
-        typealias Output = (stdout: String, stderr: String, exitCode: Int32)
+        typealias Output = ExecOutput
 
         private let lock = NSLock()
         private var continuation: CheckedContinuation<Output, Error>?
@@ -269,15 +304,20 @@ struct CLIProcessRunner: Sendable {
         private var outOpen = true
         private var errOpen = true
         private var status: Int32?
+        private var outDropped = 0
+        private var errDropped = 0
+        private let limit: Int?
         private let outHandle: FileHandle
         private let errHandle: FileHandle
         private let queue: DispatchQueue
 
-        /// `queue` is the call's ladder queue, which times the post-exit grace.
-        init(stdout: Pipe, stderr: Pipe, queue: DispatchQueue) {
+        /// `queue` is the call's ladder queue, which times the post-exit grace. `limit` is the most
+        /// of each stream kept in memory (#699); nil keeps everything.
+        init(stdout: Pipe, stderr: Pipe, queue: DispatchQueue, limit: Int?) {
             outHandle = stdout.fileHandleForReading
             errHandle = stderr.fileHandleForReading
             self.queue = queue
+            self.limit = limit
         }
 
         /// Call inside the continuation body, before the process is launched: both the drain and
@@ -316,7 +356,13 @@ struct CLIProcessRunner: Sendable {
                     if isStdout { outOpen = false } else { errOpen = false }
                     return
                 }
-                if isStdout { out.append(data) } else { err.append(data) }
+                // Past the limit the bytes are read and dropped, never left in the pipe: a child
+                // blocked on a full pipe would never exit (#699).
+                let held = isStdout ? out.count : err.count
+                let room = limit.map { max(0, $0 - held) } ?? data.count
+                let kept = data.prefix(room)
+                if isStdout { out.append(kept); outDropped += data.count - kept.count }
+                else { err.append(kept); errDropped += data.count - kept.count }
             }
             if isStdout, !lock.withLock({ outOpen }) { outHandle.readabilityHandler = nil }
             if !isStdout, !lock.withLock({ errOpen }) { errHandle.readabilityHandler = nil }
@@ -328,7 +374,7 @@ struct CLIProcessRunner: Sendable {
         private func deliverAfterExit() {
             let payload: Output? = lock.withLock {
                 guard !answered, let status else { return nil }
-                return (Self.text(out), Self.text(err), status)
+                return self.output(status)
             }
             if let payload { answer(.success(payload)) }
         }
@@ -337,7 +383,7 @@ struct CLIProcessRunner: Sendable {
         private func deliverIfComplete() {
             let payload: Output? = lock.withLock {
                 guard !answered, let status, !outOpen, !errOpen else { return nil }
-                return (Self.text(out), Self.text(err), status)
+                return self.output(status)
             }
             if let payload { answer(.success(payload)) }
         }
@@ -355,7 +401,23 @@ struct CLIProcessRunner: Sendable {
             continuation.resume(with: result)
         }
 
-        private static func text(_ data: Data) -> String { String(data: data, encoding: .utf8) ?? "" }
+        private func output(_ status: Int32) -> Output {
+            ExecOutput(stdout: CLIProcessRunner.text(out, cut: outDropped > 0), stderr: CLIProcessRunner.text(err, cut: errDropped > 0),
+                       exitCode: status, droppedStdout: outDropped, droppedStderr: errDropped)
+        }
+    }
+
+    /// A stream's text. A stream cut at a limit can end inside a character, so it is decoded
+    /// lossily rather than lost whole; one that wasn't cut decodes as it always has.
+    static func text(_ data: Data, cut: Bool) -> String {
+        if let text = String(data: data, encoding: .utf8) { return text }
+        guard cut else { return "" }
+        // Back off to the last whole character first; lossy only when the bytes before the cut
+        // weren't text either.
+        for drop in 1...min(3, data.count) {
+            if let text = String(data: data.dropLast(drop), encoding: .utf8) { return text }
+        }
+        return String(decoding: data, as: UTF8.self)
     }
 
     /// SIGKILLs the direct children of `pid`, which must still be alive (a reaped pid can be
@@ -461,6 +523,12 @@ struct CLIProcessRunner: Sendable {
     /// result — the engine's tool dispatch — runs on the same pool, so it could not act sooner.
     func run(_ arguments: [String], timeoutSeconds: Int? = nil,
              onKill: (@Sendable () -> Void)? = nil) async throws -> (stdout: String, stderr: String, exitCode: Int32) {
+        try await run(arguments, timeoutSeconds: timeoutSeconds, outputLimit: nil, onKill: onKill).tuple
+    }
+
+    /// `run`, keeping at most `outputLimit` bytes of each stream (#699); nil keeps everything.
+    func run(_ arguments: [String], timeoutSeconds: Int? = nil, outputLimit: Int?,
+             onKill: (@Sendable () -> Void)? = nil) async throws -> ExecOutput {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
@@ -478,7 +546,7 @@ struct CLIProcessRunner: Sendable {
         let ladder = DispatchQueue(label: "iris.cli-process.ladder")
 
         let box = Box(process)
-        let collector = Collector(stdout: out, stderr: err, queue: ladder)
+        let collector = Collector(stdout: out, stderr: err, queue: ladder, limit: outputLimit)
         let deadline = Deadline()
         let started = UptimeClock.live.now()   // uptime: a sleep is not time spent (#608)
         let child = Child(pid: { box.process.processIdentifier },
@@ -512,7 +580,7 @@ struct CLIProcessRunner: Sendable {
             }
         }
 
-        let result: (stdout: String, stderr: String, exitCode: Int32) = try await withTaskCancellationHandler {
+        let result: ExecOutput = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { cont in
                 collector.start(cont)
                 // Checked here, on the calling task, and not before the cancellation handler was
@@ -595,6 +663,15 @@ struct CLIContainerRuntime: ContainerRuntime {
         try await CLIProcessRunner(executable: binary).run(arguments, timeoutSeconds: timeoutSeconds, onKill: onKill)
     }
 
+    /// `Launch` with a per-stream output limit (#699).
+    typealias LaunchCapped = @Sendable (_ arguments: [String], _ timeoutSeconds: Int?, _ outputLimit: Int,
+                                        _ onKill: (@Sendable () -> Void)?) async throws -> ExecOutput
+
+    static let spawnCLICapped: LaunchCapped = { arguments, timeoutSeconds, outputLimit, onKill in
+        try await CLIProcessRunner(executable: binary).run(arguments, timeoutSeconds: timeoutSeconds,
+                                                           outputLimit: outputLimit, onKill: onKill)
+    }
+
     static let fireCLI: Fire = { arguments, timeoutSeconds in
         BlockingSpawn.detached(binary, arguments, timeoutSeconds: Double(timeoutSeconds))
     }
@@ -613,10 +690,24 @@ struct CLIContainerRuntime: ContainerRuntime {
     static let createTimeoutSeconds = 1_200
 
     private let launchKillable: Launch
+    private let launchCapped: LaunchCapped
     private let fire: Fire
 
-    init(launch: @escaping Launch = CLIContainerRuntime.spawnCLI, fire: @escaping Fire = CLIContainerRuntime.fireCLI) {
-        self.launchKillable = launch
+    /// A test that injects `launch` alone gets a capped launch that goes through it too, capping
+    /// after the fact, so nothing it renders can reach the real binary.
+    init(launch: Launch? = nil, fire: @escaping Fire = CLIContainerRuntime.fireCLI, launchCapped: LaunchCapped? = nil) {
+        let launchKillable: Launch = launch ?? CLIContainerRuntime.spawnCLI
+        self.launchKillable = launchKillable
+        if let launchCapped {
+            self.launchCapped = launchCapped
+        } else if launch == nil {
+            self.launchCapped = CLIContainerRuntime.spawnCLICapped
+        } else {
+            let postHoc: LaunchCapped = { arguments, timeoutSeconds, limit, onKill in
+                ExecOutput.capping(try await launchKillable(arguments, timeoutSeconds, onKill), at: limit)
+            }
+            self.launchCapped = postHoc
+        }
         self.fire = fire
     }
 
@@ -701,6 +792,15 @@ struct CLIContainerRuntime: ContainerRuntime {
         return try await launchKillable(["exec", "-w", workdir, name, "bash", "-c", Self.recordingWrapper(pidFile), "iris-exec", command],
                                         timeoutSeconds,
                                         { fire(["exec", name, "bash", "-c", Self.groupKiller(pidFile)], Self.housekeepingTimeoutSeconds) })
+    }
+
+    /// `exec` with the bounded drain (#699): the same wrapper, the same in-VM group killer.
+    func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?, outputLimit: Int) async throws -> ExecOutput {
+        let pidFile = Self.execPidFile(token: UUID().uuidString)
+        let fire = self.fire
+        return try await launchCapped(["exec", "-w", workdir, name, "bash", "-c", Self.recordingWrapper(pidFile), "iris-exec", command],
+                                      timeoutSeconds, outputLimit,
+                                      { fire(["exec", name, "bash", "-c", Self.groupKiller(pidFile)], Self.housekeepingTimeoutSeconds) })
     }
 
     static func execPidFile(token: String) -> String { "/tmp/.iris-exec-\(token).pid" }
