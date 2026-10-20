@@ -198,6 +198,24 @@ public final class CoreMLEvaluator: @unchecked Sendable {
 
     /// The probability over which a window is withheld; `InjectionGuard`'s tier-2 threshold.
     static let flagThreshold = 0.9
+    /// The probability over which a window is narrowed (#726): below the threshold, because benign
+    /// lines dilute an injection's window. Narrowing withholds only what flags on its own.
+    static let narrowTrigger = 0.5
+
+    /// "system prompt" counts only in an instruction's shape (a verb, then your/the): a bare mention
+    /// was 96 of 127 matches in Iris's own docs, nearly all descriptive (planner, #730).
+    /// Phrases that mark a line as a likely injection, judged alone whatever its window scored
+    /// (#726), so benign padding can't dilute it. Matched on the tier-1 text, which has already
+    /// stripped role delimiters like `system:` (scoring those lines alone is #727).
+    static let injectionMarkers = try! NSRegularExpression(pattern:
+        #"ignore\s+(all\s+)?(the\s+)?(previous|prior|above)|disregard\s+(all\s+)?(previous|prior|your|the)|you\s+are\s+now|new\s+instructions|(reveal|print|show|repeat|output|ignore|override|disregard|leak|dump)\s+(\w+\s+)?(your|the)\s+(\w+\s+)?system\s+prompt|<\|im_(start|end)\|>|\[/?INST\]|\[TOOL_CALL\]|developer\s+mode"#,
+        options: [.caseInsensitive])
+    /// The most marked lines judged alone in one text (#730 review).
+    static let maxMarkedLines = 64
+
+    static func hasInjectionMarker(_ text: String) -> Bool {
+        injectionMarkers.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+    }
     /// Tokens a window may hold. 128, not the models' full 512 (planner, #723): on typical test
     /// output, a 500-token window scored ~0.95 though no part of it flagged alone, and the whole
     /// window was withheld (398 of 471 lines); at 128 none was, and it ran faster.
@@ -245,6 +263,19 @@ public final class CoreMLEvaluator: @unchecked Sendable {
             calls += 1
             return try await m.evaluate(text: text)
         }
+        // #726 ruling (B): a window, or a small window, that flags while nothing smaller in it does is
+        // withheld only if it still flags with a line of context either side. Two real warnings
+        // scored 0.98 together at an unlucky window edge though neither flagged alone, and widening
+        // dissolves such pairings. One call each, under the budget; past it, fails closed.
+        func confirmed(_ range: ClosedRange<Int>) async throws -> Bool {
+            // A single line that flagged is a line flagging alone: nothing to confirm.
+            guard range.count > 1, calls < Self.inferenceBudget else { return true }
+            let wider = max(0, range.lowerBound - 1)...min(runs.count - 1, range.upperBound + 1)
+            guard wider != range else { return true }
+            // Against the narrowing trigger, not the threshold (#730 review): the extra lines dilute
+            // a real split injection too. The benign pair fell to 0.011 widened, far under either.
+            return try await score(runs[wider].map(\.text).joined(separator: "\n")) > Self.narrowTrigger
+        }
         var windows = runs.isEmpty ? [] : Self.windows(costs, in: 0...(runs.count - 1), size: Self.windowTokens, overlap: Self.overlapTokens)
         // The whole-text pass is bounded too (planner, #723): a caller in front of no output cap (a
         // 5 MB tool result on main, an event, memory) would otherwise cost thousands of calls. Past
@@ -264,11 +295,17 @@ public final class CoreMLEvaluator: @unchecked Sendable {
         for window in windows {
             let windowScore = try await m.evaluate(text: runs[window].map(\.text).joined(separator: "\n"))
             highest = max(highest, windowScore)
-            guard windowScore > Self.flagThreshold else { continue }
+            // #726: a window between the trigger and the threshold is narrowed too, since benign
+            // lines around an injection dilute its window's score; only what then flags on its own
+            // is withheld. A window over the threshold whose parts don't flag is withheld whole.
+            guard windowScore > Self.narrowTrigger else { continue }
+            let overThreshold = windowScore > Self.flagThreshold
             let span = runs[window.lowerBound].lines.lowerBound...runs[window.upperBound].lines.upperBound
             guard calls < Self.inferenceBudget else {
-                flagged.append(span)
-                unnarrowed.append(span)
+                if overThreshold {
+                    flagged.append(span)
+                    unnarrowed.append(span)
+                }
                 continue
             }
             // Narrowed to the small windows that flag on their own, so a warning costs its own
@@ -280,7 +317,8 @@ public final class CoreMLEvaluator: @unchecked Sendable {
                     guard calls < Self.inferenceBudget else { narrowed += [small]; continue }
                     guard try await score(runs[small].map(\.text).joined(separator: "\n")) > Self.flagThreshold else { continue }
                     // And to the single lines that flag on their own, if any; else the small window.
-                    var single: [ClosedRange<Int>] = []
+                    // A small window of one line that flags is that line flagging alone.
+                    var single: [ClosedRange<Int>] = small.count == 1 ? [small] : []
                     if small.count > 1, calls + small.count <= Self.inferenceBudget {
                         // With its neighbour either side (#723 review): an injection's other lines
                         // may not flag alone, and they are the payload around the one that does.
@@ -288,13 +326,43 @@ public final class CoreMLEvaluator: @unchecked Sendable {
                             single.append(run...run)
                         }
                     }
-                    narrowed += single.isEmpty ? [small] : single
+                    // A small window that flags with no line in it flagging alone is withheld only
+                    // when its window was itself over the threshold: under the narrowing trigger
+                    // alone, two benign warnings together scored 0.98 on the real model (#726).
+                    if !single.isEmpty {
+                        narrowed += single
+                    } else if overThreshold, try await confirmed(small) {
+                        narrowed.append(small)
+                    }
                 }
+            }
+            if narrowed.isEmpty {
+                guard overThreshold, try await confirmed(window) else { continue }
             }
             for runRange in narrowed.isEmpty ? [window] : narrowed {
                 let span = runs[runRange.lowerBound].lines.lowerBound...runs[runRange.upperBound].lines.upperBound
                 // With one original line either side (#723 review): an injection's other lines may
                 // not flag alone, and they are the payload around the one that does.
+                flagged.append(max(0, span.lowerBound - 1)...min(lines.count - 1, span.upperBound + 1))
+            }
+        }
+        // #726: a line carrying an injection marker is judged alone, whatever its window scored. It
+        // runs outside the budget: such lines are few in ordinary output, and this is the check that
+        // must not be skipped.
+        let covered = Self.merged(flagged)
+        let marked = runs.indices.filter { run in Self.hasInjectionMarker(runs[run].text)
+            && !covered.contains(where: { $0.contains(runs[run].lines.lowerBound) }) }
+        // Capped (#730 review): a text about prompts can mark thousands of lines. Past the cap the
+        // rest are withheld unjudged, which fails closed and, for the person's own files, says so.
+        for run in marked.dropFirst(Self.maxMarkedLines) {
+            flagged.append(runs[run].lines)
+            unjudged.append(runs[run].lines)
+        }
+        for run in marked.prefix(Self.maxMarkedLines) {
+            let alone = try await m.evaluate(text: runs[run].text)
+            highest = max(highest, alone)
+            if alone > Self.flagThreshold {
+                let span = runs[run].lines
                 flagged.append(max(0, span.lowerBound - 1)...min(lines.count - 1, span.upperBound + 1))
             }
         }
