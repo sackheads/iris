@@ -1439,6 +1439,7 @@ class AppState {
          guardedConfig: ConfigManager = .shared,
          runsGateUpgrade: Bool = NSClassFromString("XCTestCase") == nil) {
         self.store = store
+        self.scriptKeychain = guardedConfig.guardedKeychain
         self.engine = IrisEngine(state: self)
         loadConversations()
         // Before the retitle, which reads `isPinned`.
@@ -5277,7 +5278,7 @@ class AppState {
                 let runCount = try ledger.runCount(jobId: job.id)
                 try ledger.delete(jobId: job.id)
                 // #330: its fingerprint goes with it, so the item doesn't collect dead ones.
-                if let keychain = ConfigManager.shared.guardedKeychain { ScriptFingerprints.forget(jobId: job.id, keychain: keychain) }
+                if let keychain = scriptKeychain { ScriptFingerprints.forget(jobId: job.id, keychain: keychain) }
                 refreshLedgerAttention()
                 withdrawRevealedURLTrigger(jobId: job.id)
                 forgetURLState(jobId: job.id)
@@ -5420,6 +5421,9 @@ class AppState {
         guard loop.selfPaced else { return loop.intervalSeconds }
         return loopRequestedDelay[id] ?? ConversationLoop.selfPacedDefault
     }
+    /// Where reviewed scripts' fingerprints live (#330): the guarded config's Keychain, so a test
+    /// that injects one records into and forgets from its own. Nil only in #678's legacy mode.
+    @ObservationIgnored private(set) var scriptKeychain: KeychainManager?
 
     private func handleLoopCommand(_ arguments: String, convId: UUID) {
         guard let idx = conversations.firstIndex(where: { $0.id == convId }) else { return }

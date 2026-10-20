@@ -12,7 +12,8 @@ import Foundation
 struct ScriptJobsRealVMTests {
     private static let network = "iristest-330-isolated"
 
-    private func prefix() -> String { "iristest-330-\(UUID().uuidString.prefix(8).lowercased())-" }
+    /// Short enough that `script-<uuid>` after it fits the runtime's 64 characters.
+    static func prefix() -> String { "iristest-330-\(UUID().uuidString.prefix(4).lowercased())-" }
 
     /// The names of every container, running or not, starting with `prefix`.
     private func containers(_ prefix: String) -> [String] {
@@ -38,7 +39,7 @@ struct ScriptJobsRealVMTests {
 
     @Test("1: a script's last stdout line is the outcome, and its container is gone after")
     func outcome() async {
-        let prefix = prefix()
+        let prefix = Self.prefix()
         defer { containers(prefix).forEach(RealContainer.delete); dropNetwork() }
         let result = await run(ScriptSpec(command: "echo first; echo '42% used'", mounts: [], timeoutSeconds: 60, network: false),
                                prefix: prefix)
@@ -50,7 +51,7 @@ struct ScriptJobsRealVMTests {
 
     @Test("2: a script past its timeout is killed in the VM, and no container is left")
     func timeout() async {
-        let prefix = prefix()
+        let prefix = Self.prefix()
         defer { containers(prefix).forEach(RealContainer.delete); dropNetwork() }
         let start = Date()
         let result = await run(ScriptSpec(command: "sleep 120", mounts: [], timeoutSeconds: 5, network: false), prefix: prefix)
@@ -61,7 +62,7 @@ struct ScriptJobsRealVMTests {
 
     @Test("3: network off blocks the internet; the Mac is still reachable (#690, a known limit)")
     func networkOff() async {
-        let prefix = prefix()
+        let prefix = Self.prefix()
         defer { containers(prefix).forEach(RealContainer.delete); dropNetwork() }
         let probe = """
             timeout 5 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>/dev/null && echo internet=REACHED || echo internet=BLOCKED
@@ -79,7 +80,7 @@ struct ScriptJobsRealVMTests {
 
     @Test("4: a read-only mount refuses a write, and the host folder is untouched")
     func readOnlyMount() async throws {
-        let prefix = prefix()
+        let prefix = Self.prefix()
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iristest-330-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer {

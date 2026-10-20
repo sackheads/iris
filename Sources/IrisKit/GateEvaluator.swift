@@ -324,7 +324,10 @@ enum GateEvaluator {
                         kind: String, namePrefix: String = SandboxSessionManager.namePrefix,
                         isolatedNetwork: String = NetworkMode.isolatedNetworkName) async -> VMRun {
         // `namePrefix` and `isolatedNetwork` are the real-VM tests' (`iristest-…`), never the app's.
-        let name = "\(namePrefix)\(kind == "gate" ? "gate" : "script")-\(UUID().uuidString.lowercased())"
+        let tag = kind == "gate" ? "gate" : "script"
+        guard let name = ContainerNames.make(prefix: namePrefix, kind: tag) else {
+            return .failed(ContainerNames.tooLong(prefix: namePrefix, kind: tag))
+        }
         // Registered before the create and taken out again by `sweep`, so a sweep of the leftovers
         // of a previous process cannot delete a container that is mid-evaluation right now.
         guard await GateContainerRegistry.shared.register(name) else {

@@ -558,7 +558,9 @@ struct ToolExecutor {
                 return "Error: sandboxing is on but the container runtime isn't installed. Open Iris Settings → Sandboxing to install it, or turn sandboxing off."
             }
             executable = containerPath
-            let name = "\(SandboxSessionManager.namePrefix)run-\(UUID().uuidString.lowercased())"
+            guard let name = ContainerNames.make(prefix: SandboxSessionManager.namePrefix, kind: "run") else {
+                return "Error: " + ContainerNames.tooLong(prefix: SandboxSessionManager.namePrefix, kind: "run")
+            }
             ephemeralContainer = (containerPath, name)
             var containerArgs = ["run", "--rm", "--name", name, ConfigManager.shared.sandboxImage, "bash", "-c", command]
             if let cwd = cwd {
