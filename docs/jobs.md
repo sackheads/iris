@@ -444,7 +444,9 @@ runs once and records its baseline.
 "identical" and `grep -q` returns 0 for "found", so any exit-code convention makes a plausible gate
 fire every tick or never. Everything the script printed before that line is the gate's payload: the
 first 4,000 characters of it go into the run's prompt as untrusted context, wrapped and tagged
-`gate_output` like any other text Iris did not write.
+`gate_output` like any other text Iris did not write. Iris holds at most 1 MB of each of the
+script's output streams; a script that prints more on standard output has lost its last line, so
+that tick is a gate error, never a verdict read from cut output.
 
 A script gate is the only model-written code in Iris that runs repeatedly with nobody watching, so
 it is fenced in:
@@ -488,7 +490,7 @@ What each answer costs:
 | --- | --- |
 | changed | The job runs, and the signal is recorded on that run's row |
 | nothing changed | A `completed` row with the outcome `gate: no change`, and **no card** — cards are for things that happened, and a five-minute poll would otherwise bury Iris, the pinned conversation. It costs no model turn and does not count towards the breaker |
-| it could not tell (a 404 or 5xx, a response with none of the three headers, a missing path, a mount that has moved, a non-zero exit, a timeout, or any other last line — and a ledger Iris could not read the last signal out of) | An `interrupted` row whose reason starts `gate error`. Three of those **in a row** pause the job with the reason `gate failing`, and that pause gets a card |
+| it could not tell (a 404 or 5xx, a response with none of the three headers, a missing path, a mount that has moved, a non-zero exit, a timeout, over 1 MB of output, or any other last line — and a ledger Iris could not read the last signal out of) | An `interrupted` row whose reason starts `gate error`. Three of those **in a row** pause the job with the reason `gate failing`, and that pause gets a card |
 
 If a job's gate is ever changed — no tool does this today — the signals its runs recorded are
 dropped: a signal is a reading taken by one particular gate, and an ETag cannot answer for an

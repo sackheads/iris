@@ -33,6 +33,10 @@ enum GateResult: Equatable, Sendable {
 enum GateEvaluator {
     /// How much of a script gate's output is carried into the run's prompt (spec §7).
     static let payloadLimit = 4_000
+    /// The most of each stream a gate script's output Iris holds (#699): drained past this on the
+    /// host, so a script can't grow Iris's memory by writing around a cap inside the VM.
+    static let outputLimitBytes = 1_048_576
+    static let outputLimitMessage = "the gate script printed more than 1 MB; its last line must be \(changedToken) or \(unchangedToken)"
     /// What a gate script gets when it declared no deadline of its own.
     static let defaultTimeoutSeconds = PollSpec.legacyGateTimeoutSeconds
     /// The window a declared timeout is clamped into. A gate runs unattended on a cadence: below
@@ -319,8 +323,9 @@ enum GateEvaluator {
         let result: GateResult
         do {
             let output = try await runtime.exec(name: name, workdir: workdir, command: command,
-                                                timeoutSeconds: seconds)
-            result = scriptVerdict(output)
+                                                timeoutSeconds: seconds, outputLimit: outputLimitBytes)
+            // A cut stdout has lost its last line, which is the verdict (#699).
+            result = output.droppedStdout > 0 ? .error(Self.outputLimitMessage) : scriptVerdict(output.tuple)
         } catch ContainerRuntimeError.timedOut {
             // The allowance, not the elapsed seconds: what a person can act on is the number they
             // set, exactly as the sandboxed `run_command` route reports it.
