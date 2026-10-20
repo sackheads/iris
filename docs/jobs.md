@@ -788,14 +788,18 @@ the network flag and the timeout — and kept in Iris's Keychain item beside its
 shell command can't write. A fire whose stored script no longer matches (its row was edited
 outside Iris) **doesn't run**: one row says `script changed since review`, one card says so, and
 the job pauses until you schedule it again, which is the review again. `/jobs resume` can't lift
-that pause. The same check covers gate scripts, which were fingerprinted as they stood at the
-first launch of this version. If the Keychain item can't be read, no script runs (the run is
+that pause. The same check covers gate scripts. A gate or script job with no fingerprint at all — every gate
+made before this version, including one that kept running after #687's upgrade — pauses once with
+`script needs your review (new check in this version)`: a one-time review, not a detected change.
+Schedule it again to approve it. If the Keychain item can't be read, no script runs (the run is
 `interrupted`); deleting the item stops script jobs, it doesn't unlock them.
 
 **What a run says.** Exit 0 is `completed`, a non-zero exit or a timeout is `failed` (so the retry
 ladder applies as for any job), and the outcome is the **last non-empty line of its output**, cut
 at 200 characters (`exit N` if it printed nothing). At most 64 KB of each of stdout and stderr is
-kept on the row, and only that much ever leaves the VM. **A card posts only when something
+kept on the row, and an ordinary script's output is cut to that inside the VM. A script written
+to get round the cap can still send more, which Iris reads in full until the timeout; a host-side
+bound is #699. **A card posts only when something
 happened**: the first run, any failure, or a run whose status or outcome differs from the last
 one's. Every run writes its row either way, and `/jobs` shows a script job's *last ran* and
 *last posted* separately so a quiet one doesn't look dead. A posted line is untrusted script

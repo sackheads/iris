@@ -317,11 +317,14 @@ enum GateEvaluator {
     /// One script in a fresh container, for a gate or a script job (#330): registered with
     /// `LiveContainerNames` before the create, on the isolated network unless `network` (#687),
     /// created within `createCeiling`, run under `timeoutSeconds` with the in-VM group kill, and
-    /// always swept. At most `ScriptJobs.outputLimit` of each stream leaves the VM.
+    /// always swept. An ordinary script's output is capped in the VM (`ScriptJobs.cappedCommand`);
+    /// the host-side bound is #699.
     static func runInVM(_ command: String, mounts: [String], timeoutSeconds seconds: Int, network: Bool,
                         runtime: any ContainerRuntime, image: String, createCeiling: Int,
-                        kind: String) async -> VMRun {
-        let name = "\(SandboxSessionManager.namePrefix)\(kind == "gate" ? "gate" : "script")-\(UUID().uuidString.lowercased())"
+                        kind: String, namePrefix: String = SandboxSessionManager.namePrefix,
+                        isolatedNetwork: String = NetworkMode.isolatedNetworkName) async -> VMRun {
+        // `namePrefix` and `isolatedNetwork` are the real-VM tests' (`iristest-…`), never the app's.
+        let name = "\(namePrefix)\(kind == "gate" ? "gate" : "script")-\(UUID().uuidString.lowercased())"
         // Registered before the create and taken out again by `sweep`, so a sweep of the leftovers
         // of a previous process cannot delete a container that is mid-evaluation right now.
         guard await GateContainerRegistry.shared.register(name) else {
@@ -332,12 +335,12 @@ enum GateEvaluator {
         if network {
             networkMode = .default
         } else {
-            do { try await runtime.ensureIsolatedNetwork(named: NetworkMode.isolatedNetworkName) }
+            do { try await runtime.ensureIsolatedNetwork(named: isolatedNetwork) }
             catch {
                 await GateContainerRegistry.shared.unregister(name)
                 return .failed("the \(kind)'s isolated network could not be set up: \(describe(error))")
             }
-            networkMode = .isolated
+            networkMode = .isolated(name: isolatedNetwork)
         }
         do {
             try await createWithinCeiling(runtime, name: name, image: image,
@@ -376,7 +379,9 @@ enum GateEvaluator {
     /// `runInVM` under the job's own timeout.
     static func runScriptJob(_ spec: ScriptSpec, runtime: (any ContainerRuntime)?, image: String,
                              createCeiling: Int = GateEvaluator.createCeilingSeconds,
-                             fileManager: FileManager = .default) async -> VMRun {
+                             fileManager: FileManager = .default,
+                             namePrefix: String = SandboxSessionManager.namePrefix,
+                             isolatedNetwork: String = NetworkMode.isolatedNetworkName) async -> VMRun {
         guard let runtime else { return .failed("no container runtime: \(sandboxUnavailableDetail.replacingOccurrences(of: "a gate script", with: "a script job"))") }
         guard !spec.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return .failed("this script job has no script to run")
@@ -384,7 +389,8 @@ enum GateEvaluator {
         if let drift = mountDrift(spec.mounts, fileManager: fileManager) { return .failed(drift) }
         return await runInVM(spec.command, mounts: spec.mounts, timeoutSeconds: ScriptJobs.clampedTimeout(spec.timeoutSeconds),
                              network: spec.network, runtime: runtime, image: image,
-                             createCeiling: createCeiling, kind: "script job")
+                             createCeiling: createCeiling, kind: "script job",
+                             namePrefix: namePrefix, isolatedNetwork: isolatedNetwork)
     }
 
     /// `createDetached` with a deadline on it.

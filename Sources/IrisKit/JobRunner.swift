@@ -663,14 +663,15 @@ actor JobRunner {
             return .refuse(await noteGateError(detail, job: job, origin: origin, at: at, note: note))
         }
 
-        // #330: a gate script runs only as it was reviewed. Changed or missing pauses the job once,
-        // with a card; an unreadable Keychain is a gate error, which fails closed.
+        // #330: a gate script runs only as it was reviewed. Changed or never reviewed pauses the job
+        // once, with a card; an unreadable Keychain is a gate error, which fails closed.
         if let spec = gate.scriptSpec {
             switch fingerprintCheck(job.id, spec) {
             case .matches: break
             case .changed, .missing:
-                await pause(job: job, origin: origin, reason: ScriptJobs.changedSinceReview, at: at, note: note)
-                return .refuse(.gateError(detail: ScriptJobs.changedSinceReview, paused: true))
+                let reason = ScriptJobs.pauseReason(for: fingerprintCheck(job.id, spec))
+                await pause(job: job, origin: origin, reason: reason, at: at, note: note)
+                return .refuse(.gateError(detail: reason, paused: true))
             case .unreadable:
                 return .refuse(await noteGateError(ScriptJobs.keychainUnreadable, job: job, origin: origin, at: at, note: note))
             }
@@ -826,7 +827,8 @@ actor JobRunner {
         switch fingerprintCheck(job.id, spec) {
         case .matches: break
         case .changed, .missing:
-            await pause(job: job, origin: origin, reason: ScriptJobs.changedSinceReview, at: now(), note: note)
+            await pause(job: job, origin: origin, reason: ScriptJobs.pauseReason(for: fingerprintCheck(job.id, spec)),
+                        at: now(), note: note)
             return
         case .unreadable:
             break   // recorded below as a refused run
@@ -871,6 +873,7 @@ actor JobRunner {
                 (status, outcome, failureReason) = (.failed, why, why)
             }
         }
+        // Compared on the raw line (dev-3): one the guard always withholds still posts a change.
         let posts = ScriptJobs.posts(status: status, outcome: outcome, previous: previous)
         // D: only a line that will be posted is guarded, since tier 3 can be a model call.
         var shown = outcome
