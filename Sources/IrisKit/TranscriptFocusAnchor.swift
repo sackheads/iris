@@ -11,14 +11,23 @@ import AppKit
 /// that frame, not by position in the view tree: SwiftUI doesn't nest a background inside the
 /// List's own AppKit views, and the sidebar is a table too.
 struct TranscriptFocusAnchor: NSViewRepresentable {
-    func makeNSView(context: Context) -> AnchorView { AnchorView() }
-    func updateNSView(_ nsView: AnchorView, context: Context) {}
+    /// Off for an empty conversation: there's nothing to copy, and a click on its welcome
+    /// shouldn't take focus from a composer someone is about to type in.
+    var enabled = true
+
+    func makeNSView(context: Context) -> AnchorView {
+        let view = AnchorView()
+        view.enabled = enabled
+        return view
+    }
+    func updateNSView(_ nsView: AnchorView, context: Context) { nsView.enabled = enabled }
 
     final class AnchorView: NSView {
         nonisolated(unsafe) private var monitor: Any?
         /// The last mouse-down in this window was inside the transcript: a click, not the end of a
         /// drag that began elsewhere (a composer text selection, the sidebar divider, the window).
         private var downInside = false
+        var enabled = true
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
@@ -47,7 +56,7 @@ struct TranscriptFocusAnchor: NSViewRepresentable {
         /// A mouse-up at `point`: focuses the table only when the mouse-down was inside too.
         func focusTable(clickedAt point: NSPoint) {
             defer { downInside = false }
-            guard downInside, let window, let root = window.contentView,
+            guard enabled, downInside, let window, let root = window.contentView,
                   convert(bounds, to: nil).contains(point),
                   let table = Self.table(containing: point, in: root),
                   window.firstResponder !== table else { return }

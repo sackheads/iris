@@ -309,7 +309,7 @@ struct ChatView: View {
                         .background(Color(NSColor.textBackgroundColor))
                         // #703: a click in the transcript takes focus from the composer, so Cmd-C
                         // reaches the copy handler above instead of beeping in an empty composer.
-                        .background(TranscriptFocusAnchor())
+                        .background(TranscriptFocusAnchor(enabled: !conv.messages.isEmpty))
                         // Single Escape handler: clear a message selection if there is one,
                         // otherwise fall through to interrupting the agent (a no-op when idle).
                         // This replaced the Stop button's own .cancelAction shortcut so Escape
