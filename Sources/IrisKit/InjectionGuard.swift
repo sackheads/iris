@@ -217,7 +217,7 @@ public struct InjectionGuard {
     }
 
     private static func cacheKey(clean: String, source: String, maxTier: SanitizationTier,
-                                  fingerprint: GuardConfigFingerprint) -> String {
+                                  fingerprint: GuardConfigFingerprint, delimiterLines: [Int: String] = [:]) -> String {
         // The tier-2 model path is in the key too, so correctness does not lean on CoreMLEvaluator
         // being load-once: a hot-swapped guard model can never be served a stale verdict. The
         // provisioning results (#202 fix round 2, extended to tier 2 by #210) are what actually
@@ -231,6 +231,8 @@ public struct InjectionGuard {
                      fingerprint.promptGuardEngine, fingerprint.promptGuardModel, fingerprint.promptGuardCoreMLModel,
                      fingerprint.tier2ModelsDir, fingerprint.tier3ModelsDir,
                      String(describing: fingerprint.tier2Provisioning), String(describing: fingerprint.tier3Provisioning)]
+            // #727: two inputs that strip to the same text are scored differently by what was stripped.
+            + delimiterLines.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }
         let digest = SHA256.hash(data: Data(parts.joined(separator: "\u{0}").utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
@@ -316,6 +318,37 @@ public struct InjectionGuard {
                                tier2ModelsDir: tier2ModelsDir, tier3ModelsDir: tier3ModelsDir).outcome
     }
 
+    /// The one entry point for untrusted text (#727): `PromptInjectionGuard`'s normalization and
+    /// role-delimiter strip, then the tiers, with the lines the strip changed scored alone by tier
+    /// 2. A caller that stripped first and then called `sanitize` hid those lines from tier 2.
+    static func sanitizeUntrusted(_ rawInput: String, contextTag: String = "",
+                                  maxTier: SanitizationTier = .tier1_structural,
+                                  protectionEnabled: Bool? = nil) async -> String {
+        wrapped(await classifyUntrusted(rawInput, contextTag: contextTag, maxTier: maxTier,
+                                        protectionEnabled: protectionEnabled), contextTag: contextTag)
+    }
+
+    /// `sanitizeUntrusted`, plus `sanitizeCacheable`'s bit.
+    static func sanitizeUntrustedCacheable(_ rawInput: String, contextTag: String = "",
+                                           maxTier: SanitizationTier = .tier1_structural,
+                                           protectionEnabled: Bool? = nil) async -> (text: String, cacheable: Bool) {
+        let stripped = PromptInjectionGuard.stripRecordingDelimiters(rawInput)
+        let (outcome, cacheable) = await classifyDetailed(stripped.text, contextTag: contextTag, maxTier: maxTier,
+                                                          protectionEnabled: protectionEnabled,
+                                                          delimiterLines: stripped.delimiterLines)
+        return (wrapped(outcome, contextTag: contextTag), cacheable)
+    }
+
+    /// `sanitizeUntrusted`'s verdict, unwrapped, as `classify` is `sanitize`'s.
+    static func classifyUntrusted(_ rawInput: String, contextTag: String = "",
+                                  maxTier: SanitizationTier = .tier1_structural,
+                                  protectionEnabled: Bool? = nil) async -> GuardOutcome {
+        let stripped = PromptInjectionGuard.stripRecordingDelimiters(rawInput)
+        return await classifyDetailed(stripped.text, contextTag: contextTag, maxTier: maxTier,
+                                      protectionEnabled: protectionEnabled,
+                                      delimiterLines: stripped.delimiterLines).outcome
+    }
+
     /// `classify`, plus whether the verdict is safe for a caller to keep (equivalently: whether it
     /// came from anything other than a `.error` tier verdict). This is true far more often than it
     /// is false, and not only when this call stored something in `cache`: a tier-1-only result, a
@@ -329,7 +362,8 @@ public struct InjectionGuard {
                          maxTier: SanitizationTier = .tier1_structural,
                          protectionEnabled: Bool? = nil,
                          tier2ModelsDir: URL? = nil,
-                         tier3ModelsDir: URL? = nil) async -> (outcome: GuardOutcome, cacheable: Bool) {
+                         tier3ModelsDir: URL? = nil,
+                         delimiterLines: [Int: String] = [:]) async -> (outcome: GuardOutcome, cacheable: Bool) {
         let __turnID = PerformanceProfiler.currentTurnID
         let __start = MonotonicClock.nowMs()
         defer {
@@ -341,7 +375,10 @@ public struct InjectionGuard {
                                                     tier2ModelsDir: tier2ModelsDir, tier3ModelsDir: tier3ModelsDir)
 
         // Tier 1: Strict Structural Isolation & Text Normalization
-        var clean = measureSpanSync("guard.tier1") { executeTier1(rawInput) }
+        let tier1 = measureSpanSync("guard.tier1") { executeTier1(rawInput) }
+        var clean = tier1.text
+        // #727: what the caller's own strip recorded, then tier 1's, as the line read before both.
+        let delimiterLines = tier1.delimiterLines.merging(delimiterLines) { _, callers in callers }
 
         if maxTier == .tier1_structural {
             // Never reaches `cache` at all (see below) — but it is a pure function of `rawInput`
@@ -363,13 +400,14 @@ public struct InjectionGuard {
         // canary cached a block on shared text (the default empty USER.md) and every later engine
         // in the process was served it (#375). Production never sets a scope.
         let cache: SanitizationCache? = Self.guardTierScopeActive ? nil : Self.cache
-        let key = cacheKey(clean: clean, source: source, maxTier: maxTier, fingerprint: fingerprint)
+        let key = cacheKey(clean: clean, source: source, maxTier: maxTier, fingerprint: fingerprint,
+                           delimiterLines: delimiterLines)
         if let cached = cache?.get(key) {
             return (cached, true)
         }
 
         // Tier 2: Local Token-Classification (CoreML/ONNX) — evaluates the unwrapped content.
-        let tier2 = await measureSpan("guard.tier2") { await executeTier2CoreML(clean, protectionEnabled: protectionEnabled, provisioning: fingerprint.tier2Provisioning, source: source) }
+        let tier2 = await measureSpan("guard.tier2") { await executeTier2CoreML(clean, delimiterLines: delimiterLines, protectionEnabled: protectionEnabled, provisioning: fingerprint.tier2Provisioning, source: source) }
         switch tier2 {
         case .error:
             return (.blocked(marker: "[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]"), false)
@@ -422,21 +460,18 @@ public struct InjectionGuard {
         }
     }
 
-    private static func executeTier1(_ input: String) -> String {
-        var clean = input
-
-        // 1. Strip common LLM role delimiters that attempt to hijack the conversation
+    private static func executeTier1(_ input: String) -> (text: String, delimiterLines: [Int: String]) {
+        // 1. Strip common LLM role delimiters that attempt to hijack the conversation, recording
+        // the lines they came from for tier 2 (#727).
         let malRolePatterns = ["system:", "assistant:", "user:", "---", "###"]
-        for pattern in malRolePatterns {
-            clean = clean.replacingOccurrences(of: pattern, with: "", options: [.caseInsensitive])
-        }
+        var (clean, delimiterLines) = PromptInjectionGuard.stripRecording(input, patterns: malRolePatterns)
 
         // 2. Escape any breakout closing tag an attacker injected to escape the wrapper we
         // are about to apply. The wrapper is always <untrusted_context>, so that is the only
         // closing tag we need to neutralize.
         clean = clean.replacingOccurrences(of: "</untrusted_context>", with: "[escaped_tag]", options: [.caseInsensitive])
 
-        return clean
+        return (clean, delimiterLines)
     }
 
     /// The opening wrapper tag, carrying optional provenance as a `source` attribute.
@@ -461,7 +496,7 @@ public struct InjectionGuard {
     /// `source` is the provenance label only so the flagged log line can name it — a flat 0.9
     /// threshold across every source is what makes false positives hard to attribute (#235);
     /// per-source thresholds are #238.
-    private static func executeTier2CoreML(_ input: String, protectionEnabled: Bool? = nil, provisioning: Tier2Provisioning, source: String) async -> TierVerdict {
+    private static func executeTier2CoreML(_ input: String, delimiterLines: [Int: String] = [:], protectionEnabled: Bool? = nil, provisioning: Tier2Provisioning, source: String) async -> TierVerdict {
         guard protectionEnabled ?? ConfigManager.shared.enableAdvancedPromptInjectionProtection else {
             return .safe
         }
@@ -511,7 +546,7 @@ public struct InjectionGuard {
         do {
             // #722, #725 (d): judged in windows of whole lines; only a flagged window's lines are
             // withheld, and a text whose every line is flagged is blocked as before.
-            let judgement = try await CoreMLEvaluator.shared.judge(text: input)
+            let judgement = try await CoreMLEvaluator.shared.judge(text: input, delimiterLines: delimiterLines)
             let probability = judgement.highest
             let durationMs = UptimeClock.live.seconds(since: startTime) * 1000
             // A tier that reached a verdict is working, whatever the verdict says about the

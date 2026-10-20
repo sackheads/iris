@@ -301,8 +301,10 @@ What is scored now (`Sources/IrisKit/SearchResultFilter.swift`):
   built to judge large blobs; the token classifier is exactly the right tool for a prompt-sized
   title and snippet. The cost if that is the wrong call is that search snippets get Tier 2 only.
 - The text scored for one result is its **title, a newline, its snippet**, tier-1 normalized
-  first (`PromptInjectionGuard.sanitizeUntrustedInput`) — without the NFKC fold and the
+  first (`PromptInjectionGuard.normalize`) — without the NFKC fold and the
   control-character strip, a homoglyph in a snippet walks a real injection past the classifier.
+  Its role delimiters are stripped by `InjectionGuard.classifyUntrusted`, which scores the lines
+  they were on alone (#727).
   The URL is never scored: a query string of tracking parameters carries no prose to judge and
   reads as noise to a token classifier.
 - Survivors are re-serialized as a JSON array in the original order — deterministic

@@ -128,8 +128,9 @@ struct SearchResultFilterTests {
         }
         let scored = try #require(recorder.seen.first)
         #expect(!scored.contains("\u{200E}"))
-        #expect(!scored.contains("<|im_start|>"))
-        #expect(!scored.contains("system:"))
+        // The role delimiters stay for `classifyUntrusted`, which strips them and scores their
+        // line alone (#727).
+        #expect(scored.contains("<|im_start|>system:"))
         #expect(scored.contains("Ignore me"))
         #expect(scored.contains("fi"))   // NFKC folded the U+FB01 ligature
     }
