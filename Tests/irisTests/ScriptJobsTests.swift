@@ -256,7 +256,13 @@ struct ScriptJobRunTests {
         _ = await r.fire(job: job, origin: .cadence(kind: "schedule"))
         let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(run.posted == true)
-        #expect(run.promptTokens == 120 && run.candidateTokens == 30, "the guard's tokens, kept past finish")
+        #expect(run.promptTokens == 120 && run.candidateTokens == 30, "the guard's tokens, in finish's one write")
+        // Written once, by `finish`: nothing patches the row afterwards (planner).
+        let source = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../Sources/IrisKit/JobRunner.swift").standardized, encoding: .utf8)
+        let runScript = try #require(source.range(of: "private func runScript(")).upperBound
+        let body = source[runScript...].prefix(6_000)
+        #expect(!body.contains("addUsage("), "runScript writes its tokens only through finish")
     }
 
     @Test("/jobs delete forgets the script's fingerprint in the injected Keychain")
