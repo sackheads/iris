@@ -409,6 +409,20 @@ struct GateScriptCreationWiringTests {
                                     "gate_script": .string("echo CHANGED")])
     }
 
+    @Test("schedule_job refuses a write whose profile isn't the one the gate decided, and stores nothing (#660)")
+    func scheduleProfileMustMatchGate() async throws {
+        let (store, _, engine, conversation) = try harness()
+        let plain = ScheduleJobArguments.parse(["prompt": .string("tidy"), "intervalSeconds": .int(600)])
+        let refused = await engine.scheduleJob(plain, conversationId: conversation, sandboxAvailable: true,
+                                               decidedProfile: .mutating)
+        #expect(refused == ToolExecutor.profileChangedSinceApproval)
+        #expect(try store.ledger.jobs().isEmpty)
+        let agreed = await engine.scheduleJob(plain, conversationId: conversation, sandboxAvailable: true,
+                                              decidedProfile: .readOnly)
+        let count = try store.ledger.jobs().count
+        #expect(agreed != ToolExecutor.profileChangedSinceApproval && count == 1)
+    }
+
     @Test("a script Vibecop denies is never stored")
     func deniedScriptIsNotStored() async throws {
         let (store, _, engine, conversation) = try harness()

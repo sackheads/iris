@@ -219,7 +219,8 @@ struct ToolExecutor {
     func execute(name: String, args: [String: JSONValue], cwd: String? = nil, conversationId: UUID? = nil,
                  useSandbox: Bool = false, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil,
                  approvedWorkspaceRoot: String? = nil, decidedPath: String? = nil,
-                 restrictedPath: [String]? = nil, homeWritableOptIn: String? = nil) async -> String {
+                 restrictedPath: [String]? = nil, homeWritableOptIn: String? = nil,
+                 decidedJobProfile: JobProfile? = nil) async -> String {
         // A NUL ends the C string the kernel is handed, so the file opened is not the one named
         // (#256). The dispatcher refuses it before approval; this covers a hook's rewrite.
         if ["read_file", "write_file", "register_directory_watcher"].contains(name),
@@ -281,7 +282,8 @@ struct ToolExecutor {
             switch RegisterWatcherArguments.parse(args) {
             case .failure(let message): return message.text
             case .success(let parsed):
-                return await registerWatcher(parsed, resolved: Self.resolvePath(parsed.path, cwd: cwd), conversationId: conversationId)
+                return await registerWatcher(parsed, resolved: Self.resolvePath(parsed.path, cwd: cwd), conversationId: conversationId,
+                                             decidedProfile: decidedJobProfile)
             }
         case "search_web":
             guard let query = args["query"]?.stringValue else { return "Error: Missing query" }
@@ -363,7 +365,12 @@ struct ToolExecutor {
         }
     }
 
-    private func registerWatcher(_ parsed: RegisterWatcherArguments, resolved: String, conversationId: UUID?) async -> String {
+    /// The sentence for a job or watch whose profile, read again at the write, isn't the one the
+    /// creation gate decided and the person was shown (#660): nothing is written either way.
+    static let profileChangedSinceApproval = "Not created: the job's profile changed between the approval and the write (another call changed the watch it replaces), so neither is used. Ask again to see the current one."
+
+    private func registerWatcher(_ parsed: RegisterWatcherArguments, resolved: String, conversationId: UUID?,
+                                 decidedProfile: JobProfile? = nil) async -> String {
         guard let tools = await jobToolsProvider?() else { return "Jobs are not available yet." }
         // The canonical spelling is what is stored and what event paths are matched against
         // (`WatchRoot`); a path that is not a directory has no canonical form worth storing.
@@ -396,6 +403,7 @@ struct ToolExecutor {
             }
             let existing = Self.existingWatch(in: jobs, canonicalPath: path, conversationId: conversationId)
             let profile = JobProfile.asked(parsed.profile) ?? existing?.profile ?? .readOnly
+            if let decidedProfile, decidedProfile != profile { return Self.profileChangedSinceApproval }
             if profile == .mutating, !(mutatingJobsAvailable?() ?? SandboxPolicy.mutatingJobCanRun()) {
                 return Self.watchProfileNeedsSandbox
             }
