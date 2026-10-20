@@ -83,7 +83,7 @@ The danger is a script that fills the disk (a loop that appends, or a `cp` into 
 
 **Ruled (planner, revised 2026-10-20):**
 - **A fixed volume floor, before every fire.** Each read-write mount's volume (`statfs`) must have at least **5 GB** free, or the fire is `interrupted` with "the disk holding <mount> has only X free".
-- **A capped walk of each read-write mount, before and after the run.** It counts files and sums bytes, follows no symlinks and stays on one filesystem. It stops at **200,000 entries or 2 s**, whichever comes first. This measures the job's own folders, so nothing else on the volume moves the figures.
+- **A capped walk of each read-write mount, before and after the run.** It counts files and sums bytes, follows no symlinks and stays on one filesystem. It stops at **200,000 entries or 2 s**, whichever comes first, with the 2 s timed on `UptimeClock`, so a sleep mid-walk isn't counted (#608). This measures the job's own folders, so nothing else on the volume moves the figures.
 - **Pause, with a card, when a run:**
   - grew a mount by more than `max(2 GB, 100%)` ("this run added X to <mount>; paused so you can look");
   - shrank its bytes by more than `max(1 GB, 20%)`, or dropped its file count by more than `max(1000, 20%)` ("this run removed N files (X) from <mount>; it may have deleted more than it should"). The file count is the better deletion signal, since a delete of many small files barely moves the bytes.
