@@ -124,8 +124,8 @@ struct ScheduleJobArguments: Equatable, Sendable {
         case .success(let value): network = value
         }
         let gateNetwork: Bool?
-        switch boolean(args["gate_network"]) {
-        case .failure: return .failure("gate_network must be true or false.")
+        switch boolean(args["gate_network"], name: "gate_network") {
+        case .failure(let message): return .failure(message)
         case .success(let value): gateNetwork = value
         }
         return .success(ScheduleJobArguments(
@@ -172,10 +172,9 @@ struct ScheduleJobArguments: Equatable, Sendable {
                  fileManager: FileManager = .default,
                  directoryEntryLimit: Int = GateEvaluator.directoryEntryLimit,
                  paths: IrisPaths = .default, home: String = NSHomeDirectory()) -> Result<Job, ToolMessage> {
-        // Anything that is not the word `mutating` reads as read-only, including a value this
-        // build does not recognize: the narrow surface is the safe guess, and a refusal over a
-        // spelling would cost a retry to arrive at the same job.
-        let wantsMutating = profile?.lowercased() == JobProfile.mutating.rawValue.lowercased()
+        // `JobProfile.asked`, the one reader every job-creating path uses (#517): anything but the
+        // word `mutating` is read-only, so the approval and the job can't read a spelling apart.
+        let wantsMutating = JobProfile.asked(profile) == .mutating
         if wantsMutating, !sandboxAvailable { return .failure(ToolMessage(Self.noRuntimeForMutating)) }
         let grant: JobGrant?
         switch JobGrant.resolve(mounts: mounts, network: network,
@@ -509,18 +508,20 @@ struct ScheduleJobArguments: Equatable, Sendable {
 
     /// A Bool in the shapes a model sends one: a real Bool, or the words. Absent, null and the
     /// empty string read as "not asked"; anything else is a refusal, because a dropped `network`
-    /// would silently attach a job to the wrong network for as long as it exists.
-    static func boolean(_ value: JSONValue?) -> Result<Bool?, ToolMessage> {
+    /// would silently attach a job to the wrong network for as long as it exists. The refusal
+    /// names the argument it was given as (#517).
+    static func boolean(_ value: JSONValue?, name: String = "network") -> Result<Bool?, ToolMessage> {
         guard let value = given(value) else { return .success(nil) }
+        let shape = ToolMessage("\(name) must be true or false.")
         switch value {
         case .bool(let flag): return .success(flag)
         case .string(let word):
             switch word.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
             case "true", "yes", "on": return .success(true)
             case "false", "no", "off": return .success(false)
-            default: return .failure(networkShape)
+            default: return .failure(shape)
             }
-        default: return .failure(networkShape)
+        default: return .failure(shape)
         }
     }
 

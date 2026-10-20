@@ -409,6 +409,10 @@ struct JobGrantToolTests {
                                                    "mounts": .array([]), "network": .null]).get()
         #expect(none.mounts == nil && none.network == nil)
         #expect(ScheduleJobArguments.parse(["prompt": .string("p"), "network": .string("maybe")]) == .failure(ScheduleJobArguments.networkShape))
+        // Each boolean's refusal names the argument it was given as (#517).
+        #expect(ScheduleJobArguments.parse(["prompt": .string("p"), "gate_network": .string("maybe")])
+                == .failure("gate_network must be true or false."))
+        #expect(ScheduleJobArguments.boolean(.int(2), name: "x") == .failure("x must be true or false."))
         #expect(ScheduleJobArguments.parse(["prompt": .string("p"), "mounts": .array([.int(3)])]) == .failure(ScheduleJobArguments.mountsShape))
     }
 
