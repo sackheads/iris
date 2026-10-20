@@ -583,6 +583,8 @@ struct ToolExecutor {
                 if WorkspaceGit.entry(at: expandedPath) != .none {
                     return Self.oneOffRepositoryRefusal(expandedPath)
                 }
+                // #616: recorded as writable before the container can write it, or not run.
+                guard WritableRootsRecord().record([expandedPath]) else { return "Error: " + WritableRootsRecord.refusal }
                 // `-v`, where the session path uses `--mount` (see `ContainerMount`). The CLI
                 // lowers both to the same virtiofs bind; this one is the ephemeral no-conversation
                 // path and is left as it was rather than changed for symmetry alone.

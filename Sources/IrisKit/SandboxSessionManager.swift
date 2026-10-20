@@ -134,6 +134,10 @@ actor SandboxSessionManager {
              network: NetworkMode = .default, timeoutSeconds: Int? = nil,
              onNote: (@Sendable (String) async -> Void)? = nil) async -> String {
         let wasLost = lostSessions.contains(id)
+        // #616: every read-write mount is recorded as writable before a container can write it.
+        guard WritableRootsRecord(paths: paths).record(Self.readWriteMounts(workspace: workspace, extra: extraMounts).map(\.source)) else {
+            return "Error: " + WritableRootsRecord.refusal
+        }
         // #617: every read-write mount's `.iris/` goes in read-only, so a real directory must be
         // there to mount before the container is made; one that cannot be protected refuses.
         var absent: Set<String> = []
