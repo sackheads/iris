@@ -293,34 +293,33 @@ struct ChatView: View {
                                     .id(conv.id)
                             }
                         }
-                        .onCopyCommand {
-                            var selectedMessages: [ChatMessage] = []
-                            for item in groupedMessages(for: conv) {
-                                if selectedMessageIDs.contains(item.id) {
-                                    switch item {
-                                    case .single(let msg): selectedMessages.append(msg)
-                                    case .systemGroup(_, let msgs): selectedMessages.append(contentsOf: msgs)
-                                    }
-                                }
-                            }
-                            
-                            if selectedMessages.isEmpty { return [] }
-                            
+                        // Claimed only while something is selected (#703): a handler that returns
+                        // nothing still takes the command and empties the pasteboard, which wiped
+                        // whatever the person had copied elsewhere.
+                        .onCopyCommand(perform: selectedMessageIDs.isEmpty ? nil : {
+                            let selected = MessageSelection.messages(selectedMessageIDs, in: groupedMessages(for: conv))
+                            if selected.isEmpty { return [] }
                             let format: ChatMessage.ExportFormat =
                                 ConfigManager.shared.copyChatsAsMarkdown ? .markdown : .plainText
-                            let text = selectedMessages
+                            let text = selected
                                 .map { state.liveMessage($0).exportLine(format: format) }
                                 .joined(separator: "\n\n") + "\n\n"
                             return [NSItemProvider(object: text as NSString)]
-                        }
+                        })
                         .background(Color(NSColor.textBackgroundColor))
+                        // #703: a click in the transcript takes focus from the composer, so Cmd-C
+                        // reaches the copy handler above instead of beeping in an empty composer.
+                        .background(TranscriptFocusAnchor())
                         // Single Escape handler: clear a message selection if there is one,
                         // otherwise fall through to interrupting the agent (a no-op when idle).
                         // This replaced the Stop button's own .cancelAction shortcut so Escape
                         // isn't double-handled.
                         .onExitCommand { handleEscape() }
+                        // #703: an append keeps what's selected; clearing it here made Cmd-C beep
+                        // whenever a card, an arrival or a loop tick landed after the click.
                         .onChange(of: conv.messages.count) { _, _ in
-                            selectedMessageIDs.removeAll()
+                            selectedMessageIDs = MessageSelection.apply(.messagesChanged(groupedMessages(for: conv)),
+                                                                        to: selectedMessageIDs)
                             scrollAfterUpdate(proxy)
                         }
                         .onChange(of: conv.messages.last?.content) { _, _ in
@@ -345,12 +344,15 @@ struct ChatView: View {
                         // `scrollAfterUpdate`, which always checks the pending target first — no
                         // site does its own unconditional "scroll to bottom", so there is no race
                         // between "which handler's DispatchQueue block runs last" to depend on.
-                        .onChange(of: state.activeConversationIndex) { _, _ in
-                            selectedMessageIDs.removeAll()
+                        // Keyed on the conversation, not its index (#703): the index also moves when
+                        // an earlier conversation is deleted (a job's pruned transcript, a goal
+                        // evaluation), and that cleared the selection under the person.
+                        .onChange(of: state.selectedConversationId) { _, _ in
+                            selectedMessageIDs = MessageSelection.apply(.conversationSwitched, to: selectedMessageIDs)
                             scrollAfterUpdate(proxy)
                         }
                         // Covers revealing a hit that belongs to the conversation already open,
-                        // where `activeConversationIndex` never changes and the handler above
+                        // where `selectedConversationId` never changes and the handler above
                         // never fires.
                         .onChange(of: state.pendingScrollTarget) { _, target in
                             guard target != nil else { return }
