@@ -776,10 +776,32 @@ morning" — that would otherwise cost a model turn per fire. `schedule_job` mak
 - `script_timeout_seconds`: 5-3600 seconds, default 120. Past it the script is killed inside the VM
   and the run fails.
 
-It is **read-only in this version**: no `profile: mutating`, no grant mounts or network, and no
-gate (a script job is its own check; it can exit early when there's nothing to do). The VM or
-nothing: with no container runtime it isn't created, and a fire that finds the runtime gone is
-`interrupted`, never run on the host.
+It is **read-only by default**, and never has a gate (a script job is its own check; it can exit
+early when there's nothing to do). The VM or nothing: with no container runtime it isn't created,
+and a fire that finds the runtime gone is `interrupted`, never run on the host.
+
+**A script job that writes** (#688) has `profile: mutating`, and takes its folders and network from
+the grant's `mounts` and `network`, exactly as a mutating prompt job does (see "Grants"): every
+grant rule applies, the login-PATH refusal and the writable-roots record included, and it's
+re-checked at every fire. `script_mounts` and `script_network` are refused beside it. On top of the
+grant:
+
+- **No git repository in a read-write folder.** A folder that is a repository, or holds one at any
+  depth, is refused at creation and at every fire, and so is a folder too large to check (over
+  200,000 entries or 2 seconds to walk): a hook planted in a repository runs on the Mac the next
+  time you use git there. A repository the script *creates* fails that run and pauses the job,
+  naming the path, with the folder left as it is for you to decide.
+- **The disk:** a fire is `interrupted` while the disk holding a read-write folder has under 5 GB
+  free. Each folder is counted before and after every run, and a run that adds more than
+  max(2 GB, its size), removes more than max(1 GB, a fifth of it), or drops more than
+  max(1,000, a fifth of its files) pauses the job with a card. The counts are on the run's row.
+- **Git config** in a read-write folder is checked around every run, as in any sandboxed write, and
+  a change it puts back fails the run.
+
+Its review says, beside the folders, that the script "can change and delete files in" them on every
+run with no one watching, and what its network means for that. If the script runs, or reads
+instructions from, a file in those folders, that file can change between runs: keep the logic in the
+script itself. A deletion is bounded only by these checks, the grant rules and your backups.
 
 **You review every script job before it exists**, Vibecop or not, exactly as a gate script: the
 script, what it can read, whether it has the network and what that means, and its timeout, with
