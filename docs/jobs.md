@@ -783,7 +783,10 @@ nothing: with no container runtime it isn't created, and a fire that finds the r
 
 **You review every script job before it exists**, Vibecop or not, exactly as a gate script: the
 script, what it can read, whether it has the network and what that means, and its timeout, with
-Approve and Deny and no Always Allow. What you approved is fingerprinted — the script, each mount,
+Approve and Deny and no Always Allow. Every run card of a script job, or of a job whose gate is a script, says when you approved it,
+and what Vibecop advised if it gave advice ("script approved by you on 20 Oct 2026 (Vibecop
+advised: approve — reads one folder)"); a job made before this was recorded says its approval
+wasn't recorded. The advice is on the card only, never in a notification (#650). What you approved is fingerprinted — the script, each mount,
 the network flag and the timeout — and kept in Iris's Keychain item beside its API keys, which a
 shell command can't write. A fire whose stored script no longer matches (its row was edited
 outside Iris) **doesn't run**: one row says `script changed since review`, one card says so, and

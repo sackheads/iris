@@ -200,6 +200,8 @@ struct ScriptJobRunTests {
         #expect(runs.first?.totalTokens == 0 && runs.first?.transcriptConversationId == nil, "no model turn")
         #expect(runs.first?.scriptOutput == "header\n42% used\n" && runs.first?.posted == true)
         #expect(cards(state).count == 1)
+        // #650: made here without a review, so its card says the approval wasn't recorded.
+        #expect(cards(state).first?.scriptApproval == "script " + ScriptJobs.approvalNotRecorded)
 
         _ = await r.fire(job: job, origin: .cadence(kind: "schedule"))
         runs = try store.ledger.runs(jobId: job.id, limit: 10)
@@ -350,6 +352,7 @@ struct ScriptJobRunTests {
         #expect(answer.contains("no model turn"), "\(answer)")
         #expect(asked.value == 1, "Vibecop's APPROVE is advice: the person is asked")
         let job = try #require(try store.ledger.jobs().first { $0.name == "disk" })
+        #expect(job.policy.scriptReview?.vibecopAdvice == "approve \u{2014} fine", "#650: the review is on the job")
         let spec = try #require(job.action.scriptSpec)
         let keychain = ConfigManager.shared.guardedKeychain ?? .shared
         #expect(ScriptFingerprints.check(jobId: job.id, spec: spec, keychain: keychain) == .matches)

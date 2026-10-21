@@ -3626,6 +3626,7 @@ actor IrisEngine {
         // A gate script is reviewed once, and only once however many times the name loop below
         // goes round: a second dialog for the same script would read as a stuck button.
         var reviewedScript = false
+        var scriptReview: ScriptReview?
         // Two passes: the name check above is a read before a write, so another conversation (or
         // another engine) can take the name in between and the UNIQUE index rejects the insert.
         // One retry under the next suffix is enough to absorb that; a second failure is real.
@@ -3644,11 +3645,9 @@ actor IrisEngine {
                 if case .script(let command, let mounts, let timeout, let network) = job.trigger.gate, !reviewedScript {
                     let reviewer = review ?? Self.gateScriptReview(state: state,
                                                                    conversationId: conversationId)
-                    if case .failure(let message) = await reviewer.review(script: command,
-                                                                          mounts: mounts,
-                                                                          timeoutSeconds: timeout,
-                                                                          network: network) {
-                        return message.text
+                    switch await reviewer.review(script: command, mounts: mounts, timeoutSeconds: timeout, network: network) {
+                    case .failure(let message): return message.text
+                    case .success(let review): scriptReview = review
                     }
                     reviewedScript = true
                 }
@@ -3656,13 +3655,15 @@ actor IrisEngine {
                 // every fire with no model looking at it.
                 if case .script(let spec) = job.action, !reviewedScript {
                     let reviewer = review ?? Self.gateScriptReview(state: state, conversationId: conversationId)
-                    if case .failure(let message) = await reviewer.review(
-                        details: ScriptJobs.reviewDetails(spec, isGate: false)) {
-                        return message.text
+                    switch await reviewer.review(details: ScriptJobs.reviewDetails(spec, isGate: false)) {
+                    case .failure(let message): return message.text
+                    case .success(let review): scriptReview = review
                     }
                     reviewedScript = true
                 }
                 var job = job
+                // #650: who approved the script, and Vibecop's advice, for its run cards.
+                if let scriptReview { job.policy.scriptReview = scriptReview }
                 if let replacing {
                     job = Job(id: replacing.id, name: job.name, prompt: job.prompt, trigger: job.trigger,
                               profile: job.profile, destinationConversationId: replacing.destinationConversationId,

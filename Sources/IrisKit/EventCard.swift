@@ -63,6 +63,10 @@ struct EventCard: Codable, Equatable, Sendable {
     /// burst — and every ordinary fire carries `nil`. It is on the card rather than in the run's
     /// outcome because it is news about the schedule, not about what the turn did.
     let catchUpNote: String?
+    /// Who approved the script a gate or script job runs, and Vibecop's advice (#650,
+    /// `ScriptJobs.approvalLine`). In-app only: never in `historyLine` or a notification, since
+    /// the advice is model-written. `nil` for every other job and every older card.
+    var scriptApproval: String?
     /// What the watch burst that started this run saw and absorbed (#187 deliverable 4, spec §6),
     /// copied from `JobRun.watchSummary` when the card is written. On the card rather than read
     /// from the row because a card is persisted verbatim and never goes back to the ledger; `nil`
@@ -171,6 +175,7 @@ struct EventCard: Codable, Equatable, Sendable {
         vibecopReason = try container.decodeIfPresent(String.self, forKey: .vibecopReason)
         approvalBlockedReason = try container.decodeIfPresent(String.self, forKey: .approvalBlockedReason)
         catchUpNote = try container.decodeIfPresent(String.self, forKey: .catchUpNote)
+        scriptApproval = try container.decodeIfPresent(String.self, forKey: .scriptApproval)
         // Invariant 1: an older card has no key at all and reads false, the safe direction — a
         // card predating grants never claimed network reach in the first place.
         network = try container.decodeIfPresent(Bool.self, forKey: .network) ?? false

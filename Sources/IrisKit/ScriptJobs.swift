@@ -206,3 +206,52 @@ extension Gate {
         return ScriptSpec(command: command, mounts: mounts, timeoutSeconds: timeoutSeconds, network: network)
     }
 }
+
+/// The review that approved a gate or script job's script (#650): when the person approved it, and
+/// what Vibecop advised, if it gave advice. Recorded on the job's policy at creation, shown on its
+/// run cards. Informational: the control is the fingerprint (`ScriptFingerprints`), which hashes
+/// the script's own fields and never this.
+struct ScriptReview: Codable, Equatable, Sendable {
+    var approvedAt: Date
+    /// Vibecop's decision and reason, flattened and capped (`ScriptJobs.adviceCap`). Model-written,
+    /// so it goes on in-app cards only, never a notification.
+    var vibecopAdvice: String?
+
+    init(approvedAt: Date, vibecopAdvice: String?) {
+        self.approvedAt = approvedAt
+        self.vibecopAdvice = vibecopAdvice
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        approvedAt = try c.decodeIfPresent(Date.self, forKey: .approvedAt) ?? Date(timeIntervalSince1970: 0)
+        vibecopAdvice = try c.decodeIfPresent(String.self, forKey: .vibecopAdvice)
+    }
+
+    private enum CodingKeys: String, CodingKey { case approvedAt, vibecopAdvice }
+}
+
+extension ScriptJobs {
+    static let adviceCap = 200
+    static let approvalNotRecorded = "approval not recorded (created before this version)"
+
+    /// Vibecop's advice as recorded: its decision and reason, flattened to one capped line.
+    static func recordedAdvice(_ decision: VibecopDecision?) -> String? {
+        guard let decision else { return nil }
+        let reason = decision.reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = decision.decision.lowercased() + (reason.isEmpty ? "" : " \u{2014} \(reason)")
+        return IrisEngine.flattenCardField(text, cap: adviceCap)
+    }
+
+    /// The card's line for a job that runs a reviewed script, or nil for one that doesn't (#650).
+    static func approvalLine(for job: Job) -> String? {
+        let what: String
+        if job.action.scriptSpec != nil { what = "script" }
+        else if job.trigger.gate?.scriptSpec != nil { what = "gate script" }
+        else { return nil }
+        guard let review = job.policy.scriptReview else { return "\(what) \(approvalNotRecorded)" }
+        let date = review.approvedAt.formatted(date: .abbreviated, time: .omitted)
+        let advice = review.vibecopAdvice.map { " (Vibecop advised: \($0))" } ?? ""
+        return "\(what) approved by you on \(date)\(advice)"
+    }
+}
