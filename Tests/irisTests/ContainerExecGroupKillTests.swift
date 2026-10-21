@@ -114,7 +114,9 @@ struct ContainerExecGroupKillTests {
             # The wrapper's note lands in the host's /tmp too: list it for the test's cleanup even
             # when no killer ever runs (#577).
             printf '%s\\n' "$(printf %s "$3" | grep -o '/tmp/[.]iris-exec-[A-Za-z0-9-]*[.]pid' | head -1)" >> '\(log).notes'
-            ( ( trap '' TERM; \(late ? "for i in $(seq 1 500); do [ -e '\(go)' ] && break; sleep 0.02; done; [ -e '\(go)' ] || exit 0; " : "")trap - TERM; set -m; "$@" & wait $!; echo $? > '\(status)' ) & ) </dev/null >/dev/null 2>&1
+            # The status is written beside its name and renamed into place (#675): the test polls for
+            # the file, and a plain `>` lets it read the file between its creation and the write.
+            ( ( trap '' TERM; \(late ? "for i in $(seq 1 500); do [ -e '\(go)' ] && break; sleep 0.02; done; [ -e '\(go)' ] || exit 0; " : "")trap - TERM; set -m; "$@" & wait $!; echo $? > '\(status).tmp' && mv '\(status).tmp' '\(status)' ) & ) </dev/null >/dev/null 2>&1
             sleep \(clientNap)
         else
             pf=$(printf %s "$3" | grep -o '/tmp/[.]iris-exec-[A-Za-z0-9-]*[.]pid' | head -1)
