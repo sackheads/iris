@@ -212,6 +212,50 @@ struct CLISignalTests {
         }
     }
 
+    /// #645: two SIGINTs posted before either is delivered arrive as one delivery, so exit-now's
+    /// `resetInterrupt(onceDelivered: 2)` waits for a further delivery: it errs toward running the
+    /// cleanup. The kernel's merge is modelled exactly as it reaches Iris: the source hears two
+    /// signals (`receive` twice) while the handler counts one delivery. The real source is
+    /// installed hearing nothing, so only the deliveries are real. Deterministic: no thread mask.
+    @Test("two SIGINTs merged into one delivery: exit-now keeps SIGINT caught until the next delivery, which resets it")
+    func mergedSecondSignalWaitsForNextDelivery() async {
+        await #expect(processExitsWith: .exitCode(130)) {
+            let deleting = Fired()
+            let released = Fired()
+            let stop = CLIStop(terminateGroups: {}, closeGroups: {}, drainGroups: { true }, killGroups: {},
+                               deleteContainers: {
+                                   deleting.set()
+                                   for _ in 0..<1500 where !released.value { usleep(10_000) }
+                               },
+                               flush: {}, vacate: {}, exitNow: { _exit($0) })
+            guard stop.run.arm() == nil else { exit(2) }
+            // The handler counts deliveries; the source is told nothing, so `receive` below is the
+            // only thing that hears a signal.
+            let installation = CLISignals.install([SIGINT], queue: DispatchQueue(label: "iris.tests.645"),
+                                                  onSignal: { _ in })
+            guard installation.installed == [SIGINT] else { exit(3) }   // run `swift test` in the foreground
+
+            kill(getpid(), SIGINT)   // the merged pair's one delivery
+            for _ in 0..<500 where CLISignals.deliveries < 1 { usleep(10_000) }
+            guard CLISignals.deliveries == 1 else { exit(4) }
+            // ...and the two signals its source heard: a clean stop, then exit-now.
+            stop.receive(SIGINT)
+            DispatchQueue(label: "iris.tests.645.source").async { stop.receive(SIGINT) }
+            for _ in 0..<300 where !deleting.value { usleep(10_000) }
+            guard deleting.value else { exit(5) }
+            // Exit-now asked for the reset at the second delivery, and only one has happened:
+            // SIGINT is still caught, so a Ctrl-C now would not cut the cleanup short.
+            guard CLISignals.deliveries == 1, CLISignalTests.raw(SIGINT) > 1 else { exit(6) }
+            kill(getpid(), SIGINT)   // the next delivery: caught, and it resets SIGINT
+            for _ in 0..<300 where CLISignalTests.raw(SIGINT) != 0 { usleep(10_000) }
+            guard CLISignals.deliveries == 2, CLISignalTests.raw(SIGINT) == 0 else { exit(7) }
+            released.set()   // the deletes finish and exit-now `_exit`s with 130
+            for _ in 0..<500 { usleep(10_000) }
+            withExtendedLifetime(installation) {}
+            exit(8)
+        }
+    }
+
     /// Blocks the calling thread on `gate`. Synchronous, so a pool thread can be held with it
     /// without the async-context warning.
     static func park(_ gate: DispatchSemaphore) { gate.wait() }
