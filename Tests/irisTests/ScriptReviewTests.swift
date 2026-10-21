@@ -73,7 +73,8 @@ struct ScriptReviewTests {
         var card = EventCard(runId: UUID(), jobId: UUID(), jobName: "disk", status: .failed, outcome: "exit 1",
                              startedAt: at, finishedAt: at)
         card.scriptApproval = "script approved by you on today (Vibecop advised: SECRET-ADVICE)"
-        #expect(!card.historyLine.contains("SECRET-ADVICE"))
+        #expect(!card.historyLine.contains("SECRET-ADVICE") && !card.transcriptLine.contains("SECRET-ADVICE"))
+        #expect(card.accessibilityText.contains("SECRET-ADVICE"), "VoiceOver reads what the card shows")
         let context = NotificationContext(enabled: true, appActive: false, mainWindowVisible: false, selectedConversationId: nil)
         if let banner = NotificationPolicy.decide(.card(card, destination: UUID(), jobPausedReason: "paused"), context: context) {
             #expect(!"\(banner)".contains("SECRET-ADVICE"))
