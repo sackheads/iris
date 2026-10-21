@@ -39,6 +39,11 @@ struct UnattendedJobCreationTests {
     /// One turn in a background conversation with the model calling `tool`, reading back what the
     /// dispatcher actually returned to it.
     private func dispatchResult(for call: FunctionCall) async -> String {
+        await dispatch(call).result
+    }
+
+    /// The same turn, with what the run recorded for an event card.
+    private func dispatch(_ call: FunctionCall) async -> (result: String, blocked: BlockedCall?) {
         let app = AppState()
         app.conversations.removeAll()
         let id = app.createNewConversation(isBackground: true, select: false)
@@ -56,7 +61,23 @@ struct UnattendedJobCreationTests {
         let responses = app.conversations.first { $0.id == id }?.history
             .flatMap { $0.parts }
             .compactMap { $0.functionResponse } ?? []
-        return responses.compactMap { $0.response["result"]?.stringValue }.joined(separator: "\n")
+        return (responses.compactMap { $0.response["result"]?.stringValue }.joined(separator: "\n"),
+                app.firstBackgroundDenial(for: id))
+    }
+
+    /// #714: the profile a card's Approve and run would need to carry exists only for a job
+    /// creation recorded for a card, and none is: an unattended creation is refused before any
+    /// approval, so it never becomes a blocked call a click could re-dispatch.
+    @Test("an unattended job creation is refused, never recorded for an event card to re-run (#714: if this fails, #714's decided-profile field is needed)")
+    func neverRecordedForACard() async {
+        for call in [FunctionCall(name: "schedule_job", args: ["prompt": .string("again"), "intervalSeconds": .int(60),
+                                                                "profile": .string("mutating")]),
+                     FunctionCall(name: "register_directory_watcher",
+                                  args: ["path": .string("/tmp"), "instructions": .string("watch"), "profile": .string("mutating")])] {
+            let (result, blocked) = await dispatch(call)
+            #expect(result.contains(IrisEngine.unattendedJobCreationRefusal), "\(call.name)")
+            #expect(blocked == nil, "\(call.name): no card can re-dispatch it")
+        }
     }
 
     @Test("a forged schedule_job in a background run is refused")

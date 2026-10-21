@@ -63,6 +63,9 @@ final class JobLedger: JobUsageReading, Sendable {
         let urlTriggerCleared: Bool
     }
 
+    /// A conditional upsert's condition no longer held inside its write (#713).
+    struct ChangedSinceRead: Error, Equatable {}
+
     /// Inserts `job`, or replaces the row with the same id. A rename onto another job's name
     /// surfaces as the UNIQUE violation on `name` rather than silently clobbering that job, which
     /// is why this is an `ON CONFLICT(id)` upsert and not `INSERT OR REPLACE`.
@@ -83,13 +86,21 @@ final class JobLedger: JobUsageReading, Sendable {
     /// clear `pausedReason`, so a re-schedule that changed only the cadence would otherwise
     /// unpause a job the owner stopped and make its link live again. `/jobs resume` does not
     /// come through here: it is the owner's own act and keeps the link.
+    /// `ifStill`: the write goes ahead only if this holds for the jobs as they are inside the same
+    /// transaction (#713), so a decision taken on an earlier read can't land over a change made
+    /// since. It throws `ChangedSinceRead` and writes nothing when it doesn't.
     @discardableResult
-    func upsert(_ job: Job) throws -> UpsertOutcome {
+    func upsert(_ job: Job, ifStill stillHolds: (([Job]) -> Bool)? = nil) throws -> UpsertOutcome {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let triggerJSON = String(decoding: try encoder.encode(job.trigger), as: UTF8.self)
         let policyJSON = String(decoding: try encoder.encode(job.policy), as: UTF8.self)
         let cleared: Bool = try writer.write { db in
+            if let stillHolds {
+                let current = try Row.fetchAll(db, sql: "SELECT * FROM jobs ORDER BY createdAt, rowid")
+                    .compactMap { try? Self.job(from: $0) }
+                guard stillHolds(current) else { throw ChangedSinceRead() }
+            }
             let stored = try Row.fetchOne(db, sql: """
                 SELECT trigger, prompt, profile, policy, urlTrigger, pausedReason FROM jobs WHERE id = ?
                 """, arguments: [job.id.uuidString])
