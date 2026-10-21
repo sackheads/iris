@@ -125,8 +125,10 @@ enum ModelPricing {
             else if !familyRows.isEmpty { banded = PriceGuards.withinFamily(candidate, family: familyRows) }
             else { banded = PriceGuards.withinAbsolute(candidate) }
             if PriceGuards.fieldsValid(candidate), banded {
-                return ResolvedRate(rates: candidate, source: fetchedSource, asOf: fetchedAsOf,
-                                    estimated: snapRow == nil)
+                // OpenRouter's rows are its own prices (#701), not a list's guess at a new model.
+                let source = family == ModelPriceFeed.openRouterFamily ? RateSource.openrouter : fetchedSource
+                return ResolvedRate(rates: candidate, source: source, asOf: fetchedAsOf,
+                                    estimated: snapRow == nil && source != .openrouter)
             }
             // Rejected: the snapshot's, marked estimated, else fall through to the fallback.
             if let snapRow {

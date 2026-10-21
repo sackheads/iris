@@ -153,6 +153,60 @@ struct ModelPriceFeedTests {
         #expect(feed.isStale(now: now.addingTimeInterval(ModelPriceFeed.refreshInterval)))
     }
 
+    /// OpenRouter's `/api/v1/models` shape: dollars per token as strings.
+    static let openRouterSample = Data("""
+    {"data": [
+      {"id": "meta-llama/llama-4-scout", "pricing": {"prompt": "0.00000008", "completion": "0.0000003", "input_cache_read": "0.00000002"}},
+      {"id": "anthropic/claude-sonnet-5-5", "pricing": {"prompt": "0.000002", "completion": "0.00001"}},
+      {"id": "some/free-model", "pricing": {"prompt": "0", "completion": "0"}},
+      {"id": "some/free-input", "pricing": {"prompt": "0", "completion": "0.000001"}},
+      {"id": "openrouter/auto", "pricing": {"prompt": "-1", "completion": "-1"}},
+      {"id": "absurd/model", "pricing": {"prompt": "0.5", "completion": "0.5"}}
+    ]}
+    """.utf8)
+
+    @Test("OpenRouter's list parses to dollars per token, leaving out free and varying models (#701)")
+    func parsesOpenRouter() throws {
+        let rows = try #require(ModelPriceFeed.parseOpenRouter(Self.openRouterSample))
+        let llama = try #require(rows["meta-llama/llama-4-scout"])
+        #expect(llama.input == 8e-8 && llama.output == 3e-7 && llama.cacheRead == 2e-8)
+        #expect(rows["anthropic/claude-sonnet-5-5"]?.cacheRead == 2e-6, "no cache-read price reads at input")
+        #expect(rows["some/free-model"] == nil && rows["some/free-input"] == nil && rows["openrouter/auto"] == nil)
+        #expect(ModelPriceFeed.parseOpenRouter(Data("{}".utf8)) == nil)
+    }
+
+    @Test("a refresh fetches OpenRouter too, and its models are charged at their own price, held to the absolute bounds (#701)")
+    func openRouterRefreshAndResolve() async throws {
+        let (paths, cleanup) = try home(); defer { cleanup() }
+        let feed = ModelPriceFeed(paths: paths, keychain: keychain(), download: { [sample] url in
+            url == ModelPriceFeed.openRouterURL ? Self.openRouterSample : sample
+        })
+        let cached = try #require(try await feed.refresh(role: .app))
+        #expect(cached.rows["openrouter"]?.count == 3)
+        let book = PriceBook(feed: feed)
+        let llama = book.resolve(family: "openrouter", model: "meta-llama/llama-4-scout", side: .delegated)
+        #expect(llama.source == .openrouter && !llama.estimated && llama.rates.input == 8e-8)
+        // $500,000 per million tokens is past the absolute ceiling: the fallback, estimated.
+        let absurd = book.resolve(family: "openrouter", model: "absurd/model", side: .delegated)
+        #expect(absurd.source == .fallback && absurd.estimated)
+        // The LiteLLM families are still LiteLLM's.
+        #expect(book.resolve(family: "anthropic", model: "claude-fable-5-1", side: .delegated).source == .litellm)
+    }
+
+    @Test("OpenRouter failing leaves the LiteLLM fetch whole (#701)")
+    func openRouterFailureIsContained() async throws {
+        let (paths, cleanup) = try home(); defer { cleanup() }
+        struct Down: Error {}
+        let feed = ModelPriceFeed(paths: paths, keychain: keychain(), download: { [sample] url in
+            if url == ModelPriceFeed.openRouterURL { throw Down() }
+            return sample
+        })
+        let cached = try #require(try await feed.refresh(role: .app))
+        #expect(cached.rows["openrouter"] == nil && cached.rows["anthropic"] != nil)
+        let rate = PriceBook(feed: feed).resolve(family: "openrouter", model: "meta-llama/llama-4-scout", side: .delegated)
+        #expect(rate.source == .fallback && rate.estimated, "as before #701")
+    }
+
     @Test("a download that isn't https is refused before any request")
     func httpsOnly() async {
         await #expect(throws: ModelPriceFeed.FetchError.notHTTPS) {
