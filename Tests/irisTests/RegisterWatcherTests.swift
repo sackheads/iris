@@ -53,6 +53,44 @@ struct RegisterWatcherTests {
         return Fixture(store: store, executor: executor, base: base, notes: notes)
     }
 
+    @Test("a watch changed between a registration's read and its write isn't overwritten; nothing is saved (#713)")
+    func changedBetweenReadAndWrite() async throws {
+        let f = try fixture(); defer { f.tearDown() }
+        let conversation = UUID()
+        _ = await f.register(conversationId: conversation)
+        let before = try f.watch().job
+        // Another call lands between this one's read and its write: here, a change to the watch.
+        var executor = f.executor
+        let ledger = f.store.ledger
+        executor.jobToolsProvider = {
+            JobTools(ledger: ledger, beforeWatchWrite: {
+                var changed = before
+                changed.prompt = "changed by another call"
+                _ = try? ledger.upsert(changed)
+            })
+        }
+        let result = await executor.execute(name: "register_directory_watcher",
+                                            args: ["path": .string(f.notes.path), "instructions": .string("mine")],
+                                            conversationId: conversation)
+        #expect(result == ToolExecutor.watchChangedSinceRead)
+        #expect(try f.watch().job.prompt == "changed by another call", "the other call's write stands; this one wrote nothing")
+
+        // Unchanged in between, the same call goes through.
+        let unchanged = await f.register(instructions: "mine", conversationId: conversation)
+        #expect(unchanged != ToolExecutor.watchChangedSinceRead)
+        #expect(try f.watch().job.prompt == "mine")
+    }
+
+    @Test("the ledger's conditional upsert writes only when its condition holds inside the write (#713)")
+    func conditionalUpsert() throws {
+        let store = try ConversationStore.inMemory()
+        let job = Job(name: "j", prompt: "p", trigger: .schedule(.interval(seconds: 600)))
+        #expect(throws: JobLedger.ChangedSinceRead()) { try store.ledger.upsert(job, ifStill: { _ in false }) }
+        #expect(try store.ledger.jobs().isEmpty)
+        _ = try store.ledger.upsert(job, ifStill: { $0.isEmpty })
+        #expect(try store.ledger.jobs().count == 1)
+    }
+
     @Test("the three optional arguments decode and the window is clamped to 300 with a note")
     func argumentsDecodeAndClamp() async throws {
         let f = try fixture(); defer { f.tearDown() }
