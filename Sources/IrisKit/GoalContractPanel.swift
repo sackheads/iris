@@ -1135,6 +1135,9 @@ private struct CompletionReportItemRow: View {
 
 /// Internal, not private, so a test can host it and read its check field's editor (#397).
 struct CriterionRow: View {
+    /// The check command editor's placeholder, shown while it's empty.
+    static let checkPlaceholder = "Check command (e.g. swift test)"
+
     @Binding var criterion: Criterion
 
     /// Current milestones from the draft panel — used for the checkpoint picker.
@@ -1193,15 +1196,22 @@ struct CriterionRow: View {
                 // Vertical and unlimited, so the whole check wraps into view: an approved check may
                 // run unasked (#334), and a one-line field can scroll a `; curl x | sh` tail out
                 // of sight. The panel's ScrollView and its maxHeight cap bound the height (inv. 8).
-                TextField("Check command (e.g. swift test)", text: $checkText, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    // A shell command, kept byte for byte (#397). AppKit's field editor already
-                    // leaves dashes and quotes alone; this stops it autocorrecting a word. Text
-                    // replacement stays on: only a field editor of our own can turn it off (#565).
-                    .autocorrectionDisabled()
-                    .font(.system(.caption, design: .monospaced))
-                    .lineLimit(nil)
-                    .fixedSize(horizontal: false, vertical: true)
+                // A shell command, kept byte for byte (#397, #565): a plain text view under the
+                // composer's substitution policy, so no smart dash or quote, no autocorrection and
+                // no text replacement, which AppKit's shared field editor can't turn off. Return
+                // is swallowed: it would add a line break the grader then asks about every run.
+                ZStack(alignment: .topLeading) {
+                    LiteralTextEditor(text: $checkText, allowsReturn: false)
+                        .frame(minHeight: 34, maxHeight: 120)
+                    if checkText.isEmpty {
+                        Text(Self.checkPlaceholder)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .padding(.leading, 5)
+                            .padding(.top, 1)
+                            .allowsHitTesting(false)
+                    }
+                }
                     .padding(6)
                     .background(Color.irisIndigo.opacity(0.07))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
