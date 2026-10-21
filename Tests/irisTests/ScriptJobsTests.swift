@@ -90,6 +90,7 @@ struct ScriptJobsTests {
             }
             #expect(message.text.contains(text), "\(message.text)")
         }
+        refused(["script": .string("ls"), "script_network": .string("maybe")], "script_network must be true or false.")
         // #695 (#711): a script mount that is, holds or sits inside Iris's home is refused, as a gate's is.
         try FileManager.default.createDirectory(at: IrisPaths.default.root, withIntermediateDirectories: true)
         refused(["script": .string("ls"), "script_mounts": .array([.string(IrisPaths.default.root.path)])], "Iris's own directory")
