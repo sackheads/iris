@@ -56,7 +56,7 @@ app's `~/.iris`, so the two never collide. See [Building from source](building.m
 ## Signing in to a provider
 
 When started, Iris launches as a native macOS App. If you haven't configured your API keys or authentication method, the **Settings Window** will automatically pop up. 
-All keys are saved securely to your local Keychain, and so are the settings that guard spending, where data goes, and safety (see above); the rest of Iris's settings live in `UserDefaults`. Gemini supports both standard API Keys and **Application Default Credentials (ADC)** via `gcloud`, and Anthropic supports an API key or **Vertex AI (ADC)**, which calls Claude models hosted in a Google Cloud project you name (the location defaults to `global`; a dated Anthropic model id is sent to Vertex in its `@`-dated spelling). See [docs/Google_ADC_credentials.md](Google_ADC_credentials.md) for step-by-step setup and GCP project configuration.
+All keys are saved securely to your local Keychain; under each key field Settings shows only `••••` and the key's last four characters (just "set" for one under 8 characters), so you can tell which key is in use without reading the Keychain. So are the settings that guard spending, where data goes, and safety (see above); the rest of Iris's settings live in `UserDefaults`. Gemini supports both standard API Keys and **Application Default Credentials (ADC)** via `gcloud`, and Anthropic supports an API key or **Vertex AI (ADC)**, which calls Claude models hosted in a Google Cloud project you name (the location defaults to `global`; a dated Anthropic model id is sent to Vertex in its `@`-dated spelling). See [docs/Google_ADC_credentials.md](Google_ADC_credentials.md) for step-by-step setup and GCP project configuration.
 
 ## Updates
 

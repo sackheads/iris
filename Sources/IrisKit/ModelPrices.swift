@@ -383,11 +383,23 @@ enum TypedRates {
         return (out, out != typed)
     }
 
-    /// Settings' warning (planner): a typed delegated rate below a tenth of its family's lowest.
-    static func lowersBudgetUse(_ typed: TokenRates, family: String?, snapshot: PriceTable = .snapshot) -> Bool {
-        guard let family, let rows = snapshot.rows[family], !rows.isEmpty else { return false }
-        let lowest = PriceGuards.extreme(Array(rows.values), side: .primary)!
-        return typed.input < lowest.input / PriceGuards.band || typed.output < lowest.output / PriceGuards.band
+    /// Settings' warning (planner, #734). A typed delegated rate below a tenth of its family's
+    /// lowest, or of the lowest row of any family for a model with no family (a custom endpoint).
+    /// A typed primary rate above its own row, or above the highest of any family with none: a
+    /// delegated charge is counted in the primary's tokens, so raising the primary lowers them all.
+    static func lowersBudgetUse(_ typed: TokenRates, family: String?, side: PriceSide = .delegated,
+                                model: String? = nil, snapshot: PriceTable = .snapshot) -> Bool {
+        switch side {
+        case .delegated:
+            let rows = family.flatMap { snapshot.rows[$0].map { Array($0.values) } } ?? []
+            guard let lowest = PriceGuards.extreme(rows.isEmpty ? snapshot.allRates : rows, side: .primary) else { return false }
+            return typed.input < lowest.input / PriceGuards.band || typed.output < lowest.output / PriceGuards.band
+        case .primary:
+            let own = family.flatMap { family in model.flatMap { snapshot.rate(family: family, model: $0) } }
+            guard let reference = own ?? PriceGuards.extreme(snapshot.allRates, side: .delegated) else { return false }
+            return typed.input > reference.input || typed.output > reference.output
+        }
     }
     static let lowersBudgetWarning = "This lowers how much of the budget this model uses."
+    static let lowersSubagentBudgetWarning = "This lowers how much of the budget every subagent uses: their charges are counted in this model's tokens."
 }

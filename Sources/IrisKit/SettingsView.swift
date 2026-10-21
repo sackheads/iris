@@ -264,6 +264,7 @@ struct SettingsView: View {
                         } else {
                             SecureField("Gemini API Key", text: $config.geminiAPIKey)
                                 .help("Required for Gemini models to function.")
+                            KeyHintLine(key: config.geminiAPIKey)
                         }
                         
                         TextField("Gemini Base URL (Optional)", text: $config.geminiBaseURL)
@@ -301,6 +302,7 @@ struct SettingsView: View {
                         } else {
                             SecureField("Anthropic API Key", text: $config.anthropicAPIKey)
                                 .help("Required for Anthropic Claude models to function.")
+                            KeyHintLine(key: config.anthropicAPIKey)
                             TextField("Anthropic Base URL (Optional)", text: $config.anthropicBaseURL)
                                 .help("Leave blank for default endpoint")
                         }
@@ -315,6 +317,7 @@ struct SettingsView: View {
                     } else if config.primaryProvider == LLMProvider.openai.rawValue {
                         SecureField("OpenAI API Key", text: $config.openAIAPIKey)
                             .help("Required for OpenAI GPT/o1 models to function.")
+                        KeyHintLine(key: config.openAIAPIKey)
                         TextField("OpenAI Base URL (Optional)", text: $config.openAIBaseURL)
                             .help("Overrides the default openai endpoint. Useful for deepseek or local compatible servers.")
                         TextField("Easy Subagent Model", text: $config.openaiModelEasy)
@@ -899,6 +902,7 @@ struct SettingsView: View {
                         .help("From Google Cloud Console → APIs & Services → Credentials → OAuth 2.0 Client ID")
                     SecureField("Client Secret", text: $config.googleClientSecret)
                         .help("From Google Cloud Console → APIs & Services → Credentials → OAuth 2.0 Client ID")
+                    KeyHintLine(key: config.googleClientSecret)
                     
                     Text("These credentials enable external tools for Google Calendar, Docs, Drive, Sheets, Gmail, and Tasks.")
                         .font(.caption)
