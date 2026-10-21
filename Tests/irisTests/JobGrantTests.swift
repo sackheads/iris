@@ -455,6 +455,29 @@ struct JobGrantToolTests {
         return (store, state, engine, conversation)
     }
 
+    @Test("a writing script job whose read-write folder holds a repository is refused before the review; a clean one is reviewed with what it can change (#688)")
+    func writingScriptCreation() async throws {
+        let f = try JobGrantResolveTests.fixture(); defer { f.tearDown() }
+        let (store, _, engine, conversation) = try engineHarness()
+        let asked = Locked<[String]>([])
+        let review = GateScriptReview(verdict: { _ in nil }, ask: { text in asked.mutate { $0.append(text) }; return true })
+        func schedule() async -> String {
+            await engine.scheduleJob(ScheduleJobArguments.parse(["script": .string("tidy"), "intervalSeconds": .int(3600),
+                                                                 "profile": .string("mutating"), "mounts": .string(f.proj.path)]),
+                                     conversationId: conversation, review: review, sandboxAvailable: true,
+                                     paths: f.paths, home: f.home)
+        }
+        try FileManager.default.createDirectory(at: f.proj.appendingPathComponent("vendor/lib/.git"), withIntermediateDirectories: true)
+        let refused = await schedule()
+        #expect(refused.hasPrefix("Not scheduled:") && refused.contains("vendor/lib"), "\(refused)")
+        let stored = try store.ledger.jobs()
+        #expect(asked.value.isEmpty && stored.isEmpty, "refused before anyone was asked, and nothing stored")
+        try FileManager.default.removeItem(at: f.proj.appendingPathComponent("vendor"))
+        let scheduled = await schedule()
+        #expect(scheduled.contains("Scheduled"), "\(scheduled)")
+        #expect(asked.value.first?.contains("change and delete files in") == true)
+    }
+
     @Test("re-scheduling the same explicit name from the same conversation replaces the job and its grant; omitting the grant removes it")
     func rescheduleReplacesAndRemoves() async throws {
         let f = try JobGrantResolveTests.fixture(); defer { f.tearDown() }

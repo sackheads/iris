@@ -73,6 +73,9 @@ struct JobRun: Identifiable, Equatable, Sendable {
     /// A script job's run (#330): what the script printed, each stream capped at
     /// `ScriptJobs.outputLimit`, untrusted; and whether this run posted a card (only a change or
     /// a failure does), which `/jobs` reads as "last posted". `nil`/false on every other run.
+    /// A writing script job's read-write mounts, surveyed before and after the run (#688). Nil on
+    /// every other run.
+    var mountFigures: [MountFigures]?
     var scriptOutput: String?
     var scriptStderr: String?
     var posted: Bool = false

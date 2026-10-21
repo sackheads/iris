@@ -2398,7 +2398,7 @@ actor IrisEngine {
                 type: "OBJECT",
                 properties: [
                     "prompt": Schema(type: "STRING", description: "What Iris should do when the job fires. Give this or script, not both."),
-                    "script": Schema(type: "STRING", description: "Instead of a prompt: a shell script run inside the sandbox VM on every fire, with no model turn (a cheap check or digest). Its last line of output is the card's outcome; a card posts only on the first run, a failure, or a change. The user reviews it before the job is created. Read-only: no profile 'mutating', no mounts/network grant, no gate."),
+                    "script": Schema(type: "STRING", description: "Instead of a prompt: a shell script run inside the sandbox VM on every fire, with no model turn (a cheap check or digest). Its last line of output is the card's outcome; a card posts only on the first run, a failure, or a change. The user reviews it before the job is created. Read-only by default (script_mounts, script_network). With profile 'mutating' it can write: its folders and network come from mounts and network, as any mutating job's, and a folder that is or holds a git repository is refused. No gate."),
                     "script_mounts": Schema(type: "ARRAY", description: "Directories the script can read, as '/host/dir' or '/host/dir:/path/in/container'. Always read-only.", items: Schema(type: "STRING")),
                     "script_timeout_seconds": Schema(type: "INTEGER", description: "How long the script may run before it is killed and the run fails (default 120, clamped to 5-3600)."),
                     "script_network": Schema(type: "BOOLEAN", description: "Let the script reach the internet (default false: no internet, though it can still reach services on this Mac)."),
@@ -3651,8 +3651,13 @@ actor IrisEngine {
                 // #330: a script job's own review, human-only like a gate's: it runs in the VM on
                 // every fire with no model looking at it.
                 if case .script(let spec) = job.action, !reviewedScript {
+                    // #688: a writing script job's read-write mounts may not hold a repository, or
+                    // be too large to check for one, refused before anyone is asked.
+                    if let grant = job.effectiveGrant, let refused = await WritingScripts.creationRefusal(grant) {
+                        return "Not scheduled: \(refused)"
+                    }
                     let reviewer = review ?? Self.gateScriptReview(state: state, conversationId: conversationId)
-                    switch await reviewer.review(details: ScriptJobs.reviewDetails(spec, isGate: false)) {
+                    switch await reviewer.review(details: ScriptJobs.reviewDetails(spec, isGate: false, grant: job.effectiveGrant)) {
                     case .failure(let message): return message.text
                     case .success(let review): scriptReview = review
                     }
@@ -3673,7 +3678,11 @@ actor IrisEngine {
                 // checks nothing either: recording there would only write the real dev item.
                 if let spec = job.action.scriptSpec ?? job.trigger.gate?.scriptSpec,
                    let keychain = await MainActor.run(body: { localState?.scriptKeychain ?? ConfigManager.shared.guardedKeychain }) {
-                    guard ScriptFingerprints.record(jobId: job.id, spec: spec, keychain: keychain) else {
+                    // #688: a script job's fingerprint covers its profile and grant; a gate's never has.
+                    let isAction = job.action.scriptSpec != nil
+                    guard ScriptFingerprints.record(jobId: job.id, spec: spec,
+                                                    profile: isAction ? job.profile : .readOnly,
+                                                    grant: isAction ? job.effectiveGrant : nil, keychain: keychain) else {
                         return ScriptJobs.couldNotRecordReview
                     }
                 }

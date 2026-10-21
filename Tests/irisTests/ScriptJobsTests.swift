@@ -54,7 +54,7 @@ struct ScriptJobsTests {
         let names = ConversationStore.migrator.migrations
         let v26 = try #require(names.firstIndex(of: "v26_job_run_delegated_charges"))
         let v27 = try #require(names.firstIndex(of: "v27_script_jobs"))
-        #expect(v27 == v26 + 1 && v27 == names.count - 1, "the last, right after v26")
+        #expect(v27 == v26 + 1, "right after v26 (later migrations follow it)")
         let store = try ConversationStore.inMemory()
         let columns = try store.writer.read { db in try db.columns(in: "job_runs").map(\.name) }
         #expect(Set(["delegatedCharges", "scriptOutput", "scriptStderr", "posted"]).isSubset(of: columns))
@@ -99,7 +99,9 @@ struct ScriptJobsTests {
         refused(["script": .string("x"), "prompt": .string("p")], "not both")
         refused([:], "needs a prompt, or a script")
         refused(["script": .string("x"), "gate_url": .string("https://e.com")], "its own check")
-        refused(["script": .string("x"), "profile": .string("mutating")], "read-only")
+        // #688: a writing script job takes the grant's arguments, a read-only one its own.
+        refused(["script": .string("x"), "profile": .string("mutating"), "script_mounts": .array([.string("/tmp")])], "takes its folders and network from mounts and network")
+        refused(["script": .string("x"), "mounts": .array([.string("/tmp")])], "A read-only script job reads folders through script_mounts")
         refused(["script": .string("x"), "network": .bool(true)], "read-only")
         refused(["prompt": .string("p"), "script_network": .bool(true)], "only apply to script")
         refused(["script": .string("x")], sandbox: false, "only inside the sandbox VM")
@@ -182,7 +184,7 @@ struct ScriptJobRunTests {
                         guardLine: @escaping @Sendable (String) async -> (line: String, withoutTier3: Bool) = { ($0, false) })
         -> JobRunner {
         JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
-                  protectionEnabled: false, scriptRunner: vm, fingerprintCheck: { _, _ in check },
+                  protectionEnabled: false, scriptRunner: { _, spec in await vm(spec) }, fingerprintCheck: { _, _, _, _ in check },
                   scriptLineGuard: guardLine)
     }
 
@@ -377,7 +379,7 @@ struct ScriptJobRunTests {
         let r = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                           protectionEnabled: false,
                           gateEvaluator: { _, _ in evaluated.mutate { $0 += 1 }; return .changed(signal: "s", payload: nil) },
-                          fingerprintCheck: { _, _ in .missing })
+                          fingerprintCheck: { _, _, _, _ in .missing })
         _ = await r.fire(job: job, origin: .cadence(kind: "poll"))
         #expect(evaluated.value == 0, "the unverified gate script never ran")
         #expect(try store.ledger.jobs().first?.pausedReason == ScriptJobs.needsReview, "never reviewed: a one-time review")
