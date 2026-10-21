@@ -510,6 +510,13 @@ struct EventCard: Codable, Equatable, Sendable {
         return line
     }
 
+    /// What VoiceOver reads: the transcript line, plus the script approval (#650, #738 review). The
+    /// approval stays out of `transcriptLine` itself, which `read_conversation` and exports reach.
+    var accessibilityText: String {
+        guard let scriptApproval, !scriptApproval.isEmpty else { return transcriptLine }
+        return transcriptLine + " (" + scriptApproval + ")"
+    }
+
     /// `[Event] job pr-sweep completed: swept 3 PRs (run 1a2b3c4d)` — the model-legible form, for
     /// the line drained into a turn's history. The run is named by the first eight characters of
     /// its id, which is enough for `/jobs ack <run id>` to match on.

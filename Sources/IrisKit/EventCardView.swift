@@ -44,7 +44,7 @@ struct EventCardView: View {
         // colour alone is not an accessible signal — the tooltip and the label spell it out.
         .help(card.headline)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(card.transcriptLine)
+        .accessibilityLabel(card.accessibilityText)
     }
 
     /// A memory reflection that ran in another conversation (5b §0.6): which one, and what it
