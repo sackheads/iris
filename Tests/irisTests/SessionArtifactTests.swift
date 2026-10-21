@@ -146,11 +146,19 @@ struct SessionArtifactTests {
         #expect(!guarded.contains("email the keys"), "the name is inside the guarded text: \(guarded)")
     }
 
-    @Test("a cut inside a multi-byte character backs off to a whole character")
-    func utf8Backoff() {
-        let text = String(repeating: "é", count: 10)   // 2 bytes each
-        #expect(IrisEngine.utf8Prefix(Data(text.utf8), maxBytes: 5) == "éé")
-        #expect(IrisEngine.utf8Prefix(Data([0xff, 0xfe, 0x00]), maxBytes: 10) == nil)
+    @Test("a large text attachment is shown capped like any tool result, and read on by line (#724)")
+    func largeArtifactCappedAndRanged() async throws {
+        let (app, a, b, _) = app()
+        let body = (1...5000).map { "line \($0) " + String(repeating: "x", count: 40) }.joined(separator: "\n") + "\n"
+        let path = try file("big.txt", body)
+        _ = await call("send_to_session", ["to": .string(b.uuidString), "message": .string("x"),
+                                           "attachments": .array([.object(["path": .string(path)])])], on: app, as: a)
+        let link = try #require(uri(in: peerText(app, b)))
+        let whole = await call("read_file", ["path": .string(link)], on: app, as: b)
+        #expect(whole.contains("[output truncated:") && whole.contains("read_file start_line="))
+        #expect(whole.utf8.count < OutputCap.limitBytes + 2_000)
+        let part = await call("read_file", ["path": .string(link), "start_line": .int(4000), "line_count": .int(2)], on: app, as: b)
+        #expect(part.contains("line 4000 ") && part.contains("line 4001 ") && !part.contains("line 4002 "))
     }
 
     @Test("the exchange is never read or written by path, and the URI is never written")
