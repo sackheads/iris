@@ -26,7 +26,10 @@ the code that warns. Do not suppress it (#286).
 
 **CI.** `.github/workflows/test.yml` runs `scripts/check-warnings.sh` (which builds the package
 and tests) and `swift test --no-parallel` on every PR and push to main, on GitHub's `macos-26`
-runner, unless the change touches only documentation. A first `changes` job runs
+runner, unless a pull request touches only documentation. A push to main always runs them,
+whatever it changed (#729): runs on main cancel each other, so in a batch of merges only the last
+finishes, and a docs-only last push would otherwise leave main's merged code tested by nothing.
+`workflow_dispatch` starts a run by hand. A first `changes` job runs
 `scripts/ci-changes.sh`, which skips the build and tests only when every changed path is docs
 (Markdown outside `Sources/`, `Tests/`, `App/`, `scripts/` and `.github/`; `docs/`; the README's
 images under `assets/`), and runs them for anything else, anything it cannot classify, or a push

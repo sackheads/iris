@@ -4,6 +4,12 @@
 #
 #   scripts/ci-changes.sh <base-sha> <head-sha>   # diff base...head
 #   scripts/ci-changes.sh --paths                  # classify the paths on stdin, one per line
+#   scripts/ci-changes.sh --main-push ...          # a push to main: always code=true (#729)
+#
+# A push to main always runs the tests, whatever it changed (#729). Runs on main cancel each other
+# (cancel-in-progress), so in a batch of merges only the last run finishes; when that last push was
+# docs-only, a per-push skip left main's code, as merged, tested by nothing. Pull requests keep the
+# docs-only skip: each is tested on its own head.
 #
 # code=false only when every changed path is documentation. Anything else, including a path this
 # script does not know, an empty diff, a zero or missing base, or a git error, is code=true: when
@@ -39,6 +45,10 @@ classify() {
     [[ $any -eq 1 ]] || emit true   # an empty diff proves nothing
     emit false
 }
+
+if [[ "${1:-}" == "--main-push" ]]; then
+    emit true
+fi
 
 if [[ "${1:-}" == "--paths" ]]; then
     classify
