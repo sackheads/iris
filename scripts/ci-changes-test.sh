@@ -34,6 +34,11 @@ if [[ "$zero" == "code=true" ]]; then echo "ok   zero base"; else echo "FAIL zer
 bad="$(GITHUB_OUTPUT= "$here/ci-changes.sh" not-a-commit HEAD)"
 if [[ "$bad" == "code=true" ]]; then echo "ok   git error"; else echo "FAIL git error: got $bad"; fail=1; fi
 
+# #729: a push to main runs the tests even when it changed only docs, so a batch of merges ending in
+# a docs push still tests main's code as merged.
+mainPush="$(printf 'docs/jobs.md\n' | GITHUB_OUTPUT= "$here/ci-changes.sh" --main-push HEAD~1 HEAD)"
+if [[ "$mainPush" == "code=true" ]]; then echo "ok   a docs-only push to main"; else echo "FAIL a docs-only push to main: got $mainPush"; fail=1; fi
+
 # A rename out of Sources/ into docs/ is a change to Sources/: both paths must count.
 repo="$(mktemp -d)"
 (

@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  # A run by hand (#729), for when a run on main was cancelled and nothing replaced it.
+  workflow_dispatch:
 
 concurrency:
   group: tests-${{ github.ref }}
@@ -32,7 +34,9 @@ jobs:
         id: classify
         env:
           BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-        run: scripts/ci-changes.sh "$BASE" HEAD
+          # #729: a push to main always tests; only a pull request may skip for docs-only changes.
+          MAIN_PUSH: ${{ github.event_name == 'push' && '--main-push' || '' }}
+        run: scripts/ci-changes.sh $MAIN_PUSH "$BASE" HEAD
 
   test:
     needs: changes
