@@ -115,7 +115,26 @@ struct TypedRatesTests {
     func warning() {
         #expect(TypedRates.lowersBudgetUse(perM(0.0001, 0.0001, 0.00001), family: "anthropic"))
         #expect(!TypedRates.lowersBudgetUse(perM(3, 15, 0.3), family: "anthropic"))
-        #expect(!TypedRates.lowersBudgetUse(perM(0.0001, 0.0001, 0.00001), family: nil), "no family to compare with")
+    }
+
+    @Test("a custom endpoint is compared with the cheapest family, and a raised primary warns too (#734)")
+    func warningCustomAndPrimary() throws {
+        // A custom endpoint: far under the cheapest row of any family warns; a plausible rate doesn't.
+        #expect(TypedRates.lowersBudgetUse(perM(0.0001, 0.0001, 0.00001), family: nil))
+        #expect(!TypedRates.lowersBudgetUse(perM(1, 2, 0.1), family: nil))
+        // The primary: above its own row warns, at or below it doesn't.
+        let (family, model) = try #require(PriceTable.snapshot.rows.first { !$0.value.isEmpty }.map { ($0.key, $0.value.keys.sorted()[0]) })
+        let row = try #require(PriceTable.snapshot.rate(family: family, model: model))
+        let raised = TokenRates(input: row.input * 2, output: row.output, cacheRead: row.cacheRead, cacheWrite: row.cacheWrite)
+        #expect(TypedRates.lowersBudgetUse(raised, family: family, side: .primary, model: model))
+        let lowered = TokenRates(input: row.input / 2, output: row.output / 2, cacheRead: row.cacheRead / 2, cacheWrite: nil)
+        #expect(!TypedRates.lowersBudgetUse(lowered, family: family, side: .primary, model: model))
+        #expect(!TypedRates.lowersBudgetUse(row, family: family, side: .primary, model: model))
+        // A primary with no row is compared with the most expensive row of any family.
+        let top = try #require(PriceGuards.extreme(PriceTable.snapshot.allRates, side: .delegated))
+        #expect(TypedRates.lowersBudgetUse(TokenRates(input: top.input * 2, output: top.output, cacheRead: top.cacheRead, cacheWrite: nil),
+                                           family: nil, side: .primary, model: "local-model"))
+        #expect(!TypedRates.lowersBudgetUse(perM(3, 15, 0.3), family: nil, side: .primary, model: "local-model"))
     }
 
     @Test("the rate editor takes $ per million tokens and refuses a figure that breaks a field rule")

@@ -271,6 +271,14 @@ private struct EndpointEditor: View {
     }
 }
 
+/// The line under a key field (#702): which key is in use, by `KeyHint` only.
+struct KeyHintLine: View {
+    let key: String
+    var body: some View {
+        Text("Key: " + KeyHint.text(key)).font(.caption).foregroundColor(.secondary)
+    }
+}
+
 /// How Settings shows a saved key (#702): never the key, only its last four characters, and not
 /// even those for a key too short to spare them. Read from what this launch already loaded.
 enum KeyHint {

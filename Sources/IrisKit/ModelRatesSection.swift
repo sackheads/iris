@@ -192,8 +192,9 @@ private struct RateEditor: View {
                     Text("Held to its bound: charged at " + ModelRatesSection.rateText(charged.rates) + ".")
                         .font(.caption).foregroundColor(.orange).fixedSize(horizontal: false, vertical: true)
                 }
-                if draft.row.side == .delegated, TypedRates.lowersBudgetUse(charged.rates, family: draft.row.family) {
-                    Text(TypedRates.lowersBudgetWarning).font(.caption).foregroundColor(.orange)
+                if TypedRates.lowersBudgetUse(charged.rates, family: draft.row.family, side: draft.row.side, model: draft.row.model) {
+                    Text(draft.row.side == .delegated ? TypedRates.lowersBudgetWarning : TypedRates.lowersSubagentBudgetWarning)
+                        .font(.caption).foregroundColor(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             } else {
