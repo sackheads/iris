@@ -368,7 +368,10 @@ docs/                     # feature pages (features.md, jobs.md, …), install.m
 - **Check the "What does this change make untrue?" answer** (the PR template). Grep for the
   behaviour the PR changed yourself, in the places Invariant 9 lists, and treat a stale sentence you
   find as a finding like any other. An agent-facing one is the more serious: the model reads it on
-  every turn and no UI ever shows it (#198).
+  every turn and no UI ever shows it (#198). CI's `changes` job lists, in its step summary, the
+  agent-facing strings in the changed files that share a word with the diff
+  (`scripts/agent-strings.sh <base> <head>` locally, #629): a starting point for that grep, never a
+  verdict, and it never fails the build.
 
 ## House style
 
