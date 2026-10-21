@@ -77,8 +77,8 @@ struct ScheduleJobArguments: Equatable, Sendable {
             return .failure("script_timeout_seconds must be a number of seconds.")
         }
         let scriptNetwork: Bool?
-        switch boolean(args["script_network"]) {
-        case .failure: return .failure("script_network must be true or false.")
+        switch boolean(args["script_network"], name: "script_network") {
+        case .failure(let message): return .failure(message)
         case .success(let value): scriptNetwork = value
         }
         let weekdays: [Int]?
@@ -410,7 +410,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
             return .success(nil)
         }
         guard gateURL == nil, gatePath == nil, gateScript == nil else { return .failure(ToolMessage(Self.scriptNoGate)) }
-        guard profile?.lowercased() != JobProfile.mutating.rawValue, mounts == nil, network == nil else {
+        guard JobProfile.asked(profile) != .mutating, mounts == nil, network == nil else {
             return .failure(ToolMessage(Self.scriptReadOnly))
         }
         guard sandboxAvailable else { return .failure(ToolMessage(Self.noRuntimeForScript)) }
