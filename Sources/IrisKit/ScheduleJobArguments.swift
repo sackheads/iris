@@ -724,17 +724,19 @@ struct GateScriptReview: Sendable {
     /// even network off, the VM reaches services on the Mac, every tick, unattended, so a person
     /// reads every gate script once. Vibecop still advises, shown in the dialog, and a DENY still
     /// refuses without asking.
-    func review(script: String, mounts: [String], timeoutSeconds: Int, network: Bool = false) async -> Result<Void, ToolMessage> {
+    func review(script: String, mounts: [String], timeoutSeconds: Int, network: Bool = false) async -> Result<ScriptReview, ToolMessage> {
         await review(details: Self.details(script: script, mounts: mounts, timeoutSeconds: timeoutSeconds, network: network))
     }
 
     /// The same review over composed `details` (a script job's, #330): the script must be last.
-    func review(details subject: String) async -> Result<Void, ToolMessage> {
+    /// What the person approved goes back as a `ScriptReview` (#650), for the job's run cards.
+    func review(details subject: String, now: @Sendable () -> Date = Date.init) async -> Result<ScriptReview, ToolMessage> {
         let decision = await verdict(subject)
         if decision?.decision == "DENY" {
             return .failure(ToolMessage(Self.denied(decision?.reason ?? "")))
         }
-        return await ask(Self.withAdvice(subject, decision)) ? .success(()) : .failure(ToolMessage(Self.declined))
+        guard await ask(Self.withAdvice(subject, decision)) else { return .failure(ToolMessage(Self.declined)) }
+        return .success(ScriptReview(approvedAt: now(), vibecopAdvice: ScriptJobs.recordedAdvice(decision)))
     }
 
     /// `details` with Vibecop's view among the fixed lines, before `Script:` (#693 review): after

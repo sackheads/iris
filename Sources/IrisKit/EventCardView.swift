@@ -93,6 +93,14 @@ struct EventCardView: View {
                 .foregroundStyle(.tertiary)
                 .padding(.leading, 18)
         }
+        // #650: who approved the script this job runs, and Vibecop's advice.
+        if let approval = card.scriptApproval, !approval.isEmpty {
+            Text(approval)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .lineLimit(2)
+                .padding(.leading, 18)
+        }
         if card.blockedCall != nil { blockedCallDetail }
     }
 

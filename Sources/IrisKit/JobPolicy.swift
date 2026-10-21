@@ -55,6 +55,10 @@ struct JobPolicy: Codable, Equatable, Sendable {
     /// the fate of every unknown policy key, and documented).
     var grants: JobGrant?
 
+    /// The review that approved this job's script, gate or action (#650): shown on its run cards.
+    /// `nil` for a job without one, and for every job made before this was recorded.
+    var scriptReview: ScriptReview?
+
     /// What `schedule_job`'s `timeout_seconds` may ask for (#263). Under a minute a run cannot finish
     /// a model round and a tool; above an hour a single `run_command` (capped at 3600) no longer
     /// bounds the run, and a run nothing can end is what the timeout exists to prevent.
@@ -111,7 +115,7 @@ struct JobPolicy: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case overlap, catchUp, runTimeoutSeconds, perRunTokenBudget, dailyTokenBudget
-        case maxRunsPerHour, retry, grants, runTimeoutOverride
+        case maxRunsPerHour, retry, grants, runTimeoutOverride, scriptReview
     }
 
     /// Invariant 1, and one step further: every key is optional *and* an unrecognized `overlap`
@@ -133,6 +137,8 @@ struct JobPolicy: Codable, Equatable, Sendable {
         // Zero or less is no override: a turn nothing can end is never what a stored figure means.
         runTimeoutOverride = (try? c.decodeIfPresent(Int.self, forKey: .runTimeoutOverride))
             .flatMap { $0 > 0 ? $0 : nil }
+        // `try?`: informational, so an unreadable one is none, and the job still loads.
+        scriptReview = try? c.decodeIfPresent(ScriptReview.self, forKey: .scriptReview)
     }
 
     /// A stored figure, or `nil` — absent, which is "take the default" — when it is below zero.

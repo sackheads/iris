@@ -2113,6 +2113,10 @@ actor JobRunner {
     private func deliver(_ card: EventCard, for job: Job) async -> UUID {
         let destination = await destination(for: job)
         guard let state else { return destination }
+        // #650: every card of a job that runs a reviewed script says who approved it, here once
+        // rather than at each of the sites that build one.
+        var card = card
+        if card.scriptApproval == nil { card.scriptApproval = ScriptJobs.approvalLine(for: job) }
         await state.deliverEvent(card, to: destination)
         return destination
     }
