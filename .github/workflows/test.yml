@@ -28,6 +28,20 @@ jobs:
       - name: Test the classifier
         run: scripts/ci-changes-test.sh
 
+      - name: List the agent-facing strings this change may touch
+        # #629: for the reviewer, in the step summary; it decides nothing and never fails the job.
+        # Here, not in `test`: this job has the history to diff, and it runs on every change.
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        # continue-on-error doesn't cover the job's own 5-minute cap; this keeps it well inside.
+        timeout-minutes: 2
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        # The listing first, so it always prints; then its own test, whose failure marks the step.
+        run: |
+          scripts/agent-strings.sh "$BASE" HEAD
+          scripts/agent-strings-test.sh
+
       - name: Classify the change
         id: classify
         env:
