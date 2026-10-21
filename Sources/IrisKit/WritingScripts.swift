@@ -197,6 +197,11 @@ enum WritingScripts {
             if let made = after.repositories.first(where: { !f.before.repositories.contains($0) }) {
                 return "this run made a git repository at \(made); the job is paused and the folder left as it is, so you can decide what to do with it"
             }
+            // A walk the run left unable to finish proves nothing: the script could have made a
+            // repository past its cap or behind an unreadable folder (#739 review). Fails closed.
+            if !after.isComplete {
+                return "Iris couldn't finish checking \(f.source) after this run for a repository the script may have made (\(after.incomplete ?? "too many files to walk")); the job is paused so you can look"
+            }
             guard f.before.isComplete, after.isComplete else { continue }
             let grew = after.bytes - f.before.bytes
             if grew > max(2 * 1_073_741_824, f.before.bytes) {
@@ -209,6 +214,12 @@ enum WritingScripts {
             }
         }
         return nil
+    }
+
+    /// Whether the run itself fails, beyond pausing the job: it made a repository, or left a mount
+    /// that can't be checked for one (#739 review).
+    static func failsRun(_ figures: [MountFigures]) -> Bool {
+        madeRepository(figures) != nil || figures.contains { $0.after.map { !$0.isComplete } ?? false }
     }
 
     /// The first repository a run made in one of its mounts, if any.

@@ -122,7 +122,10 @@ struct WritingScriptJobsTests {
         #expect(WritingScripts.pauseReason(figures((100, 10 * gb), (100, 7 * gb)))?.contains("removed") == true, "a byte loss over 20%")
         #expect(WritingScripts.pauseReason(figures((10_000, gb), (7_000, gb)))?.contains("removed 3000 files") == true, "a count drop over 20%")
         #expect(WritingScripts.pauseReason(figures((100, gb), (100, gb), made: ["/w/new"]))?.contains("/w/new") == true)
-        #expect(WritingScripts.pauseReason(figures((100, gb), (110, 4 * gb), capped: true)) == nil, "a capped survey isn't compared")
+        let cappedAfter = figures((100, gb), (110, 4 * gb), capped: true)
+        #expect(WritingScripts.pauseReason(cappedAfter)?.contains("couldn't finish checking") == true, "a capped after-walk fails closed")
+        #expect(WritingScripts.failsRun(cappedAfter))
+        #expect(!WritingScripts.failsRun(figures((100, gb), (110, 4 * gb))), "growth pauses but doesn't fail the run")
         #expect(WritingScripts.madeRepository(figures((1, 0), (1, 0), made: ["/w/new"])) == "/w/new")
     }
 
@@ -262,6 +265,19 @@ struct WritingScriptJobRunTests {
         #expect(run.status == .failed && run.failureReason?.contains("/w/new") == true)
         #expect(run.mountFigures == [MountFigures(source: "/w", before: clean, after: after)])
         #expect(try store.ledger.jobs().first?.pausedReason?.contains("/w/new") == true)
+    }
+
+    @Test("a run that leaves a mount too large to walk fails and pauses the job (#739 review)")
+    func cappedAfterWalkFailsClosed() async throws {
+        let (store, state, engine, config, teardown) = try harness(); defer { teardown() }
+        let job = job(); try store.ledger.upsert(job)
+        let ran = Locked(0)
+        let capped = MountSurvey(entries: 200_000, bytes: 1_000, repositories: [], capped: true)
+        let r = runner(store, state, engine, config, surveys: [clean, capped], ran: ran)
+        _ = await r.fire(job: job, origin: .cadence(kind: "schedule"))
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 5).first { $0.mountFigures != nil })
+        #expect(run.status == .failed && run.failureReason?.contains("couldn't finish checking") == true)
+        #expect(try store.ledger.jobs().first?.pausedReason?.contains("couldn't finish checking") == true)
     }
 
     @Test("a run that empties a mount completes but pauses the job; an ordinary run doesn't")
