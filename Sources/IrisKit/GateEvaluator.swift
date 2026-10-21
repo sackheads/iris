@@ -318,10 +318,17 @@ enum GateEvaluator {
     /// created within `createCeiling`, run under `timeoutSeconds` with the in-VM group kill, and
     /// always swept. Output is capped in the VM (`ScriptJobs.cappedCommand`) and, for a script that
     /// gets round that, on the host by #699's bounded drain (`outputLimitBytes`).
+    ///
+    /// A writing script job (#688) passes `readWrite`, its mount entries already built from its
+    /// grant (read-only ones carry `:ro`, and each read-write one has its `.iris/` overlay), and
+    /// `gitGuard` with the read-write sources: watched before the script and checked after it on
+    /// every exit, a timeout's included. A change the guard put back fails the run with its notice.
     static func runInVM(_ command: String, mounts: [String], timeoutSeconds seconds: Int, network: Bool,
                         runtime: any ContainerRuntime, image: String, createCeiling: Int,
                         kind: String, namePrefix: String = SandboxSessionManager.namePrefix,
-                        isolatedNetwork: String = NetworkMode.isolatedNetworkName) async -> VMRun {
+                        isolatedNetwork: String = NetworkMode.isolatedNetworkName,
+                        readWrite: Bool = false, gitGuard: GitConfigGuard? = nil,
+                        gitSources: [String] = []) async -> VMRun {
         // `namePrefix` and `isolatedNetwork` are the real-VM tests' (`iristest-…`), never the app's.
         let tag = kind == "gate" ? "gate" : "script"
         guard let name = ContainerNames.make(prefix: namePrefix, kind: tag) else {
@@ -346,7 +353,7 @@ enum GateEvaluator {
         }
         do {
             try await createWithinCeiling(runtime, name: name, image: image,
-                                          mounts: readOnly(mounts), network: networkMode, seconds: createCeiling)
+                                          mounts: readWrite ? mounts : readOnly(mounts), network: networkMode, seconds: createCeiling)
         } catch is CreateTimedOut {
             // Not a hang: a bounded failure that lands on the ordinary error path, so it is
             // counted and somebody is eventually told. The remove is the same best-effort sweep.
@@ -358,7 +365,8 @@ enum GateEvaluator {
             await sweep(runtime, name: name)
             return .failed("the \(kind)'s container could not be started: \(describe(error))")
         }
-        let result: VMRun
+        gitGuard?.watch(owner: name, sources: gitSources)
+        var result: VMRun
         do {
             // In-VM, an ordinary script's output is capped (`ScriptJobs.cappedCommand`); on the host,
             // #699's bounded drain holds one written to get round that, above the in-VM cap and its
@@ -372,9 +380,62 @@ enum GateEvaluator {
         } catch {
             result = .failed("the \(kind) script could not be run: \(describe(error))")
         }
+        // #688: after the script, whatever ended it. A disallowed git change was put back; the run
+        // fails with what the guard said, beside a timeout when it was one.
+        if let notice = gitGuard?.finish(owner: name) {
+            if case .timedOut(let s) = result { result = .failed("script timed out after \(s) s; \(notice)") }
+            else { result = .failed(notice) }
+        }
         // No `defer`: it cannot await, and a container left running would outlive every tick.
         await sweep(runtime, name: name)
         return result
+    }
+
+    /// A writing script job's fire (#688): its grant, re-checked as a mutating job's is at every
+    /// fire (`JobGrant.drift`, the login-PATH rule included), no repository mounted read-write,
+    /// every read-write mount in the writable-roots record before the container exists (#616), each
+    /// one's `.iris/` read-only over it (#617), and `GitConfigGuard` around the script.
+    static func runWritingScriptJob(_ spec: ScriptSpec, grant: JobGrant, runtime: (any ContainerRuntime)?, image: String,
+                                    createCeiling: Int = GateEvaluator.createCeilingSeconds,
+                                    paths: IrisPaths = .default, gitGuard: GitConfigGuard = .shared,
+                                    namePrefix: String = SandboxSessionManager.namePrefix,
+                                    isolatedNetwork: String = NetworkMode.isolatedNetworkName) async -> VMRun {
+        guard let runtime else { return .failed("no container runtime: \(sandboxUnavailableDetail.replacingOccurrences(of: "a gate script", with: "a script job"))") }
+        guard !spec.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .failed("this script job has no script to run")
+        }
+        if let drift = JobGrant.drift(grant) { return .failed(drift) }
+        let workspace = grant.workspaceMount, extra = grant.extraMountEntries()
+        let readWrite = SandboxSessionManager.readWriteMounts(workspace: workspace, extra: extra)
+        if let repo = readWrite.first(where: { WorkspaceGit.entry(at: $0.source) != .none }) {
+            return .failed(Self.writingScriptRepositoryRefusal(repo.source))
+        }
+        guard WritableRootsRecord(paths: paths).record(readWrite.map(\.source)) else { return .failed(WritableRootsRecord.refusal) }
+        var absent: Set<String> = []
+        for (source, _) in readWrite {
+            for item in WorkspaceIrisDir.protected(for: source) {
+                switch WorkspaceIrisDir.prepareForMount(source, item) {
+                case .refused(let why): return .failed(why)
+                case .absent: absent.insert((source as NSString).appendingPathComponent(item.relative))
+                case .ready: break
+                }
+            }
+        }
+        let mounts = SandboxSessionManager.mountList(workspace: workspace, extra: extra) {
+            !absent.contains(($0 as NSString).appendingPathComponent($1))
+        }
+        return await runInVM(spec.command, mounts: mounts, timeoutSeconds: ScriptJobs.clampedTimeout(spec.timeoutSeconds),
+                             network: grant.network, runtime: runtime, image: image,
+                             createCeiling: createCeiling, kind: "script job",
+                             namePrefix: namePrefix, isolatedNetwork: isolatedNetwork,
+                             readWrite: true, gitGuard: gitGuard, gitSources: readWrite.map(\.source))
+    }
+
+    /// #688 (planner): a repository in a read-write folder has VM-writable hooks, which run on the
+    /// Mac the next time the person uses git there; and a script job's container lives for one run,
+    /// so the sandbox's own git dir (#658) would never be synced back. Refused at creation and fire.
+    static func writingScriptRepositoryRefusal(_ repository: String) -> String {
+        "\(repository) is a git repository in a writing script job's read-write folder, which it can't have yet: a hook planted there would run on this Mac the next time you use git in it, and the script's commits would be lost. Mount that folder read-only, or use a prompt job."
     }
 
     /// A script job's fire (#330): the VM or nothing (F), the mounts still the reviewed ones, then

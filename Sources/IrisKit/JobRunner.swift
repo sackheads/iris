@@ -80,9 +80,14 @@ actor JobRunner {
     /// without a network, a file or a VM; in the app it is `GateEvaluator` over the real three.
     private let gateEvaluator: @Sendable (Gate, String?) async -> GateResult
     /// A script job's fire in the VM (#330); a test passes its own.
-    private let scriptRunner: @Sendable (ScriptSpec) async -> GateEvaluator.VMRun
+    private let scriptRunner: @Sendable (Job, ScriptSpec) async -> GateEvaluator.VMRun
+    /// A writing script job's mount survey and the free space beside it (#688); injectable.
+    private let mountSurveyor: @Sendable (String) async -> MountSurvey
+    private let freeSpace: @Sendable (String) -> Int64?
     /// Whether a stored script is still the one a person reviewed (#330); a test passes its own.
-    private let fingerprintCheck: @Sendable (UUID, ScriptSpec) -> ScriptFingerprints.Check
+    /// Job id, spec, and the profile and grant the fingerprint covers: a script job's own (#688),
+    /// `.readOnly` and none for a gate, whose fingerprint never took them.
+    private let fingerprintCheck: @Sendable (UUID, ScriptSpec, JobProfile, JobGrant?) -> ScriptFingerprints.Check
     /// The tier-3 check a posted script line passes (#330, D): the line to post, and whether
     /// tier 3 could not run. A test passes its own.
     private let scriptLineGuard: @Sendable (String) async -> (line: String, withoutTier3: Bool)
@@ -163,8 +168,10 @@ actor JobRunner {
          usageSource: (any JobUsageReading)? = nil,
          sandboxAvailable: (@Sendable () -> Bool)? = nil,
          gateEvaluator: (@Sendable (Gate, String?) async -> GateResult)? = nil,
-         scriptRunner: (@Sendable (ScriptSpec) async -> GateEvaluator.VMRun)? = nil,
-         fingerprintCheck: (@Sendable (UUID, ScriptSpec) -> ScriptFingerprints.Check)? = nil,
+         scriptRunner: (@Sendable (Job, ScriptSpec) async -> GateEvaluator.VMRun)? = nil,
+         fingerprintCheck: (@Sendable (UUID, ScriptSpec, JobProfile, JobGrant?) -> ScriptFingerprints.Check)? = nil,
+         mountSurveyor: (@Sendable (String) async -> MountSurvey)? = nil,
+         freeSpace: (@Sendable (String) -> Int64?)? = nil,
          scriptLineGuard: (@Sendable (String) async -> (line: String, withoutTier3: Bool))? = nil,
          lastGateSignal: (@Sendable (UUID) throws -> String?)? = nil,
          approvedCallExecutor: (@Sendable (BlockedCall, UUID) async -> String)? = nil,
@@ -186,16 +193,27 @@ actor JobRunner {
         self.sandboxAvailable = resolvedSandboxAvailable
         self.gateEvaluator = gateEvaluator ?? Self.liveGateEvaluator(
             sandboxAvailable: resolvedSandboxAvailable, image: { config.sandboxImage })
-        self.scriptRunner = scriptRunner ?? { spec in
+        self.scriptRunner = scriptRunner ?? { job, spec in
             let runtime: (any ContainerRuntime)? = resolvedSandboxAvailable() ? CLIContainerRuntime() : nil
+            // #688: a writing script job runs on its grant; a read-only one on its own mounts.
+            if let grant = job.effectiveGrant {
+                return await GateEvaluator.runWritingScriptJob(spec, grant: grant, runtime: runtime, image: config.sandboxImage)
+            }
             return await GateEvaluator.runScriptJob(spec, runtime: runtime, image: config.sandboxImage)
         }
-        self.fingerprintCheck = fingerprintCheck ?? { id, spec in
+        self.mountSurveyor = mountSurveyor ?? { path in
+            // Blocking file I/O, off the cooperative pool; capped by its own entry and time bounds.
+            await OffPool.run(cancelled: MountSurvey(entries: 0, bytes: 0, repositories: [], capped: true)) { _ in
+                WritingScripts.survey(path)
+            }
+        }
+        self.freeSpace = freeSpace ?? { WritingScripts.freeBytes($0) }
+        self.fingerprintCheck = fingerprintCheck ?? { id, spec, profile, grant in
             // A config with no guarded Keychain is #678's legacy mode, which only a test's own
             // `ConfigManager(store:)` is: it keeps nothing in the item, fingerprints included.
             // Production's `ConfigManager.shared` always has one, so it always checks.
             guard let keychain = config.guardedKeychain else { return .matches }
-            return ScriptFingerprints.check(jobId: id, spec: spec, keychain: keychain)
+            return ScriptFingerprints.check(jobId: id, spec: spec, profile: profile, grant: grant, keychain: keychain)
         }
         self.scriptLineGuard = scriptLineGuard ?? { line in await ScriptJobs.guardLine(line) }
         self.lastGateSignal = lastGateSignal ?? { [ledger] in try ledger.lastGateSignal(jobId: $0) }
@@ -666,7 +684,7 @@ actor JobRunner {
         // #330: a gate script runs only as it was reviewed. Changed or never reviewed pauses the job
         // once, with a card; an unreadable Keychain is a gate error, which fails closed.
         if let spec = gate.scriptSpec {
-            let check = fingerprintCheck(job.id, spec)
+            let check = fingerprintCheck(job.id, spec, .readOnly, nil)
             switch check {
             case .matches: break
             case .changed, .missing:
@@ -818,6 +836,25 @@ actor JobRunner {
                                 catchUpNote: note, builtin: true), for: job)
     }
 
+    /// A script's VM result as a run's status, outcome and failure reason, plus its output.
+    static func scriptResult(_ run: GateEvaluator.VMRun)
+        -> (status: JobRun.Status, outcome: String, failureReason: String?, stdout: String?, stderr: String?) {
+        switch run {
+        case .ran(let out, let err, let exitCode):
+            let outcome = ScriptJobs.outcome(stdout: out, exitCode: exitCode)
+            return exitCode == 0 ? (.completed, outcome, nil, out, err) : (.failed, outcome, "exit \(exitCode)", out, err)
+        case .timedOut(let seconds):
+            return (.failed, "script timed out after \(seconds) s", "script timed out after \(seconds) s", nil, nil)
+        case .failed(let detail):
+            // No runtime at fire time is the VM-only rule (F): interrupted, never the host.
+            return (detail.hasPrefix("no container runtime") ? .interrupted : .failed, detail, detail, nil, nil)
+        case .outputTooLong:
+            // #699: past the in-VM cap, so the script wrote round it; its output isn't kept.
+            let why = "the script printed more than \(GateEvaluator.outputLimitBytes / 1_024) KB on standard output"
+            return (.failed, why, why, nil, nil)
+        }
+    }
+
     /// A script job's fire (#330), shaped like `runBuiltin`: a row with no transcript and zero
     /// tokens, the script in the VM in place of a turn, the retry ladder, and a card only on the
     /// first run, a failure, or a change in status or outcome. The fingerprint is checked first: a
@@ -825,7 +862,7 @@ actor JobRunner {
     /// unreadable Keychain refuses, fails closed, and is said once by the change rule).
     private func runScript(_ spec: ScriptSpec, job: Job, origin: FireOrigin, note: String?,
                            afterBegin: (() async -> Void)? = nil) async {
-        let check = fingerprintCheck(job.id, spec)
+        let check = fingerprintCheck(job.id, spec, job.profile, job.effectiveGrant)
         switch check {
         case .matches: break
         case .changed, .missing:
@@ -846,33 +883,37 @@ actor JobRunner {
         do { try ledger.setLastRun(jobId: job.id, at: startedAt) }
         catch { print("[JobRunner] could not stamp the last run of \(job.name): \(error)") }
 
-        let status: JobRun.Status
-        let outcome: String
+        var status: JobRun.Status
+        var outcome: String
         var failureReason: String?
         var stdout: String?, stderr: String?
+        // #688: a writing script job's mounts, surveyed before and after; what pauses the job.
+        var figures: [MountFigures] = []
+        var pauseWhy: String?
         if check == .unreadable {
             (status, outcome, failureReason) = (.interrupted, ScriptJobs.keychainUnreadable, ScriptJobs.keychainUnreadable)
-        } else {
-            switch await scriptRunner(spec) {
-            case .ran(let out, let err, let exitCode):
-                stdout = out
-                stderr = err
-                outcome = ScriptJobs.outcome(stdout: out, exitCode: exitCode)
-                if exitCode == 0 { status = .completed } else {
-                    status = .failed
-                    failureReason = "exit \(exitCode)"
+        } else if let grant = job.effectiveGrant {
+            let sources = SandboxSessionManager.readWriteMounts(workspace: grant.workspaceMount, extra: grant.extraMountEntries()).map(\.source)
+            var before: [(source: String, survey: MountSurvey)] = []
+            for source in sources { before.append((source, await mountSurveyor(source))) }
+            if let refused = WritingScripts.refusal(before) {
+                // A repository in a read-write mount, or one too large to check: not run (planner).
+                (status, outcome, failureReason) = (.failed, refused, refused)
+            } else if let low = WritingScripts.floorRefusal(sources, freeBytes: freeSpace) {
+                (status, outcome, failureReason) = (.interrupted, low, low)
+            } else {
+                (status, outcome, failureReason, stdout, stderr) = Self.scriptResult(await scriptRunner(job, spec))
+                for (source, survey) in before {
+                    figures.append(MountFigures(source: source, before: survey, after: await mountSurveyor(source)))
                 }
-            case .timedOut(let seconds):
-                (status, outcome, failureReason) = (.failed, "script timed out after \(seconds) s", "script timed out after \(seconds) s")
-            case .failed(let detail):
-                // No runtime at fire time is the VM-only rule (F): interrupted, never the host.
-                status = detail.hasPrefix("no container runtime") ? .interrupted : .failed
-                (outcome, failureReason) = (detail, detail)
-            case .outputTooLong:
-                // #699: past the in-VM cap, so the script wrote round it; its output isn't kept.
-                let why = "the script printed more than \(GateEvaluator.outputLimitBytes / 1_024) KB on standard output"
-                (status, outcome, failureReason) = (.failed, why, why)
+                pauseWhy = WritingScripts.pauseReason(figures)
+                // A repository the run made fails the run, as well as pausing the job (planner).
+                if let why = pauseWhy, WritingScripts.madeRepository(figures) != nil {
+                    (status, outcome, failureReason) = (.failed, why, why)
+                }
             }
+        } else {
+            (status, outcome, failureReason, stdout, stderr) = Self.scriptResult(await scriptRunner(job, spec))
         }
         // Compared on the raw line (dev-3): one the guard always withholds still posts a change.
         let posts = ScriptJobs.posts(status: status, outcome: outcome, previous: previous)
@@ -892,6 +933,7 @@ actor JobRunner {
             try ledger.finish(runId: run.id, status: status, outcome: shown, failureReason: failureReason,
                               blockedTool: nil, tokens: guardSpend.total, finishedAt: finishedAt)
             try ledger.recordScript(runId: run.id, stdout: stdout, stderr: stderr, posted: posts)
+            if !figures.isEmpty { try ledger.recordMountFigures(runId: run.id, figures) }
         } catch {
             print("[JobRunner] could not close the run for \(job.name): \(error)")
         }
@@ -899,6 +941,8 @@ actor JobRunner {
         let retry = Self.retryDecision(status: status, attempt: job.retryAttempt, retryEnabled: job.policy.retry,
                                        watcherFire: Self.isPathDriven(origin: origin, job: job), now: finishedAt)
         await apply(retry, job: job, status: status)
+        // #688: after the retry decision, which a pause then overrides; the pause has its own card.
+        if let pauseWhy { await pause(job: job, origin: origin, reason: pauseWhy, at: finishedAt, note: note) }
         guard posts else { return }
         await deliver(EventCard(kind: "job_run", runId: run.id, jobId: job.id, jobName: job.name,
                                 status: status,

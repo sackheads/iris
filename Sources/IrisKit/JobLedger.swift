@@ -641,6 +641,15 @@ extension JobLedger {
     }
 
     /// A script job's output and card decision (#330), written as its run finishes.
+    /// A writing script job's mount figures on its row (#688).
+    func recordMountFigures(runId: UUID, _ figures: [MountFigures]) throws {
+        let json = try Self.encodeJSON(figures)
+        try writer.write { db in
+            try db.execute(sql: "UPDATE job_runs SET mountFigures = ? WHERE id = ?", arguments: [json, runId.uuidString])
+            guard db.changesCount > 0 else { throw JobLedgerError.unknownRun(runId) }
+        }
+    }
+
     func recordScript(runId: UUID, stdout: String?, stderr: String?, posted: Bool) throws {
         try writer.write { db in
             try db.execute(sql: "UPDATE job_runs SET scriptOutput = ?, scriptStderr = ?, posted = ? WHERE id = ?",
@@ -1106,6 +1115,10 @@ extension JobLedger {
         // the card simply shows no watch line.
         if let json = try r.read("watchSummary", String.self) {
             run.watchSummary = try? JSONDecoder().decode(WatchSummary.self, from: Data(json.utf8))
+        }
+        // #688: like `watchSummary`, figures that won't decode read as absent.
+        if let json = try r.read("mountFigures", String.self) {
+            run.mountFigures = try? JSONDecoder().decode([MountFigures].self, from: Data(json.utf8))
         }
         run.scriptOutput = try r.read("scriptOutput", String.self)
         run.scriptStderr = try r.read("scriptStderr", String.self)

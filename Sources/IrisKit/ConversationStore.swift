@@ -664,6 +664,10 @@ final class ConversationStore: Sendable {
                 t.add(column: "posted", .boolean)
             }
         }
+        // #688: numbered in merge order; whichever lands after another v28 renumbers.
+        m.registerMigration("v28_script_mount_figures") { db in
+            try db.alter(table: "job_runs") { t in t.add(column: "mountFigures", .text) }
+        }
         return m
     }
 

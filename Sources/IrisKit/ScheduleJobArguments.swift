@@ -396,7 +396,8 @@ struct ScheduleJobArguments: Equatable, Sendable {
     static let promptOrScript = "Give a prompt or a script, not both: a prompt runs a model turn on each fire, a script runs in the sandbox VM with no model."
     static let scriptOptionsNeedAScript = "script_mounts, script_timeout_seconds and script_network only apply to script."
     static let scriptNoGate = "A script job is its own check: it can't also have a gate_url, gate_path or gate_script. Have the script exit early when there's nothing to do."
-    static let scriptReadOnly = "A script job is read-only in this version: it can't be profile 'mutating' or take a grant's mounts or network. Use script_mounts (always read-only) and script_network."
+    static let scriptReadOnly = "A read-only script job reads folders through script_mounts (always read-only) and asks for the internet with script_network; mounts and network are a writing script job's, with profile 'mutating'."
+    static let scriptWritingTakesGrant = "A writing script job (profile 'mutating') takes its folders and network from mounts and network, as any mutating job does, not script_mounts or script_network."
     static let noRuntimeForScript = "A script job runs only inside the sandbox VM, and the container runtime isn't available or sandboxing is off, so no job was created."
     static let scriptMountsShape: ToolMessage = "script_mounts must be a list of directory paths, like [\"/Users/me/project\"] or [\"/Users/me/project:/in\"]."
 
@@ -410,8 +411,14 @@ struct ScheduleJobArguments: Equatable, Sendable {
             return .success(nil)
         }
         guard gateURL == nil, gatePath == nil, gateScript == nil else { return .failure(ToolMessage(Self.scriptNoGate)) }
-        guard JobProfile.asked(profile) != .mutating, mounts == nil, network == nil else {
-            return .failure(ToolMessage(Self.scriptReadOnly))
+        // #688: a writing script job (profile `mutating`) takes its folders and network from the
+        // grant, `mounts` and `network`, through `JobGrant.resolve` like any mutating job; the
+        // read-only job's `script_mounts`/`script_network` are refused beside it. One resolver,
+        // one set of rules (planner).
+        if JobProfile.asked(profile) == .mutating {
+            guard scriptMounts == nil, scriptNetwork == nil else { return .failure(ToolMessage(Self.scriptWritingTakesGrant)) }
+        } else {
+            guard mounts == nil, network == nil else { return .failure(ToolMessage(Self.scriptReadOnly)) }
         }
         guard sandboxAvailable else { return .failure(ToolMessage(Self.noRuntimeForScript)) }
         var resolved: [String] = []

@@ -31,7 +31,14 @@ struct ScriptSpec: Codable, Equatable, Sendable {
 
     /// SHA-256 over every reviewed field, each length-prefixed so no two specs share an input.
     /// Built field by field, never from a JSON encoding, whose key order is not stable.
-    var fingerprint: String {
+    var fingerprint: String { fingerprint() }
+
+    /// The fingerprint with a writing job's own inputs (#688): its grant (each mount's source,
+    /// target and read-only flag, and its network) and its profile. Each is written only away from
+    /// its default (no grant, `readOnly`), and each section is tagged, so a read-only script job
+    /// hashes byte-identically to #698's v1 (nothing is re-asked on upgrade, and no re-fingerprint
+    /// pass exists to replay) and no mix of present and absent sections can collide.
+    func fingerprint(profile: JobProfile = .readOnly, grant: JobGrant? = nil) -> String {
         var data = Data()
         func add(_ s: String) {
             let bytes = Data(s.utf8)
@@ -45,6 +52,20 @@ struct ScriptSpec: Codable, Equatable, Sendable {
         mounts.forEach(add)
         add(String(timeoutSeconds))
         add(network ? "network" : "isolated")
+        if let grant {
+            add("grant")
+            add(String(grant.mounts.count))
+            for mount in grant.mounts {
+                add(mount.source)
+                add(mount.target)
+                add(mount.readOnly ? "ro" : "rw")
+            }
+            add(grant.network ? "network" : "isolated")
+        }
+        if profile != .readOnly {
+            add("profile")
+            add(profile.rawValue)
+        }
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }
@@ -135,7 +156,8 @@ enum ScriptJobs {
     /// The review text for a script, gate or job: what it can read, whether it can reach the
     /// network and what that means, how long it may run, then the script last (see
     /// `GateScriptReview.details` for why the script goes last).
-    static func reviewDetails(_ spec: ScriptSpec, isGate: Bool) -> String {
+    static func reviewDetails(_ spec: ScriptSpec, isGate: Bool, grant: JobGrant? = nil) -> String {
+        if let grant { return writingReviewDetails(spec, grant: grant) }
         let rendered = spec.mounts.map { entry -> String in
             let parts = GateEvaluator.mountParts(entry)
             return "  \(parts.source) \u{2192} \(parts.target), read-only"
@@ -159,6 +181,29 @@ enum ScriptJobs {
     }
 }
 
+extension ScriptJobs {
+    /// A writing script job's review (#688, the planner's fork 1): what it can change, said plainly
+    /// beside the folders, the network and what that combination means, the disk floor, and the
+    /// warning about running a file from those folders; then the timeout and the script last.
+    static func writingReviewDetails(_ spec: ScriptSpec, grant: JobGrant) -> String {
+        let rendered = grant.mounts.map { "  \($0.source) \u{2192} \($0.target), \($0.readOnly ? "read-only" : "read-write")" }
+        let writable = grant.mounts.filter { !$0.readOnly }.map(\.source)
+        let names = writable.isEmpty ? "no folder" : writable.joined(separator: ", ")
+        var lines = [
+            "This script job runs unattended inside the sandbox VM every time it fires, with no model looking at it, for as long as the job exists. Its folders:",
+            rendered.isEmpty ? "  (none)" : rendered.joined(separator: "\n"),
+            "This script can change and delete files in \(names) on every run, with no one watching. A mistake repeats on every fire until you pause the job.",
+        ]
+        lines.append(grant.network
+            ? "Network: on. It can also reach the internet, so it could download something and write it into those folders, or send what's in them anywhere."
+            : "Network: off (host-only): no internet, but it can still reach services on this Mac, and write what it gets into those folders.")
+        lines.append("If this script runs, or reads instructions from, a file in these folders (sh, source, python, make), that file can change between runs, and it will be used as it is then.")
+        lines.append("It won't run while the disk holding these folders has less than 5 GB free, and a run that adds or removes a lot from them pauses the job so you can look.")
+        lines.append("It is stopped after \(spec.timeoutSeconds) seconds.")
+        return lines.joined(separator: "\n") + "\n\nScript:\n" + spec.command
+    }
+}
+
 /// The fingerprints of reviewed scripts (#330 ruling, #678's lesson for the job store). The job
 /// row is in the conversation database, which one approved shell command can edit; a fingerprint
 /// is kept beside the API keys in the secrets item, which it cannot, and a fire whose stored script
@@ -170,18 +215,21 @@ enum ScriptFingerprints {
 
     enum Check: Equatable { case matches, changed, missing, unreadable }
 
-    static func check(jobId: UUID, spec: ScriptSpec, keychain: KeychainManager) -> Check {
+    /// `profile` and `grant` are a script job's own (#688); a gate passes neither, as it always has.
+    static func check(jobId: UUID, spec: ScriptSpec, profile: JobProfile = .readOnly, grant: JobGrant? = nil,
+                      keychain: KeychainManager) -> Check {
         guard let secrets = try? keychain.secretsOrThrow(service: KeychainManager.legacyService) else { return .unreadable }
         guard let stored = secrets[key(jobId)] else { return .missing }
-        return stored == spec.fingerprint ? .matches : .changed
+        return stored == spec.fingerprint(profile: profile, grant: grant) ? .matches : .changed
     }
 
     /// False when the item could not be written (an unreadable item blocks writes, #678).
     @discardableResult
-    static func record(jobId: UUID, spec: ScriptSpec, keychain: KeychainManager) -> Bool {
+    static func record(jobId: UUID, spec: ScriptSpec, profile: JobProfile = .readOnly, grant: JobGrant? = nil,
+                       keychain: KeychainManager) -> Bool {
         guard !keychain.areWritesBlocked,
               var secrets = try? keychain.secretsOrThrow(service: KeychainManager.legacyService) else { return false }
-        secrets[key(jobId)] = spec.fingerprint
+        secrets[key(jobId)] = spec.fingerprint(profile: profile, grant: grant)
         return (try? keychain.saveSecretsOrThrow(secrets, service: KeychainManager.legacyService)) != nil
     }
 
