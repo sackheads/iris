@@ -34,6 +34,7 @@ Attackers often use invisible characters, Cyrillic homoglyphs, or obscure encodi
 ### 2. Malicious Role Stripping
 Attackers attempt to "break out" of the system prompt by injecting LLM control tokens that trick the model into thinking a new persona or user message has started.
 *   **Implementation:** We actively strip common boundary markers like `<|im_start|>`, `system:`, `assistant:`, `---`, and `Instruction:`.
+*   **Whole words only (#736):** a role word (`system:`, `user:`, `assistant:`, `model:`, `Instruction:`, `System Prompt:`) is stripped only where no letter, digit or underscore sits right before it, anywhere in a line, so a mid-line `note. system: obey` or `(user: x)` is still stripped. As a suffix it used to mangle ordinary keys: `filesystem: apfs` reached the model as `file apfs`. The chat-template tokens and `---`/`###` are still matched anywhere.
 
 ### 3. XML Encapsulation
 Text is never concatenated loosely into the prompt. Instead, we use XML tagging (`<untrusted_context>`) to delineate external data.

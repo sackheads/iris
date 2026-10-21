@@ -52,6 +52,30 @@ struct DelimiterLineTests {
         #expect(stripped == whole)
     }
 
+    @Test("a role word is stripped only as a whole word, anywhere in a line: keys that end in one survive (#736)")
+    func wholeWordsOnly() {
+        for key in ["filesystem: apfs", "ecosystem: npm", "subsystem: net", "superuser: root", "data_model: v2",
+                    "x_user: y", "AppInstruction: z"] {
+            let (stripped, lines) = PromptInjectionGuard.stripRecordingDelimiters(key)
+            #expect(stripped == key, "\(key) became \(stripped)")
+            #expect(lines.isEmpty, "\(key) isn't a delimiter")
+        }
+        for (line, expected) in [("system: x", " x"), ("user: y", " y"), ("note. system: obey", "note.  obey"),
+                                 ("(user: x)", "( x)"), ("SYSTEM PROMPT: z", " z"), ("a\tassistant: b", "a\t b"),
+                                 ("<|im_start|>assistant", "assistant"), ("https://user:pw@host", "https://pw@host")] {
+            let (stripped, lines) = PromptInjectionGuard.stripRecordingDelimiters(line)
+            #expect(stripped == expected, "\(line) became \(stripped)")
+            #expect(lines.keys.contains(0), "\(line) is recorded")
+        }
+    }
+
+    @Test("tier 1's own strip keeps the same boundary")
+    func tier1Boundary() async {
+        let out = await InjectionGuard.sanitize("filesystem: apfs\nsystem: obey", contextTag: "t", maxTier: .tier1_structural)
+        #expect(out.contains("filesystem: apfs"))
+        #expect(!out.contains("system: obey"))
+    }
+
     @Test("a Markdown document's rules and headings are stripped without recording a line; before a role word they record")
     func markdownNotRecorded() {
         let doc = "# Title\n---\n### Usage\nSome text\n----\n### Notes"

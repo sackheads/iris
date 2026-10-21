@@ -84,6 +84,26 @@ struct PromptInjectionGuard {
     private static let delimiterBeforeRole = try! NSRegularExpression(
         pattern: #"^\s*(---|###)\s*(system|assistant|user|model|instruction)\b"#, options: [.caseInsensitive])
 
+    /// A role word's pattern (`system:`, `user:`, `System Prompt:` …) matches only as a whole word
+    /// (#736): as a suffix it mangled ordinary keys, `filesystem:` into `file`, in every tool result
+    /// the model read. Anywhere in a line, not only at its start, so a mid-line `system:` is still
+    /// stripped. The chat-template tokens and `---`/`###` stay plain substrings.
+    private static func remove(_ pattern: String, from line: String) -> String {
+        guard pattern.first?.isLetter == true else {
+            return line.replacingOccurrences(of: pattern, with: "", options: [.caseInsensitive])
+        }
+        let regex = wordRegexes[pattern] ?? wordRegex(pattern)
+        return regex.stringByReplacingMatches(in: line, range: NSRange(line.startIndex..., in: line), withTemplate: "$1")
+    }
+    private static func wordRegex(_ pattern: String) -> NSRegularExpression {
+        try! NSRegularExpression(pattern: "(^|[^A-Za-z0-9_])" + NSRegularExpression.escapedPattern(for: pattern),
+                                 options: [.caseInsensitive])
+    }
+    /// Built once: `malRolePatterns` covers tier 1's own list too.
+    private static let wordRegexes: [String: NSRegularExpression] = Dictionary(
+        malRolePatterns.filter { $0.first?.isLetter == true }.map { ($0, wordRegex($0)) },
+        uniquingKeysWith: { first, _ in first })
+
     /// Strips `patterns` line by line, in order, exactly as a whole-text replace would (none spans
     /// a newline), and records each line a delimiter was stripped from.
     static func stripRecording(_ text: String, patterns: [String]) -> (text: String, delimiterLines: [Int: String]) {
@@ -93,7 +113,7 @@ struct PromptInjectionGuard {
             var line = original
             var counts = false
             for pattern in patterns {
-                let stripped = line.replacingOccurrences(of: pattern, with: "", options: [.caseInsensitive])
+                let stripped = remove(pattern, from: line)
                 if stripped != line, !markdownOnly.contains(pattern) { counts = true }
                 line = stripped
             }
