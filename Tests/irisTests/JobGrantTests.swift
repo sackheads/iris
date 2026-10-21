@@ -458,7 +458,9 @@ struct JobGrantToolTests {
     @Test("a writing script job whose read-write folder holds a repository is refused before the review; a clean one is reviewed with what it can change (#688)")
     func writingScriptCreation() async throws {
         let f = try JobGrantResolveTests.fixture(); defer { f.tearDown() }
-        let (store, _, engine, conversation) = try engineHarness()
+        // The engine holds its state weakly: kept alive for the test, or a call finds no jobs.
+        let (store, state, engine, conversation) = try engineHarness()
+        defer { withExtendedLifetime(state) {} }
         let asked = Locked<[String]>([])
         let review = GateScriptReview(verdict: { _ in nil }, ask: { text in asked.mutate { $0.append(text) }; return true })
         func schedule() async -> String {
