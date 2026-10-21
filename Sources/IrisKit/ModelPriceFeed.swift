@@ -14,6 +14,10 @@ struct ModelPriceFeed: Sendable {
     static let timeoutSeconds = 30.0
     static let refreshInterval: TimeInterval = 24 * 60 * 60
     static let families: Set<String> = ["anthropic", "gemini", "openai", "deepseek"]
+    /// OpenRouter's own price list (#701): LiteLLM has no `openrouter` family, so without it a
+    /// subagent on OpenRouter is charged the highest known rate of any family.
+    static let openRouterURL = URL(string: "https://openrouter.ai/api/v1/models")!
+    static let openRouterFamily = "openrouter"
 
     struct Cached: Codable, Equatable, Sendable {
         var asOf: String
@@ -30,7 +34,8 @@ struct ModelPriceFeed: Sendable {
 
     var paths: IrisPaths
     var keychain: KeychainManager?
-    /// The download, injectable for tests: the URL's bytes, at most `maxBytes`.
+    /// The download, injectable for tests: the URL's bytes, at most `maxBytes`. Both lists go
+    /// through it.
     var download: @Sendable (URL) async throws -> Data = ModelPriceFeed.boundedDownload
 
     var cacheURL: URL { paths.configDir.appendingPathComponent("model-prices.json") }
@@ -63,7 +68,13 @@ struct ModelPriceFeed: Sendable {
     func refresh(now: Date = Date(), role: ProcessRole? = ProcessRole.current) async throws -> Cached? {
         guard role == .app else { return nil }
         let data = try await withTimeout(seconds: Self.timeoutSeconds) { [download] in try await download(Self.url) }
-        guard let rows = Self.parse(data), !rows.isEmpty else { throw FetchError.unparseable }
+        guard var rows = Self.parse(data), !rows.isEmpty else { throw FetchError.unparseable }
+        // #701: OpenRouter's own list, best effort: a failure leaves its models on the fallback
+        // (the highest known rate, estimated), never fails the LiteLLM fetch.
+        if let openRouter = try? await withTimeout(seconds: Self.timeoutSeconds, { [download] in try await download(Self.openRouterURL) }),
+           let models = Self.parseOpenRouter(openRouter), !models.isEmpty {
+            rows[Self.openRouterFamily] = models
+        }
         // The local date: the GUI check showed the next day's (UTC) date on an evening fetch.
         let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withFullDate]; formatter.timeZone = .current
         let cached = Cached(asOf: formatter.string(from: now), fetchedAt: now, rows: rows)
@@ -93,6 +104,30 @@ struct ModelPriceFeed: Sendable {
             let read = (v["cache_read_input_token_cost"] as? NSNumber)?.doubleValue ?? input
             let write = (v["cache_creation_input_token_cost"] as? NSNumber).map(\.doubleValue).flatMap { $0 > 0 ? $0 : nil }
             rows[family, default: [:]][model] = TokenRates(input: input, output: output, cacheRead: read, cacheWrite: write)
+        }
+        return rows
+    }
+
+    /// OpenRouter's `/api/v1/models`: `data[].id` with `pricing.prompt`, `pricing.completion` and
+    /// `pricing.input_cache_read`, dollars per token as strings. A model priced at zero or below
+    /// (free, or `-1` for "varies") is left out, so it takes the fallback; `PriceGuards`' absolute
+    /// bounds then hold what's left (#701, planner).
+    static func parseOpenRouter(_ data: Data) -> [String: TokenRates]? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let models = object["data"] as? [[String: Any]] else { return nil }
+        func price(_ value: Any?) -> Double? {
+            if let s = value as? String { return Double(s) }
+            return (value as? NSNumber)?.doubleValue
+        }
+        var rows: [String: TokenRates] = [:]
+        for model in models {
+            guard let id = model["id"] as? String, !id.isEmpty, !id.contains("|"),
+                  let pricing = model["pricing"] as? [String: Any],
+                  let input = price(pricing["prompt"]), input > 0,
+                  let output = price(pricing["completion"]), output > 0 else { continue }
+            let read = price(pricing["input_cache_read"]).flatMap { $0 > 0 ? $0 : nil } ?? input
+            let write = price(pricing["input_cache_write"]).flatMap { $0 > 0 ? $0 : nil }
+            rows[id] = TokenRates(input: input, output: output, cacheRead: read, cacheWrite: write)
         }
         return rows
     }
