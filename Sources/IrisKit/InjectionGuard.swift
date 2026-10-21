@@ -66,6 +66,16 @@ public struct InjectionGuard {
         return true
     }
 
+    /// Whether `executeTier3Canary` will judge, from the fingerprint this call already resolved:
+    /// protection on, and a canary registered (or scoped) or a provisioned model to load (#732).
+    private static func tier3Runs(_ fingerprint: GuardConfigFingerprint) -> Bool {
+        guard fingerprint.protectionEnabled else { return false }
+        if let scoped = AuxiliaryModelManager.scopedEngines { return scoped["canary"] != nil }
+        if AuxiliaryModelManager.shared.hasEngine(for: "canary") { return true }
+        if case .unprovisioned = fingerprint.tier3Provisioning { return false }
+        return true
+    }
+
     /// Whether a test has scoped a tier-2 model or a tier-3 canary for this task tree.
     private static var guardTierScopeActive: Bool {
         CoreMLEvaluator.scopedModel != nil || AuxiliaryModelManager.scopedEngines?["canary"] != nil
@@ -429,8 +439,10 @@ public struct InjectionGuard {
         // #709: tier 3 judges at most the cap. With tier 2 skipped (no model yet, #210) nothing
         // would judge a longer text's middle, so the text itself is cut to what the canary judges:
         // the model reads exactly what was judged. A tool result is already this size; this binds
-        // the inputs that don't pass the choke point (system events, peer messages).
-        if case .skipped = tier2, maxTier == .tier3_canary { clean = OutputCap.cap(clean) }
+        // the inputs that don't pass the choke point (system events, peer messages). Only when the
+        // canary will run (#732): with it off too, nothing judges anything, and the cut would only
+        // lose the middle.
+        if case .skipped = tier2, maxTier == .tier3_canary, tier3Runs(fingerprint) { clean = OutputCap.cap(clean) }
 
         if maxTier == .tier2_coreML {
             let passed = GuardOutcome.passed(clean: clean)

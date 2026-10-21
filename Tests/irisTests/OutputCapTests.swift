@@ -228,6 +228,27 @@ struct OutputCapTests {
         #expect(outcome.contains("[output truncated:"))
     }
 
+    @Test("with both tiers off, a long input comes back whole: no guard judges it, so nothing is cut (#732)")
+    func noTierCutsNothing() async {
+        let marker = "MIDDLE-\(UUID().uuidString)"
+        let filler = String(repeating: "an ordinary line of a long system event.\n", count: 1300)   // about 50 KB
+        let text = filler + marker + "\n" + filler
+        // No tier-2 model and no canary: protection on, but nothing to judge with.
+        let unscoped = await CoreMLEvaluator.$scopedModel.withValue(.init(nil)) {
+            await AuxiliaryModelManager.$scopedEngines.withValue([:]) {
+                await InjectionGuard.sanitize(text, contextTag: "system_event_x", maxTier: .tier3_canary, protectionEnabled: true)
+            }
+        }
+        #expect(unscoped.contains(marker) && !unscoped.contains("[output truncated:"))
+        // Protection off: the same.
+        let off = await CoreMLEvaluator.$scopedModel.withValue(.init(nil)) {
+            await AuxiliaryModelManager.$scopedEngines.withValue(["canary": MarkerCanary(marker)]) {
+                await InjectionGuard.sanitize(text, contextTag: "system_event_x", maxTier: .tier3_canary, protectionEnabled: false)
+            }
+        }
+        #expect(off.contains(marker) && !off.contains("[output truncated:"))
+    }
+
     /// A tier-2 model that flags exactly the text holding `marker`.
     private struct MarkerModel: CoreMLModelProtocol {
         let marker: String
