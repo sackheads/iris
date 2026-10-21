@@ -46,6 +46,39 @@ struct WritingScriptJobsTests {
         #expect(WritingScripts.survey(root).repositories.contains(root))
     }
 
+    @Test("a bare repository (HEAD, objects/, refs/, no .git) is found at the root or inside, and refused (#739 review)")
+    func surveyFindsBareRepositories() throws {
+        let root = try tempDir(); defer { try? FileManager.default.removeItem(atPath: root) }
+        func makeBare(_ at: String) throws {
+            try FileManager.default.createDirectory(atPath: at + "/objects", withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(atPath: at + "/refs", withIntermediateDirectories: true)
+            try "ref: refs/heads/main\n".write(toFile: at + "/HEAD", atomically: true, encoding: .utf8)
+        }
+        try makeBare(root + "/remotes/origin.git")
+        let found = WritingScripts.survey(root)
+        #expect(found.repositories == [root + "/remotes/origin.git"])
+        #expect(WritingScripts.refusal([(root, found)]) == GateEvaluator.writingScriptRepositoryRefusal(root + "/remotes/origin.git"))
+        let bareRoot = try tempDir(); defer { try? FileManager.default.removeItem(atPath: bareRoot) }
+        try makeBare(bareRoot)
+        #expect(WritingScripts.survey(bareRoot).repositories == [bareRoot])
+        // A folder that merely has a HEAD file isn't one.
+        let notBare = try tempDir(); defer { try? FileManager.default.removeItem(atPath: notBare) }
+        try "x".write(toFile: notBare + "/HEAD", atomically: true, encoding: .utf8)
+        #expect(WritingScripts.survey(notBare).repositories.isEmpty)
+    }
+
+    @Test("a folder the walk can't read makes the survey incomplete, which refuses the mount (#739 review)")
+    func unreadableFailsClosed() throws {
+        let root = try tempDir()
+        let locked = root + "/locked"
+        try FileManager.default.createDirectory(atPath: locked + "/inner", withIntermediateDirectories: true)
+        chmod(locked, 0o000)
+        defer { chmod(locked, 0o755); try? FileManager.default.removeItem(atPath: root) }
+        let found = WritingScripts.survey(root)
+        #expect(!found.isComplete && found.incomplete?.contains("can't be read") == true)
+        #expect(WritingScripts.refusal([(root, found)])?.contains("can't be checked for repositories") == true)
+    }
+
     @Test("a survey stops at its cap, and a capped mount can't be shown free of repositories")
     func surveyCaps() throws {
         let root = try tempDir(); defer { try? FileManager.default.removeItem(atPath: root) }

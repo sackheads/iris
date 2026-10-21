@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// What one read-write mount of a writing script job holds (#688): its files and bytes, and any git
 /// repository in it, from one capped walk that follows no link and stays on one filesystem. Taken
@@ -12,10 +13,17 @@ struct MountSurvey: Codable, Equatable, Sendable {
     /// The walk stopped at its cap, so the counts are partial and the mount can't be shown free of
     /// repositories.
     var capped: Bool
+    /// Why the walk couldn't see all of the mount though it wasn't capped: a folder it couldn't
+    /// read, or another volume mounted inside it (#739 review). Unverifiable, so it fails closed.
+    var incomplete: String?
 
-    init(entries: Int, bytes: Int64, repositories: [String], capped: Bool) {
+    init(entries: Int, bytes: Int64, repositories: [String], capped: Bool, incomplete: String? = nil) {
         self.entries = entries; self.bytes = bytes; self.repositories = repositories; self.capped = capped
+        self.incomplete = incomplete
     }
+
+    /// Whether the counts and the repository list cover the whole mount.
+    var isComplete: Bool { !capped && incomplete == nil }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -23,6 +31,7 @@ struct MountSurvey: Codable, Equatable, Sendable {
         bytes = try c.decodeIfPresent(Int64.self, forKey: .bytes) ?? 0
         repositories = try c.decodeIfPresent([String].self, forKey: .repositories) ?? []
         capped = try c.decodeIfPresent(Bool.self, forKey: .capped) ?? false
+        incomplete = try c.decodeIfPresent(String.self, forKey: .incomplete)
     }
 }
 
@@ -61,7 +70,8 @@ enum WritingScripts {
         var repositories: [String] = []
         let fm = FileManager.default
         var isDir: ObjCBool = false
-        if fm.fileExists(atPath: rootURL.appendingPathComponent(".git").path, isDirectory: &isDir) || isSymlink(rootURL.appendingPathComponent(".git")) {
+        if fm.fileExists(atPath: rootURL.appendingPathComponent(".git").path, isDirectory: &isDir)
+            || isSymlink(rootURL.appendingPathComponent(".git")) || isBareRepository(rootURL.path) {
             repositories.append(root)
         }
         // The walker reports resolved paths (`/private/var` for `/var`); a repository is named as
@@ -70,9 +80,15 @@ enum WritingScripts {
         let resolvedRoot = IrisPaths.realPath(root)
         let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey, .isRegularFileKey, .fileSizeKey, .volumeIdentifierKey]
         let volume = (try? rootURL.resourceValues(forKeys: [.volumeIdentifierKey]))?.volumeIdentifier.map { "\($0)" }
-        guard let walker = fm.enumerator(at: rootURL, includingPropertiesForKeys: keys, options: [], errorHandler: { _, _ in true }) else {
+        // A folder the walk can't read hides whatever is in it, so the survey says it's incomplete.
+        let unreadable = OSAllocatedUnfairLock<String?>(initialState: nil)
+        guard let walker = fm.enumerator(at: rootURL, includingPropertiesForKeys: keys, options: [], errorHandler: { url, _ in
+            unreadable.withLock { $0 = $0 ?? url.path }
+            return true
+        }) else {
             return MountSurvey(entries: 0, bytes: 0, repositories: repositories, capped: true)
         }
+        var otherVolume: String?
         var entries = 0
         var bytes: Int64 = 0
         for case let url as URL in walker {
@@ -89,12 +105,33 @@ enum WritingScripts {
             }
             if values?.isSymbolicLink == true { continue }
             if values?.isDirectory == true, let volume, let here = values?.volumeIdentifier.map({ "\($0)" }), here != volume {
+                // Another filesystem: not walked, so not verified (#739 review).
+                otherVolume = otherVolume ?? spelled(url.path, root: root, resolvedRoot: resolvedRoot)
+                walker.skipDescendants()
+                continue
+            }
+            // A bare repository (HEAD, objects/ and refs/, no `.git`) has hooks too (#739 review).
+            if values?.isDirectory == true, isBareRepository(url.path) {
+                let holder = spelled(url.path, root: root, resolvedRoot: resolvedRoot)
+                if !repositories.contains(holder) { repositories.append(holder) }
                 walker.skipDescendants()
                 continue
             }
             if values?.isRegularFile == true { bytes += Int64(values?.fileSize ?? 0) }
         }
-        return MountSurvey(entries: entries, bytes: bytes, repositories: repositories, capped: false)
+        let incomplete = unreadable.withLock { $0 }.map { "a folder in it can't be read (\($0))" }
+            ?? otherVolume.map { "another disk is mounted inside it (\($0))" }
+        return MountSurvey(entries: entries, bytes: bytes, repositories: repositories, capped: false, incomplete: incomplete)
+    }
+
+    /// git's own test for a git directory (`is_git_directory`): a `HEAD` file, and `objects/` and
+    /// `refs/` directories.
+    static func isBareRepository(_ path: String) -> Bool {
+        var dir: ObjCBool = false
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: path + "/HEAD", isDirectory: &dir), !dir.boolValue else { return false }
+        guard fm.fileExists(atPath: path + "/objects", isDirectory: &dir), dir.boolValue else { return false }
+        return fm.fileExists(atPath: path + "/refs", isDirectory: &dir) && dir.boolValue
     }
 
     private static func spelled(_ path: String, root: String, resolvedRoot: String) -> String {
@@ -119,6 +156,9 @@ enum WritingScripts {
             if let repo = survey.repositories.first { return GateEvaluator.writingScriptRepositoryRefusal(repo) }
             if survey.capped {
                 return "\(source) is too large to check for repositories quickly (over \(entryCap) entries or \(Int(secondsCap)) seconds to walk), so a writing script job can't mount it read-write. Mount a smaller folder, or mount this one read-only."
+            }
+            if let why = survey.incomplete {
+                return "\(source) can't be checked for repositories, because \(why), so a writing script job can't mount it read-write. Mount a folder Iris can read throughout, or mount this one read-only."
             }
         }
         return nil
@@ -157,7 +197,7 @@ enum WritingScripts {
             if let made = after.repositories.first(where: { !f.before.repositories.contains($0) }) {
                 return "this run made a git repository at \(made); the job is paused and the folder left as it is, so you can decide what to do with it"
             }
-            guard !f.before.capped, !after.capped else { continue }
+            guard f.before.isComplete, after.isComplete else { continue }
             let grew = after.bytes - f.before.bytes
             if grew > max(2 * 1_073_741_824, f.before.bytes) {
                 return "this run added \(size(grew)) to \(f.source); paused so you can look"
