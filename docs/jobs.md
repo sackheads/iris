@@ -790,7 +790,9 @@ grant:
   depth, is refused at creation and at every fire, and so is a folder too large to check (over
   200,000 entries or 2 seconds to walk): a hook planted in a repository runs on the Mac the next
   time you use git there. A repository the script *creates* fails that run and pauses the job,
-  naming the path, with the folder left as it is for you to decide.
+  naming the path, with the folder left as it is for you to decide; so does a run that leaves a
+  folder too large or unreadable to check afterwards. If Iris quits mid-run there's no after-check,
+  but the next fire's check finds any repository the run left and refuses that fire.
 - **The disk:** a fire is `interrupted` while the disk holding a read-write folder has under 5 GB
   free. Each folder is counted before and after every run, and a run that adds more than
   max(2 GB, its size), removes more than max(1 GB, a fifth of it), or drops more than

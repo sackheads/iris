@@ -907,8 +907,9 @@ actor JobRunner {
                     figures.append(MountFigures(source: source, before: survey, after: await mountSurveyor(source)))
                 }
                 pauseWhy = WritingScripts.pauseReason(figures)
-                // A repository the run made fails the run, as well as pausing the job (planner).
-                if let why = pauseWhy, WritingScripts.madeRepository(figures) != nil {
+                // A repository the run made, or a mount it left uncheckable, fails the run as well
+                // as pausing the job (planner, #739 review).
+                if let why = pauseWhy, WritingScripts.failsRun(figures) {
                     (status, outcome, failureReason) = (.failed, why, why)
                 }
             }
