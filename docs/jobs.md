@@ -850,7 +850,7 @@ and a "View run" button onto the transcript. (A built-in job's card has no trans
 built-in with nothing to report posts no card at all. Nor does a script job's: its card shows the
 last line of its output, posts only on a first run, a failure or a change, and marks a line checked
 without the injection guard's tier 3 with `(checked without tier 3)`; see "Script jobs".) It goes to the job's destination conversation if it
-has one, and otherwise to **Iris** — the pinned conversation Iris creates on first use, keeps at
+has one, and otherwise to **Iris** — the pinned conversation Iris creates at launch, keeps at
 the top of the sidebar, and treats as your main conversation. (Pinned conversations refuse
 `/clear`. `/new` in Iris archives it and starts a fresh one. The pin moves once the rotation's
 reflection turn is done, and a card delivered from then on lands in the new Iris; one delivered
