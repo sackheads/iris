@@ -211,7 +211,7 @@ final class OneShot<T: Sendable>: @unchecked Sendable {
 ///   the key. A conversation still flagged pinned is what the owner last saw as Iris, so the key
 ///   is pointed back at it.
 /// - nothing is pinned either: an archived target is restored; a missing one is left to
-///   `activityConversationId()`, which creates a fresh Iris on first use.
+///   `activityConversationId()`, which creates a fresh Iris at launch (#746) or on first use.
 struct PinRepair: Equatable, Sendable {
     struct Row: Equatable, Sendable {
         let id: UUID
