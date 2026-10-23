@@ -1450,7 +1450,9 @@ class AppState {
         repairPinnedConversation()
         retitleLegacyPinnedConversation()
         // #746: Iris is there from the first launch, not from whatever first needs it. Before the
-        // blank conversation below, so that one stays last and is what the next launch reopens.
+        // blank conversation below, so on an empty store that one stays last and is what the next
+        // launch reopens. A store that already had conversations gets Iris last, so its next
+        // launch opens on Iris, as the first lazily created Iris always did.
         // Off under test unless asked for: an extra conversation at load would move every test's
         // counts and indices.
         if createIfEmpty, ensuresIris { _ = activityConversationId() }
