@@ -285,7 +285,7 @@ struct OrdinalReuseTests {
         let irisId = iris.id
         store.failInjection = { $0 == irisId }
         // A window launch (#746), which creates Iris when the store has none: not this one.
-        let state = AppState(store: store, emitLaunchNotices: false, createsIris: true)
+        let state = AppState(store: store, emitLaunchNotices: false, ensuresIris: true)
         #expect(state.loadedRepairFailed == [iris.id])
         #expect(state.repairFailedIrisId == iris.id)
         #expect(state.activityConversationId() == iris.id)

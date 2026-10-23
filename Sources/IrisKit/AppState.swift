@@ -1426,7 +1426,7 @@ class AppState {
     /// empty per-process home's (#304), so only a seam can make a tier read as provisioned. `tier2Provisioning` mirrors
     /// `tier3Provisioning` (#202) for the tier-2 CoreML model (#210).
     ///
-    /// `createsIris` (#746) creates the pinned Iris at launch when the store has none; it only
+    /// `ensuresIris` (#746) makes sure the pinned Iris exists at launch, creating it only when the store has none; it only
     /// applies with `createIfEmpty`, so a headless caller never creates one.
     ///
     /// `createIfEmpty` and `emitLaunchNotices` are both things a *window* needs and a headless
@@ -1441,7 +1441,7 @@ class AppState {
          emitLaunchNotices: Bool = true,
          guardedConfig: ConfigManager = .shared,
          runsGateUpgrade: Bool = NSClassFromString("XCTestCase") == nil,
-         createsIris: Bool = NSClassFromString("XCTestCase") == nil) {
+         ensuresIris: Bool = NSClassFromString("XCTestCase") == nil) {
         self.store = store
         self.scriptKeychain = guardedConfig.guardedKeychain
         self.engine = IrisEngine(state: self)
@@ -1453,7 +1453,7 @@ class AppState {
         // blank conversation below, so that one stays last and is what the next launch reopens.
         // Off under test unless asked for: an extra conversation at load would move every test's
         // counts and indices.
-        if createIfEmpty, createsIris { _ = activityConversationId() }
+        if createIfEmpty, ensuresIris { _ = activityConversationId() }
         // `selectedConversationId == nil` covers more than an empty store: #187's background job
         // conversations are loaded but never selected, so a store holding nothing else still has
         // to open in a fresh conversation.

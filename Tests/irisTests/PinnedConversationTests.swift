@@ -15,7 +15,7 @@ import Foundation
     /// #746: Iris exists from the first launch, ahead of the blank conversation the launch selects.
     @Test func launchCreatesIrisOnAFreshStore() throws {
         let store = try ConversationStore.inMemory()
-        let state = AppState(store: store, emitLaunchNotices: false, createsIris: true)
+        let state = AppState(store: store, emitLaunchNotices: false, ensuresIris: true)
         let pinned = state.conversations.filter(\.isPinned)
         #expect(pinned.map(\.title) == ["Iris"])
         #expect(try store.metaValue(forKey: AppState.activityConversationMetaKey) == pinned.first?.id.uuidString)
@@ -26,10 +26,10 @@ import Foundation
 
     @Test func launchKeepsAnExistingIris() throws {
         let store = try ConversationStore.inMemory()
-        let first = AppState(store: store, emitLaunchNotices: false, createsIris: true)
+        let first = AppState(store: store, emitLaunchNotices: false, ensuresIris: true)
         let iris = first.activityConversationId()
         first.flushSave()
-        let second = AppState(store: store, emitLaunchNotices: false, createsIris: true)
+        let second = AppState(store: store, emitLaunchNotices: false, ensuresIris: true)
         #expect(second.conversations.filter(\.isPinned).map(\.id) == [iris])
         #expect(second.conversations.count == 2)
     }
@@ -37,7 +37,7 @@ import Foundation
     /// The headless `--run-job` path passes `createIfEmpty: false` and must not create one.
     @Test func headlessLaunchCreatesNoIris() throws {
         let store = try ConversationStore.inMemory()
-        let state = AppState(store: store, createIfEmpty: false, emitLaunchNotices: false, createsIris: true)
+        let state = AppState(store: store, createIfEmpty: false, emitLaunchNotices: false, ensuresIris: true)
         #expect(state.conversations.isEmpty)
         #expect(try store.metaValue(forKey: AppState.activityConversationMetaKey) == nil)
     }
