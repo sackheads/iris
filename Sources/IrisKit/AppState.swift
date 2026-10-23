@@ -1426,6 +1426,9 @@ class AppState {
     /// empty per-process home's (#304), so only a seam can make a tier read as provisioned. `tier2Provisioning` mirrors
     /// `tier3Provisioning` (#202) for the tier-2 CoreML model (#210).
     ///
+    /// `createsIris` (#746) creates the pinned Iris at launch when the store has none; it only
+    /// applies with `createIfEmpty`, so a headless caller never creates one.
+    ///
     /// `createIfEmpty` and `emitLaunchNotices` are both things a *window* needs and a headless
     /// caller must not do to somebody's store: `iris --run-job` (#187 §8) opens the real database,
     /// fires one job and flushes, so without these it would commit an empty "New Conversation" and
@@ -1437,7 +1440,8 @@ class AppState {
          createIfEmpty: Bool = true,
          emitLaunchNotices: Bool = true,
          guardedConfig: ConfigManager = .shared,
-         runsGateUpgrade: Bool = NSClassFromString("XCTestCase") == nil) {
+         runsGateUpgrade: Bool = NSClassFromString("XCTestCase") == nil,
+         createsIris: Bool = NSClassFromString("XCTestCase") == nil) {
         self.store = store
         self.scriptKeychain = guardedConfig.guardedKeychain
         self.engine = IrisEngine(state: self)
@@ -1445,6 +1449,11 @@ class AppState {
         // Before the retitle, which reads `isPinned`.
         repairPinnedConversation()
         retitleLegacyPinnedConversation()
+        // #746: Iris is there from the first launch, not from whatever first needs it. Before the
+        // blank conversation below, so that one stays last and is what the next launch reopens.
+        // Off under test unless asked for: an extra conversation at load would move every test's
+        // counts and indices.
+        if createIfEmpty, createsIris { _ = activityConversationId() }
         // `selectedConversationId == nil` covers more than an empty store: #187's background job
         // conversations are loaded but never selected, so a store holding nothing else still has
         // to open in a fresh conversation.
