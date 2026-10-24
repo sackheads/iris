@@ -205,11 +205,12 @@ enum GitRead {
         return inRoot(repo.gitDir) || inRoot(repo.commonDir) ? nil : repo
     }
 
-    /// The variables that pin a read to `repo`, and drop the global config: `~/.gitconfig` and
-    /// `~/.config/git/config` (and what they include) aren't under the git-dir rule, and a sandbox
-    /// that can write the home folder could write them (#758 review).
+    /// The variables that pin a read to `repo`, and drop the global and system config:
+    /// `~/.gitconfig` and `~/.config/git/config` (and what they include) aren't under the git-dir
+    /// rule, and a sandbox that can write the home folder could write them; Homebrew's system
+    /// config (`etc/gitconfig` under its prefix) is the user's to write, not root's (#758 review).
     static func pinning(_ repo: Repository) -> [String: String] {
-        var env = ["GIT_DIR": repo.gitDir, "GIT_CONFIG_GLOBAL": "/dev/null"]
+        var env = ["GIT_DIR": repo.gitDir, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"]
         if let workTree = repo.workTree { env["GIT_WORK_TREE"] = workTree }
         return env
     }

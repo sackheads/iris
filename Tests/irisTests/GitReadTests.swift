@@ -196,7 +196,8 @@ struct GitReadTests {
         #expect(spawn.arguments == ["--attr-source=\(GitRead.emptyTree)", "status", "--ignore-submodules=all"])
         #expect(spawn.environment["GIT_DIR"] == "/p/.git" && spawn.environment["GIT_WORK_TREE"] == "/p",
                 "pinned to the judged repository, never the parent's GIT_DIR")
-        #expect(spawn.environment["GIT_CONFIG_GLOBAL"] == "/dev/null", "no global config (#758 review)")
+        #expect(spawn.environment["GIT_CONFIG_GLOBAL"] == "/dev/null" && spawn.environment["GIT_CONFIG_NOSYSTEM"] == "1",
+                "no global or system config (#758 review)")
         #expect(spawn.environment["GIT_OPTIONAL_LOCKS"] == "0" && spawn.environment["PATH"] == "/usr/bin")
         let keys = (0..<(Int(spawn.environment["GIT_CONFIG_COUNT"] ?? "0") ?? 0)).compactMap { spawn.environment["GIT_CONFIG_KEY_\($0)"] }
         for key in ["core.fsmonitor", "diff.external", "core.attributesFile", "log.showSignature", "gpg.program",
