@@ -36,7 +36,11 @@ struct CheckCommandSubstitutionTests {
         // Return adds nothing: a line break would make the grader ask on every run.
         editor.string = "swift test"
         editor.setSelectedRange(NSRange(location: 10, length: 0))
-        editor.doCommand(by: #selector(NSResponder.insertNewline(_:)))
-        #expect(editor.string == "swift test")
+        // Nor Option-Return or Control-Return (#753 review): every key that inserts a break.
+        for command in [#selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)),
+                        #selector(NSResponder.insertLineBreak(_:))] {
+            editor.doCommand(by: command)
+            #expect(editor.string == "swift test", "\(command)")
+        }
     }
 }
