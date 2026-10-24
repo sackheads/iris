@@ -8,10 +8,11 @@ import Foundation
 /// prompt; a wrong "read-only" is a silent host write, so anything unparsed, unknown or ambiguous
 /// is "may write". It judges a string and never rewrites what runs, so a program is allowed only
 /// if no file it reads can make it run another one. The sandbox VM writes the conversation's
-/// workspace with no prompt, so a file there is planted as easily as a command: that rules out git
-/// altogether (a repository's config runs programs on reads: `core.fsmonitor`, `diff.external`,
-/// textconv and clean filters) and is why a read this approves runs restricted
-/// (`restrictedPath`): the run is the one judged.
+/// workspace with no prompt, so a file there is planted as easily as a command: that's why a read
+/// this approves runs restricted (`restrictedPath`): the run is the one judged. git is the one
+/// exception (#607, `GitRead`): a repository's config and attributes run programs on reads, so a
+/// git read runs only on a repository whose git dir no sandbox can write, as argv with Iris's
+/// fixed prefix and overrides neutralising the worktree's half.
 enum ReadOnlyCommand {
     static func isReadOnly(_ command: String) -> Bool {
         guard let words = words(command), let program = words.first else { return false }
@@ -20,6 +21,7 @@ enum ReadOnlyCommand {
         if program == "echo" { return true }
         if program == "find" { return findIsReadOnly(args) }
         if program == "date" { return dateIsReadOnly(args) }
+        if program == "git" { return GitRead.isReadOnly(args) }
         guard let flags = programs[program] else { return false }
         return flagsAllowed(args, flags)
     }
@@ -212,8 +214,13 @@ enum ReadOnlyCommand {
         switch toolName {
         case "run_command":
             if inSandbox { return !homeWritable || isReadOnly(details) ? .run : .ask }
+            let host = lookup()
             guard isReadOnly(details), let program = words(details)?.first,
-                  let path = restrictedPath(program: program, cwd: cwd, lookup: lookup()) else { return .ask }
+                  let path = restrictedPath(program: program, cwd: cwd, lookup: host) else { return .ask }
+            // #607: git only on a repository whose git dir no sandbox can write.
+            if program == "git", !GitRead.repositoryOutOfReach(cwd: real(cwd ?? host.cwd), writableRoots: host.writableRoots) {
+                return .ask
+            }
             return .runRestricted(path: path)
         case "read_file": return .run
         default: return .ask

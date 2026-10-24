@@ -50,11 +50,15 @@ struct ReadOnlyCommandTests {
         "git --paginate log", "git --no-pager log", "git log --output=f", "git diff --output f",
         "git diff --out=f", "git diff --outp f", "git show --output-indicator-new=x", "git diff --ext-diff",
         "git diff --ext", "git log --paginate",
-        // git, all of it: a repository's config runs programs on reads (fsmonitor, external diff,
-        // textconv, clean filters), and the sandbox VM can write that config in its workspace.
-        "git status", "git status --porcelain", "git diff", "git diff HEAD~1 -- a", "git show HEAD",
-        "git log --oneline -5", "git log -p", "git blame a", "git rev-parse HEAD", "git ls-files",
-        "git describe --tags", "git shortlog -sn", "git branch", "git branch -a", "git branch --show-current",
+        // #607: what a git read still may not be. Signature checks run gpg.program; --output and
+        // --no-index reach outside the repository; --textconv and --ext-diff run drivers; --dirty
+        // refreshes the index; a user's own --attr-source would undo Iris's; --git-path names hooks.
+        "git log --verify-signatures", "git show --verify-signatures", "git log --format='%GS'",
+        "git log --pretty='%G?'", "git show --format=%GK HEAD", "git diff --textconv", "git log --textconv",
+        "git log --ext-diff", "git blame --textconv a", "git blame --contents x a", "git diff --no-index a b",
+        "git rev-parse --git-path hooks", "git rev-parse --git-dir", "git --attr-source=HEAD diff",
+        "git diff --attr-source=HEAD", "git log --exec=x", "git describe --broken", "git status -uall --x",
+        "git log -g --walk-reflogs", "git shortlog --format=x", "git ls-files --with-tree=x",
         // The overseer's list: aliases, functions, another shell by path, a bare variable.
         "alias ls=rm", "ls() { rm x; }", "/bin/zsh -c ls", "echo $IFS",
         // rg's preprocessor and file's compiler, abbreviated too.
@@ -66,7 +70,7 @@ struct ReadOnlyCommandTests {
         // an empty quote before `=` still gets zsh's =cmd expansion.
         "rg --hostname-bin /tmp/x foo", "rg --hostname-bin=/tmp/x foo", "rg -z foo", "rg --search-zip foo",
         "rg -zl foo", "rg -lz foo", "file -z a", "file -Z a", "file -zs a", "file -bz a",
-        "git log --show-signature", "git show --show-signature", "git log --format='%G?'", "git status",
+        "git log --show-signature", "git show --show-signature", "git log --format='%G?'",
         "git describe --dirty", "ls ''=ls", "ls \"\"=ls", "cat ''=cat",
         // Options that are not on a program's list, however harmless some look: the list decides.
         "grep -Z x f", "grep -z x f", "grep -J x f", "grep --decompress x f", "rg --pr=x foo", "ls -laz",
@@ -93,6 +97,14 @@ struct ReadOnlyCommandTests {
         "ls  -la", " ls ",
         "date", "date -u", "date -R", "date -R -u", "date -u -R", "date '+%Y-%m-%d'", "date \"+%H:%M:%S %Z\"",
         "date -u '+%s'", "date -R -u '+%a, %d %b'", "date +'%s'",
+        // #607: git reads, judged by `GitRead`'s grammar. The gate adds the repository rule (the git
+        // dir out of every sandbox's reach) and the run adds the prefix and the overrides.
+        "git status", "git status --porcelain", "git status --porcelain=v2", "git status -sb", "git diff",
+        "git diff HEAD~1 -- a", "git diff --stat", "git diff --cached", "git show HEAD", "git log --oneline -5",
+        "git log -p", "git log -n 3 --format='%h %s'", "git log --since=yesterday", "git blame a",
+        "git blame -L 1,20 a", "git rev-parse HEAD", "git rev-parse --abbrev-ref HEAD", "git ls-files",
+        "git ls-files -o --exclude-standard", "git describe --tags", "git shortlog -sn", "git branch",
+        "git branch -a", "git branch --show-current", "git log --color=never --oneline",
     ]
 
     @Test("every trick in the refusal table is may-write", arguments: refused)
