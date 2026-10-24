@@ -3707,7 +3707,8 @@ class AppState {
 
     /// Appends one entry to the conversation's checkpoint history. All three resolutions are
     /// recorded, so slice F inherits a complete ladder record rather than only the skipped
-    /// checkpoints. Caller must already hold a valid index; this does not save (its callers do).
+    /// checkpoints. Caller must already hold a valid index. It marks the history changed (#205),
+    /// which is the one change that writes its column.
     ///
     /// A nil evaluation is stored as nil. `lastGoalEvaluation` is persisted while a pause is open on
     /// the user (#191, `sanitizeLoaded`), so the entry still carries the grade after a relaunch;
@@ -3721,7 +3722,10 @@ class AppState {
             milestoneIndex: c.currentMilestone,
             milestoneTitle: c.milestones[c.currentMilestone].title,
             evaluation: evaluation,
-            resolution: resolution))
+            resolution: resolution,
+            contractId: c.id))
+        // The one write of the column (#205); the callers' own `.metadata` doesn't touch it.
+        markChanged(conversations[idx].id, .checkpointHistory)
     }
 
     /// Slice D3 — the grader passed this checkpoint cleanly, so advance without stopping the human.
