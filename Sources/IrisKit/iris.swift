@@ -5617,7 +5617,9 @@ actor IrisEngine {
                     // #724: read in parts, as any file can be (#709's start_line/line_count).
                     switch LineRange.parse(start: functionCall.args["start_line"], count: functionCall.args["line_count"]) {
                     case .failure(let message): return message.text
-                    case .success(let range): return await readArtifact(sha, conversationId: conversationId, range: range)
+                    case .success(let range):
+                        let sandboxed = await isSandboxed(conversationId: conversationId, workspacePath: workspacePath)
+                        return await readArtifact(sha, conversationId: conversationId, range: range, sandboxed: sandboxed)
                     }
                 }
                 needsApproval = true
@@ -6583,7 +6585,6 @@ extension IrisEngine {
     nonisolated static let exchangePathReadRefusal = "Not read by path: an attachment is read through its iris-artifact://<sha256> URI, which checks that it was sent to or by this conversation."
 
     /// What a sandboxed sender is told for a path outside its workspace until 3b reads the VM.
-    nonisolated static let sandboxedAttachmentOutsideWorkspace = "Attaching files from outside your workspace in a sandboxed session isn't supported yet."
 
     /// Reads, checks and stores every attachment a send names, or the one sentence that stops the
     /// whole send (§7.2: a refused path fails the send, in the sender, at send time).
@@ -6664,7 +6665,9 @@ extension IrisEngine {
         let root: String, relative: [String], details: String
         switch Self.attachmentTarget(path: path, workspacePath: workspacePath, sandboxed: sandboxed) {
         case .failure(let why): return .failure(why)
-        case .success(let target): (root, relative, details) = (target.root, target.relative, target.details)
+        case .success(.vm(let vmPath)):
+            return await attachVMFile(vmPath, name: name, conversationId: conversationId, workspacePath: workspacePath)
+        case .success(.host(let r, let rel, let d)): (root, relative, details) = (r, rel, d)
         }
         if await MainActor.run(body: { IrisPaths.default.isUnderExchangeDir(details) || IrisPaths.release.isUnderExchangeDir(details) }) {
             return .failure(Refusal(text: "\(path) is in the attachment exchange; quote its iris-artifact:// URI instead."))
@@ -6689,32 +6692,75 @@ extension IrisEngine {
         }
     }
 
+    /// Where an attachment is read from: a host file, walked from `root`, or a file only the
+    /// sandbox's VM has (3b, §7.6 D), read there.
+    enum AttachmentTarget: Equatable, Sendable {
+        case host(root: String, relative: [String], details: String)
+        case vm(path: String)
+    }
+
+    /// A sandboxed sender's file outside its workspace (3b, §7.6 D): asked about as `read_file` of
+    /// `vm:<path>`, then read whole in its running container, at most 50 MB (over it refuses). The
+    /// VM can only see what's mounted into it, which for a conversation is its workspace (handled
+    /// on the host, below) and what it made itself.
+    private func attachVMFile(_ path: String, name: String, conversationId: UUID, workspacePath: String?) async -> Result<(Data, String, String), Refusal> {
+        guard await Self.sandboxLive(conversationId) else {
+            return .failure(Refusal(text: "\(path) is in your sandbox, which isn't running; run a command there first, then attach it."))
+        }
+        guard let run = Self.vmRun() else { return .failure(Refusal(text: "the container runtime isn't available, so \(path) can't be read from your sandbox.")) }
+        let details = "vm:" + path
+        let approved = await state?.requestApprovalSource(
+            toolName: "read_file", details: details, args: ["path": .string(details)], workspace: workspacePath,
+            conversationId: conversationId, origin: approvalOrigin, inSandbox: true, callerRole: .agent)
+        guard approved != nil else { return .failure(Refusal(text: "reading \(path) to attach it wasn't approved.")) }
+        switch await SandboxArtifacts.readVMFile(path, container: SandboxSessionManager.containerName(for: conversationId), run: run) {
+        case .failure(let why): return .failure(why)
+        case .success(let data): return .success((data, details, name))
+        }
+    }
+
     /// Where a `{path}` attachment is read from (§7.6 D): for a host sender, `read_file`'s real
-    /// path, walked from `/`; for a sandboxed one, a path under its workspace only, walked from the
-    /// workspace root by its spelling, so a link inside the workspace that points out is refused by
-    /// the walk rather than resolved on the host. The non-grant `run_command` mounts the workspace
-    /// at its own path (`ToolExecutor.swift`, `ContainerMount(source: IrisEngine.expandTilde(cwd))`),
-    /// so a VM path under the workspace is that host path.
+    /// path, walked from `/`. For a sandboxed one, a path under its workspace is that host path (the
+    /// workspace is mounted at its own path, `ToolExecutor`'s `ContainerMount(source:
+    /// IrisEngine.expandTilde(cwd))`), walked from the workspace root by its spelling, so a link
+    /// inside it that points out is refused by the walk, never resolved on the host. Anywhere else
+    /// in a sandboxed session's VM is read in the VM (3b).
     nonisolated static func attachmentTarget(path: String, workspacePath: String?, sandboxed: Bool)
-        -> Result<(root: String, relative: [String], details: String), Refusal> {
+        -> Result<AttachmentTarget, Refusal> {
         if sandboxed {
             let spelled = (ToolExecutor.resolvePath(path, cwd: workspacePath) as NSString).standardizingPath
-            guard let workspace = workspacePath.map({ (expandTilde($0) as NSString).standardizingPath }),
-                  spelled == workspace || spelled.hasPrefix(workspace + "/") else {
-                return .failure(Refusal(text: sandboxedAttachmentOutsideWorkspace))
+            if let workspace = workspacePath.map({ (expandTilde($0) as NSString).standardizingPath }),
+               spelled == workspace || spelled.hasPrefix(workspace + "/") {
+                return .success(.host(root: workspace, relative: spelled.dropFirst(workspace.count).split(separator: "/").map(String.init),
+                                      details: spelled))
             }
-            return .success((workspace, spelled.dropFirst(workspace.count).split(separator: "/").map(String.init), spelled))
+            guard spelled.hasPrefix("/") else { return .failure(Refusal(text: "\(path) isn't a path in your sandbox.")) }
+            return .success(.vm(path: spelled))
         }
         let details = decidedPath(path, cwd: workspacePath, walked: false)
         guard details.hasPrefix("/") else { return .failure(Refusal(text: "\(path) isn't a path that can be read.")) }
-        return .success(("/", details.split(separator: "/").map(String.init), details))
+        return .success(.host(root: "/", relative: details.split(separator: "/").map(String.init), details: details))
+    }
+
+    /// 3b's seams for a test: the `container` runs, and whether a conversation's sandbox is up.
+    @TaskLocal static var artifactVMRun: SandboxArtifacts.Run?
+    @TaskLocal static var artifactSandboxLive: (@Sendable (UUID) async -> Bool)?
+
+    private static func vmRun() -> SandboxArtifacts.Run? {
+        if let artifactVMRun { return artifactVMRun }
+        return SandboxingManager.shared.containerBinaryPath.map(SandboxArtifacts.liveRun(binary:))
+    }
+
+    private static func sandboxLive(_ id: UUID) async -> Bool {
+        if let artifactSandboxLive { return await artifactSandboxLive(id) }
+        return await SandboxSessionManager.shared.hasSession(id)
     }
 
     /// `read_file` of `iris-artifact://<sha>` (§7.3, §7.6 A, B): only for a conversation that sent or
     /// received it (or a delegate of one), only bytes that still hash to their name, and always
     /// through the injection guard as peer-authored content. Never through the generic tool-output
     /// path, whose first-party exemption for Iris's own directory would cover the exchange.
-    func readArtifact(_ sha: String, conversationId: UUID, range: LineRange? = nil) async -> String {
+    func readArtifact(_ sha: String, conversationId: UUID, range: LineRange? = nil, sandboxed: Bool = false) async -> String {
         let localState = state
         let (ledger, root, paths) = await MainActor.run { (localState?.store.artifacts, localState?.delegationRoot(of: conversationId) ?? conversationId, IrisPaths.default) }
         guard let ledger,
@@ -6738,14 +6784,29 @@ extension IrisEngine {
         // role delimiter in the name, which tier 2 scores alone. The receiver's line, which no
         // guard reads, keeps `flatten`'s strip.
         let named = "Name: " + (GateEvaluator.quoted(name).map { "\"\($0)\"" } ?? "\"(unnamed)\"")
+        let copied = await sandboxCopyNote(read.data, sha: sha, conversationId: conversationId, sandboxed: sandboxed)
         guard let text = String(data: read.data, encoding: .utf8) else {
             return header + "\n" + (await Self.guardArtifactText(named, protectionEnabled: protectionEnabled))
-                + "\nIt isn't text, so its bytes aren't shown."
+                + "\nIt isn't text, so its bytes aren't shown." + copied
         }
         // #724: at most #709's cap, as every tool result, so the guard judges all of what's shown
         // (tier 2's windows cover it whole); the rest is read by line, and the cut line says where.
         let shown = OutputCap.cap(LineRange.apply(range, to: text), advice: .readFile(startLine: range?.start ?? 1))
-        return header + "\n" + (await Self.guardArtifactText(named + "\n\n" + shown, protectionEnabled: protectionEnabled))
+        return header + "\n" + (await Self.guardArtifactText(named + "\n\n" + shown, protectionEnabled: protectionEnabled)) + copied
+    }
+
+    /// A sandboxed receiver's copy (3b, §7.6 C): the verified bytes, into its running container at
+    /// `/tmp/iris-artifacts/<sha>`, and a line saying where, or why not. Empty for a host reader.
+    private func sandboxCopyNote(_ data: Data, sha: String, conversationId: UUID, sandboxed: Bool) async -> String {
+        guard sandboxed else { return "" }
+        guard await Self.sandboxLive(conversationId) else {
+            return "\nNot copied into your sandbox: it isn't running yet. Run a command there, then read this again."
+        }
+        guard let run = Self.vmRun() else { return "\nNot copied into your sandbox: the container runtime isn't available." }
+        if let why = await SandboxArtifacts.materialize(data, sha: sha, container: SandboxSessionManager.containerName(for: conversationId), run: run) {
+            return "\nNot copied into your sandbox: \(why)."
+        }
+        return "\nAlso in your sandbox at \(SandboxArtifacts.vmPath(sha)) (a copy of its own: changing it changes nothing else)."
     }
 
     /// The peer guard every artifact read goes through (§7.3): structural isolation, then tiers
