@@ -245,19 +245,19 @@ struct SessionArtifactTests {
 
     // MARK: A sandboxed sender (§7.6 D)
 
-    @Test("a sandboxed sender attaches only from its workspace; outside it is refused with the 3a sentence")
+    @Test("a sandboxed sender's workspace file is read on the host; anywhere else in its VM is read in the VM (3b)")
     func sandboxedSenderTarget() throws {
         let ws = FileManager.default.temporaryDirectory.appendingPathComponent("iris-469ws-\(UUID().uuidString)").path
-        guard case .success(let inside) = IrisEngine.attachmentTarget(path: "out/report.md", workspacePath: ws, sandboxed: true) else {
-            Issue.record("refused a workspace file"); return
+        #expect(IrisEngine.attachmentTarget(path: "out/report.md", workspacePath: ws, sandboxed: true)
+                == .success(.host(root: ws, relative: ["out", "report.md"], details: ws + "/out/report.md")))
+        #expect(IrisEngine.attachmentTarget(path: "/etc/hosts", workspacePath: ws, sandboxed: true) == .success(.vm(path: "/etc/hosts")))
+        // A `..` out of the workspace isn't the host's parent folder: it's that path in the VM.
+        guard case .success(.vm) = IrisEngine.attachmentTarget(path: "../escape.txt", workspacePath: ws, sandboxed: true) else {
+            Issue.record("a .. out of the workspace must be a VM read, never a host one"); return
         }
-        #expect(inside.root == ws && inside.relative == ["out", "report.md"])
-        guard case .failure(let why) = IrisEngine.attachmentTarget(path: "/etc/hosts", workspacePath: ws, sandboxed: true) else {
-            Issue.record("allowed a path outside the workspace"); return
-        }
-        #expect(why.text == IrisEngine.sandboxedAttachmentOutsideWorkspace)
-        guard case .failure = IrisEngine.attachmentTarget(path: "../escape.txt", workspacePath: ws, sandboxed: true) else {
-            Issue.record("allowed a .. out of the workspace"); return
+        // A host sender is always a host read.
+        guard case .success(.host) = IrisEngine.attachmentTarget(path: "/etc/hosts", workspacePath: ws, sandboxed: false) else {
+            Issue.record("a host sender read in a VM"); return
         }
     }
 
@@ -270,16 +270,92 @@ struct SessionArtifactTests {
         try Data("host secret".utf8).write(to: outside)
         try FileManager.default.createSymbolicLink(at: ws.appendingPathComponent("link.txt"), withDestinationURL: outside)
         try Data("fine".utf8).write(to: ws.appendingPathComponent("real.txt"))
-        guard case .success(let target) = IrisEngine.attachmentTarget(path: "link.txt", workspacePath: ws.path, sandboxed: true) else {
+        guard case .success(.host(let root, let relative, _)) = IrisEngine.attachmentTarget(path: "link.txt", workspacePath: ws.path, sandboxed: true) else {
             Issue.record("target refused"); return
         }
         #expect(throws: GrantedFileError.self) {
-            _ = try GrantedFileAccess(root: target.root).readData(relative: target.relative, maxBytes: ArtifactLimits.fileBytes)
+            _ = try GrantedFileAccess(root: root).readData(relative: relative, maxBytes: ArtifactLimits.fileBytes)
         }
-        guard case .success(let real) = IrisEngine.attachmentTarget(path: "real.txt", workspacePath: ws.path, sandboxed: true) else {
+        guard case .success(.host(let realRoot, let realRelative, _)) = IrisEngine.attachmentTarget(path: "real.txt", workspacePath: ws.path, sandboxed: true) else {
             Issue.record("target refused"); return
         }
-        #expect(try GrantedFileAccess(root: real.root).readData(relative: real.relative, maxBytes: 100) == Data("fine".utf8))
+        #expect(try GrantedFileAccess(root: realRoot).readData(relative: realRelative, maxBytes: 100) == Data("fine".utf8))
+    }
+
+    // MARK: 3b: the sandbox
+
+    /// A fake `container`: records each call, answers `cat` with `vmFiles`, and keeps what `-i`
+    /// copies in.
+    private final class FakeContainer: @unchecked Sendable {
+        let lock = NSLock()
+        var calls: [[String]] = []
+        var copied: [String: Data] = [:]
+        var vmFiles: [String: Data] = [:]
+        var run: SandboxArtifacts.Run {
+            { [self] args, stdin, _, limit in
+                lock.withLock { calls.append(args) }
+                if args.contains("-i"), let stdin {
+                    let path = args.last.flatMap { $0.components(separatedBy: "mv ").last?.components(separatedBy: " ").last } ?? "?"
+                    lock.withLock { copied[path] = stdin }
+                    return .success(ProcessGroupRunner.Output(stdout: Data(), stderr: Data(), status: 0))
+                }
+                if let i = args.firstIndex(of: "--"), i + 1 < args.count {
+                    guard let data = lock.withLock({ vmFiles[args[i + 1]] }) else {
+                        return .success(ProcessGroupRunner.Output(stdout: Data(), stderr: Data("cat: no such file".utf8), status: 1))
+                    }
+                    let kept = limit.map { data.prefix($0) } ?? data
+                    return .success(ProcessGroupRunner.Output(stdout: Data(kept), stderr: Data(), status: 0,
+                                                              droppedStdout: data.count - kept.count))
+                }
+                return .success(ProcessGroupRunner.Output(stdout: Data(), stderr: Data(), status: 0))
+            }
+        }
+    }
+
+    @Test("a sandboxed receiver's read copies the verified artifact into its container and says where (C)")
+    func sandboxedReceiverCopy() async throws {
+        let (app, a, b, _) = app()
+        let body = "copied body \(UUID())"
+        let path = try file("plan.md", body)
+        _ = await call("send_to_session", ["to": .string(b.uuidString), "message": .string("x"),
+                                           "attachments": .array([.object(["path": .string(path)])])], on: app, as: a)
+        let link = try #require(uri(in: peerText(app, b)))
+        let sha = String(link.dropFirst(ArtifactURI.scheme.count))
+        let fake = FakeContainer()
+        let engine = IrisEngine(state: app, client: FakeLLMClient(responses: []), retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
+        let read = await IrisEngine.$artifactVMRun.withValue(fake.run) {
+            await IrisEngine.$artifactSandboxLive.withValue({ _ in true }) {
+                await engine.readArtifact(sha, conversationId: b, sandboxed: true)
+            }
+        }
+        #expect(read.contains(body))
+        #expect(read.contains("Also in your sandbox at \(SandboxArtifacts.vmPath(sha))"))
+        #expect(fake.copied[SandboxArtifacts.vmPath(sha)] == Data(body.utf8), "the bytes copied are the verified ones")
+        #expect(fake.calls.first?.prefix(3) == ["exec", "-i", SandboxSessionManager.containerName(for: b)])
+        let notRunning = await IrisEngine.$artifactSandboxLive.withValue({ _ in false }) {
+            await engine.readArtifact(sha, conversationId: b, sandboxed: true)
+        }
+        #expect(notRunning.contains("Not copied into your sandbox: it isn't running yet"))
+        let host = await engine.readArtifact(sha, conversationId: b, sandboxed: false)
+        #expect(!host.contains("sandbox"), "a host reader gets no copy note")
+    }
+
+    @Test("a sandboxed sender's VM-only file is read whole in its container; over 50 MB refuses, never cuts (D)")
+    func sandboxedSenderVMRead() async throws {
+        let fake = FakeContainer()
+        fake.vmFiles["/tmp/out.csv"] = Data("a,b\n1,2\n".utf8)
+        let container = "iris-test"
+        #expect(try await SandboxArtifacts.readVMFile("/tmp/out.csv", container: container, run: fake.run).get() == Data("a,b\n1,2\n".utf8))
+        #expect(fake.calls.last == ["exec", container, "cat", "--", "/tmp/out.csv"], "the path is one argument, after --, no shell")
+        fake.vmFiles["/tmp/big"] = Data(count: 1_001)
+        guard case .failure(let why) = await SandboxArtifacts.readVMFile("/tmp/big", container: container, maxBytes: 1_000, run: fake.run) else {
+            Issue.record("an over-cap file was accepted"); return
+        }
+        #expect(why.text.contains("over the"))
+        guard case .failure(let missing) = await SandboxArtifacts.readVMFile("/tmp/none", container: container, run: fake.run) else {
+            Issue.record("a missing file was accepted"); return
+        }
+        #expect(missing.text.contains("no such file"))
     }
 
     // MARK: The store, the caps and retention
