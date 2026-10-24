@@ -10,8 +10,11 @@ struct LiteralTextEditor: NSViewRepresentable {
     @Binding var text: String
     var font: NSFont = .monospacedSystemFont(ofSize: NSFont.preferredFont(forTextStyle: .caption1).pointSize,
                                              weight: .regular)
+    /// False for one logical line (#565, a shell command): Return is swallowed rather than adding
+    /// a line break the grader would then ask about on every run. A pasted break still arrives.
+    var allowsReturn = true
 
-    func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
+    func makeCoordinator() -> Coordinator { Coordinator(text: $text, allowsReturn: allowsReturn) }
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSTextView.scrollableTextView()
@@ -36,7 +39,22 @@ struct LiteralTextEditor: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var text: Binding<String>
-        init(text: Binding<String>) { self.text = text }
+        let allowsReturn: Bool
+        init(text: Binding<String>, allowsReturn: Bool = true) {
+            self.text = text
+            self.allowsReturn = allowsReturn
+        }
+
+        /// Every command that inserts a break: Return, Option-Return and Control-Return (#753 review).
+        static let lineBreakCommands: Set<Selector> = [
+            #selector(NSResponder.insertNewline(_:)),
+            #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)),
+            #selector(NSResponder.insertLineBreak(_:)),
+        ]
+
+        func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            !allowsReturn && Self.lineBreakCommands.contains(selector)
+        }
 
         func textDidChange(_ notification: Notification) {
             guard let tv = notification.object as? NSTextView else { return }

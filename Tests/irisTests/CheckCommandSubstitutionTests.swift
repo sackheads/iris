@@ -9,7 +9,7 @@ import SwiftUI
 @MainActor
 @Suite("Check command field keeps what is typed (#397)")
 struct CheckCommandSubstitutionTests {
-    @Test("the check field's editor applies no smart dashes, smart quotes or autocorrection")
+    @Test("the check field's editor applies no smart dashes, smart quotes, autocorrection or text replacement (#565)")
     func checkFieldSubstitutesNothing() throws {
         struct Host: View {
             @State var criterion = Criterion(text: "tests pass", kind: .executable, check: "")
@@ -25,15 +25,22 @@ struct CheckCommandSubstitutionTests {
         window.contentView!.addSubview(host)
         host.layoutSubtreeIfNeeded()
         func all(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(all) }
-        let field = try #require(all(host).compactMap { $0 as? NSTextField }
-            .first { $0.placeholderString == "Check command (e.g. swift test)" })
-        #expect(window.makeFirstResponder(field))
-        let editor = try #require(field.currentEditor() as? NSTextView)
+        // The check command is a text view of its own now (#565), not a field AppKit edits with its
+        // shared field editor; the one in the row that isn't a field's editor.
+        let editor = try #require(all(host).compactMap { $0 as? NSTextView }.first { !$0.isFieldEditor })
+        #expect(window.makeFirstResponder(editor))
         #expect(!editor.isAutomaticDashSubstitutionEnabled, "-- must not become an em dash")
         #expect(!editor.isAutomaticQuoteSubstitutionEnabled, "straight quotes must stay straight")
-        // Only a guard where the Mac's own NSAutomaticSpellingCorrectionEnabled is on (the default):
-        // with it off, the field editor never corrects and this passes without the modifier.
-        // Forcing it on here would mean writing the process-global defaults (invariant 7).
         #expect(!editor.isAutomaticSpellingCorrectionEnabled, "a flag must not be autocorrected")
+        #expect(!editor.isAutomaticTextReplacementEnabled, "a Text Replacements entry must not expand in a command")
+        // Return adds nothing: a line break would make the grader ask on every run.
+        editor.string = "swift test"
+        editor.setSelectedRange(NSRange(location: 10, length: 0))
+        // Nor Option-Return or Control-Return (#753 review): every key that inserts a break.
+        for command in [#selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)),
+                        #selector(NSResponder.insertLineBreak(_:))] {
+            editor.doCommand(by: command)
+            #expect(editor.string == "swift test", "\(command)")
+        }
     }
 }
