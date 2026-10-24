@@ -187,8 +187,13 @@ public final class KeychainManager: @unchecked Sendable {
         case .notFound: return [:]
         case .failure(let bad): throw SecretsError.status(bad)
         case .success:
-            guard let data = dataTypeRef as? Data else { return [:] }
-            return (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
+            // An item that won't decode is unreadable, not empty: read as empty, the next update
+            // would replace it with only its own keys (#761 review), and #678 treats it as missing.
+            guard let data = dataTypeRef as? Data,
+                  let secrets = try? JSONDecoder().decode([String: String].self, from: data) else {
+                throw SecretsError.status(errSecDecode)
+            }
+            return secrets
         }
     }
 
