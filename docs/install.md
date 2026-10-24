@@ -31,7 +31,9 @@ A command can replace that item without asking you, but Iris's next read of a re
 Clicking Deny there leaves the item untouched, and for that launch Iris uses protective values: the
 official provider addresses, built-in limits, and the sandbox, Vibecop and prompt-injection
 protection on. With the sandbox on and no container runtime, it refuses commands rather than running
-them on the host. A launch notice says what happened.
+them on the host. A launch notice says what happened. An item that reads but isn't one Iris can
+decode is damaged: Iris uses the same protective values on every launch and never saves over it, and
+its notice says how to delete the item and start over, entering your API keys again (#761).
 
 One of these settings found in the defaults domain (a `defaults write`, or an older version of Iris
 writing back what it read) is ignored and deleted. If its value differs from yours, a launch notice
