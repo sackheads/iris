@@ -360,7 +360,9 @@ struct ToolExecutor {
     /// The sentence for a job or watch whose profile, read again at the write, isn't the one the
     /// creation gate decided and the person was shown (#660): nothing is written either way.
     /// A registration whose watch changed between its read and its write (#713): nothing written.
-    static let watchChangedSinceRead = "Not saved: this folder's watch changed while this call was being decided (another call changed it), so neither is used. Ask again to see the current one."
+    /// Any change counts, a run the scheduler recorded too, because the write is a whole copy of the
+    /// job as read and would put back whatever changed since.
+    static let watchChangedSinceRead = "Not saved: this folder's watch changed while this call was being decided (another registration, or the watch running), so nothing was written. Ask again to work from the current one."
 
     static let profileChangedSinceApproval = "Not created: the job's profile changed between the approval and the write (another call changed the watch it replaces), so neither is used. Ask again to see the current one."
 
