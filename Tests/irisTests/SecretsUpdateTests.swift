@@ -38,7 +38,7 @@ struct SecretsUpdateTests {
         #expect((0..<64).allSatisfy { after["k\($0)"] == "\($0)" })
     }
 
-    @Test("a read that fails saves nothing over the item, and a change that throws saves nothing")
+    @Test("a read that fails saves nothing over the item, in either form, and a change that throws saves nothing")
     func failuresSaveNothing() throws {
         let keychain = keychain()
         keychain.replaceSecrets(["a": "1"])
@@ -46,6 +46,11 @@ struct SecretsUpdateTests {
         #expect(throws: (any Error).self) { try keychain.updateSecretsOrThrow { $0 = ["b": "2"] } }
         keychain.simulateReadFailure(nil)
         #expect(keychain.loadSecrets() == ["a": "1"])
+        // The non-throwing form saves nothing over a failed read either (#761 review).
+        keychain.simulateReadFailure(errSecInteractionNotAllowed)
+        keychain.updateSecrets { $0["b"] = "2" }
+        keychain.simulateReadFailure(nil)
+        #expect(keychain.loadSecrets() == ["a": "1"], "not replaced by an item holding only b")
         struct Stop: Error {}
         #expect(throws: Stop.self) { try keychain.updateSecretsOrThrow { $0["c"] = "3"; throw Stop() } }
         #expect(keychain.loadSecrets() == ["a": "1"])
