@@ -35,6 +35,21 @@ enum Motion {
     /// cannot be compared.
     static func slides(_ reduceMotion: ReduceMotion = .system) -> Bool { !reduceMotion.isOn }
 
+    /// How a composer popup or the session strip slides in or out (#598).
+    static let reveal = Animation.easeOut(duration: 0.18)
+
+    /// Runs `body`, inside `reveal` when it makes a view appear or go (`wasShowing` to
+    /// `isShowing`), so that view's `slide` transition animates; a change that keeps it showing
+    /// (new suggestions) is left unanimated. Under Reduce Motion there's no animation, so the view
+    /// simply appears. Returns whether it animated.
+    @discardableResult
+    static func revealing(from wasShowing: Bool, to isShowing: Bool, _ reduceMotion: ReduceMotion = .system,
+                          _ body: () -> Void) -> Bool {
+        guard wasShowing != isShowing, let animation = animation(reveal, reduceMotion) else { body(); return false }
+        SwiftUI.withAnimation(animation, body)
+        return true
+    }
+
     /// SwiftUI's `withAnimation`, with `animation(_:_:)`'s rule.
     static func withAnimation<Result>(_ base: Animation? = .default, _ reduceMotion: ReduceMotion = .system,
                                       _ body: () throws -> Result) rethrows -> Result {

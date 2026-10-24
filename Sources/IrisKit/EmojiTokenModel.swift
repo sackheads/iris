@@ -27,12 +27,13 @@ final class EmojiTokenModel: PopupNav {
         guard !hits.isEmpty else { clear(); return }
         if suggestions.map(\.id) != hits.map(\.id) { selectedIndex = 0 }
         activeRange = token.range
-        suggestions = hits
+        // #598: appearing inside an animation, so the popup's slide transition runs.
+        Motion.revealing(from: isShowing, to: true) { suggestions = hits }
     }
 
     func clear() {
         activeRange = nil
-        suggestions = []
+        Motion.revealing(from: isShowing, to: false) { suggestions = [] }
         selectedIndex = 0
     }
 
