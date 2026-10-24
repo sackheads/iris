@@ -93,10 +93,12 @@ struct PromptInjectionGuard {
             return line.replacingOccurrences(of: pattern, with: "", options: [.caseInsensitive])
         }
         let regex = wordRegexes[pattern] ?? wordRegex(pattern)
-        return regex.stringByReplacingMatches(in: line, range: NSRange(line.startIndex..., in: line), withTemplate: "$1")
+        return regex.stringByReplacingMatches(in: line, range: NSRange(line.startIndex..., in: line), withTemplate: "")
     }
     private static func wordRegex(_ pattern: String) -> NSRegularExpression {
-        try! NSRegularExpression(pattern: "(^|[^A-Za-z0-9_])" + NSRegularExpression.escapedPattern(for: pattern),
+        // A lookbehind, not a consumed character: `system:system:` would otherwise keep its second
+        // marker, since the first match takes the `:` the second needs before it (#742 review).
+        try! NSRegularExpression(pattern: "(?<![A-Za-z0-9_])" + NSRegularExpression.escapedPattern(for: pattern),
                                  options: [.caseInsensitive])
     }
     /// Built once: `malRolePatterns` covers tier 1's own list too.
