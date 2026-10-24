@@ -25,6 +25,8 @@ struct ModelLED: View {
     /// The error text behind an `.error` state, for the tooltip. Passed alongside rather than
     /// carried in the case so `LEDState` stays `CaseIterable` — several tests enumerate it.
     var failure: String? = nil
+    /// How big it's drawn (#672).
+    var size: LEDBarSize = .regular
 
     enum LEDState: CaseIterable {
         case off, configured, ready, active, downloading, unprovisioned, error
@@ -59,14 +61,14 @@ struct ModelLED: View {
     }
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: size.of(5)) {
             // Core Animation, not `.repeatForever`: that re-laid out the whole window every frame
             // a model worked, about 11% CPU (#557).
-            LEDDotView(state: state)
-                .frame(width: LEDDotView.side, height: LEDDotView.side)
+            LEDDotView(state: state, side: size.of(LEDDotView.side))
+                .frame(width: size.of(LEDDotView.side), height: size.of(LEDDotView.side))
 
             Text(label)
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .font(.system(size: size.of(10), weight: .semibold, design: .monospaced))
                 .foregroundColor(state == .off ? .secondary : .primary)
         }
         // No `.help` here: inside `ModelLEDBar`'s button label it never shows, so the bar puts
@@ -104,6 +106,20 @@ struct ModelLED: View {
 
 // MARK: - LED Bar
 
+/// The bar's size (#672): every measure is the regular one times `scale`. Fixed presets, not a
+/// continuous scale, so the row's height is one of a few known values and never follows a live
+/// resize (the composer stack's rows must stay bounded, Invariant 8).
+struct LEDBarSize: Equatable, Sendable {
+    let scale: CGFloat
+    func of(_ regular: CGFloat) -> CGFloat { regular * scale }
+
+    static let regular = LEDBarSize(scale: 1)
+    static let large = LEDBarSize(scale: 1.25)
+    /// The pane width from which the large bar is used: wide enough that the bigger row costs the
+    /// message list nothing it would miss.
+    static let largeFromWidth: CGFloat = 960
+}
+
 struct ModelLEDBar: View {
     @Bindable var config = ConfigManager.shared
     var isThinking: Bool = false
@@ -123,19 +139,13 @@ struct ModelLEDBar: View {
     @State private var shown: LEDKind?
 
     var body: some View {
-        HStack(spacing: 16) {
-            ForEach(LEDKind.allCases, id: \.self) { led($0) }
+        // The first that fits the pane's width (#672): the large bar only on a wide pane, since its
+        // minimum width is `largeFromWidth`; the regular one otherwise. No GeometryReader, so the
+        // row's height is the chosen bar's own.
+        ViewThatFits(in: .horizontal) {
+            bar(.large).frame(minWidth: LEDBarSize.largeFromWidth)
+            bar(.regular)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 7)
-                .fill(Color.black.opacity(0.30))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 7)
-                        .stroke(Color.white.opacity(0.10), lineWidth: 0.5)
-                )
-        )
         .task {
             guard DebugForceAnimation.isOn(.led) else { return }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -143,11 +153,28 @@ struct ModelLEDBar: View {
         }
     }
 
+    /// The bar at one size.
+    func bar(_ size: LEDBarSize) -> some View {
+        HStack(spacing: size.of(16)) {
+            ForEach(LEDKind.allCases, id: \.self) { led($0, size: size) }
+        }
+        .padding(.horizontal, size.of(14))
+        .padding(.vertical, size.of(6))
+        .background(
+            RoundedRectangle(cornerRadius: size.of(7))
+                .fill(Color.black.opacity(0.30))
+                .overlay(
+                    RoundedRectangle(cornerRadius: size.of(7))
+                        .stroke(Color.white.opacity(0.10), lineWidth: 0.5)
+                )
+        )
+    }
+
     /// One light, with its label, as the click target: the 10pt dot alone is too small (#88).
-    private func led(_ kind: LEDKind) -> some View {
+    private func led(_ kind: LEDKind, size: LEDBarSize) -> some View {
         let failure = failure(of: kind)
         let state = state(of: kind, failure: failure)
-        let light = ModelLED(label: kind.label, state: state, tierNumber: kind.tierNumber, failure: failure)
+        let light = ModelLED(label: kind.label, state: state, tierNumber: kind.tierNumber, failure: failure, size: size)
         return Button { shown = kind } label: {
             light.contentShape(Rectangle())
         }
