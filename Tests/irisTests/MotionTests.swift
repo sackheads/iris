@@ -88,7 +88,13 @@ struct RevealTests {
     nonisolated func viewAnimatesPopups() throws {
         let chat = try Self.source("ChatView.swift")
         for model in ["emojiModel", "slashModel"] {
-            #expect(chat.contains(".animation(Motion.animation(Motion.reveal), value: \(model).isShowing)"), "\(model)")
+            let site = chat.range(of: ".animation(Motion.animation(Motion.reveal), value: \(model).isShowing)")
+            #expect(site != nil, "\(model)")
+            // On the popups' own stack, inside the column: a send clears a popup in the same
+            // transaction as the new row, and the whole column must not animate with it.
+            let goalPanel = chat.range(of: "if conv.goalContract?.state == .draft")
+            #expect(goalPanel != nil, "precondition: the scan found the goal panel")
+            if let site, let goalPanel { #expect(site.lowerBound < goalPanel.lowerBound, "\(model)'s animation is on the column") }
         }
     }
 

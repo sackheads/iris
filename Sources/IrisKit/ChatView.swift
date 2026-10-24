@@ -364,15 +364,23 @@ struct ChatView: View {
                         }
                     }
                     
-                    if emojiModel.isShowing {
-                        EmojiAutoCompleteView(model: emojiModel)
-                            .transition(Motion.slide())
-                    }
+                    // #598: the popups' slide runs only inside an animation. Their models change from
+                    // NSTextView's edit callbacks, where a `withAnimation` crashed the app (#757's GUI
+                    // check), so it is attached here, keyed to each popup's visibility, and only on
+                    // this stack: a send that clears a popup must not animate the whole column.
+                    VStack(spacing: 0) {
+                        if emojiModel.isShowing {
+                            EmojiAutoCompleteView(model: emojiModel)
+                                .transition(Motion.slide())
+                        }
 
-                    if slashModel.isShowing {
-                        SlashCommandAutoCompleteView(model: slashModel)
-                            .transition(Motion.slide())
+                        if slashModel.isShowing {
+                            SlashCommandAutoCompleteView(model: slashModel)
+                                .transition(Motion.slide())
+                        }
                     }
+                    .animation(Motion.animation(Motion.reveal), value: emojiModel.isShowing)
+                    .animation(Motion.animation(Motion.reveal), value: slashModel.isShowing)
 
                     if conv.goalContract?.state == .draft {
                         GoalContractPanel(state: state, conversation: conv)
@@ -446,11 +454,6 @@ struct ChatView: View {
                         .allowsHitTesting(false)
                     }
                 }
-                // #598: the popups' slide runs only inside an animation. Their models change from
-                // NSTextView's edit callbacks, where a `withAnimation` crashed the app (#757's GUI
-                // check), so the animation is attached here, keyed to each popup's visibility.
-                .animation(Motion.animation(Motion.reveal), value: emojiModel.isShowing)
-                .animation(Motion.animation(Motion.reveal), value: slashModel.isShowing)
                 .background(Color(NSColor.textBackgroundColor))
                 .navigationTitle(conv.title)
                 .toolbar {
