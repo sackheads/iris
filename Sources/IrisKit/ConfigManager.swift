@@ -494,6 +494,8 @@ class ConfigManager: @unchecked Sendable {
         self.defaultEmojiSkinTone = saved.object(forKey: "DEFAULT_EMOJI_SKIN_TONE") as? Int ?? SkinTone.none.rawValue
         
         var keychainSecrets = guardedWrite ?? secretsRead ?? KeychainManager.shared.loadSecrets()
+        // What the item held, so the save below writes only what this launch changed (#750).
+        let secretsBefore = secretsRead ?? keychainSecrets
         var secretsMigrated = guardedWrite != nil
         
         func migrate(key: String, dest: inout String) {
@@ -572,7 +574,11 @@ class ConfigManager: @unchecked Sendable {
         self.googleRefreshToken = gRefreshToken
         
         if secretsMigrated {
-            (keychain ?? KeychainManager.shared).saveSecrets(keychainSecrets)
+            // Only the keys this launch moved or decided, onto the item as it is now (#750).
+            let moved = keychainSecrets
+            (keychain ?? KeychainManager.shared).updateSecrets { current in
+                for (key, value) in moved where secretsBefore[key] != value { current[key] = value }
+            }
         }
         self.googleTokenExpiry = saved.double(forKey: "GOOGLE_TOKEN_EXPIRY")
         self.enableSandboxing = guardedBool(.enableSandboxing, "ENABLE_SANDBOXING")
@@ -686,9 +692,7 @@ class ConfigManager: @unchecked Sendable {
     }
     
     private func updateSecret(key: String, value: String) {
-        var secrets = KeychainManager.shared.loadSecrets()
-        secrets[key] = value
-        KeychainManager.shared.saveSecrets(secrets)
+        KeychainManager.shared.updateSecrets { $0[key] = value }
         secretsCache = nil
     }
 }

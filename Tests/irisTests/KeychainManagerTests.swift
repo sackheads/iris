@@ -16,9 +16,9 @@ struct KeychainManagerTests {
     @Test("in-memory secrets round-trip")
     func testRoundTrip() {
         let previous = KeychainManager.shared.loadSecrets()
-        defer { KeychainManager.shared.saveSecrets(previous) }
+        defer { KeychainManager.shared.replaceSecrets(previous) }
 
-        KeychainManager.shared.saveSecrets(["API_KEY": "abc123"])
+        KeychainManager.shared.replaceSecrets(["API_KEY": "abc123"])
         #expect(KeychainManager.shared.loadSecrets()["API_KEY"] == "abc123")
     }
 
@@ -38,7 +38,7 @@ struct KeychainManagerTests {
     func throwingAPIRoundTrip() throws {
         let m = KeychainManager(serviceSuffix: ".test-throwing")
         #expect(try m.secretsOrThrow(service: "svc") == [:])
-        try m.saveSecretsOrThrow(["k": "v"], service: "svc")
+        try m.replaceSecretsOrThrow(["k": "v"], service: "svc")
         #expect(try m.secretsOrThrow(service: "svc") == ["k": "v"])
     }
 }

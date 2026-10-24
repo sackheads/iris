@@ -426,9 +426,8 @@ struct PluginDetailView: View {
 
     private func saveSecret(_ key: String) {
         let service = KeychainManager.pluginService(plugin.manifest.id)
-        var secrets = KeychainManager.shared.secrets(service: service)
-        secrets[key] = secretDrafts[key]
-        KeychainManager.shared.saveSecrets(secrets, service: service)
+        let value = secretDrafts[key]
+        KeychainManager.shared.updateSecrets(service: service) { $0[key] = value }
         Task {
             await PluginManager.shared.loadAll()
             await PluginsSettingsView.restartMCP(forPlugin: plugin.manifest.id)

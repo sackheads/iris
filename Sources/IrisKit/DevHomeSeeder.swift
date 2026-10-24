@@ -88,7 +88,7 @@ enum DevHomeSeeder {
             for service in services {
                 let secrets = try sourceKeychain.secretsOrThrow(service: service)
                 guard !secrets.isEmpty else { continue }
-                try destKeychain.saveSecretsOrThrow(secrets, service: service)
+                try destKeychain.replaceSecretsOrThrow(secrets, service: service)   // a whole item, copied
                 report.keychainServicesCopied += 1
                 report.keychainServices.append(destKeychain.resolvedService(service))
             }
