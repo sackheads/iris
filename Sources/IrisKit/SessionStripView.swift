@@ -92,6 +92,9 @@ struct SessionStripView: View {
         // Fix round 1, item 7: hoisted above the `isHidden` conditional (onto the `Group`, which
         // always exists) so the sheet's own presentation state survives the strip's content being
         // momentarily absent.
+        // #598: the strip's slide transition runs only inside an animation, and its visibility
+        // changes with the sessions, outside any; this gives that change one.
+        .animation(Motion.animation(Motion.reveal), value: isHidden)
         .onChange(of: otherSessions.isEmpty) { _, empty in
             // The strip emptied out (nothing left but main): drop any manual collapse so the
             // NEXT subagent/evaluator run starts expanded again, per the ruling above.
