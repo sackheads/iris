@@ -172,6 +172,18 @@ struct GuardedSettingsTests {
         #expect(load.notices.count == 1 && load.notices[0].contains("couldn't read"))
     }
 
+    @Test("a damaged item (read, but undecodable) fails closed too, and its notice says how to start it over (#761)")
+    func damagedItem() {
+        let load = GuardedSettings.load(item: .unreadable(errSecDecode), defaults: [:], defaultsMarker: true)
+        #expect(load.state == .unreadable(errSecDecode))
+        #expect(load.values == protective)
+        #expect(load.write == nil)
+        let service = KeychainManager.shared.resolvedService(KeychainManager.legacyService)
+        #expect(load.notices == [GuardedSettings.damagedNotice(service: service)])
+        #expect(load.notices[0].contains("security delete-generic-password -s \(service) -a all-keys"))
+        #expect(!load.notices[0].contains("deny"), "not the denied-prompt notice")
+    }
+
     @Test("a stored value that fails its type check is protective, not trusted")
     func invalidStoredValue() {
         let item = [GuardedSettings.markerKey: "1", "ENABLE_SANDBOXING": "maybe", "JOB_DAILY_TOKEN_BUDGET": "-5"]

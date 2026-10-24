@@ -116,6 +116,11 @@ enum GuardedSettings {
         return "Changes here last only until Iris quits: its Keychain item couldn't be read at launch, so nothing is saved to it."
     }
 
+    /// The item reads but isn't one Iris can decode: damaged, and never written over (#761).
+    static func damagedNotice(service: String) -> String {
+        "Iris's Keychain item holding its API keys and protected settings is damaged: it can be read, but not as anything Iris wrote. So Iris is using protective values (official provider addresses, built-in limits, and the sandbox, Vibecop and prompt-injection protection on) and won't save anything to that item. To start it over, quit Iris, delete the item (Keychain Access, \"\(service)\", or in Terminal: security delete-generic-password -s \(service) -a \(KeychainManager.account)), then open Iris and enter your API keys again in Settings."
+    }
+
     static let upgradeNotice = "Iris moved its protected settings into the Keychain (first launch of this version). If you didn't just update Iris, something reset them: check Settings → Advanced (Sandboxing, Job Limits, Agent Limits) and Settings → Vibecop."
 
     /// The approval dialog's warning when a call's text names Iris's own keychain service or
@@ -184,6 +189,12 @@ enum GuardedSettings {
         let protective = Dictionary(uniqueKeysWithValues: GuardedKey.allCases.map { ($0, $0.protective) })
 
         switch item {
+        case .unreadable(let status) where status == errSecDecode:
+            // Read, but not a dictionary Iris wrote (#761 review): nothing Iris can do will make it
+            // readable, so the notice says how to start the item over.
+            return Load(values: protective, state: .unreadable(status),
+                        notices: [damagedNotice(service: KeychainManager.shared.resolvedService(KeychainManager.legacyService))],
+                        write: nil, removeFromDefaults: [], setDefaultsMarker: false)
         case .unreadable(let status):
             return Load(values: protective, state: .unreadable(status),
                         notices: ["Iris couldn't read its protected settings in the Keychain (status \(status)), so it is using protective values: official provider addresses, built-in limits, and the sandbox, Vibecop and prompt-injection protection on. It won't change that Keychain item until it can read it. If you didn't just deny a Keychain prompt for Iris, something else may have changed the item."],

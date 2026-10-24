@@ -5,7 +5,8 @@ public final class KeychainManager: @unchecked Sendable {
     public static let shared = KeychainManager(serviceSuffix: BuildIdentity.current.keychainServiceSuffix)
 
     static let legacyService = "com.iris.secrets"
-    private let account = "all-keys"
+    static let account = "all-keys"
+    private var account: String { Self.account }
 
     public static let mcpFileService = "iris.mcp"
     public static func pluginService(_ id: String) -> String { "iris.plugin.\(id)" }
