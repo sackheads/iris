@@ -22,11 +22,17 @@ struct MotionTests {
         #expect(Motion.appearance(spring, off) == spring)
     }
 
+}
+
+/// #642: a source scan, in a suite of its own that isn't `@MainActor`. In the suite above,
+/// `nonisolated` didn't move it: Swift Testing ran the case on the main thread, and a scan held
+/// main for a quarter second of a parallel run's start, where every `@MainActor` suite waits on it.
+@Suite("SwiftUI transitions under Reduce Motion (#562): source scan")
+struct MotionSourceScanTests {
     /// Every SwiftUI animation and transition goes through `Motion`, so a new one that does not
     /// fails here until it is routed, or allowlisted on purpose with a reason.
     @Test("no withAnimation, .animation or .transition outside Motion.swift")
-    nonisolated func everySiteGoesThroughMotion() throws {
-        // Off the main actor: a scan of the sources held it for seconds in a parallel run (#637).
+    func everySiteGoesThroughMotion() throws {
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources/IrisKit")
         let raw = [

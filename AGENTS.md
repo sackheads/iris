@@ -152,7 +152,9 @@ the test at its bound instead, and give a suite that starts tasks or processes
 run the main actor is seconds behind, while dozens of `@MainActor` suites set up their stores at
 once, so a `withTimeout` or deadline whose work hops to it misses, and the miss looks like a flake
 far from its cause (#634, #642). Keep the hop outside the bound, or drive the deadline from an
-injected clock. Hold the main thread in a test only as briefly as the claim needs: read an
+injected clock. Heavy synchronous work (a scan of the sources) goes in a suite that isn't
+`@MainActor`: `nonisolated` on a test inside one doesn't move it, since Swift Testing ran the case
+on the main thread (#642). Hold the main thread in a test only as briefly as the claim needs: read an
 ordering at a hook rather than hold main until it happens (#637).
 
 **A test times elapsed bounds with `TestClock`, not `Date()`.** `Date()` counts the Mac's sleep, and a

@@ -213,9 +213,15 @@ struct HomeMountTests {
         #expect(decoded.homeWritableOptIn == nil)
     }
 
+}
+
+/// #642: a source scan, in a suite of its own that isn't `@MainActor`. In the suite above,
+/// `nonisolated` didn't move it: Swift Testing ran the case on the main thread, and a scan held
+/// main for a quarter second of a parallel run's start, where every `@MainActor` suite waits on it.
+@Suite("Home-writable sandbox mounts need the person's opt-in (#611): source scan")
+struct HomeMountSourceScanTests {
     @Test("only the UI sets the opt-in: no tool, system event or job reaches the setter or the field")
-    nonisolated func humanOnly() throws {
-        // Off the main actor: a scan of the sources held it for seconds in a parallel run (#637).
+    func humanOnly() throws {
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().appendingPathComponent("Sources/IrisKit")
         var setterCallers: Set<String> = [], fieldWriters: Set<String> = []
