@@ -43,9 +43,15 @@ struct RunJobURLEventsTests {
         #expect(RunJobURLEvents.installForApp(bundleURL: Bundle.main.bundleURL) == nil, "a test runner is not an app")
     }
 
+}
+
+/// #642: a source scan, in a suite of its own that isn't `@MainActor`. In the suite above,
+/// `nonisolated` didn't move it: Swift Testing ran the case on the main thread, and a scan held
+/// main for a quarter second of a parallel run's start, where every `@MainActor` suite waits on it.
+@Suite("Run-job URL events (D6): source scan")
+struct RunJobURLEventsSourceScanTests {
     @Test("no URL file logs anything: a log line would keep a live token")
-    nonisolated func nothingLogs() throws {
-        // Off the main actor: a scan of the sources held it for seconds in a parallel run (#637).
+    func nothingLogs() throws {
         let sources = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/IrisKit")

@@ -210,22 +210,6 @@ struct AgentProfileTests {
         #expect(kept.agentProfile == "reviewer" && kept.agentProfileSnapshot == nil)
     }
 
-    @Test("only the UI starts a conversation on a profile or clears one: no tool, job or event reaches either")
-    nonisolated func onlyTheUI() throws {
-        let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().appendingPathComponent("Sources/IrisKit")
-        var starters: Set<String> = [], clearers: Set<String> = []
-        for file in try FileManager.default.contentsOfDirectory(atPath: sources.path) where file.hasSuffix(".swift") {
-            let text = try String(contentsOf: sources.appendingPathComponent(file), encoding: .utf8)
-            for line in text.split(separator: "\n") {
-                if line.contains("createNewConversation(") && line.contains("agentProfile:") { starters.insert(file) }
-                if line.contains("clearAgentProfile(") && !line.contains("func clearAgentProfile") { clearers.insert(file) }
-            }
-        }
-        #expect(starters == ["ChatView.swift"], "\(starters)")
-        #expect(clearers == ["ChatView.swift"], "\(clearers)")
-    }
-
     // MARK: The prompt
 
     private final class Recorder: LLMClientProtocol, @unchecked Sendable {
@@ -271,5 +255,27 @@ struct AgentProfileTests {
         await engine.processInput("go", source: "System", conversationId: id)
         let prompt = try #require(client.systemPrompts.first)
         #expect(prompt.hasPrefix("ROLE: careful code reviewer."), "the role prompt, not the default: \(prompt.prefix(80))")
+    }
+}
+
+/// #642: a source scan, in a suite of its own that isn't `@MainActor`. In the suite above,
+/// `nonisolated` didn't move it: Swift Testing ran the case on the main thread, and a scan held
+/// main for a quarter second of a parallel run's start, where every `@MainActor` suite waits on it.
+@Suite("Agent profiles (#465): source scan")
+struct AgentProfileSourceScanTests {
+    @Test("only the UI starts a conversation on a profile or clears one: no tool, job or event reaches either")
+    func onlyTheUI() throws {
+        let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Sources/IrisKit")
+        var starters: Set<String> = [], clearers: Set<String> = []
+        for file in try FileManager.default.contentsOfDirectory(atPath: sources.path) where file.hasSuffix(".swift") {
+            let text = try String(contentsOf: sources.appendingPathComponent(file), encoding: .utf8)
+            for line in text.split(separator: "\n") {
+                if line.contains("createNewConversation(") && line.contains("agentProfile:") { starters.insert(file) }
+                if line.contains("clearAgentProfile(") && !line.contains("func clearAgentProfile") { clearers.insert(file) }
+            }
+        }
+        #expect(starters == ["ChatView.swift"], "\(starters)")
+        #expect(clearers == ["ChatView.swift"], "\(clearers)")
     }
 }
