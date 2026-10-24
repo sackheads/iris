@@ -1061,7 +1061,7 @@ struct SettingsView: View {
             .formStyle(.grouped)
             .padding(20)
             .tabItem {
-                Label("Advanced", systemImage: "lock.shield")
+                Label("Advanced", systemImage: "slider.horizontal.3")
             }
             .tag(SettingsTab.advanced)
 
