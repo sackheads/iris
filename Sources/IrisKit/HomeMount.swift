@@ -46,10 +46,10 @@ enum HomeMount {
         if JobGrant.isCredentialStore(p, home: home) {
             return "it is or holds a credential store (~/.ssh, ~/.aws, the Keychains folder and the like)"
         }
-        // #616 review: a workspace at, inside or holding a login-PATH folder (`/opt/homebrew/bin` is
+        // #616 review, #717: a workspace that is or holds a login-PATH folder (`/opt/homebrew/bin` is
         // the person's own on Apple silicon) lets the VM leave a program their Terminal then runs.
         if let entry = JobGrant.loginPathEntry(touching: IrisPaths.canonicalPath(IrisEngine.expandTilde(path)), loginPath: loginPath) {
-            return "it is, holds or sits inside \(entry), a folder on your login PATH, so the sandbox could leave a program your Terminal then runs"
+            return "it is or holds \(entry), a folder on your login PATH, so the sandbox could leave a program your Terminal then runs"
         }
         let guarded = [paths] + (release.map { [$0] } ?? [])
         for dir in guarded.flatMap({ [$0.configDir.path, $0.pluginsDir.path] }) {
