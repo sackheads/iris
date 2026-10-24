@@ -127,11 +127,15 @@ struct WorkspaceIrisTrustTests {
         let last = state.conversations.first { $0.id == cid }?.messages.last?.content ?? ""
         #expect(last.contains("`.iris/permissions.json`") && last.contains("Review Workspace Rules"))
     }
+}
 
-    // Off the main actor: it reads every source file, which held main for seconds in a parallel
-    // run and stalled every suite waiting on it (#637).
+/// #642: a source scan, in a suite of its own that isn't `@MainActor`. In the suite above,
+/// `nonisolated` didn't move it: Swift Testing ran the case on the main thread, and a scan held
+/// main for a quarter second of a parallel run's start, where every `@MainActor` suite waits on it.
+@Suite("Workspace rules are trusted only as Iris wrote them (#625): source scan")
+struct WorkspaceIrisTrustSourceScanTests {
     @Test("only the UI trusts rules: no tool, system event or job reaches the Trust action")
-    nonisolated func trustIsHumanOnly() throws {
+    func trustIsHumanOnly() throws {
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().appendingPathComponent("Sources/IrisKit")
         var trustCallers: Set<String> = [], trustReviewedCallers: Set<String> = []

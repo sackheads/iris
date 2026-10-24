@@ -183,12 +183,18 @@ struct StreamingTextsTests {
         a.endEngineTurn(for: id)
     }
 
+}
+
+/// #642: a source scan, in a suite of its own that isn't `@MainActor`. In the suite above,
+/// `nonisolated` didn't move it: Swift Testing ran the case on the main thread, and a scan held
+/// main for a quarter second of a parallel run's start, where every `@MainActor` suite waits on it.
+@Suite("Streamed replies stay out of conversations until they end (#541): source scan")
+struct StreamingTextsSourceScanTests {
     /// The root must never read live text (#541): a view that starts calling the live accessors
     /// stays green in the observation tests above, so every call site is listed here, and a new
     /// one fails until it is added on purpose.
     @Test("the live accessors are called only where a row, copy, export, another session or the save reads")
-    nonisolated func liveAccessorCallSites() throws {
-        // Off the main actor: a scan of the sources held it for seconds in a parallel run (#637).
+    func liveAccessorCallSites() throws {
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources/IrisKit")
         let allowed: [String: Int] = [

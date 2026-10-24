@@ -63,9 +63,15 @@ struct GraderNoMountTests {
         #expect(seen.prompt.contains("already execute there"))
     }
 
+}
+
+/// #642: a source scan, in a suite of its own that isn't `@MainActor`. In the suite above,
+/// `nonisolated` didn't move it: Swift Testing ran the case on the main thread, and a scan held
+/// main for a quarter second of a parallel run's start, where every `@MainActor` suite waits on it.
+@Suite("The grader mounts only a bound workspace (#611): source scan")
+struct GraderNoMountSourceScanTests {
     @Test("callers hand the evaluator the raw workspace: only it and the approval resolve the cwd fallback")
-    nonisolated func callersPassTheRawWorkspace() throws {
-        // Off the main actor: a scan of the sources held it for seconds in a parallel run (#637).
+    func callersPassTheRawWorkspace() throws {
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().appendingPathComponent("Sources/IrisKit")
         var callers: [String] = []
