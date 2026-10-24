@@ -40,6 +40,21 @@ struct Tier2ScoresTests {
         #expect(row.max == 0.1, "the older scores aged out")
     }
 
+    @Test("at most 100 tags, the least recently recorded dropped first, across a save too")
+    func boundedTags() throws {
+        let url = url()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let store = Tier2Scores(url: url)
+        for i in 0..<Tier2Scores.maxTags { store.record(tag: "tool_output_mcp_\(i)", score: 0.1, outcome: .passed) }
+        store.record(tag: "tool_output_mcp_0", score: 0.2, outcome: .passed)   // 0 is fresh again; 1 is now the stalest
+        store.save()
+        let reloaded = Tier2Scores(url: url)
+        reloaded.record(tag: "new_tag", score: 0.3, outcome: .passed)
+        let tags = Set(reloaded.summary().map(\.tag))
+        #expect(tags.count == Tier2Scores.maxTags)
+        #expect(tags.contains("new_tag") && tags.contains("tool_output_mcp_0") && !tags.contains("tool_output_mcp_1"))
+    }
+
     @Test("saved and read back; a file that won't read starts over; a NaN is never recorded")
     func persistence() throws {
         let url = url()
