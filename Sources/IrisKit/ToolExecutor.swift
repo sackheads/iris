@@ -653,7 +653,7 @@ struct ToolExecutor {
             // doesn't run (the gate's check could be stale by now).
             var gitRepository: GitRead.Repository?
             if restrictedPath != nil, GitRead.argv(command) != nil {
-                guard case .roots(let roots) = WritableRootsRecord().contents(),
+                guard case .roots(let roots) = WritableRootsRecord(paths: irisPaths ?? .default).contents(),
                       let repo = GitRead.ownRepository(cwd: directory ?? FileManager.default.currentDirectoryPath, writableRoots: roots) else {
                     return GitConfigGuard.withNotices(GitRead.notRunHere, before: gitBefore, after: nil)
                 }
