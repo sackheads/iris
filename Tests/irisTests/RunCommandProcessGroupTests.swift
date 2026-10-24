@@ -143,12 +143,25 @@ struct RunCommandProcessGroupTests {
     func normalExitKillsPipeHolder() async {
         let nap = Self.marker()
         defer { Self.killAll(nap) }
-        let started = TestClock.now()
         // The background sleep inherits stdout; before #353 its read blocked until the deadline.
-        let out = await ToolExecutor().runCommand("(sleep \(nap) &); echo done", cwd: nil, timeoutSeconds: 20)
-        let wall = TestClock.seconds(since: started)
-        #expect(out == "done\n")
-        #expect(wall < ProcessGroupRunner.strayGraceSeconds + 2, "returned after \(wall)s")
+        // Through the runner directly (#429), and timed by it from the leader's exit (#759): the
+        // stray is killed once the grace is up, on time. A wall bound from this call timed the
+        // shell's start-up and the pool's under load, not the runner.
+        let result = await ProcessGroupRunner().run(
+            executable: "/bin/zsh", arguments: ["-c", "(sleep \(nap) &); echo done"],
+            environment: BinaryResolver.commandEnvironment(base: ProcessInfo.processInfo.environment),
+            currentDirectory: nil, timeoutSeconds: 20)
+        guard case .success(let output) = result else { Issue.record("expected success, got \(result)"); return }
+        #expect(String(decoding: output.stdout, as: UTF8.self) == "done\n")
+        #expect(!output.timedOut, "it waited for the deadline")
+        let t = output.timeline
+        if let exited = t.leaderExited, let killed = t.groupKilled {
+            let after = killed - exited
+            #expect(after >= ProcessGroupRunner.strayGraceSeconds - 0.05, "killed \(after)s after the leader exited, before the grace")
+            #expect(after < ProcessGroupRunner.strayGraceSeconds + 1, "killed \(after)s after the leader exited: late (Invariant 4)")
+        } else {
+            Issue.record("the stray holding the pipe was never killed: \(t)")
+        }
         #expect(await Self.gone("sleep \(nap)", within: 3), "sleep \(nap) was left running")
     }
 
@@ -166,22 +179,42 @@ struct RunCommandProcessGroupTests {
         // latency is between this call and the runner's own work, so starting the clock here
         // measures the real property: the runner returns once the leader exits, without waiting
         // on a background job that no longer holds its pipes.
+        //
+        // The job lets go of the pipes before the leader exits (#759): it redirects, then leaves a
+        // marker the leader waits for. Left to the scheduler, a job started under load could still
+        // hold them when the leader exited, and the runner would rightly treat it as a stray. The
+        // property is then that it survives: past the stray grace the runner SIGKILLs the group,
+        // the job included, so a job alive after the call is one the runner never charged the grace.
+        // Not a wall bound against the grace: that timed the shell's own start-up under load.
+        let detached = FileManager.default.temporaryDirectory.appendingPathComponent("iris-759-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: detached) }
         let runner = ProcessGroupRunner()
         let started = TestClock.now()
         let result = await runner.run(executable: "/bin/zsh",
-                                       arguments: ["-c", "(sleep \(nap) >/dev/null 2>&1 &); echo started"],
+                                       arguments: ["-c", "( exec >/dev/null 2>&1 </dev/null; : > '\(detached)'; exec sleep \(nap) ) &"
+                                                   + " while [ ! -e '\(detached)' ]; do sleep 0.01; done; echo started"],
                                        environment: BinaryResolver.commandEnvironment(base: ProcessInfo.processInfo.environment),
                                        currentDirectory: nil)
         let wall = TestClock.seconds(since: started)
-        #expect(wall < ProcessGroupRunner.strayGraceSeconds, "returned after \(wall)s; looks like it paid the stray grace")
+        #expect(wall < 10, "returned after \(wall)s; it waited on a job that held no pipe")
         guard case .success(let output) = result else {
             Issue.record("expected success, got \(result)")
             return
         }
+        // Timed by the runner from the leader's exit, not from this call (#759): it returns as the
+        // leader exits, never paying the stray grace, and never kills the group.
+        let t = output.timeline
+        #expect(t.groupKilled == nil, "the runner killed a group whose job held no pipe")
+        if let exited = t.leaderExited, let finished = t.finished {
+            #expect(finished - exited < ProcessGroupRunner.strayGraceSeconds, "finished \(finished - exited)s after the leader exited")
+        } else {
+            Issue.record("no timeline: \(t)")
+        }
         #expect(String(data: output.stdout, encoding: .utf8) == "started\n")
         // Polled: the call returns once the shell has forked the job, which may not have exec'd
         // `sleep` yet. Appearing a moment after the return still proves it outlived the call.
-        #expect(await Self.appears("sleep \(nap)", within: 3), "a server started with its output redirected must outlive the call")
+        #expect(await Self.appears("sleep \(nap)", within: 3),
+                "a server started with its output redirected must outlive the call, so the runner never killed it as a stray")
     }
 
     @Test("ToolExecutor.runCommand leaves a detached background job alive")

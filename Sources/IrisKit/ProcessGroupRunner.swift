@@ -32,6 +32,19 @@ final class ProcessGroupRunner: @unchecked Sendable {
         /// output, between the head kept and the rolling tail.
         var droppedStdout = 0
         var droppedStderr = 0
+        /// When each step happened, on `UptimeClock` (seconds; only differences mean anything), so
+        /// a test can time the product's own deadlines from when the child existed rather than
+        /// from its call, which also counts the child's start-up under load (#759, #763).
+        var timeline = Timeline()
+    }
+
+    struct Timeline: Sendable, Equatable {
+        /// Just after `posix_spawn`: where the deadline starts.
+        var spawned: Double?
+        var leaderExited: Double?
+        /// The first SIGKILL to the group: a stray past the grace, or the end of the kill ladder.
+        var groupKilled: Double?
+        var finished: Double?
     }
 
     /// One stream held to a limit (#709): the first `limit - tailLimit` bytes, and a rolling last
@@ -97,6 +110,7 @@ final class ProcessGroupRunner: @unchecked Sendable {
     private var pid: pid_t = 0
     private var cancelled = false
     private var leaderExited = false
+    private var timeline = Timeline()
     private var terminating = false
     private var groupKilled = false
     private var finished = false
@@ -284,6 +298,7 @@ final class ProcessGroupRunner: @unchecked Sendable {
             return resume(.failure(POSIXError(POSIXErrorCode(rawValue: rc) ?? .EIO)))
         }
         pid = child
+        timeline.spawned = UptimeClock.live.now()
         outSource = drain(outFDs[0], isStdout: true)
         if !mergeStderr { errSource = drain(errFDs[0], isStdout: false) }
         if let inFDs, let stdin { inSource = feed(inFDs[1], stdin) }
@@ -368,6 +383,7 @@ final class ProcessGroupRunner: @unchecked Sendable {
 
     private func leaderDidExit() {
         leaderExited = true
+        timeline.leaderExited = UptimeClock.live.now()
         finishIfDone()
         guard !finished else { return }
         queue.asyncAfter(deadline: .now() + Self.strayGraceSeconds) {
@@ -385,6 +401,7 @@ final class ProcessGroupRunner: @unchecked Sendable {
     private func signalGroup(_ signal: Int32) {
         // Never once reaped: past that point the group id may belong to somebody else.
         guard pid > 0, !finished else { return }
+        if signal == SIGKILL, timeline.groupKilled == nil { timeline.groupKilled = UptimeClock.live.now() }
         kill(-pid, signal)
     }
 
@@ -402,8 +419,9 @@ final class ProcessGroupRunner: @unchecked Sendable {
         let status = signal == 0 ? (raw >> 8) & 0xff : 128 + signal
         if terminating { onKilled?() }
         onKilled = nil
+        timeline.finished = UptimeClock.live.now()
         resume(.success(Output(stdout: out.kept, stderr: err.kept, status: status, timedOut: timedOut, killed: terminating,
-                               droppedStdout: out.dropped, droppedStderr: err.dropped)))
+                               droppedStdout: out.dropped, droppedStderr: err.dropped, timeline: timeline)))
     }
 
     private func resume(_ result: Result<Output, Error>) {
