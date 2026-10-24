@@ -38,7 +38,9 @@ public struct InjectionGuard {
         case safe, malicious, error, skipped
         /// Tier 2 flagged some lines, not all (#725 ruling (d)): the text with those withheld,
         /// which the later tiers judge in place of the original.
-        case partial(redacted: String)
+        /// Some lines withheld; `unjudged` names (1-based, "a-b") those withheld without being judged
+        /// at all, past tier 2's bounds (#728: carried out as data, not reparsed from the marker).
+        case partial(redacted: String, unjudged: [String] = [])
     }
 
     /// The tier verdict for one payload, *before* the `<untrusted_context>` wrapper is applied
@@ -81,21 +83,30 @@ public struct InjectionGuard {
         CoreMLEvaluator.scopedModel != nil || AuxiliaryModelManager.scopedEngines?["canary"] != nil
     }
 
+    /// One classification: the outcome, whether a caller may keep it, and the line ranges tier 2
+    /// withheld unjudged (#728), which a guarded own file's notice reads instead of the marker text.
+    struct Verdict: Equatable, Sendable {
+        var outcome: GuardOutcome
+        var cacheable: Bool
+        var unjudged: [String] = []
+    }
+
     private final class SanitizationCache: @unchecked Sendable {
         private let lock = NSLock()
-        private var entries: [String: GuardOutcome] = [:]
+        private var entries: [String: Verdict] = [:]
         private var order: [String] = []   // least recently used first
         private let capacity: Int
         init(capacity: Int) { self.capacity = capacity }
 
-        func get(_ key: String) -> GuardOutcome? {
+        func get(_ key: String) -> Verdict? {
             lock.lock(); defer { lock.unlock() }
             guard let value = entries[key] else { return nil }
             if let i = order.firstIndex(of: key) { order.remove(at: i); order.append(key) }
             return value
         }
 
-        func set(_ key: String, _ value: GuardOutcome) {
+        func set(_ key: String, _ outcome: GuardOutcome, unjudged: [String] = []) {
+            let value = Verdict(outcome: outcome, cacheable: true, unjudged: unjudged)
             lock.lock(); defer { lock.unlock() }
             if entries.updateValue(value, forKey: key) == nil {
                 order.append(key)
@@ -295,9 +306,10 @@ public struct InjectionGuard {
                                          protectionEnabled: Bool? = nil,
                                          tier2ModelsDir: URL? = nil,
                                          tier3ModelsDir: URL? = nil) async -> (text: String, cacheable: Bool) {
-        let (outcome, cacheable) = await classifyDetailed(rawInput, contextTag: contextTag, maxTier: maxTier,
-                                                          protectionEnabled: protectionEnabled,
-                                                          tier2ModelsDir: tier2ModelsDir, tier3ModelsDir: tier3ModelsDir)
+        let verdict = await classifyDetailed(rawInput, contextTag: contextTag, maxTier: maxTier,
+                                             protectionEnabled: protectionEnabled,
+                                             tier2ModelsDir: tier2ModelsDir, tier3ModelsDir: tier3ModelsDir)
+        let (outcome, cacheable) = (verdict.outcome, verdict.cacheable)
         return (wrapped(outcome, contextTag: contextTag), cacheable)
     }
 
@@ -338,15 +350,16 @@ public struct InjectionGuard {
                                         protectionEnabled: protectionEnabled), contextTag: contextTag)
     }
 
-    /// `sanitizeUntrusted`, plus `sanitizeCacheable`'s bit.
+    /// `sanitizeUntrusted`, plus `sanitizeCacheable`'s bit and the line ranges tier 2 withheld
+    /// unjudged (#728), which the person's own files' notice names.
     static func sanitizeUntrustedCacheable(_ rawInput: String, contextTag: String = "",
                                            maxTier: SanitizationTier = .tier1_structural,
-                                           protectionEnabled: Bool? = nil) async -> (text: String, cacheable: Bool) {
+                                           protectionEnabled: Bool? = nil) async -> (text: String, cacheable: Bool, unjudged: [String]) {
         let stripped = PromptInjectionGuard.stripRecordingDelimiters(rawInput)
-        let (outcome, cacheable) = await classifyDetailed(stripped.text, contextTag: contextTag, maxTier: maxTier,
-                                                          protectionEnabled: protectionEnabled,
-                                                          delimiterLines: stripped.delimiterLines)
-        return (wrapped(outcome, contextTag: contextTag), cacheable)
+        let verdict = await classifyDetailed(stripped.text, contextTag: contextTag, maxTier: maxTier,
+                                             protectionEnabled: protectionEnabled,
+                                             delimiterLines: stripped.delimiterLines)
+        return (wrapped(verdict.outcome, contextTag: contextTag), verdict.cacheable, verdict.unjudged)
     }
 
     /// `sanitizeUntrusted`'s verdict, unwrapped, as `classify` is `sanitize`'s.
@@ -373,7 +386,7 @@ public struct InjectionGuard {
                          protectionEnabled: Bool? = nil,
                          tier2ModelsDir: URL? = nil,
                          tier3ModelsDir: URL? = nil,
-                         delimiterLines: [Int: String] = [:]) async -> (outcome: GuardOutcome, cacheable: Bool) {
+                         delimiterLines: [Int: String] = [:]) async -> Verdict {
         let __turnID = PerformanceProfiler.currentTurnID
         let __start = MonotonicClock.nowMs()
         defer {
@@ -385,6 +398,7 @@ public struct InjectionGuard {
                                                     tier2ModelsDir: tier2ModelsDir, tier3ModelsDir: tier3ModelsDir)
 
         // Tier 1: Strict Structural Isolation & Text Normalization
+        var unjudged: [String] = []
         let tier1 = measureSpanSync("guard.tier1") { executeTier1(rawInput) }
         var clean = tier1.text
         // #727: what the caller's own strip recorded, then tier 1's, as the line read before both.
@@ -395,14 +409,14 @@ public struct InjectionGuard {
             // with no model involved, so it cannot be the kind of transient failure #1 guards
             // against. Reported cacheable so a caller keying its own cache on content+fingerprint
             // (5a Task 7) does not treat a tier-1-only result as if it might be an error.
-            return (.passed(clean: clean), true)
+            return Verdict(outcome: .passed(clean: clean), cacheable: true, unjudged: unjudged)
         }
 
         // Headless `--bench` runs skip the model-backed tiers: the aux models aren't provisioned
         // and would only add nondeterministic latency to a benchmark. Tier 1 structural
         // sanitization still applies. In-process flag by design — see HeadlessMode.
         if HeadlessMode.isEnabled {
-            return (.passed(clean: clean), true)
+            return Verdict(outcome: .passed(clean: clean), cacheable: true, unjudged: unjudged)
         }
 
         // A verdict reached under a task-scoped model or engine (#237) is that scope's, not the
@@ -413,19 +427,20 @@ public struct InjectionGuard {
         let key = cacheKey(clean: clean, source: source, maxTier: maxTier, fingerprint: fingerprint,
                            delimiterLines: delimiterLines)
         if let cached = cache?.get(key) {
-            return (cached, true)
+            return cached
         }
 
         // Tier 2: Local Token-Classification (CoreML/ONNX) — evaluates the unwrapped content.
         let tier2 = await measureSpan("guard.tier2") { await executeTier2CoreML(clean, delimiterLines: delimiterLines, protectionEnabled: protectionEnabled, provisioning: fingerprint.tier2Provisioning, source: source) }
         switch tier2 {
         case .error:
-            return (.blocked(marker: "[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]"), false)
+            return Verdict(outcome: .blocked(marker: "[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]"), cacheable: false, unjudged: unjudged)
         case .malicious:
             let blocked = GuardOutcome.blocked(marker: "[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]")
-            cache?.set(key, blocked)
-            return (blocked, true)
-        case .partial(let redacted):
+            cache?.set(key, blocked, unjudged: unjudged)
+            return Verdict(outcome: blocked, cacheable: true, unjudged: unjudged)
+        case .partial(let redacted, let ranges):
+            unjudged = ranges
             // The flagged lines are withheld and the rest goes on (#725 ruling (d)): tier 3, and
             // the result, see the redacted text.
             clean = redacted
@@ -446,19 +461,19 @@ public struct InjectionGuard {
 
         if maxTier == .tier2_coreML {
             let passed = GuardOutcome.passed(clean: clean)
-            cache?.set(key, passed)
-            return (passed, true)
+            cache?.set(key, passed, unjudged: unjudged)
+            return Verdict(outcome: passed, cacheable: true, unjudged: unjudged)
         }
 
         // Tier 3: Behavioral Canary Probe — also evaluates the unwrapped content.
         let tier3 = await measureSpan("guard.tier3") { await executeTier3Canary(clean, protectionEnabled: protectionEnabled, provisioning: fingerprint.tier3Provisioning) }
         switch tier3 {
         case .error:
-            return (.blocked(marker: "[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"), false)
+            return Verdict(outcome: .blocked(marker: "[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"), cacheable: false, unjudged: unjudged)
         case .malicious:
             let blocked = GuardOutcome.blocked(marker: "[CONTENT BLOCKED BY TIER 3 CANARY GUARD]")
-            cache?.set(key, blocked)
-            return (blocked, true)
+            cache?.set(key, blocked, unjudged: unjudged)
+            return Verdict(outcome: blocked, cacheable: true, unjudged: unjudged)
         case .safe, .skipped, .partial:   // tier 3 never withholds part; it judges the whole
             // #202 fix round 2 (reversing fix round 1): a skip IS cached, exactly like `.safe`.
             // Static context (USER.md, AGENTS.md, plugin rules) being re-sanitized through tiers
@@ -467,8 +482,8 @@ public struct InjectionGuard {
             // `provisioning` (computed once above) is now part of the cache key: the moment the
             // model file appears on disk, the key changes and the stale skip can never be served.
             let passed = GuardOutcome.passed(clean: clean)
-            cache?.set(key, passed)
-            return (passed, true)
+            cache?.set(key, passed, unjudged: unjudged)
+            return Verdict(outcome: passed, cacheable: true, unjudged: unjudged)
         }
     }
 
@@ -577,7 +592,7 @@ public struct InjectionGuard {
             if !judgement.withheld.isEmpty {
                 let lines = judgement.withheld.reduce(0) { $0 + $1.count }
                 print("[InjectionGuard] Tier 2 CoreML withheld \(lines) of \(judgement.lineCount) lines (source: \(source)), highest probability \(probability) (#725).")
-                return .partial(redacted: judgement.redacting(input))
+                return .partial(redacted: judgement.redacting(input), unjudged: judgement.unjudgedRanges)
             }
             return .safe
         } catch {

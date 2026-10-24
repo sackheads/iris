@@ -325,7 +325,7 @@ actor IrisEngine {
             return cached
         }
         let userProfile = manager.getUserProfile()
-        let (safeUserProfile, cacheable) = await measureSpan("assembly.userProfile") {
+        let (safeUserProfile, cacheable, unjudged) = await measureSpan("assembly.userProfile") {
             await InjectionGuard.sanitizeUntrustedCacheable(userProfile, contextTag: "user_profile", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
         }
         // A transient guard error (fix round 1) is shown for THIS turn but never cached: caching it
@@ -336,7 +336,7 @@ actor IrisEngine {
             profileStamp = (path, stamp)
             cachedProfileText = safeUserProfile
         }
-        noteUnjudged(safeUserProfile, file: "USER.md")
+        noteUnjudged(unjudged, file: "USER.md")
         return safeUserProfile
     }
 
@@ -344,8 +344,9 @@ actor IrisEngine {
     /// per file per change, since this runs only when the file was re-guarded, not on a cache hit.
     private var pendingGuardNotices: [String] = []
 
-    private func noteUnjudged(_ guarded: String, file: String) {
-        let ranges = CoreMLEvaluator.Judgement.unjudgedLines(in: guarded)
+    /// `ranges` come from the guard's verdict (#728), never from the guarded text, which a file
+    /// that quotes a marker could fake.
+    private func noteUnjudged(_ ranges: [String], file: String) {
         guard !ranges.isEmpty else { return }
         pendingGuardNotices.append(Self.unjudgedFileNotice(file: file, ranges: ranges))
     }
@@ -387,7 +388,7 @@ actor IrisEngine {
             cachedAgentsText.removeValue(forKey: wp)
             return nil
         }
-        let (safeAgentsMd, cacheable) = await measureSpan("assembly.agentsMd") {
+        let (safeAgentsMd, cacheable, unjudged) = await measureSpan("assembly.agentsMd") {
             await InjectionGuard.sanitizeUntrustedCacheable(agentsMdContent, contextTag: "workspace_rules", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
         }
         // Same rule as `guardedUserProfileText`: a transient error is shown this turn but never
@@ -396,7 +397,7 @@ actor IrisEngine {
             agentsStamp[wp] = stamp
             cachedAgentsText[wp] = safeAgentsMd
         }
-        noteUnjudged(safeAgentsMd, file: "AGENTS.md")
+        noteUnjudged(unjudged, file: "AGENTS.md")
         return safeAgentsMd
     }
 
