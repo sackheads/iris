@@ -14,6 +14,8 @@ final class Tier2Scores: @unchecked Sendable {
         var withheld = 0
         var blocked = 0
         var recent: [Double] = []
+        /// When it was last recorded, as a running count across every tag: the eviction order.
+        var lastRecorded = 0
     }
 
     /// One row of the summary.
@@ -42,12 +44,16 @@ final class Tier2Scores: @unchecked Sendable {
     /// The scores kept per tag for the percentiles: recent enough to follow a model change,
     /// enough for a p95 that means something.
     static let kept = 200
+    /// The most tags kept, the least recently recorded dropped first (#768 review): a tag can
+    /// carry an MCP tool's, a plugin rule's or an event source's own name, so they're open-ended.
+    static let maxTags = 100
     /// How long a record waits before it's written, so a burst of tool outputs is one write.
     static let saveDelaySeconds: Double = 5
 
     let url: URL?
     private let lock = NSLock()
     private var tags: [String: Tag]
+    private var recorded = 0
     private var savePending = false
     private let queue = DispatchQueue(label: "iris.tier2-scores")
 
@@ -59,6 +65,7 @@ final class Tier2Scores: @unchecked Sendable {
         // A file that won't read starts the record over: it's measurements, not a decision.
         if let data = try? Data(contentsOf: url), let stored = try? JSONDecoder().decode([String: Tag].self, from: data) {
             tags = stored.mapValues { var t = $0; t.recent = Array(t.recent.suffix(Self.kept)); return t }
+            recorded = tags.values.map(\.lastRecorded).max() ?? 0
         } else {
             print("[Tier2Scores] \(url.path) couldn't be read; starting the record over (#238).")
         }
@@ -79,7 +86,12 @@ final class Tier2Scores: @unchecked Sendable {
             if outcome == .blocked { t.blocked += 1 }
             t.recent.append(score)
             if t.recent.count > Self.kept { t.recent.removeFirst(t.recent.count - Self.kept) }
+            recorded += 1
+            t.lastRecorded = recorded
             tags[tag] = t
+            if tags.count > Self.maxTags, let stalest = tags.min(by: { $0.value.lastRecorded < $1.value.lastRecorded })?.key {
+                tags[stalest] = nil
+            }
             guard url != nil, !savePending else { return false }
             savePending = true
             return true
