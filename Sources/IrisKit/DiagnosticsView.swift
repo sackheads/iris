@@ -46,13 +46,20 @@ struct DiagnosticsView: View {
                 Spacer()
             } else {
                 Table(scoreRows) {
-                    TableColumn("Source") { Text($0.cells[0]).lineLimit(1) }
+                    TableColumn("Source") { Text($0.cells[0]).lineLimit(1).help($0.cells[0]) }
+                        .width(min: 180, ideal: 210)
                     TableColumn("Inputs") { Text($0.cells[1]).monospacedDigit() }
+                        .width(min: 50, ideal: 90)
                     TableColumn("p50") { Text($0.cells[2]).monospacedDigit() }
+                        .width(min: 50, ideal: 90)
                     TableColumn("p95") { Text($0.cells[3]).monospacedDigit() }
+                        .width(min: 50, ideal: 90)
                     TableColumn("Max") { Text($0.cells[4]).monospacedDigit() }
+                        .width(min: 50, ideal: 90)
                     TableColumn("Lines withheld") { Text($0.cells[5]).monospacedDigit() }
+                        .width(min: 50, ideal: 90)
                     TableColumn("Blocked") { Text($0.cells[6]).monospacedDigit() }
+                        .width(min: 50, ideal: 90)
                 }
             }
             HStack {
