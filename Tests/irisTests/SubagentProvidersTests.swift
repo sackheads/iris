@@ -96,7 +96,7 @@ struct SubagentProvidersTests {
     @Test("an endpoint can't take a built-in's id or a name that would reach another secret")
     func slugs() throws {
         let (config, keychain, suite) = harness(); defer { teardown(suite) }
-        keychain.saveSecrets(["GEMINI_API_KEY": "primary-key-stays-put"])
+        keychain.replaceSecrets(["GEMINI_API_KEY": "primary-key-stays-put"])
         for bad in ["GEMINI", "gemini", "GEMINI_API_KEY", "", "-x", "x-", "a b", "x/../y", String(repeating: "a", count: 33)] {
             var e = deepseek
             e.id = bad

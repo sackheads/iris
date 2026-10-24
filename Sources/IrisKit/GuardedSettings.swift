@@ -314,10 +314,11 @@ extension ConfigManager {
     func persistGuarded(_ key: GuardedKey, legacy: (UserDefaults) -> Void) {
         guard let keychain = guardedKeychain else { legacy(store); return }
         guard !keychain.areWritesBlocked else { return }
-        var dict = keychain.loadSecrets()
-        for k in GuardedKey.allCases { dict[k.rawValue] = guardedValue(k) }
-        dict[GuardedSettings.markerKey] = "1"
-        keychain.saveSecrets(dict)
+        let values = Dictionary(uniqueKeysWithValues: GuardedKey.allCases.map { ($0.rawValue, guardedValue($0)) })
+        keychain.updateSecrets { dict in
+            dict.merge(values) { $1 }
+            dict[GuardedSettings.markerKey] = "1"
+        }
         secretsCache = nil
         // The item holds every guarded value again, so the refusal and the notice stop applying.
         if guardedState == .missing { guardedState = .normal }
@@ -348,11 +349,12 @@ extension ConfigManager {
     func setGuardedBlob(_ key: GuardedKey, _ value: String) {
         guard let keychain = guardedKeychain else { store.set(value, forKey: key.rawValue); return }
         guard !keychain.areWritesBlocked else { return }
-        var dict = keychain.loadSecrets()
-        for k in GuardedKey.allCases { dict[k.rawValue] = guardedValue(k) }
-        dict[key.rawValue] = value
-        dict[GuardedSettings.markerKey] = "1"
-        keychain.saveSecrets(dict)
+        let values = Dictionary(uniqueKeysWithValues: GuardedKey.allCases.map { ($0.rawValue, guardedValue($0)) })
+        keychain.updateSecrets { dict in
+            dict.merge(values) { $1 }
+            dict[key.rawValue] = value
+            dict[GuardedSettings.markerKey] = "1"
+        }
         secretsCache = nil
         if guardedState == .missing { guardedState = .normal }
     }

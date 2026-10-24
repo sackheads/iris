@@ -177,9 +177,9 @@ final class GuardedRoots: @unchecked Sendable {
     func add(_ roots: [String], migrating file: () -> [String]) -> (all: [String], added: Bool)? {
         lock.withLock {
             guard case .roots(let known) = loadLocked(file), let keychain else { return nil }
-            let all = Set(known).union(roots).sorted()
-            guard all != known else { return (all, false) }
-            guard save(all, keychain) else { return nil }
+            let wanted = Set(known).union(roots).sorted()
+            guard wanted != known else { return (wanted, false) }
+            guard let all = save(wanted, keychain) else { return nil }
             cached = all
             return (all, true)
         }
@@ -200,8 +200,7 @@ final class GuardedRoots: @unchecked Sendable {
             cached = Set(roots).sorted()
             return .roots(cached ?? [])
         }
-        let migrated = Set(file()).sorted()
-        guard save(migrated, keychain) else {
+        guard let migrated = save(Set(file()).sorted(), keychain) else {
             failed = true
             return .unreadable
         }
@@ -209,13 +208,22 @@ final class GuardedRoots: @unchecked Sendable {
         return .roots(migrated)
     }
 
-    /// Read fresh, so another key written since this process's own read isn't put back.
-    private func save(_ roots: [String], _ keychain: KeychainManager) -> Bool {
-        guard !keychain.areWritesBlocked,
-              var secrets = try? keychain.secretsOrThrow(service: KeychainManager.legacyService),
-              let data = try? JSONEncoder().encode(roots) else { return false }
-        secrets[Self.key] = String(decoding: data, as: UTF8.self)
-        return (try? keychain.saveSecretsOrThrow(secrets, service: KeychainManager.legacyService)) != nil
+    /// Under the item's update lock (#750), merged with the roots the item holds now, so neither
+    /// another writer's key nor a root another copy of this store saved is put back: the saved
+    /// record, or nil when it couldn't be written.
+    private func save(_ roots: [String], _ keychain: KeychainManager) -> [String]? {
+        guard !keychain.areWritesBlocked else { return nil }
+        var saved: [String]?
+        do {
+            try keychain.updateSecretsOrThrow { secrets in
+                let current = secrets[Self.key].flatMap { try? JSONDecoder().decode([String].self, from: Data($0.utf8)) } ?? []
+                let all = Set(current).union(roots).sorted()
+                guard let data = try? JSONEncoder().encode(all) else { throw KeychainManager.SecretsError.status(errSecParam) }
+                secrets[Self.key] = String(decoding: data, as: UTF8.self)
+                saved = all
+            }
+        } catch { return nil }
+        return saved
     }
 
     private static let homesLock = NSLock()

@@ -58,7 +58,9 @@ public final class KeychainManager: @unchecked Sendable {
 
     // MARK: - Legacy API (service = com.iris.secrets), unchanged behavior
     public func loadSecrets() -> [String: String] { secrets(service: Self.legacyService) }
-    public func saveSecrets(_ secrets: [String: String]) { saveSecrets(secrets, service: Self.legacyService) }
+    /// Replaces the whole item: for a copy of a whole item or a test's fixture, never for a change
+    /// to some keys, which is `updateSecrets` (#750).
+    public func replaceSecrets(_ secrets: [String: String]) { replaceSecrets(secrets, service: Self.legacyService) }
 
     // MARK: - Service-scoped API
     public func secrets(service: String) -> [String: String] {
@@ -79,7 +81,39 @@ public final class KeychainManager: @unchecked Sendable {
         return (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
     }
 
-    public func saveSecrets(_ secrets: [String: String], service: String) {
+    public func replaceSecrets(_ secrets: [String: String], service: String) {
+        Self.updateLock.withLock { storeSecrets(secrets, service: service) }
+    }
+
+    /// One lock for every load, change and save of a secrets item in this process (#750). Each
+    /// writer saves the whole dictionary, so two unlocked writes close together lose one's keys: an
+    /// API key, a guarded setting, a fingerprint. Another process can't write the same item (#463).
+    private static let updateLock = NSLock()
+
+    /// Loads `service`'s secrets, lets `mutate` change them and saves them, all under one lock, and
+    /// saves only if something changed. A read that fails reads as empty, as `secrets(service:)`.
+    func updateSecrets(service: String = KeychainManager.legacyService, _ mutate: (inout [String: String]) -> Void) {
+        Self.updateLock.withLock {
+            let before = secrets(service: service)
+            var after = before
+            mutate(&after)
+            if after != before { storeSecrets(after, service: service) }
+        }
+    }
+
+    /// `updateSecrets`, but a read or save that fails throws, and nothing is saved over a read that
+    /// failed; `mutate` throwing saves nothing.
+    func updateSecretsOrThrow(service: String = KeychainManager.legacyService,
+                              _ mutate: (inout [String: String]) throws -> Void) throws {
+        try Self.updateLock.withLock {
+            let before = try secretsOrThrow(service: service)
+            var after = before
+            try mutate(&after)
+            if after != before { try storeSecretsOrThrow(after, service: service) }
+        }
+    }
+
+    private func storeSecrets(_ secrets: [String: String], service: String) {
         if service == Self.legacyService, areWritesBlocked {
             print("Not saving secrets: the secrets item could not be read at launch, so it is left as it is (#678).")
             return
@@ -156,9 +190,12 @@ public final class KeychainManager: @unchecked Sendable {
         }
     }
 
-    /// `saveSecrets(_:service:)`, but a non-success status throws instead of only printing —
-    /// used wherever a silently dropped secret would strand the caller.
-    func saveSecretsOrThrow(_ secrets: [String: String], service: String) throws {
+    /// `replaceSecrets(_:service:)`, but a non-success status throws instead of only printing.
+    func replaceSecretsOrThrow(_ secrets: [String: String], service: String) throws {
+        try Self.updateLock.withLock { try storeSecretsOrThrow(secrets, service: service) }
+    }
+
+    private func storeSecretsOrThrow(_ secrets: [String: String], service: String) throws {
         if service == Self.legacyService, areWritesBlocked { throw SecretsError.status(errSecWrPerm) }
         let service = resolvedService(service)
         if usesInMemoryStore {

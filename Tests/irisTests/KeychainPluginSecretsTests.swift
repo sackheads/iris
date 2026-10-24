@@ -7,8 +7,8 @@ struct KeychainPluginSecretsTests {
     func isolation() {
         let kc = KeychainManager.shared
         #expect(kc.usesInMemoryStore)   // guard: never touch the real Keychain in tests
-        kc.saveSecrets(["API_KEY": "abc"], service: KeychainManager.pluginService("plug-a"))
-        kc.saveSecrets(["API_KEY": "xyz"], service: KeychainManager.pluginService("plug-b"))
+        kc.replaceSecrets(["API_KEY": "abc"], service: KeychainManager.pluginService("plug-a"))
+        kc.replaceSecrets(["API_KEY": "xyz"], service: KeychainManager.pluginService("plug-b"))
 
         #expect(kc.secrets(service: "iris.plugin.plug-a") == ["API_KEY": "abc"])
         #expect(kc.secrets(service: "iris.plugin.plug-b") == ["API_KEY": "xyz"])
@@ -18,12 +18,12 @@ struct KeychainPluginSecretsTests {
         #expect(kc.secrets(service: "iris.plugin.plug-b") == ["API_KEY": "xyz"])
     }
 
-    @Test("legacy loadSecrets/saveSecrets keep working")
+    @Test("legacy loadSecrets/replaceSecrets keep working")
     func legacyAPI() {
         let kc = KeychainManager.shared
-        kc.saveSecrets(["gemini": "key1"])
+        kc.replaceSecrets(["gemini": "key1"])
         #expect(kc.loadSecrets() == ["gemini": "key1"])
-        kc.saveSecrets([:])
+        kc.replaceSecrets([:])
     }
 
     @Test("service name helpers")
