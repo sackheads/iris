@@ -1616,20 +1616,21 @@ struct WorkspaceRulesReview: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Review Workspace Rules").font(.headline)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("These files in \(workspace)/.iris came with the folder or changed outside Iris. They decide what Iris runs without asking you (the project allowlist), whether this workspace's commands are sandboxed, and what Vibecop treats as routine. None of them is in effect until you trust it.")
-                .font(.callout).foregroundStyle(.secondary)
-                // A sheet short of room squeezes a bare Text to one truncated line (#625 on
-                // screen); these keep their wrapped height and the file list below gives way.
-                .fixedSize(horizontal: false, vertical: true)
-            if changedWhileOpen {
-                Text("These files changed since you opened this, so nothing was trusted. This is their text now.")
-                    .font(.callout.bold()).foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            // One scroll for the text and the files, the buttons pinned below it (#631): at the
+            // window's 400 pt minimum the sheet has about 310 pt, less than the text and a list
+            // floor together, and the old layout pushed the heading and the buttons out of view.
             ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Review Workspace Rules").font(.headline)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("These files in \(workspace)/.iris came with the folder or changed outside Iris. They decide what Iris runs without asking you (the project allowlist), whether this workspace's commands are sandboxed, and what Vibecop treats as routine. None of them is in effect until you trust it.")
+                        .font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if changedWhileOpen {
+                        Text("These files changed since you opened this, so nothing was trusted. This is their text now.")
+                            .font(.callout.bold()).foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     ForEach(files, id: \.file) { entry in
                         Text(".iris/\(entry.file)").font(.subheadline.bold())
                         Text(String(data: entry.data, encoding: .utf8) ?? "(not text)")
@@ -1640,7 +1641,7 @@ struct WorkspaceRulesReview: View {
                     }
                 }
             }
-            .frame(minHeight: 120, maxHeight: 360)
+            .frame(minHeight: 120, maxHeight: 520)
             HStack {
                 Spacer()
                 Button("Not Now", role: .cancel, action: dismiss)
