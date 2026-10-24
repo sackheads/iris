@@ -45,8 +45,15 @@ struct LiteralTextEditor: NSViewRepresentable {
             self.allowsReturn = allowsReturn
         }
 
+        /// Every command that inserts a break: Return, Option-Return and Control-Return (#753 review).
+        static let lineBreakCommands: Set<Selector> = [
+            #selector(NSResponder.insertNewline(_:)),
+            #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)),
+            #selector(NSResponder.insertLineBreak(_:)),
+        ]
+
         func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
-            !allowsReturn && selector == #selector(NSResponder.insertNewline(_:))
+            !allowsReturn && Self.lineBreakCommands.contains(selector)
         }
 
         func textDidChange(_ notification: Notification) {
