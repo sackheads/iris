@@ -446,6 +446,11 @@ struct ChatView: View {
                         .allowsHitTesting(false)
                     }
                 }
+                // #598: the popups' slide runs only inside an animation. Their models change from
+                // NSTextView's edit callbacks, where a `withAnimation` crashed the app (#757's GUI
+                // check), so the animation is attached here, keyed to each popup's visibility.
+                .animation(Motion.animation(Motion.reveal), value: emojiModel.isShowing)
+                .animation(Motion.animation(Motion.reveal), value: slashModel.isShowing)
                 .background(Color(NSColor.textBackgroundColor))
                 .navigationTitle(conv.title)
                 .toolbar {

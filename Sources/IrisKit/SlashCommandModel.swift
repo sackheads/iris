@@ -34,12 +34,11 @@ final class SlashCommandModel: PopupNav {
         let hits = SlashCommandItem.matches(for: text)
         guard !hits.isEmpty else { clear(); return }
         if suggestions.map(\.id) != hits.map(\.id) { selectedIndex = 0 }
-        // #598: appearing inside an animation, so the popup's slide transition runs.
-        Motion.revealing(from: isShowing, to: true) { suggestions = hits }
+        suggestions = hits
     }
 
     func clear() {
-        Motion.revealing(from: isShowing, to: false) { suggestions = [] }
+        suggestions = []
         selectedIndex = 0
     }
 
