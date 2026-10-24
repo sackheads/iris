@@ -179,8 +179,12 @@ struct ConversationStoreTests {
         c.checkpointHistory = [
             CheckpointOutcome(milestoneIndex: 1, milestoneTitle: "Integration", resolution: .humanSentBack)
         ]
+        try store.apply([write(c, .checkpointHistory)])
+        // Then a metadata-only update, which since #205 leaves the column alone: it must survive it.
+        c.title = "renamed"
         try store.apply([write(c, .metadata)])
         let back = try #require(try store.loadAll().conversations.first)
+        #expect(back.title == "renamed")
         #expect(back.checkpointHistory.count == 1)
         #expect(back.checkpointHistory.first?.resolution == .humanSentBack)
         // Nil evaluation is a real state (nothing was graded), not an encoding accident.
@@ -215,7 +219,7 @@ struct ConversationStoreTests {
         // And the upgraded row can then be written to and read back.
         back.checkpointHistory = [CheckpointOutcome(milestoneIndex: 0, milestoneTitle: "Parser",
                                                     resolution: .humanApproved)]
-        try store.apply([write(back, .metadata)])
+        try store.apply([write(back, .checkpointHistory)])
         #expect(try store.loadAll().conversations.first?.checkpointHistory.first?.resolution == .humanApproved)
     }
 
