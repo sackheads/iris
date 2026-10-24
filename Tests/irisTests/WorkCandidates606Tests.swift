@@ -5,7 +5,10 @@ import Testing
 /// through real `zsh -c "<cmd>" </dev/null | cat` in a scratch directory with marker scripts. `old`
 /// is what the blocklist version said, `zsh` what the shell actually did. Under the flag allowlists
 /// a candidate is read-only only if it reads and every option it uses is listed; every row that
-/// EXECUTED or EXPANDED, and every git row, is may-write.
+/// EXECUTED or EXPANDED is may-write. #607 made the plain git reads read-only by grammar
+/// (`GitRead`): what made them EXECUTE here (fsmonitor, diff.external, textconv, gpg.program) is
+/// neutralised where they run, and the gate runs them only on a repository no sandbox can write.
+/// `GitReadTests` springs each of those traps on a real repository and shows it no longer fires.
 @Suite("work's #606 candidates under the flag allowlists")
 struct WorkCandidates606Tests {
     struct Row: CustomTestStringConvertible, Sendable {
@@ -36,13 +39,13 @@ struct WorkCandidates606Tests {
         Row(command: "file --comp", readOnly: false, old: false, zsh: "-"),
         Row(command: "file -m x y", readOnly: false, old: true, zsh: "not run (reads magic)"),
         Row(command: "file -zs x", readOnly: false, old: true, zsh: "not run (contains -z)"),
-        Row(command: "git status", readOnly: false, old: true, zsh: "rewrites .git/index; EXECUTED fsmonitor when configured (incl. via include.path)"),
+        Row(command: "git status", readOnly: true, old: true, zsh: "rewrites .git/index; EXECUTED fsmonitor when configured (incl. via include.path)"),
         Row(command: "git describe --dirty", readOnly: false, old: true, zsh: "EXECUTED fsmonitor (as --dirty --always)"),
         Row(command: "git log --show-signature", readOnly: false, old: true, zsh: "EXECUTED gpg.program; real gpg --verify with no config"),
         Row(command: "git show --show-signature", readOnly: false, old: true, zsh: "EXECUTED gpg.program"),
         Row(command: "git log --format=%G?", readOnly: false, old: false, zsh: "- (the quoted form '%G?' would pass and verify)"),
-        Row(command: "git log -p", readOnly: false, old: true, zsh: "EXECUTED textconv; not diff.external"),
-        Row(command: "git diff", readOnly: false, old: true, zsh: "EXECUTED fsmonitor, diff.external, textconv"),
+        Row(command: "git log -p", readOnly: true, old: true, zsh: "EXECUTED textconv; not diff.external"),
+        Row(command: "git diff", readOnly: true, old: true, zsh: "EXECUTED fsmonitor, diff.external, textconv"),
         Row(command: "git diff --textconv", readOnly: false, old: true, zsh: "not run"),
         Row(command: "git show --textconv", readOnly: false, old: true, zsh: "not run (plain show EXECUTED textconv)"),
         Row(command: "git log --output=x", readOnly: false, old: false, zsh: "-"),
@@ -54,20 +57,20 @@ struct WorkCandidates606Tests {
         Row(command: "git blame --contents=x y", readOnly: false, old: true, zsh: "not run (plain blame EXECUTED textconv)"),
         Row(command: "git log --paginate", readOnly: false, old: false, zsh: "-"),
         Row(command: "git log --pag", readOnly: false, old: false, zsh: "-"),
-        Row(command: "git branch", readOnly: false, old: true, zsh: "not run"),
-        Row(command: "git branch -a", readOnly: false, old: true, zsh: "not run"),
-        Row(command: "git branch --show-current", readOnly: false, old: true, zsh: "not run"),
+        Row(command: "git branch", readOnly: true, old: true, zsh: "not run"),
+        Row(command: "git branch -a", readOnly: true, old: true, zsh: "not run"),
+        Row(command: "git branch --show-current", readOnly: true, old: true, zsh: "not run"),
         Row(command: "git branch x", readOnly: false, old: false, zsh: "-"),
         Row(command: "git branch --list x", readOnly: false, old: false, zsh: "- (work: wrongly strict)"),
-        Row(command: "git status --porcelain", readOnly: false, old: true, zsh: "EXECUTED fsmonitor"),
+        Row(command: "git status --porcelain", readOnly: true, old: true, zsh: "EXECUTED fsmonitor"),
         Row(command: "git rev-parse --git-path hooks", readOnly: false, old: true, zsh: "not run"),
         Row(command: "git log -c", readOnly: false, old: true, zsh: "not run"),
         Row(command: "git log --no-walk", readOnly: false, old: true, zsh: "not run"),
         Row(command: "git log --exec=x", readOnly: false, old: true, zsh: "not run (git errors)"),
         Row(command: "git diff --output-indicator-new=x", readOnly: false, old: false, zsh: "-"),
         Row(command: "git describe --broken", readOnly: false, old: true, zsh: "not run (refreshes index)"),
-        Row(command: "git ls-files --others", readOnly: false, old: true, zsh: "EXECUTED fsmonitor (plain ls-files)"),
-        Row(command: "git shortlog", readOnly: false, old: true, zsh: "not run"),
+        Row(command: "git ls-files --others", readOnly: true, old: true, zsh: "EXECUTED fsmonitor (plain ls-files)"),
+        Row(command: "git shortlog", readOnly: true, old: true, zsh: "not run"),
         Row(command: "git blame -S x y", readOnly: false, old: true, zsh: "not run"),
         Row(command: "git diff -Ox", readOnly: false, old: true, zsh: "not run"),
         Row(command: "git log -g", readOnly: false, old: true, zsh: "not run"),
@@ -77,9 +80,9 @@ struct WorkCandidates606Tests {
         Row(command: "git log --ext-diff", readOnly: false, old: false, zsh: "-"),
         Row(command: "GIT_EXTERNAL_DIFF=x git diff", readOnly: false, old: false, zsh: "-"),
         Row(command: "PAGER=x git log", readOnly: false, old: false, zsh: "-"),
-        Row(command: "git 'status'", readOnly: false, old: true, zsh: "not run"),
-        Row(command: "'git' status", readOnly: false, old: true, zsh: "not run"),
-        Row(command: "\"git\" status", readOnly: false, old: true, zsh: "not run"),
+        Row(command: "git 'status'", readOnly: true, old: true, zsh: "not run"),
+        Row(command: "'git' status", readOnly: true, old: true, zsh: "not run"),
+        Row(command: "\"git\" status", readOnly: true, old: true, zsh: "not run"),
         Row(command: "find . -name x", readOnly: true, old: true, zsh: "not run"),
         Row(command: "find . -delete", readOnly: false, old: false, zsh: "-"),
         Row(command: "find . '-exec' ls ';'", readOnly: false, old: false, zsh: "-"),
@@ -139,11 +142,16 @@ struct WorkCandidates606Tests {
         #expect(ReadOnlyCommand.isReadOnly(row.command) == row.readOnly, "zsh: \(row.zsh)")
     }
 
-    @Test("all 115 are here, and nothing that executed, expanded or ran git is read-only")
+    @Test("all 115 are here; nothing that executed or expanded is read-only, unless it's a git read run neutralised")
     func coverage() {
         #expect(Self.rows.count == 115)
-        for row in Self.rows where row.zsh.contains("EXECUTED") || row.zsh.contains("EXPANDED") || row.command.contains("git") {
-            #expect(!row.readOnly, "\(row.command.debugDescription)")
+        for row in Self.rows {
+            if ReadOnlyCommand.words(row.command)?.first == "git" {
+                // #607: a git row is read-only only as `GitRead` runs it (prefix, overrides, no shell).
+                if row.readOnly { #expect(GitRead.argv(row.command) != nil, "\(row.command.debugDescription)") }
+            } else if row.zsh.contains("EXECUTED") || row.zsh.contains("EXPANDED") {
+                #expect(!row.readOnly, "\(row.command.debugDescription)")
+            }
         }
     }
 }
