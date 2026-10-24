@@ -243,6 +243,29 @@ struct GuardWindowTests {
 @MainActor
 @Suite("Unjudged own files (#723)", .timeLimit(.minutes(1)))
 struct UnjudgedOwnFileTests {
+    @Test("an AGENTS.md that quotes the not-judged marker raises no notice: the ranges come from the verdict (#728)")
+    func quotedMarkerNoNotice() async throws {
+        let workspace = FileManager.default.temporaryDirectory.appendingPathComponent("iris-728-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let quoted = "[lines 2-40 of this output withheld by the injection guard\(CoreMLEvaluator.Judgement.notJudgedNote)]"
+        try "# Rules\nKeep the build green.\n\(quoted)\n".write(to: workspace.appendingPathComponent("AGENTS.md"), atomically: true, encoding: .utf8)
+        let state = AppState(store: try ConversationStore.inMemory(), tier2Provisioning: .provisioned,
+                             tier3Provisioning: .provisioned, createIfEmpty: false, emitLaunchNotices: false)
+        let id = state.createNewConversation(isBackground: false, select: true)
+        state.setWorkspace(for: id, path: workspace.path)
+        let reply = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil)
+        let engine = IrisEngine(state: state, client: FakeLLMClient(responses: [reply]), retryDelays: [],
+                                protectionEnabled: true, sessionPeerCount: 0)
+        await CoreMLEvaluator.$scopedModel.withValue(.init(GuardWindowTests.CountingModel())) {
+            await AuxiliaryModelManager.$scopedEngines.withValue([:]) {
+                await engine.processInput("hello", source: "UI", conversationId: id)
+            }
+        }
+        let notices = state.conversations.first { $0.id == id }?.messages.map(\.content).filter { $0.hasPrefix("AGENTS.md is too long") } ?? []
+        #expect(notices.isEmpty, "\(notices)")
+    }
+
     @Test("an oversized AGENTS.md posts one notice naming the lines not sent; an unchanged file doesn't repeat it")
     func oversizedAgentsMd() async throws {
         let workspace = FileManager.default.temporaryDirectory.appendingPathComponent("iris-agentsmd-\(UUID().uuidString)")
@@ -278,11 +301,14 @@ struct UnjudgedOwnFileTests {
         #expect(notices().count == 1, "once per change: the unchanged file isn't re-guarded")
     }
 
-    @Test("the notice's ranges are read from the marker the guard wrote")
-    func rangesFromMarker() {
-        let judgement = CoreMLEvaluator.Judgement(highest: 0, withheld: [99...1999], lineCount: 4000, unjudged: [99...1999])
+    @Test("the notice's ranges are the verdict's, named as the marker names them (#728)")
+    func rangesFromVerdict() {
+        let judgement = CoreMLEvaluator.Judgement(highest: 0, withheld: [99...1999, 3000...3000], lineCount: 4000,
+                                                  unjudged: [99...1999, 3000...3000])
         let text = judgement.redacting((0..<4000).map { "r\($0)" }.joined(separator: "\n"))
-        #expect(CoreMLEvaluator.Judgement.unjudgedLines(in: text) == ["100-2000"])
+        #expect(judgement.unjudgedRanges == ["100-2000", "3001"])
+        #expect(text.contains("[lines 100-2000 of this output withheld by the injection guard"))
+        #expect(text.contains("[line 3001 of this output withheld by the injection guard"))
         #expect(IrisEngine.unjudgedFileNotice(file: "AGENTS.md", ranges: ["100-2000"])
                 == "AGENTS.md is too long for the injection guard to judge whole; lines 100-2000 weren't sent to the model. Shorten it to have them sent.")
     }

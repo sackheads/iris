@@ -112,7 +112,7 @@ struct DelimiterLineTests {
     @Test("sanitizeUntrustedCacheable (USER.md, AGENTS.md) withholds the stripped line")
     func cacheableWithholds() async {
         let model = DelimiterModel()
-        let (out, cacheable) = await scoped(model) {
+        let (out, cacheable, _) = await scoped(model) {
             await InjectionGuard.sanitizeUntrustedCacheable(Self.injected(), contextTag: "workspace_rules",
                                                             maxTier: .tier2_coreML, protectionEnabled: true)
         }

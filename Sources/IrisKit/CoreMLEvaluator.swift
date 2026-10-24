@@ -161,16 +161,14 @@ public final class CoreMLEvaluator: @unchecked Sendable {
         /// Withheld ranges past the bounds on the whole-text pass: never judged at all.
         var unjudged: [ClosedRange<Int>] = []
 
-        /// What a range withheld unjudged says in its marker, and what `unjudgedLines(in:)` finds.
+        /// What a range withheld unjudged says in its marker.
         static let notJudgedNote = "; too long to judge whole, so not judged"
 
-        /// The 1-based line ranges ("a-b", or "a") a guarded text says were withheld unjudged.
-        static func unjudgedLines(in text: String) -> [String] {
-            let pattern = #"\[lines? (\d+(?:-\d+)?) of this output withheld by the injection guard"# + NSRegularExpression.escapedPattern(for: notJudgedNote) + #"\]"#
-            guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
-            return regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap {
-                Range($0.range(at: 1), in: text).map { String(text[$0]) }
-            }
+        /// The ranges withheld unjudged, 1-based ("a-b", or "a"), as their markers name them. Carried
+        /// out of the guard as data (#728): reparsing the marker from the guarded text let a file
+        /// that quoted one raise a notice for lines that were sent.
+        var unjudgedRanges: [String] {
+            unjudged.map { $0.count == 1 ? "\($0.lowerBound + 1)" : "\($0.lowerBound + 1)-\($0.upperBound + 1)" }
         }
 
         var allWithheld: Bool { lineCount > 0 && withheld.reduce(0) { $0 + $1.count } >= lineCount }
