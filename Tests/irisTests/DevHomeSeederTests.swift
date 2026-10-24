@@ -21,8 +21,8 @@ struct DevHomeSeederTests {
         let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }
         let srcKC = KeychainManager(serviceSuffix: "")
         let dstKC = KeychainManager(serviceSuffix: ".dev")
-        srcKC.saveSecrets(["ANTHROPIC_API_KEY": "sk"], service: KeychainManager.legacyService)
-        srcKC.saveSecrets(["t": "1"], service: KeychainManager.pluginService("p"))
+        srcKC.replaceSecrets(["ANTHROPIC_API_KEY": "sk"], service: KeychainManager.legacyService)
+        srcKC.replaceSecrets(["t": "1"], service: KeychainManager.pluginService("p"))
 
         let report = try DevHomeSeeder.seed(from: src, to: dst, identity: .dev, sourceKeychain: srcKC, destKeychain: dstKC)
 

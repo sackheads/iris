@@ -369,22 +369,23 @@ extension ConfigManager {
         clean.models = Self.cleaned(endpoint.models)
         if clean.name.trimmingCharacters(in: .whitespaces).isEmpty { clean.name = clean.id }
 
-        var secrets = keychain.loadSecrets()
-        if let oldId, oldId != clean.id {
-            // A rename moves the key with its origin, so a moved address still needs a re-entry.
-            let movedKey = secrets.removeValue(forKey: ProviderSlug.secretName(oldId))
-            let movedOrigin = secrets.removeValue(forKey: ProviderSlug.originName(oldId))
-            if key == nil {
-                secrets[ProviderSlug.secretName(clean.id)] = movedKey
-                secrets[ProviderSlug.originName(clean.id)] = movedOrigin
+        keychain.updateSecrets { secrets in
+            if let oldId, oldId != clean.id {
+                // A rename moves the key with its origin, so a moved address still needs a re-entry.
+                let movedKey = secrets.removeValue(forKey: ProviderSlug.secretName(oldId))
+                let movedOrigin = secrets.removeValue(forKey: ProviderSlug.originName(oldId))
+                if key == nil {
+                    secrets[ProviderSlug.secretName(clean.id)] = movedKey
+                    secrets[ProviderSlug.originName(clean.id)] = movedOrigin
+                }
+            }
+            if let key {
+                let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+                secrets[ProviderSlug.secretName(clean.id)] = trimmed.isEmpty ? nil : trimmed
+                secrets[ProviderSlug.originName(clean.id)] = trimmed.isEmpty ? nil : EndpointURL.origin(of: clean.baseURL)
             }
         }
-        if let key {
-            let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-            secrets[ProviderSlug.secretName(clean.id)] = trimmed.isEmpty ? nil : trimmed
-            secrets[ProviderSlug.originName(clean.id)] = trimmed.isEmpty ? nil : EndpointURL.origin(of: clean.baseURL)
-        }
-        keychain.saveSecrets(secrets); secretsCache = nil
+        secretsCache = nil
 
         list.removeAll { $0.id == (oldId ?? clean.id) }
         list.append(clean)
@@ -395,10 +396,11 @@ extension ConfigManager {
     func removeSubagentEndpoint(id: String, keychain explicitKeychain: KeychainManager? = nil) {
         let keychain = explicitKeychain ?? guardedKeychain ?? .shared
         subagentEndpoints = subagentEndpoints.filter { $0.id != id }
-        var secrets = keychain.loadSecrets()
-        let hadKey = secrets.removeValue(forKey: ProviderSlug.secretName(id)) != nil
-        let hadOrigin = secrets.removeValue(forKey: ProviderSlug.originName(id)) != nil
-        if hadKey || hadOrigin { keychain.saveSecrets(secrets); secretsCache = nil }
+        keychain.updateSecrets { secrets in
+            secrets[ProviderSlug.secretName(id)] = nil
+            secrets[ProviderSlug.originName(id)] = nil
+        }
+        secretsCache = nil
     }
 
     func subagentEndpointHasKey(_ id: String, keychain explicitKeychain: KeychainManager? = nil) -> Bool {

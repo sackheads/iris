@@ -8,7 +8,7 @@ struct KeychainServiceScopeTests {
     func suffixApplied() {
         let dev = KeychainManager(serviceSuffix: ".dev")
         let release = KeychainManager(serviceSuffix: "")
-        dev.saveSecrets(["k": "dev"], service: "iris.mcp")
+        dev.replaceSecrets(["k": "dev"], service: "iris.mcp")
         #expect(dev.secrets(service: "iris.mcp") == ["k": "dev"])
         #expect(dev.resolvedService("iris.mcp") == "iris.mcp.dev")
         #expect(release.resolvedService("iris.mcp") == "iris.mcp")
@@ -17,15 +17,15 @@ struct KeychainServiceScopeTests {
     @Test("storedServices lists base names for this suffix only")
     func listing() {
         let m = KeychainManager(serviceSuffix: ".dev")
-        m.saveSecrets(["a": "1"], service: KeychainManager.pluginService("one"))
-        m.saveSecrets(["b": "2"], service: KeychainManager.pluginService("two"))
+        m.replaceSecrets(["a": "1"], service: KeychainManager.pluginService("one"))
+        m.replaceSecrets(["b": "2"], service: KeychainManager.pluginService("two"))
         #expect(Set(m.storedServices(withPrefix: "iris.plugin.")) == ["iris.plugin.one", "iris.plugin.two"])
     }
 
     @Test("storedServicesOrThrow agrees with storedServices when the listing succeeds")
     func throwingListing() throws {
         let m = KeychainManager(serviceSuffix: ".dev")
-        m.saveSecrets(["a": "1"], service: KeychainManager.pluginService("one"))
+        m.replaceSecrets(["a": "1"], service: KeychainManager.pluginService("one"))
         #expect(try m.storedServicesOrThrow(withPrefix: "iris.plugin.") == ["iris.plugin.one"])
     }
 

@@ -84,9 +84,7 @@ struct PluginInstaller: Sendable {
         let secretsToStore = draft.secretValues.filter { !$0.value.isEmpty }
         if !secretsToStore.isEmpty {
             let service = KeychainManager.pluginService(id)
-            var existing = KeychainManager.shared.secrets(service: service)
-            existing.merge(secretsToStore) { _, new in new }
-            KeychainManager.shared.saveSecrets(existing, service: service)
+            KeychainManager.shared.updateSecrets(service: service) { $0.merge(secretsToStore) { _, new in new } }
         }
         let store = PluginStateStore(paths: paths)
         var states = store.load()

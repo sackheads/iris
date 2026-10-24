@@ -84,9 +84,8 @@ struct ModelPriceFeed: Sendable {
         let bytes = try JSONEncoder().encode(cached)
         try bytes.write(to: cacheURL, options: .atomic)
         // Only after the file is in place, so a fingerprint never vouches for a file that isn't.
-        var secrets = try keychain.secretsOrThrow(service: KeychainManager.legacyService)
-        secrets[Self.fingerprintKey] = Self.fingerprint(bytes)
-        try keychain.saveSecretsOrThrow(secrets, service: KeychainManager.legacyService)
+        let fingerprint = Self.fingerprint(bytes)
+        try keychain.updateSecretsOrThrow { $0[Self.fingerprintKey] = fingerprint }
         return cached
     }
 

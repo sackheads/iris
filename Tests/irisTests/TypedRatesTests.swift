@@ -102,7 +102,7 @@ struct TypedRatesTests {
             return (store, KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true), suite)
         }()
         defer { teardown(suite) }
-        keychain.saveSecrets([GuardedSettings.markerKey: "1"])
+        keychain.replaceSecrets([GuardedSettings.markerKey: "1"])
         keychain.simulateReadFailure(-25293)
         let config = ConfigManager(store: store, guardedSecrets: keychain)
         let key = TypedRates.key(providerId: "deepseek", model: "deepseek-v4-pro")

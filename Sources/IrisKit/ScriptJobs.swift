@@ -227,17 +227,14 @@ enum ScriptFingerprints {
     @discardableResult
     static func record(jobId: UUID, spec: ScriptSpec, profile: JobProfile = .readOnly, grant: JobGrant? = nil,
                        keychain: KeychainManager) -> Bool {
-        guard !keychain.areWritesBlocked,
-              var secrets = try? keychain.secretsOrThrow(service: KeychainManager.legacyService) else { return false }
-        secrets[key(jobId)] = spec.fingerprint(profile: profile, grant: grant)
-        return (try? keychain.saveSecretsOrThrow(secrets, service: KeychainManager.legacyService)) != nil
+        guard !keychain.areWritesBlocked else { return false }
+        let fingerprint = spec.fingerprint(profile: profile, grant: grant)
+        return (try? keychain.updateSecretsOrThrow { $0[key(jobId)] = fingerprint }) != nil
     }
 
     static func forget(jobId: UUID, keychain: KeychainManager) {
-        guard !keychain.areWritesBlocked,
-              var secrets = try? keychain.secretsOrThrow(service: KeychainManager.legacyService),
-              secrets.removeValue(forKey: key(jobId)) != nil else { return }
-        try? keychain.saveSecretsOrThrow(secrets, service: KeychainManager.legacyService)
+        guard !keychain.areWritesBlocked else { return }
+        try? keychain.updateSecretsOrThrow { $0[key(jobId)] = nil }
     }
 
 }

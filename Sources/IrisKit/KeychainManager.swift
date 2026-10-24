@@ -5,7 +5,8 @@ public final class KeychainManager: @unchecked Sendable {
     public static let shared = KeychainManager(serviceSuffix: BuildIdentity.current.keychainServiceSuffix)
 
     static let legacyService = "com.iris.secrets"
-    private let account = "all-keys"
+    static let account = "all-keys"
+    private var account: String { Self.account }
 
     public static let mcpFileService = "iris.mcp"
     public static func pluginService(_ id: String) -> String { "iris.plugin.\(id)" }
@@ -58,7 +59,9 @@ public final class KeychainManager: @unchecked Sendable {
 
     // MARK: - Legacy API (service = com.iris.secrets), unchanged behavior
     public func loadSecrets() -> [String: String] { secrets(service: Self.legacyService) }
-    public func saveSecrets(_ secrets: [String: String]) { saveSecrets(secrets, service: Self.legacyService) }
+    /// Replaces the whole item: for a copy of a whole item or a test's fixture, never for a change
+    /// to some keys, which is `updateSecrets` (#750).
+    public func replaceSecrets(_ secrets: [String: String]) { replaceSecrets(secrets, service: Self.legacyService) }
 
     // MARK: - Service-scoped API
     public func secrets(service: String) -> [String: String] {
@@ -79,7 +82,41 @@ public final class KeychainManager: @unchecked Sendable {
         return (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
     }
 
-    public func saveSecrets(_ secrets: [String: String], service: String) {
+    public func replaceSecrets(_ secrets: [String: String], service: String) {
+        Self.updateLock.withLock { storeSecrets(secrets, service: service) }
+    }
+
+    /// One lock for every load, change and save of a secrets item in this process (#750). Each
+    /// writer saves the whole dictionary, so two unlocked writes close together lose one's keys: an
+    /// API key, a guarded setting, a fingerprint. Another process can't write the same item (#463).
+    private static let updateLock = NSLock()
+
+    /// Loads `service`'s secrets, lets `mutate` change them and saves them, all under one lock, and
+    /// saves only if something changed. A read that fails (a locked Mac, a denied prompt) saves
+    /// nothing, rather than an item holding only `mutate`'s keys (#761 review); it's printed, as a
+    /// failed save is. `mutate` must not touch a Keychain itself: the lock isn't reentrant.
+    func updateSecrets(service: String = KeychainManager.legacyService, _ mutate: (inout [String: String]) -> Void) {
+        do {
+            try updateSecretsOrThrow(service: service, mutate)
+        } catch {
+            print("Not saving secrets for \(service): the item couldn't be read (\(error)), so it is left as it is (#750).")
+        }
+    }
+
+    /// `updateSecrets`, but a read or save that fails throws, and nothing is saved over a read that
+    /// failed; `mutate` throwing saves nothing. A Keychain prompt during the read is answered with
+    /// the lock held, so other writers wait for it; a reader that needs no lock never does.
+    func updateSecretsOrThrow(service: String = KeychainManager.legacyService,
+                              _ mutate: (inout [String: String]) throws -> Void) throws {
+        try Self.updateLock.withLock {
+            let before = try secretsOrThrow(service: service)
+            var after = before
+            try mutate(&after)
+            if after != before { try storeSecretsOrThrow(after, service: service) }
+        }
+    }
+
+    private func storeSecrets(_ secrets: [String: String], service: String) {
         if service == Self.legacyService, areWritesBlocked {
             print("Not saving secrets: the secrets item could not be read at launch, so it is left as it is (#678).")
             return
@@ -151,14 +188,22 @@ public final class KeychainManager: @unchecked Sendable {
         case .notFound: return [:]
         case .failure(let bad): throw SecretsError.status(bad)
         case .success:
-            guard let data = dataTypeRef as? Data else { return [:] }
-            return (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
+            // An item that won't decode is unreadable, not empty: read as empty, the next update
+            // would replace it with only its own keys (#761 review), and #678 treats it as missing.
+            guard let data = dataTypeRef as? Data,
+                  let secrets = try? JSONDecoder().decode([String: String].self, from: data) else {
+                throw SecretsError.status(errSecDecode)
+            }
+            return secrets
         }
     }
 
-    /// `saveSecrets(_:service:)`, but a non-success status throws instead of only printing —
-    /// used wherever a silently dropped secret would strand the caller.
-    func saveSecretsOrThrow(_ secrets: [String: String], service: String) throws {
+    /// `replaceSecrets(_:service:)`, but a non-success status throws instead of only printing.
+    func replaceSecretsOrThrow(_ secrets: [String: String], service: String) throws {
+        try Self.updateLock.withLock { try storeSecretsOrThrow(secrets, service: service) }
+    }
+
+    private func storeSecretsOrThrow(_ secrets: [String: String], service: String) throws {
         if service == Self.legacyService, areWritesBlocked { throw SecretsError.status(errSecWrPerm) }
         let service = resolvedService(service)
         if usesInMemoryStore {

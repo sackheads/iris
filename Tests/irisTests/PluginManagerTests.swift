@@ -40,7 +40,7 @@ struct PluginManagerTests {
     func loadsAndResolves() async throws {
         let (paths, _) = try fixture(manifest: simpleManifest, id: "echo-plug", mcpJSON: mcpJSON)
         defer { try? FileManager.default.removeItem(at: paths.root) }
-        KeychainManager.shared.saveSecrets(["TOKEN": "tok123"], service: KeychainManager.pluginService("echo-plug"))
+        KeychainManager.shared.replaceSecrets(["TOKEN": "tok123"], service: KeychainManager.pluginService("echo-plug"))
         defer { KeychainManager.shared.deleteSecrets(service: KeychainManager.pluginService("echo-plug")) }
 
         let pm = PluginManager(paths: paths)
@@ -95,7 +95,7 @@ struct PluginManagerTests {
     func disabled() async throws {
         let (paths, _) = try fixture(manifest: simpleManifest, id: "echo-plug", mcpJSON: mcpJSON)
         defer { try? FileManager.default.removeItem(at: paths.root) }
-        KeychainManager.shared.saveSecrets(["TOKEN": "t"], service: KeychainManager.pluginService("echo-plug"))
+        KeychainManager.shared.replaceSecrets(["TOKEN": "t"], service: KeychainManager.pluginService("echo-plug"))
         defer { KeychainManager.shared.deleteSecrets(service: KeychainManager.pluginService("echo-plug")) }
 
         let pm = PluginManager(paths: paths)

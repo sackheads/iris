@@ -64,7 +64,7 @@ struct GuardedSettingsTests {
         #expect(first.takeGuardedNotices() == [GuardedSettings.upgradeNotice])
         first.enableSandboxing = true
         // Two silent shell steps: `security delete-generic-password`, `defaults delete … GUARDED_SETTINGS_V1`.
-        keychain.saveSecrets([:])
+        keychain.replaceSecrets([:])
         store.removeObject(forKey: GuardedSettings.markerKey)
         let replayed = ConfigManager(store: store, guardedSecrets: keychain)
         #expect(!replayed.enableSandboxing, "the documented limit: back to built-in")
@@ -172,6 +172,18 @@ struct GuardedSettingsTests {
         #expect(load.notices.count == 1 && load.notices[0].contains("couldn't read"))
     }
 
+    @Test("a damaged item (read, but undecodable) fails closed too, and its notice says how to start it over (#761)")
+    func damagedItem() {
+        let load = GuardedSettings.load(item: .unreadable(errSecDecode), defaults: [:], defaultsMarker: true)
+        #expect(load.state == .unreadable(errSecDecode))
+        #expect(load.values == protective)
+        #expect(load.write == nil)
+        let service = KeychainManager.shared.resolvedService(KeychainManager.legacyService)
+        #expect(load.notices == [GuardedSettings.damagedNotice(service: service)])
+        #expect(load.notices[0].contains("security delete-generic-password -s \(service) -a all-keys"))
+        #expect(!load.notices[0].contains("deny"), "not the denied-prompt notice")
+    }
+
     @Test("a stored value that fails its type check is protective, not trusted")
     func invalidStoredValue() {
         let item = [GuardedSettings.markerKey: "1", "ENABLE_SANDBOXING": "maybe", "JOB_DAILY_TOKEN_BUDGET": "-5"]
@@ -185,7 +197,7 @@ struct GuardedSettingsTests {
         let (store, keychain, suite) = harness(); defer { teardown(suite) }
         _ = ConfigManager(store: store, guardedSecrets: keychain)
         // A replay staged for a headless run: the item and the marker deleted, defaults planted.
-        keychain.saveSecrets([:])
+        keychain.replaceSecrets([:])
         store.removeObject(forKey: GuardedSettings.markerKey)
         store.set(false, forKey: "ENABLE_SANDBOXING")
         store.set(999_999_999, forKey: "JOB_DAILY_TOKEN_BUDGET")
@@ -245,7 +257,7 @@ struct GuardedSettingsTests {
     func unreadableNeverWritten() {
         let (store, keychain, suite) = harness(); defer { teardown(suite) }
         _ = ConfigManager(store: store, guardedSecrets: keychain)
-        keychain.saveSecrets(keychain.loadSecrets().merging(["ENABLE_SANDBOXING": "false"]) { $1 })
+        keychain.replaceSecrets(keychain.loadSecrets().merging(["ENABLE_SANDBOXING": "false"]) { $1 })
         let before = keychain.loadSecrets()
 
         keychain.simulateReadFailure(errSecAuthFailed)   // the person clicked Deny
@@ -255,7 +267,7 @@ struct GuardedSettingsTests {
         #expect(config.mainAgentSandboxDefault == .sandboxed)
         #expect(config.refusesHostWithoutRuntime)
         config.jobDailyTokenBudget = 7
-        keychain.saveSecrets(["GEMINI_API_KEY": "would-replace-everything"])
+        keychain.replaceSecrets(["GEMINI_API_KEY": "would-replace-everything"])
         keychain.simulateReadFailure(nil)
         #expect(keychain.loadSecrets() == before, "the item is exactly as it was")
         #expect(GuardedSettings.settingsBanner(for: config.guardedState) != nil, "Settings says edits won't be saved")
@@ -266,7 +278,7 @@ struct GuardedSettingsTests {
     func deletedThenChanged() {
         let (store, keychain, suite) = harness(); defer { teardown(suite) }
         _ = ConfigManager(store: store, guardedSecrets: keychain)
-        keychain.saveSecrets([:])               // a silent `security delete-generic-password`
+        keychain.replaceSecrets([:])               // a silent `security delete-generic-password`
         store.set(false, forKey: "ENABLE_VIBECOP")
         let config = ConfigManager(store: store, guardedSecrets: keychain)
         #expect(config.guardedState == .missing)
