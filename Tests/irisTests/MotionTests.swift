@@ -62,3 +62,27 @@ struct MotionSourceScanTests {
         #expect(found.mapValues(\.count) == allowed, "raw SwiftUI motion outside Motion: \(found)")
     }
 }
+
+@MainActor
+@Suite("Composer popups and the session strip slide in (#598)")
+struct RevealTests {
+    @Test("a popup appearing or going is animated; new suggestions while it shows aren't; Reduce Motion animates nothing")
+    func revealing() {
+        let on = MotionSwitch(true).motion, off = MotionSwitch(false).motion
+        var ran = 0
+        #expect(Motion.revealing(from: false, to: true, off) { ran += 1 })
+        #expect(Motion.revealing(from: true, to: false, off) { ran += 1 })
+        #expect(!Motion.revealing(from: true, to: true, off) { ran += 1 })
+        #expect(!Motion.revealing(from: false, to: true, on) { ran += 1 })
+        #expect(ran == 4, "the change is always made")
+    }
+
+    @Test("the slash popup's model shows and clears through the reveal, keeping its state right")
+    func slashModel() {
+        let model = SlashCommandModel()
+        model.update(text: "/")
+        #expect(model.isShowing)
+        model.clear()
+        #expect(!model.isShowing && model.selectedIndex == 0)
+    }
+}
