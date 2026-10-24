@@ -37,6 +37,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             LaunchGate.shared.willTerminate {
                 AppState.shared.flushURLRefusalLines()
                 AppState.shared.flushSave()
+                Tier2Scores.shared.save()   // #238: the debounced write's last few seconds
             }
         }
         // Conversations live in their own database now (#163), but settings and other state

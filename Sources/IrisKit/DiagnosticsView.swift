@@ -4,10 +4,12 @@ struct DiagnosticsView: View {
     @ObservedObject private var metrics = MetricsManager.shared
     @ObservedObject private var profiler = PerformanceProfiler.shared
     @State private var mode: Mode = .byCommand
+    @State private var scoreRows: [Tier2Scores.Summary] = []
 
     enum Mode: String, CaseIterable, Identifiable {
         case byCommand = "By Command"
         case aggregate = "Aggregate"
+        case guardScores = "Guard Scores"
         var id: String { rawValue }
     }
 
@@ -23,9 +25,46 @@ struct DiagnosticsView: View {
             switch mode {
             case .byCommand: byCommand
             case .aggregate: aggregate
+            case .guardScores: guardScores
             }
         }
         .frame(minWidth: 600, minHeight: 400)
+    }
+
+    // MARK: - Guard Scores (#238)
+
+    /// Tier 2's scores per source, kept on this Mac for calibrating its threshold, which is a flat
+    /// 0.9 today. Read when shown and on Refresh, not observed: a table that redraws on every
+    /// tool output isn't worth the cost.
+    private var guardScores: some View {
+        VStack(alignment: .leading) {
+            if scoreRows.isEmpty {
+                Spacer()
+                Text("No inputs judged by the injection guard's tier 2 yet.")
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity)
+                Spacer()
+            } else {
+                Table(scoreRows) {
+                    TableColumn("Source") { Text($0.cells[0]).lineLimit(1) }
+                    TableColumn("Inputs") { Text($0.cells[1]).monospacedDigit() }
+                    TableColumn("p50") { Text($0.cells[2]).monospacedDigit() }
+                    TableColumn("p95") { Text($0.cells[3]).monospacedDigit() }
+                    TableColumn("Max") { Text($0.cells[4]).monospacedDigit() }
+                    TableColumn("Lines withheld") { Text($0.cells[5]).monospacedDigit() }
+                    TableColumn("Blocked") { Text($0.cells[6]).monospacedDigit() }
+                }
+            }
+            HStack {
+                Text("Tier 2's score per input, by source: its last \(Tier2Scores.kept) scores for the percentiles. It blocks at 0.9. Kept on this Mac only, with no text.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button("Refresh") { scoreRows = Tier2Scores.shared.summary() }
+            }
+            .padding([.horizontal, .bottom])
+        }
+        .onAppear { scoreRows = Tier2Scores.shared.summary() }
     }
 
     // MARK: - By Command

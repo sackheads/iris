@@ -570,6 +570,9 @@ public struct InjectionGuard {
             await MainActor.run { GuardTierHealth.current.clearTier2() }
             await MetricsManager.shared.trackLatency(operation: .promptGuardTier2, modelName: "CoreML", durationMs: durationMs, success: true)
 
+            // #238: the score per source, for calibrating the threshold per tag.
+            Tier2Scores.current.record(tag: source, score: probability,
+                                       outcome: judgement.allWithheld ? .blocked : judgement.withheld.isEmpty ? .passed : .withheld)
             if judgement.allWithheld {
                 print("[InjectionGuard] Tier 2 CoreML flagged injection (source: \(source)) with probability: \(probability)")
                 return .malicious
