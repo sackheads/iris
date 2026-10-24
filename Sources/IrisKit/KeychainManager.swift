@@ -91,18 +91,20 @@ public final class KeychainManager: @unchecked Sendable {
     private static let updateLock = NSLock()
 
     /// Loads `service`'s secrets, lets `mutate` change them and saves them, all under one lock, and
-    /// saves only if something changed. A read that fails reads as empty, as `secrets(service:)`.
+    /// saves only if something changed. A read that fails (a locked Mac, a denied prompt) saves
+    /// nothing, rather than an item holding only `mutate`'s keys (#761 review); it's printed, as a
+    /// failed save is. `mutate` must not touch a Keychain itself: the lock isn't reentrant.
     func updateSecrets(service: String = KeychainManager.legacyService, _ mutate: (inout [String: String]) -> Void) {
-        Self.updateLock.withLock {
-            let before = secrets(service: service)
-            var after = before
-            mutate(&after)
-            if after != before { storeSecrets(after, service: service) }
+        do {
+            try updateSecretsOrThrow(service: service, mutate)
+        } catch {
+            print("Not saving secrets for \(service): the item couldn't be read (\(error)), so it is left as it is (#750).")
         }
     }
 
     /// `updateSecrets`, but a read or save that fails throws, and nothing is saved over a read that
-    /// failed; `mutate` throwing saves nothing.
+    /// failed; `mutate` throwing saves nothing. A Keychain prompt during the read is answered with
+    /// the lock held, so other writers wait for it; a reader that needs no lock never does.
     func updateSecretsOrThrow(service: String = KeychainManager.legacyService,
                               _ mutate: (inout [String: String]) throws -> Void) throws {
         try Self.updateLock.withLock {
