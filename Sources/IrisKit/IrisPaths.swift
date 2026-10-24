@@ -164,6 +164,10 @@ struct IrisPaths: Sendable {
     var permissionsJSON: URL { configDir.appendingPathComponent("permissions.json") }
     var mcpServersJSON: URL { configDir.appendingPathComponent("mcp_servers.json") }
 
+    // metrics/: measurements kept for this Mac's own use, never sent (#238)
+    var metricsDir: URL { root.appendingPathComponent("metrics") }
+    var tier2ScoresJSON: URL { metricsDir.appendingPathComponent("tier2-scores.json") }
+
     // rules/
     var rulesDir: URL { root.appendingPathComponent("rules") }
 
