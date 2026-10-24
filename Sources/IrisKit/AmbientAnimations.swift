@@ -267,19 +267,34 @@ final class WelcomeGlowNSView: AmbientLayerView {
 /// A model LED's dot (#557): its colour, a 1 pt ring of that colour at 0.3, and its glow, growing
 /// to 1.35 times its size over 0.6 s and back for as long as the LED is active.
 struct LEDDotView: NSViewRepresentable {
+    /// The dot's side at the bar's regular size; `LEDBarSize` scales it (#672).
     static let side: CGFloat = 10
     /// Stands still at full size under Reduce Motion, not at its 1.35 peak, which is the moving state.
+    /// A scale, so it pulses the same relative amount at any side.
     static let pulse = AmbientPulse(keyPath: "transform.scale", from: 1.0, to: 1.35, duration: 0.6, still: 1.0)
     let state: ModelLED.LEDState
+    var side: CGFloat = LEDDotView.side
 
-    func makeNSView(context: Context) -> LEDDotNSView { LEDDotNSView(state: state, reduceMotion: .system) }
-    func updateNSView(_ view: LEDDotNSView, context: Context) { view.state = state }
+    func makeNSView(context: Context) -> LEDDotNSView { LEDDotNSView(state: state, reduceMotion: .system, side: side) }
+    func updateNSView(_ view: LEDDotNSView, context: Context) {
+        view.state = state
+        view.side = side
+    }
 }
 
 /// Unlike the dots and the glow, this view stays on screen while its animation comes and goes: the
 /// primary LED goes active for every turn and back to ready after it.
 final class LEDDotNSView: AmbientLayerView {
     let dot = CAShapeLayer()
+    /// The dot's side (#672): its path, glow and bounds follow it.
+    var side: CGFloat {
+        didSet {
+            guard side != oldValue else { return }
+            shape()
+            applyColors()
+            needsLayout = true
+        }
+    }
     var state: ModelLED.LEDState {
         didSet {
             guard state != oldValue else { return }
@@ -288,15 +303,11 @@ final class LEDDotNSView: AmbientLayerView {
         }
     }
 
-    init(state: ModelLED.LEDState, reduceMotion: ReduceMotion) {
+    init(state: ModelLED.LEDState, reduceMotion: ReduceMotion, side: CGFloat = LEDDotView.side) {
         self.state = state
-        super.init(frame: NSRect(x: 0, y: 0, width: LEDDotView.side, height: LEDDotView.side),
-                   reduceMotion: reduceMotion)
-        let circle = CGPath(ellipseIn: CGRect(x: 0, y: 0, width: LEDDotView.side, height: LEDDotView.side),
-                            transform: nil)
-        dot.path = circle
-        // The glow's shape given, so the render server doesn't derive it from the pixels each frame.
-        dot.shadowPath = circle
+        self.side = side
+        super.init(frame: NSRect(x: 0, y: 0, width: side, height: side), reduceMotion: reduceMotion)
+        shape()
         dot.shadowOffset = .zero
         dot.lineWidth = 1
         layer?.addSublayer(dot)
@@ -305,6 +316,17 @@ final class LEDDotNSView: AmbientLayerView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    /// The circle at `side`, and the glow's shape, given so the render server doesn't derive it
+    /// from the pixels each frame.
+    private func shape() {
+        let circle = CGPath(ellipseIn: CGRect(x: 0, y: 0, width: side, height: side), transform: nil)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        dot.path = circle
+        dot.shadowPath = circle
+        CATransaction.commit()
+    }
 
     private func pulse(wasPulsing: Bool) {
         animated = [(dot, state.isPulsing ? [LEDDotView.pulse] : [])]
@@ -362,7 +384,8 @@ final class LEDDotNSView: AmbientLayerView {
             dot.shadowColor = color
         }
         dot.shadowOpacity = look.glowOpacity
-        dot.shadowRadius = look.glowRadius
+        // The glow was drawn for the regular side; it grows with the dot (#672).
+        dot.shadowRadius = look.glowRadius * side / LEDDotView.side
         CATransaction.commit()
     }
 
@@ -382,7 +405,7 @@ final class LEDDotNSView: AmbientLayerView {
         super.layout()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        dot.bounds = CGRect(x: 0, y: 0, width: LEDDotView.side, height: LEDDotView.side)
+        dot.bounds = CGRect(x: 0, y: 0, width: side, height: side)
         dot.position = CGPoint(x: bounds.midX, y: bounds.midY)
         CATransaction.commit()
     }
