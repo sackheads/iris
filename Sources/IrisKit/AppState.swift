@@ -4052,6 +4052,10 @@ class AppState {
                     // #616: a damaged record may have lost a root, so a silent restricted read can't
                     // be vouched for; the person is asked until it's repaired.
                     if writableRootsDamaged() { break }
+                    // #607: a git read needs a git with `--attr-source` (2.40+), asked once per binary.
+                    if GitRead.argv(details) != nil {
+                        guard let git = GitRead.executable(on: path), await GitRead.versionSupported(executable: git) else { break }
+                    }
                     return .vibecopRestricted(path: path, reason: decision.reason)
                 case .ask: break
                 }

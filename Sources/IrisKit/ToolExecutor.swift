@@ -509,11 +509,21 @@ struct ToolExecutor {
     /// How a host command is spawned. A read the gate approved (`restrictedPath`, #612) runs as
     /// judged: `zsh -f` (no user startup files) with that `PATH` and `restrictedEnvironment`.
     /// Anything else runs as it always has, with the user's environment and startup files.
-    nonisolated static func hostSpawn(_ command: String, restrictedPath: [String]?,
+    nonisolated static func hostSpawn(_ command: String, restrictedPath: [String]?, gitRepository: GitRead.Repository? = nil,
                                       base: [String: String]) -> (executable: String, arguments: [String], environment: [String: String]) {
         if let restrictedPath {
-            return ("/bin/zsh", ["-f", "-c", command],
-                    ReadOnlyCommand.restrictedEnvironment(path: restrictedPath, base: base))
+            let restricted = ReadOnlyCommand.restrictedEnvironment(path: restrictedPath, base: base)
+            // #607: a git read runs as argv, no shell, with Iris's fixed prefix and overrides.
+            // A git the restricted PATH can't find, or a read with no judged repository to pin, runs
+            // nothing: never the unrestricted one.
+            if let argv = GitRead.argv(command) {
+                guard let gitRepository, let git = GitRead.executable(on: restrictedPath) else {
+                    return ("/usr/bin/false", [], restricted)
+                }
+                return (git, Array(argv.dropFirst()),
+                        restricted.merging(GitRead.environment()) { $1 }.merging(GitRead.pinning(gitRepository)) { $1 })
+            }
+            return ("/bin/zsh", ["-f", "-c", command], restricted)
         }
         return ("/bin/zsh", ["-c", command], BinaryResolver.commandEnvironment(base: base))
     }
@@ -638,7 +648,19 @@ struct ToolExecutor {
                                                              vmWritable: gitGuard.watchedSources(),
                                                              extra: gitGuard.adoptedOverrides(cwd: directory, command: command, owner: gitOwner))) { $1 }
             }
-            (executable, arguments, environment) = Self.hostSpawn(command, restrictedPath: restrictedPath, base: base)
+            // #607, #758 review: a silent git read runs pinned to the repository judged again here,
+            // against the record of every folder a sandbox could write; unreadable or reached, it
+            // doesn't run (the gate's check could be stale by now).
+            var gitRepository: GitRead.Repository?
+            if restrictedPath != nil, GitRead.argv(command) != nil {
+                guard case .roots(let roots) = WritableRootsRecord(paths: irisPaths ?? .default).contents(),
+                      let repo = GitRead.ownRepository(cwd: directory ?? FileManager.default.currentDirectoryPath, writableRoots: roots) else {
+                    return GitConfigGuard.withNotices(GitRead.notRunHere, before: gitBefore, after: nil)
+                }
+                gitRepository = repo
+            }
+            (executable, arguments, environment) = Self.hostSpawn(command, restrictedPath: restrictedPath,
+                                                                  gitRepository: gitRepository, base: base)
         }
 
         // Its own process group, killed whole on timeout and on Stop: SIGTERM, then SIGKILL (#353).
@@ -714,7 +736,9 @@ struct ToolExecutor {
         }
         var gitAfter: String? = nil
         if let ephemeralName { gitAfter = gitGuard.finish(owner: ephemeralName) }
-        return GitConfigGuard.withNotices(result, before: gitBefore, after: gitAfter)
+        // #607: what actually ran, Iris's prefix included, in the result the pill and the ledger show.
+        let shown = restrictedPath != nil && !useSandbox ? GitRead.argv(command).map { "Ran: \($0.joined(separator: " "))\n" + result } ?? result : result
+        return GitConfigGuard.withNotices(shown, before: gitBefore, after: gitAfter)
     }
 
     /// Whether the `git` on `env`'s `PATH` is real: anything but Apple's `/usr/bin/git` shim, or
