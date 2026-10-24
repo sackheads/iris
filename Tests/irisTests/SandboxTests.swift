@@ -92,15 +92,31 @@ struct SandboxTests {
         #expect(BlockingSpawn.run(stub.binary, ["warm-up"], timeoutSeconds: 30) == 0)
         var executor = ToolExecutor()
         executor.containerBinaryPath = { stub.binary }
-        let result = await executor.runCommand("true", cwd: stub.dir.path, useSandbox: true, timeoutSeconds: 1)
-        #expect(result == ToolExecutor.commandTimedOutMessage(seconds: 1))
+        // 5 s, not 1 (#763): `runCommand`'s deadline runs from the call, and its work starts in a
+        // `Task` that can wait seconds for a pool thread under load (#429). A deadline that beat
+        // it left nothing spawned and nothing to delete: the right ending, but not this test's.
+        let timeout: Double = 5
+        let result = await executor.runCommand("true", cwd: stub.dir.path, useSandbox: true, timeoutSeconds: timeout)
+        #expect(result == ToolExecutor.commandTimedOutMessage(seconds: timeout))
 
         let log = stub.dir.appendingPathComponent("calls")
         func calls() -> [String] {
             ((try? String(contentsOf: log, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
         }
-        let name = try #require(calls().first { $0.hasPrefix("run ") }?.split(separator: " ").dropFirst(3).first.map(String.init))
+        // The name from the kill ladder's own `delete --force`, a `container` call of its own that
+        // logs however far the first got (#763): under load the stub could still be starting when
+        // the 1 s deadline killed it, and never log its `run`. The kill is what's under test.
+        let deleteDeadline = TestClock.deadline(ProcessGroupRunner.terminateGraceSeconds + 5)
+        while TestClock.now() < deleteDeadline, !calls().contains(where: { $0.hasPrefix("delete --force ") }) {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let name = try #require(calls().first { $0.hasPrefix("delete --force ") }.map { String($0.dropFirst("delete --force ".count)) },
+                                calls() == ["warm-up"] ? "nothing was spawned before the \(timeout) s deadline (the work never got a pool thread, #429)"
+                                                      : "got: \(calls())")
         #expect(name.hasPrefix("\(SandboxSessionManager.namePrefix)run-"))
+        if let run = calls().first(where: { $0.hasPrefix("run ") }) {
+            #expect(run.split(separator: " ").dropFirst(3).first.map(String.init) == name, "the container it ran is the one deleted")
+        }
         let deadline = TestClock.deadline(1 + ProcessGroupRunner.terminateGraceSeconds + 5)
         while TestClock.now() < deadline {
             let registered = await EphemeralContainerRegistry.shared.current().contains(name)
