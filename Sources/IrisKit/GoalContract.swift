@@ -104,11 +104,32 @@ struct CheckpointOutcome: Codable, Identifiable, Equatable, Sendable {
     var evaluation: GoalEvaluation?
     var resolution: Resolution
     var date: Date = Date()
+    /// The goal this checkpoint belongs to (#205): the history outlives `clearGoal`, so a later
+    /// goal in the same conversation adds to it, and this tells one goal's records from another's.
+    /// Nil on records stored before it existed.
+    var contractId: UUID?
+
+    /// The most of one verdict's `evidence` a record keeps (#205). The grader is asked for brief
+    /// evidence, but nothing bounds what it writes, and every checkpoint's record repeats the
+    /// verdicts of every earlier milestone (grading is cumulative), so an unbounded string is
+    /// multiplied by the ladder's length. 1,000 characters holds a few sentences and a quoted
+    /// command line; the full text stays in the conversation's own evaluation and transcript.
+    static let evidenceLimit = 1_000
 
     init(id: UUID = UUID(), milestoneIndex: Int, milestoneTitle: String,
-         evaluation: GoalEvaluation? = nil, resolution: Resolution, date: Date = Date()) {
+         evaluation: GoalEvaluation? = nil, resolution: Resolution, date: Date = Date(), contractId: UUID? = nil) {
         self.id = id; self.milestoneIndex = milestoneIndex; self.milestoneTitle = milestoneTitle
-        self.evaluation = evaluation; self.resolution = resolution; self.date = date
+        self.evaluation = evaluation.map(Self.capped); self.resolution = resolution; self.date = date
+        self.contractId = contractId
+    }
+
+    /// `evaluation` with each verdict's evidence held to `evidenceLimit`, saying where it was cut.
+    static func capped(_ evaluation: GoalEvaluation) -> GoalEvaluation {
+        var e = evaluation
+        for i in e.criteria.indices where e.criteria[i].evidence.count > evidenceLimit {
+            e.criteria[i].evidence = String(e.criteria[i].evidence.prefix(evidenceLimit)) + " [evidence cut at \(evidenceLimit) characters]"
+        }
+        return e
     }
 
     /// Lenient decoder for the same reason `GoalContract` and `Conversation` have one (invariant 1):
@@ -124,6 +145,7 @@ struct CheckpointOutcome: Codable, Identifiable, Equatable, Sendable {
         evaluation = try c.decodeIfPresent(GoalEvaluation.self, forKey: .evaluation)
         resolution = try c.decode(Resolution.self, forKey: .resolution)
         date = try c.decodeIfPresent(Date.self, forKey: .date) ?? Date()
+        contractId = try c.decodeIfPresent(UUID.self, forKey: .contractId)
     }
 }
 

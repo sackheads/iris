@@ -6,6 +6,10 @@ import GRDB
 enum ConversationChange: Sendable, Equatable {
     case created
     case metadata
+    /// `checkpointHistory` changed (#205): the one change that writes that column. A metadata
+    /// write leaves it alone, since it holds every checkpoint's verdicts and would otherwise be
+    /// rewritten whole on every model response.
+    case checkpointHistory
     case messagesAppended(from: Int)
     case messageUpdated(id: UUID)
     case messagesReplaced
@@ -19,6 +23,7 @@ struct ChangeSet: Sendable, Equatable {
     var created = false
     var deleted = false
     var metadata = false
+    var checkpointHistory = false
     var messagesFrom: Int? = nil
     var messagesReplaced = false
     var updatedMessageIds: Set<UUID> = []
@@ -26,7 +31,7 @@ struct ChangeSet: Sendable, Equatable {
     var historyReplaced = false
 
     var isEmpty: Bool {
-        !created && !deleted && !metadata && messagesFrom == nil && !messagesReplaced
+        !created && !deleted && !metadata && !checkpointHistory && messagesFrom == nil && !messagesReplaced
             && updatedMessageIds.isEmpty && historyFrom == nil && !historyReplaced
     }
 
@@ -34,6 +39,7 @@ struct ChangeSet: Sendable, Equatable {
         switch change {
         case .created: created = true
         case .metadata: metadata = true
+        case .checkpointHistory: checkpointHistory = true
         case .messagesAppended(let from): if !messagesReplaced { messagesFrom = min(messagesFrom ?? from, from) }
         case .messageUpdated(let id): updatedMessageIds.insert(id)
         case .messagesReplaced: messagesReplaced = true; messagesFrom = nil
@@ -48,6 +54,7 @@ struct ChangeSet: Sendable, Equatable {
         created = created || other.created
         deleted = deleted || other.deleted
         metadata = metadata || other.metadata
+        checkpointHistory = checkpointHistory || other.checkpointHistory
         messagesReplaced = messagesReplaced || other.messagesReplaced
         historyReplaced = historyReplaced || other.historyReplaced
         messagesFrom = messagesReplaced ? nil : [messagesFrom, other.messagesFrom].compactMap { $0 }.min()
@@ -846,6 +853,11 @@ final class ConversationStore: Sendable {
         if !exists || w.changes.created || w.changes.metadata {
             try Self.upsertMetadata(c, exists: exists, db: db, encoder: encoder)
         }
+        // #205: written only when it changed. An insert above already wrote it.
+        if exists, w.changes.checkpointHistory || w.changes.created {
+            try db.execute(sql: "UPDATE conversations SET checkpointHistory = ? WHERE id = ?",
+                           arguments: [try Self.historyColumn(c, encoder), c.id.uuidString])
+        }
         if w.changes.messagesReplaced {
             // Before the delete, same reason as the conversation-deleted branch above (#201).
             try Self.deleteIndex(conversationId: c.id.uuidString, fromOrdinal: nil, db: db)
@@ -879,6 +891,15 @@ final class ConversationStore: Sendable {
         String(decoding: try encoder.encode(value), as: UTF8.self)
     }
 
+    /// The `checkpointHistory` column's value. NULL when empty, so the overwhelming majority of
+    /// rows carry nothing rather than "[]"; `loadAll` reads NULL back as `[]`, so the two are
+    /// indistinguishable to every caller.
+    private static func historyColumn(_ c: Conversation, _ encoder: JSONEncoder) throws -> String? {
+        c.checkpointHistory.isEmpty ? nil : try json(c.checkpointHistory, encoder)
+    }
+
+    /// Every column but `checkpointHistory` on an update (#205: that one is written only when it
+    /// changed, in `applyOne`); all of them on an insert.
     private static func upsertMetadata(_ c: Conversation, exists: Bool, db: Database, encoder: JSONEncoder) throws {
         let now = Date()
         // The column takes the conversation's own `updatedAt`, not the write clock. Now that
@@ -889,9 +910,7 @@ final class ConversationStore: Sendable {
         let tokenUsage = try json(c.tokenUsage, encoder)
         let contract = try c.goalContract.map { try json($0, encoder) }
         let result = try c.subagentResult.map { try json($0, encoder) }
-        // NULL when empty, so the overwhelming majority of rows carry nothing rather than "[]".
-        // `loadAll` reads NULL back as `[]`, so the two are indistinguishable to every caller.
-        let history = c.checkpointHistory.isEmpty ? nil : try json(c.checkpointHistory, encoder)
+        let history = try historyColumn(c, encoder)
         // NULL when absent (the overwhelming majority of rows), like `checkpointHistory` (#191).
         let evaluation = try c.lastGoalEvaluation.map { try json($0, encoder) }
         let report = try c.lastGoalCompletionReport.map { try json($0, encoder) }
@@ -904,7 +923,7 @@ final class ConversationStore: Sendable {
             try db.execute(sql: """
                 UPDATE conversations SET title = ?, updatedAt = ?, workspacePath = ?, activeGoal = ?,
                     messageCountSinceReflection = ?, goalIterationCount = ?, mainAgentSandbox = ?,
-                    tokenUsage = ?, goalContract = ?, subagentResult = ?, checkpointHistory = ?,
+                    tokenUsage = ?, goalContract = ?, subagentResult = ?,
                     lastGoalEvaluation = ?, lastGoalCompletionReport = ?, isArchived = ?,
                     isBackground = ?, isPinned = ?, sessionCard = ?, jobProfile = ?, sandboxGrant = ?,
                     hasUnattendedInput = ?, prefixMismatchBehavior = ?, role = ?, homeWritableOptIn = ?,
@@ -913,7 +932,7 @@ final class ConversationStore: Sendable {
                 WHERE id = ?
                 """, arguments: [c.title, touched, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
-                                 history, evaluation, report, c.isArchived, c.isBackground, c.isPinned, card,
+                                 evaluation, report, c.isArchived, c.isBackground, c.isPinned, card,
                                  c.jobProfile?.rawValue, grant, c.hasUnattendedInput, c.prefixMismatchBehavior?.rawValue,
                                  c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue, c.id.uuidString])
         } else {
