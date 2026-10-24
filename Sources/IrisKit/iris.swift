@@ -6701,8 +6701,10 @@ extension IrisEngine {
 
     /// A sandboxed sender's file outside its workspace (3b, §7.6 D): asked about as `read_file` of
     /// `vm:<path>`, then read whole in its running container, at most 50 MB (over it refuses). The
-    /// VM can only see what's mounted into it, which for a conversation is its workspace (handled
-    /// on the host, below) and what it made itself.
+    /// VM sees what's mounted into it: the workspace (read on the host, below), a grant's mounts,
+    /// and home when the person opted into that, besides what it made itself. That's exactly what
+    /// a sandboxed `cat` there could already read, so this adds no reach; but a `vm:` path can
+    /// name a host file through a mount, so the question is still asked (#760 review).
     private func attachVMFile(_ path: String, name: String, conversationId: UUID, workspacePath: String?) async -> Result<(Data, String, String), Refusal> {
         guard await Self.sandboxLive(conversationId) else {
             return .failure(Refusal(text: "\(path) is in your sandbox, which isn't running; run a command there first, then attach it."))
