@@ -80,17 +80,20 @@ extension JobGrant {
     }
 
     static func loginPathRefusal(_ source: String, entry: String) -> String {
-        "the mount source \(source) is, holds or sits inside \(entry), a folder on your login PATH: a sandbox that can write there could leave a program your Mac then runs. Mount it read-only, or use a folder made for the job."
+        "the mount source \(source) is or holds \(entry), a folder on your login PATH: a sandbox that can write there could leave a program your Mac then runs. Mount it read-only, or use a folder made for the job."
     }
 
-    /// #616: the login-PATH folder a read-write mount at `canonical` is, sits inside or holds, by
-    /// real path, or nil. `restrictedPath` already drops a writable folder from a silent read's
-    /// PATH; this keeps a sandbox from being able to write one at all.
+    /// #616: the login-PATH folder a read-write mount at `canonical` is or holds, compared by real
+    /// path on both sides, so an entry that's a link into a mount counts as held by it. Not one it
+    /// sits inside (#717, planner): a PATH lookup finds only an entry's direct children, so a
+    /// mount below an entry can't put anything on the PATH, and a broad entry such as `$HOME`
+    /// would otherwise refuse every mount under it. `restrictedPath` already drops a writable
+    /// folder from a silent read's PATH; this keeps a sandbox from being able to write one at all.
     static func loginPathEntry(touching canonical: String, loginPath: [String]) -> String? {
-        let lowered = canonical.lowercased()
+        let lowered = IrisPaths.canonicalPath(canonical).lowercased()
         for entry in loginPath where entry.hasPrefix("/") {
             let place = IrisPaths.canonicalPath(entry).lowercased()
-            if lowered == place || lowered.hasPrefix(place + "/") || place.hasPrefix(lowered + "/") { return entry }
+            if lowered == place || place.hasPrefix(lowered + "/") { return entry }
         }
         return nil
     }

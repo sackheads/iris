@@ -186,11 +186,24 @@ struct HostReadOnlyApprovalTests {
         #expect(try await call(state, "ls", in: cid, engine: vibecop) == .silent(true))
     }
 
-    @Test("a damaged writable-roots record turns the silent restricted read off: the person is asked, and told once (#616)")
+    @Test("a writable-roots record that can't be read turns the silent restricted read off: the person is asked, and told once (#616, #717)")
     func damagedRecordAsks() async throws {
         let (state, home) = try app()
         defer { try? FileManager.default.removeItem(at: home) }
-        state.writableRoots = WritableRootsRecord(paths: IrisPaths(root: home))
+        let keychain = KeychainManager(serviceSuffix: ".717-\(UUID().uuidString)", inMemory: true)
+        keychain.simulateReadFailure(errSecInteractionNotAllowed)
+        state.writableRoots = WritableRootsRecord(paths: IrisPaths(root: home), store: GuardedRoots(keychain: keychain))
+        let cid = state.createNewConversation(isBackground: false, select: true)
+        #expect(try await call(state, "ls", in: cid, engine: Approver()) == .asked)
+        _ = state.writableRootsDamaged()
+        #expect(state.conversations.first { $0.id == cid }?.messages.filter { $0.content == AppState.writableRootsUnreadableNotice }.count == 1)
+    }
+
+    @Test("legacy mode, the file as the record: a torn file asks too, with the file's own notice (#616)")
+    func damagedLegacyFileAsks() async throws {
+        let (state, home) = try app()
+        defer { try? FileManager.default.removeItem(at: home) }
+        state.writableRoots = WritableRootsRecord(paths: IrisPaths(root: home), store: GuardedRoots(keychain: nil))
         try FileManager.default.createDirectory(at: home.appendingPathComponent("config"), withIntermediateDirectories: true)
         try Data("\"/ok\"\n\"/torn".utf8).write(to: state.writableRoots.url)   // a write cut short
         let cid = state.createNewConversation(isBackground: false, select: true)

@@ -1440,10 +1440,13 @@ class AppState {
          createIfEmpty: Bool = true,
          emitLaunchNotices: Bool = true,
          guardedConfig: ConfigManager = .shared,
+         writableRoots: WritableRootsRecord = WritableRootsRecord(),
          runsGateUpgrade: Bool = NSClassFromString("XCTestCase") == nil,
          ensuresIris: Bool = NSClassFromString("XCTestCase") == nil) {
         self.store = store
         self.scriptKeychain = guardedConfig.guardedKeychain
+        // Before the launch reconcile and seed below, which write into it.
+        self.writableRoots = writableRoots
         self.engine = IrisEngine(state: self)
         loadConversations()
         // Before the retitle, which reads `isPinned`.
@@ -1468,6 +1471,10 @@ class AppState {
         // #678: what the guarded settings' launch found (an upgrade reset, a defaults write that
         // was ignored, a missing or unreadable item).
         if let target = noticeTarget { postGuardedNotices(guardedConfig.takeGuardedNotices(), to: target) }
+        // #717: the file's roots merged into the guarded record first, then what's live now.
+        if writableRoots.reconcile(), let target = noticeTarget {
+            appendLaunchNotice(Self.writableRootsChangedNotice(writableRoots.url.path), to: target)
+        }
         seedWritableRoots()
         if emitLaunchNotices { _ = writableRootsDamaged() }
         // #687: once, the gate scripts that just lost the network. Only here, inside the notice
@@ -4499,16 +4506,31 @@ class AppState {
     @ObservationIgnored var writableRoots = WritableRootsRecord()
     @ObservationIgnored private var writableRootsDamageNoticed = false
 
+    /// The record kept in the guarded item can't be read (#717).
+    nonisolated static let writableRootsUnreadableNotice = "Iris can't read its record of the folders a sandbox could write, which it keeps in its Keychain item, so Vibecop can't approve host reads on its own: you'll be asked for each one until Iris can read the item again."
+
+    /// #678's legacy mode only, where the file is the record.
     nonisolated static func writableRootsDamagedNotice(_ path: String) -> String {
         "Iris's record of the folders a sandbox could write (\(path)) is damaged, so Vibecop can't approve host reads on its own until it's repaired: you'll be asked for each one. Delete the file's broken line, or the file, to repair it; a root lost with it is the risk."
     }
 
+    /// The file was missing roots the guarded record has (#717): informational, nothing breaks.
+    nonisolated static func writableRootsChangedNotice(_ path: String) -> String {
+        "Iris's list of the folders a sandbox could write (\(path)) was changed outside Iris: it was missing folders Iris had recorded. Iris uses its own copy, kept in its Keychain item, so nothing was lost, and it rewrote the file."
+    }
+
     /// #616: whether the record is damaged. The first time this process finds it so, says so once.
     func writableRootsDamaged() -> Bool {
-        guard writableRoots.contents() == .damaged else { return false }
+        let damaged: Bool
+        switch writableRoots.contents() {
+        case .damaged: damaged = true
+        case .missing, .roots: damaged = false
+        }
+        guard damaged else { return false }
         if !writableRootsDamageNoticed, let target = selectedConversationId {
             writableRootsDamageNoticed = true
-            appendLaunchNotice(Self.writableRootsDamagedNotice(writableRoots.url.path), to: target)
+            appendLaunchNotice(writableRoots.store.isGuarded ? Self.writableRootsUnreadableNotice
+                                                             : Self.writableRootsDamagedNotice(writableRoots.url.path), to: target)
         }
         return true
     }

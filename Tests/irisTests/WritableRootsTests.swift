@@ -50,10 +50,11 @@ struct WritableRootsTests {
         #expect(Set(record.all()) == Set(roots.map { IrisPaths.canonicalPath($0) }))
     }
 
-    @Test("a torn last line, or any line that won't parse, is damaged; a file not there yet is empty")
+    @Test("legacy mode (the file is the record): a torn last line, or any line that won't parse, is damaged; a file not there yet is missing")
     func damaged() throws {
-        let record = WritableRootsRecord(paths: IrisPaths(root: try tempDir("home")))
-        #expect(record.contents() == .roots([]))
+        let record = WritableRootsRecord(paths: IrisPaths(root: try tempDir("home")), store: GuardedRoots(keychain: nil))
+        #expect(record.contents() == .missing)
+        #expect(record.all().isEmpty)
         #expect(record.record(["/iris616/a"]))
         let good = try Data(contentsOf: record.url)
         try (good + Data("\"/iris616/b".utf8)).write(to: record.url)
@@ -138,9 +139,9 @@ struct WritableRootsTests {
         #expect(WritableRootsRecord(paths: IrisPaths(root: home)).all().contains(IrisPaths.canonicalPath(ws.path)))
         #expect(runtime.created.count == 1)
 
-        // A config folder that can't be written: no container.
+        // A record that can't be written (its guarded item refuses writes): no container.
         let blocked = try tempDir("blocked")
-        try Data().write(to: blocked.appendingPathComponent("config"))   // a file where the folder goes
+        GuardedRoots.forHome(IrisPaths(root: blocked)).keychain?.blockWrites()
         let refused = MockRuntime()
         let strict = SandboxSessionManager(runtime: refused, image: { "ubuntu:latest" }, paths: IrisPaths(root: blocked))
         let out = await strict.run(command: "true", conversationId: UUID(),
@@ -149,7 +150,7 @@ struct WritableRootsTests {
         #expect(refused.created.isEmpty)
     }
 
-    @Test("a read-write grant on a login-PATH folder, under one, holding one, or through a link, is refused; read-only is fine")
+    @Test("a read-write grant on a login-PATH folder, holding one, or through a link, is refused; one inside is fine; read-only is fine")
     func loginPathRefused() throws {
         let paths = IrisPaths(root: try tempDir("home"))
         let prefix = try tempDir("brew")
@@ -159,10 +160,14 @@ struct WritableRootsTests {
         let link = prefix.deletingLastPathComponent().appendingPathComponent("iris616-binlink-\(UUID().uuidString)")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: bin)
         let loginPath = [bin.path]
-        for source in [bin.path, sub.path, prefix.path, link.path] {
+        for source in [bin.path, prefix.path, link.path] {
             let r = JobGrant.resolve(mounts: [source], network: false, profile: .mutating, paths: paths, loginPath: loginPath)
             guard case .failure(let why) = r else { Issue.record("\(source) was granted"); continue }
             #expect(why.text.contains("login PATH"), "\(source)")
+        }
+        // #717: a folder inside an entry puts nothing on the PATH, which finds only the entry's own files.
+        guard case .success = JobGrant.resolve(mounts: [sub.path], network: false, profile: .mutating, paths: paths, loginPath: loginPath) else {
+            Issue.record("a folder inside a PATH entry was refused"); return
         }
         let ro = JobGrant.resolve(mounts: [try tempDir("cwd").path, bin.path + ":" + bin.path + ":ro"], network: false,
                                   profile: .mutating, paths: paths, loginPath: loginPath)
@@ -182,10 +187,149 @@ struct WritableRootsTests {
         let prefix = try tempDir("wsbrew")
         let bin = prefix.appendingPathComponent("bin")
         try FileManager.default.createDirectory(at: bin.appendingPathComponent("x"), withIntermediateDirectories: true)
-        for path in [bin.path, bin.appendingPathComponent("x").path, prefix.path] {
+        for path in [bin.path, prefix.path] {
             #expect(HomeMount.reason(for: path, loginPath: [bin.path])?.contains("login PATH") == true, "\(path)")
         }
+        #expect(HomeMount.reason(for: bin.appendingPathComponent("x").path, loginPath: [bin.path]) == nil, "inside an entry is fine (#717)")
         #expect(HomeMount.reason(for: try tempDir("plain").path, loginPath: [bin.path]) == nil)
+    }
+
+    @Test("a broad PATH entry doesn't refuse the folders under it, and an entry that's a link into a mount is held by it (#717)")
+    func broadAndLinkedEntries() throws {
+        let paths = IrisPaths(root: try tempDir("home"))
+        // A broad entry, as $HOME on the PATH: a project inside it is fine.
+        let broad = try tempDir("broad")
+        let project = broad.appendingPathComponent("proj")
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        guard case .success = JobGrant.resolve(mounts: [project.path], network: false, profile: .mutating,
+                                               paths: paths, loginPath: [broad.path]) else {
+            Issue.record("a project inside a broad PATH entry was refused"); return
+        }
+        #expect(HomeMount.reason(for: project.path, loginPath: [broad.path]) == nil)
+        // An entry that's a link into a mount (~/bin -> ~/proj/bin): the mount holds its real target.
+        let proj = try tempDir("proj")
+        let realBin = proj.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: realBin, withIntermediateDirectories: true)
+        let entry = proj.deletingLastPathComponent().appendingPathComponent("iris717-bin-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(at: entry, withDestinationURL: realBin)
+        defer { try? FileManager.default.removeItem(at: entry) }
+        guard case .failure(let why) = JobGrant.resolve(mounts: [proj.path], network: false, profile: .mutating,
+                                                        paths: paths, loginPath: [entry.path]) else {
+            Issue.record("a mount holding a linked PATH entry's target was granted"); return
+        }
+        #expect(why.text.contains("login PATH"))
+        #expect(HomeMount.reason(for: proj.path, loginPath: [entry.path])?.contains("login PATH") == true)
+        // Real paths on the mount's side too, whatever the caller passes: a link to the project.
+        let projLink = proj.deletingLastPathComponent().appendingPathComponent("iris717-proj-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(at: projLink, withDestinationURL: proj)
+        defer { try? FileManager.default.removeItem(at: projLink) }
+        #expect(JobGrant.loginPathEntry(touching: projLink.path, loginPath: [realBin.path]) == realBin.path)
+    }
+
+    private func guarded() throws -> (WritableRootsRecord, KeychainManager) {
+        let keychain = KeychainManager(serviceSuffix: ".717-\(UUID().uuidString)", inMemory: true)
+        return (WritableRootsRecord(paths: IrisPaths(root: try tempDir("home")), store: GuardedRoots(keychain: keychain)), keychain)
+    }
+
+    /// The file's lines, decoded (JSONEncoder writes `/` as `\/`).
+    private func fileRoots(_ record: WritableRootsRecord) throws -> [String] {
+        try String(contentsOf: record.url, encoding: .utf8).split(separator: "\n")
+            .map { try JSONDecoder().decode(String.self, from: Data($0.utf8)) }
+    }
+
+    private func stored(_ keychain: KeychainManager) throws -> [String]? {
+        try keychain.secretsOrThrow(service: KeychainManager.legacyService)[GuardedRoots.key]
+            .map { try JSONDecoder().decode([String].self, from: Data($0.utf8)) }
+    }
+
+    @Test("the record is the guarded item: deleting the file, junk lines in it and a rewrite of it leave the lookups as they were (#717)")
+    func fileChangesDontMatter() throws {
+        let (record, keychain) = try guarded()
+        let a = IrisPaths.canonicalPath("/iris717/a"), b = IrisPaths.canonicalPath("/iris717/b")
+        #expect(record.record([a, b]))
+        #expect(try stored(keychain) == [a, b], "in the item")
+        #expect(try fileRoots(record) == [a, b], "and its copy, the file")
+
+        try FileManager.default.removeItem(at: record.url)
+        #expect(record.contents() == .roots([a, b]), "deleted")
+        // A recorder after the deletion doesn't start over from the new root (the #749 review).
+        let c = IrisPaths.canonicalPath("/iris717/c")
+        #expect(record.record([c]))
+        #expect(record.contents() == .roots([a, b, c]))
+        try Data("not json\n\"/iris717/torn".utf8).write(to: record.url)
+        #expect(record.contents() == .roots([a, b, c]), "junk")
+        try Data("\"\(a)\"\n".utf8).write(to: record.url)
+        #expect(record.contents() == .roots([a, b, c]), "rewritten without b and c")
+    }
+
+    @Test("at launch the file is merged in: a file missing recorded roots is reported and rewritten; extra lines only add (#717)")
+    func reconcileAtLaunch() throws {
+        let (record, keychain) = try guarded()
+        let a = IrisPaths.canonicalPath("/iris717/a"), b = IrisPaths.canonicalPath("/iris717/b")
+        #expect(record.record([a, b]))
+        #expect(!record.reconcile(), "the file matches")
+
+        try Data("\"\(a)\"\n".utf8).write(to: record.url)
+        #expect(record.reconcile(), "missing b: changed outside Iris")
+        #expect(try fileRoots(record) == [a, b], "rewritten from the item")
+
+        // A line the item doesn't have is merged: it can only drop a folder from the PATH.
+        let extra = IrisPaths.canonicalPath("/iris717/extra")
+        try Data("\"\(a)\"\n\"\(b)\"\n\"\(extra)\"\njunk\n".utf8).write(to: record.url)
+        #expect(!record.reconcile(), "nothing missing")
+        #expect(try stored(keychain) == [a, b, extra])
+    }
+
+    @Test("the first launch with a guarded record moves the file's parseable roots into it, then adds what's live (#717)")
+    func migration() throws {
+        let home = try tempDir("home")
+        let paths = IrisPaths(root: home)
+        try FileManager.default.createDirectory(at: paths.configDir, withIntermediateDirectories: true)
+        let old = IrisPaths.canonicalPath("/iris717/old")
+        // An older build's file, a broken line included: what parses is kept.
+        try Data("\"\(old)\"\nbroken\n".utf8).write(to: WritableRootsRecord(paths: paths, store: GuardedRoots(keychain: nil)).url)
+        let keychain = KeychainManager(serviceSuffix: ".717-\(UUID().uuidString)", inMemory: true)
+        let record = WritableRootsRecord(paths: paths, store: GuardedRoots(keychain: keychain))
+        // Read before any launch reconcile (a mount site, a lookup): the file's roots are already in.
+        #expect(record.contents() == .roots([old]))
+        #expect(try stored(keychain) == [old])
+        let ws = try tempDir("ws")
+        let store = try ConversationStore.inMemory()
+        let state = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned,
+                             createIfEmpty: false, emitLaunchNotices: false, writableRoots: record)
+        let id = state.createNewConversation(isBackground: false, select: true)
+        state.setWorkspace(for: id, path: ws.path)
+        state.seedWritableRoots()
+        #expect(try stored(keychain) == [old, IrisPaths.canonicalPath(ws.path)].sorted())
+        #expect(record.contents() == .roots([old, IrisPaths.canonicalPath(ws.path)].sorted()))
+    }
+
+    @Test("an item that can't be read fails closed: no roots vouched for, nothing recorded, nothing written over it (#717)")
+    func unreadableItem() throws {
+        let (record, keychain) = try guarded()
+        let a = IrisPaths.canonicalPath("/iris717/a")
+        #expect(record.record([a]))
+        let other = GuardedRoots(keychain: keychain)   // a fresh launch over the same item
+        keychain.simulateReadFailure(errSecInteractionNotAllowed)
+        let relaunched = WritableRootsRecord(paths: record.paths, store: other)
+        #expect(relaunched.contents() == .damaged)
+        #expect(!relaunched.record([IrisPaths.canonicalPath("/iris717/b")]), "a mount site refuses")
+        #expect(!relaunched.reconcile())
+        keychain.simulateReadFailure(nil)
+        #expect(try stored(keychain) == [a], "the item is as it was")
+    }
+
+    @Test("launch posts the changed-outside notice once when the file lost a recorded root (#717)")
+    func changedNoticeAtLaunch() throws {
+        let (record, _) = try guarded()
+        let a = IrisPaths.canonicalPath("/iris717/a")
+        #expect(record.record([a]))
+        try FileManager.default.removeItem(at: record.url)
+        let state = AppState(store: try ConversationStore.inMemory(), tier2Provisioning: .provisioned, tier3Provisioning: .provisioned,
+                             createIfEmpty: true, emitLaunchNotices: true, writableRoots: record)
+        let notice = AppState.writableRootsChangedNotice(record.url.path)
+        #expect(state.conversations.flatMap(\.messages).filter { $0.content == notice }.count == 1)
+        #expect(record.contents() == .roots([a]))
     }
 
     @Test("at fire, a stored read-write grant on a login-PATH folder is refused")

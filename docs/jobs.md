@@ -265,7 +265,7 @@ mount hands the container `config/permissions.json`, the plugin settings and the
 **credential store**, read-only included (the list is below,
 beside the fact it belongs with); a path that is or contains a place your Mac runs programs or
 settings from — `~/Library/LaunchAgents`, `~/.config`, `~/bin`, `~/.local/bin` — read-only included,
-because a program planted there runs on the host later (#611); a read-write source that is, sits inside or holds a folder on your login `PATH` (`/opt/homebrew/bin`, a link to it, or `/opt/homebrew`), for the same reason, and re-checked at every fire for a grant stored before the rule (#616); a read-only first entry when a read-write entry follows it; the
+because a program planted there runs on the host later (#611); a read-write source that is or holds a folder on your login `PATH` (`/opt/homebrew/bin`, a link to it, or `/opt/homebrew`; a folder *inside* one is fine, since a `PATH` lookup finds only an entry's own files, #717), for the same reason, and re-checked at every fire for a grant stored before the rule (#616); a read-only first entry when a read-write entry follows it; the
 same source twice. A source is judged and stored as the directory it *resolves to* — `~/x -> /` is
 a mount of the whole disk — never as it was spelled, and that resolved spelling is what every later
 check compares against.
