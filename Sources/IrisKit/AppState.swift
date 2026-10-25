@@ -1844,6 +1844,9 @@ class AppState {
         conversations[idx].agentProfile = name
         conversations[idx].agentProfileSnapshot = profile.snapshot
         agentProfileState[id] = profile.contentHash
+        // #231: the person changed this session from its row's menu, which doesn't open it, so
+        // the idle clock is reset here rather than by the selection.
+        if existing { touch(id) }
         // A role already set (by /role or the profile before) is kept: roles are addresses, and
         // peers may be talking to this session under it.
         let keptRole = existing ? conversations[idx].role : nil
@@ -1926,6 +1929,7 @@ class AppState {
         conversations[idx].agentProfileSnapshot = nil
         agentProfileState[id] = nil
         markChanged(id, .metadata)
+        touch(id)   // #231: as applying one does
         appendMessage(role: .system, content: "[agent profile] `\(name)` was cleared; this conversation runs without a profile from its next turn.", to: id)
     }
 
