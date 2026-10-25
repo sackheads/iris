@@ -283,8 +283,9 @@ struct AutoArchiveTests {
         app.markChanged(id, .metadata)
         app.flushSave()
 
-        let again = AppState(store: store, createIfEmpty: false, emitLaunchNotices: false)
-        let c = try #require(again.conversations.first { $0.id == id })
+        // Read the store itself: a second AppState would select the conversation at launch,
+        // which touches it.
+        let c = try #require(try store.loadAll().conversations.first { $0.id == id })
         #expect(abs(c.lastTouchedAt!.timeIntervalSince(stale)) < 0.01)
         #expect(abs(c.archivedAutomaticallyAt!.timeIntervalSince(now)) < 0.01)
         #expect(c.inSessions)
