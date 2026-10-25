@@ -263,19 +263,21 @@ struct AgentProfileTests {
 /// main for a quarter second of a parallel run's start, where every `@MainActor` suite waits on it.
 @Suite("Agent profiles (#465): source scan")
 struct AgentProfileSourceScanTests {
-    @Test("only the UI starts a conversation on a profile or clears one: no tool, job or event reaches either")
+    @Test("only the UI starts, applies (#670) or clears a profile: no tool, job or event reaches any")
     func onlyTheUI() throws {
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().appendingPathComponent("Sources/IrisKit")
-        var starters: Set<String> = [], clearers: Set<String> = []
+        var starters: Set<String> = [], appliers: Set<String> = [], clearers: Set<String> = []
         for file in try FileManager.default.contentsOfDirectory(atPath: sources.path) where file.hasSuffix(".swift") {
             let text = try String(contentsOf: sources.appendingPathComponent(file), encoding: .utf8)
             for line in text.split(separator: "\n") {
                 if line.contains("createNewConversation(") && line.contains("agentProfile:") { starters.insert(file) }
+                if line.contains("toExisting:") && !line.contains("func applyAgentProfile") { appliers.insert(file) }
                 if line.contains("clearAgentProfile(") && !line.contains("func clearAgentProfile") { clearers.insert(file) }
             }
         }
         #expect(starters == ["ChatView.swift"], "\(starters)")
+        #expect(appliers == ["ChatView.swift"], "\(appliers)")
         #expect(clearers == ["ChatView.swift"], "\(clearers)")
     }
 }

@@ -599,6 +599,37 @@ struct ChatView: View {
         }
     }
 
+    /// The Apply Agent Profile submenu's items (#670): each profile, the current one checked, the
+    /// unusable ones disabled with why.
+    @ViewBuilder private func applyAgentProfileMenu(_ conv: Conversation) -> some View {
+        let profiles = state.agentProfiles.list()
+        if profiles.isEmpty {
+            Text("No agent profiles yet")
+        }
+        ForEach(profiles, id: \.name) { entry in
+            switch entry.load {
+            case .loaded(let profile):
+                Toggle(isOn: Binding(
+                    get: { conv.agentProfile == profile.name },
+                    set: { on in
+                        guard on else { return }
+                        state.applyAgentProfile(profile.name, toExisting: conv.id)
+                        Task { await state.refreshKnownCapabilities() }
+                    }
+                )) {
+                    let unknown = state.knownCapabilities?.unknownLine(for: profile)
+                    Text(verbatim: unknown == nil ? profile.name : profile.name + " (unknown names)")
+                }
+                .help(state.knownCapabilities?.unknownLine(for: profile).map { $0 + "\n\n" + profile.prompt.prefix(200) }
+                      ?? String(profile.prompt.prefix(200)))
+            case .unreadable(let why):
+                Button {} label: { Text(verbatim: "\(entry.name): \(why)") }.disabled(true)
+            case .missing:
+                EmptyView()
+            }
+        }
+    }
+
     /// Shared row body for both the Conversations and Archived sections, so archiving a
     /// conversation moves it between sections without changing how it renders (#182).
     @ViewBuilder
@@ -689,6 +720,11 @@ struct ChatView: View {
         .contextMenu {
             Button("Link to Workspace...") {
                 linkWorkspace(to: conv.id)
+            }
+            // #670: the only way a profile reaches a conversation after it starts. Never Iris, a
+            // subagent's thread or a job run (AppState refuses them too).
+            if !conv.isPinned && conv.isUserFacing {
+                Menu("Apply Agent Profile") { applyAgentProfileMenu(conv) }
             }
             // #465: the only way a profile is dropped, so a chat widens back only by this act.
             if conv.agentProfile != nil {
