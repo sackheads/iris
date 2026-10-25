@@ -208,6 +208,14 @@ struct SettingsView: View {
                         Text("Needs attention").tag(NotificationMode.needsAttention)
                     }
                     .help("Needs attention: a banner when a background job is blocked on a call, when a failed run's job is paused by a limit (not by you), or when an approval is waiting and the chat window is not in front. A banner never approves anything: Open shows the details, Deny refuses an approval, Dismiss clears a blocked run. Only the installed app posts them, not swift run.")
+                    Picker("Archive idle sessions after", selection: $config.autoArchiveDays) {
+                        Text("Never").tag(AutoArchiveDays.never)
+                        Text("7 days").tag(AutoArchiveDays.week)
+                        Text("14 days").tag(AutoArchiveDays.twoWeeks)
+                        Text("30 days").tag(AutoArchiveDays.month)
+                        Text("90 days").tag(AutoArchiveDays.quarter)
+                    }
+                    .help("A session (one with a card or a role, or that has messaged another session) you haven't typed into, opened or unarchived for this long moves to Archived, and Iris says which. Nothing is deleted: Unarchive brings it back. Plain chats, Iris, and a session with a role, a goal, a loop, a job or an unanswered message are never archived this way.")
                     Toggle("Show model activity LEDs", isOn: $config.showModelLEDs)
                         .help("Show the row of model status lights above the message box. A guard model that is installed but failing still reports itself in the conversation with this off.")
                     Picker("Default emoji skin tone", selection: $config.defaultEmojiSkinTone) {

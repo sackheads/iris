@@ -638,6 +638,13 @@ struct ChatView: View {
                         .foregroundColor(.secondary)
                         .help("This conversation runs a /loop: \(loop.prompt)")
                 }
+                // #231: so a conversation the person didn't archive doesn't look like it vanished.
+                if conv.isArchived, let note = conv.autoArchiveNote {
+                    Label("archived automatically", systemImage: "clock.arrow.circlepath")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .help(note)
+                }
             }
             Spacer()
         }

@@ -193,7 +193,7 @@ struct SessionToolsTests {
         let engine = IrisEngine(state: app, tier: .medium, client: client, sessionPeerCount: 1)
         await engine.processInput("go", source: "UI", conversationId: me)
 
-        #expect(toolResultText(app, conversationId: me).lowercased().contains("no longer active"))
+        #expect(toolResultText(app, conversationId: me).contains("That session is archived; the person can unarchive it."))
         #expect(app.conversations.first { $0.id == other }?.isArchived == true,
                 "a peer must not re-expand the address space on its own initiative")
     }

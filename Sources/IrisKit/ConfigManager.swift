@@ -26,6 +26,13 @@ public enum AnthropicAuthMode: String, CaseIterable, Identifiable, Sendable {
     public var id: String { rawValue }
 }
 
+/// Settings' "Archive idle sessions" row (#231): days a session goes untouched before the sweep
+/// archives it. On at 14 by default (Brian's ruling), so the peer set stays bounded without
+/// depending on anyone archiving by hand.
+enum AutoArchiveDays: Int, CaseIterable, Sendable {
+    case never = 0, week = 7, twoWeeks = 14, month = 30, quarter = 90
+}
+
 /// Settings' "Notifications" row (D6 decision 7).
 enum NotificationMode: String, CaseIterable, Sendable {
     case off, needsAttention
@@ -93,6 +100,11 @@ class ConfigManager: @unchecked Sendable {
     /// D6 decision 7: "Notifications: Off / Needs attention". Needs attention by default.
     var notificationMode: NotificationMode {
         didSet { store.set(notificationMode.rawValue, forKey: "NOTIFICATION_MODE") }
+    }
+
+    /// #231: how long a session goes untouched before it's archived automatically.
+    var autoArchiveDays: AutoArchiveDays {
+        didSet { store.set(autoArchiveDays.rawValue, forKey: "AUTO_ARCHIVE_DAYS") }
     }
 
     /// #469 §6 — the maximum hop depth of a chain of session messages: a send carries the
@@ -487,6 +499,8 @@ class ConfigManager: @unchecked Sendable {
         }
         self.notificationMode = NotificationMode(rawValue: saved.string(forKey: "NOTIFICATION_MODE") ?? "")
             ?? .needsAttention
+        self.autoArchiveDays = (saved.object(forKey: "AUTO_ARCHIVE_DAYS") as? Int).flatMap(AutoArchiveDays.init(rawValue:))
+            ?? .twoWeeks
 
         let savedCascade = guardedInt(.maxSessionCascade, "MAX_SESSION_CASCADE")
         self.maxSessionCascade = savedCascade == 0 ? 8 : savedCascade

@@ -3788,6 +3788,9 @@ actor IrisEngine {
         // #469 §7.6 J: the attachment exchange's sweep rides the same daily maintenance.
         let localState = state
         await MainActor.run { localState?.sweepArtifacts() }
+        // #231: and the TTL auto-archive, so it too runs at launch and daily, in the app only.
+        let days = ConfigManager.shared.autoArchiveDays.rawValue
+        await MainActor.run { _ = localState?.sweepIdleSessions(days: days) }
         let decision: JobLedger.PruneDecision
         do {
             decision = try ledger.prune(now: Date(), rowRetention: Self.runRowRetention,
@@ -4751,7 +4754,10 @@ actor IrisEngine {
             // #469 review item 4: the user could have archived or deleted the target in the gap
             // between `decidePeerSend`'s decision above and this insert — re-checked here so an
             // `expects_reply` request is never left open against a target that cannot answer it.
-            await MainActor.run { localState?.closeIfTargetGone(msgId, target: targetId) }
+            await MainActor.run {
+                localState?.closeIfTargetGone(msgId, target: targetId)
+                localState?.markInSessions([conversationId, targetId])   // #231
+            }
             if let parent { _ = try? peers.close(parent.msgId, reason: "replied with \(msgId)", at: Date()) }
             let envelope = PeerEnvelope(msgId: msgId, contextId: contextId, depth: depth, expectsReply: expectsReply,
                                         replyTo: parent.map { PeerReplyRef(msgId: $0.msgId, firstLine: $0.firstLine) })

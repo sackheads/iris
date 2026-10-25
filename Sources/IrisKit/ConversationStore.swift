@@ -694,6 +694,14 @@ final class ConversationStore: Sendable {
             }
             try db.create(index: "artifact_refs_conversation", on: "artifact_refs", columns: ["conversationId"])
         }
+        // #231: the TTL auto-archive's clock, its mark on the row, and whether it may apply.
+        m.registerMigration("v30_auto_archive") { db in
+            try db.alter(table: "conversations") { t in
+                t.add(column: "lastTouchedAt", .datetime)
+                t.add(column: "archivedAutomaticallyAt", .datetime)
+                t.add(column: "inSessions", .boolean)
+            }
+        }
         return m
     }
 
@@ -928,13 +936,14 @@ final class ConversationStore: Sendable {
                     isBackground = ?, isPinned = ?, sessionCard = ?, jobProfile = ?, sandboxGrant = ?,
                     hasUnattendedInput = ?, prefixMismatchBehavior = ?, role = ?, homeWritableOptIn = ?,
                     agentProfile = ?, agentProfileSnapshot = ?,
-                    loop = ?, modelTier = ?
+                    loop = ?, modelTier = ?, lastTouchedAt = ?, archivedAutomaticallyAt = ?, inSessions = ?
                 WHERE id = ?
                 """, arguments: [c.title, touched, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
                                  evaluation, report, c.isArchived, c.isBackground, c.isPinned, card,
                                  c.jobProfile?.rawValue, grant, c.hasUnattendedInput, c.prefixMismatchBehavior?.rawValue,
-                                 c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue, c.id.uuidString])
+                                 c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue,
+                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, c.id.uuidString])
         } else {
             let position = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(position), 0) FROM conversations") ?? 0) + 1
             try db.execute(sql: """
@@ -942,13 +951,15 @@ final class ConversationStore: Sendable {
                     messageCountSinceReflection, goalIterationCount, mainAgentSandbox, tokenUsage, goalContract,
                     subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived,
                     isBackground, isPinned, sessionCard, jobProfile, sandboxGrant, hasUnattendedInput,
-                    prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier,
+                    lastTouchedAt, archivedAutomaticallyAt, inSessions)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [c.id.uuidString, position, c.title, now, touched, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
                                  tokenUsage, contract, result, history, evaluation, report, c.isArchived,
                                  c.isBackground, c.isPinned, card, c.jobProfile?.rawValue, grant, c.hasUnattendedInput,
-                                 c.prefixMismatchBehavior?.rawValue, c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue])
+                                 c.prefixMismatchBehavior?.rawValue, c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue,
+                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions])
         }
     }
 
@@ -1287,6 +1298,12 @@ final class ConversationStore: Sendable {
                 // of costing the conversation.
                 let updatedAtValue: DatabaseValue = row["updatedAt"]
                 c.updatedAt = Date.fromDatabaseValue(updatedAtValue) ?? Date()
+                // #231: NULL on every row before v30. An unreadable date is no date: the sweep
+                // restamps it from `updatedAt`, and an unreadable flag is "not in sessions", so
+                // neither can get a conversation archived early.
+                c.lastTouchedAt = Date.fromDatabaseValue(row["lastTouchedAt"] as DatabaseValue)
+                c.archivedAutomaticallyAt = Date.fromDatabaseValue(row["archivedAutomaticallyAt"] as DatabaseValue)
+                if case .value(let v) = Self.readBool(row, "inSessions") { c.inSessions = v }
 
                 // An unreadable identity must not cost the user a conversation (#185 §6.1). Same
                 // policy as `checkpointHistory`, opposite of `goalContract`: read directly through
