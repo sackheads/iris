@@ -2834,7 +2834,7 @@ class AppState {
     func touch(_ conversationId: UUID, at now: Date = Date()) {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
         conversations[idx].lastTouchedAt = now
-        markChanged(conversationId, .metadata)
+        markChanged(conversationId, .metadata, stamp: false)
     }
 
     /// #231: both ends of a peer message are sessions from now on, so the sweep may apply to them.
@@ -2842,7 +2842,7 @@ class AppState {
         for id in ids {
             guard let idx = conversations.firstIndex(where: { $0.id == id }), !conversations[idx].inSessions else { continue }
             conversations[idx].inSessions = true
-            markChanged(id, .metadata)
+            markChanged(id, .metadata, stamp: false)
         }
     }
 
@@ -2871,7 +2871,7 @@ class AppState {
             if c.lastTouchedAt == nil, let idx = conversations.firstIndex(where: { $0.id == c.id }) {
                 // Upgrade: the clock starts from the last change, once; later changes don't move it.
                 conversations[idx].lastTouchedAt = touched
-                markChanged(c.id, .metadata)
+                markChanged(c.id, .metadata, stamp: false)
             }
             guard touched <= cutoff, Self.isIdleSessionCandidate(c),
                   archiveIdle(c.id, now: now, inExchange: inExchange, jobBound: jobBound) else { continue }
@@ -4783,10 +4783,14 @@ class AppState {
     /// place every persisted mutation already passes through, which is exactly what makes it the
     /// right signal for "touched". Set directly on the element — routing it back through
     /// `markChanged` would recurse without end.
-    func markChanged(_ id: UUID, _ change: ConversationChange) {
+    ///
+    /// `stamp: false` saves without moving `updatedAt`: for bookkeeping that isn't activity, such
+    /// as #231's clock and session mark, which would otherwise show a session the person merely
+    /// clicked as `idle 0m` to its peers and reorder their listing.
+    func markChanged(_ id: UUID, _ change: ConversationChange, stamp: Bool = true) {
         let now = Date()
         // Not on `.deleted`: there is nothing left to stamp, and the row is on its way out.
-        if change != .deleted, let idx = conversations.firstIndex(where: { $0.id == id }) {
+        if stamp, change != .deleted, let idx = conversations.firstIndex(where: { $0.id == id }) {
             conversations[idx].updatedAt = now
         }
         pendingChanges[id, default: ChangeSet()].add(change)

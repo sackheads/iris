@@ -223,6 +223,24 @@ struct AutoArchiveTests {
         #expect(conv(app, id)!.lastTouchedAt! > stale, "opening it touches it")
     }
 
+    @Test("opening a session and the upgrade stamp leave updatedAt alone, so peers' listing doesn't move")
+    func bookkeepingLeavesUpdatedAt() {
+        let id = UUID()
+        let app = appWithIdleSession(id)
+        guard let idx = app.conversations.firstIndex(where: { $0.id == id }) else { return }
+        let old = now.addingTimeInterval(-3 * 86_400)
+        app.conversations[idx].updatedAt = old
+        app.selectedConversationId = id
+        app.markInSessions([id])
+        #expect(conv(app, id)?.updatedAt == old)
+
+        app.selectedConversationId = nil
+        app.conversations[idx].lastTouchedAt = nil
+        _ = app.sweepIdleSessions(days: Self.days, now: now)
+        #expect(conv(app, id)?.lastTouchedAt == old)
+        #expect(conv(app, id)?.updatedAt == old)
+    }
+
     @Test("typing into a session touches it")
     func typingTouches() {
         let id = UUID()
