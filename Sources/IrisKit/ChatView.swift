@@ -640,7 +640,8 @@ struct ChatView: View {
                 }
                 // #231: so a conversation the person didn't archive doesn't look like it vanished.
                 if conv.isArchived, let note = conv.autoArchiveNote {
-                    Label("archived automatically", systemImage: "clock.arrow.circlepath")
+                    // Short: the sidebar cut "archived automatically" to "archived…" (#771 GUI check).
+                    Label("auto", systemImage: "clock.arrow.circlepath")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                         .help(note)
