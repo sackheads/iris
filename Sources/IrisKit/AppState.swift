@@ -281,6 +281,19 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// "no recency signal yet" isn't a state that peer ordering should have to handle.
     var updatedAt: Date = Date()
 
+    /// #231: when the person last did something here: typed into it, opened it, gave it a role,
+    /// unarchived it. Unlike `updatedAt`, no flush, card, peer message or loop tick moves it, so
+    /// a session peers keep poking still ages. Wall time, since the TTL is days on a calendar.
+    /// Nil until first set; the sweep stamps it from `updatedAt` once.
+    var lastTouchedAt: Date?
+    /// #231: set when the TTL sweep archived this conversation, cleared by any unarchive. The
+    /// Archived row says so, so the person knows they didn't do it.
+    var archivedAutomaticallyAt: Date?
+    /// #231 (Brian: "sessions only"): true once this conversation sent or received a peer
+    /// message. With a card or a role, it's what makes a conversation one the sweep may archive;
+    /// a plain chat is never auto-archived. Never cleared.
+    var inSessions: Bool = false
+
     init(id: UUID = UUID(), title: String, messages: [ChatMessage] = [], workspacePath: String? = nil, history: [Content] = [], tokenUsage: TokenUsage = TokenUsage(), activeGoal: String? = nil, messageCountSinceReflection: Int = 0, goalContract: GoalContract? = nil) {
         self.id = id
         self.title = title
@@ -294,7 +307,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier, lastTouchedAt, archivedAutomaticallyAt, inSessions
     }
 
     init(from decoder: Decoder) throws {
@@ -342,6 +355,11 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         // Invariant 1: absent before #667. An unknown tier name drops only the tier.
         modelTier = (try? container.decodeIfPresent(ModelTier.self, forKey: .modelTier)) ?? nil
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        // Invariant 1: all three are absent before #231. Nil and false are "never touched since",
+        // "archived by the person" and "not in sessions".
+        lastTouchedAt = try container.decodeIfPresent(Date.self, forKey: .lastTouchedAt)
+        archivedAutomaticallyAt = try container.decodeIfPresent(Date.self, forKey: .archivedAutomaticallyAt)
+        inSessions = try container.decodeIfPresent(Bool.self, forKey: .inSessions) ?? false
         // Invariant 1: a conversation persisted before this ruling has no such key, and absent
         // means "no turn here ever started without the owner present", the correct default.
         hasUnattendedInput = try container.decodeIfPresent(Bool.self, forKey: .hasUnattendedInput) ?? false
@@ -372,6 +390,14 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
 
     /// A conversation the app may point the selection at unprompted: user-facing and not archived.
     var isSelectable: Bool { isUserFacing && !isArchived }
+
+    /// #231: the Archived row's explanation, nil unless the sweep archived it.
+    var autoArchiveNote: String? {
+        guard let at = archivedAutomaticallyAt else { return nil }
+        let days = lastTouchedAt.map { Int(at.timeIntervalSince($0) / 86_400) }
+        let idle = days.map { "Untouched for \($0) days, so" } ?? "Idle, so"
+        return "\(idle) Iris archived it on \(at.formatted(date: .abbreviated, time: .omitted)). Nothing was deleted; Unarchive brings it back."
+    }
 
     // Equality is identity ON PURPOSE: selection state and `Hashable` use in sets need "is this
     // the same conversation", not "does every field currently match". Consequence: a SwiftUI view
@@ -458,7 +484,12 @@ class AppState {
     private(set) var needsHuman: [UUID: String] = [:]
     var selectedConversationId: UUID? {
         // Opening a conversation reads its reply (#592).
-        didSet { if let selectedConversationId { clearUnread(selectedConversationId) } }
+        didSet {
+            guard let selectedConversationId else { return }
+            clearUnread(selectedConversationId)
+            // #231: opening a conversation counts as looking at it.
+            if selectedConversationId != oldValue { touch(selectedConversationId) }
+        }
     }
     /// User-facing conversations whose reply landed while the person was not looking (#592):
     /// a blue dot on the row. Transient: no field, no column, so a relaunch clears it. Changed only
@@ -2630,8 +2661,9 @@ class AppState {
     func decidePeerSend(to: String, from sender: UUID, replyTarget: UUID?) -> PeerSendDecision {
         let target: UUID
         if let replyTarget {
-            guard let c = conversations.first(where: { $0.id == replyTarget }), !c.isArchived, c.isUserFacing
+            guard let c = conversations.first(where: { $0.id == replyTarget }), c.isUserFacing
             else { return .refused("The session that sent that message is no longer active.") }
+            if c.isArchived { return .refused(SessionAddressError.archived.message) }
             if !to.isEmpty {
                 switch SessionDirectory.resolve(to, in: conversations, excluding: sender) {
                 case .success(let id) where id == replyTarget: break
@@ -2790,7 +2822,82 @@ class AppState {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
               conversations[idx].isArchived else { return false }
         conversations[idx].isArchived = false
+        // #231: an unarchive restarts the clock, so the next sweep doesn't take it straight back.
+        conversations[idx].archivedAutomaticallyAt = nil
+        conversations[idx].lastTouchedAt = Date()
         markChanged(conversationId, .metadata)
+        return true
+    }
+
+    /// #231: the person did something in this conversation. Only their own actions call this,
+    /// never a flush, a card, a peer's message or a loop tick, which is why `updatedAt` won't do.
+    func touch(_ conversationId: UUID, at now: Date = Date()) {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
+        conversations[idx].lastTouchedAt = now
+        markChanged(conversationId, .metadata)
+    }
+
+    /// #231: both ends of a peer message are sessions from now on, so the sweep may apply to them.
+    func markInSessions(_ ids: [UUID]) {
+        for id in ids {
+            guard let idx = conversations.firstIndex(where: { $0.id == id }), !conversations[idx].inSessions else { continue }
+            conversations[idx].inSessions = true
+            markChanged(id, .metadata)
+        }
+    }
+
+    /// #231 (Brian: "Sessions only, on, 14d"): archives each session nobody has touched for
+    /// `days`. A session is a conversation with a card or a role, or that has sent or received a
+    /// peer message; a plain chat is never archived this way. On top of every manual refusal
+    /// (`archiveRefusal`: a turn running, a goal, including one paused at a checkpoint, a role,
+    /// Iris) it skips a loop, an enabled job delivering to or made in it, a request either way
+    /// still awaiting its reply (archiving would close it on the peer), and the open
+    /// conversation. Posts one line in Iris naming what it archived, and nothing when it archived
+    /// nothing. Runs at launch and daily from `applyRetention`, so only in the app. Returns the
+    /// archived ids.
+    @discardableResult
+    func sweepIdleSessions(days: Int, now: Date = Date()) -> [UUID] {
+        guard days > 0 else { return [] }
+        let cutoff = now.addingTimeInterval(-Double(days) * 86_400)
+        // The ledger is pruned, so a conversation it names is marked for good while it still can.
+        let involved = (try? store.peers.sessionsInvolved()) ?? []
+        markInSessions(conversations.map(\.id).filter(involved.contains))
+        let inExchange = (try? store.peers.sessionsInOpenExchanges()) ?? []
+        let jobs = ((try? store.ledger.jobs()) ?? []).filter(\.enabled)
+        let jobBound = Set(jobs.flatMap { [$0.destinationConversationId, $0.createdInConversationId].compactMap { $0 } })
+        var archived: [UUID] = []
+        for c in conversations where c.isUserFacing && !c.isArchived {
+            let touched = c.lastTouchedAt ?? c.updatedAt
+            if c.lastTouchedAt == nil, let idx = conversations.firstIndex(where: { $0.id == c.id }) {
+                // Upgrade: the clock starts from the last change, once; later changes don't move it.
+                conversations[idx].lastTouchedAt = touched
+                markChanged(c.id, .metadata)
+            }
+            guard touched <= cutoff, Self.isIdleSessionCandidate(c),
+                  archiveIdle(c.id, now: now, inExchange: inExchange, jobBound: jobBound) else { continue }
+            archived.append(c.id)
+        }
+        if !archived.isEmpty {
+            let names = archived.compactMap { id in conversations.first { $0.id == id } }
+                .map { "\"\($0.sessionCard?.name ?? $0.title)\"" }
+            let noun = archived.count == 1 ? "session" : "sessions"
+            appendMessage(role: .system, content: "Archived \(archived.count) idle \(noun) untouched for \(days) days: \(names.joined(separator: ", ")). They're under Archived, with nothing deleted; Unarchive (right-click it, or type /unarchive in it) brings one back. Settings → General sets how long, or Never.", to: activityConversationId())
+        }
+        return archived
+    }
+
+    /// A session at all, and nothing about it that makes the sweep's archiving its business.
+    private static func isIdleSessionCandidate(_ c: Conversation) -> Bool {
+        (c.inSessions || c.sessionCard != nil || c.role != nil) && c.loop == nil
+    }
+
+    private func archiveIdle(_ id: UUID, now: Date, inExchange: Set<UUID>, jobBound: Set<UUID>) -> Bool {
+        guard id != selectedConversationId, !inExchange.contains(id), !jobBound.contains(id),
+              archiveRefusal(for: id) == nil, archiveConversation(id) == nil,
+              let idx = conversations.firstIndex(where: { $0.id == id }), conversations[idx].isArchived
+        else { return false }
+        conversations[idx].archivedAutomaticallyAt = now
+        markChanged(id, .metadata)
         return true
     }
 
@@ -2802,6 +2909,7 @@ class AppState {
     func sendMessage(_ text: String, attachments: [FileAttachment] = []) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (!trimmed.isEmpty || !attachments.isEmpty), let convId = selectedConversationId else { return }
+        touch(convId)   // #231
         
         let messageContent = trimmed
         if trimmed == "/loop" || trimmed.hasPrefix("/loop ") {

@@ -61,6 +61,25 @@ final class PeerLedger: Sendable {
         }
     }
 
+    /// #231: every session that has sent or received a message still in the ledger.
+    func sessionsInvolved() throws -> Set<UUID> {
+        try writer.read { db in
+            let ids = try String.fetchAll(db, sql: "SELECT fromSession FROM peer_messages UNION SELECT toSession FROM peer_messages")
+            return Set(ids.compactMap(UUID.init(uuidString:)))
+        }
+    }
+
+    /// #231: every session with a request it sent or received still awaiting its reply.
+    func sessionsInOpenExchanges() throws -> Set<UUID> {
+        try writer.read { db in
+            let ids = try String.fetchAll(db, sql: """
+                SELECT fromSession FROM peer_messages WHERE expectsReply = 1 AND closedAt IS NULL
+                UNION SELECT toSession FROM peer_messages WHERE expectsReply = 1 AND closedAt IS NULL
+                """)
+            return Set(ids.compactMap(UUID.init(uuidString:)))
+        }
+    }
+
     @discardableResult
     func close(_ msgId: String, reason: String, at: Date) throws -> Bool {
         try writer.write { db in

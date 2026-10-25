@@ -152,13 +152,15 @@ enum SessionDirectory {
 }
 
 enum SessionAddressError: Error, Equatable {
-    case notFound, ambiguous(Int), inactive, isSelf, malformed
+    case notFound, ambiguous(Int), inactive, archived, isSelf, malformed
 
     var message: String {
         switch self {
         case .notFound: return "No active session matches that."
         case .ambiguous(let n): return "\(n) sessions share that name; use a session_id from list_sessions."
         case .inactive: return "That session is no longer active."
+        // #231: archiving is now often automatic, so the sender is told it can come back.
+        case .archived: return "That session is archived; the person can unarchive it."
         case .isSelf: return "That is this session — refused."
         case .malformed: return "Address a session as a session_id, role:<name>, name:<name>, or iris."
         }
@@ -186,7 +188,8 @@ extension SessionDirectory {
             target = ids[0]
         } else if let id = UUID(uuidString: raw) {
             guard let c = conversations.first(where: { $0.id == id }) else { return .failure(.notFound) }
-            guard active(c), !c.isSubagent else { return .failure(.inactive) }
+            guard c.isUserFacing, !c.isSubagent else { return .failure(.inactive) }
+            guard !c.isArchived else { return .failure(.archived) }
             target = id
         } else {
             return .failure(.malformed)
