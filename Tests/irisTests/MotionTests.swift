@@ -63,10 +63,10 @@ struct MotionSourceScanTests {
     }
 }
 
-@MainActor
+/// Source scans, off the main actor for the reason `MotionSourceScanTests` gives (#642).
 @Suite("Composer popups and the session strip slide in (#598)")
 struct RevealTests {
-    private nonisolated static func source(_ name: String) throws -> String {
+    private static func source(_ name: String) throws -> String {
         let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().appendingPathComponent("Sources/IrisKit/\(name)")
         return try String(contentsOf: url, encoding: .utf8)
@@ -75,7 +75,7 @@ struct RevealTests {
     /// The models change from NSTextView's edit and key callbacks; a `withAnimation` there crashed
     /// the app in #757's GUI check (Observation's access list, then a typesetter out-of-bounds).
     @Test("the popup models never open an animation themselves")
-    nonisolated func modelsDoNotAnimate() throws {
+    func modelsDoNotAnimate() throws {
         for file in ["EmojiTokenModel.swift", "SlashCommandModel.swift"] {
             let code = try Self.source(file).components(separatedBy: "\n")
                 .map { $0.components(separatedBy: "//").first ?? "" }.joined(separator: "\n")
@@ -85,7 +85,7 @@ struct RevealTests {
     }
 
     @Test("ChatView slides each popup in and out with the reveal animation, keyed to its visibility")
-    nonisolated func viewAnimatesPopups() throws {
+    func viewAnimatesPopups() throws {
         let chat = try Self.source("ChatView.swift")
         for model in ["emojiModel", "slashModel"] {
             let site = chat.range(of: ".animation(Motion.animation(Motion.reveal), value: \(model).isShowing)")
@@ -97,7 +97,11 @@ struct RevealTests {
             if let site, let goalPanel { #expect(site.lowerBound < goalPanel.lowerBound, "\(model)'s animation is on the column") }
         }
     }
+}
 
+@MainActor
+@Suite("Composer popups and the session strip slide in (#598): the slash model")
+struct RevealModelTests {
     @Test("the slash popup's model shows and clears, keeping its state right")
     func slashModel() {
         let model = SlashCommandModel()
