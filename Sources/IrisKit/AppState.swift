@@ -1816,16 +1816,43 @@ class AppState {
             skills: Set(skills.flatMap { [$0.name.lowercased(), $0.folderName.lowercased()] }))
     }
 
-    private func applyAgentProfile(_ name: String, to id: UUID) {
+    /// The person's Apply Agent Profile (#670): `name` replaces whatever profile `id` ran on, from
+    /// its next turn. The history stays as it is, and a turn already running finishes on the
+    /// profile it started with (each turn resolves its own). Only the conversation menu calls it:
+    /// never a tool, slash command, system event or job (#611's rule). Never Iris, a subagent's
+    /// thread or a job run, as at creation.
+    func applyAgentProfile(_ name: String, toExisting id: UUID) {
+        guard let conv = conversations.first(where: { $0.id == id }), !conv.isPinned, conv.isUserFacing,
+              conv.agentProfile != name else { return }
+        applyAgentProfile(name, to: id, existing: true)
+    }
+
+    private func applyAgentProfile(_ name: String, to id: UUID, existing: Bool = false) {
         guard let idx = conversations.firstIndex(where: { $0.id == id }), !conversations[idx].isPinned else { return }
-        guard case .loaded(let profile) = agentProfiles.load(name) else {
-            appendMessage(role: .system, content: "[agent profile] `\(name)` couldn't be read, so this conversation started without it.", to: id)
+        let previous = conversations[idx].agentProfile
+        let load = agentProfiles.load(name)
+        guard case .loaded(let profile) = load else {
+            if existing {
+                let why = if case .unreadable(let reason) = load { "couldn't be read (\(reason))" } else { "isn't there" }
+                let kept = previous.map { "; this conversation keeps `\($0)`" } ?? "; this conversation keeps running without a profile"
+                appendMessage(role: .system, content: "[agent profile] `\(name)` \(why), so nothing changed" + kept + ".", to: id)
+            } else {
+                appendMessage(role: .system, content: "[agent profile] `\(name)` couldn't be read, so this conversation started without it.", to: id)
+            }
             return
         }
         conversations[idx].agentProfile = name
         conversations[idx].agentProfileSnapshot = profile.snapshot
         agentProfileState[id] = profile.contentHash
-        if let role = profile.role, SessionRoles.mayHoldRole(conversations[idx]) {
+        // A role already set (by /role or the profile before) is kept: roles are addresses, and
+        // peers may be talking to this session under it.
+        let keptRole = existing ? conversations[idx].role : nil
+        if existing {
+            let applied = previous.map { "`\(name)` replaced `\($0)`" } ?? "`\(name)` applied"
+            let role = keptRole.map { " This conversation keeps its role `\($0)`; `/role` changes it." } ?? ""
+            appendMessage(role: .system, content: "[agent profile] \(applied); it takes effect from the next turn." + role, to: id)
+        }
+        if keptRole == nil, let role = profile.role, SessionRoles.mayHoldRole(conversations[idx]) {
             if let holder = SessionRoles.holder(of: role, in: conversations), holder != id {
                 let other = conversations.first { $0.id == holder }.map { $0.sessionCard?.name ?? $0.title } ?? "another session"
                 appendMessage(role: .system, content: "[agent profile] The role `\(role)` is held by \(other), so this conversation has no role. `/role` sets one.", to: id)

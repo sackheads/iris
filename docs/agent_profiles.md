@@ -1,6 +1,6 @@
 # Agent Profiles
 
-An agent profile is a named starting point for a conversation: a role, some text added to its system prompt, a narrower set of tools, the skills it sees, and a model tier. You start a conversation on one from the profile button beside **New Conversation**, at the foot of the sidebar; **New Conversation** itself still starts an ordinary one. The menu shows each profile's role when it differs from its name.
+An agent profile is a named starting point for a conversation: a role, some text added to its system prompt, a narrower set of tools, the skills it sees, and a model tier. You start a conversation on one from the profile button beside **New Conversation**, at the foot of the sidebar; **New Conversation** itself still starts an ordinary one. The menu shows each profile's role when it differs from its name. A conversation that already exists can take one later, from its right-click menu (see [Applying a profile later](#applying-a-profile-later)).
 
 ## The files
 
@@ -20,7 +20,7 @@ You review pull requests for this repository. Read the whole diff first, ...
 - **The body** below the frontmatter is added to the system prompt, under `# Agent Profile: <name>`.
 - **Lists** can be written inline (`[a, b]`) or one `- a` per line.
 - **Errors:** a file that doesn't parse shows in the menu as unusable, with the reason.
-- **Names that match nothing:** a name in `tools:` or `skills:` that isn't one of Iris's tools, one of your MCP servers (`mcp:<name>`) or tools, or one of your skills is ignored. The menu marks such a profile "(unknown names)" and lists them on hover, and a conversation started on it says so once, so a typo doesn't quietly leave a conversation with fewer tools than you meant.
+- **Names that match nothing:** a name in `tools:` or `skills:` that isn't one of Iris's tools, one of your MCP servers (`mcp:<name>`) or tools, or one of your skills is ignored. The menu marks such a profile "(unknown names)" and lists them on hover, and a conversation started on it, or given it later, says so once, so a typo doesn't quietly leave a conversation with fewer tools than you meant.
 
 The folder is one Iris protects. The agent can't write a profile without asking you, and no background job can write one at all.
 
@@ -55,10 +55,18 @@ A conversation remembers its profile by name, and **the file is the source**. Ed
 
 **A missing or broken file:** each time the file reads cleanly, Iris keeps a copy of it with the conversation. If the file is deleted, renamed or stops parsing, the conversation keeps using that last good copy, so a narrowed conversation never quietly widens. A system line in the chat says so once and names the parse error, and the sidebar shows the profile as "(last known)".
 
-**Clear Agent Profile** in the conversation's right-click menu removes the profile and its copy. The conversation then runs as an ordinary one. It's the only way to drop a profile. A profile can't be added to an existing conversation (#670).
+**Clear Agent Profile** in the conversation's right-click menu removes the profile and its copy. The conversation then runs as an ordinary one. It's the only way to drop a profile.
+
+## Applying a profile later
+
+**Apply Agent Profile** in a conversation's right-click menu puts a profile on a conversation that already exists, or replaces the one it has; the current one is checked.
+- **From the next turn:** the history stays as it is, and a turn already running finishes on the profile it started with. A line in the chat says the profile was applied, and names the one it replaced.
+- **A file that can't be read** is refused with a line saying why, and nothing changes.
+- **Only you can apply one,** from that menu: no tool, command, system event or job can. Swapping to a profile with more tools widens the conversation, and that's yours to do.
+- **Not offered** for the pinned Iris conversation, a subagent's conversation or a job run, as at creation.
 
 ## Roles
 
-A profile's `role` is the conversation's session role (see [Sessions](sessions.md)), given when the conversation starts. If another active session already holds that role, the new conversation starts with no role, and the chat names the session that holds it. Roles are addresses, so they're never taken from another session automatically. `/role` still works afterwards and changes only the role.
+A profile's `role` is the conversation's session role (see [Sessions](sessions.md)), given when the conversation starts, or when a profile is applied to a conversation with no role yet. A conversation that already has a role, from `/role` or an earlier profile, keeps it when another profile is applied, and the chat says so. If another active session already holds that role, the conversation gets no role, and the chat names the session that holds it. Roles are addresses, so they're never taken from another session automatically. `/role` still works afterwards and changes only the role.
 
 The sidebar shows the profile under the conversation's title, and the role too when it differs from the profile's name.

@@ -142,7 +142,7 @@ Right-click conversations to archive or unarchive them, copy them to your clipbo
 
 ### Agent Profiles
 
-Start a conversation as a reviewer, researcher or writer: a profile is a Markdown file of your own that adds to the system prompt and gives the conversation its role, chosen from the profile button beside New Conversation. A profile only adds and narrows; it never approves anything. [Details](agent_profiles.md)
+Start a conversation as a reviewer, researcher or writer: a profile is a Markdown file of your own that adds to the system prompt and gives the conversation its role, chosen from the profile button beside New Conversation, or applied to a conversation later from its right-click menu. A profile only adds and narrows; it never approves anything. [Details](agent_profiles.md)
 
 ### Sessions
 
