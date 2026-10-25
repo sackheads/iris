@@ -209,8 +209,13 @@ actor SandboxSessionManager {
         // checked on both sides of each one; a disallowed change is put back and reported.
         let sources = Self.readWriteMounts(workspace: workspace, extra: extraMounts).map(\.source)
         let owner = name(for: id)
-        gitGuard.watch(owner: owner, sources: sources)
-        let gitBefore = gitGuard.check(owner: owner)
+        gitGuard.recordMounted(sources: sources)
+        var hadGit: Set<String> = []
+        for source in sources {
+            var info = stat()
+            let dotGit = (source as NSString).appendingPathComponent(".git")
+            if lstat(dotGit, &info) == 0 { hadGit.insert(source) }
+        }
         let runtime = self.runtime
         let syncs = repos.map { repo in
             SandboxGitSync(repo: repo, vm: ContainerVMGit(repo: repo) { script in
@@ -228,9 +233,18 @@ actor SandboxSessionManager {
         func noted(_ result: String) async -> String {
             var notes = syncNotes
             for (sync, before) in zip(syncs, befores) { notes += await sync.after(before) }
+            for source in sources where !hadGit.contains(source) {
+                var info = stat()
+                let dotGit = (source as NSString).appendingPathComponent(".git")
+                if lstat(dotGit, &info) == 0 {
+                    if let note = gitGuard.noticeForRepo(source) {
+                        notes.append(note)
+                    }
+                }
+            }
             if !notes.isEmpty { await onNote?(notes.joined(separator: "\n")) }
-            let synced = notes.isEmpty ? result : ([result] + notes.map { "[sandbox git] " + $0 }).joined(separator: "\n")
-            return GitConfigGuard.withNotices(synced, before: gitBefore, after: gitGuard.check(owner: owner))
+            let synced = notes.isEmpty ? result : ([result] + notes.map { $0.hasPrefix("[") ? $0 : "[sandbox git] " + $0 }).joined(separator: "\n")
+            return synced
         }
         do {
             let r = try await runtime.exec(name: name(for: id), workdir: workdir, command: command,
@@ -262,7 +276,7 @@ actor SandboxSessionManager {
             sessions[id] = nil
             do {
                 try await ensureSession(id, workspace: workspace, mounts: mounts, network: network)
-                gitGuard.watch(owner: owner, sources: sources)
+                gitGuard.recordMounted(sources: sources)
                 let r = try await runtime.exec(name: name(for: id), workdir: workdir, command: command,
                                                timeoutSeconds: timeoutSeconds, outputLimit: OutputCap.drainBytes)
                 sessions[id]?.lastUsed = Date()
@@ -441,7 +455,7 @@ actor SandboxSessionManager {
         let removed = ignoringCancellation ? await runtime.removeIgnoringCancellation(name: name)
             : await runtime.remove(name: name)
         // Only once it is gone: a container still running could write after the last check.
-        if removed { live.remove(name); gitGuard.end(owner: name) }
+        if removed { live.remove(name) }
     }
 
     /// Ensures a container exists for `id`, coalescing concurrent first-commands onto a single

@@ -284,13 +284,37 @@ enum SandboxGit {
         return path.hasPrefix(root.hasSuffix("/") ? root : root + "/")
     }
 
+    /// Renames `relative` under `root` to the first free `<name>.iris-quarantine[-N]` beside it,
+    /// opening each folder on the way with O_NOFOLLOW. The new name, or nil.
+    static func quarantine(root: String, relative: String) -> String? {
+        let parts = relative.split(separator: "/").map(String.init)
+        guard let name = parts.last else { return nil }
+        var dir = open(root, O_RDONLY | O_DIRECTORY)
+        guard dir >= 0 else { return nil }
+        for part in parts.dropLast() {
+            let next = openat(dir, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+            close(dir)
+            guard next >= 0 else { return nil }
+            dir = next
+        }
+        defer { close(dir) }
+        var info = stat()
+        for n in 1...100 {
+            let candidate = name + WorkspaceGit.quarantineSuffix + (n == 1 ? "" : "-\(n)")
+            guard fstatat(dir, candidate, &info, AT_SYMLINK_NOFOLLOW) != 0, errno == ENOENT else { continue }
+            guard renameat(dir, name, dir, candidate) == 0 else { return nil }
+            return ((root as NSString).appendingPathComponent(relative) as NSString).deletingLastPathComponent + "/" + candidate
+        }
+        return nil
+    }
+
     /// Moves each pointer that leads outside the host's repository aside (never deletes it), so
     /// host git reads nothing it names, and says what it did.
     static func quarantinePointers(source: String, commonDir: String) -> [String] {
         let root = IrisPaths.realPath(source)
         return pointerProblems(source: source, commonDir: commonDir).map { problem in
             let path = (source as NSString).appendingPathComponent(problem.relative)
-            if let moved = GitConfigGuard.quarantine(root: root, relative: problem.relative) {
+            if let moved = quarantine(root: root, relative: problem.relative) {
                 return "\(path) pointed git at \(problem.points), outside your repository; Iris moved it aside to \(moved) so git on your Mac does not use it. If you trust it, rename it back."
             }
             return "\(path) points git at \(problem.points), outside your repository, and Iris could not move it aside. Check it before running git on your Mac."

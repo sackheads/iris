@@ -1,16 +1,73 @@
 # Repositories in the Sandbox
 
-Git on your Mac runs programs a repository names, in its hooks and in its config (`core.hooksPath`, `core.fsmonitor`, `diff.external`, filter drivers). So when a sandboxed workspace is a git repository, Iris keeps the VM from choosing what your next `git commit` runs (#623, #658):
+Git on your Mac runs programs named in a repository's hooks and configuration (`core.hooksPath`, `core.fsmonitor`, `diff.external`, filter drivers, and more). When a sandboxed workspace is a git repository, Iris ensures that commands running inside the VM cannot choose what git on your Mac runs (#623, #658).
 
-- The VM gets a git dir of its own. The first time a repository is mounted, Iris copies its git dir without objects, hooks or logs to `sandbox-git/` in Iris's home, and the VM's git reads and writes that copy. It is mounted where git looks for the repository: over `.git`, or for a linked worktree at the path its `.git` file names. Your own git dir goes in only read-only, and the copy reaches its objects from there, so nothing large is copied. Commits, branches, checkouts, stashes and submodules all work in the VM; your hooks and config never see them. Two worktrees of one repository share one copy. A `.git` that is a symbolic link refuses sandboxed commands, and so does a sandboxed command with no conversation in a repository, since its commits could not be brought back.
-- After each sandboxed command that moved a branch, Iris brings those commits to your Mac as a bundle, a plain data file, into `refs/iris/sandbox/<branch>`. If that branch is the one this workspace has checked out on your Mac, and the move is a plain fast-forward, and your index has nothing staged, and your files already match the sandbox's commit, Iris moves your branch and index to it: no checkout, no file written, no hook run. The chat says so every time: "Moved main 1a2b3c4..5d6e7f8 (2 commits from the sandbox)". Otherwise your branch stays where it is, the commits wait on `refs/iris/sandbox/<branch>` for you to merge, and the chat says why: diverged, files that differ, staged changes, a detached HEAD, or a branch checked out in another worktree (Iris never moves that one, since its files would be left behind). A branch the sandbox makes is kept there too. Before each sandboxed command, if your Mac has moved ahead on the branch both have checked out, the sandbox's branch and index follow.
-- Host git still reads a few files the VM can write, because they live in the shared worktree. A submodule's `.git` pointer, or a worktree's own `.git` file, that leads anywhere but your repository's own `.git` is moved aside (renamed, never deleted) after every sandboxed command and before every host one, and the chat says so. When the sandbox changes `.gitmodules` or `.lfsconfig`, the chat says that too: they name no program, but `git submodule sync` copies their URLs into your config, and git-lfs uses `lfs.url`.
-- The copy is removed once no conversation's workspace uses that repository. Don't run git inside it yourself: its config is what the sandbox wrote.
+Iris achieves this through four coordinated defenses: giving the VM its own isolated git directory, bringing commits back via bundles, checking worktree pointers, and judging untrusted repositories before host commands run.
 
-Until the second part of #658 retires them, the earlier protections also still run:
-- Before and after every sandboxed command, and before every host one, Iris compares the repository's config files (with those of submodules already there, and a worktree's `.git` file) with the copy it kept. The VM may add or change remotes, upstream branches and `user.*`. Any other change, including `include.path`, a submodule's or Git LFS's settings, or an `ext::` URL, is put back byte for byte, and the reply says so. This includes a change you make yourself while the sandbox session is open. A file Iris could not read when it started watching (too large, not a plain file) is never written over; the reply only says it changed. When Iris cannot put a change back, a host command run in that repository, or naming it, is refused until a check finds it clean. The refusal survives the sandbox session ending and an Iris restart: after a restart Iris re-tests only what it was refused for, and takes a fresh copy to compare against once that is fixed.
-- The VM can't add a submodule to the repository, or repoint one it has. Iris reads the index itself (no git run on your Mac) before and after every command; a submodule entry that is new, or whose `.git` changed, has that `.git` renamed to `.git.iris-quarantine` beside it, and a module repository new under `.git/modules` likewise, so neither `git status` nor a later `git submodule update` uses what the VM wrote. Nothing is deleted, and the reply says what moved: if you trust it, rename it back once the sandbox session has ended. An index Iris cannot read refuses host commands in that repository until it can. A plain repository cloned into a subfolder, with no entry in the index, is left alone.
-- A repository the VM creates in a mounted folder that had none is never trusted: Iris keeps no copy of its config to restore, but judges it as it stands, and a key that can run a program there refuses host commands in that folder until it is removed. Any submodule in it is the VM's, and is moved aside like one added to your own repository. Host git runs no hooks in it. Iris remembers the folders a sandbox has mounted, and which had a repository first, across restarts (`config/sandbox-workspaces.json` in its settings folder). If that list cannot be read whole, Iris moves it aside (`sandbox-workspaces.json.corrupt`, never over an earlier copy; an entry it cannot read is skipped and the list as it was is copied there) and fails closed for as long as a `.corrupt` copy is kept, across restarts, saying so once per launch; delete the copy to end it. Meanwhile git that Iris runs on your Mac runs no hooks and has the keys that run programs overridden in every folder not mounted since, and none of your global git settings are trusted. A folder a sandbox mounts meanwhile may hold a repository the VM changed before Iris lost the list: Iris compares later changes with what is there, but its own git never runs that repository's hooks, or the programs its config names under a name of its choosing (filter, diff and merge drivers, a `!` submodule update, difftool and mergetool commands and paths, tar commands), or any of its aliases, since an alias can carry `-c`, except git-lfs's own values. An include, `remote.<x>.uploadpack`, `receivepack` or `vcs`, a `core.worktree` outside the folder, or `core.bare` cannot be overridden, so host commands there are refused until you remove it; removing entries from that repository's config is kept even while a sandbox session is open. Git run from your own terminal there is not protected.
-- A host `run_command` in a conversation with a sandbox session, in a folder a sandbox has mounted (or a linked worktree of its repository), or naming one of those folders, runs git with the fixed-name keys that start programs overridden. Your own global and system values for those keys still apply. Git started this way never opens an editor (`core.editor` is `true`), and runs only the repository's read-only `.git/hooks`. A `core.hooksPath` that points into the worktree, such as husky's `.husky`, is not run.
+## The Sandbox's Own Git Directory
 
-What this does not cover: a repository in a subfolder of the workspace whose git dir is in the worktree, whether not a submodule at all (made by `git init` or a clone there) or a submodule whose `.git` is a folder rather than a pointer into `.git/modules` (`git submodule absorbgitdirs` moves it there): git run in that folder reads its config, though git run in the workspace does not. A repository the VM makes where there was none is covered only by the judging described above. A `.gitmodules` the VM writes with `update = !command` makes git on your Mac stop with an error (git refuses that value) until it is fixed, and a submodule the sandbox added whose repository exists only in its copy makes `git status` stop the same way until you run `git submodule update --init` or it is moved aside; neither runs anything. Commits the sandbox makes on a detached HEAD are not brought back, and they go with the copy when it is removed. A repository whose own objects borrow from somewhere else (`objects/info/alternates`) is not readable in the VM.
+The first time a repository is mounted read-write in a sandbox, Iris prepares a VM-only copy of its common directory under `sandbox-git/<key>` inside Iris's home directory (`~/.iris` or `~/.iris-dev`).
+
+- **Isolated storage:** The copy includes repository configuration, refs, `HEAD`, and `info/exclude`, but excludes objects, hooks, and logs.
+- **Read-only host mount:** Your Mac's `.git` is mounted into the VM read-only, and the VM copy reaches objects through alternates. Nothing large is copied.
+- **Over-mount in the VM:** The VM's copy is mounted over `.git` (or at the path a linked worktree's `.git` file points to). Git commands in the VM read and write only this copy; your host hooks and configuration are never touched.
+- **Worktree sharing:** Two workspaces sharing the same underlying repository share one sandbox copy.
+- **Refusals:** A `.git` entry that is a symbolic link refuses sandboxed commands. A one-off sandboxed command without an active conversation is refused in a repository because its commits cannot be synced back.
+- **Cleanup:** The VM copy is removed once no conversation's workspace uses that repository.
+
+## Syncing Commits to Your Mac
+
+Commits made in the sandbox reach your Mac as plain data files, never by host git reading the VM's copy:
+
+- **Bundle transfer:** After each sandboxed command that advances a branch, Iris creates a git bundle and fetches it into `refs/iris/sandbox/<branch>` on your host repository.
+- **Clean fast-forward:** If that branch is currently checked out on your Mac, the move is a clean fast-forward, your working tree matches the commit, and there are no staged changes, Iris advances your branch and index to match. No checkout is performed, no files are written, and no hooks are run. Chat reports the update: `"Moved main 1a2b3c4..5d6e7f8 (2 commits from the sandbox)"`.
+- **Divergence and dirty state:** If your working tree has uncommitted modifications, staged changes exist, HEAD is detached, or the branch is checked out in another worktree, your host branch stays where it is. The commits wait on `refs/iris/sandbox/<branch>` for you to inspect or merge, and the chat explains why.
+- **Host forward sync:** Before each sandboxed command, if your Mac has moved ahead on the shared checked-out branch, the sandbox copy fast-forwards to match.
+
+## Worktree Pointer Checks
+
+A few git files live in the shared worktree where the VM could modify them:
+
+- **Pointer quarantine:** A submodule's `.git` pointer file or a linked worktree's `.git` file that points outside your repository's own git directory is moved aside to `<name>.iris-quarantine[-N]` before host git runs and after each sandboxed command. Iris reports the quarantined file in chat; if you trust it, you can rename it back after the session ends.
+- **Notices:** If the sandbox modifies `.gitmodules` or `.lfsconfig`, Iris reports the change in chat. While these files cannot execute programs directly, commands like `git submodule sync` or `git-lfs` read their URLs.
+
+## Untrusted Repositories
+
+A repository created inside a sandbox (for example, with `git init` at the workspace root or in any subfolder) or cloned nested inside a mounted folder has its `.git` located in the VM-writable worktree. It does not have an isolated sandbox-git copy seeded from the host, making it untrusted.
+
+### Walk-Up Discovery
+Before each host `run_command`, Iris inspects:
+1. The working directory, walking up parent directories until it finds the nearest `.git` without running git.
+2. Every `git -C <path>` argument in the command, resolved against the working directory.
+
+### Scope
+A repository found by the walk is in scope for judging if its worktree sits inside any folder a sandbox has mounted read-write.
+
+### Trust Check
+A repository is **trusted** if its canonical common directory matches the first line of the `iris-sandbox-seed` marker file in its corresponding `sandbox-git` copy. Everything else found by the walk is untrusted.
+
+### Judging Rules
+For an untrusted repository:
+- **Configuration allow-list:** Iris inspects all configuration files for the repository (`config`, `config.worktree`, submodule configs under `modules/**/config`, and linked worktree configs). Allowed keys include standard `git init` defaults (`core.repositoryformatversion`, `core.filemode`, `core.bare`, `core.logallrefupdates`, `core.ignorecase`, `core.precomposeunicode`, `core.symlinks`), remotes, upstream branch settings, `user.*`, and exact Git LFS filter values.
+- **Git LFS exemption:** Exact Git LFS settings (`WorkspaceGit.lfsValues`) are permitted. Any modified or custom filter value under `filter.lfs` is not exempt.
+- **Refusal:** If any configuration file cannot be read, or sets a key outside the allow-list (such as `core.hooksPath`, `core.fsmonitor`, `diff.external`, or custom filters), the host command is refused with a message identifying the disallowed key.
+- **No hooks execution:** If the repository's configuration is safe, host git runs with hooks disabled by setting `GIT_CONFIG_COUNT=1`, `GIT_CONFIG_KEY_0=core.hooksPath`, `GIT_CONFIG_VALUE_0=/dev/null` (after clearing any inherited `GIT_CONFIG_*` environment variables).
+- **Notice:** The first time Iris encounters an untrusted repository, it posts a notice in chat:
+  `"[sandbox] A repository at <path> was created or modified in a sandbox. Git that Iris runs on your Mac there runs no hooks. Git run from your own terminal there is not protected."`
+
+## Unreadable Workspace Store
+
+Iris records the folders sandboxes have mounted read-write in `config/sandbox-workspaces.json` across restarts.
+
+If this file cannot be parsed or decoded:
+- Iris moves the unreadable file aside to `sandbox-workspaces.json.corrupt` (using incremented `-N` suffixes if previous copies exist, never overwriting).
+- If the file cannot be moved aside, saving is disabled to avoid overwriting.
+- While a `.corrupt` copy exists, Iris **fails closed**: every repository found by the walk-up (mounted or not) is judged as untrusted unless it is a trusted sandbox-git copy.
+- A notice is emitted once per launch explaining that Iris could not read its list and that deleting the `.corrupt` copies ends the fail-closed state.
+
+## Limitations
+
+- **Your own terminal is not protected:** Git run directly from your own terminal inside an untrusted repository is not monitored or protected by Iris.
+- **Mounted parent folders:** Mounting a parent folder such as `~/src` makes every repository located under it untrusted when accessed by host commands.
+- **Detached HEAD commits:** Commits made in the sandbox while in a detached HEAD state are not brought back via bundles, and will be discarded when the sandbox copy is cleaned up.
+- **Alternates:** Repositories whose host objects borrow from another location (`objects/info/alternates`) cannot be safely read by the VM.

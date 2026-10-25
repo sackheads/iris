@@ -100,11 +100,28 @@ enum GitRead {
         return ["git"] + prefix + [subcommand] + forced(subcommand) + Array(words.dropFirst(2))
     }
 
+    private static let baseOverrides: [(key: String, value: String)] = [
+        ("core.hooksPath", "/dev/null"),
+        ("core.fsmonitor", "false"),
+        ("core.pager", "cat"),
+        ("core.editor", "true"),
+        ("sequence.editor", "true"),
+        ("core.sshCommand", "ssh"),
+        ("core.askPass", ""),
+        ("credential.helper", ""),
+        ("gpg.program", "gpg"),
+        ("gpg.ssh.program", "ssh-keygen"),
+        ("gpg.x509.program", "gpgsm"),
+        ("diff.external", #"f() { git diff --no-index --no-ext-diff -- "$2" "$5"; true; }; f"#),
+        ("core.alternateRefsCommand", ""),
+        ("protocol.ext.allow", "never"),
+        ("protocol.file.allow", "user"),
+    ]
+
     /// The `GIT_*` a silent read adds to `ReadOnlyCommand.restrictedEnvironment`: the host overrides
-    /// every sandboxed workspace's git runs with (`WorkspaceGit.overrides`, one list), plus the keys
-    /// a read can reach that those don't cover.
+    /// every sandboxed workspace's git runs with, plus the keys a read can reach that those don't cover.
     static func environment() -> [String: String] {
-        let pairs = WorkspaceGit.overrides(hooks: "/dev/null") + readOverrides
+        let pairs = baseOverrides + readOverrides
         var env: [String: String] = ["GIT_CONFIG_COUNT": String(pairs.count), "GIT_PAGER": "cat",
                                      "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0",
                                      "GIT_NO_REPLACE_OBJECTS": "1"]

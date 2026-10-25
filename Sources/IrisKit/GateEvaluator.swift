@@ -365,7 +365,7 @@ enum GateEvaluator {
             await sweep(runtime, name: name)
             return .failed("the \(kind)'s container could not be started: \(describe(error))")
         }
-        gitGuard?.watch(owner: name, sources: gitSources)
+        gitGuard?.recordMounted(sources: gitSources)
         var result: VMRun
         do {
             // In-VM, an ordinary script's output is capped (`ScriptJobs.cappedCommand`); on the host,
@@ -379,12 +379,6 @@ enum GateEvaluator {
             result = .timedOut(seconds: seconds)
         } catch {
             result = .failed("the \(kind) script could not be run: \(describe(error))")
-        }
-        // #688: after the script, whatever ended it. A disallowed git change was put back; the run
-        // fails with what the guard said, beside a timeout when it was one.
-        if let notice = gitGuard?.finish(owner: name) {
-            if case .timedOut(let s) = result { result = .failed("script timed out after \(s) s; \(notice)") }
-            else { result = .failed(notice) }
         }
         // No `defer`: it cannot await, and a container left running would outlive every tick.
         await sweep(runtime, name: name)

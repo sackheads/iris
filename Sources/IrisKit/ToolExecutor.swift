@@ -628,25 +628,23 @@ struct ToolExecutor {
             arguments = containerArgs
             directory = nil
             environment = nil
-            if let cwd { gitGuard.watch(owner: name, sources: [IrisEngine.expandTilde(cwd)]) }
-            gitBefore = gitGuard.check(owner: name)
+            if let cwd { gitGuard.recordMounted(sources: [IrisEngine.expandTilde(cwd)]) }
+            gitBefore = nil
         } else {
             directory = cwd.map { IrisEngine.expandTilde($0) }   // #275: never `expandingTildeInPath` on a decider
-            // #623: host git reads repositories a VM may have written; check them first, and in one
-            // a VM can write, run git with the keys that run programs overridden.
-            // #658: and each `.git` pointer in a sandboxed repository's worktree, which the VM can write.
-            let checked = [gitGuard.checkAll(owner: conversationId.map(SandboxSessionManager.containerName(for:))),
-                           SandboxGit.checkHostPointers()].compactMap { $0 }
-            gitBefore = checked.isEmpty ? nil : checked.joined(separator: "\n")
-            if let refusal = gitGuard.hostRefusal(cwd: directory, command: command) {
-                return GitConfigGuard.withNotices(refusal, before: gitBefore, after: nil)
+            let pointerNote = SandboxGit.checkHostPointers()
+            let decision = gitGuard.judgeHostCommand(cwd: directory, command: command, paths: irisPaths ?? .default)
+            let beforeNotes = [gitGuard.takeLoadNote(), pointerNote, decision.notice].compactMap { $0 }
+            gitBefore = beforeNotes.isEmpty ? nil : beforeNotes.joined(separator: "\n")
+            if case .refuse(let why, _) = decision {
+                return GitConfigGuard.withNotices(why, before: gitBefore, after: nil)
             }
             var base = ProcessInfo.processInfo.environment
-            let gitOwner = conversationId.map(SandboxSessionManager.containerName(for:))
-            if let hooks = gitGuard.hostOverrides(cwd: directory, command: command, owner: gitOwner) {
-                base.merge(await Self.gitOverrideEnvironment(hooks: hooks ?? "/dev/null", base: base,
-                                                             vmWritable: gitGuard.watchedSources(),
-                                                             extra: gitGuard.adoptedOverrides(cwd: directory, command: command, owner: gitOwner))) { $1 }
+            if case .noHooks = decision {
+                for key in base.keys where key.hasPrefix("GIT_CONFIG_") { base[key] = nil }
+                base["GIT_CONFIG_COUNT"] = "1"
+                base["GIT_CONFIG_KEY_0"] = "core.hooksPath"
+                base["GIT_CONFIG_VALUE_0"] = "/dev/null"
             }
             // #607, #758 review: a silent git read runs pinned to the repository judged again here,
             // against the record of every folder a sandbox could write; unreadable or reached, it
@@ -734,11 +732,9 @@ struct ToolExecutor {
         } catch {
             result = Self.commandTimedOutMessage(seconds: timeoutSeconds)
         }
-        var gitAfter: String? = nil
-        if let ephemeralName { gitAfter = gitGuard.finish(owner: ephemeralName) }
         // #607: what actually ran, Iris's prefix included, in the result the pill and the ledger show.
         let shown = restrictedPath != nil && !useSandbox ? GitRead.argv(command).map { "Ran: \($0.joined(separator: " "))\n" + result } ?? result : result
-        return GitConfigGuard.withNotices(shown, before: gitBefore, after: gitAfter)
+        return GitConfigGuard.withNotices(shown, before: gitBefore, after: nil)
     }
 
     /// Whether the `git` on `env`'s `PATH` is real: anything but Apple's `/usr/bin/git` shim, or
@@ -755,27 +751,6 @@ struct ToolExecutor {
         return false
     }
 
-    /// `WorkspaceGit.hostEnvironment` with the person's own global and system values, read with
-    /// the git and `PATH` the command will use, from `/` so no repository's config is read. Their
-    /// global config is left out when it sits in a folder a VM can write (`vmWritable`).
-    static func gitOverrideEnvironment(hooks: String, base: [String: String], vmWritable: [String],
-                                       extra: [(key: String, value: String)] = []) async -> [String: String] {
-        var env = BinaryResolver.commandEnvironment(base: base)
-        for key in env.keys where key.hasPrefix("GIT_") { env[key] = nil }
-        var listing = ""
-        // `/usr/bin/git` with no developer tools installed opens Apple's install dialog; then no
-        // git can run, and the defaults are all it needs.
-        if await gitIsInstalled(env: env), case .success(let out) = await ProcessGroupRunner.capture(
-            executable: "/usr/bin/env", arguments: ["git", "config", "--list", "--show-scope"],
-            environment: env, currentDirectory: "/", timeoutSeconds: 10), out.status == 0 {
-            listing = String(data: out.stdout, encoding: .utf8) ?? ""
-        }
-        let globalReachable = WorkspaceGit.globalConfigFiles(base: base).contains { file in
-            vmWritable.contains { WorkspaceGit.relative(file, inside: $0) != nil }
-        }
-        return WorkspaceGit.hostEnvironment(hooks: hooks, personal: WorkspaceGit.personalValues(listing: listing, trustGlobal: !globalReachable),
-                                            proxyCommand: base["GIT_PROXY_COMMAND"], extra: extra)
-    }
 
     /// What a command that outlived its deadline reports. One sentence for both routes: a command
     /// killed in the container reads exactly like one killed on the host, because which side of
