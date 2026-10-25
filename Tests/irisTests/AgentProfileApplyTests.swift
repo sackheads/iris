@@ -22,12 +22,20 @@ struct AgentProfileApplyTests {
     You write documentation.
     """
 
+    nonisolated private static let plain = """
+    ---
+    tier: easy
+    ---
+    You answer briefly.
+    """
+
     private func setUp() throws -> (AppState, AgentProfileStore, URL) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("iris-670-\(UUID().uuidString)")
         let store = AgentProfileStore(paths: IrisPaths(root: root))
         try FileManager.default.createDirectory(at: store.directory, withIntermediateDirectories: true)
         try write(Self.reviewer, as: "reviewer", in: store)
         try write(Self.writer, as: "writer", in: store)
+        try write(Self.plain, as: "plain", in: store)
         let app = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
         app.agentProfiles = store
         return (app, store, root)
@@ -141,6 +149,35 @@ struct AgentProfileApplyTests {
         #expect(c.agentProfile == "reviewer" && c.agentProfileSnapshot == snapshot)
         #expect(notes(app, profiled).last == "[agent profile] `gone` isn't there, so nothing changed; this conversation keeps `reviewer`.")
         #expect(app.resolveAgentProfile(for: profiled)?.name == "reviewer")
+    }
+
+    /// #231: the menu doesn't open the conversation, so applying or clearing must reset the idle
+    /// clock itself. "plain" has no role, since a role holder is never auto-archived anyway.
+    @Test("applying or clearing a profile counts as touching the session, so the idle sweep spares it")
+    func touchesIdleClock() throws {
+        let (app, _, root) = try setUp(); defer { try? FileManager.default.removeItem(at: root) }
+        let now = Date()
+        let old = now.addingTimeInterval(-30 * 86_400)
+        func idleSession() throws -> UUID {
+            let id = app.createNewConversation(select: false)
+            let idx = try #require(app.conversations.firstIndex { $0.id == id })
+            app.conversations[idx].inSessions = true
+            app.conversations[idx].lastTouchedAt = old
+            return id
+        }
+        let control = try idleSession(), applied = try idleSession()
+        app.applyAgentProfile("plain", toExisting: applied)
+        #expect(try conv(app, applied).role == nil, "precondition: no role shields it")
+        let first = app.sweepIdleSessions(days: 14, now: now)
+        #expect(first.contains(control), "precondition: an untouched session goes")
+        #expect(!first.contains(applied))
+
+        let cleared = try idleSession()
+        app.applyAgentProfile("plain", toExisting: cleared)
+        let idx = try #require(app.conversations.firstIndex { $0.id == cleared })
+        app.conversations[idx].lastTouchedAt = old
+        app.clearAgentProfile(for: cleared)
+        #expect(!app.sweepIdleSessions(days: 14, now: now).contains(cleared))
     }
 
     /// One turn through a real engine; returns the declared names.
