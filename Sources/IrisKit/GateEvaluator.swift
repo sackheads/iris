@@ -321,8 +321,8 @@ enum GateEvaluator {
     ///
     /// A writing script job (#688) passes `readWrite`, its mount entries already built from its
     /// grant (read-only ones carry `:ro`, and each read-write one has its `.iris/` overlay), and
-    /// `gitGuard` with the read-write sources: watched before the script and checked after it on
-    /// every exit, a timeout's included. A change the guard put back fails the run with its notice.
+    /// `gitGuard` with the read-write sources, recorded before the script runs so any repository
+    /// created there is judged before host git reads it.
     static func runInVM(_ command: String, mounts: [String], timeoutSeconds seconds: Int, network: Bool,
                         runtime: any ContainerRuntime, image: String, createCeiling: Int,
                         kind: String, namePrefix: String = SandboxSessionManager.namePrefix,
@@ -388,7 +388,7 @@ enum GateEvaluator {
     /// A writing script job's fire (#688): its grant, re-checked as a mutating job's is at every
     /// fire (`JobGrant.drift`, the login-PATH rule included), no repository mounted read-write,
     /// every read-write mount in the writable-roots record before the container exists (#616), each
-    /// one's `.iris/` read-only over it (#617), and `GitConfigGuard` around the script.
+    /// one's `.iris/` read-only over it (#617), and `GitConfigGuard` recording the read-write sources.
     static func runWritingScriptJob(_ spec: ScriptSpec, grant: JobGrant, runtime: (any ContainerRuntime)?, image: String,
                                     createCeiling: Int = GateEvaluator.createCeilingSeconds,
                                     paths: IrisPaths = .default, gitGuard: GitConfigGuard = .shared,

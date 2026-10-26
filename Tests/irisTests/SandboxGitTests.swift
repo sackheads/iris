@@ -144,6 +144,42 @@ struct SandboxGitTests {
         #expect(!fm.fileExists(atPath: repo.vmDir), "pruned once nothing uses it")
     }
 
+    @Test("mount layout, .git symlink refusal, separate-git-dir target mapping, and submodule alternates")
+    func layoutsAndSubmoduleAlternates() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/iris-home"))
+        #expect(WorkspaceIrisDir.protected(for: ws).map(\.relative) == [".iris"])
+
+        // A .git symlink refuses.
+        try FileManager.default.createDirectory(atPath: dir + "/linked", withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(atPath: dir + "/linked/.git", withDestinationPath: ws + "/.git")
+        guard case .refused = SandboxGit.prepare(source: dir + "/linked", target: dir + "/linked", paths: paths) else {
+            Issue.record("expected .git symlink to be refused"); return
+        }
+
+        // A .git file naming a git dir inside the mount maps through target.
+        let sep = dir + "/sep"
+        try FileManager.default.createDirectory(atPath: sep, withIntermediateDirectories: true)
+        try await GitFixture.sh("mkdir inner && git init -q --separate-git-dir=inner/gitdir", in: sep, env: env)
+        guard case .repo(let sepRepo) = SandboxGit.prepare(source: sep, target: "/work", paths: paths) else {
+            Issue.record("expected repo for separate-git-dir"); return
+        }
+        #expect(sepRepo.vmCommonDir == "/work/inner/gitdir")
+
+        // Submodule alternates in the sandbox copy point to the read-only host mount.
+        try await GitFixture.sh("git init -q ../sub && git -C ../sub commit -q --allow-empty -m s", in: ws, env: env)
+        let add = try await GitFixture.sh("git -c protocol.file.allow=always submodule add -q ../sub lib/sub", in: ws, env: env)
+        #expect(add.status == 0, "\(add.out)")
+        guard case .repo(let repo) = SandboxGit.prepare(source: ws, target: ws, paths: paths) else {
+            Issue.record("no copy"); return
+        }
+        #expect(repo.mounts == ["\(repo.vmDir):\(ws)/.git", "\(ws)/.git:\(repo.hostMount):ro"])
+        let alternates = try String(contentsOfFile: repo.vmDir + "/modules/lib/sub/objects/info/alternates", encoding: .utf8)
+        #expect(alternates == repo.hostMount + "/modules/lib/sub/objects\n")
+    }
+
     @Test("where a worktree's repository is, is recorded at the first look: a .git file rewritten between commands is moved aside, not taken as a new repository")
     func recordedLayout() async throws {
         let (dir, env) = try await GitFixture.repo()

@@ -797,8 +797,8 @@ grant:
   free. Each folder is counted before and after every run, and a run that adds more than
   max(2 GB, its size), removes more than max(1 GB, a fifth of it), or drops more than
   max(1,000, a fifth of its files) pauses the job with a card. The counts are on the run's row.
-- **Git config** in a read-write folder is checked around every run, as in any sandboxed write, and
-  a change it puts back fails the run.
+- **Mounted folders** are recorded in `sandbox-workspaces.json`, so if a script creates a repository
+  before the run fails, any git command Iris later runs there on the Mac checks its config and runs no hooks.
 
 Its review says, beside the folders, that the script "can change and delete files in" them on every
 run with no one watching, and what its network means for that. If the script runs, or reads

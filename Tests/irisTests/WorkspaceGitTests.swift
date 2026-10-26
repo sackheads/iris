@@ -73,7 +73,7 @@ struct GitConfigFileTests {
         #expect(map["alias.q"] == "x # y  \t z")
     }
 
-    @Test("what it cannot read in full is nil, so a change to it is put back")
+    @Test("what it cannot read in full is nil, so host commands there are refused")
     func strict() {
         for bad in ["[core\nx = 1", "x = 1", "[core]\n\tq = \"open\n", "[core]\n\tq = a\\q", "[a \"b\n", "[core]\n\t= 1"] {
             #expect(GitConfigFile.parse(Data(bad.utf8)) == nil, "parsed: \(bad.debugDescription)")
@@ -163,13 +163,11 @@ struct UntrustedRepositoryTests {
         }
         #expect(notice3 == nil, "notice should be said only once")
 
-        // Without risky key, it runs with no hooks
-        var hostEnv = env
-        hostEnv["GIT_CONFIG_COUNT"] = "1"
-        hostEnv["GIT_CONFIG_KEY_0"] = "core.hooksPath"
-        hostEnv["GIT_CONFIG_VALUE_0"] = "/dev/null"
-        let r = try await GitFixture.sh("git commit --allow-empty -m test", in: ws, env: hostEnv)
-        #expect(r.status == 0, "\(r.out)")
+        // Without risky key, running through ToolExecutor.runCommand runs with no hooks
+        var executor = ToolExecutor()
+        executor.gitGuard = guardian
+        let out = await executor.runCommand("git commit --allow-empty -m test", cwd: ws)
+        #expect(!out.contains("Not run:"), "\(out)")
         #expect(!FileManager.default.fileExists(atPath: dir + "/HOOK_RAN"), "marker hook must not fire")
     }
 
@@ -418,6 +416,204 @@ struct UntrustedRepositoryTests {
         let res2 = await executor.runCommand("git commit --allow-empty -m test", cwd: ws)
         #expect(res2.contains("[sandbox] A repository at \(ws) was created or modified in a sandbox"))
         #expect(!FileManager.default.fileExists(atPath: dir + "/E2E_HOOK_RAN"), "hook must not run in untrusted repo")
+    }
+
+    @Test("9. index parser finds gitlinks in versions 2, 3, 4 and split index; missing sharedindex refuses; planted submodule in untrusted repo is quarantined")
+    func indexVersionsSplitIndexAndUntrustedSubmodule() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        try await GitFixture.sh("git init -q ../sub && git -C ../sub commit -q --allow-empty -m s && git -c protocol.file.allow=always submodule add -q ../sub lib/sub && git commit -qm sub",
+                                in: ws, env: env)
+        for version in [2, 3, 4] {
+            let add = version >= 3 ? "echo n > new\(version) && git add -N new\(version) && " : ""
+            try await GitFixture.sh(add + "git update-index --index-version \(version)", in: ws, env: env)
+            let header = try #require(GitFixture.read(ws + "/.git/index"))
+            #expect(header[7] == UInt8(version))
+            #expect(WorkspaceGit.gitlinks(index: ws + "/.git/index", sha256: false) == ["lib/sub"], "version \(version)")
+        }
+        try Data("DIRC garbage".utf8).write(to: URL(fileURLWithPath: dir + "/bad-index"))
+        #expect(WorkspaceGit.gitlinks(index: dir + "/bad-index", sha256: false) == nil)
+        #expect(WorkspaceGit.gitlinks(index: dir + "/no-index", sha256: false) == [])
+
+        // Planted submodule under a split index in an untrusted repository:
+        let plain = dir + "/plain"
+        try FileManager.default.createDirectory(atPath: plain, withIntermediateDirectories: true)
+        try await GitFixture.sh("""
+            git init -q && git config user.email a@b && git config user.name a && echo x > a && git add a && git commit -qm i
+            git init -q \(dir)/evilrepo && git -C \(dir)/evilrepo commit -q --allow-empty -m e && git -C \(dir)/evilrepo config core.fsmonitor /bin/true
+            mkdir -p planted && echo "gitdir: \(dir)/evilrepo/.git" > planted/.git && echo y > planted/f
+            git update-index --add --cacheinfo 160000,$(git -C \(dir)/evilrepo rev-parse HEAD),planted
+            git update-index --split-index
+            """, in: plain, env: env)
+        let shared = try FileManager.default.contentsOfDirectory(atPath: plain + "/.git").filter { $0.hasPrefix("sharedindex.") }
+        #expect(!shared.isEmpty)
+        #expect(WorkspaceGit.gitlinks(index: plain + "/.git/index", sha256: false, followLink: false) == nil)
+        #expect(Set(WorkspaceGit.gitlinks(index: plain + "/.git/index", sha256: false) ?? []) == ["planted"])
+
+        let guardian = GitConfigGuard()
+        guardian.recordMounted(sources: [plain])
+        let d1 = guardian.judgeHostCommand(cwd: plain, command: "git status")
+        guard case .noHooks(let notice) = d1 else {
+            Issue.record("expected noHooks with quarantined pointer, got \(d1)")
+            return
+        }
+        #expect(notice?.contains("planted/.git") == true && notice?.contains("moved it aside") == true)
+        #expect(FileManager.default.fileExists(atPath: plain + "/planted/.git.iris-quarantine"))
+
+        // Missing shared index fails closed:
+        for name in shared { try FileManager.default.removeItem(atPath: plain + "/.git/" + name) }
+        let d2 = guardian.judgeHostCommand(cwd: plain, command: "git status")
+        guard case .refuse(let why, _) = d2 else {
+            Issue.record("expected refuse for broken split index, got \(d2)")
+            return
+        }
+        #expect(why.contains("index, in a repository the sandbox made, cannot be read"))
+    }
+
+    @Test("H1. parent mount makes repository with sandbox-git copy untrusted")
+    func parentMountMakesRepoWithCopyUntrusted() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/iris-home"))
+
+        // Step 1: earlier session mounted ws directly -> creates sandbox-git seed for ws/.git
+        _ = SandboxGit.prepare(source: ws, target: ws, paths: paths)
+
+        // Step 2: later session mounts the parent directory `dir` (no .git at `dir`, so no overlay on ws/.git)
+        let guardian = GitConfigGuard()
+        guardian.recordMounted(sources: [dir])
+
+        // Step 3: VM writes core.fsmonitor into ws/.git/config (writable under the parent mount)
+        try await GitFixture.sh("git config core.fsmonitor 'touch \(dir)/PWNED'", in: ws, env: env)
+
+        // Step 4: host command in ws MUST refuse, not trust the stale seed
+        let decision = guardian.judgeHostCommand(cwd: ws, command: "git status", paths: paths)
+        guard case .refuse(let why, _) = decision else {
+            Issue.record("expected refuse when parent mount makes .git writable, got \(decision)")
+            return
+        }
+        #expect(why.contains("core.fsmonitor"))
+    }
+
+    @Test("H2. commands reaching an untrusted repo without starting in it are judged")
+    func commandsReachingRepoWithoutStartingInIt() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let outside = dir + "/outside"
+        try FileManager.default.createDirectory(atPath: outside, withIntermediateDirectories: true)
+
+        try await GitFixture.sh("git config core.fsmonitor /bin/true", in: ws, env: env)
+
+        let guardian = GitConfigGuard()
+        guardian.recordMounted(sources: [ws])
+
+        let commands = [
+            "cd '\(ws)' && git status",
+            #"git --git-dir='\#(ws)/.git' --work-tree='\#(ws)' status"#,
+            #"GIT_DIR='\#(ws)/.git' git status"#,
+            #"git -c user.name=a -C '\#(ws)' status"#,
+            #"echo $(git -C '\#(ws)' status)"#,
+        ]
+        for cmd in commands {
+            let d = guardian.judgeHostCommand(cwd: outside, command: cmd)
+            guard case .refuse = d else {
+                Issue.record("expected refuse for `\(cmd)`, got \(d)")
+                return
+            }
+        }
+    }
+
+    @Test("H3. bare repository created by VM inside mounted folder is judged")
+    func bareRepoCreatedByVMIsJudged() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/iris-home"))
+        _ = SandboxGit.prepare(source: ws, target: ws, paths: paths)
+
+        // VM creates a bare repo inside ws with a malicious alias
+        try await GitFixture.sh("git init -q --bare evil && git -C evil config alias.st '!touch \(dir)/BARE_PWNED'", in: ws, env: env)
+
+        let guardian = GitConfigGuard()
+        guardian.recordMounted(sources: [ws])
+
+        // Host command run in ws/evil or via git -C ws/evil
+        let d1 = guardian.judgeHostCommand(cwd: ws + "/evil", command: "git st", paths: paths)
+        let d2 = guardian.judgeHostCommand(cwd: ws, command: "git -C '\(ws)/evil' st", paths: paths)
+        guard case .refuse = d1, case .refuse = d2 else {
+            Issue.record("expected refuse for bare repo, got d1=\(d1) d2=\(d2)")
+            return
+        }
+    }
+
+    @Test("11. global git config inside a mounted home is judged, and globalConfigInReach is true when mounted or unknownFolders")
+    func globalConfigInMountedHome() async throws {
+        let (dir, _) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let home = dir + "/home"
+        let ws = dir + "/ws"
+        let base = ["HOME": home, "XDG_CONFIG_HOME": home + "/.config"]
+
+        let guardian = GitConfigGuard()
+        #expect(!guardian.globalConfigInReach(base: base))
+
+        guardian.recordMounted(sources: [home])
+        #expect(guardian.globalConfigInReach(base: base))
+
+        // Write disallowed key to ~/.gitconfig
+        try "[core]\n\tfsmonitor = /bin/true\n".write(toFile: home + "/.gitconfig", atomically: false, encoding: .utf8)
+        let d1 = guardian.judgeHostCommand(cwd: ws, command: "git status", base: base)
+        guard case .refuse(let why, _) = d1 else {
+            Issue.record("expected refuse for malicious ~/.gitconfig inside mounted home, got \(d1)")
+            return
+        }
+        #expect(why.contains("sets core.fsmonitor"))
+
+        // Allowed key in ~/.gitconfig passes judging, and globalConfigInReach remains true
+        try "[user]\n\tname = Alice\n".write(toFile: home + "/.gitconfig", atomically: false, encoding: .utf8)
+        let d2 = guardian.judgeHostCommand(cwd: dir, command: "echo ok", base: base)
+        #expect(d2 == .ordinary(notice: nil))
+        #expect(guardian.globalConfigInReach(base: base))
+    }
+
+    @Test("12. upgrade from old sandbox-workspaces.json with blocked or adopted keeps repository untrusted across saves")
+    func upgradeFromBlockedOrAdopted() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/iris-home"))
+        let store = URL(fileURLWithPath: dir + "/home/sandbox-workspaces.json")
+
+        // Even with a sandbox-git seed marker, a legacy blocked/adopted entry must not be trusted
+        _ = SandboxGit.prepare(source: ws, target: ws, paths: paths)
+        try await GitFixture.sh("git config core.fsmonitor /bin/true", in: ws, env: env)
+
+        let legacyJSON = "[{\"path\":\"\(ws)\",\"hooks\":\"\(ws)/.git/hooks\",\"blocked\":{\"kind\":\"restore\",\"path\":\"\(ws)/.git/config\",\"message\":\"m\"}}]"
+        try Data(legacyJSON.utf8).write(to: store)
+
+        let g1 = GitConfigGuard(store: store)
+        let d1 = g1.judgeHostCommand(cwd: ws, command: "git status", paths: paths)
+        guard case .refuse(let why1, _) = d1 else {
+            Issue.record("expected legacy blocked repo to be judged as untrusted and refused, got \(d1)")
+            return
+        }
+        #expect(why1.contains("core.fsmonitor"))
+
+        // Trigger a save() by recording another mount, then reload from store
+        let plain = dir + "/plain"
+        try FileManager.default.createDirectory(atPath: plain, withIntermediateDirectories: true)
+        g1.recordMounted(sources: [plain])
+
+        let g2 = GitConfigGuard(store: store)
+        let d2 = g2.judgeHostCommand(cwd: ws, command: "git status", paths: paths)
+        guard case .refuse(let why2, _) = d2 else {
+            Issue.record("expected untrusted flag to survive save and reload, got \(d2)")
+            return
+        }
+        #expect(why2.contains("core.fsmonitor"))
     }
 }
 

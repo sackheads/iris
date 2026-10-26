@@ -1,7 +1,7 @@
 import Foundation
 
-/// The git config format, read only to decide which keys a change touched (#623). Strict: a file
-/// it cannot read in full is `nil`, and a change to one is put back.
+/// The git config format, read to judge whether an untrusted repository's config is safe (#623, #658).
+/// Strict: a file it cannot read in full is `nil`, and host commands there are refused.
 enum GitConfigFile {
     struct Entry: Hashable {
         /// `section.name` or `section.subsection.name`; section and name lowercased, as git does.
@@ -139,16 +139,34 @@ final class GitConfigGuard: @unchecked Sendable {
     /// which repositories the VM could have created or modified.
     struct MountedWorkspace: Codable, Equatable {
         var path: String
+        /// True when an earlier version recorded this folder as `blocked` or `adopted`, so it is
+        /// judged as untrusted even if a `sandbox-git` copy exists for it.
+        var untrusted: Bool = false
 
-        init(path: String) { self.path = path }
+        init(path: String, untrusted: Bool = false) {
+            self.path = path
+            self.untrusted = untrusted
+        }
 
         enum CodingKeys: CodingKey {
-            case path
+            case path, untrusted, blocked, adopted
         }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             path = try c.decode(String.self, forKey: .path)
+            let explicit = try c.decodeIfPresent(Bool.self, forKey: .untrusted) ?? false
+            let hasBlocked = (try? c.decodeNil(forKey: .blocked)) == false
+            let hasAdopted = (try? c.decodeNil(forKey: .adopted)) == false
+            untrusted = explicit || hasBlocked || hasAdopted
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(path, forKey: .path)
+            if untrusted {
+                try c.encode(true, forKey: .untrusted)
+            }
         }
     }
 
@@ -181,6 +199,7 @@ final class GitConfigGuard: @unchecked Sendable {
     private let lock = NSLock()
     private let store: URL?
     private var mountedPaths: Set<String> = []
+    private var untrustedPaths: Set<String> = []
     private var unknownFolders = false
     private var corruptCopies: [String] = []
     private var loadNote: String?
@@ -221,11 +240,15 @@ final class GitConfigGuard: @unchecked Sendable {
                 + (corruptCopies.isEmpty ? "" : " Delete \(corruptCopies.joined(separator: " and ")) to end this.")
         }
         for item in saved {
-            mountedPaths.insert(item.path)
+            let real = IrisPaths.realPath(item.path)
+            mountedPaths.insert(real)
+            if item.untrusted {
+                untrustedPaths.insert(real)
+            }
         }
     }
 
-    private static let unknownFoldersNote = " Until a sandbox mounts a folder again, git that Iris runs on your Mac runs no hooks and checks every repository found."
+    private static let unknownFoldersNote = " While the unreadable list is kept, git that Iris runs on your Mac checks every repository it reaches, runs no hooks in any without a sandbox copy, and ignores your global git config."
 
     private static func corruptCopies(of store: URL) -> [String] {
         let dir = store.deletingLastPathComponent().path
@@ -258,7 +281,7 @@ final class GitConfigGuard: @unchecked Sendable {
 
     private func save() {
         guard let store, !saveDisabled else { return }
-        let items = mountedPaths.sorted().map { MountedWorkspace(path: $0) }
+        let items = mountedPaths.sorted().map { MountedWorkspace(path: $0, untrusted: untrustedPaths.contains($0)) }
         guard let data = try? JSONEncoder().encode(items) else { return }
         try? FileManager.default.createDirectory(at: store.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: store, options: .atomic)
@@ -295,17 +318,38 @@ final class GitConfigGuard: @unchecked Sendable {
         return parts.joined(separator: "\n")
     }
 
-    static func isTrusted(commonDir: String, paths: IrisPaths = .default) -> Bool {
+    static func isTrusted(worktree: String = "", commonDir: String, mountedPaths: Set<String> = [],
+                          untrustedPaths: Set<String> = [], paths: IrisPaths = .default) -> Bool {
         let canonicalCommon = IrisPaths.realPath(commonDir)
         let key = SandboxGit.key(canonicalCommon)
         let markerPath = ((SandboxGit.directory(paths: paths) as NSString).appendingPathComponent(key) as NSString)
             .appendingPathComponent(SandboxGit.seedMarker)
         guard let data = WorkspaceGit.readSmall(markerPath),
               let text = String(data: data, encoding: .utf8),
-              let firstLine = text.split(separator: "\n", omittingEmptySubsequences: false).first else {
+              let firstLine = text.split(separator: "\n", omittingEmptySubsequences: false).first,
+              String(firstLine) == canonicalCommon else {
             return false
         }
-        return String(firstLine) == canonicalCommon
+        guard !worktree.isEmpty else { return true }
+        let canonicalWorktree = IrisPaths.realPath(worktree)
+        for untrusted in untrustedPaths {
+            let u = IrisPaths.realPath(untrusted)
+            if canonicalWorktree == u || WorkspaceGit.relative(canonicalWorktree, inside: u) != nil
+                || canonicalCommon == u || WorkspaceGit.relative(canonicalCommon, inside: u) != nil {
+                return false
+            }
+        }
+        // A sandbox copy protects only a repository at the root of a mount (`mount == worktree`).
+        // Any mount strictly containing the worktree, or containing its commonDir when not equal to
+        // the worktree, exposed `.git` read-write without the root overlay (#773 H1).
+        for mount in mountedPaths {
+            let m = IrisPaths.realPath(mount)
+            if m != canonicalWorktree {
+                if WorkspaceGit.relative(canonicalWorktree, inside: m) != nil { return false }
+                if canonicalCommon == m || WorkspaceGit.relative(canonicalCommon, inside: m) != nil { return false }
+            }
+        }
+        return true
     }
 
     static func findNearestGit(from dir: String) -> (worktree: String, commonDir: String)? {
@@ -313,6 +357,19 @@ final class GitConfigGuard: @unchecked Sendable {
         var visited = Set<String>()
         while true {
             visited.insert(current)
+            if (current as NSString).lastPathComponent == ".git" {
+                let parent = (current as NSString).deletingLastPathComponent
+                if parent != current {
+                    switch WorkspaceGit.entry(at: parent) {
+                    case .layout(let layout):
+                        return (worktree: parent, commonDir: IrisPaths.realPath(layout.commonDir))
+                    case .unsupported:
+                        return (worktree: parent, commonDir: current)
+                    case .none:
+                        break
+                    }
+                }
+            }
             switch WorkspaceGit.entry(at: current) {
             case .layout(let layout):
                 return (worktree: current, commonDir: IrisPaths.realPath(layout.commonDir))
@@ -320,6 +377,14 @@ final class GitConfigGuard: @unchecked Sendable {
                 return (worktree: current, commonDir: IrisPaths.realPath((current as NSString).appendingPathComponent(".git")))
             case .none:
                 break
+            }
+            if GitRead.isGitDirectory(current) {
+                var commonDir = current
+                if let named = WorkspaceGit.readSmall((current as NSString).appendingPathComponent("commondir"))
+                    .flatMap({ String(data: $0, encoding: .utf8) })?.trimmingCharacters(in: .whitespacesAndNewlines), !named.isEmpty {
+                    commonDir = WorkspaceGit.resolve(named, against: current)
+                }
+                return (worktree: current, commonDir: IrisPaths.realPath(commonDir))
             }
             let parent = (current as NSString).deletingLastPathComponent
             if parent == current || visited.contains(parent) || current == "/" {
@@ -330,34 +395,94 @@ final class GitConfigGuard: @unchecked Sendable {
         return nil
     }
 
-    static func extractGitCPaths(command: String, cwd: String?) -> [String] {
-        var paths: [String] = []
-        let pattern = #"(?:^|[;&|\s])git\s+(?:-[^\s]+\s+)*-C\s+(?:'([^']+)'|"([^"]+)"|(\S+))"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
-        let range = NSRange(command.startIndex..<command.endIndex, in: command)
-        let matches = regex.matches(in: command, range: range)
-        for match in matches {
-            let extracted: String
-            if let r1 = Range(match.range(at: 1), in: command) {
-                extracted = String(command[r1])
-            } else if let r2 = Range(match.range(at: 2), in: command) {
-                extracted = String(command[r2])
-            } else if let r3 = Range(match.range(at: 3), in: command) {
-                extracted = String(command[r3])
-            } else {
-                continue
+    static func extractGitCPaths(command: String, cwd: String?, mountedPaths: Set<String> = []) -> [String] {
+        var raw: [String] = []
+        let patterns = [
+            #"(?:^|[\s;&|(`])(?:-C|--git-dir|--work-tree|cd)\s+(?:'([^']+)'|"([^"]+)"|([^\s;&|)`"']+))"#,
+            #"(?:^|[\s;&|(`])(?:--git-dir|--work-tree|GIT_DIR|GIT_WORK_TREE)=(?:'([^']+)'|"([^"]+)"|([^\s;&|)`"']+))"#
+        ]
+        let fullRange = NSRange(command.startIndex..<command.endIndex, in: command)
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            for match in regex.matches(in: command, range: fullRange) {
+                for group in 1...3 {
+                    if let r = Range(match.range(at: group), in: command) {
+                        raw.append(String(command[r]))
+                        break
+                    }
+                }
             }
-            let resolved: String
-            if extracted.hasPrefix("/") {
-                resolved = extracted
-            } else if let cwd {
-                resolved = (cwd as NSString).appendingPathComponent(extracted)
-            } else {
-                resolved = extracted
-            }
-            paths.append(resolved)
         }
-        return paths
+
+        let delimiters = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "'\"`;&|()$<>" ))
+        for mount in mountedPaths.sorted() {
+            for spelling in Set([mount, IrisPaths.realPath(mount)]) where !spelling.isEmpty {
+                if WorkspaceGit.commandNames(command, spelling) {
+                    raw.append(spelling)
+                }
+                var search = command[...]
+                while let range = search.range(of: spelling) {
+                    let tail = search[range.lowerBound...]
+                    let end = tail.firstIndex { c in
+                        c.unicodeScalars.contains { delimiters.contains($0) }
+                    } ?? tail.endIndex
+                    let candidate = String(tail[..<end])
+                    if candidate == spelling || candidate.hasPrefix(spelling.hasSuffix("/") ? spelling : spelling + "/") {
+                        raw.append(candidate)
+                    }
+                    search = search[range.upperBound...]
+                }
+            }
+        }
+
+        var resolved: [String] = []
+        var bases: [String] = []
+        if let cwd { bases.append(cwd) }
+        for item in raw {
+            if item.hasPrefix("/") {
+                resolved.append(item)
+                bases.append(item)
+            } else {
+                for base in bases {
+                    resolved.append((base as NSString).appendingPathComponent(item))
+                }
+                for mount in mountedPaths.sorted() {
+                    resolved.append((mount as NSString).appendingPathComponent(item))
+                }
+                if bases.isEmpty && mountedPaths.isEmpty {
+                    resolved.append(item)
+                }
+            }
+        }
+        return resolved
+    }
+
+    static func judgeConfigFile(path: String, allowInitDefaults: Bool = true) -> String? {
+        var info = stat()
+        if lstat(path, &info) != 0 {
+            if errno == ENOENT { return nil }
+            return "Not run: git on your Mac would read a repository the sandbox left unsafe. \(path), in a repository the sandbox made, cannot be read."
+        }
+        guard info.st_mode & S_IFMT == S_IFREG, let data = WorkspaceGit.readSmall(path),
+              let entries = GitConfigFile.parse(data) else {
+            return "Not run: git on your Mac would read a repository the sandbox left unsafe. \(path), in a repository the sandbox made, cannot be read."
+        }
+        var values: [String: [String]] = [:]
+        for e in entries {
+            values[e.key, default: []].append(e.value ?? "\u{0}")
+        }
+        var badKeys: [String] = []
+        for key in values.keys.sorted() {
+            let vals = values[key]!
+            if allowInitDefaults && initDefaults.contains(key) { continue }
+            if GitConfigFile.isAllowed(key: key, values: vals) { continue }
+            if let lfsExpected = WorkspaceGit.lfsValues[key], vals.allSatisfy({ $0 == lfsExpected }) { continue }
+            badKeys.append(key)
+        }
+        if !badKeys.isEmpty {
+            return "Not run: git on your Mac would read a repository the sandbox left unsafe. \(path), in a repository the sandbox made, sets \(badKeys.joined(separator: ", "))."
+        }
+        return nil
     }
 
     static func judgeUntrustedRepo(worktree: String, commonDir: String) -> String? {
@@ -365,8 +490,17 @@ final class GitConfigGuard: @unchecked Sendable {
         let common = commonDir as NSString
         configPaths.append(common.appendingPathComponent("config"))
         configPaths.append(common.appendingPathComponent("config.worktree"))
-        if case .layout(let layout) = WorkspaceGit.entry(at: worktree), layout.dotGitIsFile {
-            configPaths.append((layout.gitDir as NSString).appendingPathComponent("config.worktree"))
+        var gitDir = commonDir
+        if case .layout(let layout) = WorkspaceGit.entry(at: worktree) {
+            gitDir = layout.gitDir
+            if layout.dotGitIsFile {
+                configPaths.append((layout.gitDir as NSString).appendingPathComponent("config.worktree"))
+            }
+        }
+        let indexPath = (gitDir as NSString).appendingPathComponent("index")
+        if WorkspaceGit.gitlinks(index: indexPath, sha256: false) == nil,
+           WorkspaceGit.gitlinks(index: indexPath, sha256: true) == nil {
+            return "Not run: git on your Mac would read a repository the sandbox left unsafe. \(indexPath), in a repository the sandbox made, cannot be read."
         }
         for module in WorkspaceGit.modules(commonDir: commonDir) {
             configPaths.append((module as NSString).appendingPathComponent("config"))
@@ -377,41 +511,45 @@ final class GitConfigGuard: @unchecked Sendable {
         }
 
         for path in configPaths {
-            var info = stat()
-            if lstat(path, &info) != 0 {
-                if errno == ENOENT { continue }
-                return "Not run: git on your Mac would read a repository the sandbox left unsafe. \(path), in a repository the sandbox made, cannot be read."
-            }
-            guard info.st_mode & S_IFMT == S_IFREG, let data = WorkspaceGit.readSmall(path) else {
-                return "Not run: git on your Mac would read a repository the sandbox left unsafe. \(path), in a repository the sandbox made, cannot be read."
-            }
-            guard let entries = GitConfigFile.parse(data) else {
-                return "Not run: git on your Mac would read a repository the sandbox left unsafe. \(path), in a repository the sandbox made, cannot be read."
-            }
-            var values: [String: [String]] = [:]
-            for e in entries {
-                values[e.key, default: []].append(e.value ?? "\u{0}")
-            }
-            var badKeys: [String] = []
-            for key in values.keys.sorted() {
-                let vals = values[key]!
-                if initDefaults.contains(key) { continue }
-                if GitConfigFile.isAllowed(key: key, values: vals) { continue }
-                if let lfsExpected = WorkspaceGit.lfsValues[key], vals.allSatisfy({ $0 == lfsExpected }) { continue }
-                badKeys.append(key)
-            }
-            if !badKeys.isEmpty {
-                return "Not run: git on your Mac would read a repository the sandbox left unsafe. \(path), in a repository the sandbox made, sets \(badKeys.joined(separator: ", "))."
+            if let refusal = judgeConfigFile(path: path, allowInitDefaults: true) {
+                return refusal
             }
         }
         return nil
     }
 
-    func judgeHostCommand(cwd: String?, command: String, paths: IrisPaths = .default) -> HostDecision {
+    /// Whether the person's global git config is in a folder a sandbox could have written (or the
+    /// list of mounted folders is unreadable), so host commands should not read it.
+    func globalConfigInReach(base: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
         lock.lock(); defer { lock.unlock() }
+        return globalConfigInReachLocked(base: base)
+    }
+
+    private func globalConfigInReachLocked(base: [String: String]) -> Bool {
+        if unknownFolders { return true }
+        return WorkspaceGit.globalConfigFiles(base: base).contains { isInsideMountedLocked($0) }
+    }
+
+    private func isInsideMountedLocked(_ path: String) -> Bool {
+        let real = IrisPaths.realPath(path)
+        return mountedPaths.contains { mount in
+            let mountReal = IrisPaths.realPath(mount)
+            return real == mountReal || WorkspaceGit.relative(path, inside: mountReal) != nil
+        }
+    }
+
+    func judgeHostCommand(cwd: String?, command: String, paths: IrisPaths = .default,
+                          base: [String: String] = ProcessInfo.processInfo.environment) -> HostDecision {
+        lock.lock(); defer { lock.unlock() }
+        for file in WorkspaceGit.globalConfigFiles(base: base) where isInsideMountedLocked(file) {
+            if let refusal = Self.judgeConfigFile(path: file, allowInitDefaults: false) {
+                return .refuse(refusal, notice: nil)
+            }
+        }
+
         var targetDirs: [String] = []
         if let cwd { targetDirs.append(cwd) }
-        targetDirs.append(contentsOf: Self.extractGitCPaths(command: command, cwd: cwd))
+        targetDirs.append(contentsOf: Self.extractGitCPaths(command: command, cwd: cwd, mountedPaths: mountedPaths))
 
         var reposToCheck: [(worktree: String, commonDir: String)] = []
         var seenWorktrees = Set<String>()
@@ -423,24 +561,27 @@ final class GitConfigGuard: @unchecked Sendable {
             }
         }
 
-        func isInsideMounted(_ path: String) -> Bool {
-            let real = IrisPaths.realPath(path)
-            return mountedPaths.contains { mount in
-                let mountReal = IrisPaths.realPath(mount)
-                return real == mountReal || real.hasPrefix(mountReal.hasSuffix("/") ? mountReal : mountReal + "/")
-            }
-        }
-
         var notices: [String] = []
         var hasUntrusted = false
 
         for repo in reposToCheck {
-            let inScope = unknownFolders || isInsideMounted(repo.worktree)
+            let inScope = unknownFolders || isInsideMountedLocked(repo.worktree) || isInsideMountedLocked(repo.commonDir)
             guard inScope else { continue }
-            if Self.isTrusted(commonDir: repo.commonDir, paths: paths) { continue }
+            if Self.isTrusted(worktree: repo.worktree, commonDir: repo.commonDir,
+                              mountedPaths: mountedPaths, untrustedPaths: untrustedPaths, paths: paths) {
+                continue
+            }
 
             // Untrusted repository!
             hasUntrusted = true
+            let pointerNotes = SandboxGit.quarantinePointers(source: repo.worktree, commonDir: repo.commonDir)
+            if !pointerNotes.isEmpty {
+                notices.append("[sandbox] " + pointerNotes.joined(separator: " "))
+            }
+            if !SandboxGit.pointerProblems(source: repo.worktree, commonDir: repo.commonDir).isEmpty {
+                return .refuse("Not run: git on your Mac would read a repository the sandbox left unsafe. \(repo.worktree) holds a .git pointer outside its repository that Iris could not move aside.",
+                               notice: notices.isEmpty ? nil : notices.joined(separator: "\n"))
+            }
             if let refusal = Self.judgeUntrustedRepo(worktree: repo.worktree, commonDir: repo.commonDir) {
                 return .refuse(refusal, notice: notices.isEmpty ? nil : notices.joined(separator: "\n"))
             }

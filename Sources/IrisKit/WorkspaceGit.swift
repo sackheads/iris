@@ -1,15 +1,9 @@
 import Foundation
 
-/// A git repository at the root of a read-write sandbox mount (#623). The VM may write anything in
-/// the mount, and git on the Mac runs programs a repository names: hooks, and in its config
-/// `core.hooksPath`, `core.fsmonitor`, `diff.external`, filter drivers and more. So a command the
-/// VM ran without a prompt could choose what the person's next host `git commit` runs.
-///
-/// Since #658 the VM has a git dir of its own (`SandboxGit`) and the person's is mounted only
-/// read-only, so these files are no longer the VM's to write. `GitConfigGuard` still checks them
-/// before and after every in-VM command and before every host one, and a host `run_command` in a
-/// sandboxed workspace still runs git with the risky fixed-name keys overridden
-/// (`hostEnvironment`); both go when the second #658 change retires them.
+/// Git repository layout, submodule discovery, and path helpers for sandboxed mounts (#623, #658).
+/// A repository at the root of a read-write sandbox mount gets a VM-only git dir (`SandboxGit`)
+/// and its host `.git` is mounted read-only; repositories without a sandbox copy are judged by
+/// `GitConfigGuard` before host commands run.
 enum WorkspaceGit {
     /// Where the repository at `source` keeps what git reads. `dotGit` is `<source>/.git`, a
     /// directory, or for a worktree a file naming its `gitDir`; `commonDir` holds the shared
@@ -48,41 +42,6 @@ enum WorkspaceGit {
         default:
             return .unsupported
         }
-    }
-
-    enum FileKind { case config, pointer }
-
-    /// The files of `source`'s repository the VM could change to make host git run a program, or
-    /// read another repository's: its config files, and for a worktree the `.git` file and the
-    /// gitdir's `commondir`. Only those inside `source`. A fixed name is listed whether or not it
-    /// exists, so one the VM creates is caught; a linked worktree's entries only if present.
-    static func watchedFiles(for source: String) -> [String: FileKind] {
-        guard case .layout(let layout) = entry(at: source) else { return [:] }
-        var files: [String: FileKind] = [:]
-        func add(_ path: String, _ kind: FileKind, ifPresent: Bool = false) {
-            guard relative(path, inside: source) != nil else { return }
-            if ifPresent, !FileManager.default.fileExists(atPath: path) { return }
-            files[path] = kind
-        }
-        let common = layout.commonDir as NSString
-        add(common.appendingPathComponent("config"), .config)
-        add(common.appendingPathComponent("config.worktree"), .config)
-        if layout.dotGitIsFile {
-            add((source as NSString).appendingPathComponent(".git"), .pointer)
-            add((layout.gitDir as NSString).appendingPathComponent("config.worktree"), .config)
-            add((layout.gitDir as NSString).appendingPathComponent("commondir"), .pointer)
-        }
-        // Submodules' repositories, each with a config and hooks of its own, nested to any depth.
-        for module in modules(commonDir: layout.commonDir) {
-            add((module as NSString).appendingPathComponent("config"), .config)
-        }
-        let worktrees = common.appendingPathComponent("worktrees")
-        for name in (try? FileManager.default.contentsOfDirectory(atPath: worktrees)) ?? [] {
-            let dir = (worktrees as NSString).appendingPathComponent(name) as NSString
-            add(dir.appendingPathComponent("config.worktree"), .config, ifPresent: true)
-            add(dir.appendingPathComponent("commondir"), .pointer, ifPresent: true)
-        }
-        return files
     }
 
     /// The git dirs of the submodules under `commonDir/modules` that exist now: each folder there
@@ -199,6 +158,19 @@ enum WorkspaceGit {
     }
 
 
+    /// Whether `command` names `path` as a whole path: followed by its end, `/`, or a character
+    /// that cannot continue a file name in a shell word, so `/x/iris` is not `/x/iris-overseer`.
+    static func commandNames(_ command: String, _ path: String) -> Bool {
+        guard !path.isEmpty else { return false }
+        var rest = command[...]
+        while let range = rest.range(of: path) {
+            let next = rest[range.upperBound...].first
+            if next.map({ !($0.isLetter || $0.isNumber || "-_.~+@".contains($0)) }) ?? true { return true }
+            rest = rest[range.upperBound...]
+        }
+        return false
+    }
+
     /// A repository-relative path that stays inside it: no `..`, no empty part, no `.git`.
     static func isPlainRelative(_ path: String) -> Bool {
         let parts = path.split(separator: "/", omittingEmptySubsequences: false)
@@ -206,17 +178,11 @@ enum WorkspaceGit {
             && parts.allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." && $0.lowercased() != ".git" }
     }
 
-    /// What `<source>/<link>/.git` is now, compared between checks: missing, a pointer file's
-    /// text, a folder's identity, or a link's target.
-    static func pointerSignature(source: String, link: String) -> String {
-        let path = (source as NSString).appendingPathComponent(link + "/.git")
-        var info = stat()
-        guard lstat(path, &info) == 0 else { return "absent" }
-        switch info.st_mode & S_IFMT {
-        case S_IFREG: return "file:" + (readSmall(path, limit: 4096).map { String(decoding: $0, as: UTF8.self) } ?? "\(info.st_size)-\(info.st_mtimespec.tv_nsec)")
-        case S_IFDIR: return "dir:\(info.st_dev)-\(info.st_ino)"
-        default: return "other:\(info.st_mode)-\(info.st_ino)-\(info.st_mtimespec.tv_nsec)"
-        }
+    /// Where git reads the person's global config from.
+    static func globalConfigFiles(base: [String: String]) -> [String] {
+        let home = base["HOME"] ?? NSHomeDirectory()
+        let xdg = base["XDG_CONFIG_HOME"].flatMap { $0.isEmpty ? nil : $0 } ?? (home as NSString).appendingPathComponent(".config")
+        return [(home as NSString).appendingPathComponent(".gitconfig"), (xdg as NSString).appendingPathComponent("git/config")]
     }
 
     /// git-lfs's own values, kept so LFS works in a repository whose drivers are checked. Matched

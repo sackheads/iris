@@ -37,19 +37,26 @@ A repository created inside a sandbox (for example, with `git init` at the works
 
 ### Walk-Up Discovery
 Before each host `run_command`, Iris inspects:
-1. The working directory, walking up parent directories until it finds the nearest `.git` without running git.
-2. Every `git -C <path>` argument in the command, resolved against the working directory.
+1. The working directory, walking up parent directories until it finds the nearest `.git` or bare git directory (`HEAD`, `objects/`, `refs/`) without running git.
+2. Paths in the command passed via `-C`, `--git-dir`, `--work-tree`, `GIT_DIR`, `GIT_WORK_TREE`, or `cd`, and any mounted folder paths named in the command.
 
 ### Scope
-A repository found by the walk is in scope for judging if its worktree sits inside any folder a sandbox has mounted read-write.
+A repository found by the walk is in scope for judging if its worktree or common directory sits inside any folder a sandbox has mounted read-write.
 
 ### Trust Check
-A repository is **trusted** if its canonical common directory matches the first line of the `iris-sandbox-seed` marker file in its corresponding `sandbox-git` copy. Everything else found by the walk is untrusted.
+A repository is **trusted** only if:
+1. Its canonical common directory matches the first line of the `iris-sandbox-seed` marker file in its corresponding `sandbox-git` copy.
+2. No recorded mounted folder strictly contains its worktree or common directory (a parent folder mount does not have the root `.git` overlay).
+3. It was not marked untrusted (`blocked` or `adopted`) in an earlier `sandbox-workspaces.json` record.
+
+Everything else in scope is untrusted.
 
 ### Judging Rules
 For an untrusted repository:
+- **Pointer and index check:** Any `.git` pointer in the worktree or submodule gitlinks in the index pointing outside the repository is quarantined (or refuses the command if it cannot be moved aside or if the index is unreadable).
 - **Configuration allow-list:** Iris inspects all configuration files for the repository (`config`, `config.worktree`, submodule configs under `modules/**/config`, and linked worktree configs). Allowed keys include standard `git init` defaults (`core.repositoryformatversion`, `core.filemode`, `core.bare`, `core.logallrefupdates`, `core.ignorecase`, `core.precomposeunicode`, `core.symlinks`), remotes, upstream branch settings, `user.*`, and exact Git LFS filter values.
 - **Git LFS exemption:** Exact Git LFS settings (`WorkspaceGit.lfsValues`) are permitted. Any modified or custom filter value under `filter.lfs` is not exempt.
+- **Global git config:** If a mounted folder covers `~/.gitconfig` or `~/.config/git/config`, Iris checks that global config file against the allow-list and sets `GIT_CONFIG_GLOBAL=/dev/null` on host commands. `GIT_CONFIG_GLOBAL=/dev/null` is also set whenever the mounted-folders list is unreadable.
 - **Refusal:** If any configuration file cannot be read, or sets a key outside the allow-list (such as `core.hooksPath`, `core.fsmonitor`, `diff.external`, or custom filters), the host command is refused with a message identifying the disallowed key.
 - **No hooks execution:** If the repository's configuration is safe, host git runs with hooks disabled by setting `GIT_CONFIG_COUNT=1`, `GIT_CONFIG_KEY_0=core.hooksPath`, `GIT_CONFIG_VALUE_0=/dev/null` (after clearing any inherited `GIT_CONFIG_*` environment variables).
 - **Notice:** The first time Iris encounters an untrusted repository, it posts a notice in chat:

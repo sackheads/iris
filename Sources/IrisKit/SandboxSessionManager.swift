@@ -107,7 +107,7 @@ actor SandboxSessionManager {
 
     private func name(for id: UUID) -> String { Self.containerName(for: id) }
 
-    /// A conversation's session container name, which is also its `GitConfigGuard` owner.
+    /// A conversation's session container name.
     /// Always within `ContainerNames.maxLength`: the prefix is fixed-length (`ContainerNameLengthTests`).
     static func containerName(for id: UUID) -> String { "\(namePrefix)\(id.uuidString.lowercased())" }
 
@@ -205,8 +205,7 @@ actor SandboxSessionManager {
         }
 
         let workdir = Self.workdir(for: workspace)
-        // #623: the repositories it mounts read-write, recorded before its first command and
-        // checked on both sides of each one; a disallowed change is put back and reported.
+        // #658: record the folders mounted read-write so host git checks any untrusted repository inside them.
         let sources = Self.readWriteMounts(workspace: workspace, extra: extraMounts).map(\.source)
         let owner = name(for: id)
         gitGuard.recordMounted(sources: sources)

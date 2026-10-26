@@ -118,8 +118,8 @@ enum GitRead {
         ("protocol.file.allow", "user"),
     ]
 
-    /// The `GIT_*` a silent read adds to `ReadOnlyCommand.restrictedEnvironment`: the host overrides
-    /// every sandboxed workspace's git runs with, plus the keys a read can reach that those don't cover.
+    /// The `GIT_*` a silent read adds to `ReadOnlyCommand.restrictedEnvironment`: the base program-running
+    /// key overrides plus the keys a read can reach.
     static func environment() -> [String: String] {
         let pairs = baseOverrides + readOverrides
         var env: [String: String] = ["GIT_CONFIG_COUNT": String(pairs.count), "GIT_PAGER": "cat",
@@ -132,7 +132,7 @@ enum GitRead {
         return env
     }
 
-    /// The keys a read reaches that `WorkspaceGit.overrides` leaves: an attributes file outside the
+    /// The keys a read reaches beyond `baseOverrides`: an attributes file outside the
     /// worktree (`--attr-source` doesn't cover it, probed), signature checks on `log`/`show` (which
     /// run `gpg.program`), and submodule summaries.
     static let readOverrides: [(key: String, value: String)] = [
