@@ -780,7 +780,11 @@ struct R773HoleTests {
         guardian.recordMounted(sources: [ws])
 
         let prep2 = SandboxGit.prepare(source: dir, target: dir, paths: paths)
-        #expect(prep2 == .none)
+        guard case .refused(let mountRefusal) = prep2 else {
+            Issue.record("expected parent mount holding ws to be refused at mount time, got \(prep2)")
+            return
+        }
+        #expect(mountRefusal.contains(ws))
         guardian.recordMounted(sources: [dir])
 
         try await GitFixture.sh("git config core.fsmonitor 'touch \(dir)/PWNED'", in: ws, env: env)
@@ -942,5 +946,243 @@ struct R773ShE2E {
 
         _ = await exec.runCommand("git checkout HEAD", cwd: ws, useSandbox: false, restrictedPath: ["/usr/bin", "/bin"])
         #expect(!FileManager.default.fileExists(atPath: hookMarker), "hook executed under restrictedPath!")
+    }
+}
+
+/// Round 3 probes and planner acceptance tests for #773.
+@Suite("R773 round 3 probes", .serialized, .timeLimit(.minutes(1)))
+struct R773Round3Tests {
+    static func notOrdinary(_ d: GitConfigGuard.HostDecision) -> Bool {
+        if case .ordinary = d { return false }
+        return true
+    }
+    static func isRefuse(_ d: GitConfigGuard.HostDecision) -> Bool {
+        if case .refuse = d { return true }
+        return false
+    }
+
+    /// A trusted mounted repo `ws` holding an untrusted nested repo `ws/nested` whose
+    /// core.fsmonitor (VM-written) touches `marker`.
+    static func fixture(_ marker: String) async throws -> (dir: String, ws: String, paths: IrisPaths, guardian: GitConfigGuard) {
+        let (dir, env) = try await GitFixture.repo()
+        let ws = dir + "/ws"
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/iris-home"))
+        guard case .repo = SandboxGit.prepare(source: ws, target: ws, paths: paths) else { throw CocoaError(.fileNoSuchFile) }
+        let guardian = GitConfigGuard()
+        guardian.recordMounted(sources: [ws], paths: paths)
+        let script = dir + "/fsm.sh"
+        try "#!/bin/sh\ntouch \"\(dir)/\(marker)\"\nexit 1\n".write(toFile: script, atomically: false, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script)
+        try await GitFixture.sh("""
+            git init -q nested && echo x > nested/f.txt &&
+            git -C nested config core.fsmonitor \(script) &&
+            printf 'cd nested && git status\\n' > run.sh
+            """, in: ws, env: env)
+        return (dir, ws, paths, guardian)
+    }
+
+    @Test("E: from inside the trusted mounted repo, ways into its nested untrusted repo")
+    func escapesFromWs() async throws {
+        let (dir, ws, paths, guardian) = try await Self.fixture("E_RAN")
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let cmds = [
+            "cd nest* && git status",
+            "cd \"$(echo nes)ted\" && git status",
+            "ls -d nest* | xargs -I{} git -C {} status",
+            "find . -name f.txt -execdir git status \\;",
+            "sh ./run.sh",
+            "(cd nested; git status)",
+            "\tcd nested && git status",
+            "bash -lc 'cd nested && git status'",
+            "env -C nested git status",
+            "g(){ cd nested; git \"$@\"; }; g status",
+        ]
+        for cmd in cmds {
+            let d = guardian.judgeHostCommand(cwd: ws, command: cmd, paths: paths)
+            #expect(Self.notOrdinary(d), "ESCAPE: \(cmd) -> \(d)")
+        }
+    }
+
+    @Test("E2E: a glob cd and a script run the nested repo's fsmonitor on the host")
+    func escapesEndToEnd() async throws {
+        let (dir, ws, paths, guardian) = try await Self.fixture("E2E_RAN")
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        var ex = ToolExecutor(); ex.gitGuard = guardian; ex.irisPaths = paths
+        for cmd in ["cd nest* && git status", "sh ./run.sh", "find . -name f.txt -execdir git status \\;"] {
+            try? FileManager.default.removeItem(atPath: dir + "/E2E_RAN")
+            let out = await ex.runCommand(cmd, cwd: ws)
+            #expect(!FileManager.default.fileExists(atPath: dir + "/E2E_RAN"), "RAN via `\(cmd)`: \(out.prefix(160))")
+        }
+    }
+
+    @Test("U1: a mounted ~/src-like folder holding a normal clone refuses `ls` from outside any repo")
+    func lsRefusedWithMountedSrc() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let src = dir + "/src"
+        try FileManager.default.createDirectory(atPath: src, withIntermediateDirectories: true)
+        try await GitFixture.sh("git init -q proj && git -C proj config pull.rebase true", in: src, env: env)
+        let guardian = GitConfigGuard()
+        guardian.recordMounted(sources: [src])
+        let outside = dir + "/elsewhere"
+        try FileManager.default.createDirectory(atPath: outside, withIntermediateDirectories: true)
+        for cwd in [outside, "/"] {
+            let d = guardian.judgeHostCommand(cwd: cwd, command: "ls")
+            #expect(!Self.isRefuse(d), "USABILITY: `ls` in \(cwd) -> \(d)")
+        }
+    }
+
+    @Test("U2: a mounted home with a normal clone under it refuses `ls`")
+    func lsRefusedWithMountedHome() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let home = dir + "/fakehome"
+        try FileManager.default.createDirectory(atPath: home + "/src", withIntermediateDirectories: true)
+        try "[core]\n\teditor = vim\n".write(toFile: home + "/.gitconfig", atomically: false, encoding: .utf8)
+        try await GitFixture.sh("git init -q proj && git -C proj config pull.rebase true", in: home + "/src", env: env)
+        let guardian = GitConfigGuard()
+        guardian.recordMounted(sources: [home])
+        var base = ProcessInfo.processInfo.environment
+        base["HOME"] = home
+        let d = guardian.judgeHostCommand(cwd: "/tmp", command: "ls", base: base)
+        #expect(!Self.isRefuse(d), "USABILITY: `ls` with mounted home -> \(d)")
+    }
+
+    @Test("A1: a planted nested repo is quarantined with no host command run at all (terminal case)")
+    func terminalQuarantineWithNoHostCommand() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/iris-home"))
+        guard case .repo = SandboxGit.prepare(source: ws, target: ws, paths: paths) else {
+            Issue.record("prepare failed")
+            return
+        }
+        let guardian = GitConfigGuard()
+        guardian.recordMounted(sources: [ws], paths: paths)
+        defer { _ = guardian.endMounted(sources: [ws], paths: paths) }
+
+        // Plant a nested repo with core.fsmonitor AND a second nested repo with an executable hook,
+        // without calling judgeHostCommand or ToolExecutor.runCommand.
+        try await GitFixture.sh("""
+            git init -q nested-cfg &&
+            git -C nested-cfg config core.fsmonitor /bin/true &&
+            git init -q nested-hook &&
+            printf '#!/bin/sh\\nexit 0\\n' > nested-hook/.git/hooks/post-checkout &&
+            chmod +x nested-hook/.git/hooks/post-checkout
+            """, in: ws, env: env)
+
+        let deadline = TestClock.deadline(2.0)
+        while TestClock.now() < deadline {
+            if FileManager.default.fileExists(atPath: ws + "/nested-cfg/.git.iris-quarantine"),
+               FileManager.default.fileExists(atPath: ws + "/nested-hook/.git.iris-quarantine") {
+                break
+            }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        #expect(!FileManager.default.fileExists(atPath: ws + "/nested-cfg/.git"))
+        #expect(FileManager.default.fileExists(atPath: ws + "/nested-cfg/.git.iris-quarantine"))
+        #expect(!FileManager.default.fileExists(atPath: ws + "/nested-hook/.git"))
+        #expect(FileManager.default.fileExists(atPath: ws + "/nested-hook/.git.iris-quarantine"))
+    }
+
+    @Test("A2: a plain VM git clone inside the workspace is not quarantined")
+    func plainVMGitCloneNotQuarantined() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/iris-home"))
+        guard case .repo = SandboxGit.prepare(source: ws, target: ws, paths: paths) else {
+            Issue.record("prepare failed")
+            return
+        }
+        let guardian = GitConfigGuard()
+        guardian.recordMounted(sources: [ws], paths: paths)
+        defer { _ = guardian.endMounted(sources: [ws], paths: paths) }
+
+        try await GitFixture.sh("git clone -q '\(ws)' cloned && git init -q inited", in: ws, env: env)
+        let notes = guardian.scanAndQuarantine(sources: [ws], paths: paths)
+        #expect(notes.isEmpty, "plain clone/init should not produce quarantine notices: \(notes)")
+        #expect(FileManager.default.fileExists(atPath: ws + "/cloned/.git"))
+        #expect(!FileManager.default.fileExists(atPath: ws + "/cloned/.git.iris-quarantine"))
+        #expect(FileManager.default.fileExists(atPath: ws + "/inited/.git"))
+        #expect(!FileManager.default.fileExists(atPath: ws + "/inited/.git.iris-quarantine"))
+    }
+
+    @Test("A3: a walk over its cap refuses the mount and names the limit")
+    func walkOverCapRefusesMountAndNamesLimit() async throws {
+        let (dir, _) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/iris-home"))
+        for i in 0..<10 {
+            try "x".write(toFile: ws + "/file-\(i).txt", atomically: false, encoding: .utf8)
+        }
+        let prep = SandboxGit.prepare(source: ws, target: ws, paths: paths, entryCap: 5, secondsCap: 2.0)
+        guard case .refused(let why) = prep else {
+            Issue.record("expected refused when walk exceeds entryCap, got \(prep)")
+            return
+        }
+        #expect(why.contains("5 entries"), "refusal should name the limit: \(why)")
+    }
+
+    @Test("A4: relaunch quarantine: plant a repository, skip session end, relaunch, and check that it is quarantined (and gone mount dropped silently)")
+    func relaunchQuarantineAndMissingMountDropped() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let gone = dir + "/gone"
+        try FileManager.default.createDirectory(atPath: gone, withIntermediateDirectories: true)
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/iris-home"))
+        let storeURL = URL(fileURLWithPath: dir + "/iris-home/sandbox-workspaces.json")
+        guard case .repo = SandboxGit.prepare(source: ws, target: ws, paths: paths) else {
+            Issue.record("prepare failed")
+            return
+        }
+
+        do {
+            let guard1 = GitConfigGuard(store: storeURL, paths: paths)
+            guard1.recordMounted(sources: [ws, gone], paths: paths)
+            // Crash / quit mid-session: do not call endMounted.
+        }
+
+        // Plant a nested repository with core.fsmonitor and delete `gone` before relaunch.
+        try await GitFixture.sh("git init -q planted && git -C planted config core.fsmonitor /bin/true", in: ws, env: env)
+        try FileManager.default.removeItem(atPath: gone)
+
+        let guard2 = GitConfigGuard(store: storeURL, paths: paths)
+        #expect(!FileManager.default.fileExists(atPath: ws + "/planted/.git"))
+        #expect(FileManager.default.fileExists(atPath: ws + "/planted/.git.iris-quarantine"))
+        #expect(!guard2.mountedWorkspaces.contains(IrisPaths.realPath(gone)), "gone live mount should be dropped silently")
+        #expect(guard2.mountedWorkspaces.contains(IrisPaths.realPath(ws)))
+    }
+
+    @Test("A5: a git dir with a non-.git name (foo/ or .notgit/) is quarantined")
+    func nonDotGitNamedDirectoryQuarantined() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/iris-home"))
+        guard case .repo = SandboxGit.prepare(source: ws, target: ws, paths: paths) else {
+            Issue.record("prepare failed")
+            return
+        }
+        let guardian = GitConfigGuard()
+        guardian.recordMounted(sources: [ws], paths: paths)
+        defer { _ = guardian.endMounted(sources: [ws], paths: paths) }
+
+        try await GitFixture.sh("""
+            git init --bare -q foo &&
+            git -C foo config core.fsmonitor /bin/true &&
+            git init --bare -q .notgit &&
+            printf '#!/bin/sh\\nexit 0\\n' > .notgit/hooks/post-checkout &&
+            chmod +x .notgit/hooks/post-checkout
+            """, in: ws, env: env)
+
+        _ = guardian.scanAndQuarantine(sources: [ws], paths: paths)
+        #expect(!FileManager.default.fileExists(atPath: ws + "/foo"))
+        #expect(FileManager.default.fileExists(atPath: ws + "/foo.iris-quarantine"))
+        #expect(!FileManager.default.fileExists(atPath: ws + "/.notgit"))
+        #expect(FileManager.default.fileExists(atPath: ws + "/.notgit.iris-quarantine"))
     }
 }

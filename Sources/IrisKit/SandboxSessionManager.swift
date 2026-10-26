@@ -46,6 +46,7 @@ actor SandboxSessionManager {
         /// somebody built on the default network (#282 §0.7).
         var network: NetworkMode
         var lastUsed: Date
+        var readWriteSources: [String] = []
     }
 
     private let runtime: ContainerRuntime
@@ -153,9 +154,11 @@ actor SandboxSessionManager {
         }
         // #658: a repository at a read-write mount's root gets the sandbox's own git dir over
         // its common dir's path, and the person's `.git` only read-only.
+        let existingSources = Set(sessions[id]?.readWriteSources ?? [])
         var repos: [SandboxGit.Repo] = []
         for (source, target) in Self.readWriteMounts(workspace: workspace, extra: extraMounts) {
-            switch SandboxGit.prepare(source: source, target: target, paths: paths) {
+            switch SandboxGit.prepare(source: source, target: target, paths: paths,
+                                      checkSubrepositories: !existingSources.contains(source)) {
             case .refused(let why): return why
             case .repo(let repo): repos.append(repo)
             case .none: break
@@ -167,6 +170,7 @@ actor SandboxSessionManager {
 
         // Recreate if the workspace, the mount list or the network changed (agent-initiated — not a "loss").
         if let s = sessions[id], s.mountedWorkspace != workspace || s.mounts != mounts || s.network != network {
+            _ = gitGuard.endMounted(sources: s.readWriteSources, paths: paths)
             await removeContainer(s.name)
             sessions[id] = nil
         }
@@ -208,7 +212,8 @@ actor SandboxSessionManager {
         // #658: record the folders mounted read-write so host git checks any untrusted repository inside them.
         let sources = Self.readWriteMounts(workspace: workspace, extra: extraMounts).map(\.source)
         let owner = name(for: id)
-        gitGuard.recordMounted(sources: sources)
+        sessions[id]?.readWriteSources = sources
+        gitGuard.recordMounted(sources: sources, paths: paths)
         var hadGit: Set<String> = []
         for source in sources {
             var info = stat()
@@ -232,6 +237,7 @@ actor SandboxSessionManager {
         func noted(_ result: String) async -> String {
             var notes = syncNotes
             for (sync, before) in zip(syncs, befores) { notes += await sync.after(before) }
+            notes += gitGuard.scanAndQuarantine(sources: sources, paths: paths)
             for source in sources where !hadGit.contains(source) {
                 var info = stat()
                 let dotGit = (source as NSString).appendingPathComponent(".git")
@@ -275,7 +281,8 @@ actor SandboxSessionManager {
             sessions[id] = nil
             do {
                 try await ensureSession(id, workspace: workspace, mounts: mounts, network: network)
-                gitGuard.recordMounted(sources: sources)
+                sessions[id]?.readWriteSources = sources
+                gitGuard.recordMounted(sources: sources, paths: paths)
                 let r = try await runtime.exec(name: name(for: id), workdir: workdir, command: command,
                                                timeoutSeconds: timeoutSeconds, outputLimit: OutputCap.drainBytes)
                 sessions[id]?.lastUsed = Date()
@@ -362,7 +369,10 @@ actor SandboxSessionManager {
         // (no session entry yet), that just-created container won't be torn down here. It's an
         // orphan, but it's swept by `reapOrphans()` at the home's next launch, by its prefix.
         // `closeSession` does not have this hole: the create checks the mark before it records.
-        if let s = sessions[id] { await removeContainer(s.name) }
+        if let s = sessions[id] {
+            await removeContainer(s.name)
+            _ = gitGuard.endMounted(sources: s.readWriteSources, paths: paths)
+        }
         sessions[id] = nil
         lostSessions.remove(id)
     }
@@ -440,6 +450,7 @@ actor SandboxSessionManager {
     func reapIdle(olderThan seconds: TimeInterval, now: Date = Date()) async {
         for (id, s) in sessions where now.timeIntervalSince(s.lastUsed) > seconds {
             await removeContainer(s.name)
+            _ = gitGuard.endMounted(sources: s.readWriteSources, paths: paths)
             sessions[id] = nil
             lostSessions.insert(id)
         }

@@ -97,6 +97,10 @@ enum WritingScripts {
             }
             entries += 1
             let values = try? url.resourceValues(forKeys: Set(keys))
+            if url.lastPathComponent.contains(WorkspaceGit.quarantineSuffix) {
+                if values?.isDirectory == true { walker.skipDescendants() }
+                continue
+            }
             if url.lastPathComponent == ".git" {
                 let holder = spelled(url.deletingLastPathComponent().path, root: root, resolvedRoot: resolvedRoot)
                 if holder != root, !repositories.contains(holder) { repositories.append(holder) }

@@ -66,18 +66,39 @@ enum SandboxGit {
     /// (#662 review). A pointer that no longer matches the record is moved aside by
     /// `quarantinePointers`, never taken as a new repository. The record is made again only once
     /// the recorded repository is gone.
-    static func prepare(source: String, target: String, paths: IrisPaths = .default) -> Prepared {
-        let layout: WorkspaceGit.Layout
-        switch WorkspaceGit.entry(at: source) {
-        case .none: return .none
-        case .unsupported: return .refused(refusal(source, "its .git is a link or a file Iris cannot read"))
+    static func prepare(source: String, target: String, paths: IrisPaths = .default,
+                        checkSubrepositories: Bool = true,
+                        entryCap: Int = WritingScripts.entryCap,
+                        secondsCap: Double = WritingScripts.secondsCap) -> Prepared {
+        let entry = WorkspaceGit.entry(at: source)
+        let foundLayout: WorkspaceGit.Layout?
+        switch entry {
+        case .none:
+            if WritingScripts.isBareRepository(source) {
+                return .refused(refusal(source, "it is a bare git repository"))
+            }
+            foundLayout = nil
+        case .unsupported:
+            return .refused(refusal(source, "its .git is a link or a file Iris cannot read"))
         case .layout(let found):
-            if let recorded = recorded(source: source, paths: paths) { layout = recorded }
-            else {
-                layout = found
+            if let recorded = recorded(source: source, paths: paths) {
+                foundLayout = recorded
+            } else {
+                foundLayout = found
                 record(source: source, layout: found, paths: paths)
             }
         }
+        if checkSubrepositories {
+            var st = stat()
+            if lstat(source, &st) == 0 || errno != ENOENT {
+                let survey = WritingScripts.survey(source, entryCap: entryCap, secondsCap: secondsCap)
+                if let why = mountSurveyRefusal(source: source, survey: survey, rootCommonDir: foundLayout?.commonDir,
+                                                entryCap: entryCap, secondsCap: secondsCap) {
+                    return .refused(why)
+                }
+            }
+        }
+        guard let layout = foundLayout else { return .none }
         let common = IrisPaths.realPath(layout.commonDir)
         let key = Self.key(common)
         let vmDir = (directory(paths: paths) as NSString).appendingPathComponent(key)
@@ -362,5 +383,58 @@ enum SandboxGit {
                 ? "The sandbox changed \(path). Submodule URLs in it are used by `git submodule sync` and `update` on your Mac; check them before running either."
                 : "The sandbox changed \(path). git-lfs on your Mac uses its `lfs.url` for downloads and uploads; check it before pulling or pushing LFS files."
         }
+    }
+
+    /// Why a read-write mount must be refused at creation time (#773 Part A): it holds git
+    /// repositories other than the overlaid workspace repository at `source`, or the walk hit its
+    /// entry/time cap or an unreadable folder.
+    static func mountSurveyRefusal(source: String, survey: MountSurvey, rootCommonDir: String? = nil,
+                                   entryCap: Int = WritingScripts.entryCap,
+                                   secondsCap: Double = WritingScripts.secondsCap) -> String? {
+        let sourceReal = IrisPaths.realPath(source)
+        let commonReal = rootCommonDir.map(IrisPaths.realPath)
+        let uncovered = survey.repositories.filter { repo in
+            let repoReal = IrisPaths.realPath(repo)
+            if let commonReal {
+                if repoReal == sourceReal || repoReal == commonReal { return false }
+                if case .layout(let sub) = WorkspaceGit.entry(at: repo), sub.dotGitIsFile,
+                   WorkspaceGit.relative(sub.commonDir, inside: (commonReal as NSString).appendingPathComponent("modules")) != nil {
+                    return false
+                }
+            }
+            return true
+        }
+        if !uncovered.isEmpty {
+            return "Not run: \(source) holds git repositories (\(uncovered.joined(separator: ", "))) whose git folders a sandbox could write. Mount the one repository you are working in instead."
+        }
+        if survey.capped {
+            return "Not run: \(source) is too large to check for git repositories (over \(entryCap) entries or \(Int(secondsCap)) seconds to walk), so a sandbox cannot mount it read-write. Mount the one repository or subfolder you are working in instead."
+        }
+        if let incomplete = survey.incomplete {
+            return "Not run: \(source) cannot be checked for git repositories because \(incomplete), so a sandbox cannot mount it read-write."
+        }
+        return nil
+    }
+
+    /// Quarantines an unsafe VM-made repository on disk so git (both Iris's and the person's own
+    /// terminal) no longer finds it (#773 Part B). Renames `<worktree>/.git` to
+    /// `<worktree>/.git.iris-quarantine[-N]`, or for a bare/non-`.git` git directory renames the
+    /// directory itself to `<dir>.iris-quarantine[-N]`.
+    static func quarantineRepository(worktree: String, commonDir: String, mountRoot: String? = nil) -> String? {
+        let wtReal = IrisPaths.realPath(worktree)
+        let dotGit = (wtReal as NSString).appendingPathComponent(".git")
+        var info = stat()
+        if lstat(dotGit, &info) == 0 {
+            return quarantine(root: wtReal, relative: ".git")
+        }
+        let commonReal = IrisPaths.realPath(commonDir)
+        if let mountRoot, IrisPaths.realPath(mountRoot) == commonReal {
+            _ = quarantine(root: commonReal, relative: "config")
+            return quarantine(root: commonReal, relative: "HEAD")
+        }
+        let parent = (commonReal as NSString).deletingLastPathComponent
+        let name = (commonReal as NSString).lastPathComponent
+        guard parent != commonReal, !name.isEmpty else { return nil }
+        return quarantine(root: parent, relative: name)
     }
 }

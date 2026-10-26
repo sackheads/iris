@@ -628,7 +628,7 @@ struct ToolExecutor {
             arguments = containerArgs
             directory = nil
             environment = nil
-            if let cwd { gitGuard.recordMounted(sources: [IrisEngine.expandTilde(cwd)]) }
+            if let cwd { gitGuard.recordMounted(sources: [IrisEngine.expandTilde(cwd)], paths: irisPaths ?? .default) }
             gitBefore = nil
         } else {
             directory = cwd.map { IrisEngine.expandTilde($0) }   // #275: never `expandingTildeInPath` on a decider
@@ -730,9 +730,16 @@ struct ToolExecutor {
         } catch {
             result = Self.commandTimedOutMessage(seconds: timeoutSeconds)
         }
+        let gitAfter: String?
+        if useSandbox, let cwd {
+            let notes = gitGuard.endMounted(sources: [IrisEngine.expandTilde(cwd)], paths: irisPaths ?? .default)
+            gitAfter = notes.isEmpty ? nil : notes.joined(separator: "\n")
+        } else {
+            gitAfter = nil
+        }
         // #607: what actually ran, Iris's prefix included, in the result the pill and the ledger show.
         let shown = restrictedPath != nil && !useSandbox ? GitRead.argv(command).map { "Ran: \($0.joined(separator: " "))\n" + result } ?? result : result
-        return GitConfigGuard.withNotices(shown, before: gitBefore, after: nil)
+        return GitConfigGuard.withNotices(shown, before: gitBefore, after: gitAfter)
     }
 
     /// Whether the `git` on `env`'s `PATH` is real: anything but Apple's `/usr/bin/git` shim, or
