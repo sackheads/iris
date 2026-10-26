@@ -632,22 +632,13 @@ struct ToolExecutor {
             gitBefore = nil
         } else {
             directory = cwd.map { IrisEngine.expandTilde($0) }   // #275: never `expandingTildeInPath` on a decider
-            var base = ProcessInfo.processInfo.environment
+            let base = ProcessInfo.processInfo.environment
             let pointerNote = SandboxGit.checkHostPointers(paths: irisPaths ?? .default)
             let decision = gitGuard.judgeHostCommand(cwd: directory, command: command, paths: irisPaths ?? .default, base: base)
             let beforeNotes = [gitGuard.takeLoadNote(), pointerNote, decision.notice].compactMap { $0 }
             gitBefore = beforeNotes.isEmpty ? nil : beforeNotes.joined(separator: "\n")
             if case .refuse(let why, _) = decision {
                 return GitConfigGuard.withNotices(why, before: gitBefore, after: nil)
-            }
-            if case .noHooks = decision {
-                for key in base.keys where key.hasPrefix("GIT_CONFIG_") { base[key] = nil }
-                base["GIT_CONFIG_COUNT"] = "1"
-                base["GIT_CONFIG_KEY_0"] = "core.hooksPath"
-                base["GIT_CONFIG_VALUE_0"] = "/dev/null"
-            }
-            if gitGuard.globalConfigInReach(base: base) {
-                base["GIT_CONFIG_GLOBAL"] = "/dev/null"
             }
             // #607, #758 review: a silent git read runs pinned to the repository judged again here,
             // against the record of every folder a sandbox could write; unreadable or reached, it
@@ -660,8 +651,12 @@ struct ToolExecutor {
                 }
                 gitRepository = repo
             }
-            (executable, arguments, environment) = Self.hostSpawn(command, restrictedPath: restrictedPath,
-                                                                  gitRepository: gitRepository, base: base)
+            var spawnedEnv: [String: String]
+            (executable, arguments, spawnedEnv) = Self.hostSpawn(command, restrictedPath: restrictedPath,
+                                                                 gitRepository: gitRepository, base: base)
+            gitGuard.applyEnvironment(decision: decision, base: base, to: &spawnedEnv,
+                                      preserveExistingCount: gitRepository != nil)
+            environment = spawnedEnv
         }
 
         // Its own process group, killed whole on timeout and on Stop: SIGTERM, then SIGKILL (#353).

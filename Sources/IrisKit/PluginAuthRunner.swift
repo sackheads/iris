@@ -89,12 +89,20 @@ enum PluginAuthRunner {
         guard await approve(command) else {
             return PluginAuthStatus(signedIn: false, output: "check_command not approved: \(command)")
         }
+        let base = ProcessInfo.processInfo.environment
+        let cwd = FileManager.default.currentDirectoryPath
+        let decision = GitConfigGuard.shared.judgeHostCommand(cwd: cwd, command: command, base: base)
+        if case .refuse(let why, _) = decision {
+            return PluginAuthStatus(signedIn: false, output: why)
+        }
+        var env = BinaryResolver.commandEnvironment(base: base)
+        GitConfigGuard.shared.applyEnvironment(decision: decision, base: base, to: &env)
         // A process group of its own (#364): output drains as it is written and is read only after
         // the reap, so nothing written right before exit can be lost (#368); on timeout the group
         // gets SIGTERM, then SIGKILL; a background job left holding the pipe cannot hang the pane.
         let outcome = await ProcessGroupRunner.capture(
             executable: "/bin/sh", arguments: ["-c", command],
-            environment: BinaryResolver.commandEnvironment(base: ProcessInfo.processInfo.environment),
+            environment: env,
             mergeStderr: true, timeoutSeconds: timeoutSeconds)
         switch outcome {
         case .success(let output):

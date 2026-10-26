@@ -171,6 +171,11 @@ struct HookManager {
             executable = containerPath
             arguments = ["run", "--rm", "--name", name, ConfigManager.shared.sandboxImage, "bash", "-c", hook.command]
         } else {
+            let cwd = FileManager.default.currentDirectoryPath
+            let decision = GitConfigGuard.shared.judgeHostCommand(cwd: cwd, command: hook.command)
+            if case .refuse(let why, _) = decision {
+                return gating ? .block(reason: why) : .warning(message: why)
+            }
             executable = "/bin/zsh"
             arguments = ["-c", hook.command]
         }
@@ -219,8 +224,13 @@ struct HookManager {
         for key in sensitiveEnvKeys {
             env.removeValue(forKey: key)
         }
-        env["GEMINI_CWD"] = FileManager.default.currentDirectoryPath
+        let cwd = FileManager.default.currentDirectoryPath
+        env["GEMINI_CWD"] = cwd
         env = BinaryResolver.commandEnvironment(base: env)
+        if executable == "/bin/zsh", let command = arguments.last {
+            let decision = GitConfigGuard.shared.judgeHostCommand(cwd: cwd, command: command, base: env)
+            GitConfigGuard.shared.applyEnvironment(decision: decision, base: env, to: &env)
+        }
         return await ProcessGroupRunner.capture(executable: executable, arguments: arguments, environment: env,
                                                 stdin: payload, timeoutSeconds: timeoutSeconds, onKilled: onKilled)
     }

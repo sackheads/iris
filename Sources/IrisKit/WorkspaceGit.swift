@@ -178,11 +178,66 @@ enum WorkspaceGit {
             && parts.allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." && $0.lowercased() != ".git" }
     }
 
-    /// Where git reads the person's global config from.
+    /// Where git reads the person's global config from, including any files those configs include
+    /// via `include.path` or `includeIf.<condition>.path`.
     static func globalConfigFiles(base: [String: String]) -> [String] {
         let home = base["HOME"] ?? NSHomeDirectory()
         let xdg = base["XDG_CONFIG_HOME"].flatMap { $0.isEmpty ? nil : $0 } ?? (home as NSString).appendingPathComponent(".config")
-        return [(home as NSString).appendingPathComponent(".gitconfig"), (xdg as NSString).appendingPathComponent("git/config")]
+        var roots = [(home as NSString).appendingPathComponent(".gitconfig"), (xdg as NSString).appendingPathComponent("git/config")]
+        if let envGlobal = base["GIT_CONFIG_GLOBAL"], !envGlobal.isEmpty, envGlobal != "/dev/null" {
+            roots.append(envGlobal)
+        }
+        return expandConfigIncludes(roots, home: home)
+    }
+
+    /// Where git reads system-wide configuration from, including any files those configs include.
+    static func systemConfigFiles(base: [String: String]) -> [String] {
+        let home = base["HOME"] ?? NSHomeDirectory()
+        var roots = [
+            "/etc/gitconfig",
+            "/private/etc/gitconfig",
+            "/opt/homebrew/etc/gitconfig",
+            "/usr/local/etc/gitconfig",
+            "/Library/Developer/CommandLineTools/usr/etc/gitconfig"
+        ]
+        if let envSystem = base["GIT_CONFIG_SYSTEM"], !envSystem.isEmpty, envSystem != "/dev/null" {
+            roots.append(envSystem)
+        }
+        for entry in (base["PATH"] ?? "").split(separator: ":").map(String.init) where entry.hasPrefix("/") {
+            let candidate = URL(fileURLWithPath: entry).deletingLastPathComponent().appendingPathComponent("etc/gitconfig").standardized.path
+            if !roots.contains(candidate) {
+                roots.append(candidate)
+            }
+        }
+        return expandConfigIncludes(roots, home: home)
+    }
+
+    /// Follows `include.path` and `includeIf.<cond>.path` entries in existing config files.
+    private static func expandConfigIncludes(_ roots: [String], home: String) -> [String] {
+        var result: [String] = []
+        var queue = roots
+        var seen: Set<String> = []
+        while !queue.isEmpty, result.count < 32 {
+            let file = queue.removeFirst()
+            guard seen.insert(file).inserted else { continue }
+            result.append(file)
+            guard let data = readSmall(file), let entries = GitConfigFile.parse(data) else { continue }
+            let dir = (file as NSString).deletingLastPathComponent
+            for entry in entries {
+                guard entry.key == "include.path" || (entry.key.hasPrefix("includeif.") && entry.key.hasSuffix(".path")),
+                      let raw = entry.value, !raw.isEmpty else { continue }
+                let resolved: String
+                if raw.hasPrefix("~/") {
+                    resolved = resolve(String(raw.dropFirst(2)), against: home)
+                } else {
+                    resolved = resolve(raw, against: dir)
+                }
+                if !seen.contains(resolved) {
+                    queue.append(resolved)
+                }
+            }
+        }
+        return result
     }
 
     /// git-lfs's own values, kept so LFS works in a repository whose drivers are checked. Matched

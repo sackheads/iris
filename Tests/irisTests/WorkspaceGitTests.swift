@@ -468,7 +468,7 @@ struct UntrustedRepositoryTests {
             Issue.record("expected refuse for broken split index, got \(d2)")
             return
         }
-        #expect(why.contains("index, in a repository the sandbox made, cannot be read"))
+        #expect(why.contains("index cannot be read"))
     }
 
     @Test("H1. parent mount makes repository with sandbox-git copy untrusted")
@@ -549,34 +549,64 @@ struct UntrustedRepositoryTests {
         }
     }
 
-    @Test("11. global git config inside a mounted home is judged, and globalConfigInReach is true when mounted or unknownFolders")
+    @Test("11. global and system git config in reach set GIT_CONFIG_GLOBAL=/dev/null and GIT_CONFIG_NOSYSTEM=1 without refusing normal commands")
     func globalConfigInMountedHome() async throws {
         let (dir, _) = try await GitFixture.repo()
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let home = dir + "/home"
         let ws = dir + "/ws"
-        let base = ["HOME": home, "XDG_CONFIG_HOME": home + "/.config"]
+        let prefix = dir + "/prefix"
+        try FileManager.default.createDirectory(atPath: prefix + "/bin", withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: prefix + "/etc", withIntermediateDirectories: true)
+        let base = ["HOME": home, "XDG_CONFIG_HOME": home + "/.config", "PATH": prefix + "/bin:/usr/bin:/bin"]
 
         let guardian = GitConfigGuard()
         #expect(!guardian.globalConfigInReach(base: base))
+        #expect(!guardian.systemConfigInReach(base: base))
 
-        guardian.recordMounted(sources: [home])
-        #expect(guardian.globalConfigInReach(base: base))
+        // Global config outside mount that includes a file inside `ws` (which is mounted)
+        try "[include]\n\tpath = \(ws)/extra.gitconfig\n".write(toFile: home + "/.gitconfig", atomically: false, encoding: .utf8)
+        guardian.recordMounted(sources: [ws])
+        #expect(guardian.globalConfigInReach(base: base), "include.path into mounted folder puts global config in reach")
 
-        // Write disallowed key to ~/.gitconfig
-        try "[core]\n\tfsmonitor = /bin/true\n".write(toFile: home + "/.gitconfig", atomically: false, encoding: .utf8)
-        let d1 = guardian.judgeHostCommand(cwd: ws, command: "git status", base: base)
-        guard case .refuse(let why, _) = d1 else {
-            Issue.record("expected refuse for malicious ~/.gitconfig inside mounted home, got \(d1)")
+        // Mounting home directly with normal user settings (core.editor, alias.co) does NOT refuse ls or git status
+        guardian.recordMounted(sources: [home, prefix])
+        try "[core]\n\teditor = vim\n[alias]\n\tco = checkout\n".write(toFile: home + "/.gitconfig", atomically: false, encoding: .utf8)
+        let d1 = guardian.judgeHostCommand(cwd: dir, command: "ls", base: base)
+        #expect(d1 != .refuse("", notice: nil))
+        if case .refuse(let why, _) = d1 {
+            Issue.record("ordinary ~/.gitconfig must not refuse host commands: \(why)")
+        }
+
+        var spawned = base
+        guardian.applyEnvironment(decision: d1, base: base, to: &spawned)
+        #expect(spawned["GIT_CONFIG_GLOBAL"] == "/dev/null")
+        #expect(spawned["GIT_CONFIG_NOSYSTEM"] == "1")
+    }
+
+    @Test("13. unknownFolders mode refuses pointer problems in outside repositories without renaming files on disk")
+    func unknownFoldersDoesNotQuarantineOutsideRepo() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let store = URL(fileURLWithPath: dir + "/home/sandbox-workspaces.json")
+        try Data("[{corrupt".utf8).write(to: store)
+
+        let outside = dir + "/outside"
+        try FileManager.default.createDirectory(atPath: outside + "/sub", withIntermediateDirectories: true)
+        try await GitFixture.sh("git init -q", in: outside, env: env)
+        try await GitFixture.sh("git update-index --add --cacheinfo 160000,1111111111111111111111111111111111111111,sub", in: outside, env: env)
+        let subGit = outside + "/sub/.git"
+        try Data("gitdir: /etc/passwd\n".utf8).write(to: URL(fileURLWithPath: subGit))
+
+        let guardian = GitConfigGuard(store: store)
+        #expect(guardian.isUnknownFolders)
+        let d = guardian.judgeHostCommand(cwd: outside, command: "git status")
+        guard case .refuse = d else {
+            Issue.record("expected refuse for bad pointer in unknownFolders mode, got \(d)")
             return
         }
-        #expect(why.contains("sets core.fsmonitor"))
-
-        // Allowed key in ~/.gitconfig passes judging, and globalConfigInReach remains true
-        try "[user]\n\tname = Alice\n".write(toFile: home + "/.gitconfig", atomically: false, encoding: .utf8)
-        let d2 = guardian.judgeHostCommand(cwd: dir, command: "echo ok", base: base)
-        #expect(d2 == .ordinary(notice: nil))
-        #expect(guardian.globalConfigInReach(base: base))
+        #expect(FileManager.default.fileExists(atPath: subGit), "outside repository's files must not be renamed in unknownFolders mode")
+        #expect(!FileManager.default.fileExists(atPath: subGit + ".iris-quarantine"))
     }
 
     @Test("12. upgrade from old sandbox-workspaces.json with blocked or adopted keeps repository untrusted across saves")
@@ -732,5 +762,185 @@ struct GitGuardStoreTests {
         let guardian = GitConfigGuard(store: store)
         guardian.recordMounted(sources: [dir + "/plain"])
         #expect(GitFixture.read(store.path) == original, "the bad entry's only copy is kept")
+    }
+}
+
+@Suite("PR 773 review holes", .timeLimit(.minutes(1)))
+struct R773HoleTests {
+    @Test("H1: parent mount over a repo that has a sandbox-git copy makes .git writable and untrusted")
+    func parentMountOverSeededRepo() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/iris-home"))
+        let guardian = GitConfigGuard()
+
+        let prep1 = SandboxGit.prepare(source: ws, target: ws, paths: paths)
+        guard case .repo = prep1 else { Issue.record("prep1 failed: \(prep1)"); return }
+        guardian.recordMounted(sources: [ws])
+
+        let prep2 = SandboxGit.prepare(source: dir, target: dir, paths: paths)
+        #expect(prep2 == .none)
+        guardian.recordMounted(sources: [dir])
+
+        try await GitFixture.sh("git config core.fsmonitor 'touch \(dir)/PWNED'", in: ws, env: env)
+
+        let d = guardian.judgeHostCommand(cwd: ws, command: "git status", paths: paths)
+        guard case .refuse(let why, _) = d else {
+            Issue.record("expected refuse when parent mount exposed .git, got \(d)")
+            return
+        }
+        #expect(why.contains("core.fsmonitor"))
+    }
+
+    @Test("H2: host command starting in parent dir and entering mounted repo via cd / GIT_DIR / --git-dir / script")
+    func commandReachesMountedRepoWithoutCwdOrGitDashC() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/iris-home"))
+        let guardian = GitConfigGuard()
+        guardian.recordMounted(sources: [ws])
+
+        try await GitFixture.sh("git config core.fsmonitor 'touch \(dir)/PWNED'", in: ws, env: env)
+
+        let dA = guardian.judgeHostCommand(cwd: dir, command: "cd ws && git status", paths: paths)
+        let dB = guardian.judgeHostCommand(cwd: dir, command: "GIT_DIR=ws/.git git status", paths: paths)
+        let dC = guardian.judgeHostCommand(cwd: dir, command: "git --git-dir=ws/.git status", paths: paths)
+        let dD = guardian.judgeHostCommand(cwd: dir, command: "./ws/script.sh", paths: paths)
+
+        guard case .refuse = dA, case .refuse = dB, case .refuse = dC, case .refuse = dD else {
+            Issue.record("expected all 4 to refuse: dA=\(dA) dB=\(dB) dC=\(dC) dD=\(dD)")
+            return
+        }
+    }
+
+    @Test("H3: bare repository created in sandbox is judged")
+    func bareRepoCreatedInSandbox() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let bare = dir + "/plain/bare.git"
+        try FileManager.default.createDirectory(atPath: bare, withIntermediateDirectories: true)
+        try await GitFixture.sh("git init --bare -q", in: bare, env: env)
+        try await GitFixture.sh("git config core.fsmonitor 'touch \(dir)/PWNED_BARE'", in: bare, env: env)
+
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/iris-home"))
+        let guardian = GitConfigGuard()
+        guardian.recordMounted(sources: [dir + "/plain"])
+
+        let d1 = guardian.judgeHostCommand(cwd: bare, command: "git log", paths: paths)
+        let d2 = guardian.judgeHostCommand(cwd: dir + "/plain", command: "git -C \(bare) log", paths: paths)
+        guard case .refuse = d1, case .refuse = d2 else {
+            Issue.record("expected bare repo to refuse: d1=\(d1) d2=\(d2)")
+            return
+        }
+    }
+
+    @Test("H4: end-to-end ToolExecutor.runCommand refuses when host git reaches untrusted repo via cd from parent")
+    func endToEndCdIntoMountedRepo() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/iris-home"))
+        let guardian = GitConfigGuard()
+        guardian.recordMounted(sources: [ws])
+
+        let marker = dir + "/PWNED_E2E"
+        try await GitFixture.sh("git config core.fsmonitor 'touch \(marker)'", in: ws, env: env)
+
+        let exec = ToolExecutor(irisPaths: paths, gitGuard: guardian)
+        _ = await exec.runCommand("cd ws && git status", cwd: dir, useSandbox: false)
+
+        #expect(!FileManager.default.fileExists(atPath: marker), "core.fsmonitor executed on host via `cd ws && git status`!")
+    }
+}
+
+@Suite("PR 773 round 2 variants", .timeLimit(.minutes(1)))
+struct R773VariantTests {
+    @Test("V1-V5: ways a host command from parent dir reaches a mounted repo")
+    func variantsReachingMountedRepo() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/iris-home"))
+        let guardian = GitConfigGuard()
+        guardian.recordMounted(sources: [ws])
+
+        try await GitFixture.sh("git config core.fsmonitor 'touch \(dir)/PWNED'", in: ws, env: env)
+
+        let v1 = guardian.judgeHostCommand(cwd: dir, command: "pushd ws && git status", paths: paths)
+        let v2 = guardian.judgeHostCommand(cwd: dir, command: "sh -c 'cd ws && git status'", paths: paths)
+        let v3 = guardian.judgeHostCommand(cwd: dir, command: "sh -c 'cd ws; git status'", paths: paths)
+        let v4 = guardian.judgeHostCommand(cwd: dir, command: "./build.sh", paths: paths)
+        let v5 = guardian.judgeHostCommand(cwd: dir, command: "make test", paths: paths)
+        let vEnv = guardian.judgeHostCommand(cwd: dir, command: "git status", paths: paths,
+                                             base: ["GIT_DIR": ws + "/.git"])
+
+        for (label, d) in [("V1", v1), ("V2", v2), ("V3", v3), ("V4", v4), ("V5", v5), ("V-env", vEnv)] {
+            guard case .refuse = d else {
+                Issue.record("\(label) expected refuse, got \(d)")
+                return
+            }
+        }
+    }
+
+    @Test("V6: global config in mounted home with normal user settings (core.editor, alias.*) does not refuse ls")
+    func globalConfigWithNormalSettingsInMountedHome() async throws {
+        let (dir, _) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let home = dir + "/home"
+        let base = ["HOME": home, "XDG_CONFIG_HOME": home + "/.config"]
+
+        try """
+        [user]
+            name = Alice
+        [core]
+            editor = vim
+        [alias]
+            co = checkout
+        [init]
+            defaultBranch = main
+        """.write(toFile: home + "/.gitconfig", atomically: false, encoding: .utf8)
+
+        let guardian = GitConfigGuard()
+        guardian.recordMounted(sources: [home])
+
+        let d = guardian.judgeHostCommand(cwd: dir, command: "ls", base: base)
+        if case .refuse(let why, _) = d {
+            Issue.record("ordinary ~/.gitconfig must not refuse ls: \(why)")
+        }
+    }
+}
+
+@Suite("PR 773 sh -c and pushd e2e", .timeLimit(.minutes(1)))
+struct R773ShE2E {
+    @Test("sh -c 'cd ws && git status' and pushd in parent dir do not run fsmonitor or hooks")
+    func shDashCCdAndPushd() async throws {
+        let (dir, env) = try await GitFixture.repo()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ws = dir + "/ws"
+        let paths = IrisPaths(root: URL(fileURLWithPath: dir + "/iris-home"))
+        let guardian = GitConfigGuard()
+        guardian.recordMounted(sources: [ws])
+
+        let marker = dir + "/PWNED_SH"
+        try await GitFixture.sh("git config core.fsmonitor 'touch \(marker)'", in: ws, env: env)
+
+        let exec = ToolExecutor(irisPaths: paths, gitGuard: guardian)
+        _ = await exec.runCommand("sh -c 'cd ws && git status'", cwd: dir, useSandbox: false)
+        _ = await exec.runCommand("pushd ws >/dev/null && git status", cwd: dir, useSandbox: false)
+
+        #expect(!FileManager.default.fileExists(atPath: marker), "core.fsmonitor executed via sh -c or pushd!")
+
+        // Also verify that when config is clean, a restrictedPath command still gets core.hooksPath=/dev/null
+        try await GitFixture.sh("git config --unset core.fsmonitor", in: ws, env: env)
+        let hookMarker = dir + "/PWNED_HOOK"
+        try FileManager.default.createDirectory(atPath: ws + "/.git/hooks", withIntermediateDirectories: true)
+        let hookPath = ws + "/.git/hooks/post-checkout"
+        try "#!/bin/sh\ntouch '\(hookMarker)'\n".write(toFile: hookPath, atomically: false, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hookPath)
+
+        _ = await exec.runCommand("git checkout HEAD", cwd: ws, useSandbox: false, restrictedPath: ["/usr/bin", "/bin"])
+        #expect(!FileManager.default.fileExists(atPath: hookMarker), "hook executed under restrictedPath!")
     }
 }
