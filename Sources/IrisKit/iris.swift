@@ -3669,6 +3669,10 @@ actor IrisEngine {
                     }
                     reviewedScript = true
                 }
+                // #658 (a): no read-write mount holding the person's repositories.
+                if let grant = job.effectiveGrant, let refused = await ParentMount.grantRefusal(grant, paths: .default) {
+                    return refused.replacingOccurrences(of: "Not run: ", with: "Not scheduled: ")
+                }
                 var job = job
                 // #650: who approved the script, and Vibecop's advice, for its run cards.
                 if let scriptReview { job.policy.scriptReview = scriptReview }

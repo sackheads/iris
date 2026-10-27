@@ -416,6 +416,10 @@ struct ToolExecutor {
                 return "Not watching \(displayPath): \(refusalText)."
             case .success(let resolved): grant = resolved
             }
+            // #658 (a): no read-write mount holding the person's repositories.
+            if let grant, let refused = await ParentMount.grantRefusal(grant, paths: irisPaths ?? .default) {
+                return "Not watching \(displayPath): " + refused.replacingOccurrences(of: "Not run: ", with: "")
+            }
             var job: Job
             let opening: String
             if var existing = existing, case .fsEvent(var watch) = existing.trigger {
@@ -580,6 +584,8 @@ struct ToolExecutor {
         // Named, so a timeout or a cancel can delete it: killing the `container run` client does
         // not stop the container, and the command ran on in the VM (#353).
         var ephemeralContainer: (binary: String, name: String)? = nil
+        var oneOffStarts: [String: [String]] = [:]
+        let vmRepositories = SandboxVMRepositories(paths: irisPaths ?? .default)
         if useSandbox {
             let resolvedContainerPath = if let containerBinaryPath { containerBinaryPath() }
                                         else { SandboxingManager.shared.containerBinaryPath }
@@ -603,6 +609,10 @@ struct ToolExecutor {
                 if WorkspaceGit.entry(at: expandedPath) != .none {
                     return Self.oneOffRepositoryRefusal(expandedPath)
                 }
+                // #658 (a): nor one holding the person's repositories below it.
+                let admission = await ParentMount.admit([expandedPath], vmRecord: vmRepositories)
+                if let refusal = admission.refusal { return refusal }
+                oneOffStarts = admission.starts
                 // #616: recorded as writable before the container can write it, or not run.
                 guard WritableRootsRecord(paths: irisPaths ?? .default).record([expandedPath]) else { return "Error: " + WritableRootsRecord.refusal }
                 // `-v`, where the session path uses `--mount` (see `ContainerMount`). The CLI
@@ -629,6 +639,7 @@ struct ToolExecutor {
             directory = nil
             environment = nil
             if let cwd { gitGuard.watch(owner: name, sources: [IrisEngine.expandTilde(cwd)]) }
+            vmRepositories.began(owner: name, starts: oneOffStarts)
             gitBefore = gitGuard.check(owner: name)
         } else {
             directory = cwd.map { IrisEngine.expandTilde($0) }   // #275: never `expandingTildeInPath` on a decider
@@ -735,7 +746,10 @@ struct ToolExecutor {
             result = Self.commandTimedOutMessage(seconds: timeoutSeconds)
         }
         var gitAfter: String? = nil
-        if let ephemeralName { gitAfter = gitGuard.finish(owner: ephemeralName) }
+        if let ephemeralName {
+            gitAfter = gitGuard.finish(owner: ephemeralName)
+            await OffPool.run(cancelled: ()) { _ in vmRepositories.ended(owner: ephemeralName) }
+        }
         // #607: what actually ran, Iris's prefix included, in the result the pill and the ledger show.
         let shown = restrictedPath != nil && !useSandbox ? GitRead.argv(command).map { "Ran: \($0.joined(separator: " "))\n" + result } ?? result : result
         return GitConfigGuard.withNotices(shown, before: gitBefore, after: gitAfter)
