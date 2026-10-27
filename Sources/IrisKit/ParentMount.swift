@@ -104,7 +104,8 @@ enum ParentMount {
         let isRepository = holdsGit(source) || WritingScripts.isBareRepository(source)
         if isRepository && repositoryRootAllowsNestedClones { return (nil, nil) }
         let found = survey(source)
-        if let why = refusal(source: source, survey: found, vmMade: vmRecord.vmMade(in: source)) { return (why, nil) }
+        let excused = vmRecord.vmMade(in: source).union(vmRecord.madeDuringLiveSessions(in: source, found: found.repositories))
+        if let why = refusal(source: source, survey: found, vmMade: excused) { return (why, nil) }
         return (nil, found.repositories)
     }
 
@@ -178,6 +179,14 @@ final class SandboxVMRepositories: Sendable {
 
     func vmMade(in root: String) -> Set<String> {
         Self.lock.withLock { Set(load().vmMade[root] ?? []) }
+    }
+
+    /// Of `found` in `root`, those that appeared while a session mounting it is still live: its
+    /// VM's, by the same reading as `ended`, before that session has ended. So a subagent, or a
+    /// second session, isn't refused for the clone the first one just made.
+    func madeDuringLiveSessions(in root: String, found: [String]) -> Set<String> {
+        let starts = Self.lock.withLock { load().live.values.compactMap { $0[root] } }
+        return Set(found.filter { repo in starts.contains { !$0.contains(repo) } })
     }
 
     /// `owner`'s container was made with these read-write roots, holding these repositories. A

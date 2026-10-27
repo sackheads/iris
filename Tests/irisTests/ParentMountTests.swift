@@ -112,10 +112,12 @@ struct ParentMountTests {
         await m.endSession(first)
         let record = SandboxVMRepositories(paths: IrisPaths(root: URL(fileURLWithPath: home)))
         #expect(record.vmMade(in: root) == [root + "/x"])
-        let out = await m.run(command: "true", conversationId: UUID(), workspace: ContainerMount(source: root))
+        let second = UUID()
+        let out = await m.run(command: "true", conversationId: second, workspace: ContainerMount(source: root))
         #expect(!out.hasPrefix("Not run"), "\(out)")
         #expect(rt.createdCount == 2)
-        // One the person made there between sessions still counts.
+        // One the person made there between sessions, with none live, still counts.
+        await m.endSession(second)
         try clone(root + "/mine")
         let other = await m.run(command: "true", conversationId: UUID(), workspace: ContainerMount(source: root))
         #expect(other.contains("`\(root)/mine`") && !other.contains("`\(root)/x`"))
@@ -196,5 +198,18 @@ struct ParentMountTests {
         let why = await ParentMount.grantRefusal(JobGrant(mounts: [ContainerMount(source: parent)]), paths: paths)
         #expect(why?.contains("`\(parent)/alpha`") == true)
         #expect(await ParentMount.grantRefusal(JobGrant(mounts: [ContainerMount(source: parent, readOnly: true)]), paths: paths) == nil)
+    }
+
+    @Test("a clone made while a session is live doesn't refuse a second container on the same folder, a subagent's say")
+    func liveSessionCloneExcused() async throws {
+        let root = try temp("live"), home = try temp("home")
+        defer { try? FileManager.default.removeItem(atPath: root); try? FileManager.default.removeItem(atPath: home) }
+        let rt = MockRuntime()
+        let m = manager(rt, home: home)
+        #expect(!(await m.run(command: "git clone x", conversationId: UUID(), workspace: ContainerMount(source: root))).hasPrefix("Not run"))
+        try clone(root + "/x")
+        let out = await m.run(command: "true", conversationId: UUID(), workspace: ContainerMount(source: root))
+        #expect(!out.hasPrefix("Not run"), "\(out)")
+        #expect(rt.createdCount == 2)
     }
 }
