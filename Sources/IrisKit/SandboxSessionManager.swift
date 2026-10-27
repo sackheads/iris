@@ -85,6 +85,10 @@ actor SandboxSessionManager {
     /// The home whose `sandbox-git/` holds each repository's copy for the VM (#658).
     private let paths: IrisPaths
 
+    /// The repositories each session made in its mounts (#658 (a)), so they don't get the next
+    /// session's mount refused as a parent of the person's repositories.
+    private let vmRepositories: SandboxVMRepositories
+
     init(runtime: ContainerRuntime, image: @escaping @Sendable () -> String,
          mountAgreementAttempts: Int = SandboxSessionManager.mountAgreementAttempts,
          startContainerSystem: @escaping @Sendable () async -> Bool = {
@@ -94,6 +98,7 @@ actor SandboxSessionManager {
          paths: IrisPaths = .default) {
         self.gitGuard = gitGuard
         self.paths = paths
+        self.vmRepositories = SandboxVMRepositories(paths: paths)
         self.runtime = runtime
         self.image = image
         self.mountAgreementAttempts = mountAgreementAttempts
@@ -174,7 +179,14 @@ actor SandboxSessionManager {
         // Capture whether this call is responsible for (re)creating the session BEFORE
         // awaiting, so the reset notice fires correctly even when multiple callers race.
         let created = (sessions[id] == nil)
+        let rwSources = Self.readWriteMounts(workspace: workspace, extra: extraMounts).map(\.source)
+        var starts: [String: [String]] = [:]
         if created {
+            // #658 (a): a read-write mount holding the person's repositories is refused here, as
+            // the container is made, and never per command.
+            let admission = await ParentMount.admit(rwSources, vmRecord: vmRepositories)
+            if let refusal = admission.refusal { return refusal }
+            starts = admission.starts
             // Asked on the far side of the barrier, and asked until the answer holds.
             // `ensureSession` coalesces concurrent first-commands onto one create, and the
             // container belongs to whichever of them got there first — including its mounts. A
@@ -202,6 +214,7 @@ actor SandboxSessionManager {
                 await removeContainer(s.name)
                 sessions[id] = nil
             }
+            vmRepositories.began(owner: name(for: id), starts: starts)
         }
 
         let workdir = Self.workdir(for: workspace)
@@ -260,8 +273,12 @@ actor SandboxSessionManager {
             lostSessions.insert(id)
             await removeContainer(name(for: id))
             sessions[id] = nil
+            // A new container is a new mount: checked again, with what the lost one made recorded.
+            let admission = await ParentMount.admit(rwSources, vmRecord: vmRepositories)
+            if let refusal = admission.refusal { return refusal }
             do {
                 try await ensureSession(id, workspace: workspace, mounts: mounts, network: network)
+                vmRepositories.began(owner: owner, starts: admission.starts)
                 gitGuard.watch(owner: owner, sources: sources)
                 let r = try await runtime.exec(name: name(for: id), workdir: workdir, command: command,
                                                timeoutSeconds: timeoutSeconds, outputLimit: OutputCap.drainBytes)
@@ -422,6 +439,11 @@ actor SandboxSessionManager {
             .filter { $0.hasPrefix(own) || (includingLegacy && Self.isLegacyName($0)) }
         let spared = Set(sessions.values.map(\.name)).union(await inFlight()).union(live.names)
         for n in found where !spared.contains(n) { await removeContainer(n) }
+        // #658 (a): a session a crash or quit cut short is ended once, which only records what its
+        // VM made. Its container may be gone already, so this doesn't wait on the listing.
+        let record = vmRepositories
+        let keep = Set(sessions.values.map(\.name)).union(await inFlight()).union(live.names)
+        await OffPool.run(cancelled: ()) { _ in record.endAbandoned(except: keep) }
     }
 
     func reapIdle(olderThan seconds: TimeInterval, now: Date = Date()) async {
@@ -441,7 +463,11 @@ actor SandboxSessionManager {
         let removed = ignoringCancellation ? await runtime.removeIgnoringCancellation(name: name)
             : await runtime.remove(name: name)
         // Only once it is gone: a container still running could write after the last check.
-        if removed { live.remove(name); gitGuard.end(owner: name) }
+        if removed {
+            live.remove(name); gitGuard.end(owner: name)
+            let record = vmRepositories
+            await OffPool.run(cancelled: ()) { _ in record.ended(owner: name) }
+        }
     }
 
     /// Ensures a container exists for `id`, coalescing concurrent first-commands onto a single
