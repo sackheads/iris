@@ -212,4 +212,39 @@ struct ParentMountTests {
         #expect(!out.hasPrefix("Not run"), "\(out)")
         #expect(rt.createdCount == 2)
     }
+
+    @Test("a root the VM's git init made a repository is still walked, so a clone of the person's there is refused (#776 review)")
+    func vmInitRootStillWalked() async throws {
+        let root = try temp("vminit"), home = try temp("home")
+        defer { try? FileManager.default.removeItem(atPath: root); try? FileManager.default.removeItem(atPath: home) }
+        let rt = MockRuntime()
+        let m = manager(rt, home: home)
+        let first = UUID()
+        _ = await m.run(command: "git init .", conversationId: first, workspace: ContainerMount(source: root))
+        try clone(root)   // what the VM's git init left on the host
+        await m.endSession(first)
+        let second = UUID()
+        let again = await m.run(command: "true", conversationId: second, workspace: ContainerMount(source: root))
+        #expect(!again.hasPrefix("Not run"), "the VM's own root alone is no reason to refuse: \(again)")
+        await m.endSession(second)
+        try clone(root + "/mine")   // the person's own clone, later, with no session live
+        let out = await m.run(command: "true", conversationId: UUID(), workspace: ContainerMount(source: root))
+        #expect(out.hasPrefix("Not run") && out.contains("`\(root)/mine`"), "\(out)")
+    }
+
+    @Test("a VM clone's path isn't excused once the person's own clone replaces it there (#776 review)")
+    func replacedCloneNotExcused() async throws {
+        let root = try temp("replaced"), home = try temp("home")
+        defer { try? FileManager.default.removeItem(atPath: root); try? FileManager.default.removeItem(atPath: home) }
+        let rt = MockRuntime()
+        let m = manager(rt, home: home)
+        let first = UUID()
+        _ = await m.run(command: "git clone x", conversationId: first, workspace: ContainerMount(source: root))
+        try clone(root + "/x")
+        await m.endSession(first)
+        try FileManager.default.removeItem(atPath: root + "/x")
+        try clone(root + "/x")   // the person's own clone at the same path
+        let out = await m.run(command: "true", conversationId: UUID(), workspace: ContainerMount(source: root))
+        #expect(out.hasPrefix("Not run") && out.contains("`\(root)/x`"), "\(out)")
+    }
 }

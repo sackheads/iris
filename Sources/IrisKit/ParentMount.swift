@@ -74,6 +74,16 @@ enum ParentMount {
         return Survey(repositories: repositories, capped: false, incomplete: incomplete)
     }
 
+    static func isRepository(_ dir: String) -> Bool { holdsGit(dir) || WritingScripts.isBareRepository(dir) }
+
+    /// Which repository is at `dir`: its `.git`'s (or a bare repository's `HEAD`'s) device, inode
+    /// and birth time, so one cloned again at the same path isn't taken for the one recorded.
+    static func identity(_ dir: String) -> String? {
+        var info = stat()
+        guard lstat(dir + "/.git", &info) == 0 || lstat(dir + "/HEAD", &info) == 0 else { return nil }
+        return "\(info.st_dev):\(info.st_ino):\(info.st_birthtimespec.tv_sec).\(info.st_birthtimespec.tv_nsec)"
+    }
+
     /// Whether `dir` has a `.git` of any kind: a folder, a gitfile, or a link (never followed).
     static func holdsGit(_ dir: String) -> Bool {
         var info = stat()
@@ -101,12 +111,15 @@ enum ParentMount {
     /// walked at all).
     static func check(source: String, vmRecord: SandboxVMRepositories,
                       survey: (String) -> Survey = { survey($0) }) -> (refusal: String?, start: [String]?) {
-        let isRepository = holdsGit(source) || WritingScripts.isBareRepository(source)
-        if isRepository && repositoryRootAllowsNestedClones { return (nil, nil) }
+        let isRepository = isRepository(source)
+        let vmMade = vmRecord.vmMade(in: source)
+        // The allowance is for a repository of the person's, not a root the VM's `git init` made
+        // one (#776 review): that folder is still the parent it was, so it's walked.
+        if isRepository && repositoryRootAllowsNestedClones && !vmMade.contains(source) { return (nil, nil) }
         let found = survey(source)
-        let excused = vmRecord.vmMade(in: source).union(vmRecord.madeDuringLiveSessions(in: source, found: found.repositories))
+        let excused = vmMade.union(vmRecord.madeDuringLiveSessions(in: source, found: found.repositories))
         if let why = refusal(source: source, survey: found, vmMade: excused) { return (why, nil) }
-        return (nil, found.repositories)
+        return (nil, found.repositories + (isRepository ? [source] : []))
     }
 
     /// What `admit` decided for a container's read-write sources.
@@ -158,12 +171,16 @@ final class SandboxVMRepositories: Sendable {
         var vmMade: [String: [String]] = [:]
         /// Container name → mount root → the repositories it held when the container was made.
         var live: [String: [String: [String]]] = [:]
+        /// Repository → `ParentMount.identity` when it was recorded as the VM's. It's excused only
+        /// while that still matches (#776 review).
+        var identities: [String: String] = [:]
 
         init() {}
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             vmMade = try c.decodeIfPresent([String: [String]].self, forKey: .vmMade) ?? [:]
             live = try c.decodeIfPresent([String: [String: [String]]].self, forKey: .live) ?? [:]
+            identities = try c.decodeIfPresent([String: String].self, forKey: .identities) ?? [:]
         }
     }
 
@@ -177,8 +194,13 @@ final class SandboxVMRepositories: Sendable {
         self.survey = survey
     }
 
+    /// The repositories recorded as the VM's in `root` that are still the ones recorded: one the
+    /// person cloned again at the same path isn't.
     func vmMade(in root: String) -> Set<String> {
-        Self.lock.withLock { Set(load().vmMade[root] ?? []) }
+        let r = Self.lock.withLock { load() }
+        return Set((r.vmMade[root] ?? []).filter { repo in
+            r.identities[repo].map { $0 == ParentMount.identity(repo) } ?? false
+        })
     }
 
     /// Of `found` in `root`, those that appeared while a session mounting it is still live: its
@@ -189,8 +211,8 @@ final class SandboxVMRepositories: Sendable {
         return Set(found.filter { repo in starts.contains { !$0.contains(repo) } })
     }
 
-    /// `owner`'s container was made with these read-write roots, holding these repositories. A
-    /// recorded repository that's gone is dropped, so a later clone at its path isn't excused.
+    /// `owner`'s container was made with these read-write roots, holding these repositories (the
+    /// root among them when it is one). A recorded repository that's gone is dropped.
     func began(owner: String, starts: [String: [String]]) {
         guard !starts.isEmpty else { return }
         Self.lock.withLock {
@@ -198,6 +220,8 @@ final class SandboxVMRepositories: Sendable {
             for (root, repos) in starts {
                 if let made = r.vmMade[root] { r.vmMade[root] = made.filter(repos.contains) }
             }
+            let kept = Set(r.vmMade.values.joined())
+            r.identities = r.identities.filter { kept.contains($0.key) }
             r.live[owner] = starts
             save(r)
         }
@@ -226,12 +250,18 @@ final class SandboxVMRepositories: Sendable {
         }
     }
 
+    /// What's new in each root since `starts` is the VM's, the root itself included when it has
+    /// become a repository (#776 review: a `git init` at the root).
     private func record(_ starts: [String: [String]], into r: inout Record) {
         for (root, before) in starts {
-            let new = survey(root).repositories.filter { !before.contains($0) }
+            let now = survey(root).repositories + (ParentMount.isRepository(root) ? [root] : [])
+            let new = now.filter { !before.contains($0) }
             guard !new.isEmpty else { continue }
             r.vmMade[root] = Array(Set(r.vmMade[root] ?? []).union(new)).sorted()
+            for repo in new { r.identities[repo] = ParentMount.identity(repo) }
         }
+        let kept = Set(r.vmMade.values.joined())
+        r.identities = r.identities.filter { kept.contains($0.key) }
     }
 
     private func load() -> Record {
