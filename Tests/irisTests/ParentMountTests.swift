@@ -170,4 +170,31 @@ struct ParentMountTests {
         #expect(!out.hasPrefix("Not run"), "\(out)")
         #expect(rt.createdCount == 1)
     }
+
+    @Test("the one-off container with no conversation refuses a parent too, and runs in a plain folder")
+    func oneOffRefused() async throws {
+        let parent = try temp("oneoff"), plain = try temp("oneoff-plain"), home = try temp("home")
+        defer { for d in [parent, plain, home] { try? FileManager.default.removeItem(atPath: d) } }
+        try clone(parent + "/alpha")
+        var executor = ToolExecutor()
+        executor.containerBinaryPath = { "/usr/bin/true" }   // stands in for `container`
+        executor.irisPaths = IrisPaths(root: URL(fileURLWithPath: home))
+        func run(_ cwd: String) async -> String {
+            await executor.execute(name: "run_command", args: ["command": .string("true")], cwd: cwd,
+                                   conversationId: nil, useSandbox: true)
+        }
+        #expect(await run(parent).hasPrefix("Not run: \(parent) holds git repositories (`\(parent)/alpha`)"))
+        #expect(!(await run(plain)).hasPrefix("Not run"))
+    }
+
+    @Test("a mutating job's grant is refused when the job is made, read-only mounts aside")
+    func grantRefused() async throws {
+        let parent = try temp("grant"), home = try temp("home")
+        defer { try? FileManager.default.removeItem(atPath: parent); try? FileManager.default.removeItem(atPath: home) }
+        try clone(parent + "/alpha")
+        let paths = IrisPaths(root: URL(fileURLWithPath: home))
+        let why = await ParentMount.grantRefusal(JobGrant(mounts: [ContainerMount(source: parent)]), paths: paths)
+        #expect(why?.contains("`\(parent)/alpha`") == true)
+        #expect(await ParentMount.grantRefusal(JobGrant(mounts: [ContainerMount(source: parent, readOnly: true)]), paths: paths) == nil)
+    }
 }
