@@ -247,4 +247,23 @@ struct ParentMountTests {
         let out = await m.run(command: "true", conversationId: UUID(), workspace: ContainerMount(source: root))
         #expect(out.hasPrefix("Not run") && out.contains("`\(root)/x`"), "\(out)")
     }
+
+    @Test("a root recorded as the VM's stays walked after its .git is made again, so the identity check can't reopen it (#776 re-review)")
+    func vmRootRemadeStillWalked() async throws {
+        let root = try temp("remade"), home = try temp("home")
+        defer { try? FileManager.default.removeItem(atPath: root); try? FileManager.default.removeItem(atPath: home) }
+        let rt = MockRuntime()
+        let m = manager(rt, home: home)
+        let first = UUID(), second = UUID()
+        _ = await m.run(command: "git init .", conversationId: first, workspace: ContainerMount(source: root))
+        try clone(root)
+        await m.endSession(first)
+        _ = await m.run(command: "rm -rf .git && git init", conversationId: second, workspace: ContainerMount(source: root))
+        try FileManager.default.removeItem(atPath: root + "/.git")
+        try clone(root)   // a new .git: a new identity
+        await m.endSession(second)
+        try clone(root + "/mine")
+        let out = await m.run(command: "true", conversationId: UUID(), workspace: ContainerMount(source: root))
+        #expect(out.hasPrefix("Not run") && out.contains("`\(root)/mine`"), "\(out)")
+    }
 }

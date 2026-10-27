@@ -114,8 +114,10 @@ enum ParentMount {
         let isRepository = isRepository(source)
         let vmMade = vmRecord.vmMade(in: source)
         // The allowance is for a repository of the person's, not a root the VM's `git init` made
-        // one (#776 review): that folder is still the parent it was, so it's walked.
-        if isRepository && repositoryRootAllowsNestedClones && !vmMade.contains(source) { return (nil, nil) }
+        // one (#776 review): that folder is still the parent it was, so it's walked. Decided from
+        // the raw record, never the identity check, which a VM could fail on purpose by making
+        // the root's `.git` again (#776 re-review).
+        if isRepository && repositoryRootAllowsNestedClones && !vmRecord.everVMMade(source, in: source) { return (nil, nil) }
         let found = survey(source)
         let excused = vmMade.union(vmRecord.madeDuringLiveSessions(in: source, found: found.repositories))
         if let why = refusal(source: source, survey: found, vmMade: excused) { return (why, nil) }
@@ -201,6 +203,11 @@ final class SandboxVMRepositories: Sendable {
         return Set((r.vmMade[root] ?? []).filter { repo in
             r.identities[repo].map { $0 == ParentMount.identity(repo) } ?? false
         })
+    }
+
+    /// Whether `repo` was ever recorded as the VM's in `root`, whatever is there now.
+    func everVMMade(_ repo: String, in root: String) -> Bool {
+        Self.lock.withLock { load().vmMade[root]?.contains(repo) ?? false }
     }
 
     /// Of `found` in `root`, those that appeared while a session mounting it is still live: its
