@@ -9,7 +9,7 @@ import Foundation
 /// read-only, so these files are no longer the VM's to write. `GitConfigGuard` still checks them
 /// before and after every in-VM command and before every host one, and a host `run_command` in a
 /// sandboxed workspace still runs git with the risky fixed-name keys overridden
-/// (`hostEnvironment`); both go when the second #658 change retires them.
+/// (`hostEnvironment`); both are frozen as they are (#658 (a)): no new keys.
 enum WorkspaceGit {
     /// Where the repository at `source` keeps what git reads. `dotGit` is `<source>/.git`, a
     /// directory, or for a worktree a file naming its `gitDir`; `commonDir` holds the shared
