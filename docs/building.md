@@ -78,6 +78,21 @@ For repeatable performance tracking over time, run `perf/run.sh`: it executes th
 comparison against a bare provider call), and compares against promoted baselines. See
 [perf/README.md](../perf/README.md).
 
+## Timing the guard models (`--guard-probe`)
+
+```sh
+swift run iris --guard-probe                       # judge one benign text through tiers 2 and 3
+swift run iris --guard-probe --reps 3              # three judgements in one process
+swift run iris --guard-probe --prebuild 20         # build the canary engine 20 s before judging
+```
+
+It reads this dev home's guard settings and prints a timestamped `[perf]` line for each model
+load's begin and end, each tier's start and end, and each Ollama request, with Ollama's own
+`load_duration` (#778). Dev builds only, and read-only: no conversation store, job or home lock,
+and a cloud tier 3 is skipped rather than called. Each rep's text gets a suffix so the verdict
+cache never answers for the model. The fake lane of `--perf` runs with the guards off, so it can't
+time them. The app prints the same `[perf]` lines to stdout.
+
 ## Running one job headlessly (`--run-job`)
 
 ```bash

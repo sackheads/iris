@@ -41,6 +41,17 @@ public struct InjectionGuard {
         /// Some lines withheld; `unjudged` names (1-based, "a-b") those withheld without being judged
         /// at all, past tier 2's bounds (#728: carried out as data, not reparsed from the marker).
         case partial(redacted: String, unjudged: [String] = [])
+
+        /// The verdict's name for a log line: never the text it carries.
+        var logName: String {
+            switch self {
+            case .safe: return "safe"
+            case .malicious: return "malicious"
+            case .error: return "error"
+            case .skipped: return "skipped"
+            case .partial: return "partial"
+            }
+        }
     }
 
     /// The tier verdict for one payload, *before* the `<untrusted_context>` wrapper is applied
@@ -431,7 +442,10 @@ public struct InjectionGuard {
         }
 
         // Tier 2: Local Token-Classification (CoreML/ONNX) — evaluates the unwrapped content.
+        PerformanceProfiler.event("guard.tier2 start source=\(source) chars=\(clean.count)")
+        let tier2Start = MonotonicClock.nowMs()
         let tier2 = await measureSpan("guard.tier2") { await executeTier2CoreML(clean, delimiterLines: delimiterLines, protectionEnabled: protectionEnabled, provisioning: fingerprint.tier2Provisioning, source: source) }
+        PerformanceProfiler.event("guard.tier2 end source=\(source) ms=\(Int(MonotonicClock.nowMs() - tier2Start)) verdict=\(tier2.logName)")
         switch tier2 {
         case .error:
             return Verdict(outcome: .blocked(marker: "[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]"), cacheable: false, unjudged: unjudged)
@@ -466,7 +480,10 @@ public struct InjectionGuard {
         }
 
         // Tier 3: Behavioral Canary Probe — also evaluates the unwrapped content.
+        PerformanceProfiler.event("guard.tier3 start source=\(source) chars=\(clean.count)")
+        let tier3Start = MonotonicClock.nowMs()
         let tier3 = await measureSpan("guard.tier3") { await executeTier3Canary(clean, protectionEnabled: protectionEnabled, provisioning: fingerprint.tier3Provisioning) }
+        PerformanceProfiler.event("guard.tier3 end source=\(source) ms=\(Int(MonotonicClock.nowMs() - tier3Start)) verdict=\(tier3.logName)")
         switch tier3 {
         case .error:
             return Verdict(outcome: .blocked(marker: "[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"), cacheable: false, unjudged: unjudged)

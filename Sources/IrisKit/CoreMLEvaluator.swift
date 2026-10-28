@@ -92,13 +92,17 @@ public final class CoreMLEvaluator: @unchecked Sendable {
                 let onnxURL = fullPath.appendingPathComponent("model.onnx")
                 if FileManager.default.fileExists(atPath: onnxURL.path) {
                     #if canImport(OnnxRuntimeBindings)
-                    let liveModel = try await LiveONNXModel(modelURL: onnxURL, tokenizerConfigURL: fullPath)
+                    let liveModel = try await ModelLoadTracker.shared.track(.guardTier2, name: modelDirName) {
+                        try await LiveONNXModel(modelURL: onnxURL, tokenizerConfigURL: fullPath)
+                    }
                     setModel(liveModel)
                     #else
                     throw NSError(domain: "CoreMLEvaluator", code: -1, userInfo: [NSLocalizedDescriptionKey: "ONNX model found but ONNX Runtime is not available in this build."])
                     #endif
                 } else {
-                    let liveModel = try await LiveCoreMLModel(modelURL: fullPath, tokenizerConfigURL: fullPath)
+                    let liveModel = try await ModelLoadTracker.shared.track(.guardTier2, name: modelDirName) {
+                        try await LiveCoreMLModel(modelURL: fullPath, tokenizerConfigURL: fullPath)
+                    }
                     setModel(liveModel)
                 }
             } catch {

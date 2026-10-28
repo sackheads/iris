@@ -36,16 +36,27 @@ final class AuxiliaryModelManager: @unchecked Sendable {
             if let existing = loadingTasks[role] {
                 return existing
             } else {
-                let newTask = Task {
+                let newTask = Task<AuxiliaryInferenceEngine, Error> {
                     let engine: AuxiliaryInferenceEngine
                     switch config.engineType {
                     case .llamaCPP:
-                        engine = try await LlamaCPPEngine()
+                        // The load is the file read into memory, so it is tracked here (#778).
+                        engine = try await ModelLoadTracker.shared.track(ModelLoadPurpose(role: role), name: config.modelPathOrName) {
+                            let llama = try await LlamaCPPEngine()
+                            try await llama.loadModel(config: config)
+                            return llama
+                        }
+                        return engine
                     case .ollama:
+                        // Ollama's load happens in its server; the engine tracks its own preload.
                         engine = OllamaEngine()
                     case .mlx:
-                        engine = MLXEngine.shared
+                        try await ModelLoadTracker.shared.track(ModelLoadPurpose(role: role), name: config.modelPathOrName) {
+                            try await MLXEngine.shared.loadModel(config: config)
+                        }
+                        return MLXEngine.shared
                     case .cloud:
+                        // Nothing local to load.
                         var cloud = CloudAuxiliaryEngine()
                         cloud.role = role
                         engine = cloud
