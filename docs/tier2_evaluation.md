@@ -1,7 +1,7 @@
 # Tier 2 re-test: DeBERTa v3 on realistic tool output (#770)
 
 **Date:** 2026-10-27. **Bundle:** `protectai/deberta-v3-base-prompt-injection-v2`, ONNX fp32
-(`model.onnx`, 704 MB, exported July 2026), the bundle the fresh-install default URL points at.
+(`model.onnx`, 704 MB, exported July 2026), the bundle fresh installs defaulted to until #781.
 **Code:** main at `b61bf05c` plus the test in this change. **Machine:** Brian's Apple-silicon Mac,
 headless (`swift test`), no other model loaded.
 
@@ -10,7 +10,7 @@ benign texts lose at least one line (bar: 2% or less), and 68.0% of attacks are 
 or more). Those benign texts are small (104 B to 3.7 KB, median 760 B), and the rate grows with
 length: joined to 8 or 32 KB, the size a real tool result reaches, 8 of 9 categories lost lines. Loading it costs about 1.74 GB of memory. On Brian's Mac tier 2 stays
 disabled on these results (the bundle folder is renamed to `…onnx-no`), and the fresh-install
-default is for the planner to change (see "Fresh-install default" below).
+default changed to no model in #781 (see "Fresh-install default" below).
 
 The July survey (`docs/prompt_guard_coreml.md`) scored 12 benign and 7 attack samples on the raw
 model. This re-test scores 201 benign and 75 attack texts through the product.
@@ -180,15 +180,9 @@ one short sentence in one window; a real tool output is many windows.
 
 ## Fresh-install default
 
-Today a fresh install has protection on, and the tier-2 URL defaults to this bundle
-(`ConfigManager.swift`). The Setup Wizard and Settings offer it as a one-click download, and until
-it's downloaded a launch notice says tier 2 is skipped. Recommendation, for the planner to file:
-- Default the tier-2 URL to empty: no model configured, rather than this one not yet downloaded.
-  A saved empty value currently falls back to the DeBERTa URL, so empty has to become storable.
-- With no model configured, tier 2 should read as off: no "not downloaded" launch notice, and no
-  `.unprovisioned` P2 LED nudging the user to fetch a model that fails this bar. A URL set but not
-  downloaded keeps today's notice and LED.
-- The wizard and Settings stop prefilling and offering this bundle. Tier 2 is optional, with no
-  recommended model; the URL field stays for bring-your-own, linking here.
-- Existing installs keep their saved URL and downloaded bundle; the release notes say why and how
-  to turn it off.
+Changed in #781 on these results: a fresh install has no tier-2 model, so tier 2 is off. The P2
+light is gray, the launch notice doesn't mention it, and the Setup Wizard and Settings no longer
+offer this bundle. An install that already downloaded it keeps it: with no tier-2 model ever saved
+in Settings, Iris uses this bundle only if its folder (`deberta-v3-base-prompt-injection-v2.onnx`)
+is in the models folder. To turn it off, clear the field in Settings → Security, or remove that
+folder.

@@ -593,12 +593,12 @@ struct SettingsView: View {
                 
                 if config.enableAdvancedPromptInjectionProtection {
                     Section(header: Text("Tier 2: Fast Local Classifier").font(.headline)) {
-                        Text("Rapidly classifies text as safe or malicious on-device — CoreML (Apple Neural Engine) or ONNX Runtime (CPU).")
+                        Text("Optional, and off with the field empty. Classifies text on-device — CoreML (Apple Neural Engine) or ONNX Runtime (CPU). No model is recommended yet: the one tested, DeBERTa v3, withheld lines from 30% of ordinary tool output and caught 68% of attacks (docs/tier2_evaluation.md).")
                             .font(.caption)
                             .foregroundColor(.secondary)
 
                         TextField("Model .zip URL or Path", text: $config.promptGuardCoreMLModel)
-                            .help("Provide a URL to a .mlmodelc.zip (CoreML) or .onnx.zip (ONNX Runtime) to download and enable the Tier 2 classifier.")
+                            .help("Provide a URL to a .mlmodelc.zip (CoreML) or .onnx.zip (ONNX Runtime) to download and enable the Tier 2 classifier. Leave it empty to keep tier 2 off.")
                         
                         if !config.promptGuardCoreMLModel.isEmpty {
                             // #210 fix round 1: routed through the shared helpers so this can
@@ -621,7 +621,7 @@ struct SettingsView: View {
                                             await downloader.downloadModel(name: config.promptGuardCoreMLModel)
                                         }
                                     }
-                                    Text("Downloads and unzips the model to enable Tier 2 locally (~650 MB for the default DeBERTa model).")
+                                    Text("Downloads and unzips the model to enable Tier 2 locally.")
                                         .font(.caption)
                                         .foregroundColor(.orange)
                                 }

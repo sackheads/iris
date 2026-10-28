@@ -110,14 +110,13 @@ final class ModelLEDBarTests: XCTestCase {
         XCTAssertEqual(bar.tier2State(), .off)
     }
 
-    func testTier2UnprovisionedWhenModelFieldEmpty() {
-        // #210: an empty field is `.notConfigured`, which the LED treats the same as
-        // `.unprovisioned` — the guard skips tier 2 entirely rather than blocking, so the LED
-        // must say so rather than reporting the more benign "enabled, not loaded" `.configured`.
+    func testTier2OffWhenModelFieldEmpty() {
+        // #781: an empty field (`.notConfigured`) is the default, and no model is recommended, so
+        // tier 2 is off rather than owing a download. Before #781 it was `.unprovisioned` (#210).
         config.enableAdvancedPromptInjectionProtection = true
         config.promptGuardCoreMLModel = ""
         let bar = ModelLEDBar(config: config)
-        XCTAssertEqual(bar.tier2State(), .unprovisioned)
+        XCTAssertEqual(bar.tier2State(), .off)
     }
 
     func testTier2UnprovisionedWhenModelNotDownloaded() {

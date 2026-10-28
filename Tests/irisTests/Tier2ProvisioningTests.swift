@@ -124,11 +124,11 @@ struct UnprovisionedGuardNoticeTests {
         #expect(notice == "Prompt-injection protection is on, but the tier-3 guard model canary-model.gguf is not downloaded. Tier 3 is skipped until it is (Settings \u{2192} Security).")
     }
 
-    @Test("notConfigured is named like unprovisioned, without a filename")
-    func notConfiguredNamedWithoutFilename() {
+    @Test("notConfigured says nothing: no model is the default, and none is recommended (#781)")
+    func notConfiguredSaysNothing() {
         let notice = InjectionGuard.unprovisionedGuardNotice(
             protectionEnabled: true, tier2: .notConfigured, tier3: .provisioned)
-        #expect(notice == "Prompt-injection protection is on, but the tier-2 guard model is not downloaded. Tier 2 is skipped until it is (Settings \u{2192} Security).")
+        #expect(notice == nil)
     }
 
     @Test("plural form names both models when both are unprovisioned")
