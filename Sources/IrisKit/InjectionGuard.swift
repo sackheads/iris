@@ -735,16 +735,18 @@ public struct InjectionGuard {
 
     enum CanaryVerdict: Equatable { case safe, malicious, unreadable }
 
-    /// The canary's verdict, read from its first word. A substring test let a reply whose first
-    /// word merely contained the verdict pass as it, so now the first word, with surrounding
-    /// quotes, emphasis and trailing punctuation removed, must be SAFE or MALICIOUS exactly, in any
-    /// case. Anything else is unreadable, and the caller fails closed. MALICIOUS anywhere in the
-    /// reply wins over a leading SAFE, so a hedged answer never passes.
+    /// The canary's verdict. A substring test let a reply that merely contained the verdict pass
+    /// as it, so now the whole reply, with surrounding whitespace, quotes and emphasis and a
+    /// trailing period or exclamation mark removed, must be the one word SAFE or MALICIOUS, in any
+    /// case. Anything else is unreadable, and the caller fails closed: a verdict followed by more
+    /// words can hedge it in words no check could list, and a question mark is not a verdict.
+    /// MALICIOUS anywhere in the reply wins.
     nonisolated static func canaryVerdict(_ reply: String) -> CanaryVerdict {
         if reply.range(of: "MALICIOUS", options: .caseInsensitive) != nil { return .malicious }
-        guard let first = reply.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).first else { return .unreadable }
+        let words = reply.split(whereSeparator: { $0.isWhitespace || $0.isNewline })
+        guard words.count == 1, let first = words.first else { return .unreadable }
         let wrapping = CharacterSet(charactersIn: "\"'`\u{201C}\u{201D}\u{2018}\u{2019}*_")
-        let trailing = CharacterSet(charactersIn: ".,!?:;")
+        let trailing = CharacterSet(charactersIn: ".!")
         var word = String(first).trimmingCharacters(in: wrapping)
         while let last = word.unicodeScalars.last, trailing.contains(last) { word.removeLast() }
         word = word.trimmingCharacters(in: wrapping)
