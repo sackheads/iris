@@ -74,6 +74,15 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
         guard !modelName.isEmpty, let data = await transport.ps() else { return nil }
         return Self.modelIsInPSList(modelName, models: Self.parsePSModels(from: data))
     }
+
+    /// Before each generate (#779): a model Ollama has unloaded (keep_alive ran out, or Ollama
+    /// restarted) is loaded again by that call, so the preload is re-sent beside it, and its reply,
+    /// not the generate's, ends the load. A `/api/ps` that doesn't answer shows nothing rather
+    /// than guess.
+    func prepareForGenerate() async {
+        guard preload == nil, await psListsModel() == false, preload == nil else { return }
+        startPreload()
+    }
     
     // MARK: - Parsing (pure functions — testable without network)
     
@@ -264,6 +273,7 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
         
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         
+        await prepareForGenerate()
         generates += 1
         let call = "ollama.generate purpose=\"\(purpose.label)\" model=\(modelName) n=\(generates)"
         // stream:false, so the first byte is the whole reply: one line for both (#778).
