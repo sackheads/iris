@@ -153,7 +153,7 @@ enum GuardProbeFixtures {
         switch outcome {
         case .passed: name = "passed"
         case .blocked:
-            // The product blocks on an error and on an answer with no verdict word: both fail closed.
+            // The product blocks on an error and on a reply with no clear verdict (#821): both fail closed.
             let answer = call.response ?? ""
             name = call.error != nil || InjectionGuard.canaryVerdict(answer) == .unreadable ? "fail-closed" : "blocked"
         }
