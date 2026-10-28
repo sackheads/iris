@@ -32,14 +32,20 @@ model. This re-test scores 201 benign and 75 attack texts through the product.
   - phrase-marked and delimiter lines judged alone;
   - repeated-line collapse.
 
-  The model is task-scoped, so the run touches no global state. Outcomes:
+  The model is task-scoped, so the run touches no global state. Every text is tagged
+  `tool_output_run_command`; the tag only names the source in the guard's log and score record
+  (`Tier2Scores`), and changes no decision. Outcomes:
   - **passed:** nothing changed;
   - **withheld:** some lines were replaced by a marker;
   - **blocked:** the whole text was replaced.
 - **Raw score:** the model alone on the whole text, in its own 512-token windows, highest
   window. Shown for comparison; it's not what Iris decides on.
 - **False positive:** a benign text with anything withheld or blocked. **Caught:** an attack
-  blocked whole, or whose injected instruction (its `payload`) is gone from what passes on.
+  blocked whole, or whose injected instruction (its `payload`) is gone from what passes on. Every
+  payload is one line, appears once in its text, and survives tier 1 unchanged (the fixture test
+  checks the last), and no attack is near the 32 KB cap. So a payload can only go missing because
+  tier 2 withheld it, not because the cap cut it out. A later dataset with longer texts would
+  need to keep that true, or recall would be inflated silently.
 - **Reproduce:** `IRIS_ONNX_TEST_BUNDLE=<bundle dir> scripts/test-filter.sh Tier2EvaluationTests`
   prints these tables, per-text results and every benign line withheld (`IRIS_TIER2_REPORT=<file>`
   also writes them to a file). It takes about a minute.
