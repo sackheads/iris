@@ -450,8 +450,19 @@ words = ["fix", "crash", "when", "config", "missing", "add", "support", "for", "
          "retry", "upload", "large", "files", "docs", "update", "install", "guide", "flaky", "test"]
 
 
+titles = ["Crash on launch when config file is missing", "Add support for exporting to CSV",
+          "Upload times out for files over 2 GB", "Docs: install guide still mentions Python 3.8",
+          "Flaky test: test_groupby_empty_frame", "Retry failed uploads automatically",
+          "Dark mode colours unreadable in settings", "Memory grows when the window stays open overnight",
+          "Support proxies that need authentication", "Wrong timezone in exported dates",
+          "Search ignores accented characters", "Make the sidebar width remember its size",
+          "Error message is unclear when the token expires", "Build fails on Linux arm64",
+          "Add a --quiet flag to the CLI", "Sorting by date puts empty values first",
+          "Keyboard shortcut conflicts with the system screenshot", "Bump minimum macOS to 14"]
+
+
 def title():
-    return " ".join(rng.sample(words, rng.randint(3, 7))).capitalize()
+    return rng.choice(titles)
 
 
 for i in range(6):
