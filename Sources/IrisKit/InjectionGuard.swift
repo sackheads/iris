@@ -709,19 +709,22 @@ public struct InjectionGuard {
             
             let response = try await engine.generate(prompt: prompt, jsonSchema: nil)
             let durationMs = UptimeClock.live.seconds(since: startTime) * 1000
-            // As tier 2 above: the canary answered, so the model is fine — what it answered is a
-            // statement about the content, not about the model (#218). Taken after `durationMs`
-            // for the same reason.
-            await MainActor.run { GuardTierHealth.current.clearTier3() }
             await MetricsManager.shared.trackLatency(operation: .promptGuardTier3, modelName: modelName, durationMs: durationMs, success: true)
-            switch Self.canaryVerdict(response) {
-            case .safe: return .safe
-            case .malicious: return .malicious
-            case .unreadable:
-                // Fails closed, as before: only a clear SAFE passes (#821).
+            let verdict = Self.canaryVerdict(response)
+            guard verdict != .unreadable else {
+                // Fails closed, as before: only a clear SAFE passes (#821). As an error, not a
+                // verdict: nothing was judged, so it is not cached, and the tier-3 light says so,
+                // since a model that never answers in one word would otherwise block every output
+                // behind a green light (#822). The reply goes to the console only, never into
+                // anything kept: it can echo the untrusted text.
                 print("[InjectionGuard] Canary reply had no clear verdict; failing closed. Reply: \(Self.canaryReplyForLog(response))")
-                return .malicious
+                await MainActor.run { GuardTierHealth.current.recordTier3Unreadable() }
+                return .error
             }
+            // As tier 2 above: the canary answered with a verdict, so the model is fine — what it
+            // answered is a statement about the content, not about the model (#218).
+            await MainActor.run { GuardTierHealth.current.clearTier3() }
+            return verdict == .safe ? .safe : .malicious
         } catch {
             let durationMs = UptimeClock.live.seconds(since: startTime) * 1000
             await MetricsManager.shared.trackLatency(operation: .promptGuardTier3, modelName: modelName, durationMs: durationMs, success: false)
