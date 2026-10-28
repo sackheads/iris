@@ -1339,6 +1339,11 @@ actor IrisEngine {
         // user selects another conversation in the meantime.
         let startState = state
         let launchSelection = await MainActor.run { startState?.selectedConversationId }
+        // #792: the guard's local models start loading now, not on the first prompt. The app only:
+        // a test, `--run-job` or `--perf` never preloads a model it may not use.
+        if ProcessRole.current == .app {
+            LaunchWarmup.start(LaunchWarmup.engines(config: .shared, modelsDir: IrisPaths.default.modelsDir))
+        }
         let droppedLegacy = JobScheduler.removeLegacyDefaults(from: IrisDefaults.store)
         // The removal logs with `print`, which nobody running a Mac app reads: no importer ships,
         // so this is the user's only notice that records they made are gone. Deduped by wording.
