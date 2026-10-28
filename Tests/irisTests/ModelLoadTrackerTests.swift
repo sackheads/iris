@@ -137,6 +137,15 @@ struct GuardProbeCLITests {
         #expect(GuardProbeCLI.parse(["iris", "--guard-probe"]) == .success(.init()))
     }
 
+    @Test func configOverridesAreOptionsNotSettings() throws {
+        let parsed = try #require(GuardProbeCLI.parse(["iris", "--guard-probe", "--engine", "ollama", "--model", "gemma4:12b"]))
+        guard case .success(let options) = parsed else { Issue.record("not parsed"); return }
+        #expect(options.engine == "ollama" && options.model == "gemma4:12b" && options.tier2 == nil)
+        #expect(options.overridesConfig)
+        #expect(!GuardProbeCLI.Options().overridesConfig)
+        #expect(GuardProbeCLI.parse(["iris", "--guard-probe", "--tier2"]) == .failure(.badValue("--tier2")))
+    }
+
     @Test func refusesBadValues() {
         #expect(GuardProbeCLI.parse(["iris", "--guard-probe", "--reps", "0"]) == .failure(.badValue("--reps")))
         #expect(GuardProbeCLI.parse(["iris", "--guard-probe", "--text"]) == .failure(.badValue("--text")))
