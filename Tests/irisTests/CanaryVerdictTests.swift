@@ -65,6 +65,20 @@ struct CanaryVerdictTests {
         }
     }
 
+    @Test("an unreadable reply is a block like any verdict: cacheable, not an uncached error")
+    func unreadableIsACacheableBlock() async {
+        let text = "Build complete. \(UUID().uuidString)"
+        let result = await AuxiliaryModelManager.$scopedEngines.withValue(["canary": Canary(reply: "Not safe at all")]) {
+            await CoreMLEvaluator.$scopedModel.withValue(.init(PassingTier2())) {
+                await InjectionGuard.classifyUntrustedDetailed(text, contextTag: "tool_output_run_command",
+                                                               maxTier: .tier3_canary, protectionEnabled: true)
+            }
+        }
+        guard case .blocked = result.outcome else { Issue.record("not blocked: \(result.outcome)"); return }
+        // An error would not be cacheable, giving the same text a fresh roll on every re-read.
+        #expect(result.cacheable)
+    }
+
     @Test("through the guard, a reply that only contains the verdict word is blocked")
     func guardBlocksAnUnreadableReply() async {
         #expect(await outcome("UNSAFE") == "blocked")
@@ -85,6 +99,9 @@ struct CanaryVerdictTests {
             #expect(notices.isEmpty, "one odd reply is not announced")
             #expect(await outcome("SAFE then more words") == "blocked")
             #expect(notices == [GuardTierHealth.unreadableNotice], "the second in a row is")
+            // Guarded text can provoke an unclear reply, so the notice must not argue for the off-switch.
+            #expect(!GuardTierHealth.unreadableNotice.localizedCaseInsensitiveContains("turn off"))
+            #expect(!GuardTierHealth.unreadableNotice.contains("Enable Protection"))
             #expect(await outcome("SAFE") == "passed")
             #expect(box.tier3Failure == nil, "a clear verdict clears the light")
         }

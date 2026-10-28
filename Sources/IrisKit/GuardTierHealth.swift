@@ -105,8 +105,9 @@ import Foundation
     static let tier3UnreadableReason = "the canary's reply had no clear verdict"
 
     /// #822: the canary answered, but not with a one-word SAFE or MALICIOUS, so the output was
-    /// blocked. Recorded like a failure, so the light shows it, with a notice whose remedy fits:
-    /// choosing another model, not re-downloading or restarting one. One odd reply can be a fluke,
+    /// blocked. Recorded like a failure, so the light shows it, with a notice of its own: no
+    /// re-download or restart advice, and no off-switch (see `unreadableNotice`). The spell counter
+    /// is shared with `recordTier3Failure`, so a mixed run announces whichever notice comes due. One odd reply can be a fluke,
     /// so the notice waits for a second in a row whatever the engine; the light changes at once.
     /// The reply is never kept here: it can echo the untrusted text.
     func recordTier3Unreadable() {
@@ -116,9 +117,13 @@ import Foundation
         tier3Announced = announce(Self.unreadableNotice)
     }
 
-    static let unreadableNotice = "The tier-3 prompt-injection guard's model is answering without a one-word SAFE or MALICIOUS, "
-        + "so guarded output is being blocked rather than checked. Choose a different tier-3 model in Settings → Security, "
-        + "or turn off \"Enable Protection (Tier 2 & 3)\" there if you would rather run without it."
+    /// No off-switch here, unlike `notice`: the text being judged can provoke an unclear reply on
+    /// purpose (asking the scanner to explain itself), so a notice that offered turning protection
+    /// off would let guarded content argue the user out of the guard (#822 review). It names both
+    /// possible causes and only the remedy that is safe either way.
+    static let unreadableNotice = "The tier-3 prompt-injection guard got replies without a one-word SAFE or MALICIOUS, "
+        + "so that output was blocked rather than checked. The cause may be the guard's model or the text it was judging. "
+        + "If it keeps happening on ordinary output, the model may not suit tier 3: you can choose another in Settings → Security."
 
     /// Local engines are named; anything else is remote or a daemon.
     static func announceThreshold(engine: String) -> Int {
