@@ -132,7 +132,8 @@ locked while read and appended, and one that exists but won't read or parse stop
 on their tokens, thinking included; a full run prints its estimate with the assumption it uses. It
 uses gcloud's ADC on Vertex (project from `GOOGLE_CLOUD_QUOTA_PROJECT` or gcloud's config) and
 never reads the Keychain; `--gemini-auth key` uses the Keychain's API key instead.
-`--thinking-level` is added to the probe's own request body only; the product sends none.
+`--thinking-level` is added to the probe's own request body only; the product sends none. The
+table also counts each arm's calls slower than the product's 60 s request timeout (#797).
 
 ## Running one job headlessly (`--run-job`)
 
