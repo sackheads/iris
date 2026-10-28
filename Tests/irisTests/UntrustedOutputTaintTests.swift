@@ -17,7 +17,7 @@ private func eventually(_ timeoutMs: Int = 5000, _ condition: @MainActor @Sendab
 struct UntrustedOutputClassifierTests {
     @Test func ownWordsDoNotTaint() {
         for name in ["write_file", "create_skill", "update_soul", "save_fact", "reflect", "set_workspace",
-                     "gmail_send_email", "goal_complete", "send_to_session"] {
+                     "rename_conversation"] {
             #expect(!IrisEngine.resultCarriesOutsideContent(name, args: [:]), "\(name)")
         }
     }
@@ -26,7 +26,10 @@ struct UntrustedOutputClassifierTests {
         for name in ["run_command", "search_web", "gmail_list_unread", "google_docs_get", "search_memory",
                      "search_conversations", "read_conversation", "get_job_run", "list_jobs",
                      "list_sessions", "describe_session", "delegate_milestone",
-                     "someserver___fetch", "a_tool_nobody_declared"] {
+                     "someserver___fetch", "a_tool_nobody_declared",
+                     // #818 review: these can return text they didn't compose.
+                     "goal_complete", "reach_checkpoint", "gmail_send_email", "google_calendar_create_event",
+                     "google_tasks_create_task", "send_to_session", "set_session_card", "manage_fact"] {
             #expect(IrisEngine.resultCarriesOutsideContent(name, args: [:]), "\(name)")
         }
     }
@@ -36,6 +39,20 @@ struct UntrustedOutputClassifierTests {
         #expect(!IrisEngine.resultCarriesOutsideContent("read_file", args: ["path": .string("/tmp/x")]))
         #expect(IrisEngine.resultCarriesOutsideContent("read_file",
                                                        args: ["path": .string("iris-artifact://" + String(repeating: "a", count: 64))]))
+    }
+
+    /// Only Iris's own standing context is first-party; the rest of ~/.iris can hold anyone's text.
+    @Test func onlyStandingContextIsAFirstPartyRead() {
+        let paths = IrisPaths(root: URL(fileURLWithPath: "/tmp/iris-813-\(UUID().uuidString)"))
+        for url in [paths.soulMd, paths.userMd, paths.memoryMd, paths.skillsDir.appendingPathComponent("x/SKILL.md"),
+                    paths.rulesDir.appendingPathComponent("a.md"), paths.configDir.appendingPathComponent("hooks.json")] {
+            #expect(IrisEngine.isFirstPartyRead(url.path, paths: paths), "\(url.path)")
+        }
+        for url in [paths.workspacesDir.appendingPathComponent("repo/README.md"), paths.pluginsDir.appendingPathComponent("p/rules.md"),
+                    paths.libraryDir.appendingPathComponent("doc.md"), paths.artifactsDir.appendingPathComponent("a.txt"),
+                    paths.root.appendingPathComponent("notes.md")] {
+            #expect(!IrisEngine.isFirstPartyRead(url.path, paths: paths), "\(url.path)")
+        }
     }
 
     @Test func aBackgroundSubagentTaintsOnlyWhenItReports() {
@@ -150,31 +167,73 @@ struct UntrustedOutputEngineTests {
         #expect(!tainted(app, id))
     }
 
-    /// Iris's own file is first-party; any other file is someone else's text.
-    @Test func aReadTaintsOnlyOutsideIrisOwnFolder() async throws {
-        let own = IrisPaths.default.root.appendingPathComponent("taint-813-\(UUID().uuidString).md")
+    /// Iris's own standing context is first-party; any other file is someone else's text, a cloned
+    /// workspace under ~/.iris included (#818 review).
+    @Test func aReadTaintsOutsideIrisStandingContext() async throws {
+        let own = IrisPaths.default.rulesDir.appendingPathComponent("taint-813-\(UUID().uuidString).md")
+        let cloned = IrisPaths.default.workspacesDir.appendingPathComponent("taint-813-\(UUID().uuidString).md")
         let outside = FileManager.default.temporaryDirectory.appendingPathComponent("taint-813-\(UUID().uuidString).txt")
-        try FileManager.default.createDirectory(at: IrisPaths.default.root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: IrisPaths.default.rulesDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: IrisPaths.default.workspacesDir, withIntermediateDirectories: true)
         try "mine".write(to: own, atomically: true, encoding: .utf8)
         try "theirs".write(to: outside, atomically: true, encoding: .utf8)
-        defer { try? FileManager.default.removeItem(at: own); try? FileManager.default.removeItem(at: outside) }
+        try "cloned".write(to: cloned, atomically: true, encoding: .utf8)
+        defer { for u in [own, outside, cloned] { try? FileManager.default.removeItem(at: u) } }
 
         let (app, _, id) = session([FunctionCall(name: "read_file", args: ["path": .string(own.path)], id: "c1")])
         app.sendMessage("go")
         #expect(await eventually { self.finished(app, id) })
-        #expect(!tainted(app, id), "a read under ~/.iris is first-party")
+        #expect(!tainted(app, id), "a read of a rule is first-party")
 
         let (app2, _, id2) = session([FunctionCall(name: "read_file", args: ["path": .string(outside.path)], id: "c1")])
         app2.sendMessage("go")
         #expect(await eventually { self.finished(app2, id2) })
         #expect(tainted(app2, id2))
+
+        let (app3, _, id3) = session([FunctionCall(name: "read_file", args: ["path": .string(cloned.path)], id: "c1")])
+        app3.sendMessage("go")
+        #expect(await eventually { self.finished(app3, id3) })
+        #expect(tainted(app3, id3), "a workspace under ~/.iris is someone else's text")
     }
 
-    @Test func anArrivalTaints() async {
-        let (app, engine, id) = session([])
-        #expect(!tainted(app, id))
-        await engine.handleSystemEvent("Background subagent result: built", source: "SubagentManager", conversationId: id)
-        #expect(await eventually { self.tainted(app, id) })
-        await engine.cancelReprompt(for: id)
+    /// #818 review: a subagent of a tainted parent starts tainted, or delegating walks around the
+    /// hold. Read from inside the subagent's first model call: its own `goal_complete` taints it
+    /// afterwards either way.
+    @Test func aSubagentInheritsItsParentsTaint() async throws {
+        let app = AppState()
+        app.autoApproveTools = true
+        func startedTainted(parent: UUID) async -> Bool? {
+            let done = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [
+                Part(functionCall: FunctionCall(name: "goal_complete", args: ["summary": .string("done")]))]))], usageMetadata: nil)
+            let client = TaintProbe(response: done) {
+                await MainActor.run { app.conversations.last { $0.isSubagent }?.hasUntrustedToolOutput }
+            }
+            _ = await SubagentManager.shared.runSubagent(role: "w", task: "t", effort: "easy", parentConversationId: parent,
+                                                         client: client, appState: app)
+            return client.seen
+        }
+        let clean = app.createNewConversation(select: false)
+        #expect(await startedTainted(parent: clean) == false, "a clean parent's subagent starts clean")
+        let dirty = app.createNewConversation(select: false)
+        app.markConversationReadUntrusted(dirty)
+        #expect(await startedTainted(parent: dirty) == true)
+    }
+}
+
+/// Answers every call with one response, recording what `probe` saw at the first.
+private final class TaintProbe: LLMClientProtocol, @unchecked Sendable {
+    private let probe: @Sendable () async -> Bool?
+    private let response: GeminiResponse
+    private let lock = NSLock()
+    private var first: Bool??
+    init(response: GeminiResponse, probe: @escaping @Sendable () async -> Bool?) {
+        self.response = response
+        self.probe = probe
+    }
+    var seen: Bool? { lock.withLock { first ?? nil } }
+    func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+        let observed = await probe()
+        lock.withLock { if first == nil { first = observed } }
+        return response
     }
 }

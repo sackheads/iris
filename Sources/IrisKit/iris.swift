@@ -3901,19 +3901,33 @@ actor IrisEngine {
     /// run is a run that grows its own footprint with nobody asked.
     static let jobCreationTools: Set<String> = ["schedule_job", "register_directory_watcher"]
 
-    /// #813: the tools whose result is only Iris's own words: an echo of what the model sent, a
-    /// confirmation sentence, a Google create or send acknowledgement. Every other result taints the
-    /// conversation (`resultCarriesOutsideContent`), including an unknown or MCP tool's, so a tool
-    /// added later taints until someone decides it shouldn't.
+    /// #813: the tools whose every result is only Iris's own words: an echo of what the model sent,
+    /// or a fixed confirmation sentence. Every other result taints the conversation
+    /// (`resultCarriesOutsideContent`), including an unknown or MCP tool's, so a tool added later
+    /// taints until someone decides it shouldn't. Kept short on purpose (#818 review): a tool that
+    /// can return anything it didn't compose itself (an evaluator's evidence, Google's response
+    /// or error body, another session's card, a restored fact's text) stays off it.
     nonisolated static let resultIsIrisOwnWords: Set<String> = [
         "write_file", "create_skill", "update_skill", "delete_skill",
         "set_workspace", "register_directory_watcher",
-        "update_user_profile", "update_soul", "update_memory", "save_fact", "manage_fact", "reflect",
-        "rename_conversation", "schedule_job", "propose_goal_contract", "amend_goal_contract",
-        "reach_checkpoint", "waive_criterion", "goal_complete", scheduleNextTickTool, "submit_evaluation",
-        "send_to_session", "set_session_card", "close_request",
-        "gmail_send_email", "google_tasks_create_task", "google_calendar_create_event",
+        "update_user_profile", "update_soul", "update_memory", "save_fact", "reflect",
+        "rename_conversation", scheduleNextTickTool,
     ]
+
+    /// #813: a read under ~/.iris that is Iris's own standing context: SOUL, USER, memory.md,
+    /// skills, rules, config. The rest of ~/.iris holds other people's text too (cloned
+    /// workspaces, plugin files, library imports, artifacts), so a read there taints (#818 review).
+    nonisolated static func isFirstPartyRead(_ path: String, paths: IrisPaths = .default) -> Bool {
+        let target = IrisPaths.realPath(path)
+        for file in [paths.soulMd, paths.userMd, paths.memoryMd] where IrisPaths.samePath(target, IrisPaths.realPath(file.path)) {
+            return true
+        }
+        return [paths.skillsDir, paths.rulesDir, paths.configDir].contains { dir in
+            let root = IrisPaths.realPath(dir.path).lowercased()
+            let t = target.lowercased()
+            return t == root || t.hasPrefix(root + "/")
+        }
+    }
 
     /// #813: whether a call's result, as the dispatcher returns it, puts text in front of the model
     /// that neither the person nor Iris's own files wrote. `read_file` is decided here only for an
@@ -6267,6 +6281,7 @@ actor IrisEngine {
         if name == "read_file",
            let path = execArgs["path"]?.stringValue,
            IrisPaths.default.isUnderIrisDir(path) {
+            if !Self.isFirstPartyRead(ToolExecutor.resolvePath(path, cwd: cwd)) { await markReadUntrusted(conversationId) }
             return result
         }
         // #813: any other read is someone else's text. Decided here, after the hooks, on the path
