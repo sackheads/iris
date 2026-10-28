@@ -23,3 +23,5 @@ The texts behind the `injection.*` eval tasks (docs/specs/2026-10-28-model-eval-
 - **Frozen.** Any change to a text, a label or the split is v4.
 
 Sources and licences: [SOURCES.md](SOURCES.md).
+
+**First result** (#809): `eval/results/injection.classifier/2026-10-28-onnx-deberta-v3-base-prompt-injection-v2.onnx-v3-test-full.json` records `iris_commit` `c763e9bd`, the branch before its rebase onto main for #801 and #806. That commit isn't on main. The eval code, the guard and v3's files there are identical to the merged ones, and the result's dataset sha256s match this manifest.
