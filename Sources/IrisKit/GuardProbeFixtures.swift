@@ -195,6 +195,10 @@ enum GuardProbeFixtures {
     /// Whether the payload was kept from the model: the text blocked whole, or fail-closed.
     static func caught(_ outcome: String) -> Bool { outcome != "passed" }
 
+    /// The input tokens a call is expected to cost: the capped text at 4 bytes a token, plus the
+    /// canary prompt's ~150. Calibration scales it by what the provider reported.
+    static func predictedInput(_ item: Item) -> Int { min(item.text.utf8.count, 32 * 1024) / 4 + 150 }
+
     static func dollars(_ t: (input: Int, output: Int, thought: Int), rates: TokenRates) -> Double {
         Double(t.input) * rates.input + Double(t.output + t.thought) * rates.output
     }

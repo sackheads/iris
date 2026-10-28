@@ -123,4 +123,51 @@ struct GuardProbeFixturesTests {
         #expect(table.contains("0/1 (0.0%)"), "agreement: a1 judged three times, not all alike")
         #expect(table.contains("$0.01 total"))
     }
+
+    private func tempLedger(_ contents: String? = nil) throws -> String {
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent("iris-783-ledger-\(UUID().uuidString)").path
+        if let contents { try contents.write(toFile: path, atomically: true, encoding: .utf8) }
+        return path
+    }
+
+    @Test func aMissingLedgerStartsAtZero() throws {
+        let path = try tempLedger()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        #expect(try SpendLedger(path: path, arm: "a", cap: 5).total() == 0)
+    }
+
+    @Test func aDamagedOrUnreadableLedgerStopsTheRun() async throws {
+        let path = try tempLedger(#"{"arm":"a","reserve":0.1,"id":"x"}"# + "\nnot json\n")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        #expect(throws: SpendLedger.LedgerError.corrupt(line: 2)) { _ = try SpendLedger(path: path, arm: "a", cap: 5) }
+        #expect(throws: SpendLedger.LedgerError.self) { _ = try SpendLedger(path: FileManager.default.temporaryDirectory.path, arm: "a", cap: 5) }
+        // The run stops on it before its first call, and before it touches any setting.
+        let o = GuardProbeFixtures.Options(dir: "/nonexistent", model: "cloud:gemini/gemini-3.8-flash", arm: "a", out: "/tmp",
+                                           allowPaid: true, spendLedger: path)
+        #expect(await GuardProbeFixtures.run(o) == 1)
+    }
+
+    @Test func aReserveCountsForOtherArmsUntilSettled() throws {
+        let path = try tempLedger()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let a = try SpendLedger(path: path, arm: "a", cap: 1), b = try SpendLedger(path: path, arm: "b", cap: 1)
+        let held = try #require(try a.reserve(0.6))
+        #expect(try b.reserve(0.5) == nil, "a's call in flight already counts")
+        try a.settle(held, dollars: 0.2, tokens: (10, 1, 5))
+        #expect(try b.reserve(0.5) != nil)
+        #expect(abs(try a.total() - 0.7) < 1e-9)
+    }
+
+    @Test func twoArmsTogetherStayUnderTheCap() throws {
+        let path = try tempLedger()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let arms = [try SpendLedger(path: path, arm: "a", cap: 1), try SpendLedger(path: path, arm: "b", cap: 1)]
+        DispatchQueue.concurrentPerform(iterations: 200) { i in
+            let ledger = arms[i % 2]
+            if let id = try? ledger.reserve(0.05) { try? ledger.settle(id, dollars: 0.04, tokens: (1, 1, 1)) }
+        }
+        let total = try arms[0].total()
+        #expect(total <= 1.0)
+        #expect(total > 0.9, "the cap is used, not refused early: \(total)")
+    }
 }
