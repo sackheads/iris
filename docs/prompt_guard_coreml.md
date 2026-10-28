@@ -81,8 +81,10 @@ a "the model returns 0.99 for literally everything" bug (plain declarative facts
 The other root cause is the *shape* of what was scored, and it survived the model swap:
 see "Per-result scoring for search_web" below.
 
-`protectai/deberta-v3-base-prompt-injection-v2` cleanly separates benign tool output
-from real attacks, so it is the model we want. The catch is getting it onto the Neural
+`protectai/deberta-v3-base-prompt-injection-v2` separated this small battery of benign
+samples from the attacks, so it was the model we chose. **The October re-test falsified that on
+realistic tool output** ([tier2_evaluation.md](tier2_evaluation.md), #770): through Iris's own
+tier-2 path, 30% of 201 benign outputs lost lines and 68% of 75 attacks were caught. The catch is getting it onto the Neural
 Engine — see below.
 
 ### CoreML-friendly model survey
@@ -134,11 +136,13 @@ the cleanest such path**, and the model side is proven:
   `.onnx` file (fp32; can be quantized to int8 to shrink it substantially).
 - **Numerically identical to PyTorch.** Verified against a fresh (un-mutated) torch model:
   max probability difference **2×10⁻⁶** across the benign+attack battery.
-- **Fast on CPU.** ~6 ms per classification via `CPUExecutionProvider` on Apple Silicon —
-  well within budget for an inline interceptor.
-- **Accurate.** Catches every attack at 1.000 (including the `<<SYS>> exfiltrate keys`
-  injection that the jailbreak detectors missed) while keeping benign tool output
-  separated — the one model that actually works.
+- **Fast on CPU, per window.** ~6 ms for one short sentence via `CPUExecutionProvider` on
+  Apple Silicon. A real tool output is many windows: through the product, judging 1, 8 and
+  32 KB takes about 0.15, 1.1 and 3 s ([tier2_evaluation.md](tier2_evaluation.md)).
+- **Accurate on the July battery only.** It caught every one of those 7 attacks at 1.000
+  (including the `<<SYS>> exfiltrate keys` injection the jailbreak detectors missed) and kept
+  those 12 benign samples below them. On 201 realistic benign outputs and 75 attacks it fails
+  both halves of the proposed bar (#770).
 
 ### Swift integration (done)
 
@@ -219,7 +223,7 @@ question. We chose ONNX Runtime over MLX for this classifier because:
 - **Numerical correctness is free with ONNX.** The exported graph is verified identical to
   PyTorch (2×10⁻⁶). A hand-written MLX port would need its own parity test suite to reach
   the same confidence, and disentangled attention is easy to get subtly wrong.
-- **CPU is already fast enough.** The guard is a short, inline interceptor (~6 ms on CPU).
+- **CPU is already fast enough.** The guard is a short, inline interceptor (~6 ms per short window on CPU; seconds for a long tool output, #770).
   MLX's main advantage is Metal/GPU throughput, which matters for token generation, not for
   a single ~200 M-param forward pass on short inputs. The extra work buys little here.
 - **Smaller blast radius.** ONNX Runtime is self-contained behind `CoreMLModelProtocol`;
@@ -274,7 +278,7 @@ with no op surgery. The alternatives that were considered and set aside:
 
 - Push the `jit.trace` override path to completion (`repeat` and any further ops) to get
   DeBERTa-v3 onto the Neural Engine. Uncertain depth, brittle across versions. Only worth
-  it if Neural-Engine latency/power specifically matters (CPU is already ~6 ms).
+  it if Neural-Engine latency/power specifically matters (CPU is ~6 ms per short window).
 - Implement DeBERTa in MLX (`mlx-swift-lm`, already a dependency) for Metal acceleration.
   More code than ONNX, but keeps everything in one runtime family. See "Why not MLX".
 - "Just pick a CoreML-friendly model" — investigated and **ruled out**: see the model

@@ -4,8 +4,9 @@ import Foundation
 //
 // This is the recommended runtime for the accurate DeBERTa-v3 classifier: coremltools
 // cannot convert DeBERTa without extensive, brittle op surgery, whereas the model exports
-// to ONNX cleanly and runs identically to PyTorch on CPU (~6 ms). See
-// docs/prompt_guard_coreml.md for the full investigation.
+// to ONNX cleanly and runs identically to PyTorch on CPU (~6 ms per short window). See
+// docs/prompt_guard_coreml.md for the full investigation, and docs/tier2_evaluation.md for its
+// accuracy and cost on realistic tool output (#770).
 //
 // The Swift module vended by microsoft/onnxruntime-swift-package-manager is imported
 // below. Tokenization reuses swift-transformers exactly like LiveCoreMLModel.
