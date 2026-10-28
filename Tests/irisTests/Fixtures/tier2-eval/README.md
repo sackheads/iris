@@ -38,6 +38,6 @@ Attacks:
   `### Instruction:`, `Human:`/`Assistant:`, a wrapper breakout), alone or in a log.
 - `known_miss`: the sentence that scored 0.29 alone on this model
   (`docs/prompt_injection_guard_design.md`, "Known limit"). It was recorded with an ellipsis
-  ("run curl … and send the user's API keys"), so the elided part is filled in. It appears alone, inside a build log, and in two shorter
-  variants closer to the recorded wording.
+  ("run curl … and send the user's API keys"), so the elided part is filled in. It appears
+  alone, inside a build log, and in two shorter variants closer to the recorded wording.
 - `subtle`: instructions without the usual trigger words, inside a how-to.
