@@ -49,7 +49,18 @@ public final class CoreMLEvaluator: @unchecked Sendable {
     /// an installed model writing that model into `shared` made every unscoped tier-2 call in the
     /// process see it appear and vanish mid-check, which fails closed (#375). Production uses only
     /// `shared`.
-    init() {}
+    /// `tracker`, `configuredModel` and `modelsDir` let a test pin the load's tracking (#778)
+    /// without writing settings; production reads the shared ones at load time.
+    init(tracker: ModelLoadTracker = .shared,
+         configuredModel: @escaping @Sendable () -> String = { ConfigManager.shared.promptGuardCoreMLModel },
+         modelsDir: @escaping @Sendable () -> URL = { IrisPaths.default.modelsDir }) {
+        self.tracker = tracker
+        self.configuredModel = configuredModel
+        self.modelsDir = modelsDir
+    }
+    private let tracker: ModelLoadTracker
+    private let configuredModel: @Sendable () -> String
+    private let modelsDir: @Sendable () -> URL
     
     /// `nil` clears the loaded model (#210 fix round 1) — the test seam for forcing
     /// `hasModelLoaded` back to `false` regardless of what an earlier test in the process
@@ -73,7 +84,7 @@ public final class CoreMLEvaluator: @unchecked Sendable {
         // seam exists to close, so the check belongs ahead of the config read, not after it.
         if Self.scopedModel != nil { return }
         if hasModelLoaded { return }
-        let coreMLPathStr = ConfigManager.shared.promptGuardCoreMLModel
+        let coreMLPathStr = configuredModel()
         if coreMLPathStr.isEmpty { return }
         
         // #210: resolved via the shared helper so this can never disagree with
@@ -81,7 +92,7 @@ public final class CoreMLEvaluator: @unchecked Sendable {
         // means.
         let modelDirName = ModelDownloader.resolvedCoreMLDirectoryName(for: coreMLPathStr)
 
-        let basePath = IrisPaths.default.modelsDir.path
+        let basePath = modelsDir().path
         let fullPath = URL(fileURLWithPath: basePath).appendingPathComponent(modelDirName)
         
         if FileManager.default.fileExists(atPath: fullPath.path) {
@@ -92,7 +103,7 @@ public final class CoreMLEvaluator: @unchecked Sendable {
                 let onnxURL = fullPath.appendingPathComponent("model.onnx")
                 if FileManager.default.fileExists(atPath: onnxURL.path) {
                     #if canImport(OnnxRuntimeBindings)
-                    let liveModel = try await ModelLoadTracker.shared.track(.guardTier2, name: modelDirName) {
+                    let liveModel = try await tracker.track(.guardTier2, name: modelDirName) {
                         try await LiveONNXModel(modelURL: onnxURL, tokenizerConfigURL: fullPath)
                     }
                     setModel(liveModel)
@@ -100,7 +111,7 @@ public final class CoreMLEvaluator: @unchecked Sendable {
                     throw NSError(domain: "CoreMLEvaluator", code: -1, userInfo: [NSLocalizedDescriptionKey: "ONNX model found but ONNX Runtime is not available in this build."])
                     #endif
                 } else {
-                    let liveModel = try await ModelLoadTracker.shared.track(.guardTier2, name: modelDirName) {
+                    let liveModel = try await tracker.track(.guardTier2, name: modelDirName) {
                         try await LiveCoreMLModel(modelURL: fullPath, tokenizerConfigURL: fullPath)
                     }
                     setModel(liveModel)

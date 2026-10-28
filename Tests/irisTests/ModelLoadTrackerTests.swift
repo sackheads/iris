@@ -162,3 +162,71 @@ struct GuardProbeCLITests {
         #expect(await GuardProbeCLI.run(.init(), build: .release) == 1)
     }
 }
+
+/// The load sites report to the tracker they were given (#778 review): each site's begin and its
+/// end, including the failure path a missing model takes.
+@Suite("Model load sites report to the tracker (#778)", .timeLimit(.minutes(1)))
+struct ModelLoadSiteTests {
+    @Test func aMissingLlamaModelIsAFailedLoad() async {
+        let lines = Lines()
+        let tracker = ModelLoadTracker(log: { lines.append($0) })
+        let manager = AuxiliaryModelManager(tracker: tracker)
+        let config = AuxiliaryModelConfig(role: "canary", engineType: .llamaCPP,
+                                          modelPathOrName: "missing-\(UUID().uuidString).gguf")
+        await #expect(throws: (any Error).self) { _ = try await manager.getEngine(for: "canary", config: config) }
+        #expect(tracker.active.isEmpty)
+        #expect(lines.all.count == 2)
+        #expect(lines.all[0].contains("begin purpose=\"guard (tier 3)\""))
+        #expect(lines.all[1].contains("failed error="))
+        #expect(!manager.hasEngine(for: "canary"))
+    }
+
+    @Test func aCloudEngineLoadsNothing() async throws {
+        let lines = Lines()
+        let manager = AuxiliaryModelManager(tracker: ModelLoadTracker(log: { lines.append($0) }))
+        _ = try await manager.getEngine(for: "canary", config: AuxiliaryModelConfig(role: "canary", engineType: .cloud, modelPathOrName: "x"))
+        #expect(lines.all.isEmpty)
+    }
+
+    @Test func aBrokenTier2BundleIsAFailedLoad() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-778-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir.appendingPathComponent("bogus.mlmodelc"), withIntermediateDirectories: true)
+        let lines = Lines()
+        let tracker = ModelLoadTracker(log: { lines.append($0) })
+        let evaluator = CoreMLEvaluator(tracker: tracker, configuredModel: { "bogus.mlmodelc" }, modelsDir: { dir })
+        await #expect(throws: (any Error).self) { try await evaluator.loadModelIfNeeded() }
+        #expect(tracker.active.isEmpty)
+        #expect(lines.all.first?.contains("begin purpose=\"guard (tier 2)\" name=bogus.mlmodelc") == true)
+        #expect(lines.all.last?.contains("failed error=") == true)
+    }
+
+    @Test func theOllamaPreloadIsALoadUntilItsReply() async throws {
+        let lines = Lines()
+        let tracker = ModelLoadTracker(log: { lines.append($0) })
+        let replied = Lines()
+        let engine = OllamaEngine(tracker: tracker, transport: .init(
+            ps: { nil },
+            preload: { _ in
+                replied.append("sent")
+                return (200, Data(#"{"done":true,"load_duration":2500000000}"#.utf8))
+            }))
+        try await engine.loadModel(config: AuxiliaryModelConfig(role: "vibecop", engineType: .ollama, modelPathOrName: "gemma4:12b"))
+        #expect(lines.all.first?.contains("begin purpose=\"Vibecop\" name=gemma4:12b") == true)
+        if let task = await engine.pendingPreload { try await value(of: task, within: 10) }
+        #expect(tracker.active.isEmpty)
+        #expect(replied.all == ["sent"])
+        #expect(lines.all.last?.contains("loaded load_duration_ms=2500") == true)
+    }
+
+    @Test func aRefusedOllamaPreloadIsAFailedLoad() async throws {
+        let lines = Lines()
+        let tracker = ModelLoadTracker(log: { lines.append($0) })
+        let engine = OllamaEngine(tracker: tracker, transport: .init(
+            ps: { nil }, preload: { _ in (404, Data(#"{"error":"model not found"}"#.utf8)) }))
+        try await engine.loadModel(config: AuxiliaryModelConfig(role: "canary", engineType: .ollama, modelPathOrName: "nope"))
+        if let task = await engine.pendingPreload { try await value(of: task, within: 10) }
+        #expect(tracker.active.isEmpty)
+        #expect(lines.all.last?.contains("failed error=\"HTTP 404\"") == true)
+    }
+}

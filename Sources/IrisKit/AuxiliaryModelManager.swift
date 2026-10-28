@@ -19,7 +19,11 @@ final class AuxiliaryModelManager: @unchecked Sendable {
     /// Production never sets it.
     @TaskLocal static var scopedEngines: [String: AuxiliaryInferenceEngine]?
     
-    init() {
+    /// Where this manager's loads are tracked (#778); a test passes its own.
+    private let tracker: ModelLoadTracker
+
+    init(tracker: ModelLoadTracker = .shared) {
+        self.tracker = tracker
         self.modelsDir = IrisPaths.default.modelsDir.path
         self.registryPath = "\(modelsDir)/models.json"
 
@@ -41,7 +45,7 @@ final class AuxiliaryModelManager: @unchecked Sendable {
                     switch config.engineType {
                     case .llamaCPP:
                         // The load is the file read into memory, so it is tracked here (#778).
-                        engine = try await ModelLoadTracker.shared.track(ModelLoadPurpose(role: role), name: config.modelPathOrName) {
+                        engine = try await tracker.track(ModelLoadPurpose(role: role), name: config.modelPathOrName) {
                             let llama = try await LlamaCPPEngine()
                             try await llama.loadModel(config: config)
                             return llama
@@ -49,9 +53,9 @@ final class AuxiliaryModelManager: @unchecked Sendable {
                         return engine
                     case .ollama:
                         // Ollama's load happens in its server; the engine tracks its own preload.
-                        engine = OllamaEngine()
+                        engine = OllamaEngine(tracker: tracker)
                     case .mlx:
-                        try await ModelLoadTracker.shared.track(ModelLoadPurpose(role: role), name: config.modelPathOrName) {
+                        try await tracker.track(ModelLoadPurpose(role: role), name: config.modelPathOrName) {
                             try await MLXEngine.shared.loadModel(config: config)
                         }
                         return MLXEngine.shared
