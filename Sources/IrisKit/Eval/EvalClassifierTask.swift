@@ -61,7 +61,7 @@ enum EvalClassifierTask {
             throw EvalError.unsupported("this build has no tokenizers")
             #endif
         case .ollama, .llamacpp, .mlx:
-            throw EvalError.unsupported("\(spec.runtime.rawValue) models are judged by injection.verdict (slice 1b, #788)")
+            throw EvalError.unsupported("\(spec.runtime.rawValue) models are canaries: injection.verdict and injection.stack (#803)")
         }
     }
 

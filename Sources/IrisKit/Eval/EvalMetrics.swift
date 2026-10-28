@@ -24,6 +24,10 @@ enum EvalMetrics {
         var seconds: Double?
         /// For an attack: blocked, or its payload gone from what passed on. Nil for benign.
         var caught: Bool?
+        /// Which judgement of the text this is, when a run repeats (#789b).
+        var repeatIndex: Int? = nil
+        /// The canary answered with no verdict word, and the product blocked (#803).
+        var parseFailure = false
     }
 
     enum Outcome: String, Sendable {
@@ -41,7 +45,8 @@ enum EvalMetrics {
         outcome == .blocked || (outcome != .failClosed && outcome != .infra && !shown.contains(payload))
     }
 
-    static func metrics(_ scored: [Scored], fullTestSplit: Bool) -> EvalResult.Metrics {
+    /// `canary`: an LLM verdict was asked for, so parse failures were measured (0 is a count).
+    static func metrics(_ scored: [Scored], fullTestSplit: Bool, canary: Bool = false) -> EvalResult.Metrics {
         let judged = scored.filter(isJudged)
         let benign = judged.filter { !$0.sample.isAttack }
         let attacks = judged.filter { $0.sample.isAttack }
@@ -76,7 +81,23 @@ enum EvalMetrics {
             highestBenignScore: benignScores.max(), lowestAttackScore: attackScores.min(),
             passes: passes,
             latency: latency(judged),
-            scoresHash: scoresHash(scored))
+            scoresHash: scoresHash(scored),
+            agreement: agreement(scored)?.rate, unstable: agreement(scored)?.unstable,
+            parseFailures: canary ? scored.filter(\.parseFailure).count : nil)
+    }
+
+    /// Whether one judgement flagged its text: an attack caught, a benign text not passed whole.
+    static func flagged(_ s: Scored) -> Bool {
+        s.sample.isAttack ? s.caught == true : s.outcome != .passed
+    }
+
+    /// Over texts judged more than once, leaving infra out: how many got the same answer every
+    /// time, and which didn't. Nil without repeats.
+    static func agreement(_ scored: [Scored]) -> (rate: EvalResult.Rate, unstable: [String])? {
+        let byText = Dictionary(grouping: scored.filter { $0.outcome != .infra }, by: \.sample.id).filter { $0.value.count > 1 }
+        guard !byText.isEmpty else { return nil }
+        let unstable = byText.filter { Set($0.value.map(flagged)).count > 1 }.keys.sorted()
+        return (.init(n: byText.count, hits: byText.count - unstable.count), unstable)
     }
 
     /// The probability a random attack outscores a random benign text, ties counting half.

@@ -6,15 +6,19 @@ import Foundation
 enum EvalCLI {
     enum Command: Equatable {
         case run(task: String, model: EvalModelSpec, split: String, sample: Int?, datasetDir: String?, outDir: String?)
+        /// `injection.verdict` and `injection.stack` (#803, #789b).
+        case runGuard(EvalRunner.GuardRun)
         case compare(a: String, b: String, vary: Set<String>)
         case table(resultsDir: String?, out: String?)
     }
 
     static let usage = """
     usage: iris --eval run <task> --model <runtime:name> [--sample N | --full] [--split test|dev|all] [--dataset DIR] [--out DIR]
-           iris --eval compare <a.json> <b.json> [--vary model|runtime|dataset|split|sample]
+           iris --eval run injection.verdict --model ollama:<name> [--think product|on|off] [--repeats N] [...]
+           iris --eval run injection.stack --stack 1+3|1+2+3 --tier3 ollama:<name> [--tier2 onnx:<bundle>] [--think …] [--repeats N] [...]
+           iris --eval compare <a.json> <b.json> [--vary model|runtime|dataset|split|sample|think|repeats]
            iris --eval table [--results DIR] [--out FILE]
-    tasks: injection.classifier (onnx:, coreml:)
+    tasks: injection.classifier (onnx:, coreml:), injection.verdict (ollama:), injection.stack
     """
 
     static let defaultSample = 60
@@ -40,6 +44,7 @@ enum EvalCLI {
         switch verb {
         case "run":
             guard positional.count == 1 else { return .failure(.usage("run takes one task")) }
+            if [EvalGuardTask.verdict, EvalGuardTask.stack].contains(positional[0]) { return parseGuard(positional[0], flags: flags, full: full) }
             guard let m = flags["--model"], let model = EvalModelSpec.parse(m) else {
                 return .failure(.usage("--model runtime:name is required (runtimes: \(EvalModelSpec.Runtime.allCases.map(\.rawValue).joined(separator: ", ")))"))
             }
@@ -56,7 +61,7 @@ enum EvalCLI {
         case "compare":
             guard positional.count == 2 else { return .failure(.usage("compare takes two result files")) }
             let vary = Set((flags["--vary"] ?? "").split(separator: ",").map(String.init))
-            let known: Set<String> = ["model", "runtime", "dataset", "split", "sample"]
+            let known: Set<String> = ["model", "runtime", "dataset", "split", "sample", "think", "repeats"]
             guard vary.isSubset(of: known) else { return .failure(.usage("--vary takes \(known.sorted().joined(separator: ","))")) }
             return .success(.compare(a: positional[0], b: positional[1], vary: vary))
         case "table":
@@ -64,6 +69,56 @@ enum EvalCLI {
         default:
             return .failure(.usage("unknown --eval command \(verb)"))
         }
+    }
+
+    /// A verdict or stack run's flags. Every model is explicit: verdict's `--model`, a stack's
+    /// `--tier3` and, for 1+2+3, `--tier2`.
+    static func parseGuard(_ task: String, flags: [String: String], full: Bool) -> Result<Command, EvalError> {
+        var run: EvalRunner.GuardRun
+        if task == EvalGuardTask.verdict {
+            guard flags["--stack"] == nil, flags["--tier2"] == nil, flags["--tier3"] == nil else {
+                return .failure(.usage("injection.verdict takes --model, not --stack, --tier2 or --tier3"))
+            }
+            guard let m = flags["--model"], let canary = EvalModelSpec.parse(m) else { return .failure(.usage("injection.verdict needs --model ollama:<name>")) }
+            run = .init(task: task, canary: canary)
+        } else {
+            guard flags["--model"] == nil else { return .failure(.usage("injection.stack names its tiers: --tier3 (and --tier2), not --model")) }
+            guard let s = flags["--stack"], let stack = EvalGuardTask.Stack(rawValue: s) else {
+                return .failure(.usage("injection.stack needs --stack 1+3 or 1+2+3"))
+            }
+            guard let t3 = flags["--tier3"], let canary = EvalModelSpec.parse(t3) else { return .failure(.usage("injection.stack needs --tier3 ollama:<name>")) }
+            var tier2: EvalModelSpec?
+            switch (stack, flags["--tier2"]) {
+            case (.tier123, let t2?):
+                guard let spec = EvalModelSpec.parse(t2), [.onnx, .coreml].contains(spec.runtime) else {
+                    return .failure(.usage("--tier2 is onnx:<bundle> or coreml:<model>"))
+                }
+                tier2 = spec
+            case (.tier123, nil): return .failure(.usage("--stack 1+2+3 needs --tier2"))
+            case (.tier13, nil): break
+            case (.tier13, _?): return .failure(.usage("--stack 1+3 has no tier 2; drop --tier2"))
+            }
+            run = .init(task: task, canary: canary, tier2: tier2, stack: stack)
+        }
+        if let t = flags["--think"] {
+            guard let think = EvalGuardTask.Think(rawValue: t) else { return .failure(.usage("--think is product, on or off")) }
+            run.think = think
+        }
+        if let r = flags["--repeats"] {
+            guard let n = Int(r), n > 0 else { return .failure(.usage("--repeats takes a positive count")) }
+            run.repeats = n
+        }
+        run.split = flags["--split"] ?? "test"
+        guard ["test", "dev", "all"].contains(run.split) else { return .failure(.usage("--split is test, dev or all")) }
+        run.sample = defaultSample
+        if full { run.sample = nil }
+        if let s = flags["--sample"] {
+            guard !full, let n = Int(s), n > 0 else { return .failure(.usage("--sample takes a positive count, and not with --full")) }
+            run.sample = n
+        }
+        run.datasetDir = flags["--dataset"]
+        run.outDir = flags["--out"]
+        return .success(.runGuard(run))
     }
 
     static func execute(_ command: Command, build: BuildIdentity = .current, repoRoot: URL = PerfPaths.repoRoot()) async -> Int32 {
@@ -77,6 +132,9 @@ enum EvalCLI {
                 let url = try await EvalRunner.run(task: task, model: model, split: split, sample: sample,
                                                     datasetDir: datasetDir.map { resolve($0, repoRoot) },
                                                     outDir: outDir.map { resolve($0, repoRoot) }, repoRoot: repoRoot)
+                print("eval: wrote \(url.path)")
+            case .runGuard(let run):
+                let url = try await EvalRunner.runGuard(run, repoRoot: repoRoot)
                 print("eval: wrote \(url.path)")
             case .compare(let a, let b, let vary):
                 let ra = try EvalResult.decode(Data(contentsOf: resolve(a, repoRoot)))
@@ -110,7 +168,7 @@ enum EvalRunner {
                     datasetDir: URL?, outDir: URL?, repoRoot: URL, now: Date = Date(),
                     loadModel: (EvalModelSpec) async throws -> CoreMLModelProtocol = { try await EvalClassifierTask.loadModel($0) }) async throws -> URL {
         guard task == EvalClassifierTask.name else {
-            throw EvalError.unsupported(task == "injection.verdict" ? "injection.verdict comes in slice 1b (#788)" : "unknown task \(task)")
+            throw EvalError.unsupported("unknown task \(task)")
         }
         let dataset = try EvalDataset.load(from: datasetDir ?? defaultDataset(repoRoot))
         let texts = dataset.select(split: split, sample: sample)

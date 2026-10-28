@@ -26,6 +26,12 @@ struct EvalResult: Codable, Equatable, Sendable {
         /// Bumped by hand when a metric's meaning changes (a threshold rule, what "caught" means),
         /// never for a cosmetic change to the scorer.
         var scoringVersion: Int
+        /// An LLM canary's thinking as sent: "on", "off", or "none" for a model that doesn't think
+        /// (#789b). Absent for a classifier.
+        var think: String? = nil
+        /// Judgements per text (#789b): rates pool them, so a different count doesn't compare.
+        /// Absent means one.
+        var repeats: Int? = nil
     }
 
     struct Model: Codable, Equatable, Sendable {
@@ -111,6 +117,14 @@ struct EvalResult: Codable, Equatable, Sendable {
         var costPerThousandUsd: Double?
         /// Classifiers: sha256 of every raw score rounded to 4 places, in id order.
         var scoresHash: String?
+        /// With repeats: texts whose every judgement agreed, of the texts judged more than once.
+        var agreement: Rate? = nil
+        /// With repeats: the texts whose judgements disagreed, by id. `compare` leaves them out of
+        /// the caught/missed flips (spec, section 9).
+        var unstable: [String]? = nil
+        /// Canary answers with neither SAFE nor MALICIOUS: the product blocks them, so they are
+        /// in `failClosed` too, counted here apart (spec, section 2).
+        var parseFailures: Int? = nil
     }
 
     struct Verdict: Codable, Equatable, Sendable {
@@ -120,6 +134,8 @@ struct EvalResult: Codable, Equatable, Sendable {
         var caught: Bool?
         var rawScore: Double?
         var seconds: Double?
+        /// Which judgement of the text this is, from 0, when a run repeats (#789b).
+        var repeatIndex: Int? = nil
     }
 
     var schemaVersion = EvalResult.schemaVersion
