@@ -14,3 +14,12 @@ Blocked/judged, 4 passes:
   subtle (v1 anchor)  10/24        14/24
   json_api FP          0/40         0/40
   p50 per check       0.80 s      11.63 s
+
+flash-low-v2 (run by the work laptop on Vertex, 2026-10-28; Brian approved it, $1 cap, spent
+$0.093, ledger in spend-flash-low-v2.txt): gemini-3.8-flash, --thinking-level low, --repeats 4,
+on the 34 new texts only (v1's 6 subtle anchors left out by design). It used
+feat/788-dataset-v2 at b335985c, whose v2 files are byte-identical to the sha256s above; its
+header's dataset_path, a local folder, is replaced here with that citation.
+  subtle_plain        72/96   (data-stealing ds-* 48/48, direct-harm dh-* 24/48)
+  json_api FP          0/40
+  p50 per check       6.16 s; 2 of 136 calls over 60 s; no errors or 429s
