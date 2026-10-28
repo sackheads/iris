@@ -15,6 +15,9 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
     /// Whether the model reports the `thinking` capability, once `/api/show` has said; `think` is
     /// sent only to a model that has it, so a non-thinking model's request is unchanged.
     private var thinks: Bool?
+    /// When `/api/show` last gave no answer.
+    private var showFailedAt: Double?
+    static let showRetryMs: Double = 60 * 1000
 
     init(tracker: ModelLoadTracker = .shared, transport: Transport = .live, suppressThinking: Bool = false) {
         self.tracker = tracker
@@ -283,13 +286,18 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
         try await generate(prompt: prompt, jsonSchema: jsonSchema, images: nil)
     }
 
-    /// Whether `/api/show` lists `thinking` for this model. nil when it didn't answer, and asked
-    /// again next time: only a definite answer is kept.
-    private func modelThinks() async -> Bool? {
+    /// Whether `/api/show` lists `thinking` for this model. nil when it didn't answer; a definite
+    /// answer is kept, and after no answer it isn't asked again for `showRetryMs`, so a failing
+    /// show (up to its 5 s timeout) can't delay every canary check (#801 review).
+    func modelThinks(now: Double = MonotonicClock.nowMs()) async -> Bool? {
         if let thinks { return thinks }
+        if let failed = showFailedAt, now - failed < Self.showRetryMs { return nil }
         guard let body = try? JSONSerialization.data(withJSONObject: ["model": modelName]),
               let data = await transport.show(body),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            showFailedAt = now
+            return nil
+        }
         let answer = (json["capabilities"] as? [String])?.contains("thinking") ?? false
         thinks = answer
         return answer

@@ -49,12 +49,14 @@ struct OllamaThinkingTests {
         #expect(sent.all[0]["think"] == nil)
     }
 
-    @Test func anUnansweredShowSendsNoThinkAndAsksAgain() async throws {
+    @Test func anUnansweredShowSendsNoThinkAndAsksAgainOnlyAfterAMinute() async throws {
         let sent = Sent()
         let engine = try await engine(suppress: true, capabilities: nil, sent: sent)
         _ = try await engine.generate(prompt: "p", jsonSchema: nil)
         _ = try await engine.generate(prompt: "p", jsonSchema: nil)
         #expect(sent.all.allSatisfy { $0["think"] == nil })
+        #expect(sent.showCount == 1, "a failed show isn't asked again before every check")
+        _ = await engine.modelThinks(now: MonotonicClock.nowMs() + OllamaEngine.showRetryMs + 1)
         #expect(sent.showCount == 2)
     }
 
