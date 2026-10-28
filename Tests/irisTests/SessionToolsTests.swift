@@ -260,6 +260,10 @@ struct SessionToolsTests {
         let final = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))],
                                    usageMetadata: nil)
         let client = FakeLLMClient(responses: [first, final])
+        // A session tool stays declared once its state has held (sticky), which is how production
+        // reaches the handler's own off-state refusals; since #811 an undeclared call never does.
+        // Stickiness applies to attended `.main` turns only, so a subagent here is still not offered them.
+        app.stickyTools.record(StickyTools.eligible, for: conversationId)
         let engine = IrisEngine(state: app, tier: .medium, principal: principal, client: client,
                                 retryDelays: [], protectionEnabled: false, sessionPeerCount: peerCount)
         await engine.processInput("go", source: "UI", conversationId: conversationId)
@@ -633,7 +637,7 @@ struct SessionToolsTests {
         #expect(app.conversations.first { $0.id == me }?.sessionCard == nil)
     }
 
-    @Test("a subagent's forged set_session_card call is refused by the handler")
+    @Test("a subagent's forged set_session_card call is refused")
     func subagentSetCardRefused() async {
         let app = AppState(); app.conversations.removeAll()
         let sub = UUID()
@@ -644,11 +648,12 @@ struct SessionToolsTests {
                                 args: ["name": .string("impostor"), "description": .string("d")],
                                 id: "c1")
         let result = await runToolCall(call, on: app, as: sub, principal: .subagent)
-        #expect(result.contains("Refused — a subagent is not a session."))
+        // Never offered to a subagent, so #811's dispatch check refuses it before the handler's own.
+        #expect(result.contains(IrisEngine.notOfferedRefusal("set_session_card")), Comment(rawValue: result))
         #expect(app.conversations.first { $0.id == sub }?.sessionCard == nil)
     }
 
-    @Test("a subagent's forged list_sessions call is refused by the handler")
+    @Test("a subagent's forged list_sessions call is refused")
     func subagentListRefused() async {
         let app = AppState(); app.conversations.removeAll()
         let sub = UUID()
@@ -657,7 +662,7 @@ struct SessionToolsTests {
 
         let result = await runToolCall(FunctionCall(name: "list_sessions", args: [:], id: "c1"),
                                        on: app, as: sub, principal: .subagent)
-        #expect(result.contains("Refused — a subagent is not a session."))
+        #expect(result.contains(IrisEngine.notOfferedRefusal("list_sessions")), Comment(rawValue: result))
         #expect(!result.contains("session_id:"), "a subagent must not learn the peer set either")
     }
 
@@ -754,7 +759,7 @@ struct SessionToolsTests {
     /// offered `close_request` as a subagent (it is declared only for `principal == .main`), but
     /// the dispatcher refuses a forged call too, the same defense-in-depth every other session
     /// tool here gets — and the open request must survive it untouched.
-    @Test("a subagent's forged close_request is refused by the handler, and closes nothing")
+    @Test("a subagent's forged close_request is refused, and closes nothing")
     func subagentCloseRequestRefused() async throws {
         let app = AppState(); app.conversations.removeAll()
         let sub = UUID(), target = UUID()
@@ -762,7 +767,7 @@ struct SessionToolsTests {
         try app.store.peers.insert(openRequest("aaaa0006", from: sub, to: target))
         let call = FunctionCall(name: "close_request", args: ["msg": .string("aaaa0006")], id: "c1")
         let result = await runToolCall(call, on: app, as: sub, principal: .subagent)
-        #expect(result.contains("Refused — a subagent is not a session."))
+        #expect(result.contains(IrisEngine.notOfferedRefusal("close_request")), Comment(rawValue: result))
         #expect(try app.store.peers.message("aaaa0006")?.isOpen == true, "a forged call must close nothing")
     }
 }

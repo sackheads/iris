@@ -39,6 +39,9 @@ import Foundation
                              peerCount: Int, factStore: FactStoreManager? = nil,
                              prompt: String = "go") async -> String {
         let client = ScriptedClient([Self.reply(Part(functionCall: call)), Self.reply(Part(text: "ok"))])
+        // How production reaches an off-state call: the tool stayed declared (sticky) after its
+        // state ended. Since #811 a call to an undeclared tool is refused before its own handler.
+        app.stickyTools.record(StickyTools.eligible, for: conversationId)
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
                                 retryDelays: [], factStore: factStore, protectionEnabled: false,
                                 sessionPeerCount: peerCount)
