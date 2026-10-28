@@ -179,6 +179,7 @@ extension GuardProbeFixtures {
                                       "outcome": j.outcome, "seconds": (j.seconds * 1000).rounded() / 1000]
             if item.payload != nil { row["caught"] = caught(j.outcome) }
             if let e = j.error { row["error"] = String(e.prefix(300)) }
+            if let r = j.reply { row["reply"] = String(r.prefix(200)) }
             if rates != nil {
                 row["tokens_in"] = j.tokens.input; row["tokens_out"] = j.tokens.output; row["tokens_thought"] = j.tokens.thought
                 row["dollars"] = cost
