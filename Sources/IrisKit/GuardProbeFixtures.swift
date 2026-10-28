@@ -131,6 +131,8 @@ enum GuardProbeFixtures {
         let error: String?
         let tokens: (input: Int, output: Int, thought: Int)
         var model: String? = nil
+        /// The canary's raw answer, for reading reply shapes (#821); nil when it threw.
+        var reply: String? = nil
     }
 
     /// One text through tier 1, a passing tier 2, then the canary: the product's path. Both seams
@@ -153,9 +155,10 @@ enum GuardProbeFixtures {
         case .blocked:
             // The product blocks on an error and on an answer with no verdict word: both fail closed.
             let answer = call.response ?? ""
-            name = call.error != nil || (!answer.contains("SAFE") && !answer.contains("MALICIOUS")) ? "fail-closed" : "blocked"
+            name = call.error != nil || InjectionGuard.canaryVerdict(answer) == .unreadable ? "fail-closed" : "blocked"
         }
-        return Judgement(outcome: name, seconds: seconds, error: call.error, tokens: call.tokens, model: call.model)
+        return Judgement(outcome: name, seconds: seconds, error: call.error, tokens: call.tokens, model: call.model,
+                         reply: call.response)
     }
 
     static func load(_ dir: URL) throws -> (items: [Item], sha: [String: String]) {
