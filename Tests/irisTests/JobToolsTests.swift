@@ -619,7 +619,7 @@ struct JobToolsTests {
     /// Invariant 6 is a property of the conversation, not of what the model was offered: dispatch
     /// reads `functionCall.name` alone, so an unpinned conversation that calls the tool anyway
     /// must be refused where it would otherwise read the ledger.
-    @Test("a forged call from an unpinned conversation is refused by the handler")
+    @Test("a forged call from an unpinned conversation is refused")
     func forgedCallRefused() async throws {
         let app = AppState()
         app.conversations.removeAll()
@@ -630,7 +630,8 @@ struct JobToolsTests {
         let result = await runToolCall(FunctionCall(name: "list_jobs", args: [:], id: "c1"),
                                        on: app, as: id)
 
-        #expect(result.contains("Refused"))
+        // Not offered to an unpinned conversation: #811's dispatch check refuses it, ahead of the handler's own refusal.
+        #expect(result.contains(IrisEngine.notOfferedRefusal("list_jobs")), Comment(rawValue: result))
         #expect(!result.contains("pr-sweep"))
     }
 
@@ -1002,7 +1003,8 @@ struct JobToolsTests {
             FunctionCall(name: "search_conversations", args: ["query": .string("anything")], id: "c1"),
             on: app, as: id)
 
-        #expect(result.contains("Refused"))
+        // Not offered to an unpinned conversation: #811's dispatch check refuses it, ahead of the handler's own refusal.
+        #expect(result.contains(IrisEngine.notOfferedRefusal("search_conversations")), Comment(rawValue: result))
     }
 
     /// #343: `search_conversations` used to return directly, skipping `BlockedResultTracker`'s
@@ -1178,7 +1180,8 @@ struct JobToolsTests {
             FunctionCall(name: "read_conversation", args: [:], id: "c1"),
             on: app, as: id)
 
-        #expect(result.contains("Refused"))
+        // Not offered to an unpinned conversation: #811's dispatch check refuses it, ahead of the handler's own refusal.
+        #expect(result.contains(IrisEngine.notOfferedRefusal("read_conversation")), Comment(rawValue: result))
         #expect(result != "read_conversation needs an id.")
     }
 
@@ -1269,7 +1272,8 @@ struct JobToolsTests {
             FunctionCall(name: "read_conversation", args: ["id": .string(other.uuidString)], id: "c1"),
             on: app, as: id)
 
-        #expect(result.contains("Refused"))
+        // Not offered to an unpinned conversation: #811's dispatch check refuses it, ahead of the handler's own refusal.
+        #expect(result.contains(IrisEngine.notOfferedRefusal("read_conversation")), Comment(rawValue: result))
     }
 
     // MARK: Blocked-result tracking (#343)

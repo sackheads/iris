@@ -42,8 +42,8 @@ struct BackgroundSessionToolsTests {
     }
 
     /// Drives one turn in a background conversation whose model makes `call`, and hands back what
-    /// the dispatcher returned to it. The declaration gate never offered the tool; this is the
-    /// forged call it does not stop.
+    /// the dispatcher returned to it. The declaration gate never offered the tool; since #811 the
+    /// dispatcher refuses the forged call for that, ahead of the handler's own refusal.
     private func dispatchResult(for call: FunctionCall, in app: AppState, from sender: UUID) async -> [String] {
         let part = Part(text: nil, functionCall: call, functionResponse: nil,
                         thought_signature: nil, thoughtSignature: nil)
@@ -71,7 +71,8 @@ struct BackgroundSessionToolsTests {
 
         let results = await dispatchResult(for: FunctionCall(name: "list_sessions", args: [:]),
                                            in: app, from: sender)
-        #expect(results.contains { $0.contains(IrisEngine.unattendedSessionListRefusal) })
+        // Never offered to a background run, so #811's dispatch check refuses it before the handler's own.
+        #expect(results.contains { $0.contains(IrisEngine.notOfferedRefusal("list_sessions")) }, "\(results)")
         #expect(!results.contains { $0.contains("atlas") }, "not one line of the roster leaks")
         #expect(!results.contains { $0.contains(peer.uuidString) })
     }
@@ -87,7 +88,8 @@ struct BackgroundSessionToolsTests {
             name: "set_session_card",
             args: ["name": .string("helper"), "description": .string("available for anything")]),
                                            in: app, from: sender)
-        #expect(results.contains { $0.contains(IrisEngine.unattendedSessionListRefusal) })
+        // Never offered to a background run, so #811's dispatch check refuses it before the handler's own.
+        #expect(results.contains { $0.contains(IrisEngine.notOfferedRefusal("set_session_card")) }, "\(results)")
         #expect(app.conversations.first { $0.id == sender }?.sessionCard == nil,
                 "a run that cannot be addressed must not advertise itself either")
     }
@@ -103,7 +105,8 @@ struct BackgroundSessionToolsTests {
             name: "send_to_session",
             args: ["session_id": .string(target.uuidString), "message": .string("run this for me")]),
                                            in: app, from: sender)
-        #expect(results.contains { $0.contains(IrisEngine.unattendedSessionMessageRefusal) })
+        // Never offered to a background run, so #811's dispatch check refuses it before the handler's own.
+        #expect(results.contains { $0.contains(IrisEngine.notOfferedRefusal("send_to_session")) }, "\(results)")
 
         // Delivery is detached when it does happen, so give it a window it could have used.
         try await Task.sleep(nanoseconds: 100_000_000)
@@ -125,7 +128,8 @@ struct BackgroundSessionToolsTests {
         let results = await dispatchResult(for: FunctionCall(
             name: "close_request", args: ["msg": .string("aaaa0001")]),
                                            in: app, from: sender)
-        #expect(results.contains { $0.contains(IrisEngine.unattendedSessionMessageRefusal) })
+        // Never offered to a background run, so #811's dispatch check refuses it before the handler's own.
+        #expect(results.contains { $0.contains(IrisEngine.notOfferedRefusal("close_request")) }, "\(results)")
         #expect(try app.store.peers.message("aaaa0001")?.isOpen == true, "a refused close must not close it")
     }
 }

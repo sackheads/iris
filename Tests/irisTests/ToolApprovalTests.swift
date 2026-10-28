@@ -155,7 +155,9 @@ struct ToolApprovalTests {
     func ungatedSaysSo() async throws {
         let root = try home(); defer { try? FileManager.default.removeItem(at: root) }
         let state = try app(root)
-        let (_, pill) = try await turn(state, call("no_such_tool_599", [:]), workspace: root)
+        // An offered tool with no approval step (an unknown name is refused before the pill's
+        // approval is recorded since #811).
+        let (_, pill) = try await turn(state, call("delete_skill", ["name": .string("no-such-skill-599")]), workspace: root)
         #expect(pill?.approval == .ungated)
         #expect(pill?.approval?.line == "No approval needed for this tool (nobody was asked).")
     }

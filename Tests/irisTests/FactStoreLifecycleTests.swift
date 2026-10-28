@@ -327,6 +327,9 @@ struct FactLifecycleToolTests {
         let app = AppState()
         let id = UUID()
         app.createNewConversation(id: id)
+        // manage_fact is declared once facts have surfaced and stays (sticky); since #811 an
+        // undeclared call never reaches its handler, so the turn declares it the way production does.
+        app.stickyTools.record(["manage_fact"], for: id)
         let engine = IrisEngine(state: app, tier: .medium, principal: .main,
                                 client: FakeLLMClient(responses: [response, textReply()]),
                                 retryDelays: [], factStore: store, protectionEnabled: false)

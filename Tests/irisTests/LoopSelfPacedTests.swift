@@ -126,6 +126,8 @@ struct LoopSelfPacedTests {
     @Test("an off-state call is refused at dispatch, with or without a fixed loop")
     func offStateRefused() async throws {
         let (state, id) = try app()
+        // Declared by stickiness, the way production reaches an off-state call (#811).
+        state.stickyTools.record([IrisEngine.scheduleNextTickTool], for: id)
         #expect(await scheduleTurn(state, id, delay: .int(600))?.contains("no self-paced /loop") == true)
         try setLoop(state, id, ConversationLoop(prompt: "p", intervalSeconds: 600, cap: 5, paused: true))
         #expect(await scheduleTurn(state, id, delay: .int(600))?.contains("no self-paced /loop") == true)
