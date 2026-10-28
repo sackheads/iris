@@ -3945,6 +3945,48 @@ actor IrisEngine {
         return true
     }
 
+    /// #813: holds `call` when its conversation has read untrusted output, and says so to the
+    /// model; nil means run it as usual. A conversation the app doesn't know (none should reach
+    /// here) is held too: unknown is not clean.
+    private func holdContextWriteIfTainted(_ call: FunctionCall, conversationId: UUID, workspacePath: String?) async -> String? {
+        let paths = memory.paths
+        let target = ContextHolds.targetPath(call.name, args: call.args, cwd: workspacePath, paths: paths)
+        let item = PendingContextWrite(
+            id: UUID(), conversationId: conversationId, toolName: call.name, args: call.args,
+            workspacePath: workspacePath, targetPath: target, targetSha256: ContextHolds.sha256(ofFileAt: target),
+            firstLine: ContextHolds.firstLine(call.name, args: call.args, targetPath: target, paths: paths),
+            createdAt: Date(), state: .pending, turnId: PerformanceProfiler.currentTurnID)
+        let localState = state
+        let held = await MainActor.run { () -> Bool in
+            guard let localState, localState.readUntrustedThroughDelegation(conversationId) else { return false }
+            let root = localState.delegationRoot(of: conversationId)
+            var row = item
+            row.rootConversationId = root == conversationId ? nil : root
+            row.isPinnedIris = localState.conversations.first { $0.id == root }?.isPinned == true
+            localState.holdContextWrite(row)
+            return true
+        }
+        return held ? ContextHolds.heldResult(item) : nil
+    }
+
+    /// #813: applies an item the person approved, through the handler that would have applied
+    /// it, with the hold switched off for this call only. A held `write_file` runs as an approved
+    /// call, past the permission ladder: the person's approval is the permission.
+    func applyHeldWrite(_ item: PendingContextWrite) async -> String {
+        if item.toolName == "write_file" {
+            let decidedPath = item.args["path"].map { IrisPaths.throughPrivate(ToolExecutor.resolvePath($0.stringValue, cwd: item.workspacePath)) }
+            return await executeToolWithHooks(name: "write_file", args: item.args, cwd: item.workspacePath,
+                                              conversationId: item.conversationId, useSandbox: false,
+                                              origin: .approvedCall, decidedPath: decidedPath)
+        }
+        let call = FunctionCall(name: item.toolName, args: item.args)
+        return await ContextHolds.$applying.withValue(true) {
+            // #811: the approved call is the only tool this dispatch offers.
+            await executeFunctionCall(call, conversationId: item.conversationId, workspacePath: item.workspacePath,
+                                      offeredTools: [item.toolName])
+        }
+    }
+
     /// #813: sets the conversation's sticky untrusted-output taint, in one main-actor hop.
     func markReadUntrusted(_ conversationId: UUID?) async {
         guard let conversationId else { return }
@@ -4649,6 +4691,16 @@ actor IrisEngine {
         // refusals below stay as defence in depth.
         if !offeredTools.contains(functionCall.name) {
             return await notOffered(functionCall.name, conversationId: conversationId)
+        }
+
+        // #813: on a conversation that has read untrusted output, a write that becomes standing
+        // prompt context is kept for the person to approve, not applied. An unattended
+        // `write_file` is left to the ladder below, which never auto-allows ~/.iris for a
+        // background run: holding it would let an approval grant more than the run could do.
+        if !ContextHolds.applying, !(functionCall.name == "write_file" && isUnattended),
+           ContextHolds.shouldHold(functionCall.name, args: functionCall.args, cwd: workspacePath, paths: memory.paths),
+           let held = await holdContextWriteIfTainted(functionCall, conversationId: conversationId, workspacePath: workspacePath) {
+            return held
         }
 
         if functionCall.name == "set_workspace", let path = functionCall.args["path"]?.stringValue {

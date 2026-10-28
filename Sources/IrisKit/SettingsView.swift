@@ -589,6 +589,13 @@ struct SettingsView: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
+                    // #813: held standing-context writes, whichever conversation they wait in.
+                    LabeledContent("Memory changes waiting for your OK") {
+                        Text(verbatim: "\(state.pendingContextWriteCount)")
+                    }
+                    Text("A conversation that has read text from outside keeps its changes to SOUL, your profile, memory, facts, skills and rules until you approve them, from the chip above its composer.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
                 
                 if config.enableAdvancedPromptInjectionProtection {

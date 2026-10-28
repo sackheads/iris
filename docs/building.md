@@ -96,6 +96,15 @@ Scores a guard model on a frozen dataset (`eval/datasets/`, injection v3 unless 
 
 The canary sends thinking as the product does (off for a model that thinks, #783), unless `--think on` or `off` says otherwise. The canary tasks judge every text 3 times (`--repeats`). Their rates pool the judgements, and a result lists the texts judged differently across repeats as unstable; `compare` leaves those out of its flips and prints no verdict on whether two results differ until the margin rule lands (#816). A text whose canary couldn't be reached counts as `infra`. A timeout, an error or an answer with neither SAFE nor MALICIOUS counts as `fail-closed`, as the product blocks it.  Dev builds only, and read-only apart from the result file: no store, conversation, job or home lock.  Results are append-only: a second run the same day gets `-2`, and CI fails a pull request that edits or deletes one (`scripts/eval-append-only.sh`).  `compare` refuses two results whose version keys differ, unless `--vary` names what's meant to differ; task, configuration and scoring version never compare across.  A result gives the false positives and recall of texts marked `exposure: clean` apart, and v3's fresh attacks' recall on its own line. A run prints `MODEL CHANGED` when the model's fingerprint differs from its last committed result.  The results table is [docs/evals.md](evals.md).
 
+## Held memory changes (`--context-holds-report`)
+
+```sh
+swift run iris --context-holds-report            # the last 7 days
+swift run iris --context-holds-report --days 30
+```
+
+Prints, per day, how often the hold on standing-context writes asked (#813, [memory](memory.md)): the turns that showed the chip, the items held by tool, how many were approved, declined, went stale or are still pending, and the median time from the hold to the decision, each for the pinned Iris and for other conversations. It reads `conversations.sqlite` read-only (no lock, no migration, so it runs beside the app), and touches no Keychain item and no settings. A store older than the hold reads as zeros. It's local only; nothing is sent anywhere.
+
 ## Timing the guard models (`--guard-probe`)
 
 ```sh
