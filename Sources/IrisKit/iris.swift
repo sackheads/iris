@@ -2966,6 +2966,9 @@ actor IrisEngine {
                 // uniformly, and the span includes engine-side call overhead. Each attempt is
                 // its own span so retry backoff sleeps are not counted as model time.
                 let requestToSend = activeRequest
+                // #811: what this round offered, as sent (a hook's rewrite included). The dispatcher
+                // refuses a call to anything else; declaring a tool or not is otherwise only advice.
+                let offeredTools = Self.offeredToolNames(requestToSend)
                 let modelCallStart = UptimeClock.live.now()   // uptime: a sleep is not time spent (#640)
                 // Resolved once, here, per model call (see `streamResponsesOverride`): a config
                 // flip after this point cannot change what THIS call does, but the next call
@@ -3186,7 +3189,7 @@ actor IrisEngine {
                                     }
 
                                     let cmdStart = UptimeClock.live.now()   // uptime: a sleep is not time spent (#608)
-                                    let result = await self.executeFunctionCall(call, conversationId: conversationId, workspacePath: workspacePath, restrictToGoalComplete: restrictToGoalComplete, pillId: pillId)
+                                    let result = await self.executeFunctionCall(call, conversationId: conversationId, workspacePath: workspacePath, restrictToGoalComplete: restrictToGoalComplete, offeredTools: offeredTools, pillId: pillId)
                                     let elapsed = UptimeClock.live.seconds(since: cmdStart)
                                     if let id = timingId {
                                         await self.recordCommandDuration(id: id, elapsed: elapsed)
@@ -4387,6 +4390,22 @@ actor IrisEngine {
     static func unknownToolResult(_ name: String) -> String { "Error: Unknown tool \(name)" }
 
     /// What the model is told when a human refused a tool call in an attended conversation.
+    /// #811: refuses a call to a tool the round did not offer, with a line in the transcript.
+    private func notOffered(_ name: String, conversationId: UUID) async -> String {
+        await pushToUI(role: .system, text: "[blocked] '\(name)' was not offered in this turn.", conversationId: conversationId)
+        return Self.notOfferedRefusal(name)
+    }
+
+    /// #811: the result for a call to a tool the round did not offer.
+    static func notOfferedRefusal(_ name: String) -> String {
+        "Not run: '\(name)' is not one of the tools offered in this turn. Use only the tools you were given."
+    }
+
+    /// #811: the names a request declared, which are the only tools its reply may call.
+    nonisolated static func offeredToolNames(_ request: GeminiRequest) -> Set<String> {
+        Set(request.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? [])
+    }
+
     static let deniedToolResult = "User denied permission to execute this tool. You must ask the user for clarification or suggest an alternative."
 
     /// What an unattended turn is told when a call needed an approval nobody was there to give
@@ -4426,7 +4445,7 @@ actor IrisEngine {
 
     /// `pillId` is the call's `[TOOL_CALL]` message, which is told what let the call run (#599).
     private func executeFunctionCall(_ functionCall: FunctionCall, conversationId: UUID, workspacePath: String?, restrictToGoalComplete: Bool = false,
-                                     pillId: UUID? = nil) async -> String {
+                                     offeredTools: Set<String>, pillId: UUID? = nil) async -> String {
         let localState = state
         var result = ""
 
@@ -4450,6 +4469,11 @@ actor IrisEngine {
         // above.
         if Self.jobCreationTools.contains(functionCall.name), principal != .main {
             return Self.subagentJobCreationRefusal
+        }
+        // #811: the job tools act (hooks, an approval prompt) before the general check below, so a
+        // call to one this round did not offer stops here.
+        if Self.jobCreationTools.contains(functionCall.name), !offeredTools.contains(functionCall.name) {
+            return await notOffered(functionCall.name, conversationId: conversationId)
         }
         // #256: the owner approves the directory the watch will be on, not the model's spelling of
         // it — the executor resolves a relative path against the workspace, and the approval below
@@ -4550,6 +4574,15 @@ actor IrisEngine {
         // stops only a model that plays by it.
         if let scope = Self.agentToolScope, !scope.allows(functionCall.name) {
             return Self.agentProfileDeniedToolResult(tool: functionCall.name, profile: scope.profile.name)
+        }
+
+        // #811: a model can name any tool it has seen anywhere, not only the ones this round
+        // offered, so stripping a declaration (hardStrip, the grader's three tools, credential
+        // gating, a workflow trigger) holds only if the call is refused here. After the read-only
+        // profile and agent-scope checks, which keep their own records and wording; the per-tool
+        // refusals below stay as defence in depth.
+        if !offeredTools.contains(functionCall.name) {
+            return await notOffered(functionCall.name, conversationId: conversationId)
         }
 
         if functionCall.name == "set_workspace", let path = functionCall.args["path"]?.stringValue {
