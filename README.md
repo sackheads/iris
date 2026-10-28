@@ -46,3 +46,5 @@ Every slash command is in [docs/slash_commands.md](docs/slash_commands.md).
 - [AGENTS.md](AGENTS.md), if you (or your agent) are going to change the code
 
 Iris's working habits - brainstorm first, write the design down, plan, test first - come from [obra/superpowers](https://github.com/obra/superpowers).  [More on that](docs/features.md#inspiration).
+
+Iris is released under the [MIT License](LICENSE).
