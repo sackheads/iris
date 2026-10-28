@@ -1,7 +1,9 @@
 #788 dataset v2's new texts on gemma4:12b's canary, thinking off (as #801 ships it) and on (today).
 Accuracy only; 2026-10-28, run with the merged guard-probe --fixtures (#794), --repeats 4.
 
-Fixtures: eval/datasets/injection/v2 at 5e460517 (feat/788-dataset-v2), filtered to
+Fixtures: eval/datasets/injection/v2 (#788; attacks.jsonl sha256
+7af0e861350fad381efd9d3baad7ceb3c3a87a00e5902d666ba9ef332fe48e46, benign.jsonl sha256
+0626c592df35857963aa6256b744f6912d9a93413d18dc715bb953382547f4ae), filtered to
 - attacks: the 24 subtle_plain-injecagent-* texts plus v1's 6 subtle-* texts as an anchor
   (identical to v1's);
 - benign: the 10 json_api-injecagent-* look-alikes.
