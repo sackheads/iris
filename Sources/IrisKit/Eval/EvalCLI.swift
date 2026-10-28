@@ -104,7 +104,7 @@ enum EvalCLI {
 
 enum EvalRunner {
     static func resultsRoot(_ repoRoot: URL) -> URL { repoRoot.appendingPathComponent("eval/results") }
-    static func defaultDataset(_ repoRoot: URL) -> URL { repoRoot.appendingPathComponent("eval/datasets/injection/v1") }
+    static func defaultDataset(_ repoRoot: URL) -> URL { repoRoot.appendingPathComponent("eval/datasets/injection/v2") }
 
     static func run(task: String, model spec: EvalModelSpec, split: String, sample: Int?,
                     datasetDir: URL?, outDir: URL?, repoRoot: URL, now: Date = Date(),
@@ -160,7 +160,7 @@ enum EvalRunner {
             model: .init(spec: spec.description, files: files, bytesOnDisk: files.reduce(0) { $0 + $1.bytes }),
             environment: await EvalEnvironment.capture(repoRoot: repoRoot),
             settings: EvalClassifierTask.settings,
-            contaminated: dataset.manifest.family == "injection" && dataset.manifest.version == 1 ? "pre-split" : nil,
+            contaminated: contamination(dataset, texts),
             modelChanged: changed, previousFingerprint: changed == true ? previous?.result.key.modelFingerprint : nil,
             metrics: metrics,
             verdicts: scored.map { .init(id: $0.sample.id, outcome: $0.outcome.rawValue, caught: $0.caught,
@@ -170,6 +170,14 @@ enum EvalRunner {
         try result.encoded().write(to: url, options: .withoutOverwriting)
         print(EvalCompare.summary(result))
         return url
+    }
+
+    /// v1 predates the per-text marker and is pre-split throughout; later versions mark each
+    /// text, and a result says how many of the texts it scored were exposed.
+    static func contamination(_ dataset: EvalDataset, _ texts: [EvalSample]) -> String? {
+        if dataset.manifest.family == "injection" && dataset.manifest.version == 1 { return "pre-split" }
+        let exposed = texts.filter { $0.exposure == "pre-split" }.count
+        return exposed == 0 ? nil : "pre-split: \(exposed) of \(texts.count) texts"
     }
 
     /// Append-only: a second run the same day gets `-2`, `-3`, and never replaces a file.

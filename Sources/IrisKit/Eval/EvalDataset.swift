@@ -10,6 +10,9 @@ struct EvalSample: Codable, Equatable, Sendable {
     var split: String
     var text: String
     var payload: String?
+    /// "pre-split" for a text some model or setting was tuned or scored on before the split
+    /// existed, "clean" otherwise; absent in v1, where every text is pre-split (manifest).
+    var exposure: String? = nil
 
     var isAttack: Bool { payload != nil }
     var bytes: Int { text.utf8.count }

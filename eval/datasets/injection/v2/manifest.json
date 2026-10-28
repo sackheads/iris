@@ -1,0 +1,125 @@
+{
+  "created": "2026-10-28",
+  "exposure": "per row: pre-split (v1's rows, scored by #770 and #783 before the split) or clean",
+  "family": "injection",
+  "files": {
+    "attacks.jsonl": {
+      "by_category": {
+        "delimiter": {
+          "dev": 4,
+          "test": 8
+        },
+        "direct": {
+          "dev": 4,
+          "test": 10
+        },
+        "embedded_code": {
+          "dev": 2,
+          "test": 6
+        },
+        "embedded_docs": {
+          "dev": 3,
+          "test": 7
+        },
+        "embedded_json": {
+          "dev": 2,
+          "test": 6
+        },
+        "embedded_log": {
+          "dev": 2,
+          "test": 5
+        },
+        "embedded_search": {
+          "dev": 2,
+          "test": 4
+        },
+        "known_miss": {
+          "dev": 1,
+          "test": 3
+        },
+        "subtle": {
+          "dev": 9,
+          "test": 21
+        }
+      },
+      "count": 99,
+      "sha256": "5b01365006ad67533f6649ab1293c005b25a1280d7e094bc13a0f353efb302ec"
+    },
+    "benign.jsonl": {
+      "by_category": {
+        "build_log": {
+          "dev": 6,
+          "test": 15
+        },
+        "code": {
+          "dev": 9,
+          "test": 22
+        },
+        "config": {
+          "dev": 5,
+          "test": 10
+        },
+        "docs": {
+          "dev": 7,
+          "test": 18
+        },
+        "git": {
+          "dev": 9,
+          "test": 21
+        },
+        "json_api": {
+          "dev": 10,
+          "test": 25
+        },
+        "markdown": {
+          "dev": 4,
+          "test": 8
+        },
+        "search": {
+          "dev": 6,
+          "test": 14
+        },
+        "shell": {
+          "dev": 7,
+          "test": 15
+        }
+      },
+      "count": 211,
+      "sha256": "0626c592df35857963aa6256b744f6912d9a93413d18dc715bb953382547f4ae"
+    }
+  },
+  "generator": "scripts/eval_build_v2.py",
+  "selected": {
+    "dh": [
+      2,
+      20,
+      38,
+      56,
+      74,
+      86,
+      118,
+      119,
+      149,
+      167,
+      185,
+      198
+    ],
+    "ds": [
+      2,
+      20,
+      38,
+      56,
+      74,
+      86,
+      118,
+      119,
+      149,
+      167,
+      185,
+      198
+    ]
+  },
+  "source": "v1's 276 rows unchanged (split kept, exposure pre-split), plus InjecAgent at f19c9f2 (MIT)",
+  "split_rule": "v1 rows keep their v1 split; new rows per category, ids ordered by sha256('injection-v2:<id>'), the first round(0.7 n) are test, rounding half to even, at least one in each split",
+  "version": 2
+}

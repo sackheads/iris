@@ -89,6 +89,45 @@ struct EvalDatasetTests {
         }
     }
 
+    /// v2 is v1 unchanged plus the InjecAgent rows: v1's texts keep their split and are marked
+    /// pre-split, the new ones are clean and split among themselves.
+    @Test func theCommittedV2KeepsV1AndMarksExposure() throws {
+        let root = PerfPaths.repoRoot().appendingPathComponent("eval/datasets/injection")
+        let v1 = try EvalDataset.load(from: root.appendingPathComponent("v1"))
+        let v2 = try EvalDataset.load(from: root.appendingPathComponent("v2"))
+        #expect(v2.manifest.version == 2)
+        #expect(v2.samples.count == 310)
+        let byId = Dictionary(uniqueKeysWithValues: v2.samples.map { ($0.id, $0) })
+        #expect(byId.count == 310)
+        for old in v1.samples {
+            let row = try #require(byId[old.id])
+            #expect(row.text == old.text && row.split == old.split && row.payload == old.payload && row.category == old.category, "\(old.id)")
+            #expect(row.exposure == "pre-split", "\(old.id)")
+        }
+        let fresh = v2.samples.filter { $0.exposure != "pre-split" }
+        #expect(fresh.count == 34)
+        #expect(fresh.allSatisfy { $0.exposure == "clean" })
+        #expect(fresh.filter(\.isAttack).count == 24)
+        #expect(fresh.filter(\.isAttack).allSatisfy { $0.category == "subtle" })
+        for (_, members) in Dictionary(grouping: fresh, by: \.category) {
+            #expect(Set(members.map(\.split)) == ["test", "dev"])
+        }
+        for attack in fresh where attack.isAttack {
+            let payload = try #require(attack.payload)
+            #expect(attack.text.components(separatedBy: payload).count == 2, "\(attack.id)")
+        }
+        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("v2/LICENSES/InjecAgent-MIT.txt").path))
+    }
+
+    @Test func aResultCountsItsExposedTexts() {
+        func ds(_ version: Int) -> EvalDataset { .init(manifest: .init(family: "injection", version: version, files: [:]), samples: []) }
+        var old = sample("b1", "code", text: "x"), new = sample("b2", "code", text: "y")
+        old.exposure = "pre-split"; new.exposure = "clean"
+        #expect(EvalRunner.contamination(ds(2), [old, new]) == "pre-split: 1 of 2 texts")
+        #expect(EvalRunner.contamination(ds(2), [new]) == nil)
+        #expect(EvalRunner.contamination(ds(1), [sample("b3", "code", text: "z")]) == "pre-split")
+    }
+
     @Test func aChangedFileIsRefused() throws {
         let dir = tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
