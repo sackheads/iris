@@ -91,7 +91,31 @@ load's begin and end, each tier's start and end, and each Ollama request, with O
 `load_duration` (#778). Dev builds only, and read-only: no conversation store, job or home lock,
 and a cloud tier 3 is skipped rather than called. Each rep's text gets a suffix so the verdict
 cache never answers for the model. The fake lane of `--perf` runs with the guards off, so it can't
-time them. The app prints the same `[perf]` lines to stdout.
+time them. The app writes the same `[perf]` lines to stderr.
+
+`--fixtures` runs a folder of labelled texts (#785's `benign.jsonl` and `attacks.jsonl`) through
+the guard with tier 2 passing everything, so each verdict is tier 3's alone, on the one model
+`--model` names (#783's bake-off; #788's `iris --eval` replaces it):
+
+```sh
+swift run iris --guard-probe --fixtures Tests/irisTests/Fixtures/tier2-eval --model ollama:gemma4:12b \
+  --arm g12-today --out ~/bakeoff --joins --latency --repeats 3 --agreement-sample 40
+swift run iris --guard-probe --fixtures … --model ollama:gemma4:12b --think off --arm g12-off \
+  --out ~/bakeoff --baseline ~/bakeoff/g12-today.jsonl
+swift run iris --guard-probe --fixtures … --model cloud:gemini/gemini-3.8-flash --thinking-level low \
+  --arm flash-low --out ~/bakeoff --allow-paid --max-dollars 2
+swift run iris --guard-probe --compare ~/bakeoff --baseline-arm g12-today   # the table, also table.md
+```
+
+Each run writes one row per judgement to `<out>/<arm>.jsonl`, with the model's digest, the machine
+and the dataset's sha256 in a header row. `--joins` adds each benign category joined to 8 and
+32 KB; `--latency` times a cold call, five warm and three rounds of three at once; `--baseline`
+re-judges, `--flip-repeats` times (3), every text whose first verdict differs from that arm's.
+`--think off` asks a thinking Ollama model not to think, as tier 3 does. A cloud arm makes paid
+calls: it needs `--allow-paid`, prints its estimate first and stops at `--max-dollars` (5). It
+uses gcloud's ADC on Vertex (project from `GOOGLE_CLOUD_QUOTA_PROJECT` or gcloud's config) and
+never reads the Keychain; `--gemini-auth key` uses the Keychain's API key instead.
+`--thinking-level` is added to the probe's own request body only; the product sends none.
 
 ## Running one job headlessly (`--run-job`)
 
