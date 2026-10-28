@@ -22,6 +22,25 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
     struct Transport: Sendable {
         var ps: @Sendable () async -> Data?
         var preload: @Sendable (Data) async throws -> (status: Int, data: Data)
+        /// A `/api/generate` request (#779 review): through here so a test drives `generate`.
+        var generate: @Sendable (Data) async throws -> (status: Int, data: Data) = Transport.post
+
+        init(ps: @escaping @Sendable () async -> Data?,
+             preload: @escaping @Sendable (Data) async throws -> (status: Int, data: Data),
+             generate: @escaping @Sendable (Data) async throws -> (status: Int, data: Data) = Transport.post) {
+            self.ps = ps
+            self.preload = preload
+            self.generate = generate
+        }
+
+        static let post: @Sendable (Data) async throws -> (status: Int, data: Data) = { body in
+            var req = URLRequest(url: URL(string: "\(OllamaEngine.baseURL)/api/generate")!)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = body
+            let (data, response) = try await URLSession.shared.data(for: req)
+            return ((response as? HTTPURLResponse)?.statusCode ?? 0, data)
+        }
 
         static let live = Transport(
             ps: {
@@ -33,14 +52,7 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
                       (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
                 return data
             },
-            preload: { body in
-                var req = URLRequest(url: URL(string: "\(OllamaEngine.baseURL)/api/generate")!)
-                req.httpMethod = "POST"
-                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                req.httpBody = body
-                let (data, response) = try await URLSession.shared.data(for: req)
-                return ((response as? HTTPURLResponse)?.statusCode ?? 0, data)
-            })
+            preload: post)
     }
 
     func loadModel(config: AuxiliaryModelConfig) async throws {
@@ -79,10 +91,22 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
     /// restarted) is loaded again by that call, so the preload is re-sent beside it, and its reply,
     /// not the generate's, ends the load. A `/api/ps` that doesn't answer shows nothing rather
     /// than guess.
-    func prepareForGenerate() async {
+    ///
+    /// Never awaited by the generate it serves (#779 review): a busy server is slow to answer ps,
+    /// and Vibecop's verdict is bounded. Skipped while a reply came within keep_alive, since the
+    /// model is still loaded then.
+    func prepareForGenerate(now: Double = MonotonicClock.nowMs()) async {
+        if let last = lastReplyAt, now - last < Self.recentReplyMs { return }
         guard preload == nil, await psListsModel() == false, preload == nil else { return }
         startPreload()
     }
+
+    /// Under keep_alive's 5 minutes, with margin: a reply this recent means the model is loaded.
+    static let recentReplyMs: Double = 4.5 * 60 * 1000
+    /// When Ollama last answered a preload or generate with 200, in uptime ms.
+    private var lastReplyAt: Double?
+    /// The cold-model check beside the generate in flight, for a test to await.
+    private(set) var pendingColdCheck: Task<Void, Never>?
     
     // MARK: - Parsing (pure functions — testable without network)
     
@@ -234,6 +258,7 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
             do {
                 let (status, data) = try await transport.preload(body)
                 if status == 200 {
+                    lastReplyAt = MonotonicClock.nowMs()
                     tracker.end(load, .loaded, detail: Self.timings(from: data))
                 } else {
                     tracker.end(load, .failed("HTTP \(status)"))
@@ -252,11 +277,6 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
     }
 
     func generate(prompt: String, jsonSchema: String?, images: [String]? = nil) async throws -> String {
-        let url = URL(string: "http://localhost:11434/api/generate")!
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
         var body: [String: Any] = [
             "model": modelName,
             "prompt": prompt,
@@ -271,28 +291,30 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
             body["images"] = images
         }
         
-        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        let requestBody = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
         
-        await prepareForGenerate()
+        // Beside the request, not before it (#779 review): it only decides whether a load shows.
+        pendingColdCheck = Task { await self.prepareForGenerate() }
         generates += 1
         let call = "ollama.generate purpose=\"\(purpose.label)\" model=\(modelName) n=\(generates)"
         // stream:false, so the first byte is the whole reply: one line for both (#778).
         PerformanceProfiler.event("\(call) sent")
         let sentAt = MonotonicClock.nowMs()
+        let status: Int
         let data: Data
-        let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: req)
+            (status, data) = try await transport.generate(requestBody)
         } catch {
             PerformanceProfiler.event("\(call) failed ms=\(Int(MonotonicClock.nowMs() - sentAt)) error=\"\(error.localizedDescription)\"")
             throw error
         }
-        PerformanceProfiler.event("\(call) complete ms=\(Int(MonotonicClock.nowMs() - sentAt)) status=\((response as? HTTPURLResponse)?.statusCode ?? 0) \(Self.timings(from: data))")
+        PerformanceProfiler.event("\(call) complete ms=\(Int(MonotonicClock.nowMs() - sentAt)) status=\(status) \(Self.timings(from: data))")
         
-        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+        guard status == 200 else {
             let errString = String(data: data, encoding: .utf8) ?? "Unknown error"
             throw NSError(domain: "OllamaEngine", code: 1, userInfo: [NSLocalizedDescriptionKey: "Ollama Error: \(errString)"])
         }
+        lastReplyAt = MonotonicClock.nowMs()
         
         if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
            let responseText = json["response"] as? String {
@@ -301,4 +323,5 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
         
         throw NSError(domain: "OllamaEngine", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid Ollama JSON response"])
     }
+
 }
