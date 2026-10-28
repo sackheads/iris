@@ -712,14 +712,16 @@ public struct InjectionGuard {
             await MetricsManager.shared.trackLatency(operation: .promptGuardTier3, modelName: modelName, durationMs: durationMs, success: true)
             let verdict = Self.canaryVerdict(response)
             guard verdict != .unreadable else {
-                // Fails closed, as before: only a clear SAFE passes (#821). As an error, not a
-                // verdict: nothing was judged, so it is not cached, and the tier-3 light says so,
-                // since a model that never answers in one word would otherwise block every output
-                // behind a green light (#822). The reply goes to the console only, never into
-                // anything kept: it can echo the untrusted text.
+                // Fails closed, as before: only a clear SAFE passes (#821). A block, cached like any
+                // other: an off-script reply is itself what the canary exists to catch (the text
+                // pulled the model off its instruction), and an uncached one would give the same
+                // text a fresh roll on every re-read until one came back SAFE. The tier-3 light says
+                // so, since a model that never answers in one word would otherwise block every
+                // output behind a green light (#822). The reply goes to the console only, never
+                // into anything kept: it can echo the untrusted text.
                 print("[InjectionGuard] Canary reply had no clear verdict; failing closed. Reply: \(Self.canaryReplyForLog(response))")
                 await MainActor.run { GuardTierHealth.current.recordTier3Unreadable() }
-                return .error
+                return .malicious
             }
             // As tier 2 above: the canary answered with a verdict, so the model is fine — what it
             // answered is a statement about the content, not about the model (#218).
