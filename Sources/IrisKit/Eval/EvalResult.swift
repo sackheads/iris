@@ -117,7 +117,8 @@ struct EvalResult: Codable, Equatable, Sendable {
     var environment: Environment
     /// The settings the product scored with (threshold, windows, caps), as text.
     var settings: [String: String]
-    /// "pre-split" when the settings were chosen with this dataset's test texts in view.
+    /// "pre-split" when the settings were chosen with this dataset's test texts in view; from v2
+    /// on, "pre-split: N of M texts", counting the scored texts marked so.
     var contaminated: String?
     var modelChanged: Bool?
     var previousFingerprint: String?
