@@ -21,7 +21,7 @@ Why now:
 - **One harness, many tasks.** A *task* is one job a model does in Iris, with its own labelled dataset and its own accuracy metrics. Models compete only within a task.
 - **Score the product, not just the model.** Every accuracy number is taken through the code path Iris runs (windows, thresholds, narrowing, prompts, parsing), as #770 did. A raw model score is reported beside it, never instead of it.
 - **Nothing is compared unless it's pinned.** That covers the dataset version, model identity, runtime, hardware, OS, Iris commit and settings. A result missing any of them can't be compared.
-- **Headless and free by default.** Local runs need no paid calls and no GUI. Paid cloud runs are opt-in and go to the work laptop.
+- **Headless and free by default.** Local runs need no paid calls and no GUI. Paid cloud runs are opt-in and need explicit configuration.
 - **Results are files in the repo.** They're machine-readable, diffable and regenerable, and the docs table is generated from them, never hand-edited.
 
 ## 2. Tasks
@@ -99,7 +99,7 @@ eval/datasets/<task-family>/v<N>/
 
 - **`iris --eval run <task> --model <spec> [--sample N | --full] [--split test|dev] [--repeats N] [--out DIR]`**
   - It's dev builds only, read-only, with no store, conversation or home lock, which is #782's `--guard-probe` pattern.
-  - `--model` takes the runtime and model as config (`ollama:gemma4:12b`, `onnx:<path>`, `cloud:<provider>/<model>`), so the same command runs on the work laptop with a cloud model.
+  - `--model` takes the runtime and model as config (`ollama:gemma4:12b`, `onnx:<path>`, `cloud:<provider>/<model>`), so the same command runs against a cloud model when it's configured that way.
 - **Model-change flag (§10 Q4).** Before scoring, `run` looks up the last committed result for the same task and model name. If the fingerprint differs, it prints `MODEL CHANGED: <old> → <new>` and records `model_changed: true` with both digests. This catches a silent change, such as an Ollama re-pull of `gemma4:12b`. A changed model is a new model for comparison purposes.
 - **`iris --eval compare <a.json> <b.json>`** prints the per-metric and per-category differences, and flags any attack that flipped from caught to missed. This is modelled on `iris --perf compare`.
 - **`iris --eval table`** regenerates `docs/evals.md` from every result file.
@@ -108,7 +108,7 @@ eval/datasets/<task-family>/v<N>/
   - `--full` takes the whole split.
   - A local 12B canary takes about 5 s per text (#778), so the full `injection` set is about 25 min per repeat. Sample by default for LLMs, and go full before a decision.
 - **Results:** `eval/results/<task>/<YYYY-MM-DD>-<model-slug>-<dataset-version>.json`, committed, with schema-versioned JSON. The per-text verdicts are included, so a later run can diff text by text.
-- **Paid runs:** cloud-model runs go to the work laptop through the planner, as the house rule says. The results file records it as `paid: true`.
+- **Paid runs:** a cloud model is never used unless `--model cloud:…` names it and its provider credentials are configured. The run says up front that it will make paid calls, and its results file records `paid: true` along with the token totals.
 - **Opt-in tests:** #770's `IRIS_ONNX_TEST_BUNDLE` tests become thin wrappers that call the runner on the sampled set. CI still skips them.
 
 ## 7. Where existing work goes
@@ -128,7 +128,7 @@ eval/datasets/<task-family>/v<N>/
 
    This is the slice that unblocks #783 phase 2 and #780.
 2. **Stack, adversarial variants and the frozen test split.** `injection.stack` (tier 1+2+3 as configured, plus named configurations), the adversarial generator, and contamination marking.
-3. **Cloud models and cost.** The `cloud:` model spec and cost from #239's price list. First paid run on work.
+3. **Cloud models and cost.** The `cloud:` model spec and cost from #239's price list. Its first paid run is recorded like any other.
 4. **`approval.vibecop`**, later (§10 Q1): its dataset and task.
 
 ## 9. Rules for honest comparison
