@@ -108,7 +108,9 @@ struct LaunchWarmupTests {
                                                           modelPathOrName: "missing-\(UUID().uuidString).gguf")]) { config in
             _ = try await manager.getEngine(for: config.role, config: config)
         })
-        try await value(of: task, within: 10)
+        // Generous: if this is the process's first llama.cpp use, ggml compiles its Metal library
+        // first, which took 14 s on CI's runner (#795, run 40634864744); later loads take ~1 ms.
+        try await value(of: task, within: 50)
         #expect(log.all.first?.contains("model.load begin purpose=\"guard (tier 3)\"") == true)
         #expect(log.all.last?.contains("failed") == true)
     }
