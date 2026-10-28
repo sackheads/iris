@@ -271,6 +271,24 @@ struct EvalRunnerTests {
         #expect(r.metrics.costPerThousandUsd == 0)
     }
 
+    /// The eval never resolves `ConfigManager.shared` (#805): that reads the Keychain secrets
+    /// item, which asks the person for access, and the home's guard settings, which the eval must
+    /// not score with. Both a working and a failing model's run, so the fail-closed path is covered.
+    @Test func aRunNeverReachesTheSharedConfig() async throws {
+        let s = try setUp()
+        defer { try? FileManager.default.removeItem(at: s.root) }
+        let access = ConfigManagerAccess()
+        try await ConfigManagerAccess.$recorder.withValue(access) {
+            _ = try await run(s)
+            _ = try await run(s, model: BrokenModel())
+        }
+        #expect(access.count == 0)
+        // The seam itself records: without this, a recorder that never fires would pass above.
+        let probe = ConfigManagerAccess()
+        ConfigManagerAccess.$recorder.withValue(probe) { _ = ConfigManager.shared }
+        #expect(probe.count == 1)
+    }
+
     @Test func runsAppendAndAChangedModelIsFlagged() async throws {
         let s = try setUp()
         defer { try? FileManager.default.removeItem(at: s.root) }
