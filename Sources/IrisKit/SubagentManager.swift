@@ -125,6 +125,11 @@ final class SubagentManager: @unchecked Sendable {
             let parentIsBackground = appState.conversations
                 .first(where: { $0.id == parentConversationId })?.isBackground == true
             appState.createNewConversation(id: subagentId, isSubagent: true, isBackground: parentIsBackground)
+            // #813: the task was written by a model that may have read untrusted output, so the
+            // subagent starts as tainted as its parent; otherwise delegating would walk around the hold.
+            if appState.conversations.first(where: { $0.id == parentConversationId })?.hasUntrustedToolOutput ?? true {
+                appState.markConversationReadUntrusted(subagentId)
+            }
             if parentIsBackground { appState.linkBackgroundDescendant(subagentId, of: parentConversationId) }
             appState.linkDelegate(subagentId, of: parentConversationId)   // #418: its asks are the parent's
             appState.updateConversationTitle(id: subagentId, title: "Subagent: \(role)")

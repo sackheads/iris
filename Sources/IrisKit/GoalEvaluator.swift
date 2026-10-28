@@ -93,6 +93,10 @@ final class GoalEvaluator: Sendable {
             // ask a local model (#187).
             let originIsBackground = app.conversations.first(where: { $0.id == originId })?.isBackground == true
             app.createNewConversation(id: evalId, isSubagent: true, isBackground: originIsBackground)
+            // #813: it grades work done by a conversation that may have read untrusted output.
+            if app.conversations.first(where: { $0.id == originId })?.hasUntrustedToolOutput ?? true {
+                app.markConversationReadUntrusted(evalId)
+            }
             if originIsBackground { app.linkBackgroundDescendant(evalId, of: originId) }
             app.linkDelegate(evalId, of: originId, kind: .evaluator)   // #418: its asks are the graded session's
             app.updateConversationTitle(id: evalId, title: "Evaluator")
