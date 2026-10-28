@@ -6,8 +6,9 @@
 headless (`swift test`), no other model loaded.
 
 **Verdict: it fails both halves of the proposed bar.** Through Iris's own tier-2 path, 30.3% of
-benign tool outputs lose at least one line (bar: 2% or less), and 68.0% of attacks are caught
-(bar: 80% or more). Loading it costs about 1.74 GB of memory. On Brian's Mac tier 2 stays
+benign texts lose at least one line (bar: 2% or less), and 68.0% of attacks are caught (bar: 80%
+or more). Those benign texts are small (104 B to 3.7 KB, median 760 B), and the rate grows with
+length: joined to 8 or 32 KB, the size a real tool result reaches, 8 of 9 categories lost lines. Loading it costs about 1.74 GB of memory. On Brian's Mac tier 2 stays
 disabled on these results (the bundle folder is renamed to `…onnx-no`), and the fresh-install
 default is for the planner to change (see "Fresh-install default" below).
 
@@ -84,6 +85,35 @@ report:
 - JSON: ordinary fields of an issue list or a payment object (`"state": "open"`, `"currency": "gbp"`).
 - Code: `return out` and a closing brace; doc comments.
 
+**By size.** Any one window can flag, so a longer text is likelier to lose a line. The fixtures
+are small, so 30.3% is the rate for texts under about 4 KB:
+
+| Size | n | False positives |
+|---|---|---|
+| under 512 B | 49 | 18.4% |
+| 512 B-1 KB | 79 | 26.6% |
+| 1-2 KB | 36 | 44.4% |
+| 2 KB and over (to 3.7 KB) | 37 | 40.5% |
+
+Tool results run to the 32 KB cap, so the test also joins each category's texts, in order with a
+blank line between, into one 8 KB and one 32 KB output of that kind. These are constructed, not
+captured, but they're the same lines at a realistic length:
+
+| Category | 8 KB | Lines lost | 32 KB | Lines lost |
+|---|---|---|---|---|
+| build_log | withheld | 19.2% | withheld | 12.9% |
+| code | withheld | 4.1% | withheld | 4.4% |
+| config | withheld | 2.7% | withheld | 1.9% |
+| docs | withheld | 28.3% | withheld | 7.1% |
+| git | withheld | 13.7% | withheld | 6.6% |
+| json_api | withheld | 63.0% | withheld | 32.1% |
+| markdown | withheld | 9.3% | withheld | 5.4% |
+| search | passed | 0% | passed | 0% |
+| shell | withheld | 28.8% | withheld | 33.3% |
+
+At those sizes, 8 of 9 (89%) lose lines. A per-window rate isn't reported: the product doesn't
+expose its windows, and the size bands answer the same question.
+
 ### Attacks (75 texts)
 
 | Category | n | Raw > 0.9 | Passed | Lines withheld | Blocked whole | **Recall** |
@@ -131,8 +161,10 @@ which this test doesn't do.
 | Load, again in the same process (12 loads) | 0.74-0.84 s |
 
 The footprint *falls* after judging, which the July probe (#725) didn't see. That probe judged
-45 KB once; this one judges 1-32 KB fifteen times. A plausible reading is that the OS compressed
-pages ONNX Runtime touched only at load. It's measured, not explained.
+45 KB once; this one judges 1-32 KB fifteen times. It isn't compression: `task_vm_info`'s
+`compressed` reads 0 MB at every step (fifth run). Something ONNX Runtime held after loading is
+released by the time judging is done, perhaps a load-time buffer, but that's not established.
+The number that matters for the cost is the after-load peak, about 1.76 GB.
 
 Judge latency, benign text cut from the fixtures at whole lines, median of 5 (min-max):
 
