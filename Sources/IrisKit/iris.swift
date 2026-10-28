@@ -837,6 +837,8 @@ actor IrisEngine {
     /// `chargeTo`: the conversation the arrival is for, which a cloud guard call on it is charged
     /// to (#689, #700 review). The arrival is checked before any turn there binds its own sink.
     private func sanitizeArrival(_ message: String, source: String, chargeTo conversationId: UUID) async -> String {
+        // #813: a peer's message or a background post-back is someone else's text.
+        await markReadUntrusted(conversationId)
         let sink = await MainActor.run { [state] in GuardUsage.charging(conversationId, in: state) }
         return await GuardUsage.$sink.withValue(sink) {
             await InjectionGuard.sanitizeUntrusted(message, contextTag: "system_event_\(source)", maxTier: .tier3_canary,
@@ -3190,6 +3192,10 @@ actor IrisEngine {
 
                                     let cmdStart = UptimeClock.live.now()   // uptime: a sleep is not time spent (#608)
                                     let result = await self.executeFunctionCall(call, conversationId: conversationId, workspacePath: workspacePath, restrictToGoalComplete: restrictToGoalComplete, offeredTools: offeredTools, pillId: pillId)
+                                    // #813: before the model reads it, so a write later in this turn sees the taint.
+                                    if Self.resultCarriesOutsideContent(call.name, args: call.args) {
+                                        await self.markReadUntrusted(conversationId)
+                                    }
                                     let elapsed = UptimeClock.live.seconds(since: cmdStart)
                                     if let id = timingId {
                                         await self.recordCommandDuration(id: id, elapsed: elapsed)
@@ -3894,6 +3900,43 @@ actor IrisEngine {
     /// "no unattended job creation" is an epic-level ruling, and a run that could schedule another
     /// run is a run that grows its own footprint with nobody asked.
     static let jobCreationTools: Set<String> = ["schedule_job", "register_directory_watcher"]
+
+    /// #813: the tools whose result is only Iris's own words: an echo of what the model sent, a
+    /// confirmation sentence, a Google create or send acknowledgement. Every other result taints the
+    /// conversation (`resultCarriesOutsideContent`), including an unknown or MCP tool's, so a tool
+    /// added later taints until someone decides it shouldn't.
+    nonisolated static let resultIsIrisOwnWords: Set<String> = [
+        "write_file", "create_skill", "update_skill", "delete_skill",
+        "set_workspace", "register_directory_watcher",
+        "update_user_profile", "update_soul", "update_memory", "save_fact", "manage_fact", "reflect",
+        "rename_conversation", "schedule_job", "propose_goal_contract", "amend_goal_contract",
+        "reach_checkpoint", "waive_criterion", "goal_complete", scheduleNextTickTool, "submit_evaluation",
+        "send_to_session", "set_session_card", "close_request",
+        "gmail_send_email", "google_tasks_create_task", "google_calendar_create_event",
+    ]
+
+    /// #813: whether a call's result, as the dispatcher returns it, puts text in front of the model
+    /// that neither the person nor Iris's own files wrote. `read_file` is decided here only for an
+    /// artifact (a peer's content); every other read is decided in `executeToolWithHooks`, on the
+    /// path a `BeforeTool` hook may have rewritten, because a read under `~/.iris` is first-party.
+    /// A background `invoke_subagent` returns only "spawned"; its report arrives later through
+    /// `sanitizeArrival`, which taints then.
+    nonisolated static func resultCarriesOutsideContent(_ name: String, args: [String: JSONValue]) -> Bool {
+        if resultIsIrisOwnWords.contains(name) { return false }
+        if name == "read_file" {
+            let path = args["path"]?.stringValue.trimmingCharacters(in: .whitespaces).lowercased() ?? ""
+            return path.hasPrefix(ArtifactURI.scheme)
+        }
+        if name == "invoke_subagent", args["background"]?.stringValue.lowercased() == "true" { return false }
+        return true
+    }
+
+    /// #813: sets the conversation's sticky untrusted-output taint, in one main-actor hop.
+    func markReadUntrusted(_ conversationId: UUID?) async {
+        guard let conversationId else { return }
+        let localState = state
+        await MainActor.run { localState?.markConversationReadUntrusted(conversationId) }
+    }
 
     /// 5c §1: never declared to an unattended turn, whatever a sticky set says.
     nonisolated static let unattendedNeverDeclared: Set<String> =
@@ -5861,10 +5904,13 @@ actor IrisEngine {
             case .unchanged: break
             }
         }
-        return await executeToolWithHooks(name: call.toolName, args: call.args, cwd: call.cwd,
-                                          conversationId: conversationId, useSandbox: useSandbox,
-                                          origin: .approvedCall, grant: grant, grantedMount: grantedMount,
-                                          decidedPath: decidedPath, beforeToolFired: call.hooksFired)
+        let result = await executeToolWithHooks(name: call.toolName, args: call.args, cwd: call.cwd,
+                                                conversationId: conversationId, useSandbox: useSandbox,
+                                                origin: .approvedCall, grant: grant, grantedMount: grantedMount,
+                                                decidedPath: decidedPath, beforeToolFired: call.hooksFired)
+        // #813: the person approved running the call, not what came back.
+        await markReadUntrusted(conversationId)
+        return result
     }
 
     /// What an approved call that turns out to target a protected directory returns instead of
@@ -6223,6 +6269,9 @@ actor IrisEngine {
            IrisPaths.default.isUnderIrisDir(path) {
             return result
         }
+        // #813: any other read is someone else's text. Decided here, after the hooks, on the path
+        // that was actually read; the dispatcher's classifier leaves `read_file` to this line.
+        if name == "read_file" { await markReadUntrusted(conversationId) }
 
         // #287: both tools' results are echoes of what the model itself sent — a path, a glob, a
         // refusal or clamp sentence quoting the argument — so tier 1 is still the right tier. What

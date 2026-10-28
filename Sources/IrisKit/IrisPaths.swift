@@ -191,8 +191,10 @@ struct IrisPaths: Sendable {
     /// - `plugins/` is the same thing one step removed: a plugin with an `mcp` component spawns a
     ///   command at the next launch, and `PluginState` defaults to enabled.
     ///
-    /// `rules/` is deliberately NOT here: it is prompt persistence, which the guard already treats
-    /// as untrusted content, not a way to make something execute.
+    /// `rules/` is deliberately NOT here: a rule is prompt persistence, not a way to make something
+    /// execute. The guard does not judge the person's own rules (`SkillManager.loadCustomRules`
+    /// guards plugin rules only), so they go into the system prompt as written. #813 is to hold such
+    /// a write from a conversation that has read untrusted output until the person approves it.
     /// Session artifacts (#469 §7): content-addressed, written only by the harness.
     var exchangeDir: URL { root.appendingPathComponent("exchange") }
 
