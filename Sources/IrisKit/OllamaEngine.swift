@@ -5,18 +5,49 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
     private var purpose: ModelLoadPurpose = .other("ollama")
     private var generates = 0
     private let tracker: ModelLoadTracker
+    private let transport: Transport
+    /// The preload in flight, if any: at most one per engine, so a cold call never shows twice.
+    private var preload: Task<Void, Never>?
 
-    init(tracker: ModelLoadTracker = .shared) {
+    init(tracker: ModelLoadTracker = .shared, transport: Transport = .live) {
         self.tracker = tracker
+        self.transport = transport
     }
     
     private static let baseURL = "http://localhost:11434"
+
+    /// The two requests a load decision rests on (#778), injectable so a test stands in for the
+    /// server. `ps` is `/api/ps`'s body, nil when it didn't answer 200; `preload` posts a
+    /// `/api/generate` body and returns the status and body.
+    struct Transport: Sendable {
+        var ps: @Sendable () async -> Data?
+        var preload: @Sendable (Data) async throws -> (status: Int, data: Data)
+
+        static let live = Transport(
+            ps: {
+                guard let url = URL(string: "\(OllamaEngine.baseURL)/api/ps") else { return nil }
+                var req = URLRequest(url: url)
+                req.httpMethod = "GET"
+                req.timeoutInterval = 3
+                guard let (data, response) = try? await URLSession.shared.data(for: req),
+                      (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+                return data
+            },
+            preload: { body in
+                var req = URLRequest(url: URL(string: "\(OllamaEngine.baseURL)/api/generate")!)
+                req.httpMethod = "POST"
+                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                req.httpBody = body
+                let (data, response) = try await URLSession.shared.data(for: req)
+                return ((response as? HTTPURLResponse)?.statusCode ?? 0, data)
+            })
+    }
 
     func loadModel(config: AuxiliaryModelConfig) async throws {
         self.modelName = config.modelPathOrName
         self.purpose = ModelLoadPurpose(role: config.role)
         // Warm the model on init so the first Vibecop call doesn't hit a cold-start timeout
-        preloadModel()
+        startPreload()
     }
     
     func unloadModel() async {
@@ -35,22 +66,13 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
     /// Checks whether the model is currently loaded in Ollama's VRAM/RAM
     /// by querying the /api/ps endpoint.
     func isModelLoaded() async -> Bool {
-        guard !modelName.isEmpty,
-              let url = URL(string: "\(Self.baseURL)/api/ps") else { return false }
-        
-        var req = URLRequest(url: url)
-        req.httpMethod = "GET"
-        
-        do {
-            let (data, response) = try await URLSession.shared.data(for: req)
-            guard let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200 else { return false }
-            
-            let models = Self.parsePSModels(from: data)
-            return Self.modelIsInPSList(modelName, models: models)
-        } catch {
-            return false
-        }
+        await psListsModel() ?? false
+    }
+
+    /// Whether `/api/ps` lists this engine's model; nil when it didn't answer, which decides nothing.
+    private func psListsModel() async -> Bool? {
+        guard !modelName.isEmpty, let data = await transport.ps() else { return nil }
+        return Self.modelIsInPSList(modelName, models: Self.parsePSModels(from: data))
     }
     
     // MARK: - Parsing (pure functions — testable without network)
@@ -182,27 +204,26 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
         }.joined(separator: " ")
     }
 
+    /// The preload in flight, for a test to await.
+    var pendingPreload: Task<Void, Never>? { preload }
+
     /// Fires a non-blocking warmup request to keep the model alive.
     /// Ollama's default keep_alive is ~5m, so this extends the window.
-    /// Tracked as a load from send to reply (#778): the reply is Ollama's own signal that the model
-    /// is in memory, so the load ends on it and never on a guess.
-    private func preloadModel() {
-        Task {
-            guard !modelName.isEmpty,
-                  let url = URL(string: "\(Self.baseURL)/api/generate") else { return }
-            var req = URLRequest(url: url)
-            req.httpMethod = "POST"
-            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            let body: [String: Any] = [
-                "model": modelName,
-                "prompt": "",
-                "keep_alive": "5m"
-            ]
-            req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-            let load = tracker.begin(purpose, name: modelName)
+    /// Tracked as a load from send to reply (#778): Ollama answers it only once the model is
+    /// resident, so the load ends on that reply and never on a guess.
+    @discardableResult
+    func startPreload() -> Task<Void, Never>? {
+        guard !modelName.isEmpty else { return nil }
+        if let preload { return preload }
+        let body = (try? JSONSerialization.data(withJSONObject: [
+            "model": modelName,
+            "prompt": "",
+            "keep_alive": "5m"
+        ] as [String: Any])) ?? Data()
+        let load = tracker.begin(purpose, name: modelName)
+        let task = Task {
             do {
-                let (data, response) = try await URLSession.shared.data(for: req)
-                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                let (status, data) = try await transport.preload(body)
                 if status == 200 {
                     tracker.end(load, .loaded, detail: Self.timings(from: data))
                 } else {
@@ -211,8 +232,12 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
             } catch {
                 tracker.end(load, .failed("\(error.localizedDescription)"))
             }
+            preload = nil
         }
+        preload = task
+        return task
     }
+
     func generate(prompt: String, jsonSchema: String?) async throws -> String {
         try await generate(prompt: prompt, jsonSchema: jsonSchema, images: nil)
     }
