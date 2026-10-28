@@ -44,6 +44,9 @@ struct ModelLoadStatusRow: View {
                 .padding(.vertical, 2)
                 // In the composer stack: bounded (Invariant 8). Four caption lines at most.
                 .frame(maxHeight: 72)
+                // After the cap, so the frame reports its lines' height: a maxHeight frame alone
+                // grows to whatever it's offered, and the stack gave one line all 72 (#791's GUI check).
+                .fixedSize(horizontal: false, vertical: true)
                 .accessibilityElement(children: .combine)
             }
         }
