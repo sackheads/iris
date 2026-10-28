@@ -89,7 +89,8 @@ final class AuxiliaryModelManager: @unchecked Sendable {
     
     /// Whether an Ollama engine for `role` asks a thinking model not to think (#783): tier 3 only.
     /// On #785's fixtures gemma4:12b's canary took about 1.2 s a check instead of about 10, and
-    /// missed none of the 70 attacks it blocked every time with thinking. Vibecop is unmeasured.
+    /// missed none of the 70 attacks it blocked every time with thinking in #783's bake-off; a later
+    /// 3-repeat run (#803) caught two of those 2 of 3 times each. Vibecop is unmeasured.
     static func suppressesThinking(role: String) -> Bool {
         ModelLoadPurpose(role: role) == .guardTier3
     }
