@@ -1134,6 +1134,9 @@ class AppState {
 
     enum DelegateKind { case subagent, evaluator }
 
+    /// The session `child` was delegated from, if it is a live delegate.
+    func delegationParent(of child: UUID) -> UUID? { delegationParent[child] }
+
     func linkDelegate(_ child: UUID, of parent: UUID, kind: DelegateKind = .subagent) {
         delegationParent[child] = parent
         if kind == .evaluator { evaluatorDelegates.insert(child) } else { evaluatorDelegates.remove(child) }
@@ -1452,6 +1455,9 @@ class AppState {
     }
 
     private(set) var engine: IrisEngine!
+    /// #813: standing-context writes held from a conversation that has read untrusted output,
+    /// in every state (the report and Settings read decided ones too). Loaded with the store.
+    var pendingContextWrites: [PendingContextWrite] = []
     /// Durable conversation persistence (#163). Injected so tests get an in-memory database.
     let store: ConversationStore
     /// Rows `loadConversations()` could not decode on the most recent load (#163). Internal for
@@ -5036,6 +5042,7 @@ class AppState {
 
         do {
             let result = try store.loadAll()
+            pendingContextWrites = (try? store.loadPendingWrites()) ?? []
             loadedSkippedRows = result.skipped
             loadedRepairFailed = result.repairFailed
             let (loaded, roleNormalizationChanged) = Self.sanitizeLoaded(result.conversations)

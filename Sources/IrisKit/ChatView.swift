@@ -393,6 +393,13 @@ struct ChatView: View {
                             .transition(Motion.slide())
                     }
 
+                    // #813: standing-context writes held for the person's OK, shown once the turn
+                    // has ended. Height-capped (Invariant 8).
+                    if !state.isThinking(in: conv.id), !state.pendingContextWrites(shownIn: conv.id).isEmpty {
+                        ContextHoldsChip(state: state, conversationId: conv.id)
+                            .transition(Motion.slide())
+                    }
+
                     // #190: the loop's chip. One line of controls, height-capped (Invariant 8).
                     if let loop = conv.loop {
                         LoopChip(state: state, conversationId: conv.id, loop: loop)

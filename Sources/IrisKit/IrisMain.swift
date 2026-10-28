@@ -1,7 +1,7 @@
 import Foundation
 
 /// The process entry point, shared by the SwiftPM `iris` binary and the Xcode `Iris.app`.
-/// Headless modes (--perf, --bench, --run-job, --eval, --guard-probe, --seed-dev-home) run before any
+/// Headless modes (--perf, --bench, --run-job, --eval, --context-holds-report, --guard-probe, --seed-dev-home) run before any
 /// SwiftUI window is created and exit.
 public enum IrisMain {
     @MainActor
@@ -61,6 +61,16 @@ public enum IrisMain {
                 exit(await EvalCLI.execute(command))
             case .failure(let err):
                 FileHandle.standardError.write(Data("iris --eval: \(err.localizedDescription)\n\(EvalCLI.usage)\n".utf8))
+                exit(64)
+            }
+        } else if let report = ContextHoldsReportCLI.parse(CommandLine.arguments) {
+            // #817: the context-hold read-out. Read-only on the store file; no lock, Keychain or settings.
+            ProcessRole.set(.report)
+            switch report {
+            case .success(let days):
+                exit(ContextHoldsReportCLI.run(days: days))
+            case .failure(let err):
+                FileHandle.standardError.write(Data("iris --context-holds-report: \(err.message)\n\(ContextHoldsReportCLI.usage)\n".utf8))
                 exit(64)
             }
         } else if let probe = GuardProbeCLI.parse(CommandLine.arguments) {

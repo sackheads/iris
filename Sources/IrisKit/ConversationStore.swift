@@ -710,6 +710,28 @@ final class ConversationStore: Sendable {
                 t.add(column: "hasUntrustedToolOutput", .boolean)
             }
         }
+        // #813: standing-context writes held for the person's approval. Not keyed to the
+        // conversation by a foreign key: a held item outlives a job run's hidden conversation.
+        // `turnId`, `isPinnedIris` and `decidedAt` are #817's read-out, nullable from the start.
+        m.registerMigration("v32_pending_context_writes") { db in
+            try db.create(table: "pending_context_writes") { t in
+                t.column("id", .text).primaryKey()
+                t.column("conversationId", .text).notNull()
+                t.column("rootConversationId", .text)
+                t.column("toolName", .text).notNull()
+                t.column("args", .text).notNull()
+                t.column("workspacePath", .text)
+                t.column("targetPath", .text)
+                t.column("targetSha256", .text)
+                t.column("firstLine", .text).notNull()
+                t.column("createdAt", .datetime).notNull()
+                t.column("state", .text).notNull()
+                t.column("turnId", .text)
+                t.column("isPinnedIris", .boolean)
+                t.column("decidedAt", .datetime)
+                t.column("outcome", .text)
+            }
+        }
         return m
     }
 
@@ -1725,6 +1747,68 @@ final class ConversationStore: Sendable {
     private static func sanitizeFTSQuery(_ query: String) -> String {
         let allowed = CharacterSet.alphanumerics.union(.whitespaces)
         return String(String.UnicodeScalarView(query.unicodeScalars.filter { allowed.contains($0) }))
+    }
+
+    // MARK: Held context writes (#813)
+
+    /// Inserts or replaces one held item, whole.
+    func savePendingWrite(_ item: PendingContextWrite) throws {
+        let args = String(decoding: try JSONEncoder().encode(item.args), as: UTF8.self)
+        try writer.write { db in
+            try db.execute(sql: """
+                INSERT INTO pending_context_writes (id, conversationId, rootConversationId, toolName, args, workspacePath,
+                    targetPath, targetSha256, firstLine, createdAt, state, turnId, isPinnedIris, decidedAt, outcome)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET state = excluded.state, decidedAt = excluded.decidedAt,
+                    outcome = excluded.outcome
+                """, arguments: [item.id.uuidString, item.conversationId.uuidString, item.rootConversationId?.uuidString,
+                                 item.toolName, args,
+                                 item.workspacePath, item.targetPath, item.targetSha256, item.firstLine,
+                                 item.createdAt, item.state.rawValue, item.turnId?.uuidString, item.isPinnedIris,
+                                 item.decidedAt, item.outcome])
+        }
+    }
+
+    /// Every held item, oldest first. A row this build can't read is skipped and logged, never
+    /// fatal: the store must still load.
+    func loadPendingWrites() throws -> [PendingContextWrite] {
+        try writer.read { db in try Self.pendingWrites(db) }
+    }
+
+    static func pendingWrites(_ db: Database) throws -> [PendingContextWrite] {
+        try Row.fetchAll(db, sql: "SELECT * FROM pending_context_writes ORDER BY createdAt, id").compactMap { row in
+            guard let id = (row["id"] as String?).flatMap(UUID.init(uuidString:)),
+                  let conversationId = (row["conversationId"] as String?).flatMap(UUID.init(uuidString:)),
+                  let toolName = row["toolName"] as String?,
+                  let argsText = row["args"] as String?,
+                  let args = try? JSONDecoder().decode([String: JSONValue].self, from: Data(argsText.utf8)),
+                  let firstLine = row["firstLine"] as String?,
+                  let createdAt = row["createdAt"] as Date?,
+                  let state = (row["state"] as String?).flatMap(PendingContextWrite.State.init(rawValue:)) else {
+                print("WARNING: unreadable held context write row; skipped")
+                return nil
+            }
+            return PendingContextWrite(id: id, conversationId: conversationId,
+                                       rootConversationId: (row["rootConversationId"] as String?).flatMap(UUID.init(uuidString:)),
+                                       toolName: toolName, args: args,
+                                       workspacePath: row["workspacePath"], targetPath: row["targetPath"],
+                                       targetSha256: row["targetSha256"], firstLine: firstLine, createdAt: createdAt,
+                                       state: state, turnId: (row["turnId"] as String?).flatMap(UUID.init(uuidString:)),
+                                       isPinnedIris: row["isPinnedIris"], decidedAt: row["decidedAt"], outcome: row["outcome"])
+        }
+    }
+
+    /// #817's report reads the store file directly, read-only: no migration, no lock, no write.
+    /// A store with no such table yet (older than #813) reads as no rows.
+    static func readPendingWrites(at url: URL) throws -> [PendingContextWrite] {
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        var c = Configuration()
+        c.readonly = true
+        let queue = try DatabaseQueue(path: url.path, configuration: c)
+        return try queue.read { db in
+            guard try db.tableExists("pending_context_writes") else { return [] }
+            return try pendingWrites(db)
+        }
     }
 
     /// Tests corrupt rows through this; nothing in the app calls it.
