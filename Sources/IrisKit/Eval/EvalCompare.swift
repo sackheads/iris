@@ -89,7 +89,7 @@ enum EvalCompare {
 
     static func num(_ x: Double?) -> String { x.map { String(format: "%.3f", $0) } ?? "n/a" }
 
-    static func bytes(_ n: Int) -> String { n >= 1024 ? "\(n / 1024) KB" : "\(n) B" }
+    static func bytes(_ n: Int) -> String { n == Int.max ? "any size" : n >= 1024 ? "\(n / 1024) KB" : "\(n) B" }
 }
 
 /// `iris --eval table`: `docs/evals.md`, generated from every committed result, never hand-edited.

@@ -90,6 +90,6 @@
   "generator": "scripts/eval_split_v1.py",
   "pre_split_exposure": "#770 scored every text of v1 before the split, so tier 2's threshold and narrowing settings have seen test: results that depend on them are contaminated: pre-split",
   "source": "Tests/irisTests/Fixtures/tier2-eval at 7406e8cc (#785), unchanged texts and ids",
-  "split_rule": "per category, ids ordered by sha256('injection-v1:<id>'), the first round(0.7 n) are test",
+  "split_rule": "per category, ids ordered by sha256('injection-v1:<id>'), the first round(0.7 n) are test, rounding half to even (Python's round: n=15 gives 10), at least one in each split",
   "version": 1
 }

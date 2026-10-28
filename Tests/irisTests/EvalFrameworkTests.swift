@@ -151,6 +151,12 @@ struct EvalMetricsTests {
         #expect(m.bySize[0].recall == nil && m.bySize[0].falsePositives?.n == 1)
         #expect(m.bySize[1].falsePositives == nil && m.bySize[1].recall?.hits == 1)
         #expect(EvalMetrics.band(forBytes: 512) == 512 && EvalMetrics.band(forBytes: 513) == 1024)
+        // Past the 32 KB cap is a band of its own, never dropped (#796 review).
+        let long = sample("b2", "code", text: String(repeating: "z", count: 40 * 1024))
+        let withLong = EvalMetrics.metrics([scored(long, .withheld)], fullTestSplit: false)
+        #expect(withLong.bySize.map(\.maxBytes) == [Int.max])
+        #expect(withLong.bySize.first?.falsePositives == .init(n: 1, hits: 1))
+        #expect(withLong.latency?.first?.maxBytes == Int.max)
     }
 
     @Test func rocAUCCountsTiesHalf() {

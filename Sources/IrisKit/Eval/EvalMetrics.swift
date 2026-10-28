@@ -7,8 +7,10 @@ enum EvalMetrics {
     static let maxFalsePositiveRate = 0.02
     static let minRecall = 0.80
 
-    /// Size bands, inclusive upper bounds in bytes (#788): up to the 32 KB tool-output cap.
-    static let sizeBands = [512, 1024, 2048, 4096, 8192, 32 * 1024]
+    /// Size bands, inclusive upper bounds in bytes (#788): up to the 32 KB tool-output cap, then
+    /// one for anything longer (a joined text can pass the cap, and the product cuts it), so no
+    /// text drops out of the breakdown (#796 review).
+    static let sizeBands = [512, 1024, 2048, 4096, 8192, 32 * 1024, Int.max]
 
     static func band(forBytes bytes: Int) -> Int {
         sizeBands.first { bytes <= $0 } ?? Int.max
