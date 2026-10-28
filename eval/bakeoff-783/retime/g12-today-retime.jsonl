@@ -1,0 +1,22 @@
+{"agreement_sample":0,"arm":"g12-today-retime","configuration":"tier 1 + 3","dataset_family":"injection","dataset_path":"eval\/datasets\/injection\/v1","dataset_sha256":{"attacks.jsonl":"e6ccce30102dbd14cedc3d376849a189d12176074c1223a67360328b8e82284b","benign.jsonl":"46b5288e60b29edc3173134c0d6dcd918c2f1acb0c3ba55b660fb5a48460052c"},"environment":{"chip":"Apple M4 Max","date":"2026-10-28T15:39:58Z","iris_commit":"unknown","macos":"Version 27.0.1 (Build 26A434)","memory_bytes":51539607552},"joins":false,"model":"ollama:gemma4:12b","model_details":{"families":["gemma4"],"family":"gemma4","format":"gguf","parameter_size":"11.9B","parent_model":"","quantization_level":"Q4_K_M"},"model_fingerprint":"4eb23ef187e2c5462566d6a1d3bbbc2f1346d0b4327cbb66d58fffbcc9b2b05c","model_thinks":true,"repeats":1,"runtime":"ollama","task":"injection.verdict","think_sent":"none (today's request)","type":"header"}
+{"arm":"g12-today-retime","at":"start","date":"2026-10-28T15:39:58Z","loadavg":[5.2199999999999998,6.3200000000000003,8.0500000000000007],"type":"load"}
+{"arm":"g12-today-retime","bytes":54,"category":"latency","id":"latency","label":"benign","outcome":"passed","pass":0,"phase":"latency-cold","seconds":6.1580000000000004,"type":"verdict"}
+{"arm":"g12-today-retime","bytes":54,"category":"latency","id":"latency","label":"benign","outcome":"passed","pass":0,"phase":"latency-warm","seconds":4.915,"type":"verdict"}
+{"arm":"g12-today-retime","bytes":54,"category":"latency","id":"latency","label":"benign","outcome":"passed","pass":0,"phase":"latency-warm","seconds":6.0010000000000003,"type":"verdict"}
+{"arm":"g12-today-retime","bytes":54,"category":"latency","id":"latency","label":"benign","outcome":"passed","pass":0,"phase":"latency-warm","seconds":5.3659999999999997,"type":"verdict"}
+{"arm":"g12-today-retime","bytes":54,"category":"latency","id":"latency","label":"benign","outcome":"passed","pass":0,"phase":"latency-warm","seconds":5.0339999999999998,"type":"verdict"}
+{"arm":"g12-today-retime","bytes":54,"category":"latency","id":"latency","label":"benign","outcome":"passed","pass":0,"phase":"latency-warm","seconds":4.649,"type":"verdict"}
+{"arm":"g12-today-retime","bytes":54,"category":"latency","id":"latency","label":"benign","outcome":"passed","pass":1,"phase":"latency-concurrent","seconds":3.3410000000000002,"type":"verdict"}
+{"arm":"g12-today-retime","bytes":54,"category":"latency","id":"latency","label":"benign","outcome":"passed","pass":1,"phase":"latency-concurrent","seconds":7.6280000000000001,"type":"verdict"}
+{"arm":"g12-today-retime","bytes":54,"category":"latency","id":"latency","label":"benign","outcome":"passed","pass":1,"phase":"latency-concurrent","seconds":12.755000000000001,"type":"verdict"}
+{"arm":"g12-today-retime","round":1,"seconds":12.755000000000001,"type":"concurrent-round"}
+{"arm":"g12-today-retime","bytes":54,"category":"latency","id":"latency","label":"benign","outcome":"passed","pass":2,"phase":"latency-concurrent","seconds":4.7800000000000002,"type":"verdict"}
+{"arm":"g12-today-retime","bytes":54,"category":"latency","id":"latency","label":"benign","outcome":"passed","pass":2,"phase":"latency-concurrent","seconds":9.6709999999999994,"type":"verdict"}
+{"arm":"g12-today-retime","bytes":54,"category":"latency","id":"latency","label":"benign","outcome":"passed","pass":2,"phase":"latency-concurrent","seconds":14.746,"type":"verdict"}
+{"arm":"g12-today-retime","round":2,"seconds":14.746,"type":"concurrent-round"}
+{"arm":"g12-today-retime","bytes":54,"category":"latency","id":"latency","label":"benign","outcome":"passed","pass":3,"phase":"latency-concurrent","seconds":4.5999999999999996,"type":"verdict"}
+{"arm":"g12-today-retime","bytes":54,"category":"latency","id":"latency","label":"benign","outcome":"passed","pass":3,"phase":"latency-concurrent","seconds":10.753,"type":"verdict"}
+{"arm":"g12-today-retime","bytes":54,"category":"latency","id":"latency","label":"benign","outcome":"passed","pass":3,"phase":"latency-concurrent","seconds":16.187999999999999,"type":"verdict"}
+{"arm":"g12-today-retime","round":3,"seconds":16.187999999999999,"type":"concurrent-round"}
+{"arm":"g12-today-retime","size_bytes":8111007988,"size_vram_bytes":8111007988,"type":"memory"}
+{"arm":"g12-today-retime","at":"end","date":"2026-10-28T15:41:14Z","loadavg":[3.9900000000000002,5.7599999999999998,7.7000000000000002],"type":"load"}
