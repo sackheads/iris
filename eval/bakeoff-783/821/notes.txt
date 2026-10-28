@@ -1,9 +1,11 @@
-#821: how the tier-3 canary's replies are actually shaped, and whether reading them by first word
+#821: how the tier-3 canary's replies are actually shaped, and whether reading them as one exact word
 changes any verdict. 2026-10-28. Each verdict row's `reply` is the canary's raw answer, truncated
 to 200 characters. table.md applies both readings to the same rows: the old one (passes if the
 reply contains SAFE and not MALICIOUS) and the new one, InjectionGuard.canaryVerdict (passes only if
-the first word, trimmed of quotes, emphasis and trailing punctuation, is SAFE in any case, and
-MALICIOUS appears nowhere). A row with no reply is an error and fails closed under both.
+the whole reply, trimmed of whitespace, quotes, emphasis and a trailing period or exclamation mark,
+is the one word SAFE in any case; MALICIOUS anywhere blocks; anything else fails closed). The
+table was first made with a first-word reading; the one-word reading gives the same numbers, since
+every reply was one word. A row with no reply is an error and fails closed under both.
 
 Arms:
 - g12-{off,on}-{v1,v2look,v3long}: gemma4:12b on this Mac (Apple M4 Max), thinking off and as
