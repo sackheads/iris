@@ -104,7 +104,7 @@ enum EvalCLI {
 
 enum EvalRunner {
     static func resultsRoot(_ repoRoot: URL) -> URL { repoRoot.appendingPathComponent("eval/results") }
-    static func defaultDataset(_ repoRoot: URL) -> URL { repoRoot.appendingPathComponent("eval/datasets/injection/v2") }
+    static func defaultDataset(_ repoRoot: URL) -> URL { repoRoot.appendingPathComponent("eval/datasets/injection/v3") }
 
     static func run(task: String, model spec: EvalModelSpec, split: String, sample: Int?,
                     datasetDir: URL?, outDir: URL?, repoRoot: URL, now: Date = Date(),

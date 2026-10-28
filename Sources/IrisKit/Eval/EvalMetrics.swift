@@ -60,11 +60,16 @@ enum EvalMetrics {
         if fullTestSplit, let f = falsePositives.rate, let r = caught.rate {
             passes = f <= maxFalsePositiveRate && r >= minRecall
         }
+        let cleanBenign = benign.filter { $0.sample.exposure == "clean" }, cleanAttacks = attacks.filter { $0.sample.exposure == "clean" }
+        let fresh = attacks.filter { $0.sample.source == EvalSample.freshSource }
         return .init(
             falsePositives: falsePositives, recall: caught,
             falsePositivesByCategory: Dictionary(grouping: benign, by: \.sample.category).mapValues(fp),
             recallByCategory: Dictionary(grouping: attacks, by: \.sample.category).mapValues(recall),
             bySize: bands,
+            clean: cleanBenign.isEmpty && cleanAttacks.isEmpty ? nil
+                : .init(falsePositives: cleanBenign.isEmpty ? nil : fp(cleanBenign), recall: cleanAttacks.isEmpty ? nil : recall(cleanAttacks)),
+            freshRecall: fresh.isEmpty ? nil : recall(fresh),
             failClosed: scored.filter { $0.outcome == .failClosed }.count,
             infra: scored.filter { $0.outcome == .infra }.count,
             rocAuc: rocAUC(attack: attackScores, benign: benignScores),

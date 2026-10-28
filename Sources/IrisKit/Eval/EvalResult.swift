@@ -69,6 +69,12 @@ struct EvalResult: Codable, Equatable, Sendable {
         var recall: Rate?
     }
 
+    /// One slice of the scored texts, both rates over it; a side with no texts is absent.
+    struct Subset: Codable, Equatable, Sendable {
+        var falsePositives: Rate?
+        var recall: Rate?
+    }
+
     struct Latency: Codable, Equatable, Sendable {
         var maxBytes: Int
         var n: Int
@@ -85,6 +91,12 @@ struct EvalResult: Codable, Equatable, Sendable {
         var recallByCategory: [String: Rate]
         /// By input size, so a dataset's length mix can't hide a length effect (#785 review).
         var bySize: [Band]
+        /// The texts marked `exposure: clean` (v2 on): nothing was tuned or scored on them before
+        /// the split. Absent when none were scored.
+        var clean: Subset? = nil
+        /// v3's fresh attacks (`source: v3-fresh`), written after the split froze and all `test`:
+        /// the recall no setting has seen (#789). Absent when none were scored.
+        var freshRecall: Rate? = nil
         var failClosed: Int
         var infra: Int
         var rocAuc: Double?

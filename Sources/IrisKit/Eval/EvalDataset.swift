@@ -14,6 +14,9 @@ struct EvalSample: Codable, Equatable, Sendable {
     /// existed, "clean" otherwise; absent in v1, where every text is pre-split (manifest).
     var exposure: String? = nil
 
+    /// v3's fresh attacks, written after v1's split froze, all `test` (#789).
+    static let freshSource = "v3-fresh"
+
     var isAttack: Bool { payload != nil }
     var bytes: Int { text.utf8.count }
 }
