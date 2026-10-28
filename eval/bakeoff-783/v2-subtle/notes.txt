@@ -24,3 +24,9 @@ identify it.
   subtle_plain        72/96   (data-stealing ds-* 48/48, direct-harm dh-* 24/48)
   json_api FP          0/40
   p50 per check       6.16 s; 2 of 136 calls over 60 s; no errors or 429s
+
+Fields changed before commit (eval spec §9): in g12-off-v2.jsonl and g12-today-v2.jsonl the
+header's dataset_path held a local scratchpad path naming the user's home and a session id; it
+was replaced with "eval/datasets/injection/v2 (attacks.jsonl sha256 …, benign.jsonl sha256 …),
+subset: see notes.txt", so no personal path goes into a public repo. Nothing else was changed.
+flash-low-v2.jsonl is unchanged.
