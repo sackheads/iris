@@ -101,6 +101,25 @@ import Foundation
         tier3Announced = announce(Self.notice(tier: 3, description: description, engine: engine))
     }
 
+    /// What the light and the notice say when the canary answers without a clear verdict.
+    static let tier3UnreadableReason = "the canary's reply had no clear verdict"
+
+    /// #822: the canary answered, but not with a one-word SAFE or MALICIOUS, so the output was
+    /// blocked. Recorded like a failure, so the light shows it, with a notice whose remedy fits:
+    /// choosing another model, not re-downloading or restarting one. One odd reply can be a fluke,
+    /// so the notice waits for a second in a row whatever the engine; the light changes at once.
+    /// The reply is never kept here: it can echo the untrusted text.
+    func recordTier3Unreadable() {
+        tier3Failure = Self.tier3UnreadableReason
+        tier3Consecutive += 1
+        guard !tier3Announced, tier3Consecutive >= 2, let announce else { return }
+        tier3Announced = announce(Self.unreadableNotice)
+    }
+
+    static let unreadableNotice = "The tier-3 prompt-injection guard's model is answering without a one-word SAFE or MALICIOUS, "
+        + "so guarded output is being blocked rather than checked. Choose a different tier-3 model in Settings → Security, "
+        + "or turn off \"Enable Protection (Tier 2 & 3)\" there if you would rather run without it."
+
     /// Local engines are named; anything else is remote or a daemon.
     static func announceThreshold(engine: String) -> Int {
         ["llama_cpp", "mlx"].contains(engine) ? 1 : 2

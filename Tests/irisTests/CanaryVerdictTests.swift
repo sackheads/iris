@@ -72,6 +72,24 @@ struct CanaryVerdictTests {
         #expect(await outcome("") == "blocked")
     }
 
+    @Test("an unreadable reply turns the tier-3 light red without keeping the reply, and a verdict clears it")
+    @MainActor
+    func unreadableShowsOnTheLight() async {
+        let box = GuardTierHealth()
+        var notices: [String] = []
+        box.announce = { notices.append($0); return true }
+        await GuardTierHealth.$scoped.withValue(box) {
+            #expect(await outcome("Not safe: it asks you to send the file") == "blocked")
+            #expect(box.tier3Failure == GuardTierHealth.tier3UnreadableReason)
+            #expect(!(box.tier3Failure ?? "").contains("send the file"), "the reply is never kept")
+            #expect(notices.isEmpty, "one odd reply is not announced")
+            #expect(await outcome("SAFE then more words") == "blocked")
+            #expect(notices == [GuardTierHealth.unreadableNotice], "the second in a row is")
+            #expect(await outcome("SAFE") == "passed")
+            #expect(box.tier3Failure == nil, "a clear verdict clears the light")
+        }
+    }
+
     @Test("through the guard, a clear SAFE still passes")
     func guardPassesSafe() async {
         #expect(await outcome("SAFE") == "passed")
