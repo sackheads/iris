@@ -34,7 +34,7 @@ enum GuardProbeCLI {
                iris --guard-probe --fixtures DIR --model ollama:NAME|cloud:gemini/ID --arm LABEL --out DIR
                     [--think on|off] [--thinking-level LEVEL] [--repeats N] [--agreement-sample N]
                     [--baseline ROWS.jsonl] [--flip-repeats N] [--joins] [--latency]
-                    [--allow-paid --max-dollars N [--spend-ledger FILE] [--estimate-only]] [--gemini-auth adc|key]
+                    [--latency-only] [--allow-paid --max-dollars N [--spend-ledger FILE] [--estimate-only]] [--gemini-auth adc|key]
                iris --guard-probe --compare DIR [--baseline-arm LABEL]
         """
 
@@ -64,12 +64,13 @@ enum GuardProbeCLI {
             case "--compare", "--baseline-arm":
                 guard let value = rest.next(), !value.isEmpty else { return .failure(.badValue(flag)) }
                 if flag == "--compare" { options.compare = value } else { options.baselineArm = value }
-            case "--joins", "--latency", "--allow-paid", "--estimate-only":
+            case "--joins", "--latency", "--allow-paid", "--estimate-only", "--latency-only":
                 var f = options.fixtures ?? GuardProbeFixtures.Options()
                 switch flag {
                 case "--joins": f.joins = true
                 case "--latency": f.latency = true
                 case "--estimate-only": f.estimateOnly = true
+                case "--latency-only": f.latencyOnly = true; f.latency = true
                 default: f.allowPaid = true
                 }
                 options.fixtures = f

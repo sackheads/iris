@@ -168,6 +168,7 @@ extension GuardProbeFixtures {
                       "joins": o.joins, "repeats": o.repeats, "agreement_sample": o.agreementSample,
                       "environment": environment()]) { a, _ in a }
         rows.write(header)
+        rows.write(machineLoad(o.arm, at: "start"))
         say("arm \(o.arm): \(all.count) texts, \(o.model)")
 
         func record(_ item: Item, _ j: Judgement, phase: String, pass: Int) {
@@ -210,6 +211,11 @@ extension GuardProbeFixtures {
             }
         }
 
+        if o.latencyOnly {
+            rows.write(machineLoad(o.arm, at: "end"))
+            say("rows in \(outDir.appendingPathComponent("\(o.arm).jsonl").path)")
+            return 0
+        }
         var first: [String: String] = [:]
         for (n, item) in all.enumerated() {
             guard let j = await next(item) else { break }
@@ -230,6 +236,7 @@ extension GuardProbeFixtures {
                 for k in 1...max(1, o.flipRepeats) { if let j = await next(item) { record(item, j, phase: "flip", pass: k) } }
             }
         }
+        rows.write(machineLoad(o.arm, at: "end"))
         if rates != nil { say(String(format: "spent $%.4f", spent)) }
         say("rows in \(outDir.appendingPathComponent("\(o.arm).jsonl").path)")
         return 0
@@ -308,6 +315,16 @@ extension GuardProbeFixtures {
             if !models.contains(where: { ($0["name"] as? String) == name }) { return }
             try? await Task.sleep(for: .milliseconds(250))
         }
+    }
+
+    /// The load average and the busiest processes, so a run on a busy machine shows as one (#783:
+    /// a runaway `deleted` held ~2.3 cores during the first arm).
+    static func machineLoad(_ arm: String, at moment: String) -> [String: Any] {
+        var load = [Double](repeating: 0, count: 3)
+        let n = getloadavg(&load, 3)
+        var row: [String: Any] = ["type": "load", "arm": arm, "at": moment, "date": ISO8601DateFormatter().string(from: Date())]
+        if n == 3 { row["loadavg"] = load.map { ($0 * 100).rounded() / 100 } }
+        return row
     }
 
     static func environment() -> [String: Any] {
