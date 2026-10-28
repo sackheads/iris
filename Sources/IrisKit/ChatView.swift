@@ -417,6 +417,9 @@ struct ChatView: View {
 
                     SpectrumLine(active: state.isThinking(in: conv.id))
 
+                    // #779: above the LED bar, outside its `if`, so it shows with the LEDs hidden.
+                    ModelLoadStatusRow()
+
                     // #261: absent, not hidden — a `.hidden()` or a zero-opacity bar would keep
                     // its slot in the stack and give the space back to nothing.
                     if config.showModelLEDs {
