@@ -4,7 +4,7 @@
 
 ## InjecAgent (24 attacks)
 
-[uiuc-kang-lab/InjecAgent](https://github.com/uiuc-kang-lab/InjecAgent) at `f19c9f2c79a41046eb13c03c51a24c567a8ffa07`, MIT, "Copyright (c) 2023 Qiusi Zhan" ([licence](LICENSES/InjecAgent-MIT.txt)).  Each row carries `source: injecagent`, its `file`, `index`, `commit`, `attack_type`, `user_tool` and `license`.
+[uiuc-kang-lab/InjecAgent](https://github.com/uiuc-kang-lab/InjecAgent) at `f19c9f2c79a41046eb13c03c51a24c567a8ffa07`, MIT, "Copyright (c) 2023 Qiusi Zhan" ([licence](LICENSES/InjecAgent-MIT.txt)).  Category `subtle_plain`, kept apart from v1's disguised `subtle` texts so the table reports each on its own line.  Each row carries `source: injecagent`, its `file`, `index`, `commit`, `attack_type`, `user_tool` and `license`.
 
 Taking a public set reverses the spec's "synthetic and repository content only" (§10 Q2) for this slice only, by Brian's decision on 2026-10-28 ("InjecAgent + note the gap"), because the project-written attacks were all we had and #783's bake-off had only 6 subtle ones.
 

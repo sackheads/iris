@@ -38,12 +38,16 @@
           "test": 3
         },
         "subtle": {
-          "dev": 9,
-          "test": 21
+          "dev": 2,
+          "test": 4
+        },
+        "subtle_plain": {
+          "dev": 7,
+          "test": 17
         }
       },
       "count": 99,
-      "sha256": "5b01365006ad67533f6649ab1293c005b25a1280d7e094bc13a0f353efb302ec"
+      "sha256": "7af0e861350fad381efd9d3baad7ceb3c3a87a00e5902d666ba9ef332fe48e46"
     },
     "benign.jsonl": {
       "by_category": {
