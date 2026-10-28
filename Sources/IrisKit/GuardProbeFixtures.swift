@@ -35,6 +35,8 @@ enum GuardProbeFixtures {
         var spendLedger: String?
         /// Print the estimate and make no call.
         var estimateOnly = false
+        /// Only the latency calls: re-times an arm without judging the fixtures again.
+        var latencyOnly = false
     }
 
     enum Runtime: Equatable {
