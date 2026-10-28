@@ -1,5 +1,5 @@
 The two gemma4:12b arms re-timed with --latency-only (#783) once the background process that
-held a core during the original runs had stopped. 2026-10-28, Apple M4 Pro, signed build of
+held a core during the original runs had stopped. 2026-10-28, Apple M4 Max, signed build of
 main + #801 (scripts/sign.sh), fixtures eval/datasets/injection/v1.
 
 Check before (11:39:55 EDT): no BackgroundShortcutRunner process (ps, sampled ~2 min before
