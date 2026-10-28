@@ -1,5 +1,11 @@
 # Custom CoreML Prompt Guard Models
 
+> **Re-tested 2026-10-27 (#770):** the recommended DeBERTa-v3 bundle fails the proposed bar on
+> realistic tool output. 30% of benign outputs lose lines (bar: 2% or less), 68% of attacks are
+> caught (bar: 80% or more), and it costs 1.74 GB of memory. Method, tables and the fresh-install
+> recommendation: [tier2_evaluation.md](tier2_evaluation.md). The July findings below were
+> measured on 19 samples and are corrected where that data falsified them.
+
 Iris includes an extremely fast, on-device text classifier for its Tier 2 Prompt Injection Guard powered by Apple's CoreML and the Neural Engine. 
 
 By default, you can enable Tier 2 by providing a URL to a pre-compiled `.mlmodelc.zip` file in the Settings UI. However, if you want to experiment with different security models (like Meta's official Prompt Guard or other community fine-tunes), you can easily compile your own!
