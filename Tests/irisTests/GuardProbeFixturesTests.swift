@@ -170,4 +170,21 @@ struct GuardProbeFixturesTests {
         #expect(total <= 1.0)
         #expect(total > 0.9, "the cap is used, not refused early: \(total)")
     }
+
+    /// Another process holding the ledger's lock: a reserve waits for it rather than read a total
+    /// that may be about to change.
+    @Test func aReserveWaitsForAnotherHoldersLock() throws {
+        let path = try tempLedger("")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let ledger = try SpendLedger(path: path, arm: "a", cap: 1)
+        let fd = open(path, O_RDWR)
+        try #require(fd >= 0)
+        defer { close(fd) }
+        try #require(flock(fd, LOCK_EX) == 0)
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { _ = try? ledger.reserve(0.1); done.signal() }
+        #expect(done.wait(timeout: .now() + 0.3) == .timedOut, "the reserve went ahead under another holder's lock")
+        flock(fd, LOCK_UN)
+        #expect(done.wait(timeout: .now() + 10) == .success)
+    }
 }
