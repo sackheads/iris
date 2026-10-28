@@ -65,12 +65,23 @@ enum EvalClassifierTask {
         }
     }
 
+    /// The guard configuration a classifier is judged with: protection on and the task-scoped model
+    /// provisioned, never the home's settings (#805). Resolving those reads the Keychain secrets
+    /// item, and they could make the eval score whatever the home is set to. Tier 3 isn't reached
+    /// at `.tier2_coreML`, so its fields hold nothing.
+    static var guardConfig: InjectionGuard.GuardConfigFingerprint {
+        .init(protectionEnabled: true, promptGuardEngine: "", promptGuardModel: "", promptGuardCoreMLModel: "eval",
+              tier2ModelsDir: "", tier3ModelsDir: "", tier2Provisioning: .provisioned,
+              tier3Provisioning: .unprovisioned(modelName: ""))
+    }
+
     /// One text through the product, stopping after tier 2: the outcome and what was passed on.
     /// #785's report reads this too, so there is one scoring path.
     static func product(_ text: String, model: CoreMLModelProtocol) async -> (outcome: EvalMetrics.Outcome, shown: String) {
         let (outcome, cacheable) = await CoreMLEvaluator.$scopedModel.withValue(.init(model)) {
             await InjectionGuard.classifyUntrustedDetailed(OutputCap.cap(text), contextTag: contextTag,
-                                                          maxTier: .tier2_coreML, protectionEnabled: true)
+                                                          maxTier: .tier2_coreML, protectionEnabled: true,
+                                                          config: guardConfig)
         }
         switch outcome {
         case .blocked(let marker): return (cacheable ? .blocked : .failClosed, marker)

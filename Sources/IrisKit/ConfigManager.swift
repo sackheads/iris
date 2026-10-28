@@ -38,9 +38,24 @@ enum NotificationMode: String, CaseIterable, Sendable {
     case off, needsAttention
 }
 
+/// Records each resolution of `ConfigManager.shared` inside a task tree, so a test can prove a
+/// path never reaches it (#805): resolving it reads the secrets item, which asks for Keychain
+/// access, and the home's settings, which `iris --eval` must never use.
+final class ConfigManagerAccess: @unchecked Sendable {
+    @TaskLocal static var recorder: ConfigManagerAccess?
+    private let lock = NSLock()
+    private var resolved = 0
+    var count: Int { lock.withLock { resolved } }
+    func record() { lock.withLock { resolved += 1 } }
+}
+
 @Observable
 class ConfigManager: @unchecked Sendable {
-    @ObservationIgnored static let shared = ConfigManager()
+    @ObservationIgnored private static let sharedInstance = ConfigManager()
+    static var shared: ConfigManager {
+        ConfigManagerAccess.recorder?.record()
+        return sharedInstance
+    }
 
     /// The suite this instance was constructed with. `nil` — what `shared` and every production
     /// call site get — means "whatever `IrisDefaults` resolves at the moment of the write".

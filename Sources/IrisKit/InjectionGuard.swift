@@ -377,13 +377,17 @@ public struct InjectionGuard {
     /// `classifyUntrusted`, plus whether the verdict may be kept: false only when a tier errored
     /// and failed closed, whose marker reads exactly like a real block. The eval counts those
     /// apart from verdicts (#788).
+    ///
+    /// `config` is the guard configuration to judge with, for a caller that must not read the
+    /// home's settings (`iris --eval`, #805); nil resolves it from `ConfigManager.shared`.
     static func classifyUntrustedDetailed(_ rawInput: String, contextTag: String = "",
                                           maxTier: SanitizationTier = .tier1_structural,
-                                          protectionEnabled: Bool? = nil) async -> (outcome: GuardOutcome, cacheable: Bool) {
+                                          protectionEnabled: Bool? = nil,
+                                          config: GuardConfigFingerprint? = nil) async -> (outcome: GuardOutcome, cacheable: Bool) {
         let stripped = PromptInjectionGuard.stripRecordingDelimiters(rawInput)
         let verdict = await classifyDetailed(stripped.text, contextTag: contextTag, maxTier: maxTier,
                                              protectionEnabled: protectionEnabled,
-                                             delimiterLines: stripped.delimiterLines)
+                                             delimiterLines: stripped.delimiterLines, config: config)
         return (verdict.outcome, verdict.cacheable)
     }
 
@@ -411,7 +415,8 @@ public struct InjectionGuard {
                          protectionEnabled: Bool? = nil,
                          tier2ModelsDir: URL? = nil,
                          tier3ModelsDir: URL? = nil,
-                         delimiterLines: [Int: String] = [:]) async -> Verdict {
+                         delimiterLines: [Int: String] = [:],
+                         config: GuardConfigFingerprint? = nil) async -> Verdict {
         let __turnID = PerformanceProfiler.currentTurnID
         let __start = MonotonicClock.nowMs()
         defer {
@@ -419,8 +424,8 @@ public struct InjectionGuard {
                                               durationMs: (MonotonicClock.nowMs() - __start))
         }
         let source = sanitizeSourceLabel(contextTag)
-        let fingerprint = currentConfigFingerprint(protectionEnabled: protectionEnabled,
-                                                    tier2ModelsDir: tier2ModelsDir, tier3ModelsDir: tier3ModelsDir)
+        let fingerprint = config ?? currentConfigFingerprint(protectionEnabled: protectionEnabled,
+                                                              tier2ModelsDir: tier2ModelsDir, tier3ModelsDir: tier3ModelsDir)
 
         // Tier 1: Strict Structural Isolation & Text Normalization
         var unjudged: [String] = []
