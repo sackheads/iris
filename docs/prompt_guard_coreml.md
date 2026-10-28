@@ -1,10 +1,11 @@
 # Custom CoreML Prompt Guard Models
 
 > **Re-tested 2026-10-27 (#770):** the recommended DeBERTa-v3 bundle fails the proposed bar on
-> realistic tool output. 30% of benign outputs lose lines (bar: 2% or less), 68% of attacks are
-> caught (bar: 80% or more), and it costs 1.74 GB of memory. Method, tables and the fresh-install
-> recommendation: [tier2_evaluation.md](tier2_evaluation.md). The July findings below were
-> measured on 19 samples and are corrected where that data falsified them.
+> realistic tool output. 30% of benign texts under 4 KB lose lines, and at 8-32 KB 8 of 9 kinds
+> do (bar: 2% or less). 68% of attacks are caught (bar: 80% or more), and loading it costs 1.74 GB
+> of memory. Method, tables and the fresh-install recommendation are in
+> [tier2_evaluation.md](tier2_evaluation.md). The July findings below were measured on 19 samples
+> and are corrected where that data falsified them.
 
 Iris includes an extremely fast, on-device text classifier for its Tier 2 Prompt Injection Guard powered by Apple's CoreML and the Neural Engine. 
 
@@ -90,7 +91,8 @@ see "Per-result scoring for search_web" below.
 `protectai/deberta-v3-base-prompt-injection-v2` separated this small battery of benign
 samples from the attacks, so it was the model we chose. **The October re-test falsified that on
 realistic tool output** ([tier2_evaluation.md](tier2_evaluation.md), #770): through Iris's own
-tier-2 path, 30% of 201 benign outputs lost lines and 68% of 75 attacks were caught. The catch is getting it onto the Neural
+tier-2 path, 30% of 201 short benign texts lost lines (more at real output sizes) and 68% of
+75 attacks were caught. The catch is getting it onto the Neural
 Engine — see below.
 
 ### CoreML-friendly model survey
