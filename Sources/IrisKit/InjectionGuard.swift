@@ -714,7 +714,14 @@ public struct InjectionGuard {
             // for the same reason.
             await MainActor.run { GuardTierHealth.current.clearTier3() }
             await MetricsManager.shared.trackLatency(operation: .promptGuardTier3, modelName: modelName, durationMs: durationMs, success: true)
-            return (response.contains("SAFE") && !response.contains("MALICIOUS")) ? .safe : .malicious
+            switch Self.canaryVerdict(response) {
+            case .safe: return .safe
+            case .malicious: return .malicious
+            case .unreadable:
+                // Fails closed, as before: only a clear SAFE passes (#821).
+                print("[InjectionGuard] Canary reply had no clear verdict; failing closed. Reply: \(Self.canaryReplyForLog(response))")
+                return .malicious
+            }
         } catch {
             let durationMs = UptimeClock.live.seconds(since: startTime) * 1000
             await MetricsManager.shared.trackLatency(operation: .promptGuardTier3, modelName: modelName, durationMs: durationMs, success: false)
@@ -722,5 +729,35 @@ public struct InjectionGuard {
             await MainActor.run { GuardTierHealth.current.recordTier3Failure("\(error)", engine: engineTypeString) }
             return .error
         }
+    }
+
+    // MARK: - Reading the canary's reply (#821)
+
+    enum CanaryVerdict: Equatable { case safe, malicious, unreadable }
+
+    /// The canary's verdict, read from its first word. A substring test let a reply whose first
+    /// word merely contained the verdict pass as it, so now the first word, with surrounding
+    /// quotes, emphasis and trailing punctuation removed, must be SAFE or MALICIOUS exactly, in any
+    /// case. Anything else is unreadable, and the caller fails closed. MALICIOUS anywhere in the
+    /// reply wins over a leading SAFE, so a hedged answer never passes.
+    nonisolated static func canaryVerdict(_ reply: String) -> CanaryVerdict {
+        if reply.range(of: "MALICIOUS", options: .caseInsensitive) != nil { return .malicious }
+        guard let first = reply.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).first else { return .unreadable }
+        let wrapping = CharacterSet(charactersIn: "\"'`\u{201C}\u{201D}\u{2018}\u{2019}*_")
+        let trailing = CharacterSet(charactersIn: ".,!?:;")
+        var word = String(first).trimmingCharacters(in: wrapping)
+        while let last = word.unicodeScalars.last, trailing.contains(last) { word.removeLast() }
+        word = word.trimmingCharacters(in: wrapping)
+        switch word.uppercased() {
+        case "SAFE": return .safe
+        case "MALICIOUS": return .malicious
+        default: return .unreadable
+        }
+    }
+
+    /// The reply as logged: one line, at most 200 characters.
+    nonisolated static func canaryReplyForLog(_ reply: String) -> String {
+        let flat = reply.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
+        return flat.count > 200 ? String(flat.prefix(200)) + "…" : flat
     }
 }
