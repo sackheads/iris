@@ -76,4 +76,44 @@ struct OllamaThinkingTests {
         try await engine.loadModel(config: AuxiliaryModelConfig(role: "canary", engineType: .ollama, modelPathOrName: "m"))
         await #expect(throws: (any Error).self) { _ = try await engine.generate(prompt: "p", jsonSchema: nil) }
     }
+
+    // The product's engines, through a manager of the test's own (never `.shared`): tier 3 is asked
+    // not to think, Vibecop is not (#783, #798).
+
+    private func managerSend(role: String, capabilities: [String], sent: Sent) async throws {
+        var transport = OllamaEngine.Transport(ps: { nil }, preload: { _ in (200, Data("{}".utf8)) })
+        transport.generate = { body in sent.add(body); return (200, Self.reply) }
+        transport.show = { _ in
+            sent.showed()
+            return try? JSONSerialization.data(withJSONObject: ["capabilities": capabilities])
+        }
+        let manager = AuxiliaryModelManager(tracker: ModelLoadTracker(log: { _ in }), ollamaTransport: transport)
+        let engine = try await manager.getEngine(for: role, config: AuxiliaryModelConfig(role: role, engineType: .ollama, modelPathOrName: "gemma4:12b"))
+        let ollama = try #require(engine as? OllamaEngine)
+        if let task = await ollama.pendingPreload { try await value(of: task, within: 10) }
+        _ = try await engine.generate(prompt: "p", jsonSchema: role == "vibecop" ? "vibecop_schema" : nil)
+    }
+
+    @Test(arguments: ["canary", "promptGuard"])
+    func tierThreesEngineAsksAThinkingModelNotToThink(role: String) async throws {
+        let sent = Sent()
+        try await managerSend(role: role, capabilities: ["completion", "thinking"], sent: sent)
+        #expect(sent.all.map { $0["think"] as? Bool } == [false])
+    }
+
+    @Test func tierThreesRequestToAModelThatDoesNotThinkIsUnchanged() async throws {
+        let sent = Sent()
+        try await managerSend(role: "canary", capabilities: ["completion"], sent: sent)
+        #expect(sent.all.count == 1)
+        #expect(sent.all[0]["think"] == nil)
+    }
+
+    @Test func vibecopsRequestIsUnchanged() async throws {
+        let sent = Sent()
+        try await managerSend(role: "vibecop", capabilities: ["completion", "thinking"], sent: sent)
+        #expect(sent.all.count == 1)
+        #expect(sent.all[0]["think"] == nil)
+        #expect(sent.showCount == 0, "Vibecop's engine never asks for the capability")
+        #expect(!AuxiliaryModelManager.suppressesThinking(role: "vibecop"))
+    }
 }

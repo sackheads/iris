@@ -9,8 +9,8 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
     /// The preload in flight, if any: at most one per engine, so a cold call never shows twice.
     private var preload: Task<Void, Never>?
     /// Ask a thinking model not to think (#783): gemma4 otherwise writes 150-570 hidden tokens
-    /// before a one-word verdict, about 90% of each call's time. Only `--guard-probe --fixtures`
-    /// sets it for now; the product's engines leave it off until #783's bake-off picks a lever.
+    /// before a one-word verdict, about 90% of each call's time. `AuxiliaryModelManager` sets it
+    /// for tier 3's canary only (`suppressesThinking(role:)`), and `--guard-probe --think off`.
     let suppressThinking: Bool
     /// Whether the model reports the `thinking` capability, once `/api/show` has said; `think` is
     /// sent only to a model that has it, so a non-thinking model's request is unchanged.
