@@ -111,8 +111,14 @@ Each run writes one row per judgement to `<out>/<arm>.jsonl`, with the model's d
 and the dataset's sha256 in a header row. `--joins` adds each benign category joined to 8 and
 32 KB; `--latency` times a cold call, five warm and three rounds of three at once; `--baseline`
 re-judges, `--flip-repeats` times (3), every text whose first verdict differs from that arm's.
-`--think off` asks a thinking Ollama model not to think, as tier 3 does. A cloud arm makes paid
-calls: it needs `--allow-paid`, prints its estimate first and stops at `--max-dollars` (5). It
+`--think off` asks a thinking Ollama model not to think. A cloud arm makes paid calls. It needs
+`--allow-paid`, prints its estimate before the first call, and never passes `--max-dollars` (5):
+each call first reserves the most it could cost in the spend ledger, and settles what it did cost
+after. `--spend-ledger FILE` makes one cap for every arm naming that file, even running at once:
+the file is append-only (a line per reserve and per settled call, with its tokens and dollars) and
+locked while read and appended, and one that exists but won't read or parse stops the run.
+`--estimate-only` makes three real calls (counted in the ledger) and prints an estimate calibrated
+on their tokens, thinking included; a full run prints its estimate with the assumption it uses. It
 uses gcloud's ADC on Vertex (project from `GOOGLE_CLOUD_QUOTA_PROJECT` or gcloud's config) and
 never reads the Keychain; `--gemini-auth key` uses the Keychain's API key instead.
 `--thinking-level` is added to the probe's own request body only; the product sends none.
