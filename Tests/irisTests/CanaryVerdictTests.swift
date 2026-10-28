@@ -107,6 +107,21 @@ struct CanaryVerdictTests {
         }
     }
 
+    @Test("unclear replies and engine failures count apart: neither triggers or swallows the other's notice")
+    @MainActor
+    func countersAreSeparate() {
+        let box = GuardTierHealth()
+        var notices: [String] = []
+        box.announce = { notices.append($0); return true }
+        box.recordTier3Unreadable()
+        box.recordTier3Failure("HTTP 503", engine: "cloud")
+        #expect(notices.isEmpty, "one of each is not two of either")
+        box.recordTier3Unreadable()
+        #expect(notices == [GuardTierHealth.unreadableNotice])
+        box.recordTier3Failure("HTTP 503", engine: "cloud")
+        #expect(notices.count == 2 && notices[1].contains("HTTP 503"), "the engine notice is not swallowed")
+    }
+
     @Test("through the guard, a clear SAFE still passes")
     func guardPassesSafe() async {
         #expect(await outcome("SAFE") == "passed")
