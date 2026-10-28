@@ -133,7 +133,7 @@ eval/datasets/<task-family>/v<N>/
 
 ## 9. Rules for honest comparison
 
-These hold across every task.
+These hold across every task. Most are adapted from the eval design of [kube-agents](https://github.com/gke-labs/kube-agents), an open-source agent project (Apache-2.0) whose benchmark harness has run since mid-2026 (`docs/designs/eval-scorer.md` and `bench/` there, read at `adc39ad4`).
 
 - **A version key on every result.** It joins the dataset version and sha256, the model identity, the runtime and its version, and a hand-bumped `scoring_version` integer. Bump `scoring_version` whenever a metric's meaning changes (a threshold rule, the definition of "caught"), and not for a cosmetic change to the scorer. `compare` refuses to compare results whose keys differ, unless it's told which part is meant to differ (the model, for a model comparison).
 - **Append-only results.** A run adds a file and never rewrites or deletes one. A wrong result is superseded by a later file that names it, not edited.
@@ -143,6 +143,27 @@ These hold across every task.
 - **Infra failures are not product failures.** An engine that's down, or a runner error, invalidates that text's result and is counted as `infra`. A timeout or parse failure that the product would treat as a block is counted as `fail-closed`, because that's what a person would see.
 - **Watch the margin, not just the bar.** The table keeps each model's separation (ROC-AUC, and the gap between the highest benign and lowest attack score) over time, so a model that still passes while getting worse is visible before it fails.
 - **A fix comes with a case.** A guard change that fixes a missed attack or a false positive adds that text to the next dataset version, so the fix stays tested.
+
+### What we take from kube-agents, and what we don't
+
+**Taken as ideas.** These are re-implemented in Swift for Iris's tasks; no code is copied.
+- the version key on every result;
+- an append-only results store;
+- "absent, never zero";
+- deterministic checks decide, while their LLM judge stays advisory (Iris needs no judge at all);
+- margins sized to measured judge noise, with the plain statement that 3 repeats catch a collapse, not a drift;
+- infra repetitions kept out of the rates;
+- the "drift under green" view: cases that still pass while their score slides;
+- "a behaviour change comes with a red-to-green case".
+
+**Not taken, and why.**
+- **Pull-request gating, a nightly CI run and a blocking roster.** Iris's CI has no local models, and a full local run takes about 25 minutes. Runs are by hand (§10 Q4).
+- **A cloud evidence store (create-only bucket, BigQuery views, dashboard, digest email).** Committed result files and a generated docs table are enough here.
+- **An LLM judge.** Iris's labels are deterministic.
+- **Case admission (at least 20 runs at a pass rate of 0.90 or more).** That exists to arm a gate, and Iris has no gate.
+- **Planted infrastructure fixtures, owner aliases and rosters.** That's team-scale process.
+
+**Licence.** kube-agents is Apache-2.0 (its `LICENSE`; it has no `NOTICE` file). This spec copies nothing verbatim. If a later slice does copy a file or a substantial passage, for example its scoring ladder or dashboard SQL as a starting point, that file keeps the Apache-2.0 licence header, says what was changed, and names its source. Apache-2.0 allows that inside Iris.
 
 ## 10. Decisions (Brian, 2026-10-28, via the Overseer)
 
