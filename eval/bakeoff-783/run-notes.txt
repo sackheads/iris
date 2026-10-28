@@ -1,4 +1,4 @@
-Machine load during the local arms (2026-10-28, Apple M4 Pro, 48 GB). A background system
+Machine load during the local arms (2026-10-28, Apple M4 Max, 48 GB). A background system
 process held about one core (~95% CPU) throughout, so the local arms' timings are flagged and
 a --latency-only re-time of both gemma4:12b arms in a quiet window is pending. Accuracy is
 unaffected.

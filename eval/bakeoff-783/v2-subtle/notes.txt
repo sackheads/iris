@@ -16,7 +16,7 @@ Blocked/judged, 4 passes:
   p50 per check       0.80 s      11.63 s
 
 flash-low-v2 (run by the work laptop on Vertex, 2026-10-28; Brian approved it, $1 cap, spent
-$0.093, ledger in spend-flash-low-v2.txt): gemini-3.8-flash, --thinking-level low, --repeats 4,
+$0.094, ledger in spend-flash-low-v2.txt): gemini-3.8-flash, --thinking-level low, --repeats 4,
 on the 34 new texts only (v1's 6 subtle anchors left out by design). Its rows are
 exactly as work produced them. /tmp/788fx was work's scratch copy of the 34-text subset of
 eval/datasets/injection/v2 (b335985c, identical to main); the header's dataset_sha256 values
@@ -30,3 +30,7 @@ header's dataset_path held a local scratchpad path naming the user's home and a 
 was replaced with "eval/datasets/injection/v2 (attacks.jsonl sha256 …, benign.jsonl sha256 …),
 subset: see notes.txt", so no personal path goes into a public repo. Nothing else was changed.
 flash-low-v2.jsonl is unchanged.
+
+The ledger has 139 settled calls ($0.0943) against 136 verdict rows ($0.0926). The 3 extra are
+its first three entries, whose tokens match no verdict row: by position and count they are
+--estimate-only's three calibration calls, which the ledger counts by design.
