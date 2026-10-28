@@ -23,20 +23,14 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
         var ps: @Sendable () async -> Data?
         var preload: @Sendable (Data) async throws -> (status: Int, data: Data)
         /// A `/api/generate` request (#779 review): through here so a test drives `generate`.
-        var generate: @Sendable (Data) async throws -> (status: Int, data: Data) = Transport.post
+        var generate: @Sendable (Data) async throws -> (status: Int, data: Data) = { try await Transport.post("generate", $0) }
 
-        init(ps: @escaping @Sendable () async -> Data?,
-             preload: @escaping @Sendable (Data) async throws -> (status: Int, data: Data),
-             generate: @escaping @Sendable (Data) async throws -> (status: Int, data: Data) = Transport.post) {
-            self.ps = ps
-            self.preload = preload
-            self.generate = generate
-        }
-
-        static let post: @Sendable (Data) async throws -> (status: Int, data: Data) = { body in
-            var req = URLRequest(url: URL(string: "\(OllamaEngine.baseURL)/api/generate")!)
+        /// POSTs `body` to `/api/<endpoint>`. The shape #794 shares, adding its own endpoints.
+        static func post(_ endpoint: String, _ body: Data, timeout: TimeInterval? = nil) async throws -> (status: Int, data: Data) {
+            var req = URLRequest(url: URL(string: "\(OllamaEngine.baseURL)/api/\(endpoint)")!)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            if let timeout { req.timeoutInterval = timeout }
             req.httpBody = body
             let (data, response) = try await URLSession.shared.data(for: req)
             return ((response as? HTTPURLResponse)?.statusCode ?? 0, data)
@@ -52,7 +46,7 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
                       (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
                 return data
             },
-            preload: post)
+            preload: { try await post("generate", $0) })
     }
 
     func loadModel(config: AuxiliaryModelConfig) async throws {
