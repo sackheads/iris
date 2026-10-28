@@ -88,15 +88,17 @@ enum Tier2Bundle {
         }
     }
 
-    /// Lines named by the withheld markers in `shown`.
-    static func withheldLines(_ shown: String) -> Int {
+    /// The 1-based line ranges named by the withheld markers in `shown`.
+    static func withheldRanges(_ shown: String) -> [ClosedRange<Int>] {
         let pattern = try! NSRegularExpression(pattern: #"\[lines? (\d+)(?:-(\d+))? of this output withheld"#)
-        return pattern.matches(in: shown, range: NSRange(shown.startIndex..., in: shown)).reduce(0) { sum, m in
+        return pattern.matches(in: shown, range: NSRange(shown.startIndex..., in: shown)).map { m in
             let a = Int((shown as NSString).substring(with: m.range(at: 1)))!
             let b = m.range(at: 2).location == NSNotFound ? a : Int((shown as NSString).substring(with: m.range(at: 2)))!
-            return sum + b - a + 1
+            return a...b
         }
     }
+
+    static func withheldLines(_ shown: String) -> Int { withheldRanges(shown).reduce(0) { $0 + $1.count } }
 }
 
 @Suite("Tier 2 evaluation on the real model (#770, opt-in)", .timeLimit(.minutes(30)))
@@ -113,7 +115,7 @@ struct Tier2EvaluationTests {
         let model = try await Tier2Bundle.load()
         let benign = try Tier2Sample.load("benign.jsonl"), attacks = try Tier2Sample.load("attacks.jsonl")
         var benignRows: [String: Row] = [:], attackRows: [String: Row] = [:]
-        var detail: [String] = []
+        var detail: [String] = [], withheldText: [String] = []
         let start = TestClock.now()
 
         for sample in benign + attacks {
@@ -138,6 +140,17 @@ struct Tier2EvaluationTests {
                 detail.append("\(sample.id)\traw \(String(format: "%.3f", raw))\t\(verdict.rawValue)\t\(caught ? "caught" : "MISSED")")
             } else {
                 if verdict != .passed { row.misses.append(sample.id) }
+                if verdict == .withheld {
+                    // What was lost, as the text read: the guard's line numbers are the input's,
+                    // since tier 1 never removes a newline.
+                    let original = sample.text.split(separator: "\n", omittingEmptySubsequences: false)
+                    for range in Tier2Bundle.withheldRanges(shown) {
+                        let cut = original[(range.lowerBound - 1)...min(range.upperBound - 1, original.count - 1)]
+                        withheldText.append("\(sample.id) lines \(range.lowerBound)-\(range.upperBound):")
+                        withheldText += cut.prefix(4).map { "    " + String($0.prefix(140)) }
+                        if cut.count > 4 { withheldText.append("    … \(cut.count - 4) more") }
+                    }
+                }
                 detail.append("\(sample.id)\traw \(String(format: "%.3f", raw))\t\(verdict.rawValue)\(verdict == .withheld ? " (\(Tier2Bundle.withheldLines(shown)) of \(lines) lines)" : "")")
             }
             if isAttack { attackRows[sample.category] = row } else { benignRows[sample.category] = row }
@@ -167,7 +180,8 @@ struct Tier2EvaluationTests {
         out += ["", "Benign texts with anything withheld: " + benignRows.values.flatMap(\.misses).sorted().joined(separator: ", "),
                 "Attacks whose payload got through: " + attackRows.values.flatMap(\.misses).sorted().joined(separator: ", "),
                 "", String(format: "Scored %d texts in %.0f s.", benign.count + attacks.count, TestClock.seconds(since: start)),
-                "", "### Per text", "", "```"] + detail + ["```"]
+                "", "### Per text", "", "```"] + detail + ["```",
+                "", "### Benign lines withheld", "", "```"] + withheldText + ["```"]
         let report = out.joined(separator: "\n")
         print(report)
         if let path = ProcessInfo.processInfo.environment["IRIS_TIER2_REPORT"], !path.isEmpty {
