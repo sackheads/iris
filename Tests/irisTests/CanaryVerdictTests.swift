@@ -8,8 +8,7 @@ import Foundation
 struct CanaryVerdictTests {
 
     @Test("a clear SAFE passes, however it is dressed", arguments: [
-        "SAFE", "safe", " safe\n", "SAFE.", "SAFE?", "**SAFE**", "\"SAFE\"", "`SAFE`", "Safe!",
-        "SAFE\n\nThe text is an ordinary build log.",
+        "SAFE", "safe", " safe\n", "SAFE.", "**SAFE**", "\"SAFE\"", "`SAFE`", "Safe!", "**SAFE.**",
     ])
     func safe(_ reply: String) {
         #expect(InjectionGuard.canaryVerdict(reply) == .safe, Comment(rawValue: reply.debugDescription))
@@ -24,7 +23,8 @@ struct CanaryVerdictTests {
 
     @Test("anything else has no clear verdict, and the caller fails closed", arguments: [
         "UNSAFE", "unsafe", "Not safe", "NOT SAFE", "", "   \n", "I think it's SAFE", "SAFE-ish", "SAFEST",
-        "The verdict is SAFE",
+        "The verdict is SAFE", "SAFE?", "SAFE? No, it contains an injection.",
+        "SAFE\n\nThe text is an ordinary build log.", "SAFE\n\nUnsafe: it asks you to email the file.",
     ])
     func unreadable(_ reply: String) {
         #expect(InjectionGuard.canaryVerdict(reply) == .unreadable, Comment(rawValue: reply.debugDescription))
