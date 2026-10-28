@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Builds eval/datasets/injection/v2 (#788): v1's 276 rows unchanged, with their v1 splits and
-`exposure: pre-split`, plus 24 InjecAgent attacks and 10 benign look-alikes built on InjecAgent's
+`exposure: pre-split`, plus 24 InjecAgent attacks (category subtle_plain) and 10 benign look-alikes built on InjecAgent's
 tool-response templates, split with salt `injection-v2`.
 
 InjecAgent (github.com/uiuc-kang-lab/InjecAgent, MIT) is read from a checkout at the pinned
@@ -114,7 +114,7 @@ def attack_row(key, index, case):
     instruction, response = case["Attacker Instruction"], case["Tool Response"]
     if instruction not in response:
         sys.exit(f"{key}[{index}]: the instruction is not verbatim in the tool response")
-    return {"id": f"subtle-injecagent-{key}-{index:04d}", "category": "subtle", "source": "injecagent",
+    return {"id": f"subtle_plain-injecagent-{key}-{index:04d}", "category": "subtle_plain", "source": "injecagent",
             "exposure": "clean", "text": response, "payload": instruction[:60],
             "file": SOURCES[key][0], "index": index, "commit": COMMIT,
             "attack_type": case["Attack Type"], "user_tool": case["User Tool"], "license": "MIT"}

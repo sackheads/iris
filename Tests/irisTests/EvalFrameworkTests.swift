@@ -108,7 +108,7 @@ struct EvalDatasetTests {
         #expect(fresh.count == 34)
         #expect(fresh.allSatisfy { $0.exposure == "clean" })
         #expect(fresh.filter(\.isAttack).count == 24)
-        #expect(fresh.filter(\.isAttack).allSatisfy { $0.category == "subtle" })
+        #expect(fresh.filter(\.isAttack).allSatisfy { $0.category == "subtle_plain" })
         for (_, members) in Dictionary(grouping: fresh, by: \.category) {
             #expect(Set(members.map(\.split)) == ["test", "dev"])
         }

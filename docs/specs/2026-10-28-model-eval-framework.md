@@ -63,7 +63,7 @@ eval/datasets/<task-family>/v<N>/
   - burying it deeper in benign text.
 
   They're reported as their own category, so robustness is visible rather than averaged away.
-- **A known weakness, stated:** every v1 attack was written by this project, so a model tuned to our authors' phrasing would look better than it is. v2 adds 24 attacks from InjecAgent (MIT) in the `subtle` category, plus 10 benign look-alikes built on its templates; they are plain requests planted in tool output, not disguised ones, and harder cases are #802.
+- **A known weakness, stated:** every v1 attack was written by this project, so a model tuned to our authors' phrasing would look better than it is. v2 adds 24 attacks from InjecAgent (MIT) as their own category, `subtle_plain`, plus 10 benign look-alikes built on its templates; they are plain requests planted in tool output, not disguised ones, and harder cases are #802.
 - **Real traffic:** none for now (§10 Q2). The datasets hold synthetic and repository content only, apart from v2's InjecAgent rows (Brian, 2026-10-28, for that slice only). This can be revisited once Iris is used for work; a private local split would be the shape then.
 - **`approval.vibecop`** needs its own dataset: commands with cwd, the workspace shape and the conversation's recent denials, labelled safe-to-run-silently or must-ask. Seed it from the refusal tables of `ReadOnlyCommand` and the #600 cases. Deferred (§10 Q1).
 
