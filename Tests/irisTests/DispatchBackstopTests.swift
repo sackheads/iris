@@ -70,7 +70,7 @@ struct DispatchBackstopTests {
         app.createNewConversation(id: peer)
         try app.store.peers.insert(openRequest("bbbb0002", from: sub, to: peer))
         let args: [String: JSONValue] = [
-            "session_id": .string(peer.uuidString), "message": .string("m"),
+            "session_id": .string(peer.uuidString), "to": .string(peer.uuidString), "message": .string("m"),
             "name": .string("impostor"), "description": .string("d"), "msg": .string("bbbb0002"),
         ]
         let result = await engine(app, principal: .subagent).dispatchForTesting(FunctionCall(name: name, args: args),
