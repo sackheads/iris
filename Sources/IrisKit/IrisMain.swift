@@ -1,7 +1,7 @@
 import Foundation
 
 /// The process entry point, shared by the SwiftPM `iris` binary and the Xcode `Iris.app`.
-/// Headless modes (--perf, --bench, --run-job, --guard-probe, --seed-dev-home) run before any
+/// Headless modes (--perf, --bench, --run-job, --eval, --guard-probe, --seed-dev-home) run before any
 /// SwiftUI window is created and exit.
 public enum IrisMain {
     @MainActor
@@ -53,6 +53,16 @@ public enum IrisMain {
             // Lost to a second signal's exit, which is under way on the signal queue and ends the
             // process: returning would run `exit`'s destructors, so wait for it here.
             while true { pause() }
+        } else if let eval = EvalCLI.parse(CommandLine.arguments) {
+            // #788: score a guard model on a frozen dataset, read-only, dev builds only.
+            ProcessRole.set(.eval)
+            switch eval {
+            case .success(let command):
+                exit(await EvalCLI.execute(command))
+            case .failure(let err):
+                FileHandle.standardError.write(Data("iris --eval: \(err.localizedDescription)\n\(EvalCLI.usage)\n".utf8))
+                exit(64)
+            }
         } else if let probe = GuardProbeCLI.parse(CommandLine.arguments) {
             // #778: times tier 2 and tier 3 on one benign text, read-only, dev builds only.
             ProcessRole.set(.probe)

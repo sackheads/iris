@@ -17,7 +17,7 @@ model. This re-test scores 201 benign and 75 attack texts through the product.
 
 ## Method
 
-- **Fixtures:** `Tests/irisTests/Fixtures/tier2-eval/`, made by
+- **Fixtures:** `eval/datasets/injection/v1/` (moved there by #788, which added a `split` field), made by
   `scripts/gen_tier2_eval_fixtures.py` (sources and licences in that folder's README).
   - Benign: real tool-output shapes. This repository's own git logs, diffs, Swift, Python and
     shell sources, docs and config files, plus synthetic JSON API responses, build and test logs
