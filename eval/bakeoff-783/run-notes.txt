@@ -16,3 +16,9 @@ to subtle-*, empty benign.jsonl, hence the different dataset sha), --think off -
 model fingerprint 4eb23ef1 as g12-off. Blocked/judged: 001 4/4, 002 0/4, 003 0/4, 004 4/4,
 005 3/4, 006 2/4. Accuracy only; load 6.4 at the time. First written as g12-off.subtle and
 renamed (file and its "arm" field) so --compare folds it into g12-off's §9 view only.
+
+Fields changed before these files reached main (eval spec §9, recorded in #806): in
+g12-off.stability.jsonl and g12-today.stability.jsonl the header's dataset_path held a local
+scratchpad path and was replaced with the fixtures' description, so no personal path goes into a
+public repo; in g12-off.stability.jsonl, "arm" was renamed from g12-off.subtle to
+g12-off.stability in all 27 rows, so that --compare folds it into the g12-off arm.
