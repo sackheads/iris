@@ -40,7 +40,9 @@ enum NotificationMode: String, CaseIterable, Sendable {
 
 /// Records each resolution of `ConfigManager.shared` inside a task tree, so a test can prove a
 /// path never reaches it (#805): resolving it reads the secrets item, which asks for Keychain
-/// access, and the home's settings, which `iris --eval` must never use.
+/// access, and the home's settings, which `iris --eval` must never use. A task-local reaches child
+/// and unstructured tasks, but not a `Task.detached` or a dispatch hop: a resolution there goes
+/// unrecorded, so a clean count proves only the structured path.
 final class ConfigManagerAccess: @unchecked Sendable {
     @TaskLocal static var recorder: ConfigManagerAccess?
     private let lock = NSLock()
