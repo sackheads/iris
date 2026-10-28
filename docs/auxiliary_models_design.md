@@ -53,7 +53,7 @@ We need a dedicated subsystem to handle the lifecycle of these heavy assets, sto
 
 *   **Registry (`models.json`)**: Tracks installed models, their file paths, file sizes, and assigned roles.
 *   **Downloader**: A background `URLSession` queue that streams models directly from HuggingFace.
-*   **Memory Management**: Models are hundreds of megabytes or gigabytes. The manager loads them into memory lazily when their specific role is invoked, and unloads them (or relies on macOS memory compression/mmap) when idle. The exceptions are the prompt guard's tier-3 canary and Vibecop: when protection or Vibecop is on with a local engine, the app builds that engine at launch, so the first prompt doesn't pay the model's cold load (#792). The model is then resident from launch, and Ollama still unloads it after five idle minutes.
+*   **Memory Management**: Models are hundreds of megabytes or gigabytes. The manager loads them into memory lazily when their specific role is invoked, and unloads them (or relies on macOS memory compression/mmap) when idle. The exceptions are the prompt guard's tier-3 canary and Vibecop: when protection or Vibecop is on with an Ollama or llama.cpp engine, the app builds that engine at launch, so the first prompt doesn't pay the model's cold load (#792). MLX is left to first use, since its load can download the model. The model is then resident from launch, and Ollama still unloads it after five idle minutes.
 
 ### UI Configuration
 A new **Local Models** tab will be added to `SettingsView`:
