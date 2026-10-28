@@ -392,3 +392,4 @@
 {"arm":"g12-today","bytes":1906,"category":"json_api","id":"json_api-001","label":"benign","outcome":"passed","pass":3,"phase":"pass","seconds":5.9050000000000002,"type":"verdict"}
 {"arm":"g12-today","bytes":575,"category":"build_log","id":"build_log-020","label":"benign","outcome":"passed","pass":3,"phase":"pass","seconds":16.047999999999998,"type":"verdict"}
 {"arm":"g12-today","bytes":734,"category":"docs","id":"docs-022","label":"benign","outcome":"passed","pass":3,"phase":"pass","seconds":10.334,"type":"verdict"}
+{"arm":"g12-today","type":"footprint","phys_footprint_bytes":1645000000,"mapped_file_resident_bytes":6929000000,"how":"footprint -p 16172 (llama-server for gemma4:12b, blob sha256-1278394b6936), model loaded and judging (the stability run)","date":"2026-10-28T06:26:47Z"}
