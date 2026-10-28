@@ -196,6 +196,18 @@ public final class PerformanceProfiler: ObservableObject, @unchecked Sendable {
 
     public init() {}
 
+    /// Where `event` lines go instead of stdout. Nil in the app; a test binds it so it sees only
+    /// the events its own task tree produced.
+    @TaskLocal public static var eventSink: (@Sendable (String) -> Void)?
+
+    /// A timestamped log line for a moment rather than a span: a model load beginning, a request
+    /// sent (#778). Wall time to line it up with other logs, uptime ms to subtract.
+    public static func event(_ text: String) {
+        let stamp = Date.ISO8601FormatStyle(includingFractionalSeconds: true).format(Date())
+        let line = "[perf] \(stamp) up=\(String(format: "%.1f", MonotonicClock.nowMs()))ms \(text)"
+        if let sink = eventSink { sink(line) } else { print(line) }
+    }
+
     public func beginTurn(label: String, source: String) -> UUID {
         let id = UUID()
         let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)

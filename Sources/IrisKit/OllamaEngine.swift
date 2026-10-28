@@ -2,11 +2,19 @@ import Foundation
 
 actor OllamaEngine: AuxiliaryInferenceEngine {
     private var modelName: String = ""
+    private var purpose: ModelLoadPurpose = .other("ollama")
+    private var generates = 0
+    private let tracker: ModelLoadTracker
+
+    init(tracker: ModelLoadTracker = .shared) {
+        self.tracker = tracker
+    }
     
     private static let baseURL = "http://localhost:11434"
 
     func loadModel(config: AuxiliaryModelConfig) async throws {
         self.modelName = config.modelPathOrName
+        self.purpose = ModelLoadPurpose(role: config.role)
         // Warm the model on init so the first Vibecop call doesn't hit a cold-start timeout
         preloadModel()
     }
@@ -163,8 +171,21 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
         }
     }
     
+    /// Ollama's timings from a `/api/generate` reply, in ms, for #778's log: `load_duration` is
+    /// the model load the request waited on. Ollama reports durations in nanoseconds. Empty when
+    /// the body has none.
+    static func timings(from data: Data) -> String {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return "" }
+        return ["load_duration", "prompt_eval_duration", "eval_duration", "total_duration"].compactMap { key in
+            guard let ns = (json[key] as? NSNumber)?.doubleValue else { return nil }
+            return "\(key)_ms=\(Int((ns / 1_000_000).rounded()))"
+        }.joined(separator: " ")
+    }
+
     /// Fires a non-blocking warmup request to keep the model alive.
     /// Ollama's default keep_alive is ~5m, so this extends the window.
+    /// Tracked as a load from send to reply (#778): the reply is Ollama's own signal that the model
+    /// is in memory, so the load ends on it and never on a guess.
     private func preloadModel() {
         Task {
             guard !modelName.isEmpty,
@@ -178,7 +199,18 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
                 "keep_alive": "5m"
             ]
             req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-            _ = try? await URLSession.shared.data(for: req)
+            let load = tracker.begin(purpose, name: modelName)
+            do {
+                let (data, response) = try await URLSession.shared.data(for: req)
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                if status == 200 {
+                    tracker.end(load, .loaded, detail: Self.timings(from: data))
+                } else {
+                    tracker.end(load, .failed("HTTP \(status)"))
+                }
+            } catch {
+                tracker.end(load, .failed("\(error.localizedDescription)"))
+            }
         }
     }
     func generate(prompt: String, jsonSchema: String?) async throws -> String {
@@ -207,7 +239,20 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
         
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         
-        let (data, response) = try await URLSession.shared.data(for: req)
+        generates += 1
+        let call = "ollama.generate purpose=\"\(purpose.label)\" model=\(modelName) n=\(generates)"
+        // stream:false, so the first byte is the whole reply: one line for both (#778).
+        PerformanceProfiler.event("\(call) sent")
+        let sentAt = MonotonicClock.nowMs()
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: req)
+        } catch {
+            PerformanceProfiler.event("\(call) failed ms=\(Int(MonotonicClock.nowMs() - sentAt)) error=\"\(error.localizedDescription)\"")
+            throw error
+        }
+        PerformanceProfiler.event("\(call) complete ms=\(Int(MonotonicClock.nowMs() - sentAt)) status=\((response as? HTTPURLResponse)?.statusCode ?? 0) \(Self.timings(from: data))")
         
         guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
             let errString = String(data: data, encoding: .utf8) ?? "Unknown error"

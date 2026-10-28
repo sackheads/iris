@@ -2982,6 +2982,7 @@ actor IrisEngine {
                                         conversationId: conversationId)
                 }) {
                     dumpSink?(requestToSend, roundForDump, retryAttempt?.get() ?? 0)
+                    PerformanceProfiler.event("provider.request sent round=\(roundForDump)")
                     return try await measure(.primaryLLM) {
                         try await self.consumeModelStream(request: requestToSend, streamed: streamed, streamer: streamer)
                     }
