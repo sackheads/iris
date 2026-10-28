@@ -702,6 +702,14 @@ final class ConversationStore: Sendable {
                 t.add(column: "inSessions", .boolean)
             }
         }
+        // #813: the sticky untrusted-output taint. NULL for every conversation that predates it,
+        // which reads back as TRUE (tainted): unlike `hasUnattendedInput`, the cautious side of this
+        // flag is set, and nothing says what an older conversation's model read.
+        m.registerMigration("v31_untrusted_tool_output") { db in
+            try db.alter(table: "conversations") { t in
+                t.add(column: "hasUntrustedToolOutput", .boolean)
+            }
+        }
         return m
     }
 
@@ -934,14 +942,14 @@ final class ConversationStore: Sendable {
                     tokenUsage = ?, goalContract = ?, subagentResult = ?,
                     lastGoalEvaluation = ?, lastGoalCompletionReport = ?, isArchived = ?,
                     isBackground = ?, isPinned = ?, sessionCard = ?, jobProfile = ?, sandboxGrant = ?,
-                    hasUnattendedInput = ?, prefixMismatchBehavior = ?, role = ?, homeWritableOptIn = ?,
+                    hasUnattendedInput = ?, hasUntrustedToolOutput = ?, prefixMismatchBehavior = ?, role = ?, homeWritableOptIn = ?,
                     agentProfile = ?, agentProfileSnapshot = ?,
                     loop = ?, modelTier = ?, lastTouchedAt = ?, archivedAutomaticallyAt = ?, inSessions = ?
                 WHERE id = ?
                 """, arguments: [c.title, touched, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
                                  evaluation, report, c.isArchived, c.isBackground, c.isPinned, card,
-                                 c.jobProfile?.rawValue, grant, c.hasUnattendedInput, c.prefixMismatchBehavior?.rawValue,
+                                 c.jobProfile?.rawValue, grant, c.hasUnattendedInput, c.hasUntrustedToolOutput, c.prefixMismatchBehavior?.rawValue,
                                  c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue,
                                  c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, c.id.uuidString])
         } else {
@@ -951,14 +959,14 @@ final class ConversationStore: Sendable {
                     messageCountSinceReflection, goalIterationCount, mainAgentSandbox, tokenUsage, goalContract,
                     subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived,
                     isBackground, isPinned, sessionCard, jobProfile, sandboxGrant, hasUnattendedInput,
-                    prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier,
+                    hasUntrustedToolOutput, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier,
                     lastTouchedAt, archivedAutomaticallyAt, inSessions)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [c.id.uuidString, position, c.title, now, touched, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
                                  tokenUsage, contract, result, history, evaluation, report, c.isArchived,
                                  c.isBackground, c.isPinned, card, c.jobProfile?.rawValue, grant, c.hasUnattendedInput,
-                                 c.prefixMismatchBehavior?.rawValue, c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue,
+                                 c.hasUntrustedToolOutput, c.prefixMismatchBehavior?.rawValue, c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue,
                                  c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions])
         }
     }
@@ -1274,6 +1282,15 @@ final class ConversationStore: Sendable {
                 case .unconvertible:
                     print("WARNING: unreadable hasUnattendedInput for conversation \(id); defaulting to untainted")
                     c.hasUnattendedInput = false
+                }
+                // #813: the opposite default. True is the cautious side of this flag, so a row that
+                // predates it (NULL) or whose value is garbled reads as tainted.
+                switch Self.readBool(row, "hasUntrustedToolOutput") {
+                case .null: c.hasUntrustedToolOutput = true
+                case .value(let v): c.hasUntrustedToolOutput = v
+                case .unconvertible:
+                    print("WARNING: unreadable hasUntrustedToolOutput for conversation \(id); defaulting to tainted")
+                    c.hasUntrustedToolOutput = true
                 }
 
                 // #187 deliverable 3 — degrades like the flags above rather than costing the

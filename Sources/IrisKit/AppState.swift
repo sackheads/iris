@@ -270,6 +270,14 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// because the taint lived in transient state instead of being derived from what persists.
     var hasUnattendedInput: Bool = false
 
+    /// #813: true once a tool result, an arrival or an approved call's output that did not come
+    /// from the person or from Iris's own files has been put in front of the model here. It is not
+    /// `hasUnattendedInput`, which says a turn started without the owner present; this one says the
+    /// model has read text someone else may have written. Sticky, never cleared. Set only by
+    /// `IrisEngine` (`markReadUntrusted`), never by matching on text. A conversation whose history
+    /// predates the flag reads as true: nothing says what it read.
+    var hasUntrustedToolOutput: Bool = false
+
     /// #314 decision 6: `drop_block` once a binding 400's retry succeeded, so later requests send
     /// it, across restarts, wherever the beta is taken (CAUSES:93). Never cleared. Nil is unset.
     var prefixMismatchBehavior: PrefixMismatchBehavior? = nil
@@ -307,7 +315,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier, lastTouchedAt, archivedAutomaticallyAt, inSessions
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, hasUntrustedToolOutput, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier, lastTouchedAt, archivedAutomaticallyAt, inSessions
     }
 
     init(from decoder: Decoder) throws {
@@ -363,6 +371,9 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         // Invariant 1: a conversation persisted before this ruling has no such key, and absent
         // means "no turn here ever started without the owner present", the correct default.
         hasUnattendedInput = try container.decodeIfPresent(Bool.self, forKey: .hasUnattendedInput) ?? false
+        // Invariant 1, and #813's narrow direction: absent means persisted before the flag, with
+        // nothing to say what the model read, so it reads as tainted.
+        hasUntrustedToolOutput = try container.decodeIfPresent(Bool.self, forKey: .hasUntrustedToolOutput) ?? true
         // Invariant 1: absent on every conversation persisted before #314, and absent is unset.
         // Read as a string so a value this build does not know is unset too, not a failed decode.
         prefixMismatchBehavior = try container.decodeIfPresent(String.self, forKey: .prefixMismatchBehavior)
@@ -3289,6 +3300,15 @@ class AppState {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
               !conversations[idx].hasUnattendedInput else { return }
         conversations[idx].hasUnattendedInput = true
+        markChanged(conversationId, .metadata)
+    }
+
+    /// #813: marks `conversationId` as having read untrusted output. Called only from `IrisEngine`
+    /// (`markReadUntrusted`); a no-op once set, since the flag never clears.
+    func markConversationReadUntrusted(_ conversationId: UUID) {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
+              !conversations[idx].hasUntrustedToolOutput else { return }
+        conversations[idx].hasUntrustedToolOutput = true
         markChanged(conversationId, .metadata)
     }
 
