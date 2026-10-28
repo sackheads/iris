@@ -49,6 +49,11 @@ import Foundation
     /// Consecutive failures in the current spell, so a remote engine's notice can wait for a
     /// second one. Reset with the spell.
     private var tier3Consecutive = 0
+    /// Unclear canary replies in a row, and whether their notice was given (#822). Kept apart
+    /// from the failure count and flag above so neither kind's notice is triggered or swallowed by
+    /// the other's; a verdict resets both.
+    private var tier3UnreadableConsecutive = 0
+    private var tier3UnreadableAnnounced = false
 
     /// Where a first-of-spell failure is said out loud. `AppState` installs it at launch; a test
     /// leaves it nil, or sets its own to assert on the sentence. Nil means "recorded but not
@@ -107,14 +112,15 @@ import Foundation
     /// #822: the canary answered, but not with a one-word SAFE or MALICIOUS, so the output was
     /// blocked. Recorded like a failure, so the light shows it, with a notice of its own: no
     /// re-download or restart advice, and no off-switch (see `unreadableNotice`). The spell counter
-    /// is shared with `recordTier3Failure`, so a mixed run announces whichever notice comes due. One odd reply can be a fluke,
+    /// and announced flag are its own, so an engine failure in between neither counts toward it nor
+    /// is swallowed by it. One odd reply can be a fluke,
     /// so the notice waits for a second in a row whatever the engine; the light changes at once.
     /// The reply is never kept here: it can echo the untrusted text.
     func recordTier3Unreadable() {
         tier3Failure = Self.tier3UnreadableReason
-        tier3Consecutive += 1
-        guard !tier3Announced, tier3Consecutive >= 2, let announce else { return }
-        tier3Announced = announce(Self.unreadableNotice)
+        tier3UnreadableConsecutive += 1
+        guard !tier3UnreadableAnnounced, tier3UnreadableConsecutive >= 2, let announce else { return }
+        tier3UnreadableAnnounced = announce(Self.unreadableNotice)
     }
 
     /// No off-switch here, unlike `notice`: the text being judged can provoke an unclear reply on
@@ -173,9 +179,12 @@ import Foundation
         // Nothing recorded means nothing to invalidate: this runs after *every* successful guard
         // evaluation — every tool output — and an unconditional write still goes through
         // `withMutation`, redrawing the LED bar on every tool call for no change.
-        guard tier3Failure != nil || tier3Announced || tier3Consecutive > 0 else { return }
+        guard tier3Failure != nil || tier3Announced || tier3Consecutive > 0
+              || tier3UnreadableAnnounced || tier3UnreadableConsecutive > 0 else { return }
         tier3Failure = nil
         tier3Announced = false
         tier3Consecutive = 0
+        tier3UnreadableAnnounced = false
+        tier3UnreadableConsecutive = 0
     }
 }
