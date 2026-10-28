@@ -28,7 +28,7 @@ Why now:
 
 | Task | What is judged | Who competes | Label | Accuracy metrics |
 |---|---|---|---|---|
-| `injection.classifier` | one text → injection probability | tier-2 classifiers (ONNX, CoreML) | benign / attack, plus the attack's payload | **at the product threshold:** benign false-positive rate (anything withheld) and attack recall (payload withheld or text blocked), each per category. **Threshold-free:** ROC-AUC on the raw score. |
+| `injection.classifier` | one text → injection probability | tier-2 classifiers (ONNX, CoreML) | benign / attack, plus the attack's payload | **at the product threshold:** benign false-positive rate (anything withheld) and attack recall (payload withheld or text blocked), each per category. **Threshold-free:** ROC-AUC on one raw score per text, the **maximum over its windows**, which is the score that first flags a text in the product. |
 | `injection.verdict` | one text → SAFE / MALICIOUS | tier-3 canaries (llama.cpp, MLX, Ollama, cloud) | the same dataset | the same, plus **parse failures**: no verdict means fail-closed, counted apart. **Agreement** across N repeats. |
 | `injection.stack` | one text → what reaches the main model | the guard stack as configured: tier 1 + 2 + 3 | the same dataset | the same, end to end: what Iris as a whole catches and wrongly withholds |
 | `approval.vibecop` (later, §10 Q1) | one command plus its context → approve / ask | Vibecop engines and models | safe-to-run-silently / must-ask | **wrong-approve rate** on must-ask, which must be ~0 (it's the security number), and **approve rate** on safe, which is the prompts-saved number Brian cares about |
@@ -52,7 +52,9 @@ eval/datasets/<task-family>/v<N>/
 - **Splits.**
   - `test` (about 70%) is frozen and never used to choose a threshold, prompt or fine-tune.
   - `dev` (about 30%) is for tuning.
+  - The split is **stratified by category**, and the manifest states each category's count in each split. At v1's size, some attack categories have only a handful of `test` texts, so **bars apply to the aggregate over `test`**. Per-category numbers are reported and marked "small n" below 10, but they aren't barred.
   - #780's fine-tune option may train only on `dev` and on data outside the dataset. A model or setting tuned on `test` is marked `contaminated` and can't be compared.
+  - **Choices made before the split are contaminated too.** #770 measured DeBERTa on all 276 texts. So tier 2's current threshold and narrowing settings, and anything #780 shortlists with #770's full-set numbers in view, have seen v1's `test`. Results that depend on them carry `contaminated: pre-split`. Before #780 decides anything, v2 adds a fresh set of `test` attacks, written after the split is frozen and never scored during tuning.
 - **Adversarial variants** (`attacks.adversarial`): deterministic transforms of the attack set, using a fixed seed in the generator:
   - case and whitespace changes;
   - Unicode look-alikes;
@@ -74,7 +76,11 @@ eval/datasets/<task-family>/v<N>/
   - parameter count, if known;
   - licence and gating (open, gated, commercial).
 - **Runtime:** ONNX Runtime, CoreML, llama.cpp, MLX, Ollama, or cloud provider plus model id. Record its version: the ORT version, `ollama --version`, or the cloud model id with the run date (cloud models change under one name).
-- **Settings:** temperature (0 wherever the runtime allows), the prompt template's sha256 for LLM tasks, the threshold and window settings for classifiers, max tokens.
+- **Settings:** the **temperature and sampling the product actually uses**, recorded rather than overridden; the eval runs the canary as Iris runs it. Today:
+  - Ollama and MLX use the model's defaults, since no engine sets a temperature;
+  - llama.cpp uses argmax.
+
+  A temperature of 0 would be a product change, measured with `compare` like any other lever, not an eval setting. Also recorded: the prompt template's sha256 for LLM tasks, hashed with the per-call random tag (`executeTier3Canary`'s UUID prefix) as a placeholder; the threshold and window settings for classifiers; and max tokens. The per-call tag means no two rendered prompts are identical, which is part of the run-to-run variance §5 measures.
 - **Environment:**
   - chip and RAM (`sysctl hw.model`, `hw.memsize`);
   - macOS version;
@@ -90,7 +96,7 @@ eval/datasets/<task-family>/v<N>/
 | **Cold start** | Process start → first verdict. Load time is separate, from #782's `ModelLoadTracker`. For Ollama, `load_duration`, plus a run after `ollama stop`. |
 | **Size** | on-disk bytes, plus resident memory added (`phys_footprint` before and after load, after judging; the #725 probe method) |
 | **Cost** | local: $0, with energy not measured. Cloud: tokens × price from #239's price list, reported per 1,000 judgements of the dataset's median text |
-| **Variance** | LLM tasks: N repeats (default 3), with the verdict agreement rate and the latency spread. Classifiers are deterministic, so their run-to-run check is a hash of all scores. |
+| **Variance** | LLM tasks: N repeats (default 3), with the verdict agreement rate and the latency spread. Classifiers are deterministic on ONNX Runtime's CPU path, so their run-to-run check is a hash of all scores **rounded to 4 decimal places**. CoreML on the GPU or Neural Engine can differ in the last bits between runs and machines. |
 | **Fail-closed rate** | errors, timeouts and parse failures that make the product block, counted apart from real verdicts |
 | **Licence / gating / platforms** | recorded fields, so "it passed but we can't ship it" is visible in the table |
 | **Pass / fail** | against a per-task accuracy bar (§10 Q3), shown as a column. The verdict is the bar's, not the reader's. |
@@ -99,7 +105,7 @@ eval/datasets/<task-family>/v<N>/
 
 - **`iris --eval run <task> --model <spec> [--sample N | --full] [--split test|dev] [--repeats N] [--out DIR]`**
   - It's dev builds only, read-only, with no store, conversation or home lock, which is #782's `--guard-probe` pattern.
-  - `--model` takes the runtime and model as config (`ollama:gemma4:12b`, `onnx:<path>`, `cloud:<provider>/<model>`), so the same command runs against a cloud model when it's configured that way.
+  - `--model` takes the runtime and model as config (`ollama:gemma4:12b`, `onnx:<path>`, `cloud:<provider>/<model>`), so the same command runs against a cloud model when it's configured that way. The runtime prefix is split on the **first colon only**, because Ollama names contain colons (`gemma4:12b-32k`). The runner never reads the home's settings by default: the model is always explicit config, so a run can't silently score whatever the home happens to be set to.
 - **Model-change flag (§10 Q4).** Before scoring, `run` looks up the last committed result for the same task and model name. If the fingerprint differs, it prints `MODEL CHANGED: <old> → <new>` and records `model_changed: true` with both digests. This catches a silent change, such as an Ollama re-pull of `gemma4:12b`. A changed model is a new model for comparison purposes.
 - **`iris --eval compare <a.json> <b.json>`** prints the per-metric and per-category differences, and flags any attack that flipped from caught to missed. This is modelled on `iris --perf compare`.
 - **`iris --eval table`** regenerates `docs/evals.md` from every result file.
@@ -114,7 +120,7 @@ eval/datasets/<task-family>/v<N>/
 ## 7. Where existing work goes
 
 - **#770 lands as it is.** Don't stall it. Slice 1 then moves its fixtures to `eval/datasets/injection/v1/` unchanged, with the same ids, plus the `split` field. Its test becomes a wrapper, and its docs table becomes the first generated row.
-- **#783 phase 1 runs now**, measuring tokens, calls per turn and latency with `--guard-probe`. Its **tier-3 verdict baseline waits for slice 1**: it would otherwise be a second, throwaway accuracy harness. Phase 2's levers are then each an `iris --eval compare` against that baseline.
+- **#783 phase 1 runs now**, measuring tokens, calls per turn and latency with `--guard-probe`. **Phase 2 doesn't wait for slice 1**, because the 5-second floor is what Brian feels. As an interim, #783 may add a tier-3 mode to #770's opt-in fixture test (the same fixtures and the same file, not a new harness) for its baseline and lever verdicts, with `--guard-probe` for latency. Slice 1 then migrates that mode and reruns #783's chosen lever through `compare` as a follow-up.
 - **#780 stays parked** until slice 1 lands. Every candidate is then one `run` plus one `compare`.
 - **#782's** `ModelLoadTracker` and `--guard-probe` are reused for load time and cold start.
 
@@ -136,13 +142,17 @@ eval/datasets/<task-family>/v<N>/
 These hold across every task. Most are adapted from the eval design of [kube-agents](https://github.com/gke-labs/kube-agents), an open-source agent project (Apache-2.0) whose benchmark harness has run since mid-2026 (`docs/designs/eval-scorer.md` and `bench/` there, read at `adc39ad4`).
 
 - **A version key on every result.** It joins the dataset version and sha256, the model identity, the runtime and its version, and a hand-bumped `scoring_version` integer. Bump `scoring_version` whenever a metric's meaning changes (a threshold rule, the definition of "caught"), and not for a cosmetic change to the scorer. `compare` refuses to compare results whose keys differ, unless it's told which part is meant to differ (the model, for a model comparison).
-- **Append-only results.** A run adds a file and never rewrites or deletes one. A wrong result is superseded by a later file that names it, not edited.
+- **Append-only results.** A run adds a file and never rewrites or deletes one. A wrong result is superseded by a later file that names it, not edited. `compare` can't see this, since it reads only two files, so slice 1 adds a CI check in the style of `scripts/ci-changes.sh` that fails a PR modifying or deleting any existing file under `eval/results/`.
 - **Absent, never zero.** A metric that wasn't measured (memory on a cloud model, cold start in a sampled run) is recorded as missing, and the table shows "n/a". It is never 0.
 - **Deterministic labels decide.** Every accuracy number comes from the dataset's labels (payload withheld or not, verdict parsed), never from a model grading another model.
-- **Margins sized to noise.** For LLM tasks, `compare` calls a difference real only beyond the run-to-run spread its repeats measured. The docs say plainly that 3 repeats catch a collapse, not a slow drift.
+- **Margins sized to noise.** For LLM tasks:
+  - **Unstable texts.** A text whose verdict differs across a result's own repeats is `unstable`. `compare` lists unstable texts separately and leaves them out of the caught/missed flips.
+  - **When a difference counts.** `compare` reports an aggregate difference as real only if it moves by at least 2 stable texts **and** by more than twice the larger of the two results' repeat spreads. It prints that rule with its verdict.
+
+  The docs say plainly that 3 repeats catch a collapse, not a slow drift.
 - **Infra failures are not product failures.** An engine that's down, or a runner error, invalidates that text's result and is counted as `infra`. A timeout or parse failure that the product would treat as a block is counted as `fail-closed`, because that's what a person would see.
 - **Watch the margin, not just the bar.** The table keeps each model's separation (ROC-AUC, and the gap between the highest benign and lowest attack score) over time, so a model that still passes while getting worse is visible before it fails.
-- **A fix comes with a case.** A guard change that fixes a missed attack or a false positive adds that text to the next dataset version, so the fix stays tested.
+- **A fix comes with a case.** A guard change that fixes a missed attack or a false positive adds that text to the next dataset version, so the fix stays tested. That can't be checked by machine, so it's a line in the PR template's checklist, held to at review.
 
 ### What we take from kube-agents, and what we don't
 
