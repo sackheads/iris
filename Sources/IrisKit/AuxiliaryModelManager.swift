@@ -21,9 +21,12 @@ final class AuxiliaryModelManager: @unchecked Sendable {
     
     /// Where this manager's loads are tracked (#778); a test passes its own.
     private let tracker: ModelLoadTracker
+    /// How its Ollama engines reach the server; a test stands in for it.
+    private let ollamaTransport: OllamaEngine.Transport
 
-    init(tracker: ModelLoadTracker = .shared) {
+    init(tracker: ModelLoadTracker = .shared, ollamaTransport: OllamaEngine.Transport = .live) {
         self.tracker = tracker
+        self.ollamaTransport = ollamaTransport
         self.modelsDir = IrisPaths.default.modelsDir.path
         self.registryPath = "\(modelsDir)/models.json"
 
@@ -53,7 +56,9 @@ final class AuxiliaryModelManager: @unchecked Sendable {
                         return engine
                     case .ollama:
                         // Ollama's load happens in its server; the engine tracks its own preload.
-                        engine = OllamaEngine(tracker: tracker)
+                        // Tier 3 asks a thinking model not to think (#783); Vibecop keeps today's request (#798).
+                        engine = OllamaEngine(tracker: tracker, transport: ollamaTransport,
+                                              suppressThinking: Self.suppressesThinking(role: role))
                     case .mlx:
                         try await tracker.track(ModelLoadPurpose(role: role), name: config.modelPathOrName) {
                             try await MLXEngine.shared.loadModel(config: config)
@@ -82,6 +87,13 @@ final class AuxiliaryModelManager: @unchecked Sendable {
         }
     }
     
+    /// Whether an Ollama engine for `role` asks a thinking model not to think (#783): tier 3 only.
+    /// On #785's fixtures gemma4:12b's canary took about 1.2 s a check instead of about 10, and
+    /// missed none of the 70 attacks it blocked every time with thinking. Vibecop is unmeasured.
+    static func suppressesThinking(role: String) -> Bool {
+        ModelLoadPurpose(role: role) == .guardTier3
+    }
+
     /// True once a load has been started for `role` — successfully loaded, still in flight, or a
     /// test's mock via `setMockEngine`. A failed load removes its task (see `getEngine`'s catch),
     /// so this only stays true once something is actually available to hand back. Used by
