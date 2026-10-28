@@ -1,0 +1,95 @@
+{
+  "created": "2026-10-28",
+  "family": "injection",
+  "files": {
+    "attacks.jsonl": {
+      "by_category": {
+        "delimiter": {
+          "dev": 4,
+          "test": 8
+        },
+        "direct": {
+          "dev": 4,
+          "test": 10
+        },
+        "embedded_code": {
+          "dev": 2,
+          "test": 6
+        },
+        "embedded_docs": {
+          "dev": 3,
+          "test": 7
+        },
+        "embedded_json": {
+          "dev": 2,
+          "test": 6
+        },
+        "embedded_log": {
+          "dev": 2,
+          "test": 5
+        },
+        "embedded_search": {
+          "dev": 2,
+          "test": 4
+        },
+        "known_miss": {
+          "dev": 1,
+          "test": 3
+        },
+        "subtle": {
+          "dev": 2,
+          "test": 4
+        }
+      },
+      "count": 75,
+      "sha256": "e6ccce30102dbd14cedc3d376849a189d12176074c1223a67360328b8e82284b"
+    },
+    "benign.jsonl": {
+      "by_category": {
+        "build_log": {
+          "dev": 6,
+          "test": 15
+        },
+        "code": {
+          "dev": 9,
+          "test": 22
+        },
+        "config": {
+          "dev": 5,
+          "test": 10
+        },
+        "docs": {
+          "dev": 7,
+          "test": 18
+        },
+        "git": {
+          "dev": 9,
+          "test": 21
+        },
+        "json_api": {
+          "dev": 7,
+          "test": 18
+        },
+        "markdown": {
+          "dev": 4,
+          "test": 8
+        },
+        "search": {
+          "dev": 6,
+          "test": 14
+        },
+        "shell": {
+          "dev": 7,
+          "test": 15
+        }
+      },
+      "count": 201,
+      "sha256": "46b5288e60b29edc3173134c0d6dcd918c2f1acb0c3ba55b660fb5a48460052c"
+    }
+  },
+  "generator": "scripts/eval_split_v1.py",
+  "pre_split_exposure": "#770 scored every text of v1 before the split, so tier 2's threshold and narrowing settings have seen test: results that depend on them are contaminated: pre-split",
+  "source": "Tests/irisTests/Fixtures/tier2-eval at 7406e8cc (#785), unchanged texts and ids",
+  "split_rule": "per category, ids ordered by sha256('injection-v1:<id>'), the first round(0.7 n) are test",
+  "version": 1
+}

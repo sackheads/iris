@@ -5,7 +5,7 @@ import os
 /// home's store lock. Never set in the shared test process (only in an exit test's child), so a
 /// test that reaches `.shared` crashes the suite: that is the alarm, and it has no disarm.
 enum ProcessRole: Sendable, Equatable {
-    case app, runJob, perf, bench, seed, probe
+    case app, runJob, perf, bench, seed, probe, eval
 
     private static let storage = OSAllocatedUnfairLock<ProcessRole?>(initialState: nil)
 

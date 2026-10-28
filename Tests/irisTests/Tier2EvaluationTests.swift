@@ -4,7 +4,7 @@ import Darwin
 @testable import IrisKit
 
 // #770: tier 2's accuracy and cost on realistic tool output, measured through the product's own
-// path, not the raw model alone. The fixtures (`Fixtures/tier2-eval/`, made by
+// path, not the raw model alone. The fixtures (`eval/datasets/injection/v1/` since #788, made by
 // `scripts/gen_tier2_eval_fixtures.py`; sources in its README) are checked on every run; the model
 // runs are opt-in, since the bundle is 704 MB:
 //
@@ -26,8 +26,8 @@ struct Tier2Sample: Decodable {
     let text: String
     let payload: String?
 
-    static let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        .appendingPathComponent("Fixtures/tier2-eval")
+    /// The texts live in the eval dataset now (#788); its `split` field is ignored here.
+    static let directory = PerfPaths.repoRoot().appendingPathComponent("eval/datasets/injection/v1")
 
     static func load(_ name: String) throws -> [Tier2Sample] {
         let data = try String(contentsOf: directory.appendingPathComponent(name), encoding: .utf8)
@@ -73,18 +73,15 @@ enum Tier2Bundle {
         return try await LiveONNXModel(modelURL: url.appendingPathComponent("model.onnx"), tokenizerConfigURL: url)
     }
 
-    /// A tool result as `IrisEngine` guards it: capped, then `sanitizeUntrusted`'s path (tier 1's
-    /// normalization and delimiter strip, then tier 2's windows, narrowing, phrase and delimiter
-    /// lines), stopping at tier 2. The model is task-scoped, so nothing global changes.
+    /// A tool result as `IrisEngine` guards it, stopping at tier 2: the eval runner's own path
+    /// (`EvalClassifierTask.product`, #788), so this report and `iris --eval` can't disagree. A
+    /// tier error that fails closed reads as blocked here, as it did when #770 was measured.
     static func product(_ text: String, model: LiveONNXModel) async -> (verdict: Tier2ProductVerdict, shown: String) {
-        let outcome = await CoreMLEvaluator.$scopedModel.withValue(.init(model)) {
-            await InjectionGuard.classifyUntrusted(OutputCap.cap(text), contextTag: "tool_output_run_command",
-                                                   maxTier: .tier2_coreML, protectionEnabled: true)
-        }
+        let (outcome, shown) = await EvalClassifierTask.product(text, model: model)
         switch outcome {
-        case .blocked(let marker): return (.blocked, marker)
-        case .passed(let clean):
-            return (clean.contains("withheld by the injection guard") ? .withheld : .passed, clean)
+        case .passed: return (.passed, shown)
+        case .withheld: return (.withheld, shown)
+        case .blocked, .failClosed, .infra: return (.blocked, shown)
         }
     }
 

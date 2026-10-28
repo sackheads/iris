@@ -44,6 +44,16 @@ jobs:
           scripts/agent-strings.sh "$BASE" HEAD
           scripts/agent-strings-test.sh
 
+      - name: Eval results are append-only
+        # #788: a committed result is never edited or deleted; a wrong one is superseded by a new
+        # file. Pull requests only: main only ever receives what a pull request already passed.
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          scripts/eval-append-only-test.sh
+          scripts/eval-append-only.sh "$BASE" HEAD
+
       - name: Classify the change
         id: classify
         env:

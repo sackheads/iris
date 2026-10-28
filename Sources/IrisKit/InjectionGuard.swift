@@ -374,6 +374,19 @@ public struct InjectionGuard {
         return (wrapped(verdict.outcome, contextTag: contextTag), verdict.cacheable, verdict.unjudged)
     }
 
+    /// `classifyUntrusted`, plus whether the verdict may be kept: false only when a tier errored
+    /// and failed closed, whose marker reads exactly like a real block. The eval counts those
+    /// apart from verdicts (#788).
+    static func classifyUntrustedDetailed(_ rawInput: String, contextTag: String = "",
+                                          maxTier: SanitizationTier = .tier1_structural,
+                                          protectionEnabled: Bool? = nil) async -> (outcome: GuardOutcome, cacheable: Bool) {
+        let stripped = PromptInjectionGuard.stripRecordingDelimiters(rawInput)
+        let verdict = await classifyDetailed(stripped.text, contextTag: contextTag, maxTier: maxTier,
+                                             protectionEnabled: protectionEnabled,
+                                             delimiterLines: stripped.delimiterLines)
+        return (verdict.outcome, verdict.cacheable)
+    }
+
     /// `sanitizeUntrusted`'s verdict, unwrapped, as `classify` is `sanitize`'s.
     static func classifyUntrusted(_ rawInput: String, contextTag: String = "",
                                   maxTier: SanitizationTier = .tier1_structural,

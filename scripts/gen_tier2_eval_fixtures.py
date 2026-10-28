@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Generate the tier-2 evaluation fixtures (#770).
 
-Writes Tests/irisTests/Fixtures/tier2-eval/benign.jsonl and attacks.jsonl, one JSON object per
+Made the texts of eval/datasets/injection/v1 (#788 froze them there, adding a split; see
+scripts/eval_split_v1.py). Re-running it writes to the old fixture folder, which nothing reads:
+new or changed texts are a new dataset version, v2, never an edit to v1.
+
+Wrote Tests/irisTests/Fixtures/tier2-eval/benign.jsonl and attacks.jsonl, one JSON object per
 line: {"id", "category", "source", "text"}, and for an attack also "payload", a distinctive
 substring of the injected instruction that must not reach the model (the line withheld, or the
 whole text blocked).

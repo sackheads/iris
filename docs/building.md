@@ -78,6 +78,17 @@ For repeatable performance tracking over time, run `perf/run.sh`: it executes th
 comparison against a bare provider call), and compares against promoted baselines. See
 [perf/README.md](../perf/README.md).
 
+## Model evals (`--eval`)
+
+```sh
+swift run iris --eval run injection.classifier --model onnx:~/.iris/models/<bundle dir>          # a 60-text sample of test
+swift run iris --eval run injection.classifier --model onnx:~/.iris/models/<bundle dir> --full   # the whole test split: graded
+swift run iris --eval compare eval/results/<task>/<a>.json eval/results/<task>/<b>.json --vary model
+swift run iris --eval table                                                                       # regenerates docs/evals.md
+```
+
+Scores a guard model on a frozen dataset (`eval/datasets/`) through the product's own path, and writes one result file under `eval/results/<task>/` to commit ([spec](specs/2026-10-28-model-eval-framework.md), #788).  The model is always named on the command line (`onnx:`, `coreml:`; `ollama:`, `llamacpp:` and `mlx:` come with `injection.verdict`), never read from the home's settings.  Dev builds only, and read-only apart from the result file: no store, conversation, job or home lock.  Results are append-only: a second run the same day gets `-2`, and CI fails a pull request that edits or deletes one (`scripts/eval-append-only.sh`).  `compare` refuses two results whose version keys differ, unless `--vary` names what's meant to differ; task, configuration and scoring version never compare across.  A run prints `MODEL CHANGED` when the model's fingerprint differs from its last committed result.  The results table is [docs/evals.md](evals.md).
+
 ## Timing the guard models (`--guard-probe`)
 
 ```sh
