@@ -258,12 +258,15 @@ struct ModelLEDBar: View {
                                                  modelsDir: IrisPaths.default.modelsDir) {
         case .provisioned:
             return CoreMLEvaluator.shared.hasModelLoaded ? .ready : .configured
-        case .unprovisioned, .notConfigured:
-            // Unlike the other LEDs' `.configured` fallback, an absent/unconfigured tier-2 model
-            // isn't just "not loaded yet" — the guard actively skips tier 2 for every evaluation
-            // until this is downloaded (#210), so it gets the same distinguishing state tier 3 got
-            // in #202.
+        case .unprovisioned:
+            // Unlike the other LEDs' `.configured` fallback, an absent tier-2 model isn't just
+            // "not loaded yet" — the guard actively skips tier 2 for every evaluation until this
+            // is downloaded (#210), so it gets the same distinguishing state tier 3 got in #202.
             return .unprovisioned
+        case .notConfigured:
+            // No model chosen is the default now (#781), and no model is recommended: tier 2 is
+            // simply off, not a download the person still owes.
+            return .off
         }
     }
 

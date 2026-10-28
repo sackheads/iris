@@ -417,7 +417,23 @@ class ConfigManager: @unchecked Sendable {
     /// - Parameter guardedMayChange: whether this process may complete the guarded upgrade and
     ///   tidy defaults. Nil decides by role: only the app (and a test) does, since only the app
     ///   announces what it did.
-    init(store storeOverride: UserDefaults? = nil, guardedSecrets: KeychainManager? = nil, guardedMayChange: Bool? = nil) {
+    /// The tier-2 model fresh installs used to default to (#781). No longer the default: it failed
+    /// #770's bar. Kept only so an install that downloaded it, without ever saving a choice, keeps it.
+    static let legacyTier2Model = "https://luthen.scromp.net/iris/deberta-v3-base-prompt-injection-v2.onnx.zip"
+
+    /// The tier-2 model when none was ever saved (#781): none, unless the old default's bundle is in
+    /// `modelsDir`. Downloading it never saved the field, so most installs that have it never chose
+    /// it explicitly; a plain default change would have turned their tier 2 off. Decided through
+    /// `InjectionGuard.tier2Provisioning`, the predicate the guard, the LED and the loader share, so
+    /// a folder present but broken still counts and fails closed as before. Nothing is persisted:
+    /// once the folder is gone, the install has no tier-2 model.
+    static func inheritedTier2Model(modelsDir: URL) -> String {
+        InjectionGuard.tier2Provisioning(modelName: legacyTier2Model, modelsDir: modelsDir) == .provisioned
+            ? legacyTier2Model : ""
+    }
+
+    init(store storeOverride: UserDefaults? = nil, guardedSecrets: KeychainManager? = nil, guardedMayChange: Bool? = nil,
+         modelsDir: URL? = nil) {
         self.storeOverride = storeOverride
         // Bound locally because `self.store` is unreadable until every stored property is
         // initialised; it is the same store the instance property returns from here on.
@@ -672,10 +688,10 @@ class ConfigManager: @unchecked Sendable {
         let savedPromptModel = saved.string(forKey: "PROMPT_GUARD_MODEL") ?? ""
         self.promptGuardModel = savedPromptModel.isEmpty ? "Qwen3.5-2B-Q4_K_M.gguf" : savedPromptModel
         
-        // Default to the accurate DeBERTa-v3 ONNX guard. The old distilbert CoreML default
-        // over-blocked ordinary tool output; see docs/prompt_guard_coreml.md.
-        let savedCoreMLModel = saved.string(forKey: "PROMPT_GUARD_COREML_MODEL") ?? ""
-        self.promptGuardCoreMLModel = savedCoreMLModel.isEmpty ? "https://luthen.scromp.net/iris/deberta-v3-base-prompt-injection-v2.onnx.zip" : savedCoreMLModel
+        // No tier-2 model by default (#781): a saved value, empty included, is the person's choice;
+        // with none saved, only an already-downloaded old default is inherited.
+        self.promptGuardCoreMLModel = saved.string(forKey: "PROMPT_GUARD_COREML_MODEL")
+            ?? Self.inheritedTier2Model(modelsDir: modelsDir ?? IrisPaths.default.modelsDir)
 
         self.auxiliaryVisionEngine = saved.string(forKey: "AUXILIARY_VISION_ENGINE") ?? ""
         self.auxiliaryVisionModel = saved.string(forKey: "AUXILIARY_VISION_MODEL") ?? ""

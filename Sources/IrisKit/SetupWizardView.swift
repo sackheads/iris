@@ -443,52 +443,61 @@ struct SecurityStepView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Tier 2: Fast Local Classifier")
                             .font(.headline)
-                        Text("Rapidly classifies text as safe or malicious on-device — CoreML (Neural Engine) or ONNX Runtime (CPU).")
+                        Text("Optional. Classifies text on-device — CoreML (Neural Engine) or ONNX Runtime (CPU).")
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        
-                        // #210 fix round 1: routed through the shared helpers so this can never
-                        // disagree with InjectionGuard.tier2Provisioning/ModelLEDBar, and so an
-                        // empty field is guarded (matches SettingsView's `!isEmpty` check above it)
-                        // rather than `isModelDownloaded(name: "")` reporting "downloaded" because
-                        // the models directory itself exists.
-                        let coreMLName = ModelDownloader.resolvedFilename(for: config.promptGuardCoreMLModel)
-                        let isDownloaded = downloader.isCoreMLModelDownloaded(name: config.promptGuardCoreMLModel)
-                        
-                        if !isDownloaded {
-                            if downloader.isDownloading && downloader.currentDownloadName == coreMLName {
-                                ProgressView(value: downloader.progress)
-                            } else {
-                                Button("Download Model (~650 MB)") {
-                                    Task { await downloader.downloadModel(name: config.promptGuardCoreMLModel) }
-                                }
-                            }
+
+                        // #781: no model by default, since none tested well enough to recommend.
+                        // A model is added in Settings → Security; an inherited one shows below.
+                        if config.promptGuardCoreMLModel.isEmpty {
+                            Text("No model is recommended yet, so tier 2 starts off. You can add your own in Settings → Security.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
                         } else {
-                            HStack {
-                                Text("✅ Model ready.")
-                                    .foregroundColor(.green)
-                                    .font(.caption)
-                                    
-                                Button("Test Model") {
-                                    Task {
-                                        do {
-                                            try await CoreMLEvaluator.shared.loadModelIfNeeded()
-                                            if CoreMLEvaluator.shared.hasModelLoaded {
-                                                _ = try await CoreMLEvaluator.shared.evaluate(text: "Hello")
-                                                tier2TestStatus = "✅ Success"
-                                            } else {
-                                                tier2TestStatus = "❌ Failed: Model not loaded"
-                                            }
-                                        } catch {
-                                            tier2TestStatus = "❌ Failed: \(error.localizedDescription)"
-                                        }
+                        
+                            // #210 fix round 1: routed through the shared helpers so this can never
+                            // disagree with InjectionGuard.tier2Provisioning/ModelLEDBar, and so an
+                            // empty field is guarded (matches SettingsView's `!isEmpty` check above it)
+                            // rather than `isModelDownloaded(name: "")` reporting "downloaded" because
+                            // the models directory itself exists.
+                            let coreMLName = ModelDownloader.resolvedFilename(for: config.promptGuardCoreMLModel)
+                            let isDownloaded = downloader.isCoreMLModelDownloaded(name: config.promptGuardCoreMLModel)
+                        
+                            if !isDownloaded {
+                                if downloader.isDownloading && downloader.currentDownloadName == coreMLName {
+                                    ProgressView(value: downloader.progress)
+                                } else {
+                                    Button("Download Model") {
+                                        Task { await downloader.downloadModel(name: config.promptGuardCoreMLModel) }
                                     }
                                 }
-                                .buttonStyle(.link)
-                                .font(.caption)
+                            } else {
+                                HStack {
+                                    Text("✅ Model ready.")
+                                        .foregroundColor(.green)
+                                        .font(.caption)
+                                    
+                                    Button("Test Model") {
+                                        Task {
+                                            do {
+                                                try await CoreMLEvaluator.shared.loadModelIfNeeded()
+                                                if CoreMLEvaluator.shared.hasModelLoaded {
+                                                    _ = try await CoreMLEvaluator.shared.evaluate(text: "Hello")
+                                                    tier2TestStatus = "✅ Success"
+                                                } else {
+                                                    tier2TestStatus = "❌ Failed: Model not loaded"
+                                                }
+                                            } catch {
+                                                tier2TestStatus = "❌ Failed: \(error.localizedDescription)"
+                                            }
+                                        }
+                                    }
+                                    .buttonStyle(.link)
+                                    .font(.caption)
                                 
-                                if let status = tier2TestStatus {
-                                    Text(status).font(.caption).foregroundColor(status.starts(with: "✅") ? .green : .red)
+                                    if let status = tier2TestStatus {
+                                        Text(status).font(.caption).foregroundColor(status.starts(with: "✅") ? .green : .red)
+                                    }
                                 }
                             }
                         }

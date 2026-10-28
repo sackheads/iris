@@ -9,7 +9,7 @@
 
 Iris includes an extremely fast, on-device text classifier for its Tier 2 Prompt Injection Guard powered by Apple's CoreML and the Neural Engine. 
 
-By default, you can enable Tier 2 by providing a URL to a pre-compiled `.mlmodelc.zip` file in the Settings UI. However, if you want to experiment with different security models (like Meta's official Prompt Guard or other community fine-tunes), you can easily compile your own!
+Tier 2 has no model by default (#781): none tested well enough to recommend. You can enable it by providing a URL to a pre-compiled `.mlmodelc.zip` or `.onnx.zip` in Settings → Security. If you want to experiment with different security models (like Meta's official Prompt Guard or other community fine-tunes), you can compile your own.
 
 ## Prerequisites
 

@@ -137,6 +137,9 @@ extension ModelLEDBar {
             switch kind {
             case .primary: return "No model provider is set up yet."
             case .vibecop: return "Vibecop is turned off."
+            case .tier2 where config.enableAdvancedPromptInjectionProtection:
+                // Protection is on; only tier 2 has no model, which is the default (#781).
+                return "No tier-2 model is set, so tier 2 is off. It's optional, and no model is recommended yet."
             default:       return "Prompt injection protection is turned off."
             }
         case .configured:

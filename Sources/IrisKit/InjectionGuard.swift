@@ -22,8 +22,8 @@ public struct InjectionGuard {
 
     /// Whether the tier-2 CoreML/ONNX classifier is available to run at all (#210, mirror of
     /// #202's `Tier3Provisioning`). Unlike tier 3, tier 2 has a third state: the config field can
-    /// simply be empty (`.notConfigured`), which behaves like `.unprovisioned` everywhere but
-    /// carries no filename to report.
+    /// simply be empty (`.notConfigured`). The guard skips tier 2 for both, but since #781 an empty
+    /// field is the default and reads as off: no "not downloaded" notice, and a neutral P2 light.
     public enum Tier2Provisioning: Equatable {
         case provisioned
         case unprovisioned(modelName: String)
@@ -166,7 +166,8 @@ public struct InjectionGuard {
             switch tier2 {
             case .provisioned: return nil
             case .unprovisioned(let modelName): return ("2", "tier-2 guard model \(modelName)")
-            case .notConfigured: return ("2", "tier-2 guard model")
+            // No model chosen is the default and none is recommended (#781): nothing to say.
+            case .notConfigured: return nil
             }
         }
         func tier3Phrase() -> (tier: String, phrase: String)? {

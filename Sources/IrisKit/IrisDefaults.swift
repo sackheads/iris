@@ -59,7 +59,8 @@ enum IrisDefaults {
         DispatchQueue.global(qos: .utility).async { sweepStaleTestSuites() }
 
         // Point the model-backed guard tiers at a path that cannot exist. `promptGuardCoreMLModel`
-        // falls back to a real DeBERTa ONNX URL when unset. Before #304 that resolved the ~704MB
+        // used to fall back to a real DeBERTa ONNX URL when unset (since #781, only when that
+        // bundle is already in the models directory). Before #304 that resolved the ~704MB
         // model in the developer's real ~/.iris/models, and whichever happened first in a run — a
         // test installing a mock, or any engine test calling `sanitize` — decided for the whole
         // process whether the real model loaded, so runs swung between 0.9s and 11s and the Tier
