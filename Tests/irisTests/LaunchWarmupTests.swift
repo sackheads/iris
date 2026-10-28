@@ -48,6 +48,16 @@ struct LaunchWarmupTests {
         }
     }
 
+    @Test func mlxIsLeftToFirstUse() {
+        withConfig { config, models in
+            config.enableAdvancedPromptInjectionProtection = true
+            config.promptGuardEngine = "mlx"
+            config.enableVibecop = true
+            config.vibecopEngine = "mlx"
+            #expect(LaunchWarmup.engines(config: config, modelsDir: models).isEmpty)
+        }
+    }
+
     @Test func aMissingLlamaModelIsNotBuilt() throws {
         try withConfig { config, models in
             config.enableAdvancedPromptInjectionProtection = true
