@@ -54,7 +54,7 @@ eval/datasets/<task-family>/v<N>/
   - `dev` (about 30%) is for tuning.
   - The split is **stratified by category**, and the manifest states each category's count in each split. At v1's size, some attack categories have only a handful of `test` texts, so **bars apply to the aggregate over `test`**. Per-category numbers are reported and marked "small n" below 10, but they aren't barred.
   - #780's fine-tune option may train only on `dev` and on data outside the dataset. A model or setting tuned on `test` is marked `contaminated` and can't be compared.
-  - **Choices made before the split are contaminated too.** #770 measured DeBERTa on all 276 texts. So tier 2's current threshold and narrowing settings, and anything #780 shortlists with #770's full-set numbers in view, have seen v1's `test`. Results that depend on them carry `contaminated: pre-split`. Before #780 decides anything, v2 adds a fresh set of `test` attacks, never scored during tuning: 24 from InjecAgent, with each text marked `exposure: pre-split` or `clean`, so a result says how many of its texts were exposed (`eval/datasets/injection/v2/`).
+  - **Choices made before the split are contaminated too.** #770 measured DeBERTa on all 276 texts. So tier 2's current threshold and narrowing settings, and anything #780 shortlists with #770's full-set numbers in view, have seen v1's `test`. Results that depend on them carry `contaminated: pre-split`. Before #780 decides anything, v2 adds a fresh set of `test` attacks, never scored during tuning: 24 from InjecAgent, with each text marked `exposure: pre-split` or `clean`, so a result says how many of its texts were exposed (`eval/datasets/injection/v2/`). v3 adds 30 more, written for this project after the freeze and all `test` (`source: v3-fresh`, reported on their own line), and long texts of 8 to 32 KB (`eval/datasets/injection/v3/`, #789).
 - **Adversarial variants** (`attacks.adversarial`): deterministic transforms of the attack set, using a fixed seed in the generator:
   - case and whitespace changes;
   - Unicode look-alikes;
@@ -62,7 +62,7 @@ eval/datasets/<task-family>/v<N>/
   - paraphrase without trigger words;
   - burying it deeper in benign text.
 
-  They're reported as their own category, so robustness is visible rather than averaged away.
+  They're reported as their own category, so robustness is visible rather than averaged away. v3 has the case and whitespace, look-alike, line-split and buried transforms, 12 parents each; trigger-free paraphrase isn't mechanical, so it's left to #802.
 - **A known weakness, stated:** every v1 attack was written by this project, so a model tuned to our authors' phrasing would look better than it is. v2 adds 24 attacks from InjecAgent (MIT) as their own category, `subtle_plain`, plus 10 benign look-alikes built on its templates; they are plain requests planted in tool output, not disguised ones, and harder cases are #802.
 - **Real traffic:** none for now (§10 Q2). The datasets hold synthetic and repository content only, apart from v2's InjecAgent rows (Brian, 2026-10-28, for that slice only). This can be revisited once Iris is used for work; a private local split would be the shape then.
 - **`approval.vibecop`** needs its own dataset: commands with cwd, the workspace shape and the conversation's recent denials, labelled safe-to-run-silently or must-ask. Seed it from the refusal tables of `ReadOnlyCommand` and the #600 cases. Deferred (§10 Q1).

@@ -119,6 +119,69 @@ struct EvalDatasetTests {
         #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("v2/LICENSES/InjecAgent-MIT.txt").path))
     }
 
+    /// v3 is v2 unchanged plus long texts, fresh test attacks and adversarial variants (#789).
+    /// Every new attack must still be scorable: its payload once in its text, judged whole (under
+    /// OutputCap), and still there after tier 1, or its absence would count as a catch.
+    @Test func theCommittedV3KeepsV2AndItsNewAttacksAreScorable() throws {
+        let root = PerfPaths.repoRoot().appendingPathComponent("eval/datasets/injection")
+        let v2 = try EvalDataset.load(from: root.appendingPathComponent("v2"))
+        let v3 = try EvalDataset.load(from: root.appendingPathComponent("v3"))
+        #expect(v3.manifest.version == 3)
+        #expect(v3.samples.count == 454)
+        let byId = Dictionary(uniqueKeysWithValues: v3.samples.map { ($0.id, $0) })
+        #expect(byId.count == 454)
+        for old in v2.samples {
+            let row = try #require(byId[old.id])
+            #expect(row == old, "\(old.id)")
+        }
+        let v2Ids = Set(v2.samples.map(\.id))
+        let new = v3.samples.filter { !v2Ids.contains($0.id) }
+        #expect(new.count == 144)
+        for row in new {
+            #expect(OutputCap.cap(row.text) == row.text, "\(row.id) is cut by OutputCap")
+            #expect(["clean", "pre-split"].contains(row.exposure), "\(row.id)")
+            guard let payload = row.payload else { continue }
+            #expect(row.text.components(separatedBy: payload).count == 2, "\(row.id)")
+            #expect(PromptInjectionGuard.sanitizeUntrustedInput(row.text).contains(payload), "\(row.id) loses its payload to tier 1")
+        }
+
+        let long = new.filter { $0.category.hasPrefix("long_") }
+        #expect(long.count == 66)
+        #expect(long.allSatisfy { (8 * 1024...32000).contains($0.bytes) && $0.exposure == "clean" })
+        #expect(Set(long.filter(\.isAttack).map(\.category)) == ["long_head", "long_middle", "long_tail"])
+        // A repository row can be traced to what it came from (#809 review).
+        let origins = try Dictionary(uniqueKeysWithValues: ["benign", "attacks"].flatMap { name in
+            try String(contentsOf: root.appendingPathComponent("v3/\(name).jsonl"), encoding: .utf8).split(separator: "\n").map { line in
+                let row = try #require(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+                return (row["id"] as? String ?? "", row["commit"] != nil)
+            }
+        })
+        for row in long where row.source == "repo" {
+            #expect(origins[row.id] == true, "\(row.id) names no commit")
+        }
+
+        let fresh = new.filter { $0.source == EvalSample.freshSource }
+        #expect(fresh.count == 30)
+        #expect(fresh.allSatisfy { $0.isAttack && $0.split == "test" && $0.exposure == "clean" })
+        #expect(Set(fresh.map(\.category)).isSubset(of: ["direct", "delimiter", "embedded_json", "embedded_log", "embedded_docs", "embedded_code"]))
+
+        // A variant takes its parent's split and exposure: a dev parent's variant must not be test.
+        let lines = try String(contentsOf: root.appendingPathComponent("v3/attacks.jsonl"), encoding: .utf8).split(separator: "\n")
+        let parents = try Dictionary(uniqueKeysWithValues: lines.compactMap { line -> (String, String)? in
+            let row = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+            guard let id = row?["id"] as? String, let parent = row?["parent"] as? String else { return nil }
+            return (id, parent)
+        })
+        let variants = new.filter { $0.category.hasPrefix("adversarial.") }
+        #expect(variants.count == 48)
+        #expect(Dictionary(grouping: variants, by: \.category).mapValues(\.count)
+                == ["adversarial.case_space": 12, "adversarial.lookalike": 12, "adversarial.line_split": 12, "adversarial.buried": 12])
+        for variant in variants {
+            let parent = try #require(parents[variant.id].flatMap { byId[$0] }, "\(variant.id) names its parent")
+            #expect(variant.split == parent.split && variant.exposure == parent.exposure, "\(variant.id)")
+        }
+    }
+
     @Test func aResultCountsItsExposedTexts() {
         func ds(_ version: Int) -> EvalDataset { .init(manifest: .init(family: "injection", version: version, files: [:]), samples: []) }
         var old = sample("b1", "code", text: "x"), new = sample("b2", "code", text: "y")
@@ -209,6 +272,25 @@ struct EvalMetricsTests {
         #expect(EvalMetrics.scoresHash([scored(s, .passed, raw: 0.123_41)]) == EvalMetrics.scoresHash([scored(s, .passed, raw: 0.123_409_9)]))
         #expect(EvalMetrics.scoresHash([scored(s, .passed, raw: 0.1234)]) != EvalMetrics.scoresHash([scored(s, .passed, raw: 0.1235)]))
         #expect(EvalMetrics.scoresHash([scored(s, .passed)]) == nil)
+    }
+
+    /// Clean texts and v3's fresh attacks each get their own rates (#789); absent when none were scored.
+    @Test func cleanTextsAndFreshAttacksReportApart() {
+        var cleanBenign = sample("b1", "code", text: "x"), exposedBenign = sample("b2", "code", text: "x")
+        var cleanAttack = sample("a1", "direct", text: "x", payload: "x"), exposedAttack = sample("a2", "direct", text: "x", payload: "x")
+        var freshAttack = sample("a3", "direct", text: "x", payload: "x")
+        cleanBenign.exposure = "clean"; exposedBenign.exposure = "pre-split"
+        cleanAttack.exposure = "clean"; exposedAttack.exposure = "pre-split"
+        freshAttack.exposure = "clean"; freshAttack.source = EvalSample.freshSource
+        let m = EvalMetrics.metrics([
+            scored(cleanBenign, .withheld), scored(exposedBenign, .passed),
+            scored(cleanAttack, .passed, caught: false), scored(exposedAttack, .blocked, caught: true),
+            scored(freshAttack, .blocked, caught: true),
+        ], fullTestSplit: false)
+        #expect(m.clean == .init(falsePositives: .init(n: 1, hits: 1), recall: .init(n: 2, hits: 1)))
+        #expect(m.freshRecall == .init(n: 1, hits: 1))
+        let v1Like = EvalMetrics.metrics([scored(sample("b3", "code", text: "x"), .passed)], fullTestSplit: false)
+        #expect(v1Like.clean == nil && v1Like.freshRecall == nil)
     }
 
     @Test func absentMetricsAreLeftOutNotZeroed() throws {

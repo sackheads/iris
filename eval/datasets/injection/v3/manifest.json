@@ -1,0 +1,157 @@
+{
+  "created": "2026-10-28",
+  "exposure": "per row: pre-split (v1's rows, and variants of them) or clean",
+  "family": "injection",
+  "files": {
+    "attacks.jsonl": {
+      "by_category": {
+        "adversarial.buried": {
+          "dev": 1,
+          "test": 11
+        },
+        "adversarial.case_space": {
+          "dev": 1,
+          "test": 11
+        },
+        "adversarial.line_split": {
+          "dev": 1,
+          "test": 11
+        },
+        "adversarial.lookalike": {
+          "dev": 1,
+          "test": 11
+        },
+        "delimiter": {
+          "dev": 4,
+          "test": 16
+        },
+        "direct": {
+          "dev": 4,
+          "test": 18
+        },
+        "embedded_code": {
+          "dev": 2,
+          "test": 9
+        },
+        "embedded_docs": {
+          "dev": 3,
+          "test": 10
+        },
+        "embedded_json": {
+          "dev": 2,
+          "test": 10
+        },
+        "embedded_log": {
+          "dev": 2,
+          "test": 9
+        },
+        "embedded_search": {
+          "dev": 2,
+          "test": 4
+        },
+        "known_miss": {
+          "dev": 1,
+          "test": 3
+        },
+        "long_head": {
+          "dev": 2,
+          "test": 6
+        },
+        "long_middle": {
+          "dev": 2,
+          "test": 6
+        },
+        "long_tail": {
+          "dev": 2,
+          "test": 6
+        },
+        "subtle": {
+          "dev": 2,
+          "test": 4
+        },
+        "subtle_plain": {
+          "dev": 7,
+          "test": 17
+        }
+      },
+      "count": 201,
+      "sha256": "05422624c805b002c157ebe9909cc6a0943d0dc4ca999c716c28f809bbeba3ff"
+    },
+    "benign.jsonl": {
+      "by_category": {
+        "build_log": {
+          "dev": 6,
+          "test": 15
+        },
+        "code": {
+          "dev": 9,
+          "test": 22
+        },
+        "config": {
+          "dev": 5,
+          "test": 10
+        },
+        "docs": {
+          "dev": 7,
+          "test": 18
+        },
+        "git": {
+          "dev": 9,
+          "test": 21
+        },
+        "json_api": {
+          "dev": 10,
+          "test": 25
+        },
+        "long_build_log": {
+          "dev": 2,
+          "test": 4
+        },
+        "long_code": {
+          "dev": 2,
+          "test": 4
+        },
+        "long_diff": {
+          "dev": 2,
+          "test": 4
+        },
+        "long_docs": {
+          "dev": 2,
+          "test": 4
+        },
+        "long_json": {
+          "dev": 2,
+          "test": 4
+        },
+        "long_listing": {
+          "dev": 2,
+          "test": 4
+        },
+        "long_test_log": {
+          "dev": 2,
+          "test": 4
+        },
+        "markdown": {
+          "dev": 4,
+          "test": 8
+        },
+        "search": {
+          "dev": 6,
+          "test": 14
+        },
+        "shell": {
+          "dev": 7,
+          "test": 15
+        }
+      },
+      "count": 253,
+      "sha256": "b64fd51c5eac36e16441a3023873fa49b4fda9ff6762879d25ea1a5e6f3dbc30"
+    }
+  },
+  "generator": "scripts/eval_build_v3.py",
+  "max_bytes": 32000,
+  "seed": 789,
+  "source": "v2's 310 rows unchanged; long texts from this repository at b61bf05c and synthetic; fresh attacks and adversarial variants written for v3 (#789)",
+  "split_rule": "v1 and v2 rows keep their split; fresh attacks (source v3-fresh) are all test; adversarial variants take their parent's split; other new rows per category, ids ordered by sha256('injection-v3:<id>'), the first round(0.7 n) are test, rounding half to even, at least one in each split",
+  "version": 3
+}

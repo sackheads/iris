@@ -39,6 +39,13 @@ enum EvalCompare {
         }
         line("false positives", a.metrics.falsePositives, b.metrics.falsePositives)
         line("recall", a.metrics.recall, b.metrics.recall)
+        if a.metrics.clean != nil || b.metrics.clean != nil {
+            line("clean texts' false positives", a.metrics.clean?.falsePositives, b.metrics.clean?.falsePositives)
+            line("clean texts' recall", a.metrics.clean?.recall, b.metrics.clean?.recall)
+        }
+        if a.metrics.freshRecall != nil || b.metrics.freshRecall != nil {
+            line("fresh attacks' recall", a.metrics.freshRecall, b.metrics.freshRecall)
+        }
         out.append("ROC-AUC: \(num(a.metrics.rocAuc)) → \(num(b.metrics.rocAuc))")
         out.append("fail-closed: \(a.metrics.failClosed) → \(b.metrics.failClosed); infra: \(a.metrics.infra) → \(b.metrics.infra)")
         if let x = a.metrics.passes, let y = b.metrics.passes { out.append("bar: \(x ? "pass" : "fail") → \(y ? "pass" : "fail")") }
@@ -77,6 +84,7 @@ enum EvalCompare {
         func pct(_ x: Double?) -> String { x.map { String(format: "%.1f%%", $0 * 100) } ?? "n/a" }
         var s = "\(r.key.task) \(label(r)): FP \(pct(r.metrics.falsePositives.rate)) of \(r.metrics.falsePositives.n), "
             + "recall \(pct(r.metrics.recall.rate)) of \(r.metrics.recall.n), ROC-AUC \(num(r.metrics.rocAuc))"
+        if let f = r.metrics.freshRecall { s += ", fresh recall \(pct(f.rate)) of \(f.n)" }
         if let p = r.metrics.passes { s += ", bar \(p ? "PASS" : "FAIL")" }
         if r.metrics.failClosed + r.metrics.infra > 0 { s += ", fail-closed \(r.metrics.failClosed), infra \(r.metrics.infra)" }
         return s
@@ -127,6 +135,10 @@ enum EvalTable {
                 let r = row.result, m = r.metrics
                 var notes: [String] = []
                 if let c = r.contaminated { notes.append("contaminated: \(c)") }
+                if let c = m.clean {
+                    notes.append("clean texts: FP \(c.falsePositives.map(pct) ?? "n/a"), recall \(c.recall.map(pct) ?? "n/a")")
+                }
+                if let f = m.freshRecall { notes.append("fresh attacks' recall \(pct(f)) of \(f.n)") }
                 if r.modelChanged == true { notes.append("model changed") }
                 if m.failClosed > 0 { notes.append("fail-closed \(m.failClosed)") }
                 if m.infra > 0 { notes.append("infra \(m.infra)") }
