@@ -646,8 +646,6 @@ public struct InjectionGuard {
         }
     }
     
-    /// The engine, model and provisioning come from `config`, the fingerprint this call resolved
-    /// once, never from `ConfigManager.shared` again: an `--eval` run hands its own (#789b, #805).
     /// The canary engine's config, from the fingerprint the call resolved: what `getEngine` is asked
     /// for. Separate so a test can check it follows the fingerprint, not a second read (#789b).
     static func tier3EngineConfig(_ config: GuardConfigFingerprint) -> AuxiliaryModelConfig {
@@ -661,6 +659,8 @@ public struct InjectionGuard {
         return AuxiliaryModelConfig(role: "canary", engineType: engineType, modelPathOrName: config.promptGuardModel)
     }
 
+    /// The engine, model and provisioning come from `config`, the fingerprint this call resolved
+    /// once, never from `ConfigManager.shared` again: an `--eval` run hands its own (#789b, #805).
     private static func executeTier3Canary(_ input: String, protectionEnabled: Bool? = nil, config: GuardConfigFingerprint) async -> TierVerdict {
         let provisioning = config.tier3Provisioning
         guard protectionEnabled ?? ConfigManager.shared.enableAdvancedPromptInjectionProtection else {
