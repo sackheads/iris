@@ -1,0 +1,15 @@
+The two gemma4:12b arms re-timed with --latency-only (#783) once the background process that
+held a core during the original runs had stopped. 2026-10-28, Apple M4 Pro, signed build of
+main + #801 (scripts/sign.sh), fixtures eval/datasets/injection/v1.
+
+Check before (11:39:55 EDT): no BackgroundShortcutRunner process (ps, sampled ~2 min before
+too); loadavg 5.24 6.34 8.07, falling, no build running.
+Check after  (11:41:24 EDT): still none; loadavg 4.48 5.80 7.69.
+
+Seconds          cold   warm p50 (5)   3 at once (3 rounds, median)
+g12-today-retime 6.16   5.03           14.75   (rounds 12.76, 14.75, 16.19)
+g12-off-retime   2.03   0.60            1.35   (rounds 1.35, 1.35, 1.36)
+
+Against the original runs (table.md): thinking off is unchanged (2.02 / 0.60 / 1.34); thinking
+as today is a little faster (7.61 / 5.45 / 17.63 before, 6.23 / 5.78 / 16.34 in g12-today-latency).
+The ratio holds: about 8x per warm check and about 11x for three at once.
