@@ -8,10 +8,18 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
     private let transport: Transport
     /// The preload in flight, if any: at most one per engine, so a cold call never shows twice.
     private var preload: Task<Void, Never>?
+    /// Ask a thinking model not to think (#783): gemma4 otherwise writes 150-570 hidden tokens
+    /// before a one-word verdict, about 90% of each call's time. Only `--guard-probe --fixtures`
+    /// sets it for now; the product's engines leave it off until #783's bake-off picks a lever.
+    let suppressThinking: Bool
+    /// Whether the model reports the `thinking` capability, once `/api/show` has said; `think` is
+    /// sent only to a model that has it, so a non-thinking model's request is unchanged.
+    private var thinks: Bool?
 
-    init(tracker: ModelLoadTracker = .shared, transport: Transport = .live) {
+    init(tracker: ModelLoadTracker = .shared, transport: Transport = .live, suppressThinking: Bool = false) {
         self.tracker = tracker
         self.transport = transport
+        self.suppressThinking = suppressThinking
     }
     
     private static let baseURL = "http://localhost:11434"
@@ -24,6 +32,11 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
         var preload: @Sendable (Data) async throws -> (status: Int, data: Data)
         /// A `/api/generate` request (#779 review): through here so a test drives `generate`.
         var generate: @Sendable (Data) async throws -> (status: Int, data: Data) = { try await Transport.post("generate", $0) }
+        /// `/api/show`'s body for a model, nil when it didn't answer 200 (#783).
+        var show: @Sendable (Data) async -> Data? = { body in
+            guard let (status, data) = try? await Transport.post("show", body, timeout: 5), status == 200 else { return nil }
+            return data
+        }
 
         /// POSTs `body` to `/api/<endpoint>`. The shape #794 shares, adding its own endpoints.
         static func post(_ endpoint: String, _ body: Data, timeout: TimeInterval? = nil) async throws -> (status: Int, data: Data) {
@@ -270,6 +283,18 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
         try await generate(prompt: prompt, jsonSchema: jsonSchema, images: nil)
     }
 
+    /// Whether `/api/show` lists `thinking` for this model. nil when it didn't answer, and asked
+    /// again next time: only a definite answer is kept.
+    private func modelThinks() async -> Bool? {
+        if let thinks { return thinks }
+        guard let body = try? JSONSerialization.data(withJSONObject: ["model": modelName]),
+              let data = await transport.show(body),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        let answer = (json["capabilities"] as? [String])?.contains("thinking") ?? false
+        thinks = answer
+        return answer
+    }
+
     func generate(prompt: String, jsonSchema: String?, images: [String]? = nil) async throws -> String {
         var body: [String: Any] = [
             "model": modelName,
@@ -283,6 +308,11 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
         
         if let images, !images.isEmpty {
             body["images"] = images
+        }
+
+        // Only to a model that thinks: a model without the capability gets today's request.
+        if suppressThinking, await modelThinks() == true {
+            body["think"] = false
         }
         
         let requestBody = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
