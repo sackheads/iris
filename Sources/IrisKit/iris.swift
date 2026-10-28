@@ -4390,6 +4390,14 @@ actor IrisEngine {
     static func unknownToolResult(_ name: String) -> String { "Error: Unknown tool \(name)" }
 
     /// What the model is told when a human refused a tool call in an attended conversation.
+    /// Tests only: one call through the dispatcher with `offered` as the round's declarations, to
+    /// reach a per-tool backstop that #811's check now stands in front of on a real turn. It skips
+    /// nothing: a name outside `offered` meets the same refusal.
+    func dispatchForTesting(_ call: FunctionCall, conversationId: UUID, workspacePath: String? = nil,
+                            offered: Set<String>) async -> String {
+        await executeFunctionCall(call, conversationId: conversationId, workspacePath: workspacePath, offeredTools: offered)
+    }
+
     /// #811: refuses a call to a tool the round did not offer, with a line in the transcript.
     private func notOffered(_ name: String, conversationId: UUID) async -> String {
         await pushToUI(role: .system, text: "[blocked] '\(name)' was not offered in this turn.", conversationId: conversationId)
