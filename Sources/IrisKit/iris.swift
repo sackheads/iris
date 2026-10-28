@@ -3159,8 +3159,8 @@ actor IrisEngine {
                                     // dispatcher refuses everything except goal_complete. This is
                                     // what stops the looping action from running again.
                                     if restrictToGoalComplete && call.name != "goal_complete" {
-                                        await self.pushToUI(role: .system, text: "[blocked] '\(call.name)' is unavailable — the goal loop was stopped. Call goal_complete.", conversationId: conversationId)
-                                        return (index, "Blocked: the goal loop has been stopped after repeating an action too many times. '\(call.name)' is unavailable in this turn. Call goal_complete with a summary of what you accomplished and what is blocking you.")
+                                        await self.pushToUI(role: .system, text: "[blocked] '\(Self.flattenToolEcho(call.name))' is unavailable — the goal loop was stopped. Call goal_complete.", conversationId: conversationId)
+                                        return (index, "Blocked: the goal loop has been stopped after repeating an action too many times. '\(Self.flattenToolEcho(call.name))' is unavailable in this turn. Call goal_complete with a summary of what you accomplished and what is blocking you.")
                                     }
                                     // 5c §0.2: a sticky goal_complete with no goal leaves no trace —
                                     // refused before the pill, the panel and the summary push (#84).
@@ -4389,7 +4389,6 @@ actor IrisEngine {
     /// one reads exactly what any conversation would (#550).
     static func unknownToolResult(_ name: String) -> String { "Error: Unknown tool \(name)" }
 
-    /// What the model is told when a human refused a tool call in an attended conversation.
     /// Tests only: one call through the dispatcher with `offered` as the round's declarations, to
     /// reach a per-tool backstop that #811's check now stands in front of on a real turn. It skips
     /// nothing: a name outside `offered` meets the same refusal.
@@ -4400,13 +4399,14 @@ actor IrisEngine {
 
     /// #811: refuses a call to a tool the round did not offer, with a line in the transcript.
     private func notOffered(_ name: String, conversationId: UUID) async -> String {
-        await pushToUI(role: .system, text: "[blocked] '\(name)' was not offered in this turn.", conversationId: conversationId)
+        await pushToUI(role: .system, text: "[blocked] '\(Self.flattenToolEcho(name))' was not offered in this turn.", conversationId: conversationId)
         return Self.notOfferedRefusal(name)
     }
 
     /// #811: the result for a call to a tool the round did not offer.
+    /// The name is the model's own choice, so it is flattened like any other echo (#819 review).
     static func notOfferedRefusal(_ name: String) -> String {
-        "Not run: '\(name)' is not one of the tools offered in this turn. Use only the tools you were given."
+        "Not run: '\(flattenToolEcho(name))' is not one of the tools offered in this turn. Use only the tools you were given."
     }
 
     /// #811: the names a request declared, which are the only tools its reply may call.
@@ -4414,6 +4414,7 @@ actor IrisEngine {
         Set(request.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? [])
     }
 
+    /// What the model is told when a human refused a tool call in an attended conversation.
     static let deniedToolResult = "User denied permission to execute this tool. You must ask the user for clarification or suggest an alternative."
 
     /// What an unattended turn is told when a call needed an approval nobody was there to give
