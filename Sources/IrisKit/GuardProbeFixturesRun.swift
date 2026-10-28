@@ -297,6 +297,11 @@ extension GuardProbeFixtures {
         return models.first { ($0["name"] as? String) == name }?["digest"] as? String
     }
 
+    /// The server's version, for an eval result's runtime version (#789b).
+    static func ollamaVersion() async -> String? {
+        (await ollamaJSON("version")?["version"] as? String).map { "ollama \($0)" }
+    }
+
     static func ollamaThinks(_ name: String) async -> Bool? {
         guard let caps = await ollamaJSON("show", body: ["model": name])?["capabilities"] as? [String] else { return nil }
         return caps.contains("thinking")

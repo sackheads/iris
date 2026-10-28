@@ -233,9 +233,12 @@ public struct InjectionGuard {
     /// would actually use for the same parameters. `classify`/`classifyDetailed` call this too
     /// (rather than recomputing the same five lines locally), which is what keeps the two unable to
     /// drift apart.
+    /// `settings` is for a test: production always reads the live `ConfigManager.shared`, once per
+    /// call, so a change in Settings reaches the next check (#789b).
     static func currentConfigFingerprint(protectionEnabled: Bool?, tier2ModelsDir: URL? = nil,
-                                          tier3ModelsDir: URL? = nil) -> GuardConfigFingerprint {
-        let config = ConfigManager.shared
+                                          tier3ModelsDir: URL? = nil,
+                                          settings: ConfigManager? = nil) -> GuardConfigFingerprint {
+        let config = settings ?? ConfigManager.shared
         let resolvedTier2ModelsDir = tier2ModelsDir ?? IrisPaths.default.modelsDir
         let resolvedTier3ModelsDir = tier3ModelsDir ?? IrisPaths.default.modelsDir
         return GuardConfigFingerprint(
@@ -501,7 +504,7 @@ public struct InjectionGuard {
         // Tier 3: Behavioral Canary Probe — also evaluates the unwrapped content.
         PerformanceProfiler.event("guard.tier3 start source=\(source) chars=\(clean.count)")
         let tier3Start = MonotonicClock.nowMs()
-        let tier3 = await measureSpan("guard.tier3") { await executeTier3Canary(clean, protectionEnabled: protectionEnabled, provisioning: fingerprint.tier3Provisioning) }
+        let tier3 = await measureSpan("guard.tier3") { await executeTier3Canary(clean, protectionEnabled: protectionEnabled, config: fingerprint) }
         PerformanceProfiler.event("guard.tier3 end source=\(source) ms=\(Int(MonotonicClock.nowMs() - tier3Start)) verdict=\(tier3.logName)")
         switch tier3 {
         case .error:
@@ -643,7 +646,23 @@ public struct InjectionGuard {
         }
     }
     
-    private static func executeTier3Canary(_ input: String, protectionEnabled: Bool? = nil, provisioning: Tier3Provisioning) async -> TierVerdict {
+    /// The engine, model and provisioning come from `config`, the fingerprint this call resolved
+    /// once, never from `ConfigManager.shared` again: an `--eval` run hands its own (#789b, #805).
+    /// The canary engine's config, from the fingerprint the call resolved: what `getEngine` is asked
+    /// for. Separate so a test can check it follows the fingerprint, not a second read (#789b).
+    static func tier3EngineConfig(_ config: GuardConfigFingerprint) -> AuxiliaryModelConfig {
+        let engineType: AuxiliaryEngineType
+        switch config.promptGuardEngine {
+        case "ollama": engineType = .ollama
+        case "mlx": engineType = .mlx
+        case "cloud": engineType = .cloud
+        default: engineType = .llamaCPP
+        }
+        return AuxiliaryModelConfig(role: "canary", engineType: engineType, modelPathOrName: config.promptGuardModel)
+    }
+
+    private static func executeTier3Canary(_ input: String, protectionEnabled: Bool? = nil, config: GuardConfigFingerprint) async -> TierVerdict {
+        let provisioning = config.tier3Provisioning
         guard protectionEnabled ?? ConfigManager.shared.enableAdvancedPromptInjectionProtection else {
             return .safe
         }
@@ -655,7 +674,7 @@ public struct InjectionGuard {
         // tier 3 through a mock without a real model file on disk.
         let hasRegisteredEngine = AuxiliaryModelManager.shared.hasEngine(for: "canary")
 
-        let engineTypeString = ConfigManager.shared.promptGuardEngine
+        let engineTypeString = config.promptGuardEngine
 
         // #202: distinguish "no model provisioned" (skip, don't block) from "model present but
         // failed to load/run" (fail closed, below, unchanged). Only llama_cpp has a local file to
@@ -665,25 +684,12 @@ public struct InjectionGuard {
             return .skipped
         }
 
-        let engineType: AuxiliaryEngineType
-        switch engineTypeString {
-        case "ollama": engineType = .ollama
-        case "mlx": engineType = .mlx
-        case "cloud": engineType = .cloud
-        default: engineType = .llamaCPP
-        }
-        
-        let modelName = ConfigManager.shared.promptGuardModel
-        
-        let config = AuxiliaryModelConfig(
-            role: "canary",
-            engineType: engineType,
-            modelPathOrName: modelName
-        )
-        
+        let modelName = config.promptGuardModel
+        let engineConfig = tier3EngineConfig(config)
+
         let startTime = UptimeClock.live.now()   // uptime: a sleep is not time spent (#608)
         do {
-            let engine = try await AuxiliaryModelManager.shared.getEngine(for: "canary", config: config)
+            let engine = try await AuxiliaryModelManager.shared.getEngine(for: "canary", config: engineConfig)
             let tag = UUID().uuidString.prefix(8)
             // #709's backstop: the canary is never sent more than the model-visible cap, whoever
             // calls it. A tool result is cut to that size before it gets here; a longer input from

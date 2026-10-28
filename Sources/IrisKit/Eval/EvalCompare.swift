@@ -14,6 +14,8 @@ enum EvalCompare {
         if a.datasetFamily != b.datasetFamily || a.datasetVersion != b.datasetVersion || a.datasetSha256 != b.datasetSha256 { d.insert("dataset") }
         if a.split != b.split { d.insert("split") }
         if a.sample != b.sample { d.insert("sample") }
+        if a.think != b.think { d.insert("think") }
+        if (a.repeats ?? 1) != (b.repeats ?? 1) { d.insert("repeats") }
         return d
     }
 
@@ -49,6 +51,12 @@ enum EvalCompare {
         out.append("ROC-AUC: \(num(a.metrics.rocAuc)) → \(num(b.metrics.rocAuc))")
         out.append("fail-closed: \(a.metrics.failClosed) → \(b.metrics.failClosed); infra: \(a.metrics.infra) → \(b.metrics.infra)")
         if let x = a.metrics.passes, let y = b.metrics.passes { out.append("bar: \(x ? "pass" : "fail") → \(y ? "pass" : "fail")") }
+        if a.metrics.agreement != nil || b.metrics.agreement != nil {
+            line("agreement across repeats", a.metrics.agreement, b.metrics.agreement)
+        }
+        if a.metrics.parseFailures != nil || b.metrics.parseFailures != nil {
+            out.append("parse failures: \(a.metrics.parseFailures.map(String.init) ?? "n/a") → \(b.metrics.parseFailures.map(String.init) ?? "n/a")")
+        }
         out += ["", "by category:"]
         for c in Set(a.metrics.falsePositivesByCategory.keys).union(b.metrics.falsePositivesByCategory.keys).sorted() {
             line("  benign \(c)", a.metrics.falsePositivesByCategory[c], b.metrics.falsePositivesByCategory[c])
@@ -66,18 +74,41 @@ enum EvalCompare {
         let flips = flipped(a, b)
         out += ["", "attacks caught → missed: " + (flips.lost.isEmpty ? "none" : flips.lost.joined(separator: ", ")),
                 "attacks missed → caught: " + (flips.gained.isEmpty ? "none" : flips.gained.joined(separator: ", "))]
+        if !flips.unstable.isEmpty {
+            out.append("left out of the flips, judged differently across a result's own repeats: " + flips.unstable.joined(separator: ", "))
+        }
+        if (a.key.repeats ?? 1) > 1 || (b.key.repeats ?? 1) > 1 {
+            // Spec section 9's rule (2 stable texts and twice the repeat spread) isn't built yet:
+            // these are counts and flips, not a finding that the two differ or don't.
+            out.append("margin rule (spec §9) pending, #816: no verdict on whether these results differ")
+        }
         return out.joined(separator: "\n")
     }
 
-    /// Attacks scored in both whose caught flag changed, by id.
-    static func flipped(_ a: EvalResult, _ b: EvalResult) -> (lost: [String], gained: [String]) {
-        let before = Dictionary(uniqueKeysWithValues: a.verdicts.compactMap { v in v.caught.map { (v.id, $0) } })
-        var lost: [String] = [], gained: [String] = []
-        for v in b.verdicts {
-            guard let now = v.caught, let then = before[v.id], now != then else { continue }
-            if then { lost.append(v.id) } else { gained.append(v.id) }
+    /// Each attack's caught flag where every judgement of it agreed, and the ids where they didn't.
+    static func stableCaught(_ r: EvalResult) -> (stable: [String: Bool], unstable: Set<String>) {
+        var seen: [String: Set<Bool>] = [:]
+        for v in r.verdicts where v.outcome != EvalMetrics.Outcome.infra.rawValue {
+            if let c = v.caught { seen[v.id, default: []].insert(c) }
         }
-        return (lost.sorted(), gained.sorted())
+        var stable: [String: Bool] = [:], unstable: Set<String> = []
+        for (id, values) in seen {
+            if values.count == 1 { stable[id] = values.first! } else { unstable.insert(id) }
+        }
+        return (stable, unstable)
+    }
+
+    /// Attacks scored in both whose caught flag changed, by id, among those stable in both: an
+    /// attack judged differently across either result's repeats is listed apart (spec, section 9).
+    static func flipped(_ a: EvalResult, _ b: EvalResult) -> (lost: [String], gained: [String], unstable: [String]) {
+        let before = stableCaught(a), after = stableCaught(b)
+        var lost: [String] = [], gained: [String] = []
+        for (id, now) in after.stable {
+            guard let then = before.stable[id], now != then else { continue }
+            if then { lost.append(id) } else { gained.append(id) }
+        }
+        let both = Set(before.stable.keys).union(before.unstable).intersection(Set(after.stable.keys).union(after.unstable))
+        return (lost.sorted(), gained.sorted(), before.unstable.union(after.unstable).intersection(both).sorted())
     }
 
     static func summary(_ r: EvalResult) -> String {
@@ -85,14 +116,16 @@ enum EvalCompare {
         var s = "\(r.key.task) \(label(r)): FP \(pct(r.metrics.falsePositives.rate)) of \(r.metrics.falsePositives.n), "
             + "recall \(pct(r.metrics.recall.rate)) of \(r.metrics.recall.n), ROC-AUC \(num(r.metrics.rocAuc))"
         if let f = r.metrics.freshRecall { s += ", fresh recall \(pct(f.rate)) of \(f.n)" }
+        if let a = r.metrics.agreement { s += ", agreement \(pct(a.rate)) of \(a.n) texts" }
         if let p = r.metrics.passes { s += ", bar \(p ? "PASS" : "FAIL")" }
         if r.metrics.failClosed + r.metrics.infra > 0 { s += ", fail-closed \(r.metrics.failClosed), infra \(r.metrics.infra)" }
         return s
     }
 
     static func label(_ r: EvalResult) -> String {
-        "\(r.key.runtime):\(r.key.model) (\(String(r.key.modelFingerprint.suffix(8)))) on \(r.key.datasetFamily) v\(r.key.datasetVersion) \(r.key.split)"
-            + (r.key.sample.map { " s\($0)" } ?? " full") + ", \(r.date)"
+        "\(r.key.runtime):\(r.key.model) (\(String(r.key.modelFingerprint.suffix(8))))" + (r.key.think.map { " think \($0)" } ?? "")
+            + " on \(r.key.datasetFamily) v\(r.key.datasetVersion) \(r.key.split)"
+            + (r.key.sample.map { " s\($0)" } ?? " full") + (r.key.repeats.map { $0 > 1 ? " ×\($0)" : "" } ?? "") + ", \(r.date)"
     }
 
     static func num(_ x: Double?) -> String { x.map { String(format: "%.3f", $0) } ?? "n/a" }
@@ -142,8 +175,11 @@ enum EvalTable {
                 if r.modelChanged == true { notes.append("model changed") }
                 if m.failClosed > 0 { notes.append("fail-closed \(m.failClosed)") }
                 if m.infra > 0 { notes.append("infra \(m.infra)") }
+                if let t = r.key.think { notes.append("think \(t)") }
+                if let a = m.agreement { notes.append("agreement \(pct(a)) of \(a.n), \(m.unstable?.count ?? 0) unstable") }
+                if let p = m.parseFailures, p > 0 { notes.append("parse failures \(p)") }
                 if r.environment.onBattery == true { notes.append("on battery") }
-                let texts = "\(r.key.split) " + (r.key.sample.map { "s\($0)" } ?? "full")
+                let texts = "\(r.key.split) " + (r.key.sample.map { "s\($0)" } ?? "full") + (r.key.repeats.map { $0 > 1 ? " ×\($0)" : "" } ?? "")
                 let sep = "\(EvalCompare.num(m.highestBenignScore)) / \(EvalCompare.num(m.lowestAttackScore))"
                 let bar = m.passes.map { $0 ? "pass" : "**fail**" } ?? "n/a"
                 out.append("| \(r.date) | \(r.key.runtime):\(r.key.model) | `\(r.key.modelFingerprint.suffix(12))` | \(r.key.configuration) | "
