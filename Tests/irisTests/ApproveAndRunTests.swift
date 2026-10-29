@@ -246,6 +246,35 @@ struct ApproveAndRunTests {
         #expect(!card.scrollsArguments, "a short path needs no scroll area")
     }
 
+    private func runCard(_ command: String) -> EventCard {
+        let call = BlockedCall(toolName: "run_command", args: ["command": .string(command)], cwd: "/tmp", reason: .approval)
+        return EventCard(runId: UUID(), jobId: UUID(), jobName: "sweep", status: .blockedOnApproval,
+                         blockedTool: call.toolName, startedAt: Date(), finishedAt: Date(),
+                         blockedCall: EventCard.displayCopy(of: call))
+    }
+
+    @Test("each limit alone makes a command scroll: many short lines, or one long line (#836 review)")
+    func eachLimitAloneScrolls() {
+        let shortLines = (1...(EventCard.argumentPreviewLines + 1)).map { "x\($0)" }.joined(separator: "\n")
+        #expect(shortLines.count <= EventCard.argumentPreviewLimit)
+        #expect(runCard(shortLines).scrollsArguments, "13 short lines, under 500 characters")
+        let oneLine = String(repeating: "a", count: EventCard.argumentPreviewLimit + 1)
+        #expect(runCard(oneLine).scrollsArguments, "one line of 501 characters")
+        let fits = (1...EventCard.argumentPreviewLines).map { "x\($0)" }.joined(separator: "\n")
+        #expect(!runCard(fits).scrollsArguments, "12 short lines fit")
+    }
+
+    @Test("CRLF line breaks count as lines, for the scroll and for a content cut (#836 review)")
+    func crlfLinesCount() {
+        let crlf = (1...100).map { "e\($0)" }.joined(separator: "\r\n")
+        #expect(crlf.count < EventCard.argumentPreviewLimit)
+        let card = runCard(crlf)
+        #expect(card.scrollsArguments)
+        #expect(card.blockedArguments.first { $0.key == "command" }?.value == crlf, "and the command is still shown byte-exact")
+        let content = EventCard.preview(key: "content", value: .string(crlf))
+        #expect(content.hasSuffix("… (\(100 - EventCard.argumentPreviewLines) more lines)"))
+    }
+
     @Test("a profile denial is never offered an Approve button (R13)")
     func profileDenialIsNotApprovable() {
         let card = EventCard(runId: UUID(), jobId: UUID(), jobName: "reader", status: .blockedOnApproval,

@@ -409,7 +409,7 @@ struct EventCard: Codable, Equatable, Sendable {
             guard Self.executionBearingArguments.contains(key) else { return false }
             let text = Self.renderedText(value)
             return text.count > Self.argumentPreviewLimit
-                || text.split(separator: "\n", omittingEmptySubsequences: false).count > Self.argumentPreviewLines
+                || Self.lines(of: text).count > Self.argumentPreviewLines
         }
     }
 
@@ -461,7 +461,7 @@ struct EventCard: Codable, Equatable, Sendable {
         if whole { return OutboundTools.fullText(value) }
         if executionBearingArguments.contains(key) { return renderedText(value) }
         let text = collapsingBlankLines(renderedText(value))
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        let lines = Self.lines(of: text)
         let hiddenLines = max(0, lines.count - argumentPreviewLines)
         var shown = hiddenLines == 0 ? text : lines.prefix(argumentPreviewLines).joined(separator: "\n")
         var notes: [String] = []
@@ -488,10 +488,16 @@ struct EventCard: Codable, Equatable, Sendable {
 
     /// Any run of blank lines becomes one. A file with paragraph breaks still reads as one; a
     /// thousand newlines becomes a single gap.
+    /// The lines of `text`, split at any line break: "\r\n" is one `Character`, so a split at "\n"
+    /// alone saw a CRLF command as a single line and left it uncounted (#836 review).
+    static func lines(of text: String) -> [Substring] {
+        text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+    }
+
     private static func collapsingBlankLines(_ text: String) -> String {
         var kept: [Substring] = []
         var inBlankRun = false
-        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+        for line in Self.lines(of: text) {
             let isBlank = line.trimmingCharacters(in: .whitespaces).isEmpty
             if isBlank && inBlankRun { continue }
             inBlankRun = isBlank
