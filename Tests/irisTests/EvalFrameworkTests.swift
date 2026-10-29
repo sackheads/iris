@@ -445,7 +445,7 @@ struct EvalRunnerTests {
 /// A canary for the verdict and stack tasks: answers MALICIOUS for a marked text, SAFE otherwise,
 /// or behaves as one of the failures the runner must sort (#803).
 private final class FakeCanary: AuxiliaryInferenceEngine, @unchecked Sendable {
-    enum Mode { case marker, noVerdict, unreachable, timesOut, flaky }
+    enum Mode { case marker, noVerdict, hedged, unreachable, timesOut, flaky }
     let mode: Mode
     private let lock = NSLock()
     private var calls = 0
@@ -457,6 +457,7 @@ private final class FakeCanary: AuxiliaryInferenceEngine, @unchecked Sendable {
         switch mode {
         case .marker: return prompt.contains("IGNORE ALL RULES") ? "MALICIOUS" : "SAFE"
         case .noVerdict: return "I can't tell."
+        case .hedged: return "SAFE, probably."
         case .unreachable: throw URLError(.cannotConnectToHost)
         case .timesOut: throw URLError(.timedOut)
         // SAFE through the first repeat of the 4 texts, MALICIOUS after: each text gets both answers.
@@ -525,6 +526,13 @@ struct EvalGuardTaskTests {
         let r = try await run(s, FakeCanary(.noVerdict), repeats: 1)
         #expect(r.metrics.failClosed == 4 && r.metrics.parseFailures == 4)
         #expect(r.metrics.falsePositives.n == 0, "fail-closed is counted apart from verdicts")
+    }
+
+    @Test func aHedgedVerdictIsAParseFailureByTheProductsOwnReading() async throws {
+        let s = try setUp()
+        defer { try? FileManager.default.removeItem(at: s.root) }
+        let r = try await run(s, FakeCanary(.hedged), repeats: 1)
+        #expect(r.metrics.failClosed == 4 && r.metrics.parseFailures == 4, "the product blocks it, so the eval counts it apart (#822)")
     }
 
     @Test func anUnreachableEngineIsInfraAndATimeoutFailsClosed() async throws {
