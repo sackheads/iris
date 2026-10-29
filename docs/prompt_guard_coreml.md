@@ -1,15 +1,40 @@
 # Custom CoreML Prompt Guard Models
 
-> **Re-tested 2026-10-27 (#770):** the recommended DeBERTa-v3 bundle fails the proposed bar on
-> realistic tool output. 30% of benign texts under 4 KB lose lines, and at 8-32 KB 8 of 9 kinds
-> do (bar: 2% or less). 68% of attacks are caught (bar: 80% or more), and loading it costs 1.74 GB
-> of memory. Method, tables and the fresh-install recommendation are in
-> [tier2_evaluation.md](tier2_evaluation.md). The July findings below were measured on 19 samples
-> and are corrected where that data falsified them.
+## Off by default
+
+Tier 2 stays off by default (#780). Measured 2026-10-29 on dataset v3 (454 texts, 3 repeats
+each), with DeBERTa v3 as tier 2 and `ollama:gemma4:12b` as tier 3 (#789,
+[evals](evals.md)):
+
+| | tiers 1 + 3 | tiers 1 + 2 + 3 |
+|---|---|---|
+| Attacks caught | 477 of 603 (79.1%) | 547 of 603 (90.7%) |
+| Benign texts not passed | 2 of 759 (0.3%) | 303 of 759 (39.9%): 12 blocked, 291 with lines withheld |
+| Benign texts over 8 KB not passed | 2 of 126 | 111 of 126 (88%), all with lines withheld |
+
+- **What tier 2 added:** tiers 1 + 2 + 3 caught 77 attack judgements that tiers 1 + 3 missed.
+  Tier 2 took part in 66 of them: 28 it blocked, 35 where withheld lines removed the payload, and
+  3 that tier 3 blocked after a tier-2 partial. The other 11 were tier 3 alone, on texts whose
+  outcome varies between repeats. The 7 catches the stack lost were passed by both tiers.
+- **What it cost:** every one of the 303 benign judgements not passed came from tier 2. Tier 3
+  blocked no benign text in that run.
+
+So tier 2 is off by default: on that data it gains 66 of 603 attack judgements and withholds
+some or all of 4 in 10 ordinary tool outputs, and nearly 9 in 10 long ones. The per-tier tables
+and the data that rebuilds them are in `eval/runs-789-v3/`.
+
+**History: the #770 re-test (2026-10-27).** The DeBERTa-v3 bundle, the default until #781,
+failed the proposed bar on realistic tool output. 30% of benign texts under 4 KB lost lines, and
+at 8-32 KB 8 of 9 kinds did (bar: 2% or less). 68% of attacks were caught (bar: 80% or more),
+and loading it costs 1.74 GB of memory. Method, tables and the fresh-install default are in
+[tier2_evaluation.md](tier2_evaluation.md). The July findings below were measured on 19 samples
+and are corrected where that data falsified them.
+
+## Overview
 
 Iris includes an extremely fast, on-device text classifier for its Tier 2 Prompt Injection Guard powered by Apple's CoreML and the Neural Engine. 
 
-Tier 2 has no model by default (#781): none tested well enough to recommend. You can enable it by providing a URL to a pre-compiled `.mlmodelc.zip` or `.onnx.zip` in Settings → Security. If you want to experiment with different security models (like Meta's official Prompt Guard or other community fine-tunes), you can compile your own.
+Tier 2 has no model by default (#781): none tested well enough to recommend (see [Off by default](#off-by-default)). You can enable it by providing a URL to a pre-compiled `.mlmodelc.zip` or `.onnx.zip` in Settings → Security. If you want to experiment with different security models (like Meta's official Prompt Guard or other community fine-tunes), you can compile your own.
 
 ## Prerequisites
 
@@ -124,14 +149,14 @@ positive separation margin is DeBERTa-based, which coremltools 9 cannot convert 
 the extensive op surgery described below.
 
 **But CoreML is not the only on-device option.** The accurate DeBERTa-v3 model runs
-cleanly on CPU via ONNX Runtime — see "Recommended path" below. The CoreML wall is a
+cleanly on CPU via ONNX Runtime — see "Runtime path" below. The CoreML wall is a
 `coremltools` limitation, not a DeBERTa limitation.
 
 Note that even the best model (deberta-v3-v2) scores a JSON tool result at 0.848, so the
 current `prob > 0.5` block threshold is too low regardless of model — see "Regardless of
 model" below.
 
-## Recommended path: ONNX Runtime on CPU (not CoreML) — implemented
+## Runtime path: ONNX Runtime on CPU (not CoreML) — implemented
 
 **Status: implemented and verified end-to-end.** Iris already runs models on-device via
 llama.cpp (`LlamaSwift`) and MLX (`mlx-swift-lm`), so CoreML/Neural-Engine is not a
@@ -281,7 +306,7 @@ it means either continuing the op-by-op override work on the trace path (uncerta
 or waiting on/patching `coremltools` EXIR support.
 
 **Resolution: we did not finish the CoreML conversion — the ONNX Runtime CPU path is
-implemented instead** (see "Recommended path" above). It runs the accurate model today
+implemented instead** (see "Runtime path" above). It runs the accurate model today
 with no op surgery. The alternatives that were considered and set aside:
 
 - Push the `jit.trace` override path to completion (`repeat` and any further ops) to get

@@ -600,7 +600,7 @@ struct SettingsView: View {
                 
                 if config.enableAdvancedPromptInjectionProtection {
                     Section(header: Text("Tier 2: Fast Local Classifier").font(.headline)) {
-                        Text("Optional, and off with the field empty. Classifies text on-device — CoreML (Apple Neural Engine) or ONNX Runtime (CPU). No model is recommended yet: the one tested, DeBERTa v3, withheld lines from 30% of ordinary tool output and caught 68% of attacks (docs/tier2_evaluation.md).")
+                        Text("Optional, and off with the field empty. Classifies text on-device — CoreML (Apple Neural Engine) or ONNX Runtime (CPU). It is off by default: on dataset v3, the one model tested, DeBERTa v3, withheld some or all of 40% of ordinary tool outputs and 88% of long ones, and the guard caught 547 of 603 attacks with it against 477 without (docs/prompt_guard_coreml.md#off-by-default).")
                             .font(.caption)
                             .foregroundColor(.secondary)
 
