@@ -278,12 +278,14 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// predates the flag reads as true: nothing says what it read.
     var hasUntrustedToolOutput: Bool = false
 
-    /// #812: the outbound tools that run here without asking even once the conversation has read
-    /// untrusted output. Part of the person's exemption list: an attended conversation gets one
-    /// from the approval card's "Allow in this conversation"; a job run is stamped with its job's
-    /// exemptions (`JobPolicy.outboundExemptions`) by `JobRunner`. No tool call sets it. Not carried
-    /// by `/new`: a new conversation asks again.
+    /// #812: the outbound tools the person allowed in this conversation from the approval card
+    /// ("Allow in This Conversation"), part of their exemption list. It covers this conversation
+    /// only: a delegate never inherits it, and `/new` doesn't carry it. No tool call sets it.
     var outboundAllowedTools: [String] = []
+    /// #812: a job run's exemptions, stamped from `JobPolicy.outboundExemptions` by `JobRunner`.
+    /// Unlike the allow above, the run's delegates inherit these: they are the person's decision
+    /// for the whole job. Empty on every conversation that is not a job run.
+    var jobOutboundExemptions: [String] = []
 
     /// #314 decision 6: `drop_block` once a binding 400's retry succeeded, so later requests send
     /// it, across restarts, wherever the beta is taken (CAUSES:93). Never cleared. Nil is unset.
@@ -322,7 +324,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, hasUntrustedToolOutput, outboundAllowedTools, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier, lastTouchedAt, archivedAutomaticallyAt, inSessions
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, hasUntrustedToolOutput, outboundAllowedTools, jobOutboundExemptions, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier, lastTouchedAt, archivedAutomaticallyAt, inSessions
     }
 
     init(from decoder: Decoder) throws {
@@ -383,6 +385,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         hasUntrustedToolOutput = try container.decodeIfPresent(Bool.self, forKey: .hasUntrustedToolOutput) ?? true
         // Invariant 1: absent means nothing was ever allowed here, so every tainted send asks.
         outboundAllowedTools = try container.decodeIfPresent([String].self, forKey: .outboundAllowedTools) ?? []
+        jobOutboundExemptions = try container.decodeIfPresent([String].self, forKey: .jobOutboundExemptions) ?? []
         // Invariant 1: absent on every conversation persisted before #314, and absent is unset.
         // Read as a string so a value this build does not know is unset too, not a failed decode.
         prefixMismatchBehavior = try container.decodeIfPresent(String.self, forKey: .prefixMismatchBehavior)
@@ -3331,40 +3334,45 @@ class AppState {
         markChanged(conversationId, .metadata)
     }
 
-    /// #812: whether an outbound call in `conversationId` meets the gate, and whether the person's
-    /// exemption list lets `tool` through there. Tainted if the conversation or any session it was
-    /// delegated from has read untrusted output (a parent can be tainted after its delegate was
-    /// made), and a conversation the app doesn't know is tainted. Allowed if the conversation or
-    /// the session it was delegated from lists the tool: a job run's subagent uses its run's.
-    func outboundGateState(_ conversationId: UUID, tool: String) -> (tainted: Bool, allowed: Bool) {
+    /// Which part of the person's exemption list let an outbound call through, for its pill.
+    enum OutboundExemption: String, Equatable, Sendable { case conversation, job }
+
+    /// #812: whether an outbound call in `conversationId` meets the gate, and what lets `tool`
+    /// through there. Tainted if the conversation or any session it was delegated from has read
+    /// untrusted output, checked now rather than copied at spawn, since a parent can be tainted
+    /// after its delegate was made (and the task text it hands a delegate was written from that
+    /// context); a conversation the app doesn't know is tainted. Allowed by the conversation's own
+    /// "Allow in This Conversation" only, never an ancestor's, or by a job's exemptions on it or on
+    /// any ancestor (a job run's delegates inherit those).
+    func outboundGateState(_ conversationId: UUID, tool: String) -> (tainted: Bool, exemption: OutboundExemption?) {
         var tainted = false
-        var allowed = false
+        var exemption: OutboundExemption?
         var current: UUID? = conversationId
         for _ in 0..<16 {
             guard let id = current else { break }
             guard let conversation = conversations.first(where: { $0.id == id }) else { tainted = true; break }
             if conversation.hasUntrustedToolOutput { tainted = true }
-            if conversation.outboundAllowedTools.contains(tool) { allowed = true }
+            if id == conversationId, conversation.outboundAllowedTools.contains(tool) { exemption = .conversation }
+            if exemption == nil, conversation.jobOutboundExemptions.contains(tool) { exemption = .job }
             current = delegationParent[id]
         }
-        return (tainted, allowed)
+        return (tainted, exemption)
     }
 
-    /// #812: the card's "Allow in this conversation". Recorded on the session the call worked for
-    /// (`delegationRoot`), so a delegate's ask allows it for the session the person is in.
+    /// #812: the card's "Allow in This Conversation", on the conversation that asked: a delegate's
+    /// card allows the delegate, and the session it works for still asks for itself.
     func allowOutboundInConversation(_ tool: String, conversationId: UUID) {
-        let root = delegationRoot(of: conversationId)
-        guard let idx = conversations.firstIndex(where: { $0.id == root }),
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
               !conversations[idx].outboundAllowedTools.contains(tool) else { return }
         conversations[idx].outboundAllowedTools.append(tool)
         conversations[idx].outboundAllowedTools.sort()
-        markChanged(root, .metadata)
+        markChanged(conversationId, .metadata)
     }
 
     /// #812: stamps a job run's conversation with its job's outbound exemptions (`JobRunner`).
-    func setOutboundAllowedTools(for conversationId: UUID, _ tools: [String]) {
+    func setJobOutboundExemptions(for conversationId: UUID, _ tools: [String]) {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
-        conversations[idx].outboundAllowedTools = tools.sorted()
+        conversations[idx].jobOutboundExemptions = tools.sorted()
         markChanged(conversationId, .metadata)
     }
 

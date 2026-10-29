@@ -4011,10 +4011,10 @@ actor IrisEngine {
         guard OutboundTools.isOutbound(call.name, readOnlyMCPTools: readOnlyMCP) else { return .notGated }
         let localState = state
         guard let localState else { return isUnattended ? .refused(OutboundTools.unattendedRefusal(tool: call.name)) : .refused(Self.deniedToolResult) }
-        let (tainted, allowed) = await MainActor.run { localState.outboundGateState(conversationId, tool: call.name) }
+        let (tainted, exemption) = await MainActor.run { localState.outboundGateState(conversationId, tool: call.name) }
         guard tainted else { return .notGated }
-        if allowed {
-            return .approved(ToolApproval(layer: .exemption, detail: isUnattended ? "job" : "conversation"))
+        if let exemption {
+            return .approved(ToolApproval(layer: .exemption, detail: exemption.rawValue))
         }
         if isUnattended {
             let blocked = BlockedCall(toolName: call.name, args: call.args, cwd: workspacePath, reason: .approval)

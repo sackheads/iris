@@ -1952,7 +1952,7 @@ actor JobRunner {
             // #812: the person's exemptions for this job, which the outbound gate reads here (and
             // from a subagent the run delegates to, through its parent link).
             if !job.policy.outboundExemptions.isEmpty {
-                state.setOutboundAllowedTools(for: id, job.policy.outboundExemptions)
+                state.setJobOutboundExemptions(for: id, job.policy.outboundExemptions)
             }
             // An ordinary `.mutating` fire asks for a container, and so does any approved call
             // that could run a command (R20). `.readOnly` otherwise leaves the field nil

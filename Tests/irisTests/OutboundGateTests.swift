@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import GRDB
 @testable import IrisKit
 
 /// #812: which tools are outbound, and the exemption checks the job tools and `/jobs` share.
@@ -66,6 +67,20 @@ struct OutboundToolsTests {
         #expect(details.contains("This job may create calendar events without asking, even after reading untrusted content."))
     }
 
+    /// dev-3's finding: what the person approves is the whole call. A long body is shown to its
+    /// end, and a list or object argument (an MCP tool's recipients) as JSON, not "[...]".
+    @Test func theCardShowsEveryArgumentInFull() {
+        let body = String(repeating: "a", count: 500) + "SECRET-AT-THE-END"
+        let details = OutboundTools.approvalDetails(tool: "srv___post", args: [
+            "body": .string(body),
+            "to": .array([.string("a@example.com"), .string("b@example.com")]),
+            "meta": .object(["cc": .string("c@example.com")]),
+        ])
+        #expect(details.contains("SECRET-AT-THE-END"))
+        #expect(details.contains("b@example.com") && details.contains("c@example.com"))
+        #expect(!details.contains("[...]") && !details.contains("{...}"))
+    }
+
     @Test func theUnattendedRefusalNamesTheToolAndTheExemption() {
         let text = OutboundTools.unattendedRefusal(tool: "gmail_send_email")
         #expect(text.contains("`gmail_send_email`"))
@@ -111,11 +126,51 @@ struct OutboundAllowPersistenceTests {
                 "an unreadable list is none, which asks again")
     }
 
+    @Test @MainActor func aRunsJobExemptionsSurviveAReload() throws {
+        let store = try ConversationStore.inMemory()
+        let app = AppState(store: store)
+        app.conversations.removeAll()
+        let id = app.createNewConversation(isBackground: true, select: false)
+        app.setJobOutboundExemptions(for: id, ["gmail_send_email"])
+        app.flushSave()
+        let loaded = try #require(try store.loadAll().conversations.first { $0.id == id })
+        #expect(loaded.jobOutboundExemptions == ["gmail_send_email"] && loaded.outboundAllowedTools == [])
+    }
+
+    /// A store from a build that registered this migration under another name already has the
+    /// columns; the migration keeps them rather than failing the open on a duplicate ALTER. The
+    /// fixture is the real case: a dev home opened by this PR's pre-rebase build, which applied
+    /// `v32_outbound_allowed_tools` and never saw #826's `v32_pending_context_writes`.
+    @Test func aStoreThatAlreadyHasTheColumnsOpens() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("iris-outbound-mig-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("conversations.sqlite")
+        let queue = try DatabaseQueue(path: url.path)
+        try ConversationStore.migrator.migrate(queue, upTo: "v31_untrusted_tool_output")
+        try queue.write { db in
+            try db.execute(sql: #"ALTER TABLE "conversations" ADD COLUMN "outboundAllowedTools" TEXT"#)
+            try db.execute(sql: #"ALTER TABLE "conversations" ADD COLUMN "jobOutboundExemptions" TEXT"#)
+            try db.execute(sql: "INSERT INTO grdb_migrations (identifier) VALUES ('v32_outbound_allowed_tools')")
+        }
+        try queue.close()
+        let store = try ConversationStore.onDisk(at: url)
+        let (complete, columns, holds) = try store.writer.read { db in
+            (try ConversationStore.migrator.hasCompletedMigrations(db), Set(try db.columns(in: "conversations").map(\.name)),
+             try db.tableExists("pending_context_writes"))
+        }
+        #expect(complete)
+        #expect(holds)
+        #expect(columns.isSuperset(of: ["outboundAllowedTools", "jobOutboundExemptions"]))
+    }
+
     @Test func anAbsentKeyDecodesAsNone() throws {
         var json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(
             Conversation(id: UUID(), title: "t", workspacePath: nil))) as? [String: Any])
         json.removeValue(forKey: "outboundAllowedTools")
-        #expect(try JSONDecoder().decode(Conversation.self, from: JSONSerialization.data(withJSONObject: json)).outboundAllowedTools == [])
+        json.removeValue(forKey: "jobOutboundExemptions")
+        let decoded = try JSONDecoder().decode(Conversation.self, from: JSONSerialization.data(withJSONObject: json))
+        #expect(decoded.outboundAllowedTools == [] && decoded.jobOutboundExemptions == [])
     }
 }
 
@@ -239,16 +294,49 @@ struct OutboundGateDispatchTests {
         #expect(app.conversations.first { $0.id == id }?.outboundAllowedTools == [])
     }
 
-    @Test func aDelegateOfATaintedSessionIsGatedAndItsAllowLandsOnTheSession() async throws {
+    /// The planner's check: a delegate's own flag starts false, but the task text it was handed
+    /// was written from its parent's context, so it counts as tainted while any ancestor is.
+    @Test func aDelegateOfATaintedSessionIsGatedAndItsAllowLandsOnTheDelegate() async throws {
         let (app, parent) = try app(tainted: false)
         let child = UUID()
         app.createNewConversation(id: child, isSubagent: true, select: false)
         app.linkDelegate(child, of: parent)
         app.markConversationReadUntrusted(parent)   // after the delegate was made
+        #expect(app.conversations.first { $0.id == child }?.hasUntrustedToolOutput == false)
         let (_, request) = await dispatch(FunctionCall(name: send, args: sendArgs), on: app, in: child,
                                           resolving: .allowInConversation, principal: .subagent)
         #expect(request != nil)
-        #expect(app.conversations.first { $0.id == parent }?.outboundAllowedTools == [send])
+        #expect(app.conversations.first { $0.id == child }?.outboundAllowedTools == [send])
+        #expect(app.conversations.first { $0.id == parent }?.outboundAllowedTools == [],
+                "the session the delegate works for still asks for itself")
+    }
+
+    /// The planner's ruling: an attended allow covers only the conversation it was granted in.
+    @Test func aParentsAllowDoesNotReachItsDelegate() async throws {
+        let (app, parent) = try app(tainted: true)
+        app.allowOutboundInConversation(send, conversationId: parent)
+        let child = UUID()
+        app.createNewConversation(id: child, isSubagent: true, select: false)
+        app.linkDelegate(child, of: parent)
+        let (_, request) = await dispatch(FunctionCall(name: send, args: sendArgs), on: app, in: child,
+                                          resolving: .deny, principal: .subagent)
+        #expect(request != nil, "a delegate asks even where its parent was allowed")
+    }
+
+    /// The other half: a job's exemptions are the person's decision for the whole job.
+    @Test func aJobsExemptionReachesItsRunsDelegate() async throws {
+        let (app, run) = try app(tainted: true, background: true)
+        app.setJobOutboundExemptions(for: run, [send])
+        let child = UUID()
+        app.createNewConversation(id: child, isSubagent: true, isBackground: true, select: false)
+        app.linkDelegate(child, of: run)
+        let engine = engine(app, principal: .subagent)
+        #expect(await engine.outboundGate(FunctionCall(name: send, args: sendArgs), conversationId: child, workspacePath: nil, isUnattended: true)
+                == .approved(ToolApproval(layer: .exemption, detail: "job")))
+        app.allowOutboundInConversation("gmail_send_email", conversationId: run)
+        #expect(await engine.outboundGate(FunctionCall(name: "gmail_send_email", args: sendArgs), conversationId: child, workspacePath: nil, isUnattended: true)
+                == .refused(OutboundTools.unattendedRefusal(tool: "gmail_send_email")),
+                "an allow written on the run itself is not a job exemption, and is not inherited")
     }
 
     @Test func anUnattendedTaintedSendIsRefusedAndRecorded() async throws {
@@ -273,7 +361,7 @@ struct OutboundGateDispatchTests {
 
     @Test func aJobsExemptionLetsAnUnattendedTaintedSendRun() async throws {
         let (app, id) = try app(tainted: true, background: true)
-        app.setOutboundAllowedTools(for: id, [send])
+        app.setJobOutboundExemptions(for: id, [send])
         let (result, request) = await dispatch(FunctionCall(name: send, args: sendArgs), on: app, in: id)
         #expect(request == nil)
         #expect(result != OutboundTools.unattendedRefusal(tool: send), Comment(rawValue: result))
@@ -285,7 +373,7 @@ struct OutboundGateDispatchTests {
 
     @Test func anExemptionCoversOnlyItsOwnTool() async throws {
         let (app, id) = try app(tainted: true, background: true)
-        app.setOutboundAllowedTools(for: id, [send])
+        app.setJobOutboundExemptions(for: id, [send])
         let (result, _) = await dispatch(FunctionCall(name: "gmail_send_email", args: sendArgs), on: app, in: id)
         #expect(result == OutboundTools.unattendedRefusal(tool: "gmail_send_email"))
     }
