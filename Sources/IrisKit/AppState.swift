@@ -3345,13 +3345,12 @@ class AppState {
     /// "Allow in This Conversation" only, never an ancestor's, or by a job's exemptions on it or on
     /// any ancestor (a job run's delegates inherit those).
     func outboundGateState(_ conversationId: UUID, tool: String) -> (tainted: Bool, exemption: OutboundExemption?) {
-        var tainted = false
+        // Taint as #813's context holds read it, so the two gates never disagree on a chain.
+        let tainted = readUntrustedThroughDelegation(conversationId)
         var exemption: OutboundExemption?
         var current: UUID? = conversationId
         for _ in 0..<16 {
-            guard let id = current else { break }
-            guard let conversation = conversations.first(where: { $0.id == id }) else { tainted = true; break }
-            if conversation.hasUntrustedToolOutput { tainted = true }
+            guard let id = current, let conversation = conversations.first(where: { $0.id == id }) else { break }
             if id == conversationId, conversation.outboundAllowedTools.contains(tool) { exemption = .conversation }
             if exemption == nil, conversation.jobOutboundExemptions.contains(tool) { exemption = .job }
             current = delegationParent[id]
