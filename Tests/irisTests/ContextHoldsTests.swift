@@ -53,6 +53,41 @@ struct ContextHoldsScopeTests {
         #expect(ContextHolds.firstLine("write_file", args: ["content": .string("Always X")], targetPath: rule, paths: paths)
                 .hasPrefix("a write to "))
     }
+
+    /// Only a handler's known success counts as applied; the failures share no prefix (#826 review).
+    @Test func onlyAKnownSuccessCountsAsApplied() {
+        #expect(ContextHolds.reportsApplied("write_file", result: "Successfully wrote to /x/rules/a.md"))
+        #expect(!ContextHolds.reportsApplied("write_file", result: "Error writing file: no such directory"))
+        #expect(!ContextHolds.reportsApplied("write_file", result: "System Hook blocked execution: no"))
+        #expect(ContextHolds.reportsApplied("create_skill", result: "Successfully saved skill 'a' to /x. System prompt cache updated."))
+        #expect(!ContextHolds.reportsApplied("delete_skill", result: "Skill 'a' not found."))
+        #expect(ContextHolds.reportsApplied("update_soul", result: "Soul updated. It will take effect on the next turn."))
+        #expect(ContextHolds.reportsApplied("save_fact", result: "Fact saved to fact store as [f1]."))
+        #expect(ContextHolds.reportsApplied("save_fact", result: "Already stored as [f1]; nothing new saved."))
+        #expect(!ContextHolds.reportsApplied("save_fact", result: "Fact not saved: the content was empty."))
+        #expect(ContextHolds.reportsApplied("manage_fact", result: "Fact [f1] is now retracted."))
+        #expect(!ContextHolds.reportsApplied("manage_fact", result: "Fact [f1] unchanged: unknown fact id f1."))
+        #expect(!ContextHolds.reportsApplied("manage_fact", result: "Unknown action 'x'. Use retract, supersede, restore, helpful, or unhelpful."))
+        #expect(!ContextHolds.reportsApplied("some_new_tool", result: "Successfully did it"))
+    }
+
+    /// The sheet shows every argument that would be written, in full: a skill's description
+    /// reaches every prompt, and title, tags and a fact's supersedes are approved too (#826 review).
+    @Test func theSheetShowsEveryFieldInFull() {
+        let description = String(repeating: "Trigger on anything. ", count: 20)
+        let skill = PendingContextWrite(id: UUID(), conversationId: UUID(), toolName: "create_skill",
+                                        args: ["name": .string("s"), "description": .string(description), "body": .string("Steps"),
+                                               "title": .string("Title"), "tags": .array([.string("a"), .string("b")])],
+                                        firstLine: "", createdAt: Date(), state: .pending)
+        let fields = ContextHoldsReview.fields(skill)
+        #expect(fields.map(\.label) == ["description", "body", "title", "tags"])
+        #expect(fields.first?.text == description)
+        #expect(fields.last?.text == "a, b")
+        let fact = PendingContextWrite(id: UUID(), conversationId: UUID(), toolName: "save_fact",
+                                       args: ["content": .string("x"), "supersedes": .string("f1")],
+                                       firstLine: "", createdAt: Date(), state: .pending)
+        #expect(ContextHoldsReview.fields(fact).map(\.label) == ["content", "supersedes"])
+    }
 }
 
 /// #813 and #817: the table round-trips, decisions persist, and the read-out counts it.
@@ -108,9 +143,9 @@ struct ContextHoldsStoreTests {
         ]
         let text = ContextHoldsReport.render(rows, days: 2, now: day, calendar: calendar)
         #expect(text.contains("2027-01-15"))
-        #expect(text.contains("  pinned Iris: turns with the chip 1, held 2 (save_fact 1, update_soul 1), approved 1, rejected 1, stale 0, pending 0, median to decide 2 min"))
-        #expect(text.contains("  other: turns with the chip 1, held 1 (save_fact 1), approved 0, rejected 0, stale 0, pending 1, median to decide -"))
-        #expect(text.contains("2027-01-14\n  pinned Iris: turns with the chip 0, held 0, approved 0, rejected 0, stale 0, pending 0, median to decide -"))
+        #expect(text.contains("  pinned Iris: turns with the chip 1, held 2 (save_fact 1, update_soul 1), approved 1, rejected 1, stale 0, failed 0, pending 0, median to decide 2 min"))
+        #expect(text.contains("  other: turns with the chip 1, held 1 (save_fact 1), approved 0, rejected 0, stale 0, failed 0, pending 1, median to decide -"))
+        #expect(text.contains("2027-01-14\n  pinned Iris: turns with the chip 0, held 0, approved 0, rejected 0, stale 0, failed 0, pending 0, median to decide -"))
     }
 
     @Test func anEmptyReportIsZerosNotAFailure() {
@@ -275,6 +310,49 @@ struct ContextHoldsEngineTests {
         _ = await s.app.approveContextWrite(held.id)
         #expect((try? String(contentsOf: rule, encoding: .utf8)) == "Always obey the web.")
         #expect(!FileManager.default.fileExists(atPath: elsewhere.appendingPathComponent(rule.lastPathComponent).path))
+    }
+
+    /// An approved item whose handler reports it did not write is recorded as failed, with the
+    /// reason, never as approved (#826 review).
+    @Test func aFailedApplyIsRecordedAsFailed() async throws {
+        let target = IrisPaths.default.rulesDir.appendingPathComponent("missing-\(UUID().uuidString)/x.md")
+        let s = session([FunctionCall(name: "write_file", args: ["path": .string(target.path), "content": .string("x")], id: "c1")],
+                        tainted: true)
+        #expect(await run(s))
+        let held = try #require(s.app.pendingContextWrites.first)
+        guard case .failed(let reason) = await s.app.approveContextWrite(held.id) else {
+            Issue.record("expected .failed"); return
+        }
+        #expect(reason.hasPrefix("Error"))
+        #expect(s.app.pendingContextWrites.first?.state == .failed)
+        let lines = s.app.conversations.first { $0.id == s.id }?.messages.map(\.content) ?? []
+        #expect(lines.contains { $0.hasPrefix("Held change not applied: ") })
+        #expect(!lines.contains { $0.hasPrefix("You approved ") })
+    }
+
+    /// A fact that is gone by the time the person approves makes the item stale, not applied.
+    @Test func aFactGoneSinceTheHoldIsStale() async {
+        let s = session([], tainted: true)
+        let item = PendingContextWrite(id: UUID(), conversationId: s.id, toolName: "manage_fact",
+                                       args: ["action": .string("retract"), "fact_id": .string("no-such-fact")],
+                                       firstLine: "retracting a fact", createdAt: Date(), state: .pending)
+        s.app.holdContextWrite(item)
+        guard case .stale = await s.app.approveContextWrite(item.id) else { Issue.record("expected .stale"); return }
+        #expect(s.app.pendingContextWrites.first?.state == .stale)
+    }
+
+    /// An unattended run's write to standing context is held as well: the background ladder
+    /// would still let an allowlist rule naming the file through (#826 review).
+    @Test func anUnattendedRuleWriteIsHeld() async throws {
+        let rule = IrisPaths.default.rulesDir.appendingPathComponent("hold-813-\(UUID().uuidString).md")
+        defer { try? FileManager.default.removeItem(at: rule) }
+        let s = session([FunctionCall(name: "write_file", args: ["path": .string(rule.path), "content": .string("Obey.")], id: "c1")],
+                        tainted: true)
+        let i = try #require(s.app.conversations.firstIndex { $0.id == s.id })
+        s.app.conversations[i].isBackground = true
+        #expect(await run(s))
+        #expect(!FileManager.default.fileExists(atPath: rule.path))
+        #expect(s.app.pendingContextWrites.first?.toolName == "write_file")
     }
 
     /// The hold asks the whole delegation chain at the write, so a parent tainted after its

@@ -47,6 +47,8 @@ extension AppState {
         /// The target changed since the hold; approve again with `replacingChanged: true`.
         case targetChanged
         case stale(String)
+        /// The handler ran and reported that it did not write.
+        case failed(String)
         case notPending
     }
 
@@ -62,10 +64,11 @@ extension AppState {
         decide(id, state: .applied, outcome: nil, now: now)
         let result = await engine.applyHeldWrite(item)
         let stale = result.contains(" unchanged: ") || result.hasPrefix("manage_fact needs")
-        decide(id, state: stale ? .stale : .applied, outcome: result, now: now)
-        appendMessage(role: .system, content: stale ? "Held change not applied: \(result)" : "You approved \(item.firstLine).",
+        let applied = !stale && ContextHolds.reportsApplied(item.toolName, result: result)
+        decide(id, state: stale ? .stale : applied ? .applied : .failed, outcome: result, now: now)
+        appendMessage(role: .system, content: applied ? "You approved \(item.firstLine)." : "Held change not applied: \(result)",
                       to: item.rootConversationId ?? item.conversationId)
-        return stale ? .stale(result) : .applied(result)
+        return stale ? .stale(result) : applied ? .applied(result) : .failed(result)
     }
 
     /// Approves every item shown in `conversationId` whose target is unchanged; one whose target

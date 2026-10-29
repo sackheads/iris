@@ -7,7 +7,7 @@ import Foundation
 /// SOUL.md, the fact store, the skills folder and rules/ are untouched until approval, so the
 /// prompt builders need no filter and cannot leak a pending item.
 struct PendingContextWrite: Codable, Equatable, Sendable, Identifiable {
-    enum State: String, Codable, Sendable { case pending, applied, rejected, stale }
+    enum State: String, Codable, Sendable { case pending, applied, rejected, stale, failed }
 
     var id: UUID
     /// The conversation that made the call: a subagent's own, for a delegate.
@@ -33,7 +33,7 @@ struct PendingContextWrite: Codable, Equatable, Sendable, Identifiable {
     var turnId: UUID?
     var isPinnedIris: Bool?
     var decidedAt: Date?
-    /// What applying it returned, or why it went stale.
+    /// What applying it returned: why it went stale or failed, too.
     var outcome: String?
 }
 
@@ -52,6 +52,31 @@ enum ContextHolds {
     @TaskLocal static var applying = false
 
     static let heldResultPrefix = "Saved for the person to review"
+
+    /// Whether an approved item's handler reports that it wrote. The handlers share no failure
+    /// prefix ("Error…", "Fact not saved:", "Skill … not found.", "Not run:", a hook's block), but
+    /// each success is one known shape, so anything else counts as not applied. An AfterTool hook
+    /// that rewrites a success reads as failed: the loud side.
+    static func reportsApplied(_ tool: String, result: String) -> Bool {
+        switch tool {
+        case "write_file", "create_skill", "update_skill", "delete_skill":
+            return result.hasPrefix("Successfully ")
+        case "update_soul": return result.hasPrefix("Soul updated.")
+        case "update_user_profile": return result == "User profile updated."
+        case "update_memory": return result == "Memory updated."
+        case "save_fact": return result.hasPrefix("Fact saved to fact store as ") || result.hasPrefix("Already stored as ")
+        case "manage_fact":
+            guard result.hasPrefix("Fact "), !result.contains(" unchanged: ") else { return false }
+            return [" is now retracted.", " is now superseded by ", " is active again.", " rated "].contains { result.contains($0) }
+        default: return false
+        }
+    }
+
+    /// What the model reads when the hold cannot be checked (the app's state is gone): the write
+    /// is refused, never run, since a conversation the app doesn't know is not clean.
+    static func uncheckedResult(_ tool: String) -> String {
+        "Not run: `\(tool)` changes what Iris remembers, and this conversation's history couldn't be checked; nothing was written."
+    }
 
     /// What the model reads instead of the tool's result.
     static func heldResult(_ item: PendingContextWrite) -> String {
@@ -189,7 +214,7 @@ enum ContextHoldsReport {
         }
         return "turns with the chip \(rows.isEmpty ? 0 : turns), held \(rows.count)"
             + (kinds.isEmpty ? "" : " (\(kinds.joined(separator: ", ")))")
-            + ", approved \(count(.applied)), rejected \(count(.rejected)), stale \(count(.stale)), pending \(count(.pending))"
+            + ", approved \(count(.applied)), rejected \(count(.rejected)), stale \(count(.stale)), failed \(count(.failed)), pending \(count(.pending))"
             + ", median to decide \(median)"
     }
 
