@@ -1011,8 +1011,10 @@ recipient and body on the card. Only you can answer: the command allowlist (`Per
 never approves a tainted send, and neither does Vibecop, because the model wrote the recipient and
 the body after reading the tainted content, and a model judge reads the same content. **Allow in
 This Conversation** ends the prompts for that tool there; it is kept with the conversation, and a
-new conversation (`/new` included) asks again. A delegate's ask is allowed for the session it works
-for. Headless and scenario runs (`autoApproveTools`) approve it as they approve everything.
+new conversation (`/new` included) asks again. It covers that conversation only: a subagent counts
+as having read what its parent read, and asks for itself even where its parent was allowed. The
+card shows every argument in full. Headless and scenario runs (`autoApproveTools`) approve it as
+they approve everything.
 
 **Jobs.** A run never asks. A tainted send is refused, recorded on the run's card ("Approve and
 run" sends it once), and the model is told which tool, and that the job can be exempted. A job's
@@ -1020,7 +1022,8 @@ exemptions are your list too: `schedule_job` and `register_directory_watcher` ma
 `outbound_exemptions`, but a job that carries any always asks before it is created, and the card
 states each one plainly: "This job may send email to anyone without asking, even after reading
 untrusted content." A read-only job can't carry one, and a tool that isn't outbound can't be
-exempted. Afterwards only `/jobs exempt` and `/jobs unexempt` change them; `/jobs` lists them. A
+exempted. A run's subagents share its exemptions. Afterwards only `/jobs exempt` and `/jobs unexempt`
+change them; `/jobs` lists them. A
 re-schedule or re-registration stores exactly the exemptions it names, as with a grant.
 
 Not covered: `search_web`'s query is also a way out (#825), and a send in the same batch of

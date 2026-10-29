@@ -38,6 +38,13 @@ enum OutboundTools {
         return plain ? name : IrisEngine.flattenToolEcho(name)
     }
 
+    static func fullText(_ value: JSONValue) -> String {
+        if case .string(let s) = value { return s }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        return (try? encoder.encode(value)).flatMap { String(data: $0, encoding: .utf8) } ?? value.stringValue
+    }
+
     /// The job tools' argument that proposes exemptions. A proposal only: it takes effect through
     /// the creation approval card, which always asks when it is given and states each one.
     static let exemptionsArgument = "outbound_exemptions"
@@ -81,13 +88,11 @@ enum OutboundTools {
         return "Not run: `\(shown)` sends or changes something outside this Mac, and this run has read untrusted content, so it needs a person's approval and nobody is here to give it. The person can exempt this job with `/jobs exempt <job> \(shown)`. Do not ask a question, and do not try to reach the same target another way. Finish the rest of the task if you can, then report what you did and what was refused."
     }
 
-    /// The approval card's line for an outbound ask on a tainted conversation.
+    /// The approval card's text for an outbound ask on a tainted conversation: every argument in
+    /// full, since a body cut short or a list shown as "[...]" hides exactly what would leave
+    /// (the card scrolls). A string as it is; anything else as JSON.
     static func approvalDetails(tool: String, args: [String: JSONValue]) -> String {
-        let argLines = args.keys.sorted().map { key in
-            let value = args[key]?.stringValue ?? ""
-            let flat = value.replacingOccurrences(of: "\n", with: " ")
-            return "\(key): \(flat.count > 300 ? String(flat.prefix(300)) + "…" : flat)"
-        }
+        let argLines = args.keys.sorted().map { key in "\(key): \(fullText(args[key] ?? .null))" }
         return (["This conversation has read untrusted content, and this call sends or changes something outside this Mac."] + argLines)
             .joined(separator: "\n")
     }

@@ -1483,11 +1483,18 @@ struct ApprovalBannerView: View {
             Text("wants to run a potentially sensitive action:")
                 .font(.subheadline)
 
-            Text("\(request.toolName): \(request.details)")
-                .font(.caption.monospaced())
-                .padding(8)
-                .background(Color.black.opacity(0.1))
-                .cornerRadius(4)
+            // #812: a send's card carries its whole body and every argument, so the text scrolls
+            // inside a capped height rather than growing the overlay past the window.
+            ScrollView {
+                Text("\(request.toolName): \(request.details)")
+                    .font(.caption.monospaced())
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxHeight: 240)
+            .padding(8)
+            .background(Color.black.opacity(0.1))
+            .cornerRadius(4)
 
             if let warning = GuardedSettings.approvalWarning(for: request.details) {
                 Label(warning, systemImage: "exclamationmark.triangle.fill")
