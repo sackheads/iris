@@ -141,12 +141,8 @@ struct EventCardView: View {
         }
     }
 
-    /// The call the run stopped on, in full: what it would run, then what to do about it.
-    @ViewBuilder
-    private var blockedCallDetail: some View {
+    private var blockedArgumentRows: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(card.blockedCall?.toolName ?? "")
-                .font(.system(.caption, design: .monospaced).bold())
             ForEach(card.blockedArguments) { argument in
                 HStack(alignment: .top, spacing: 6) {
                     Text(argument.key)
@@ -154,13 +150,32 @@ struct EventCardView: View {
                         .foregroundStyle(.secondary)
                     // Same guarantee the refusal below gets: an argument is the thing being
                     // approved, so it must lay out in full rather than be clipped to one line by
-                    // the surrounding stack. `EventCard.preview` is what keeps "in full" bounded.
+                    // the surrounding stack. `EventCard.preview` is what keeps "in full" bounded,
+                    // except for an outbound call, whose scroll area does (#812).
                     Text(argument.value)
                         .font(.system(.caption2, design: .monospaced))
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
+            }
+        }
+    }
+
+    /// The call the run stopped on, in full: what it would run, then what to do about it.
+    @ViewBuilder
+    private var blockedCallDetail: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(card.blockedCall?.toolName ?? "")
+                .font(.system(.caption, design: .monospaced).bold())
+            if card.showsArgumentsWhole {
+                // #812: an outbound call's arguments are uncut, so the scroll area bounds them.
+                ScrollView {
+                    blockedArgumentRows
+                }
+                .frame(maxHeight: 240)
+            } else {
+                blockedArgumentRows
             }
             if let cwd = card.blockedCall?.cwd, !cwd.isEmpty {
                 HStack(alignment: .top, spacing: 6) {
