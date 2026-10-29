@@ -129,8 +129,8 @@ enum EvalGuardTask {
         case .blocked(let marker):
             if let error = call.error { return (isInfra(error) ? .infra : .failClosed, marker, false) }
             if !cacheable { return (.failClosed, marker, false) }
-            // Tier 3 answered: the product blocks an answer with no verdict word too (fail-closed).
-            if marker.contains("TIER 3"), let answer = call.answer, !answer.contains("SAFE"), !answer.contains("MALICIOUS") {
+            // Tier 3 answered: the product blocks an answer with no clear verdict too (fail-closed).
+            if marker.contains("TIER 3"), let answer = call.answer, InjectionGuard.canaryVerdict(answer) == .unreadable {
                 return (.failClosed, marker, true)
             }
             return (.blocked, marker, false)

@@ -26,7 +26,7 @@ enum EvalMetrics {
         var caught: Bool?
         /// Which judgement of the text this is, when a run repeats (#789b).
         var repeatIndex: Int? = nil
-        /// The canary answered with no verdict word, and the product blocked (#803).
+        /// The canary answered with no clear verdict, and the product blocked (#803).
         var parseFailure = false
     }
 
