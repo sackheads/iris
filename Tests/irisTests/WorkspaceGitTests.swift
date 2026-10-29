@@ -5,12 +5,18 @@ import Foundation
 /// A throwaway repository made by the real `git`, isolated from the developer's own config.
 enum GitFixture {
     /// `HOME` and the system config pointed away, so only the repository's config is read.
+    /// Every repository made under it has an identity: without one, git guesses user@host, and
+    /// refuses to commit when the host's name has no domain (#832).
     static func environment(home: String) -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         for key in env.keys where key.hasPrefix("GIT_") { env[key] = nil }
         env["HOME"] = home
         env["XDG_CONFIG_HOME"] = home + "/.config"
         env["GIT_CONFIG_NOSYSTEM"] = "1"
+        for role in ["AUTHOR", "COMMITTER"] {
+            env["GIT_\(role)_NAME"] = "a"
+            env["GIT_\(role)_EMAIL"] = "a@b"
+        }
         return env
     }
 
@@ -46,6 +52,15 @@ enum GitFixture {
 
 @Suite("Git config parsing and the allow-list (#623)")
 struct GitConfigFileTests {
+    @Test("a repository the fixture makes commits without a configured identity or the host's name (#832)")
+    func fixtureIdentity() async throws {
+        let dir = try GitFixture.temp("ident")
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let r = try await GitFixture.sh("git init -q s && git -C s -c user.useConfigOnly=true commit -q --allow-empty -m s",
+                                        in: dir, env: GitFixture.environment(home: dir + "/home"))
+        #expect(r.status == 0, "\(r.out)")
+    }
+
     @Test("sections, subsections, bare keys, quotes, escapes, comments and continuations parse as git reads them")
     func parses() throws {
         let text = """
