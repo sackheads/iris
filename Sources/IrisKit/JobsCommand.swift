@@ -25,11 +25,16 @@ enum JobsCommand: Equatable {
     /// `setting` nil asks whether the job's URL trigger is on; true turns it on (minting a new
     /// link), false turns it off (D6 decision 9).
     case url(name: String, setting: Bool?)
+    /// #812: adds or removes one outbound tool from the job's exemptions. Typed by the person:
+    /// a slash command is read only from the composer (`ChatView` → `AppState.sendMessage`).
+    case exempt(name: String, tool: String)
+    case unexempt(name: String, tool: String)
     case usage
 
     static let usageText = "Usage: /jobs · /jobs ack <run id> · /jobs pause <name> · "
         + "/jobs resume <name> · /jobs enable <name> · /jobs disable <name> · /jobs run <name> · /jobs delete <name> · "
-        + "/jobs reschedule <name> <cron> [timezone] · /jobs url <name> [on|off]"
+        + "/jobs reschedule <name> <cron> [timezone] · /jobs url <name> [on|off] · "
+        + "/jobs exempt <name> <tool> · /jobs unexempt <name> <tool>"
 
     /// What `/jobs enable` answers (#590). Enabling does not lift a pause: that is `/jobs resume`'s.
     static func enabledText(_ job: Job, now: Date) -> String {
@@ -78,6 +83,14 @@ enum JobsCommand: Equatable {
         }
         if args == "url" || args.hasPrefix("url ") {
             return parseURL(String(args.dropFirst("url".count)))
+        }
+        for (verb, adding) in [("exempt", true), ("unexempt", false)] where args == verb || args.hasPrefix(verb + " ") {
+            // The tool is the last word (tool names have no spaces); the name is the rest.
+            var tokens = quotedTokens(String(args.dropFirst(verb.count)))
+            guard tokens.count >= 2, let tool = tokens.popLast() else { return .usage }
+            let name = tokens.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty else { return .usage }
+            return adding ? .exempt(name: name, tool: tool) : .unexempt(name: name, tool: tool)
         }
         for (verb, form) in named {
             guard args == verb || args.hasPrefix(verb + " ") else { continue }
@@ -476,6 +489,10 @@ enum JobsCommand: Equatable {
         // bound off a self-write loop entirely, so it must not read as `default`.
         if let runs = job.policy.maxRunsPerHour {
             parts.append(runs == 0 ? "no breaker" : "breaker \(runs)/h")
+        }
+        // #812: named, since each one lets the job send without asking after untrusted content.
+        if !job.policy.outboundExemptions.isEmpty {
+            parts.append("exempt: " + job.policy.outboundExemptions.joined(separator: ", "))
         }
         switch job.policy.catchUp {
         case .coalesce: break

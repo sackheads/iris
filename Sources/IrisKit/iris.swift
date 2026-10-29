@@ -2401,7 +2401,7 @@ actor IrisEngine {
         if !isUnattended && principal == .main {
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
-            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; by default a job that was due while the app was asleep runs once on wake rather than replaying every tick it missed, which `catch_up` changes, and by default a fire that finds the previous run still going is dropped, which `overlap` changes. Each prompt job's fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris' conversation (your main conversation) — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so, unless the job was created with a grant that covers it (mounts and network, below). A job with profile 'mutating' asks the user to approve it first, showing its mounts and network; so does any job created from Iris itself, or from a conversation that has received a message from another session or a background subagent's report. If the user declines, the job is not created: say so, and do not create a narrower one (such as read-only) unless they ask. A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only, with no internet unless gate_network is true). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. A gate script is always reviewed by the user before the job is created, Vibecop or not — shown the script, the directories it may read, whether it has the network and its timeout together, so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. For a check or digest that needs no thinking, give script instead of prompt: a shell script run inside the sandbox VM on every fire with no model turn at all (script_mounts read-only, script_network off by default, script_timeout_seconds 5-3600). Its last line of output becomes the card, which posts only on the first run, a failure, or a change; the user reviews the script before the job is created; and a stored script that has changed since then never runs. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
+            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; by default a job that was due while the app was asleep runs once on wake rather than replaying every tick it missed, which `catch_up` changes, and by default a fire that finds the previous run still going is dropped, which `overlap` changes. Each prompt job's fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris' conversation (your main conversation) — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so, unless the job was created with a grant that covers it (mounts and network, below). A job with profile 'mutating' asks the user to approve it first, showing its mounts and network; so does any job created from Iris itself, or from a conversation that has received a message from another session or a background subagent's report. If the user declines, the job is not created: say so, and do not create a narrower one (such as read-only) unless they ask. A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Once a run has read untrusted content (mail, a web page, a file it didn't write, an MCP result), sending mail, creating calendar events or tasks, and any MCP tool not marked read-only are refused in it unless the job carries that tool in outbound_exemptions, which the user approves when the job is created. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only, with no internet unless gate_network is true). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. A gate script is always reviewed by the user before the job is created, Vibecop or not — shown the script, the directories it may read, whether it has the network and its timeout together, so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. For a check or digest that needs no thinking, give script instead of prompt: a shell script run inside the sandbox VM on every fire with no model turn at all (script_mounts read-only, script_network off by default, script_timeout_seconds 5-3600). Its last line of output becomes the card, which posts only on the first run, a failure, or a change; the user reviews the script before the job is created; and a stored script that has changed since then never runs. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -2430,6 +2430,7 @@ actor IrisEngine {
                     "timeout_seconds": Schema(type: "INTEGER", description: "Time limit for one run of this job, in seconds, 60-3600 (clamped); time the Mac spends asleep does not count. Overrides the global job run timeout (default 10 minutes) for this job only, and is reported in the answer. A run that reaches it is stopped and recorded as failed. Omit it unless the work needs longer, or should be held shorter; re-scheduling without it returns the job to the global setting. It does not lengthen one run_command past that command's own timeout_seconds."),
                     "overlap": Schema(type: "STRING", description: "What a fire does when the previous run has not finished: 'skip' (default — the fire is dropped and recorded) or 'queue' (one fire is held and taken as soon as that run ends; never more than one)."),
                     "catch_up": Schema(type: "STRING", description: "What a wake does with occurrences missed while the Mac slept: 'coalesce' (default — one fire now), 'skip' (none; jump to the next occurrence), or 'replay' to run the most recent missed ones one at a time, up to a cap (default 5, at most 100) — write a cap as 'replay:3'. A replayed fire is an ordinary one, so it asks the gate and counts against the breaker and the budgets, and the burst stops at the first fire that is refused or fails."),
+                    "outbound_exemptions": Schema(type: "ARRAY", description: OutboundTools.exemptionsParameterDescription, items: Schema(type: "STRING")),
                     "mounts": Schema(type: "ARRAY", description: "Directories the job may use, as '/host/dir', '/host/dir:ro' or '/host/dir:/path/in/container'. Read-write unless ':ro'. The first read-write one is the job's working directory. Mutating jobs only. Recorded as the directory each path resolves to; the whole filesystem, the home directory, volume roots and Iris's own directory cannot be mounted, nor read-write a folder holding git repositories without being one (mount the repository itself).", items: Schema(type: "STRING")),
                     "network": Schema(type: "BOOLEAN", description: "true lets the job's commands reach the network from inside the VM; default false, which attaches the VM to a host-only network. Mutating jobs only.")
                 ],
@@ -3994,6 +3995,40 @@ actor IrisEngine {
         }
     }
 
+    enum OutboundGateDecision: Equatable { case notGated, approved(ToolApproval), refused(String) }
+
+    /// #812: an outbound call (`OutboundTools`) on a conversation that has read untrusted output
+    /// runs only if the person's exemption list allows that tool there, or the person approves it
+    /// now. Unattended, there is nobody to ask: it is refused and recorded for the run's card, and
+    /// neither a job grant nor the command allowlist (`PermissionManager`) can approve it, so this
+    /// never reaches `requestApprovalSource`'s background branch, which consults both. Attended, the
+    /// ask is `humanOnly`: the allowlist and Vibecop never answer it, because the model wrote the
+    /// recipient and body after reading the tainted content, and a model judge reads the same
+    /// content. `autoApproveTools` (headless and scenario drivers only) still approves.
+    func outboundGate(_ call: FunctionCall, conversationId: UUID, workspacePath: String?,
+                      isUnattended: Bool) async -> OutboundGateDecision {
+        let readOnlyMCP = JobProfile.isMCPTool(call.name) ? await MCPManager.shared.readOnlyToolNames() : []
+        guard OutboundTools.isOutbound(call.name, readOnlyMCPTools: readOnlyMCP) else { return .notGated }
+        let localState = state
+        guard let localState else { return isUnattended ? .refused(OutboundTools.unattendedRefusal(tool: call.name)) : .refused(Self.deniedToolResult) }
+        let (tainted, allowed) = await MainActor.run { localState.outboundGateState(conversationId, tool: call.name) }
+        guard tainted else { return .notGated }
+        if allowed {
+            return .approved(ToolApproval(layer: .exemption, detail: isUnattended ? "job" : "conversation"))
+        }
+        if isUnattended {
+            let blocked = BlockedCall(toolName: call.name, args: call.args, cwd: workspacePath, reason: .approval)
+            await MainActor.run { localState.recordBackgroundDenial(call: blocked, in: conversationId) }
+            return .refused(OutboundTools.unattendedRefusal(tool: call.name))
+        }
+        let source = await localState.requestApprovalSource(
+            toolName: call.name, details: OutboundTools.approvalDetails(tool: call.name, args: call.args), args: call.args,
+            workspace: workspacePath, conversationId: conversationId, origin: approvalOrigin,
+            humanOnly: true, offersConversationAllow: true)
+        guard let source else { return .refused(Self.deniedToolResult) }
+        return .approved(ToolApproval(source))
+    }
+
     /// #813: sets the conversation's sticky untrusted-output taint, in one main-actor hop.
     func markReadUntrusted(_ conversationId: UUID?) async {
         guard let conversationId else { return }
@@ -4062,11 +4097,15 @@ actor IrisEngine {
         globalRunTimeoutSeconds: Int = ConfigManager.shared.jobRunTimeoutSeconds
     ) -> String {
         let profile = profile ?? JobProfile.asked(ScheduleJobArguments.text(args["profile"])) ?? .readOnly
+        let base: String
         switch toolName {
-        case "schedule_job": return scheduleJobApprovalDetails(args, profile: profile, globalRunTimeoutSeconds: globalRunTimeoutSeconds)
-        case "register_directory_watcher": return registerWatcherApprovalDetails(args, profile: profile)
+        case "schedule_job": base = scheduleJobApprovalDetails(args, profile: profile, globalRunTimeoutSeconds: globalRunTimeoutSeconds)
+        case "register_directory_watcher": base = registerWatcherApprovalDetails(args, profile: profile)
         default: return toolName
         }
+        // #812: each exemption in its own plain sentence, so the approval is informed.
+        let exemptions = (try? OutboundTools.proposedExemptions(args).get()) ?? []
+        return ([base] + OutboundTools.exemptionLines(exemptions)).joined(separator: "\n")
     }
 
     /// The profile a job-creating call would give its job: the one it names, else for a watch the
@@ -4634,7 +4673,20 @@ actor IrisEngine {
         if Self.jobCreationTools.contains(functionCall.name) {
             let profile = await jobCreationProfile(functionCall, conversationId: conversationId)
             decidedJobProfile = profile
-            if profile != .readOnly || isPinned || hasUnattendedInput {
+            // #812: proposed exemptions are refused or shown before anything else; a job that
+            // carries any always asks, whatever below would have let it skip the card.
+            let exemptions: [String]
+            switch OutboundTools.proposedExemptions(functionCall.args) {
+            case .failure(let message): return message.text
+            case .success(let names): exemptions = names
+            }
+            if !exemptions.isEmpty {
+                let readOnlyMCP = exemptions.contains(where: JobProfile.isMCPTool) ? await MCPManager.shared.readOnlyToolNames() : []
+                if let refusal = OutboundTools.exemptionRefusal(exemptions, profile: profile, readOnlyMCPTools: readOnlyMCP) {
+                    return refusal.text
+                }
+            }
+            if profile != .readOnly || isPinned || hasUnattendedInput || !exemptions.isEmpty {
                 // Review #340, item 4 (ruling): parse and validate before the human is ever asked. A
                 // malformed call is going to fail either way; asking first just spends the owner's
                 // attention on a job that was never going to be created. `GateScriptReview`'s own
@@ -4709,6 +4761,15 @@ actor IrisEngine {
            ContextHolds.shouldHold(functionCall.name, args: functionCall.args, cwd: workspacePath, paths: memory.paths),
            let held = await holdContextWriteIfTainted(functionCall, conversationId: conversationId, workspacePath: workspacePath) {
             return held
+        }
+
+        // #812: after the read-only profile (which refuses every send outright) and #811's check.
+        var outboundApproval: ToolApproval?
+        switch await outboundGate(functionCall, conversationId: conversationId, workspacePath: workspacePath,
+                                  isUnattended: isUnattended) {
+        case .notGated: break
+        case .approved(let approval): outboundApproval = approval
+        case .refused(let message): return message
         }
 
         if functionCall.name == "set_workspace", let path = functionCall.args["path"]?.stringValue {
@@ -5866,7 +5927,7 @@ actor IrisEngine {
                                           : Self.deniedToolResult
                 }
             } else {
-                await recordApproval(.ungated, pillId: pillId, conversationId: conversationId)
+                await recordApproval(outboundApproval ?? .ungated, pillId: pillId, conversationId: conversationId)
                 result = await executeToolWithHooks(name: functionCall.name, args: callArgs, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath, decidedJobProfile: decidedJobProfile,
                                                     beforeToolFired: jobHooksFired)
             }

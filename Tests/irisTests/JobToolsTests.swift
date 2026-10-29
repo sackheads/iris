@@ -1568,7 +1568,8 @@ struct JobToolsTests {
                                             callerRole: VibecopCallerRole = .agent, allowedCommands: [String] = [],
                                             vibecopEnabled: Bool? = nil, grantedMount: ContainerMount? = nil,
                                             humanOnly: Bool = false, graderReadWalked: Bool = false,
-                                            offersAlwaysAllow: Bool = true, beforeToolFired: Bool = false) async -> ApprovalSource? {
+                                            offersAlwaysAllow: Bool = true, offersConversationAllow: Bool = false,
+                                            beforeToolFired: Bool = false) async -> ApprovalSource? {
             approvalCount += 1
             lastHumanOnly = humanOnly
             lastDetails = details

@@ -100,6 +100,10 @@ Native support for local smaller models for background tasks like Vibecop. Suppo
 
 Includes a multi-tiered security pipeline (Structural Isolation + Behavioral Canary Probes) to actively neutralize indirect prompt injections hidden within untrusted external data.
 
+### Outbound Send Gate
+
+Once a conversation has read untrusted content, sending mail, creating calendar events or tasks, and any MCP tool not marked read-only ask you first, and a job run refuses them unless the job exempts the tool (#812). The cost in prompts: an attended conversation asks on the first send of each such tool; Vibecop and the command allowlist (`PermissionManager`) can't answer, because the model wrote the recipient and body from the tainted content; **Allow in This Conversation** ends the prompts for that tool there; and an unattended run never asks. The per-job exemptions and the per-conversation allow are your exemption list, and only you set them. [Details](jobs.md#outbound-sends-after-untrusted-content)
+
 ### Rich Native UI
 
 Beautiful macOS `NavigationSplitView` with multi-conversation support — a conversation you archive collapses into its own Archived section, out of the main list but one right-click away — `.regularMaterial` frosted glass input bars, and native markdown chat rendering powered by `swift-markdown-ui`. The sidebar's search field finds any past conversation by what was said in it, grouping ranked hits per conversation and jumping straight to the matching message when you pick one; hidden conversations (job runs, subagent logs) stay out of the results, the same as they stay out of the list.
@@ -188,6 +192,8 @@ guide with worked examples.
 
 Natively acts as an MCP client, dynamically loading external tool servers (like Postgres or SQLite) straight into the agent's brain.
 
+An MCP tool's result counts as untrusted content, and a tool its server didn't mark `readOnlyHint: true` counts as outbound: once a conversation has read untrusted content, each such tool asks before its first call there, and **Allow in This Conversation** stops it asking ([Outbound Send Gate](#outbound-send-gate)). Iris trusts the server's own marking; a server you don't trust shouldn't be installed.
+
 Iris natively supports the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/). 
 
 To configure MCP servers, create a JSON file at `~/.iris/mcp_servers.json` with your server configurations:
@@ -236,6 +242,8 @@ Once connected, Iris has native API access to the following Workspace tools dire
 *   **Google Sheets**: `google_sheets_get`
 *   **Google Tasks**: `google_tasks_list_tasklists`, `google_tasks_list_tasks`, `google_tasks_create_task`
 *   **Gmail**: `gmail_list_unread`, `gmail_send_email`
+
+The three that send or create (`gmail_send_email`, `google_calendar_create_event`, `google_tasks_create_task`) ask first once the conversation has read untrusted content ([Outbound Send Gate](#outbound-send-gate)).
 
 ## File attachments and auxiliary vision
 
