@@ -150,8 +150,9 @@ struct EventCardView: View {
                         .foregroundStyle(.secondary)
                     // Same guarantee the refusal below gets: an argument is the thing being
                     // approved, so it must lay out in full rather than be clipped to one line by
-                    // the surrounding stack. `EventCard.preview` is what keeps "in full" bounded,
-                    // except for an outbound call, whose scroll area does (#812).
+                    // the surrounding stack. `EventCard.preview` bounds a content-like argument;
+                    // an outbound call's, or a long command or path, is uncut, and the scroll area
+                    // around the rows bounds it instead (#812, #829).
                     Text(argument.value)
                         .font(.system(.caption2, design: .monospaced))
                         .textSelection(.enabled)
@@ -168,8 +169,8 @@ struct EventCardView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(card.blockedCall?.toolName ?? "")
                 .font(.system(.caption, design: .monospaced).bold())
-            if card.showsArgumentsWhole {
-                // #812: an outbound call's arguments are uncut, so the scroll area bounds them.
+            if card.scrollsArguments {
+                // #812, #829: uncut arguments, so the scroll area bounds them.
                 ScrollView {
                     blockedArgumentRows
                 }
