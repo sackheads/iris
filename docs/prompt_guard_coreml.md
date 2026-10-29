@@ -2,9 +2,9 @@
 
 ## Off by default
 
-Tier 2 stays off by default (#780). Measured 2026-10-29 on dataset v3 (454 texts, 3 repeats
-each), with DeBERTa v3 as tier 2 and `ollama:gemma4:12b` as tier 3 (#789,
-[evals](evals.md)):
+Tier 2 stays off by default (#780). Measured on dataset v3 (454 texts, 3 repeats
+each), with DeBERTa v3 as tier 2 and `ollama:gemma4:12b` as tier 3: tiers 1 + 3 on 2026-10-28, and
+1 + 2 + 3 on 2026-10-29 (#789, [evals](evals.md)). Counts are judgements, each text judged once a repeat:
 
 | | tiers 1 + 3 | tiers 1 + 2 + 3 |
 |---|---|---|
