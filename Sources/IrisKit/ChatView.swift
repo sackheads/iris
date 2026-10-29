@@ -1511,6 +1511,13 @@ struct ApprovalBannerView: View {
                         }
                     }
                 }
+                // #812: a tainted send's card only. Per conversation and per tool; never global.
+                if request.offersConversationAllow {
+                    Button(action: { onResolve(.allowInConversation) }) {
+                        Text("Allow in This Conversation")
+                    }
+                    .help("Approve, and let \(request.toolName) run without asking for the rest of this conversation.")
+                }
 
                 Spacer()
                 

@@ -59,6 +59,12 @@ struct JobPolicy: Codable, Equatable, Sendable {
     /// `nil` for a job without one, and for every job made before this was recorded.
     var scriptReview: ScriptReview?
 
+    /// #812: the outbound tools this job's runs may call without asking after reading untrusted
+    /// content, part of the person's exemption list. Set only through the creation approval card
+    /// (which states each one) or `/jobs exempt`; never by a tool on its own. Empty for every job
+    /// without any, and for every job made before this.
+    var outboundExemptions: [String] = []
+
     /// What `schedule_job`'s `timeout_seconds` may ask for (#263). Under a minute a run cannot finish
     /// a model round and a tool; above an hour a single `run_command` (capped at 3600) no longer
     /// bounds the run, and a run nothing can end is what the timeout exists to prevent.
@@ -115,7 +121,7 @@ struct JobPolicy: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case overlap, catchUp, runTimeoutSeconds, perRunTokenBudget, dailyTokenBudget
-        case maxRunsPerHour, retry, grants, runTimeoutOverride, scriptReview
+        case maxRunsPerHour, retry, grants, runTimeoutOverride, scriptReview, outboundExemptions
     }
 
     /// Invariant 1, and one step further: every key is optional *and* an unrecognized `overlap`
@@ -139,6 +145,8 @@ struct JobPolicy: Codable, Equatable, Sendable {
             .flatMap { $0 > 0 ? $0 : nil }
         // `try?`: informational, so an unreadable one is none, and the job still loads.
         scriptReview = try? c.decodeIfPresent(ScriptReview.self, forKey: .scriptReview)
+        // `try?`: an unreadable list is none, which fails toward refusing a tainted send.
+        outboundExemptions = (try? c.decodeIfPresent([String].self, forKey: .outboundExemptions)) ?? []
     }
 
     /// A stored figure, or `nil` — absent, which is "take the default" — when it is below zero.

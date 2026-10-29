@@ -138,6 +138,7 @@ struct ToolExecutor {
                     "ignore": Schema(type: "ARRAY", description: "glob patterns relative to the path, e.g. `*.log`, `build/`", items: Schema(type: "STRING")),
                     "overlap": Schema(type: "STRING", description: "`queue` or `skip`"),
                     "profile": Schema(type: "STRING", description: "'readOnly' (default) or 'mutating'. A watch that writes must be mutating; its commands then run in the sandbox VM, which must be available."),
+                    "outbound_exemptions": Schema(type: "ARRAY", description: OutboundTools.exemptionsParameterDescription, items: Schema(type: "STRING")),
                     "mounts": Schema(type: "ARRAY", description: "Directories the watch's runs may use, as '/host/dir', '/host/dir:ro' or '/host/dir:/path/in/container'. Read-write unless ':ro'; the first read-write one is the working directory. Mutating only. The watched folder is not included unless named here.", items: Schema(type: "STRING")),
                     "network": Schema(type: "BOOLEAN", description: "true lets the runs' commands reach the network from inside the VM; default false. Mutating only."),
                     "max_runs_per_hour": Schema(type: "INTEGER", description: "How many runs an hour before the watch pauses itself. On a new watch, omitting this takes the shared setting for watches (\(ConfigManager.JobDefaults.maxRunsPerHourForWatch) by default, which covers ordinary editing); on a re-registration, omitting it leaves whatever the watch already has. 0 removes the breaker entirely. Say a lower number for a folder that should rarely change.")
@@ -433,6 +434,7 @@ struct ToolExecutor {
                 if let runs = parsed.maxRunsPerHour { existing.policy.maxRunsPerHour = runs }
                 existing.profile = profile
                 existing.policy.grants = grant
+                existing.policy.outboundExemptions = parsed.outboundExemptions
                 existing.enabled = true
                 existing.pausedReason = nil
                 job = existing
@@ -452,8 +454,12 @@ struct ToolExecutor {
                     // Nothing stored unless the caller named a figure: nil means "the watch global"
                     // (#283), so the Settings row moves this watch like every other, and naming one
                     // here is a per-job override the way it is for a scheduled job.
-                    policy: JobPolicy(overlap: parsed.overlap ?? .queue,
-                                      maxRunsPerHour: parsed.maxRunsPerHour, grants: grant))
+                    policy: {
+                        var policy = JobPolicy(overlap: parsed.overlap ?? .queue,
+                                               maxRunsPerHour: parsed.maxRunsPerHour, grants: grant)
+                        policy.outboundExemptions = parsed.outboundExemptions
+                        return policy
+                    }())
                 let others = watching.map { "`\($0.name)`" }
                 let named = others.count <= 2 ? others.joined(separator: " and ")
                     : others.dropLast().joined(separator: ", ") + " and " + others[others.count - 1]

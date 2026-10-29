@@ -1949,6 +1949,11 @@ actor JobRunner {
                 if let workingDirectory = grant.workingDirectory { state.setWorkspace(for: id, path: workingDirectory) }
                 state.setSandboxGrant(for: id, grant)
             }
+            // #812: the person's exemptions for this job, which the outbound gate reads here (and
+            // from a subagent the run delegates to, through its parent link).
+            if !job.policy.outboundExemptions.isEmpty {
+                state.setOutboundAllowedTools(for: id, job.policy.outboundExemptions)
+            }
             // An ordinary `.mutating` fire asks for a container, and so does any approved call
             // that could run a command (R20). `.readOnly` otherwise leaves the field nil
             // deliberately: nil means "fall through to the per-workspace/global default", which is

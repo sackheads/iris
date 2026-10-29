@@ -278,6 +278,13 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// predates the flag reads as true: nothing says what it read.
     var hasUntrustedToolOutput: Bool = false
 
+    /// #812: the outbound tools that run here without asking even once the conversation has read
+    /// untrusted output. Part of the person's exemption list: an attended conversation gets one
+    /// from the approval card's "Allow in this conversation"; a job run is stamped with its job's
+    /// exemptions (`JobPolicy.outboundExemptions`) by `JobRunner`. No tool call sets it. Not carried
+    /// by `/new`: a new conversation asks again.
+    var outboundAllowedTools: [String] = []
+
     /// #314 decision 6: `drop_block` once a binding 400's retry succeeded, so later requests send
     /// it, across restarts, wherever the beta is taken (CAUSES:93). Never cleared. Nil is unset.
     var prefixMismatchBehavior: PrefixMismatchBehavior? = nil
@@ -315,7 +322,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, hasUntrustedToolOutput, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier, lastTouchedAt, archivedAutomaticallyAt, inSessions
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, hasUntrustedToolOutput, outboundAllowedTools, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier, lastTouchedAt, archivedAutomaticallyAt, inSessions
     }
 
     init(from decoder: Decoder) throws {
@@ -374,6 +381,8 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         // Invariant 1, and #813's narrow direction: absent means persisted before the flag, with
         // nothing to say what the model read, so it reads as tainted.
         hasUntrustedToolOutput = try container.decodeIfPresent(Bool.self, forKey: .hasUntrustedToolOutput) ?? true
+        // Invariant 1: absent means nothing was ever allowed here, so every tainted send asks.
+        outboundAllowedTools = try container.decodeIfPresent([String].self, forKey: .outboundAllowedTools) ?? []
         // Invariant 1: absent on every conversation persisted before #314, and absent is unset.
         // Read as a string so a value this build does not know is unset too, not a failed decode.
         prefixMismatchBehavior = try container.decodeIfPresent(String.self, forKey: .prefixMismatchBehavior)
@@ -442,13 +451,16 @@ struct ToolApprovalRequest: Identifiable {
     /// composed text would let the same text run on the host unasked, where the person approved
     /// it for the sandbox. Off means no button and, in `resolveApproval`, no rule.
     let offersAlwaysAllow: Bool
+    /// #812: whether the dialog offers "Allow in this conversation", which adds the tool to the
+    /// conversation's `outboundAllowedTools`. On only for a tainted outbound send's card.
+    let offersConversationAllow: Bool
     let continuation: CheckedContinuation<Bool, Never>
     /// When the ask was raised, so `list_sessions` can say how long a peer has waited (#418).
     let requestedAt: Date
 
     init(id: UUID, toolName: String, details: String, workspace: String?, conversationId: UUID?, origin: String,
-         humanOnly: Bool = false, offersAlwaysAllow: Bool = true, requestedAt: Date = Date(),
-         continuation: CheckedContinuation<Bool, Never>) {
+         humanOnly: Bool = false, offersAlwaysAllow: Bool = true, offersConversationAllow: Bool = false,
+         requestedAt: Date = Date(), continuation: CheckedContinuation<Bool, Never>) {
         self.id = id
         self.requestedAt = requestedAt
         self.toolName = toolName
@@ -458,6 +470,7 @@ struct ToolApprovalRequest: Identifiable {
         self.origin = origin
         self.humanOnly = humanOnly
         self.offersAlwaysAllow = offersAlwaysAllow && !humanOnly
+        self.offersConversationAllow = offersConversationAllow
         self.continuation = continuation
     }
 }
@@ -3318,6 +3331,43 @@ class AppState {
         markChanged(conversationId, .metadata)
     }
 
+    /// #812: whether an outbound call in `conversationId` meets the gate, and whether the person's
+    /// exemption list lets `tool` through there. Tainted if the conversation or any session it was
+    /// delegated from has read untrusted output (a parent can be tainted after its delegate was
+    /// made), and a conversation the app doesn't know is tainted. Allowed if the conversation or
+    /// the session it was delegated from lists the tool: a job run's subagent uses its run's.
+    func outboundGateState(_ conversationId: UUID, tool: String) -> (tainted: Bool, allowed: Bool) {
+        var tainted = false
+        var allowed = false
+        var current: UUID? = conversationId
+        for _ in 0..<16 {
+            guard let id = current else { break }
+            guard let conversation = conversations.first(where: { $0.id == id }) else { tainted = true; break }
+            if conversation.hasUntrustedToolOutput { tainted = true }
+            if conversation.outboundAllowedTools.contains(tool) { allowed = true }
+            current = delegationParent[id]
+        }
+        return (tainted, allowed)
+    }
+
+    /// #812: the card's "Allow in this conversation". Recorded on the session the call worked for
+    /// (`delegationRoot`), so a delegate's ask allows it for the session the person is in.
+    func allowOutboundInConversation(_ tool: String, conversationId: UUID) {
+        let root = delegationRoot(of: conversationId)
+        guard let idx = conversations.firstIndex(where: { $0.id == root }),
+              !conversations[idx].outboundAllowedTools.contains(tool) else { return }
+        conversations[idx].outboundAllowedTools.append(tool)
+        conversations[idx].outboundAllowedTools.sort()
+        markChanged(root, .metadata)
+    }
+
+    /// #812: stamps a job run's conversation with its job's outbound exemptions (`JobRunner`).
+    func setOutboundAllowedTools(for conversationId: UUID, _ tools: [String]) {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
+        conversations[idx].outboundAllowedTools = tools.sorted()
+        markChanged(conversationId, .metadata)
+    }
+
     /// #314 decision 6: the conversation sends `drop_block` from now on, where the beta is taken.
     /// Called only once a retry succeeded. A no-op once set.
     func recordPrefixMismatchFallback(_ conversationId: UUID) {
@@ -4046,6 +4096,9 @@ class AppState {
         case deny
         case alwaysAllowGlobal
         case alwaysAllowProject
+        /// #812: approve, and let this outbound tool run without asking for the rest of the
+        /// conversation. Offered only on the tainted-send card.
+        case allowInConversation
     }
     
     /// `args` is what the model sent for this call, carried only so a background denial can record
@@ -4106,6 +4159,7 @@ class AppState {
                          allowedCommands: [String] = [], vibecopEnabled: Bool? = nil,
                          grantedMount: ContainerMount? = nil, humanOnly: Bool = false,
                          graderReadWalked: Bool = false, offersAlwaysAllow: Bool = true,
+                         offersConversationAllow: Bool = false,
                          beforeToolFired: Bool = false) async -> ApprovalSource? {
         // No pre-granted-approval branch here, deliberately (#187 R21, 2026-09-21): a call a
         // person clicked "Approve and run" on is dispatched by `IrisEngine.executeApprovedCall`,
@@ -4184,7 +4238,8 @@ class AppState {
         // through to this same prompt for an ordinary call too.
         if humanOnly || irisWrite {
             return await enqueueUserApproval(toolName: toolName, details: details, workspace: workspace,
-                                             conversationId: conversationId, origin: origin, humanOnly: true) ? .person : nil
+                                             conversationId: conversationId, origin: origin, humanOnly: true,
+                                             offersConversationAllow: offersConversationAllow) ? .person : nil
         }
         // Fast path: deterministic permissions.
         if let match = permissions.match(toolName: toolName, details: details, workspace: workspace) {
@@ -4386,7 +4441,7 @@ class AppState {
     /// separated from `requestApproval`'s permission/Vibecop fast paths so it is unit-testable.
     func enqueueUserApproval(toolName: String, details: String, workspace: String?,
                              conversationId: UUID?, origin: String, humanOnly: Bool = false,
-                             offersAlwaysAllow: Bool = true) async -> Bool {
+                             offersAlwaysAllow: Bool = true, offersConversationAllow: Bool = false) async -> Bool {
         // If our task was already cancelled (e.g. a subagent torn down while we were suspended
         // in the Vibecop/timeout window), do NOT enqueue a request nobody will resolve — the
         // teardown's denyPendingApprovals already ran and would miss a late append.
@@ -4401,7 +4456,8 @@ class AppState {
                 pendingApprovals.append(ToolApprovalRequest(
                     id: requestId, toolName: toolName, details: details, workspace: workspace,
                     conversationId: conversationId, origin: origin, humanOnly: humanOnly,
-                    offersAlwaysAllow: offersAlwaysAllow, continuation: continuation))
+                    offersAlwaysAllow: offersAlwaysAllow, offersConversationAllow: offersConversationAllow,
+                    continuation: continuation))
             }
         } onCancel: {
             Task { @MainActor [weak self] in self?.denyApproval(id: requestId) }
@@ -4746,6 +4802,13 @@ class AppState {
                 } else {
                     permissions.allowGlobally(toolName: pending.toolName, details: pending.details)
                 }
+            }
+            approved = true
+        case .allowInConversation:
+            // Like the Always-Allow cases: a click on a card that didn't offer it approves this
+            // call and writes nothing standing.
+            if pending.offersConversationAllow, let id = pending.conversationId {
+                allowOutboundInConversation(pending.toolName, conversationId: id)
             }
             approved = true
         }
@@ -5334,6 +5397,43 @@ class AppState {
         }
     }
 
+    /// #812: `/jobs exempt|unexempt <name> <tool>`, the person's edit of a job's exemptions after
+    /// creation. Adding one states what it lets the job do, in the creation card's own sentence.
+    private func handleExemptCommand(name: String, tool: String, adding: Bool, ledger: JobLedger, convId: UUID) async {
+        let readOnlyMCP = adding && JobProfile.isMCPTool(tool) ? await MCPManager.shared.readOnlyToolNames() : []
+        do {
+            guard var job = try ledger.job(named: name) else {
+                emitCommandOutput("No job named '\(name)'.", format: .markdown, to: convId)
+                return
+            }
+            var names = job.policy.outboundExemptions
+            if adding {
+                if let refusal = OutboundTools.exemptionRefusal([tool], profile: job.profile, readOnlyMCPTools: readOnlyMCP) {
+                    emitCommandOutput(refusal.text.replacingOccurrences(of: "Not created: ", with: "Not exempted: "),
+                                      format: .markdown, to: convId)
+                    return
+                }
+                if !names.contains(tool) { names.append(tool) }
+            } else {
+                guard names.contains(tool) else {
+                    emitCommandOutput("**\(job.name)** has no exemption for `\(tool)`.", format: .markdown, to: convId)
+                    return
+                }
+                names.removeAll { $0 == tool }
+            }
+            job.policy.outboundExemptions = names.sorted()
+            let outcome = try ledger.upsert(job)
+            // A policy change turns a job's link off, as `/jobs url` documents.
+            if outcome.urlTriggerCleared { announceURLTriggerCleared(jobId: job.id, jobName: job.name) }
+            emitCommandOutput(adding
+                ? "Exempted `\(tool)` for **\(job.name)**. \(OutboundTools.exemptionSentence(tool)) `/jobs unexempt \(job.name) \(tool)` removes it."
+                : "Removed the exemption for `\(tool)` from **\(job.name)**: once a run has read untrusted content, that tool is refused again.",
+                format: .markdown, to: convId)
+        } catch {
+            emitCommandOutput("Could not change that job's exemptions: \(error).", format: .markdown, to: convId)
+        }
+    }
+
     private func handleJobsCommand(_ trimmed: String, convId: UUID) {
         let ledger = store.ledger
         switch JobsCommand.parse(trimmed) {
@@ -5477,6 +5577,11 @@ class AppState {
 
         case .url(let name, let setting):
             handleURLTriggerCommand(name: name, setting: setting, ledger: ledger, convId: convId)
+
+        case .exempt(let name, let tool):
+            Task { await handleExemptCommand(name: name, tool: tool, adding: true, ledger: ledger, convId: convId) }
+        case .unexempt(let name, let tool):
+            Task { await handleExemptCommand(name: name, tool: tool, adding: false, ledger: ledger, convId: convId) }
 
         case .delete(let name):
             do {

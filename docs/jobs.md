@@ -985,6 +985,9 @@ for them — so a `permissions.json` rule cannot put a granted run's `write_file
 outside its mounts, and the `~/.iris` read carve-out does not apply to a granted run's `read_file`
 outside its mounts either (see "Grants").
 
+One kind of call is never approved by the grant or the allowlist: an outbound send once the run has
+read untrusted content (next section). It is refused unless the job exempts that tool.
+
 A background run cannot message other sessions either. `list_sessions`, `describe_session`,
 `send_to_session`, `set_session_card` and `close_request` are not offered to it, and all five are
 refused if called anyway: delivering a
@@ -992,6 +995,37 @@ message starts a real turn in an attended conversation — which would run the w
 conversation's approval path — and the roster is how a sender picks its target. A run reports
 through its card; it does not ask a peer to act for it, and it does not advertise itself to peers
 that cannot reach it.
+
+## Outbound sends after untrusted content
+
+Once a conversation has read text someone else may have written (a mail, a web page, a file Iris
+didn't write, an MCP result: the flag `hasUntrustedToolOutput`), a call that sends or changes
+something outside the Mac asks the person when they are there and is refused in a run, where nobody
+is (#812). The gated tools are `gmail_send_email`, `google_calendar_create_event`,
+`google_tasks_create_task`, and every MCP tool whose server didn't mark it `readOnlyHint: true`.
+Iris trusts an MCP server's own read-only marking; a server you don't trust shouldn't be installed.
+A conversation that has read nothing untrusted is not gated.
+
+**What gets asked.** In an attended conversation, the first send of each gated tool asks, with the
+recipient and body on the card. Only you can answer: the command allowlist (`PermissionManager`)
+never approves a tainted send, and neither does Vibecop, because the model wrote the recipient and
+the body after reading the tainted content, and a model judge reads the same content. **Allow in
+This Conversation** ends the prompts for that tool there; it is kept with the conversation, and a
+new conversation (`/new` included) asks again. A delegate's ask is allowed for the session it works
+for. Headless and scenario runs (`autoApproveTools`) approve it as they approve everything.
+
+**Jobs.** A run never asks. A tainted send is refused, recorded on the run's card ("Approve and
+run" sends it once), and the model is told which tool, and that the job can be exempted. A job's
+exemptions are your list too: `schedule_job` and `register_directory_watcher` may propose them in
+`outbound_exemptions`, but a job that carries any always asks before it is created, and the card
+states each one plainly: "This job may send email to anyone without asking, even after reading
+untrusted content." A read-only job can't carry one, and a tool that isn't outbound can't be
+exempted. Afterwards only `/jobs exempt` and `/jobs unexempt` change them; `/jobs` lists them. A
+re-schedule or re-registration stores exactly the exemptions it names, as with a grant.
+
+Not covered: `search_web`'s query is also a way out (#825), and a send in the same batch of
+calls as the read that taints the conversation is not gated by that read, since the model wrote it
+before seeing the result.
 
 ## Approve and run
 
@@ -1238,6 +1272,7 @@ pause reason the table prints, on the `interrupted` row and on the card.
 | `/jobs run <name>` | Fires the job now, through the same admission a scheduled fire meets. Says it is starting straight away, then reports what admission decided once the fire is over — an overlap, the breaker or an exhausted budget is named rather than reported as a run. The result itself arrives as a card. A paused or disabled job is refused up front |
 | `/jobs reschedule <name> <cron> [timezone]` | Gives a scheduled or polled job a new five-field cron (the same subset `schedule_job` takes), recomputes its next fire and says when that is. Quote a name or cron with spaces in it — `/jobs reschedule "Daily digest" "0 9 * * *"` — or leave them bare and the last five words are the cron. Without a timezone a cron job keeps its own zone and an interval job (which becomes a cron job) takes the Mac's. Works on built-ins such as the daily digest; a polled job keeps its gate; a pending retry is dropped with the old schedule; a job you or the retry ladder paused stays paused, but a job paused because its old cron could never match is resumed by a cron that can, and a new cron that can never match pauses the job with that reason. The zone is any IANA name or abbreviation the Mac knows (`Europe/Paris`, `CET`, `GMT+2`). An invalid cron, a cron of six fields, or an unknown zone (a misspelled `Europe/Pairs` included) is refused with a sentence and changes nothing, and a directory watch, which has no schedule, is refused |
 | `/jobs delete <name>` | Deletes a job and its ledger rows. Refused while a run is in flight. The transcripts are left for retention to clear, so a card you are still reading keeps working |
+| `/jobs exempt <name> <tool>` · `/jobs unexempt <name> <tool>` | Adds or removes one tool from a mutating job's outbound exemptions (see "Outbound sends after untrusted content"). Adding one states what it lets the job do, in the creation card's sentence; a read-only job, or a tool that isn't outbound, is refused. Like any policy change, it turns the job's link off |
 | `/jobs url <name> [on\|off]` | `on` makes a link that fires the job, `iris://run-job/<token>` (`iris-dev://` for a dev build), shown once in a sheet with Copy and never saved; `on` again replaces it; `off` retires it; the bare form says whether it is on. Changing the job's prompt, profile or policy, or a model lifting your pause, turns it off. Opening the link fires the job; see "Firing a job from a link" below for what a cold launch does |
 
 ## Running one job from a terminal (`iris --run-job`)

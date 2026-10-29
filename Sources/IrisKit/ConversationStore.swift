@@ -732,6 +732,13 @@ final class ConversationStore: Sendable {
                 t.column("outcome", .text)
             }
         }
+        // #812: the outbound tools the person allowed in this conversation (or a job run's
+        // exemptions), as a JSON array. NULL, the value of every row before it, is none.
+        m.registerMigration("v33_outbound_allowed_tools") { db in
+            try db.alter(table: "conversations") { t in
+                t.add(column: "outboundAllowedTools", .text)
+            }
+        }
         return m
     }
 
@@ -955,6 +962,7 @@ final class ConversationStore: Sendable {
         // NULL when absent, like `goalContract` a few lines above (#185).
         let card = try c.sessionCard.map { try json($0, encoder) }
         let grant = try c.sandboxGrant.map { try json($0, encoder) }
+        let outboundAllowed = c.outboundAllowedTools.isEmpty ? nil : try json(c.outboundAllowedTools, encoder)
         let profileSnapshot = try c.agentProfileSnapshot.map { try json($0, encoder) }
         let loop = try c.loop.map { try json($0, encoder) }
         if exists {
@@ -964,14 +972,14 @@ final class ConversationStore: Sendable {
                     tokenUsage = ?, goalContract = ?, subagentResult = ?,
                     lastGoalEvaluation = ?, lastGoalCompletionReport = ?, isArchived = ?,
                     isBackground = ?, isPinned = ?, sessionCard = ?, jobProfile = ?, sandboxGrant = ?,
-                    hasUnattendedInput = ?, hasUntrustedToolOutput = ?, prefixMismatchBehavior = ?, role = ?, homeWritableOptIn = ?,
+                    hasUnattendedInput = ?, hasUntrustedToolOutput = ?, outboundAllowedTools = ?, prefixMismatchBehavior = ?, role = ?, homeWritableOptIn = ?,
                     agentProfile = ?, agentProfileSnapshot = ?,
                     loop = ?, modelTier = ?, lastTouchedAt = ?, archivedAutomaticallyAt = ?, inSessions = ?
                 WHERE id = ?
                 """, arguments: [c.title, touched, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
                                  evaluation, report, c.isArchived, c.isBackground, c.isPinned, card,
-                                 c.jobProfile?.rawValue, grant, c.hasUnattendedInput, c.hasUntrustedToolOutput, c.prefixMismatchBehavior?.rawValue,
+                                 c.jobProfile?.rawValue, grant, c.hasUnattendedInput, c.hasUntrustedToolOutput, outboundAllowed, c.prefixMismatchBehavior?.rawValue,
                                  c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue,
                                  c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, c.id.uuidString])
         } else {
@@ -981,14 +989,14 @@ final class ConversationStore: Sendable {
                     messageCountSinceReflection, goalIterationCount, mainAgentSandbox, tokenUsage, goalContract,
                     subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived,
                     isBackground, isPinned, sessionCard, jobProfile, sandboxGrant, hasUnattendedInput,
-                    hasUntrustedToolOutput, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier,
+                    hasUntrustedToolOutput, outboundAllowedTools, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier,
                     lastTouchedAt, archivedAutomaticallyAt, inSessions)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [c.id.uuidString, position, c.title, now, touched, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
                                  tokenUsage, contract, result, history, evaluation, report, c.isArchived,
                                  c.isBackground, c.isPinned, card, c.jobProfile?.rawValue, grant, c.hasUnattendedInput,
-                                 c.hasUntrustedToolOutput, c.prefixMismatchBehavior?.rawValue, c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue,
+                                 c.hasUntrustedToolOutput, outboundAllowed, c.prefixMismatchBehavior?.rawValue, c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue,
                                  c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions])
         }
     }
@@ -1171,6 +1179,7 @@ final class ConversationStore: Sendable {
                 }
                 let subagentResult = supplementary("subagentResult")
                 let sandboxGrant = supplementary("sandboxGrant")
+                let outboundAllowed = supplementary("outboundAllowedTools")
                 let prefixMismatch = supplementary("prefixMismatchBehavior")
                 let checkpointHistory = supplementary("checkpointHistory")
                 let lastGoalEvaluation = supplementary("lastGoalEvaluation")
@@ -1313,6 +1322,11 @@ final class ConversationStore: Sendable {
                 case .unconvertible:
                     print("WARNING: unreadable hasUntrustedToolOutput for conversation \(id); defaulting to tainted")
                     c.hasUntrustedToolOutput = true
+                }
+                // #812: an unreadable list is none. That fails toward asking, which is the safe side.
+                if let s = outboundAllowed {
+                    do { c.outboundAllowedTools = try decoder.decode([String].self, from: Data(s.utf8)) }
+                    catch { localSoftLosses.append(("outboundAllowedTools", "\(error)")) }
                 }
 
                 // #187 deliverable 3 — degrades like the flags above rather than costing the

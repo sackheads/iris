@@ -8,6 +8,8 @@ import Foundation
 struct ToolApproval: Codable, Equatable, Sendable {
     enum Layer: String, Codable, Sendable {
         case person, autoApprove, allowlist, grant, graderCheck, vibecop, vibecopRestricted
+        /// #812: an outbound tool the person exempted, for the conversation or for the job.
+        case exemption
         /// The tool has no approval step: nobody was asked, and nothing had to say yes.
         case ungated
         /// Read from a newer build: shown as an approval it cannot name.
@@ -81,6 +83,10 @@ struct ToolApproval: Codable, Equatable, Sendable {
             return nil
         case .ungated:
             return "No approval needed for this tool (nobody was asked)."
+        case .exemption:
+            return detail == "job"
+                ? "Exempted for this job when you approved it (or with /jobs exempt): it sends without asking."
+                : "You allowed this tool in this conversation: it sends without asking."
         case .autoApprove:
             return "Auto-approve is on (headless run)." + (shownDetail.map { " Vibecop's verdict, not used: \($0)" } ?? "")
         case .allowlist:

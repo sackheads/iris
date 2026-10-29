@@ -23,6 +23,8 @@ struct RegisterWatcherArguments: Equatable, Sendable {
     /// stored figure alone, and omitted on a new watch takes the watch default rather than the
     /// scheduled-job one.
     let maxRunsPerHour: Int?
+    /// #812: like the grant, a re-registration stores exactly what it names.
+    var outboundExemptions: [String] = []
 
     static let missing: ToolMessage = "Error: Missing path or instructions"
     static let windowShape: ToolMessage = "Error: quiet_window_seconds must be a whole number of seconds (1 to 300)."
@@ -83,9 +85,14 @@ struct RegisterWatcherArguments: Equatable, Sendable {
             }
             runsPerHour = value
         }
+        let exemptions: [String]
+        switch OutboundTools.proposedExemptions(args) {
+        case .failure(let message): return .failure(ToolMessage("Error: " + message.text))
+        case .success(let names): exemptions = names
+        }
         return .success(RegisterWatcherArguments(
             path: path, instructions: instructions, quietWindowSeconds: window, ignore: ignore, overlap: overlap,
             profile: ScheduleJobArguments.text(args["profile"]), mounts: mounts, network: network,
-            maxRunsPerHour: runsPerHour))
+            maxRunsPerHour: runsPerHour, outboundExemptions: exemptions))
     }
 }

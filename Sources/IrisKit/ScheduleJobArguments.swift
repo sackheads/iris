@@ -53,6 +53,9 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// above — on a re-schedule an absent grant *removes* the stored one.
     let mounts: [String]?
     let network: Bool?
+    /// #812: the outbound exemptions the approved call named; checked and shown by the creation
+    /// gate before this is ever built. A re-schedule stores exactly these, like the grant.
+    var outboundExemptions: [String] = []
     /// What the parse had to change about what was asked for, in the words the answer uses. Not a
     /// refusal and not a silent fix: the job is created and the tool's sentence says what it got.
     var notes: [String] = []
@@ -152,6 +155,11 @@ struct ScheduleJobArguments: Equatable, Sendable {
         case .failure(let message): return .failure(message)
         case .success(let value): gateNetwork = value
         }
+        let exemptions: [String]
+        switch OutboundTools.proposedExemptions(args) {
+        case .failure(let message): return .failure(message)
+        case .success(let names): exemptions = names
+        }
         return .success(ScheduleJobArguments(
             prompt: prompt, name: text(args["name"]), alias: alias, profile: text(args["profile"]),
             gateURL: text(args["gate_url"]), gatePath: text(args["gate_path"]),
@@ -160,7 +168,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
             script: script, scriptMounts: scriptMounts,
             scriptTimeoutSeconds: integer(args["script_timeout_seconds"]), scriptNetwork: scriptNetwork,
             overlap: overlap, catchUp: catchUp, runTimeoutSeconds: runTimeout, mounts: mounts,
-            network: network, notes: notes))
+            network: network, outboundExemptions: exemptions, notes: notes))
     }
 
     /// A requested run timeout, clamped into `JobPolicy.toolRunTimeoutRange`, with the sentence for
@@ -235,6 +243,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
             if let catchUp { policy.catchUp = catchUp }
             policy.runTimeoutOverride = runTimeoutSeconds
             policy.grants = grant
+            policy.outboundExemptions = outboundExemptions
             return .success(Job(
                 name: Self.uniqueName(Job.slug(from: name ?? (scriptSpec != nil ? "script-job" : prompt)), existing: existingNames),
                 prompt: prompt,
