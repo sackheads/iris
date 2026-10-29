@@ -117,7 +117,7 @@ struct ContextHoldsReview: View {
     /// Everything the change would write, in full, each under its argument's name, or what a
     /// delete would remove. Every argument shows: a skill's description reaches every prompt, and
     /// its title, tags or a fact's `supersedes` are part of what is approved too (#826 review).
-    static func fields(_ item: PendingContextWrite) -> [(label: String, text: String)] {
+    nonisolated static func fields(_ item: PendingContextWrite) -> [(label: String, text: String)] {
         if item.toolName == "delete_skill" {
             let current = item.targetPath.flatMap { try? String(contentsOfFile: $0, encoding: .utf8) }
             return current.map { [(label: "what it removes", text: $0)] } ?? []
@@ -131,7 +131,7 @@ struct ContextHoldsReview: View {
         }
     }
 
-    private static func render(_ value: JSONValue) -> String {
+    nonisolated private static func render(_ value: JSONValue) -> String {
         switch value {
         case .array(let items): return items.map(render).joined(separator: ", ")
         case .object(let members):
