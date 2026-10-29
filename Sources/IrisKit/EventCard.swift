@@ -378,9 +378,22 @@ struct EventCard: Codable, Equatable, Sendable {
     /// is no blocked call.
     var blockedArguments: [BlockedArgument] {
         guard let blockedCall else { return [] }
+        let whole = showsArgumentsWhole
         return blockedCall.args.keys.sorted().map { key in
-            BlockedArgument(key: key, value: Self.preview(key: key, value: blockedCall.args[key] ?? .null))
+            BlockedArgument(key: key, value: Self.preview(key: key, value: blockedCall.args[key] ?? .null, whole: whole))
         }
+    }
+
+    /// #812: an outbound call's arguments are shown whole, never cut: "Approve and run" sends the
+    /// body and recipients exactly as the run wrote them, after it read untrusted content, so a
+    /// cut hides what would leave. The view scrolls them in a capped area instead.
+    var showsArgumentsWhole: Bool {
+        guard let name = blockedCall?.toolName else { return false }
+        return Self.showsArgumentsWhole(toolName: name)
+    }
+
+    static func showsArgumentsWhole(toolName: String) -> Bool {
+        OutboundTools.builtIn.contains(toolName) || JobProfile.isMCPTool(toolName)
     }
 
     /// `Vibecop: DENY — recursive delete` — its opinion of the call, or `nil` when it was not
@@ -397,12 +410,16 @@ struct EventCard: Codable, Equatable, Sendable {
     /// whole file into the transcript for nothing. Values that fit are untouched, and keep their
     /// type.
     ///
+    /// An outbound call (`showsArgumentsWhole`) is carried whole too, every argument: the click
+    /// sends it after the run read untrusted content, and an email body is not a megabyte file.
+    ///
     /// Execution-bearing arguments are carried whole, which is the deliberate side of the trade:
     /// the argument that can be a megabyte is the content-like one and it is still capped, while a
     /// command or a path is bounded in practice by what a shell or a filesystem accepts. A card
     /// with a pathologically long single-line command is a tall card in a scrolling transcript —
     /// preferable to an approver reading 500 characters of a command and authorising 600.
     static func displayCopy(of call: BlockedCall) -> BlockedCall {
+        if showsArgumentsWhole(toolName: call.toolName) { return call }
         var args: [String: JSONValue] = [:]
         for (key, value) in call.args {
             let shown = preview(key: key, value: value)
@@ -423,7 +440,8 @@ struct EventCard: Codable, Equatable, Sendable {
     /// cannot see is the one thing this must not do. The character count is of the whole
     /// (blank-collapsed) text, so it answers "how much was there", not "how much of the top
     /// twelve lines was there".
-    static func preview(key: String, value: JSONValue) -> String {
+    static func preview(key: String, value: JSONValue, whole: Bool = false) -> String {
+        if whole { return OutboundTools.fullText(value) }
         let text = collapsingBlankLines(renderedText(value))
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
         let hiddenLines = max(0, lines.count - argumentPreviewLines)

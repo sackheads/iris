@@ -1034,7 +1034,9 @@ before seeing the result.
 
 The card for a run that stopped on an approval shows the **whole call** — the tool, every argument,
 and a long body cut to the first 500 characters — because an approval given without sight of the
-payload is worse than no button. Vibecop is asked about that same persisted call once the card is
+payload is worse than no button. An outbound send refused after untrusted content (mail, calendar,
+tasks, an MCP tool) is never cut: the click sends the body and recipients exactly as the run wrote
+them, so the card shows every argument whole, in a scroll area of capped height. Vibecop is asked about that same persisted call once the card is
 saved, and its verdict and reason are then written onto the card beside the button. The card does
 not wait for it, because a local model can take seconds and a run stopped in that wait would
 otherwise leave a blocked row with no card at all (#521). A verdict that comes back after you have

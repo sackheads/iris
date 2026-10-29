@@ -103,6 +103,36 @@ struct OutboundToolsTests {
         #expect(JobsCommand.parse("/jobs exempt digest") == .usage)
         #expect(JobsCommand.parse("/jobs exempt") == .usage)
     }
+
+    /// A run's card for a refused send offers "Approve and run", which sends the ledger's full
+    /// call, so the card shows every argument whole: a 20-line body, long recipients, all of it.
+    @Test func aRunCardShowsARefusedSendWhole() {
+        let body = (1...20).map { "Line \($0) of the body." }.joined(separator: "\n")
+            + "\n" + String(repeating: "x", count: EventCard.argumentPreviewLimit + 50)
+        let to = (1...40).map { "person\($0)@example.com" }.joined(separator: ", ")
+        let call = BlockedCall(toolName: "gmail_send_email", args: ["to": .string(to), "subject": .string("s"), "body": .string(body)],
+                               cwd: nil, reason: .approval)
+        let card = EventCard(runId: UUID(), jobId: UUID(), jobName: "digest", status: .blockedOnApproval,
+                             blockedTool: call.toolName, startedAt: Date(), finishedAt: Date(),
+                             blockedCall: EventCard.displayCopy(of: call))
+        #expect(card.showsArgumentsWhole && card.offersApproval)
+        let shown = Dictionary(uniqueKeysWithValues: card.blockedArguments.map { ($0.key, $0.value) })
+        #expect(shown["body"] == body)
+        #expect(shown["to"] == to)
+        #expect(EventCard.displayCopy(of: call).args == call.args)
+    }
+
+    /// Every other tool keeps the bounded preview.
+    @Test func aRunCardStillBoundsOtherTools() {
+        let body = (1...20).map { "Line \($0)" }.joined(separator: "\n")
+        let call = BlockedCall(toolName: "write_file", args: ["path": .string("/w/a.md"), "content": .string(body)],
+                               cwd: "/w", reason: .approval)
+        let card = EventCard(runId: UUID(), jobId: UUID(), jobName: "digest", status: .blockedOnApproval,
+                             blockedTool: call.toolName, startedAt: Date(), finishedAt: Date(),
+                             blockedCall: EventCard.displayCopy(of: call))
+        #expect(!card.showsArgumentsWhole)
+        #expect(card.blockedArguments.first { $0.key == "content" }?.value != body)
+    }
 }
 
 /// #812: the per-conversation allow persists (Invariant 1) and is never carried by a new conversation.
