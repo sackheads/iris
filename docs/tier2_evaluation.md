@@ -186,3 +186,6 @@ offer this bundle. An install that already downloaded it keeps it: with no tier-
 in Settings, Iris uses this bundle only if its folder (`deberta-v3-base-prompt-injection-v2.onnx`)
 is in the models folder. To turn it off, clear the field in Settings → Security, or remove that
 folder.
+
+Kept in #780, on the whole stack's result on dataset v3: see
+[Off by default](prompt_guard_coreml.md#off-by-default).
