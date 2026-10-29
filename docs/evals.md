@@ -9,3 +9,19 @@ How these are made, and the rules for comparing them: [the spec](specs/2026-10-2
 | Date | Model | Fingerprint | Config | Dataset | Texts | FP | Recall | ROC-AUC | Benign max / attack min | Bar | Notes | File |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | 2026-10-28 | onnx:deberta-v3-base-prompt-injection-v2.onnx | `bd3d231da777` | tier 1 + 2 | injection v1 | test full | 31.2% | 71.7% | 0.767 | 0.996 / 0.000 | **fail** | contaminated: pre-split | `2026-10-28-onnx-deberta-v3-base-prompt-injection-v2.onnx-v1-test-full.json` |
+| 2026-10-28 | onnx:deberta-v3-base-prompt-injection-v2.onnx | `bd3d231da777` | tier 1 + 2 | injection v3 | test full | 39.8% | 63.6% | 0.731 | 1.000 / 0.000 | **fail** | contaminated: pre-split: 214 of 338 texts; clean texts: FP 74.3%, recall 57.3%; fresh attacks' recall 63.3% of 30 | `2026-10-28-onnx-deberta-v3-base-prompt-injection-v2.onnx-v3-test-full.json` |
+
+## injection.stack
+
+| Date | Model | Fingerprint | Config | Dataset | Texts | FP | Recall | ROC-AUC | Benign max / attack min | Bar | Notes | File |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-10-28 | onnx+ollama:deberta-v3-base-prompt-injection-v2.onnx + gemma4:12b | `ffbcc9b2b05c` | tier 1 + 2 + 3 | injection v2 | test s60 ×3 | 26.8% | 75.0% | n/a | n/a / n/a | n/a | contaminated: pre-split: 51 of 61 texts; think off; agreement 100.0% of 61, 0 unstable | `2026-10-28-stack123-ollama-gemma4-12b-thinkoff-v2-test-s60.json` |
+| 2026-10-28 | ollama:gemma4:12b | `ffbcc9b2b05c` | tier 1 + 3 | injection v2 | test s60 ×3 | 0.0% | 75.0% | n/a | n/a / n/a | n/a | contaminated: pre-split: 51 of 61 texts; think off; agreement 96.7% of 61, 2 unstable | `2026-10-28-stack13-ollama-gemma4-12b-thinkoff-v2-test-s60.json` |
+| 2026-10-29 | onnx+ollama:deberta-v3-base-prompt-injection-v2.onnx + gemma4:12b | `ffbcc9b2b05c` | tier 1 + 2 + 3 | injection v3 | all full ×3 | 39.9% | 90.7% | n/a | n/a / n/a | n/a | contaminated: pre-split: 300 of 454 texts; clean texts: FP 76.9%, recall 85.6%; fresh attacks' recall 95.6% of 90; think off; agreement 98.7% of 454, 6 unstable | `2026-10-29-stack123-ollama-gemma4-12b-thinkoff-v3-all-full.json` |
+
+## injection.verdict
+
+| Date | Model | Fingerprint | Config | Dataset | Texts | FP | Recall | ROC-AUC | Benign max / attack min | Bar | Notes | File |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-10-28 | ollama:gemma4:12b | `ffbcc9b2b05c` | tier 1 + 3 (tier 2 passing) | injection v1 | all full ×3 | 0.0% | 96.0% | n/a | n/a / n/a | n/a | contaminated: pre-split; think off; agreement 98.9% of 276, 3 unstable | `2026-10-28-ollama-gemma4-12b-thinkoff-v1-all-full.json` |
+| 2026-10-28 | ollama:gemma4:12b | `ffbcc9b2b05c` | tier 1 + 3 (tier 2 passing) | injection v3 | all full ×3 | 0.3% | 79.1% | n/a | n/a / n/a | n/a | contaminated: pre-split: 300 of 454 texts; clean texts: FP 1.3%, recall 64.1%; fresh attacks' recall 88.9% of 90; think off; agreement 96.7% of 454, 15 unstable | `2026-10-28-ollama-gemma4-12b-thinkoff-v3-all-full.json` |
