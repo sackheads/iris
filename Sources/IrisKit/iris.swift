@@ -3974,8 +3974,15 @@ actor IrisEngine {
     /// call, past the permission ladder: the person's approval is the permission.
     func applyHeldWrite(_ item: PendingContextWrite) async -> String {
         if item.toolName == "write_file" {
-            let decidedPath = item.args["path"].map { IrisPaths.throughPrivate(ToolExecutor.resolvePath($0.stringValue, cwd: item.workspacePath)) }
-            return await executeToolWithHooks(name: "write_file", args: item.args, cwd: item.workspacePath,
+            // The target the person was shown: the real path taken at the hold, not the call's
+            // spelling resolved again now. The approved write walks it with no link followed, so a
+            // link swapped in since is refused rather than written through.
+            guard let decidedPath = item.targetPath else {
+                return "Error: this held write has no recorded target; nothing was written."
+            }
+            var args = item.args
+            args["path"] = .string(decidedPath)
+            return await executeToolWithHooks(name: "write_file", args: args, cwd: item.workspacePath,
                                               conversationId: item.conversationId, useSandbox: false,
                                               origin: .approvedCall, decidedPath: decidedPath)
         }
