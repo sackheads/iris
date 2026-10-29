@@ -84,13 +84,16 @@ struct ContextHoldsReview: View {
     private func row(_ item: PendingContextWrite) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(verbatim: item.firstLine).font(.callout.bold())
-            if let body = Self.preview(item) {
-                Text(verbatim: body)
-                    .font(.caption.monospaced())
-                    .lineLimit(12)
-                    .padding(6)
-                    .background(Color.secondary.opacity(0.08))
-                    .cornerRadius(4)
+            ForEach(Array(Self.fields(item).enumerated()), id: \.offset) { _, field in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(verbatim: field.label).font(.caption2).foregroundColor(.secondary)
+                    Text(verbatim: field.text)
+                        .font(.caption.monospaced())
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(6)
+                        .background(Color.secondary.opacity(0.08))
+                        .cornerRadius(4)
+                }
             }
             if changed.contains(item.id) {
                 Text("This file changed after the change was proposed. Approving replaces what's there now.")
@@ -111,14 +114,29 @@ struct ContextHoldsReview: View {
         }
     }
 
-    /// The text the change would write, or what a delete would remove.
-    static func preview(_ item: PendingContextWrite) -> String? {
+    /// Everything the change would write, in full, each under its argument's name, or what a
+    /// delete would remove. Every argument shows: a skill's description reaches every prompt, and
+    /// its title, tags or a fact's `supersedes` are part of what is approved too (#826 review).
+    static func fields(_ item: PendingContextWrite) -> [(label: String, text: String)] {
         if item.toolName == "delete_skill" {
-            return item.targetPath.flatMap { try? String(contentsOfFile: $0, encoding: .utf8) }
+            let current = item.targetPath.flatMap { try? String(contentsOfFile: $0, encoding: .utf8) }
+            return current.map { [(label: "what it removes", text: $0)] } ?? []
         }
-        for key in ["content", "body", "description"] {
-            if let text = item.args[key]?.stringValue, !text.isEmpty { return text }
+        let order = ["path", "content", "description", "body", "title", "tags", "supersedes", "action", "fact_id", "by_fact_id"]
+        let keys = item.args.keys.filter { $0 != "name" }
+            .sorted { (order.firstIndex(of: $0) ?? order.count, $0) < (order.firstIndex(of: $1) ?? order.count, $1) }
+        return keys.compactMap { key in
+            guard let value = item.args[key] else { return nil }
+            return (label: key, text: render(value))
         }
-        return nil
+    }
+
+    private static func render(_ value: JSONValue) -> String {
+        switch value {
+        case .array(let items): return items.map(render).joined(separator: ", ")
+        case .object(let members):
+            return members.keys.sorted().map { "\($0): \(render(members[$0]!))" }.joined(separator: "\n")
+        default: return value.stringValue
+        }
     }
 }

@@ -3956,9 +3956,9 @@ actor IrisEngine {
             workspacePath: workspacePath, targetPath: target, targetSha256: ContextHolds.sha256(ofFileAt: target),
             firstLine: ContextHolds.firstLine(call.name, args: call.args, targetPath: target, paths: paths),
             createdAt: Date(), state: .pending, turnId: PerformanceProfiler.currentTurnID)
-        let localState = state
+        guard let localState = state else { return ContextHolds.uncheckedResult(call.name) }
         let held = await MainActor.run { () -> Bool in
-            guard let localState, localState.readUntrustedThroughDelegation(conversationId) else { return false }
+            guard localState.readUntrustedThroughDelegation(conversationId) else { return false }
             let root = localState.delegationRoot(of: conversationId)
             var row = item
             row.rootConversationId = root == conversationId ? nil : root
@@ -4701,10 +4701,11 @@ actor IrisEngine {
         }
 
         // #813: on a conversation that has read untrusted output, a write that becomes standing
-        // prompt context is kept for the person to approve, not applied. An unattended
-        // `write_file` is left to the ladder below, which never auto-allows ~/.iris for a
-        // background run: holding it would let an approval grant more than the run could do.
-        if !ContextHolds.applying, !(functionCall.name == "write_file" && isUnattended),
+        // prompt context is kept for the person to approve, not applied. Unattended too: the
+        // background ladder refuses ~/.iris's carve-out but still honours an allowlist rule that
+        // names the file, and an unheld write the ladder refuses goes on an approvable card anyway,
+        // so the hold grants nothing that card wouldn't (#826 review).
+        if !ContextHolds.applying,
            ContextHolds.shouldHold(functionCall.name, args: functionCall.args, cwd: workspacePath, paths: memory.paths),
            let held = await holdContextWriteIfTainted(functionCall, conversationId: conversationId, workspacePath: workspacePath) {
             return held

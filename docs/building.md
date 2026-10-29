@@ -103,7 +103,7 @@ swift run iris --context-holds-report            # the last 7 days
 swift run iris --context-holds-report --days 30
 ```
 
-Prints, per day, how often the hold on standing-context writes asked (#813, [memory](memory.md)): the turns that showed the chip, the items held by tool, how many were approved, declined, went stale or are still pending, and the median time from the hold to the decision, each for the pinned Iris and for other conversations. It reads `conversations.sqlite` read-only (no lock, no migration, so it runs beside the app), and touches no Keychain item and no settings. A store older than the hold reads as zeros. It's local only; nothing is sent anywhere.
+Prints, per day, how often the hold on standing-context writes asked (#813, [memory](memory.md)): the turns that showed the chip, the items held by tool, how many were approved, declined, went stale, failed to apply or are still pending, and the median time from the hold to the decision, each for the pinned Iris and for other conversations. It reads `conversations.sqlite` read-only (no lock, no migration, so it runs beside the app), and touches no Keychain item and no settings. A store older than the hold reads as zeros. It's local only; nothing is sent anywhere.
 
 ## Timing the guard models (`--guard-probe`)
 
