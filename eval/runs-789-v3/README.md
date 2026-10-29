@@ -30,6 +30,12 @@ Both were run from one binary built at `73e9be39`, signed with the Developer ID 
 
   The order holds because the eval judges serially in id order, repeat by repeat (`EvalGuardTask.swift:205-207`, `EvalDataset.select`).
 
+  The perf log carries no id. The extractor gave line n the id at position `n mod 454` of the sorted ids, with repeat `n div 454`. So the `id` check only confirms that rule. The outcome and length checks are the independent ones.
+- **`tier1_lengths.py`:** explains every text whose tier-2 input length differs from its dataset length.
+  - It replays tier 1 in Python: NFKC, the control-character strip, the role-delimiter strips and the breakout-tag escape.
+  - It counts the result in Swift Characters and requires the logged length exactly.
+  - All 454 texts match, and it prints the cause of each difference with one example id.
+
 ## Stripped
 
 The stack result's `model.spec` and `settings.tier2_bundle` held the absolute path of the tier-2 bundle under the home folder. The home prefix is replaced with `~/`, so they read `~/.iris/models/deberta-v3-base-prompt-injection-v2.onnx-no`. Nothing else was changed. The bundle's files and sha256s are unchanged in `model`, and its digest is in `settings.tier2_fingerprint`. The verdict result and these files held no local path.

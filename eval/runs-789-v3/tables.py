@@ -121,6 +121,13 @@ print(f"- verdict missed {len(vm)}; 1+2+3 caught {sum(hit(sr[k]) for k in vm)} o
 print(f"- verdict caught {len(keys) - len(vm)}; 1+2+3 missed {len(lost)} of them: "
       + ", ".join(f"{n} {l}" for l, n in Counter(layer(k) for k in lost).most_common())
       + ": " + ", ".join(f"`{i}` r{r + 1}" for i, r in lost))
+def unstable_ids(rows): return {i for i in ids if len({rows[(i, r)]["outcome"] for r in range(R)}) > 1}
+either = unstable_ids(vr) | unstable_ids(sr)
+gained = [k for k in vm if hit(sr[k])]
+t3_alone = [k for k in gained if layer(k) == "t3 block"]
+print(f"- of the {len(gained)}: tier 3 alone (no tier-2 partial) {len(t3_alone)}, leaving {len(gained) - len(t3_alone)} that "
+      f"tier 2 took part in; {sum(k[0] in either for k in gained)} of the {len(gained)} are texts unstable in either run "
+      f"({sum(k[0] in either for k in t3_alone)} of the tier-3-alone ones)")
 per = defaultdict(lambda: [0, 0])
 for k in keys:
     per[k[0]][0] += hit(vr[k]); per[k[0]][1] += hit(sr[k])
