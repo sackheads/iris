@@ -26,9 +26,16 @@ enum OutboundTools {
         case "gmail_send_email": action = "send email to anyone"
         case "google_calendar_create_event": action = "create calendar events"
         case "google_tasks_create_task": action = "create tasks"
-        default: action = "call `\(IrisEngine.flattenToolEcho(name))`, which can send or change something outside this Mac,"
+        default: action = "call `\(shownName(name))`, which can send or change something outside this Mac,"
         }
         return "This job may \(action) without asking, even after reading untrusted content."
+    }
+
+    /// A tool name as text the model or the person reads: as is when it is a plain identifier (every
+    /// built-in, and an MCP name of the usual shape), else flattened like any echoed name.
+    static func shownName(_ name: String) -> String {
+        let plain = !name.isEmpty && name.count <= 128 && name.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "_-.".contains($0)) }
+        return plain ? name : IrisEngine.flattenToolEcho(name)
     }
 
     /// The job tools' argument that proposes exemptions. A proposal only: it takes effect through
@@ -56,7 +63,7 @@ enum OutboundTools {
             return "Not created: a read-only job can't send or change anything outside this Mac, so it can't carry outbound_exemptions. Ask for a mutating job, or leave them out."
         }
         if let bad = names.first(where: { !isOutbound($0, readOnlyMCPTools: readOnlyMCPTools) }) {
-            return ToolMessage("Not created: `\(IrisEngine.flattenToolEcho(bad))` isn't an outbound tool, so it can't be exempted. Exemptions are for: \(builtIn.sorted().joined(separator: ", ")), and MCP tools their server didn't mark read-only.")
+            return ToolMessage("Not created: `\(shownName(bad))` isn't an outbound tool, so it can't be exempted. Exemptions are for: \(builtIn.sorted().joined(separator: ", ")), and MCP tools their server didn't mark read-only.")
         }
         return nil
     }
@@ -70,7 +77,7 @@ enum OutboundTools {
     /// tool, why, and where the person can exempt it. Like `unattendedDeniedToolResult`, it forbids
     /// reaching the same target another way.
     static func unattendedRefusal(tool: String) -> String {
-        let shown = IrisEngine.flattenToolEcho(tool)
+        let shown = shownName(tool)
         return "Not run: `\(shown)` sends or changes something outside this Mac, and this run has read untrusted content, so it needs a person's approval and nobody is here to give it. The person can exempt this job with `/jobs exempt <job> \(shown)`. Do not ask a question, and do not try to reach the same target another way. Finish the rest of the task if you can, then report what you did and what was refused."
     }
 

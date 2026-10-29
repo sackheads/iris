@@ -84,7 +84,8 @@ struct JobsCommandTests {
     func usageTextSpellsEveryForm() {
         #expect(JobsCommand.usageText == "Usage: /jobs · /jobs ack <run id> · /jobs pause <name> · "
                 + "/jobs resume <name> · /jobs enable <name> · /jobs disable <name> · /jobs run <name> · "
-                + "/jobs delete <name> · /jobs reschedule <name> <cron> [timezone] · /jobs url <name> [on|off]")
+                + "/jobs delete <name> · /jobs reschedule <name> <cron> [timezone] · /jobs url <name> [on|off] · "
+                + "/jobs exempt <name> <tool> · /jobs unexempt <name> <tool>")
     }
 
     // MARK: reschedule
