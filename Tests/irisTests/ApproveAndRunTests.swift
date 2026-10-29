@@ -201,18 +201,78 @@ struct ApproveAndRunTests {
         #expect(both.contains("characters,") && both.hasSuffix("more lines)"))
         #expect(both.count < EventCard.argumentPreviewLimit + 60)
 
-        // The bound holds for an execution-bearing argument too: it is exempt from the character
-        // cap, not from having a height — and with no character cut ahead of it the line count is
-        // exact.
+        // An execution-bearing argument has no line bound (#829): the card shows every line the
+        // click would run, and the scroll area around the rows bounds the card instead.
         let longCommand = (1...100).map { "echo \($0)" }.joined(separator: "\n")
-        let cappedCommand = EventCard.preview(key: "command", value: .string(longCommand))
-        #expect(cappedCommand.components(separatedBy: "\n").count == EventCard.argumentPreviewLines)
-        #expect(cappedCommand.hasSuffix("… (\(100 - EventCard.argumentPreviewLines) more lines)"))
-        #expect(cappedCommand.hasPrefix("echo 1\n"))
+        #expect(EventCard.preview(key: "command", value: .string(longCommand)) == longCommand)
 
         // One hidden line is "1 more line", not "1 more lines".
         let oneOver = (1...(EventCard.argumentPreviewLines + 1)).map { "x\($0)" }.joined(separator: "\n")
         #expect(EventCard.preview(key: "content", value: .string(oneOver)).hasSuffix("… (1 more line)"))
+    }
+
+    @Test("a 100-line command is on the card exactly as the ledger will run it (#829)")
+    func aLongCommandIsShownWhole() throws {
+        let command = (1...100).map { "echo \($0)" }.joined(separator: "\n") + "\nrm -rf ~/scratch"
+        let call = BlockedCall(toolName: "run_command", args: ["command": .string(command)], cwd: "/tmp", reason: .approval)
+        let card = EventCard(runId: UUID(), jobId: UUID(), jobName: "sweep", status: .blockedOnApproval,
+                             blockedTool: call.toolName, startedAt: Date(), finishedAt: Date(),
+                             blockedCall: EventCard.displayCopy(of: call))
+        #expect(card.blockedArguments.first { $0.key == "command" }?.value == command)
+        #expect(card.blockedCall?.args["command"] == call.args["command"], "the stored copy is the ledger's command")
+        #expect(card.scrollsArguments, "and the view bounds it with a scroll area")
+        #expect(card.offersApproval)
+    }
+
+    @Test("blank lines in a command survive on the card (#829)")
+    func blankLinesInACommandSurvive() {
+        let command = "cat <<'EOF' > notes.txt\nfirst\n\n\n\nlast\nEOF"
+        #expect(EventCard.preview(key: "command", value: .string(command)) == command)
+        #expect(EventCard.displayCopy(of: BlockedCall(toolName: "run_command", args: ["command": .string(command)],
+                                                      reason: .approval)).args["command"]?.stringValue == command)
+    }
+
+    @Test("a content argument is still cut, and a short call does not scroll (#829)")
+    func contentIsStillCut() {
+        let body = (1...100).map { "line \($0)" }.joined(separator: "\n")
+        let call = BlockedCall(toolName: "write_file", args: ["path": .string("/w/a.md"), "content": .string(body)],
+                               cwd: "/w", reason: .approval)
+        let card = EventCard(runId: UUID(), jobId: UUID(), jobName: "sweep", status: .blockedOnApproval,
+                             blockedTool: call.toolName, startedAt: Date(), finishedAt: Date(),
+                             blockedCall: EventCard.displayCopy(of: call))
+        let content = card.blockedArguments.first { $0.key == "content" }?.value ?? ""
+        #expect(content.hasSuffix("… (\(100 - EventCard.argumentPreviewLines) more lines)"))
+        #expect(card.blockedCall?.args["content"] != call.args["content"])
+        #expect(!card.scrollsArguments, "a short path needs no scroll area")
+    }
+
+    private func runCard(_ command: String) -> EventCard {
+        let call = BlockedCall(toolName: "run_command", args: ["command": .string(command)], cwd: "/tmp", reason: .approval)
+        return EventCard(runId: UUID(), jobId: UUID(), jobName: "sweep", status: .blockedOnApproval,
+                         blockedTool: call.toolName, startedAt: Date(), finishedAt: Date(),
+                         blockedCall: EventCard.displayCopy(of: call))
+    }
+
+    @Test("each limit alone makes a command scroll: many short lines, or one long line (#836 review)")
+    func eachLimitAloneScrolls() {
+        let shortLines = (1...(EventCard.argumentPreviewLines + 1)).map { "x\($0)" }.joined(separator: "\n")
+        #expect(shortLines.count <= EventCard.argumentPreviewLimit)
+        #expect(runCard(shortLines).scrollsArguments, "13 short lines, under 500 characters")
+        let oneLine = String(repeating: "a", count: EventCard.argumentPreviewLimit + 1)
+        #expect(runCard(oneLine).scrollsArguments, "one line of 501 characters")
+        let fits = (1...EventCard.argumentPreviewLines).map { "x\($0)" }.joined(separator: "\n")
+        #expect(!runCard(fits).scrollsArguments, "12 short lines fit")
+    }
+
+    @Test("CRLF line breaks count as lines, for the scroll and for a content cut (#836 review)")
+    func crlfLinesCount() {
+        let crlf = (1...100).map { "e\($0)" }.joined(separator: "\r\n")
+        #expect(crlf.count < EventCard.argumentPreviewLimit)
+        let card = runCard(crlf)
+        #expect(card.scrollsArguments)
+        #expect(card.blockedArguments.first { $0.key == "command" }?.value == crlf, "and the command is still shown byte-exact")
+        let content = EventCard.preview(key: "content", value: .string(crlf))
+        #expect(content.hasSuffix("… (\(100 - EventCard.argumentPreviewLines) more lines)"))
     }
 
     @Test("a profile denial is never offered an Approve button (R13)")

@@ -342,16 +342,19 @@ struct EventCard: Codable, Equatable, Sendable {
     /// arguments are exempt — see `executionBearingArguments`.
     static let argumentPreviewLimit = 500
 
-    /// How many lines of one argument a card shows, whatever kind of argument it is. The character
-    /// cap says nothing about newlines, so 500 blank lines used to pass it untouched and stretch
-    /// the card to 500 rows in the transcript. Runs of blank lines collapse to one and what is
-    /// left is capped here, with the remainder counted rather than silently dropped.
+    /// How many lines of one *content-like* argument a card shows. The character cap says nothing
+    /// about newlines, so 500 blank lines used to pass it untouched and stretch the card to 500
+    /// rows in the transcript. Runs of blank lines collapse to one and what is left is capped
+    /// here, with the remainder counted rather than silently dropped. Execution-bearing arguments
+    /// are exempt from this too (#829).
     static let argumentPreviewLines = 12
 
-    /// Arguments a tool *executes* rather than stores, exempt from `argumentPreviewLimit`: cutting
-    /// one of these hides the thing the click authorises, and nobody can approve the 100
-    /// characters they were not shown. The ledger's untruncated copy is what runs either way — the
-    /// question here is only what a person can read before clicking.
+    /// Arguments a tool *executes* rather than stores, shown exactly as they run: no character
+    /// cut, no line cut, no blank-line collapsing. Cutting one of these hides the thing the click
+    /// authorises, and nobody can approve the 100 characters, or the 88 lines, they were not shown
+    /// (#829). The ledger's untruncated copy is what runs either way — the question here is only
+    /// what a person can read before clicking. A long one scrolls in a capped area on the card
+    /// (`scrollsArguments`).
     ///
     /// | argument      | tools that execute it                                   | why it is never cut                                                          |
     /// | ------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------- |
@@ -373,8 +376,9 @@ struct EventCard: Codable, Equatable, Sendable {
         let value: String
     }
 
-    /// Every argument of the blocked call, sorted by key and cut to `argumentPreviewLimit`, so the
-    /// person approving sees the whole call and two renders of it read the same. Empty when there
+    /// Every argument of the blocked call, sorted by key and through `preview` (a content-like one
+    /// cut, what runs never), so the person approving sees the whole call and two renders of it
+    /// read the same. Empty when there
     /// is no blocked call.
     var blockedArguments: [BlockedArgument] {
         guard let blockedCall else { return [] }
@@ -396,6 +400,19 @@ struct EventCard: Codable, Equatable, Sendable {
         OutboundTools.builtIn.contains(toolName) || JobProfile.isMCPTool(toolName)
     }
 
+    /// Whether the view bounds the arguments with a scroll area: an outbound call's, all uncut, or
+    /// any call with an execution-bearing argument longer than a content preview would be (#829).
+    var scrollsArguments: Bool {
+        guard let blockedCall else { return false }
+        if showsArgumentsWhole { return true }
+        return blockedCall.args.contains { key, value in
+            guard Self.executionBearingArguments.contains(key) else { return false }
+            let text = Self.renderedText(value)
+            return text.count > Self.argumentPreviewLimit
+                || Self.lines(of: text).count > Self.argumentPreviewLines
+        }
+    }
+
     /// `Vibecop: DENY — recursive delete` — its opinion of the call, or `nil` when it was not
     /// consulted. Information for the person deciding; the button is offered regardless.
     var vibecopLine: String? {
@@ -413,11 +430,11 @@ struct EventCard: Codable, Equatable, Sendable {
     /// An outbound call (`showsArgumentsWhole`) is carried whole too, every argument: the click
     /// sends it after the run read untrusted content, and an email body is not a megabyte file.
     ///
-    /// Execution-bearing arguments are carried whole, which is the deliberate side of the trade:
-    /// the argument that can be a megabyte is the content-like one and it is still capped, while a
-    /// command or a path is bounded in practice by what a shell or a filesystem accepts. A card
-    /// with a pathologically long single-line command is a tall card in a scrolling transcript —
-    /// preferable to an approver reading 500 characters of a command and authorising 600.
+    /// Execution-bearing arguments are carried whole and byte-exact, which is the deliberate side
+    /// of the trade: the argument that can be a megabyte is the content-like one and it is still
+    /// capped, while a command or a path is bounded in practice by what a shell or a filesystem
+    /// accepts. A long one scrolls in a capped area on the card — preferable to an approver
+    /// reading 12 lines of a command and authorising 100 (#829).
     static func displayCopy(of call: BlockedCall) -> BlockedCall {
         if showsArgumentsWhole(toolName: call.toolName) { return call }
         var args: [String: JSONValue] = [:]
@@ -429,10 +446,10 @@ struct EventCard: Codable, Equatable, Sendable {
                            cwd: call.cwd, reason: call.reason, at: call.at, grantNearest: call.grantNearest)
     }
 
-    /// One argument as a card shows it. Four passes: render it (compact JSON for a structure, so a
-    /// nested argument reads as itself rather than `{...}`), collapse runs of blank lines, bound
-    /// its height to `argumentPreviewLines`, and cut it to `argumentPreviewLimit` characters
-    /// *unless* `key` is execution-bearing.
+    /// One argument as a card shows it. An execution-bearing `key` is only rendered, never
+    /// changed (#829). Anything else takes four passes: render it (compact JSON for a structure,
+    /// so a nested argument reads as itself rather than `{...}`), collapse runs of blank lines,
+    /// bound its height to `argumentPreviewLines`, and cut it to `argumentPreviewLimit` characters.
     ///
     /// Lines are cut before characters, and both notes are collected into one `… (N characters,
     /// M more lines)` suffix at the end. Order matters: cutting characters first puts the note
@@ -442,12 +459,13 @@ struct EventCard: Codable, Equatable, Sendable {
     /// twelve lines was there".
     static func preview(key: String, value: JSONValue, whole: Bool = false) -> String {
         if whole { return OutboundTools.fullText(value) }
+        if executionBearingArguments.contains(key) { return renderedText(value) }
         let text = collapsingBlankLines(renderedText(value))
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        let lines = Self.lines(of: text)
         let hiddenLines = max(0, lines.count - argumentPreviewLines)
         var shown = hiddenLines == 0 ? text : lines.prefix(argumentPreviewLines).joined(separator: "\n")
         var notes: [String] = []
-        if !executionBearingArguments.contains(key), shown.count > argumentPreviewLimit {
+        if shown.count > argumentPreviewLimit {
             shown = String(shown.prefix(argumentPreviewLimit))
             notes.append("\(text.count) characters")
         }
@@ -456,7 +474,7 @@ struct EventCard: Codable, Equatable, Sendable {
         return shown + "… (" + notes.joined(separator: ", ") + ")"
     }
 
-    private static func renderedText(_ value: JSONValue) -> String {
+    static func renderedText(_ value: JSONValue) -> String {
         switch value {
         case .object, .array:
             let encoder = JSONEncoder()
@@ -468,12 +486,18 @@ struct EventCard: Codable, Equatable, Sendable {
         }
     }
 
+    /// The lines of `text`, split at any line break: "\r\n" is one `Character`, so a split at "\n"
+    /// alone saw a CRLF command as a single line and left it uncounted (#836 review).
+    static func lines(of text: String) -> [Substring] {
+        text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+    }
+
     /// Any run of blank lines becomes one. A file with paragraph breaks still reads as one; a
     /// thousand newlines becomes a single gap.
     private static func collapsingBlankLines(_ text: String) -> String {
         var kept: [Substring] = []
         var inBlankRun = false
-        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+        for line in Self.lines(of: text) {
             let isBlank = line.trimmingCharacters(in: .whitespaces).isEmpty
             if isBlank && inBlankRun { continue }
             inBlankRun = isBlank
