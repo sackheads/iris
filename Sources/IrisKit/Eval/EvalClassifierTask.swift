@@ -70,7 +70,7 @@ enum EvalClassifierTask {
     /// item, and they could make the eval score whatever the home is set to. Tier 3 isn't reached
     /// at `.tier2_coreML`, so its fields hold nothing.
     static var guardConfig: InjectionGuard.GuardConfigFingerprint {
-        .init(protectionEnabled: true, promptGuardEngine: "", promptGuardModel: "", promptGuardCoreMLModel: "eval",
+        .init(protectionEnabled: true, promptGuardEngine: "", promptGuardModel: "", promptGuardCoreMLModel: "eval", tier3CloudModel: "",
               tier2ModelsDir: "", tier3ModelsDir: "", tier2Provisioning: .provisioned,
               tier3Provisioning: .unprovisioned(modelName: ""))
     }
