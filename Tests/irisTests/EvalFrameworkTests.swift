@@ -580,6 +580,21 @@ struct EvalGuardTaskTests {
         #expect(canaryOnly.verdicts.first { $0.id == "a1" }?.caught == false, "1+3 has no tier 2 to withhold the line")
     }
 
+    @Test func aStackResultRecordsTheBlockingTierPerRowAndAVerdictResultDoesNot() async throws {
+        let s = try setUp()
+        defer { try? FileManager.default.removeItem(at: s.root) }
+        let stack = try await run(s, SafeCanary(), task: EvalGuardTask.stack, stack: .tier123, repeats: 1)
+        #expect(stack.key.scoringVersion == 2)
+        #expect(stack.verdicts.count == 4 && stack.verdicts.allSatisfy { $0.blockedBy != nil && $0.tier2Verdict != nil })
+        #expect(stack.verdicts.first { $0.id == "b1" }.map { $0.blockedBy == "none" && $0.tier2Verdict == "safe" } == true)
+        #expect(stack.verdicts.first { $0.id == "a1" }?.blockedBy == "tier2", "the 3-line attack is wholly withheld: tier 2 blocks it")
+        let canaryOnly = try await run(s, FakeCanary(), task: EvalGuardTask.stack, stack: .tier13, repeats: 1)
+        #expect(canaryOnly.verdicts.first { $0.id == "a1" }.map { $0.blockedBy == "tier3" && $0.tier2Verdict == "skipped" } == true)
+        let verdict = try await run(s, FakeCanary(), repeats: 1)
+        #expect(verdict.key.scoringVersion == 1)
+        #expect(verdict.verdicts.allSatisfy { $0.blockedBy == nil && $0.tier2Verdict == nil })
+    }
+
     @Test func theCLIParsesVerdictAndStackRuns() {
         guard case .success(.runGuard(let v))? = EvalCLI.parse(["iris", "--eval", "run", "injection.verdict", "--model", "ollama:gemma4:12b",
                                                                   "--think", "off", "--repeats", "5", "--full"]) else {
