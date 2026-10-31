@@ -1001,6 +1001,20 @@ struct ViewWholeBlockedCallTests {
         #expect(whole.fields.map(\.key) == ["content", "path"])
     }
 
+    @Test("the target is the real file behind a symlinked directory, and only a write has one")
+    func targetFollowsSymlinks() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("iris-whole-\(UUID().uuidString)")
+        let real = root.appendingPathComponent("real"), link = root.appendingPathComponent("link")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let call = BlockedCall(toolName: "write_file", args: ["path": .string("link/a.md"), "content": .string("x")],
+                               cwd: root.path, reason: .approval)
+        #expect(BlockedCallWhole(call: call).target == IrisPaths.realPath(real.path) + "/a.md", "a file that does not exist yet still resolves its directory")
+        let read = BlockedCall(toolName: "read_file", args: ["path": .string("link/a.md")], cwd: root.path, reason: .approval)
+        #expect(BlockedCallWhole(call: read).target == nil)
+    }
+
     @Test("the size line says one character and one line in the singular")
     func sizeLineSingular() {
         #expect(BlockedCallWhole.sizeLine("x").hasPrefix("1 character, 1 line, "))
