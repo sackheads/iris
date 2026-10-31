@@ -34,20 +34,41 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
         var ps: @Sendable () async -> Data?
         var preload: @Sendable (Data) async throws -> (status: Int, data: Data)
         /// A `/api/generate` request (#779 review): through here so a test drives `generate`.
-        var generate: @Sendable (Data) async throws -> (status: Int, data: Data) = { try await Transport.post("generate", $0) }
+        var generate: @Sendable (Data) async throws -> (status: Int, data: Data) = { try await Transport.send(Transport.generateRequest($0)) }
         /// `/api/show`'s body for a model, nil when it didn't answer 200 (#783).
         var show: @Sendable (Data) async -> Data? = { body in
             guard let (status, data) = try? await Transport.post("show", body, timeout: 5), status == 200 else { return nil }
             return data
         }
 
-        /// POSTs `body` to `/api/<endpoint>`. The shape #794 shares, adding its own endpoints.
-        static func post(_ endpoint: String, _ body: Data, timeout: TimeInterval? = nil) async throws -> (status: Int, data: Data) {
+        /// How long one `/api/generate` call may take before it fails (#797). With no timeout
+        /// URLSession's 60 s default applied, and a 32 KB tool result on a loaded Mac took 61.0 s
+        /// with thinking on (28-38 s for the others), so the guard timed out and tier 3 failed
+        /// closed on an ordinary output. 180 s is about three times the slowest measured call; a
+        /// call past it still throws and the check still fails closed.
+        static let generateTimeout: TimeInterval = 180
+
+        /// The request `post` sends. `timeout` nil leaves URLSession's 60 s default.
+        static func request(_ endpoint: String, _ body: Data, timeout: TimeInterval? = nil) -> URLRequest {
             var req = URLRequest(url: URL(string: "\(OllamaEngine.baseURL)/api/\(endpoint)")!)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             if let timeout { req.timeoutInterval = timeout }
             req.httpBody = body
+            return req
+        }
+
+        /// The canary's `/api/generate` request: `generateTimeout`, never the default.
+        static func generateRequest(_ body: Data) -> URLRequest {
+            request("generate", body, timeout: generateTimeout)
+        }
+
+        /// POSTs `body` to `/api/<endpoint>`. The shape #794 shares, adding its own endpoints.
+        static func post(_ endpoint: String, _ body: Data, timeout: TimeInterval? = nil) async throws -> (status: Int, data: Data) {
+            try await send(request(endpoint, body, timeout: timeout))
+        }
+
+        static func send(_ req: URLRequest) async throws -> (status: Int, data: Data) {
             let (data, response) = try await URLSession.shared.data(for: req)
             return ((response as? HTTPURLResponse)?.statusCode ?? 0, data)
         }
