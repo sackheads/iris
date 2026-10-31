@@ -86,7 +86,8 @@ The most robust defense against zero-day injections is to have a small, restrict
 The Tier 2 and Tier 3 verdict for a given piece of content is memoized for the process lifetime
 (`InjectionGuard.SanitizationCache`, bounded LRU of 128 entries). The key covers the normalized
 content, the provenance tag, the requested tier, and the settings that decide the verdict
-(protection enabled, `promptGuardEngine`, `promptGuardModel`, `promptGuardCoreMLModel`, the models
+(protection enabled, `promptGuardEngine`, `promptGuardModel`, `promptGuardCoreMLModel`, the model a
+`cloud` tier 3 sends (Vibecop's cloud model, else the easy tier's; #824), the models
 directory, and the resolved tier-2/tier-3 provisioning state), so changing
 the guard configuration — or a model appearing on disk mid-process — invalidates naturally. Genuine
 verdicts are cached in both directions (safe and blocked), and a `skipped` verdict (tier
