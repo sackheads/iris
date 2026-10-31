@@ -468,6 +468,22 @@ struct OutboundGateDispatchTests {
         #expect(decision == .approved(ToolApproval(layer: .exemption, detail: AppState.OutboundExemption.job.rawValue)))
     }
 
+    /// #825, the planner's condition: the search exemption is for search only, and a run without it
+    /// is refused after taint.
+    @Test func theSearchExemptionCoversSearchOnly() async throws {
+        let (app, id) = try app(tainted: true, background: true)
+        let idx = try #require(app.conversations.firstIndex { $0.id == id })
+        let engine = engine(app)
+        #expect(await engine.outboundGate(search, conversationId: id, workspacePath: nil, isUnattended: true)
+                == .refused(OutboundTools.unattendedRefusal(tool: "search_web")), "without the exemption it is refused")
+        app.conversations[idx].jobOutboundExemptions = ["search_web"]
+        for tool in ["gmail_send_email", "google_tasks_create_task", send] {
+            #expect(await engine.outboundGate(FunctionCall(name: tool, args: sendArgs), conversationId: id,
+                                              workspacePath: nil, isUnattended: true)
+                    == .refused(OutboundTools.unattendedRefusal(tool: tool)), "\(tool)")
+        }
+    }
+
     @Test func aToolThatIsntOutboundIsNotGated() async throws {
         let (app, id) = try app(tainted: true, background: true)
         let engine = engine(app)
