@@ -1,14 +1,23 @@
 import Foundation
 
 /// #812: the tools that send or change something outside the machine (mail, calendar, tasks, and
-/// any MCP tool its server didn't mark read-only). Once a conversation has read untrusted output
+/// any MCP tool its server didn't mark read-only), and since #825 `search_web`, whose query goes
+/// to a search provider. Once a conversation has read untrusted output
 /// (`Conversation.hasUntrustedToolOutput`), a call to one asks the person when attended and is
 /// refused when unattended, unless the person exempted it: for the conversation from the approval
 /// card, or for a job when they approved creating it (or later with `/jobs exempt`).
 enum OutboundTools {
-    /// The built-in outbound tools. The Google tools that only read are not here; nor is
-    /// `search_web`, whose query is a channel too (a parked follow-up, not this gate).
-    static let builtIn: Set<String> = ["gmail_send_email", "google_calendar_create_event", "google_tasks_create_task"]
+    /// The built-in outbound tools. The Google tools that only read are not here.
+    static let builtIn: Set<String> = ["gmail_send_email", "google_calendar_create_event", "google_tasks_create_task", searchWeb]
+
+    /// `search_web` is outbound for its query, not for what it changes: it can run in a read-only
+    /// job, so such a job may carry its exemption (#825).
+    static let searchWeb = "search_web"
+
+    /// What the tool does outside the Mac, as a clause the refusal and the card complete.
+    private static func channel(_ name: String) -> String {
+        name == searchWeb ? "sends a query you wrote to a search provider" : "sends or changes something outside this Mac"
+    }
 
     /// Whether `name` is outbound. An MCP tool is, unless its server marked it `readOnlyHint: true`:
     /// Iris trusts that marking, since a server that lies about its own tools can already do
@@ -26,6 +35,7 @@ enum OutboundTools {
         case "gmail_send_email": action = "send email to anyone"
         case "google_calendar_create_event": action = "create calendar events"
         case "google_tasks_create_task": action = "create tasks"
+        case searchWeb: action = "search the web, with queries it writes"
         default: action = "call `\(shownName(name))`, which can send or change something outside this Mac,"
         }
         return "This job may \(action) without asking, even after reading untrusted content."
@@ -49,7 +59,7 @@ enum OutboundTools {
     /// the creation approval card, which always asks when it is given and states each one.
     static let exemptionsArgument = "outbound_exemptions"
 
-    static let exemptionsParameterDescription = "Mutating jobs only. Outbound tools this job's runs may call without asking even after reading untrusted content (gmail_send_email, google_calendar_create_event, google_tasks_create_task, or an MCP tool by its full name). Give only what the task needs: the user is shown each one, e.g. that the job may send email to anyone, and the job is created only if they approve. Without one, such a call is refused once the run has read untrusted content."
+    static let exemptionsParameterDescription = "Mutating jobs only. Outbound tools this job's runs may call without asking even after reading untrusted content (gmail_send_email, google_calendar_create_event, google_tasks_create_task, search_web, or an MCP tool by its full name). Give only what the task needs: the user is shown each one, e.g. that the job may send email to anyone, and the job is created only if they approve. Without one, such a call is refused once the run has read untrusted content."
 
     static let exemptionsShape: ToolMessage = "outbound_exemptions must be a list of tool names, e.g. [\"gmail_send_email\"]."
 
@@ -66,7 +76,7 @@ enum OutboundTools {
     /// isn't outbound is refused too: exempting it would suggest protection that isn't there.
     static func exemptionRefusal(_ names: [String], profile: JobProfile, readOnlyMCPTools: Set<String>) -> ToolMessage? {
         guard !names.isEmpty else { return nil }
-        if profile == .readOnly {
+        if profile == .readOnly, names.contains(where: { $0 != searchWeb }) {
             return "Not created: a read-only job can't send or change anything outside this Mac, so it can't carry outbound_exemptions. Ask for a mutating job, or leave them out."
         }
         if let bad = names.first(where: { !isOutbound($0, readOnlyMCPTools: readOnlyMCPTools) }) {
@@ -85,7 +95,7 @@ enum OutboundTools {
     /// reaching the same target another way.
     static func unattendedRefusal(tool: String) -> String {
         let shown = shownName(tool)
-        return "Not run: `\(shown)` sends or changes something outside this Mac, and this run has read untrusted content, so it needs a person's approval and nobody is here to give it. The person can exempt this job with `/jobs exempt <job> \(shown)`. Do not ask a question, and do not try to reach the same target another way. Finish the rest of the task if you can, then report what you did and what was refused."
+        return "Not run: `\(shown)` \(channel(tool)), and this run has read untrusted content, so it needs a person's approval and nobody is here to give it. The person can exempt this job with `/jobs exempt <job> \(shown)`. Do not ask a question, and do not try to reach the same target another way. Finish the rest of the task if you can, then report what you did and what was refused."
     }
 
     /// The approval card's text for an outbound ask on a tainted conversation: every argument in
@@ -93,7 +103,7 @@ enum OutboundTools {
     /// (the card scrolls). A string as it is; anything else as JSON.
     static func approvalDetails(tool: String, args: [String: JSONValue]) -> String {
         let argLines = args.keys.sorted().map { key in "\(key): \(fullText(args[key] ?? .null))" }
-        return (["This conversation has read untrusted content, and this call sends or changes something outside this Mac."] + argLines)
+        return (["This conversation has read untrusted content, and this call \(channel(tool))."] + argLines)
             .joined(separator: "\n")
     }
 }

@@ -1002,7 +1002,7 @@ Once a conversation has read text someone else may have written (a mail, a web p
 didn't write, an MCP result: the flag `hasUntrustedToolOutput`), a call that sends or changes
 something outside the Mac asks the person when they are there and is refused in a run, where nobody
 is (#812). The gated tools are `gmail_send_email`, `google_calendar_create_event`,
-`google_tasks_create_task`, and every MCP tool whose server didn't mark it `readOnlyHint: true`.
+`google_tasks_create_task`, `search_web` (its query goes to a search provider, #825), and every MCP tool whose server didn't mark it `readOnlyHint: true`.
 Iris trusts an MCP server's own read-only marking; a server you don't trust shouldn't be installed.
 A conversation that has read nothing untrusted is not gated.
 
@@ -1021,12 +1021,12 @@ run" sends it once), and the model is told which tool, and that the job can be e
 exemptions are your list too: `schedule_job` and `register_directory_watcher` may propose them in
 `outbound_exemptions`, but a job that carries any always asks before it is created, and the card
 states each one plainly: "This job may send email to anyone without asking, even after reading
-untrusted content." A read-only job can't carry one, and a tool that isn't outbound can't be
-exempted. A run's subagents share its exemptions. Afterwards only `/jobs exempt` and `/jobs unexempt`
+untrusted content." A read-only job can't carry one, except for `search_web`, which a read-only job
+uses to read the web, and a tool that isn't outbound can't be exempted. A run's subagents share its exemptions. Afterwards only `/jobs exempt` and `/jobs unexempt`
 change them; `/jobs` lists them. A
 re-schedule or re-registration stores exactly the exemptions it names, as with a grant.
 
-Not covered: `search_web`'s query is also a way out (#825), and a send in the same batch of
+Not covered: a send in the same batch of
 calls as the read that taints the conversation is not gated by that read, since the model wrote it
 before seeing the result.
 

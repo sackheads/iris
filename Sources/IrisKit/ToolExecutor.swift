@@ -148,7 +148,7 @@ struct ToolExecutor {
         ),
         FunctionDeclaration(
             name: "search_web",
-            description: "Search the web using DuckDuckGo. Returns a JSON array of results with title, url, and snippet.",
+            description: "Search the web using DuckDuckGo. Returns a JSON array of results with title, url, and snippet. The query is sent to a search provider, so once this conversation has read untrusted content (a web page, a mail, a file Iris did not write) the person is asked first, and an unattended run is refused.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [

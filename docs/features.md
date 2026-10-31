@@ -102,7 +102,7 @@ Includes a multi-tiered security pipeline (Structural Isolation + Behavioral Can
 
 ### Outbound Send Gate
 
-Once a conversation has read untrusted content, sending mail, creating calendar events or tasks, and any MCP tool not marked read-only ask you first, and a job run refuses them unless the job exempts the tool (#812). The cost in prompts: an attended conversation asks on the first send of each such tool; Vibecop and the command allowlist (`PermissionManager`) can't answer, because the model wrote the recipient and body from the tainted content; **Allow in This Conversation** ends the prompts for that tool there; and an unattended run never asks. The per-job exemptions and the per-conversation allow are your exemption list, and only you set them. [Details](jobs.md#outbound-sends-after-untrusted-content)
+Once a conversation has read untrusted content, sending mail, creating calendar events or tasks, searching the web (the query is a way out too, #825), and any MCP tool not marked read-only ask you first, and a job run refuses them unless the job exempts the tool (#812). The cost in prompts: an attended conversation asks on the first send of each such tool; Vibecop and the command allowlist (`PermissionManager`) can't answer, because the model wrote the recipient and body from the tainted content; **Allow in This Conversation** ends the prompts for that tool there; and an unattended run never asks. The per-job exemptions and the per-conversation allow are your exemption list, and only you set them. [Details](jobs.md#outbound-sends-after-untrusted-content)
 
 ### Rich Native UI
 
@@ -243,7 +243,7 @@ Once connected, Iris has native API access to the following Workspace tools dire
 *   **Google Tasks**: `google_tasks_list_tasklists`, `google_tasks_list_tasks`, `google_tasks_create_task`
 *   **Gmail**: `gmail_list_unread`, `gmail_send_email`
 
-The three that send or create (`gmail_send_email`, `google_calendar_create_event`, `google_tasks_create_task`) ask first once the conversation has read untrusted content ([Outbound Send Gate](#outbound-send-gate)).
+The three that send or create (`gmail_send_email`, `google_calendar_create_event`, `google_tasks_create_task`), like `search_web`, ask first once the conversation has read untrusted content ([Outbound Send Gate](#outbound-send-gate)).
 
 ## File attachments and auxiliary vision
 

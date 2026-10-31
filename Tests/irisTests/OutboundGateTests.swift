@@ -7,10 +7,10 @@ import GRDB
 @Suite("Outbound gate: classification and exemptions (#812)")
 struct OutboundToolsTests {
     @Test func theBuiltInSendsAreOutbound() {
-        for name in ["gmail_send_email", "google_calendar_create_event", "google_tasks_create_task"] {
+        for name in ["gmail_send_email", "google_calendar_create_event", "google_tasks_create_task", "search_web"] {
             #expect(OutboundTools.isOutbound(name, readOnlyMCPTools: []), "\(name)")
         }
-        for name in ["read_file", "search_web", "gmail_list_unread", "google_calendar_list_events", "write_file", "run_command"] {
+        for name in ["read_file", "gmail_list_unread", "google_calendar_list_events", "write_file", "run_command"] {
             #expect(!OutboundTools.isOutbound(name, readOnlyMCPTools: []), "\(name)")
         }
     }
@@ -30,7 +30,7 @@ struct OutboundToolsTests {
         ]
         let names = await GoogleWorkspaceManager.shared.getTools().map(\.name)
             + GoogleTasksManager.shared.getTools().map(\.name)
-        #expect(Set(names) == reads.union(OutboundTools.builtIn),
+        #expect(Set(names) == reads.union(OutboundTools.builtIn.subtracting([OutboundTools.searchWeb])),
                 "a Google tool must be added to OutboundTools.builtIn or, if it only reads, to this list")
     }
 
@@ -46,6 +46,22 @@ struct OutboundToolsTests {
         #expect(refusal?.text.contains("read-only job") == true)
         #expect(OutboundTools.exemptionRefusal(["gmail_send_email"], profile: .mutating, readOnlyMCPTools: []) == nil)
         #expect(OutboundTools.exemptionRefusal([], profile: .readOnly, readOnlyMCPTools: []) == nil)
+    }
+
+    /// #825: a search is how a read-only job reads the web, so its exemption is the one a read-only
+    /// job may carry; any other still can't.
+    @Test func aReadOnlyJobMayCarryTheSearchExemptionAndNothingElse() {
+        #expect(OutboundTools.exemptionRefusal(["search_web"], profile: .readOnly, readOnlyMCPTools: []) == nil)
+        #expect(OutboundTools.exemptionRefusal(["search_web", "gmail_send_email"], profile: .readOnly, readOnlyMCPTools: [])?.text.contains("read-only job") == true)
+    }
+
+    @Test func theSearchRefusalAndCardSayItsQueryLeaves() {
+        let refusal = OutboundTools.unattendedRefusal(tool: "search_web")
+        #expect(refusal.contains("query") && refusal.contains("search provider") && !refusal.contains("changes something"))
+        #expect(refusal.contains("/jobs exempt <job> search_web"))
+        let card = OutboundTools.approvalDetails(tool: "search_web", args: ["query": .string("secret from the page")])
+        #expect(card.contains("search provider") && card.contains("query: secret from the page"))
+        #expect(OutboundTools.exemptionSentence("search_web").contains("search the web"))
     }
 
     @Test func aToolThatIsntOutboundCantBeExempted() {
@@ -413,6 +429,43 @@ struct OutboundGateDispatchTests {
         let engine = engine(app)
         #expect(await engine.outboundGate(FunctionCall(name: "gmail_send_email", args: sendArgs), conversationId: id,
                                           workspacePath: nil, isUnattended: true) == .notGated)
+    }
+
+    // #825: search_web goes through the same gate, tainted or not. Each asserts the layer that
+    // answered (the outbound gate, via `outboundGate` or its own refusal text), not just a refusal.
+    private let search = FunctionCall(name: "search_web", args: ["query": .string("what the page said")])
+
+    @Test func aTaintedAttendedSearchAsksThePersonOnlyAndDenyRefuses() async throws {
+        let (app, id) = try app(tainted: true)
+        let (result, request) = await dispatch(search, on: app, in: id)
+        let asked = try #require(request, "a tainted search asks")
+        #expect(asked.humanOnly, "neither the allowlist nor Vibecop answers it")
+        #expect(asked.toolName == "search_web")
+        #expect(result == IrisEngine.deniedToolResult)
+    }
+
+    @Test func anUntaintedSearchIsNotGated() async throws {
+        let (app, id) = try app(tainted: false)
+        let engine = engine(app)
+        #expect(await engine.outboundGate(search, conversationId: id, workspacePath: nil, isUnattended: false) == .notGated)
+        #expect(await engine.outboundGate(search, conversationId: id, workspacePath: nil, isUnattended: true) == .notGated)
+    }
+
+    @Test func anUnattendedTaintedSearchIsRefusedWithItsReason() async throws {
+        let (app, id) = try app(tainted: true, background: true)
+        let (result, request) = await dispatch(search, on: app, in: id)
+        #expect(request == nil, "nobody is asked")
+        #expect(result == OutboundTools.unattendedRefusal(tool: "search_web"))
+        #expect(result.contains("search provider"))
+    }
+
+    @Test func aSearchExemptionLetsATaintedRunSearch() async throws {
+        let (app, id) = try app(tainted: true, background: true)
+        let idx = try #require(app.conversations.firstIndex { $0.id == id })
+        app.conversations[idx].jobOutboundExemptions = ["search_web"]
+        let engine = engine(app)
+        let decision = await engine.outboundGate(search, conversationId: id, workspacePath: nil, isUnattended: true)
+        #expect(decision == .approved(ToolApproval(layer: .exemption, detail: AppState.OutboundExemption.job.rawValue)))
     }
 
     @Test func aToolThatIsntOutboundIsNotGated() async throws {
