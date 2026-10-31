@@ -378,8 +378,7 @@ struct EventCard: Codable, Equatable, Sendable {
 
     /// Every argument of the blocked call, sorted by key and through `preview` (a content-like one
     /// cut, what runs never), so the person approving sees the whole call and two renders of it
-    /// read the same. Empty when there
-    /// is no blocked call.
+    /// read the same. Empty when there is no blocked call.
     var blockedArguments: [BlockedArgument] {
         guard let blockedCall else { return [] }
         let whole = showsArgumentsWhole
