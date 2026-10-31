@@ -27,6 +27,8 @@ struct EventCardView: View {
     var onApprove: (() -> Void)?
     /// Marks the run seen. `nil` for a card with nothing outstanding.
     var onDismiss: (() -> Void)?
+    /// Opens the whole call from the ledger when the card's copy has a cut argument (#834).
+    var onViewWhole: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -177,6 +179,20 @@ struct EventCardView: View {
                 .frame(maxHeight: 240)
             } else {
                 blockedArgumentRows
+            }
+            if card.hasCutArguments {
+                // The click uses the ledger's whole copy, so say that the card's is cut.
+                HStack(spacing: 6) {
+                    Text("Preview cut: Approve and run uses the whole text.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let onViewWhole {
+                        Button("View whole", action: onViewWhole)
+                            .buttonStyle(.link)
+                            .font(.caption2)
+                    }
+                }
             }
             if let cwd = card.blockedCall?.cwd, !cwd.isEmpty {
                 HStack(alignment: .top, spacing: 6) {

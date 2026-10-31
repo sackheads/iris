@@ -1039,6 +1039,12 @@ never cut: a command, a path, a working directory or a destination is shown exac
 every line and character (#829). An outbound send refused after untrusted content (mail, calendar,
 tasks, an MCP tool) is never cut either: the click sends the body and recipients exactly as the run
 wrote them, so the card shows every argument whole. A long one scrolls in an area of capped height.
+A body that is cut says so on the card, with **View whole**: a sheet that reads the call from the
+run's ledger record, the copy the click dispatches, and shows the file it writes to (the path
+resolved against the working directory), every character of every argument and its size
+(#834). The card's cut copy is what the transcript keeps; the sheet never reads from it. Nothing
+makes you open the sheet first: Approve and run stays one click at every size, so a long body can
+still be approved unread, by decision (#840).
 Vibecop is asked about that same persisted call once the card is saved, and its verdict and reason
 are then written onto the card beside the button. The card does not wait for it, because a local
 model can take seconds and a run stopped in that wait would otherwise leave a blocked row with no

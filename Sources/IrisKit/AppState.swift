@@ -622,6 +622,19 @@ class AppState {
     /// to scrolls out of the lazy stack.
     var transcriptSheetConversationId: UUID?
 
+    /// The whole blocked call an event card's "View whole" is showing (#834), or nil. Held here
+    /// for the reason `transcriptSheetConversationId` is: the card is a row in a lazy list, and
+    /// the `.sheet` stays on a view that is always mounted. Transient, never persisted.
+    var wholeCallSheet: WholeCallSheet?
+
+    struct WholeCallSheet: Identifiable, Equatable {
+        let id = UUID()
+        let jobName: String
+        /// nil when the ledger no longer has the call; `message` says so.
+        let whole: BlockedCallWhole?
+        let message: String?
+    }
+
     /// Job id → what of that job is in flight (D6 decision 5). Observed, so the status item
     /// redraws. Written only by `adjustRunningJob`, which `JobRunner` reaches through one hop.
     private(set) var runningJobs: [UUID: RunningJob] = [:]
@@ -4402,6 +4415,27 @@ class AppState {
                 return
             }
             _ = await runner.runApproved(runId: runId)
+        }
+    }
+
+    /// Opens the sheet with the call exactly as the ledger holds it, which is what "Approve and run"
+    /// dispatches; the card's own copy is cut (#834). The ledger read and the rendering of a large
+    /// body are off the main actor.
+    func showWholeBlockedCall(runId: UUID, jobName: String) {
+        let ledger = store.ledger
+        Task { [weak self] in
+            let sheet = await Task.detached { () -> WholeCallSheet in
+                do {
+                    guard let call = try ledger.run(id: runId)?.blockedCall else {
+                        return WholeCallSheet(jobName: jobName, whole: nil,
+                                              message: "The run's record no longer holds this call, so there is nothing to show, and Approve and run will refuse it too.")
+                    }
+                    return WholeCallSheet(jobName: jobName, whole: BlockedCallWhole(call: call), message: nil)
+                } catch {
+                    return WholeCallSheet(jobName: jobName, whole: nil, message: "Could not read the run's record: \(error.localizedDescription)")
+                }
+            }.value
+            self?.wholeCallSheet = sheet
         }
     }
 

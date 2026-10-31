@@ -122,6 +122,10 @@ struct SessionStripView: View {
                 }
             }
         }
+        // An event card's "View whole" (#834): same reason, same place.
+        .sheet(item: Binding(get: { state.wholeCallSheet }, set: { state.wholeCallSheet = $0 })) { item in
+            BlockedCallWholeSheet(item: item) { state.wholeCallSheet = nil }
+        }
     }
 }
 
