@@ -520,6 +520,14 @@ struct EvalGuardTaskTests {
         #expect(r.verdicts.filter { $0.id == "a1" }.allSatisfy { $0.outcome == "blocked" && $0.caught == true })
     }
 
+    @Test func theCanaryIsUnloadedOnceTheTextsAreJudged() async throws {
+        let s = try setUp()
+        defer { try? FileManager.default.removeItem(at: s.root) }
+        let canary = UnloadCountingCanary()
+        _ = try await run(s, canary, repeats: 1)
+        #expect(canary.unloads == 1, "llama.cpp's Metal backend aborts the process at exit with a model still loaded (#815)")
+    }
+
     @Test func noVerdictWordFailsClosedAndCountsAsAParseFailure() async throws {
         let s = try setUp()
         defer { try? FileManager.default.removeItem(at: s.root) }
@@ -936,4 +944,13 @@ struct EvalOtherCanaryTests {
             try await engine.loadModel(config: AuxiliaryModelConfig(role: "canary", engineType: .llamaCPP, modelPathOrName: "absent.gguf"))
         }
     }
+}
+
+private final class UnloadCountingCanary: AuxiliaryInferenceEngine, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _unloads = 0
+    var unloads: Int { lock.withLock { _unloads } }
+    func loadModel(config: AuxiliaryModelConfig) async throws {}
+    func unloadModel() async { lock.withLock { _unloads += 1 } }
+    func generate(prompt: String, jsonSchema: String?) async throws -> String { "SAFE" }
 }
