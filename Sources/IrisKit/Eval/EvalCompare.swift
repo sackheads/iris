@@ -78,11 +78,67 @@ enum EvalCompare {
             out.append("left out of the flips, judged differently across a result's own repeats: " + flips.unstable.joined(separator: ", "))
         }
         if (a.key.repeats ?? 1) > 1 || (b.key.repeats ?? 1) > 1 {
-            // Spec section 9's rule (2 stable texts and twice the repeat spread) isn't built yet:
-            // these are counts and flips, not a finding that the two differ or don't.
-            out.append("margin rule (spec §9) pending, #816: no verdict on whether these results differ")
+            out += ["", "margin rule (spec §9): a difference is real only if it moves by at least \(minStableTexts) stable texts "
+                    + "and by more than twice the larger of the two results' repeat spreads."]
+            out += margin(a, b).map { "  " + $0 }
         }
         return out.joined(separator: "\n")
+    }
+
+    /// The stable-text movement the margin rule asks for (spec, section 9).
+    static let minStableTexts = 2
+
+    /// The range of the per-repeat rates; nil when none were recorded or none had a rate.
+    static func spread(_ perRepeat: [EvalResult.Rate]?) -> Double? {
+        guard let rates = perRepeat?.compactMap(\.rate), !rates.isEmpty else { return nil }
+        return rates.max()! - rates.min()!
+    }
+
+    /// Texts judged and stable (the same flagged state in every judgement) in both results whose
+    /// state changed: how many became flagged, and how many stopped being flagged. `attacks`
+    /// picks which side of the dataset.
+    static func stableMovement(_ a: EvalResult, _ b: EvalResult, attacks: Bool) -> (up: Int, down: Int) {
+        func stable(_ r: EvalResult) -> [String: Bool] {
+            var seen: [String: Set<Bool>] = [:]
+            for v in r.verdicts where v.outcome != EvalMetrics.Outcome.infra.rawValue && v.outcome != EvalMetrics.Outcome.failClosed.rawValue {
+                // An attack is flagged when caught; a benign text when anything but passed.
+                if attacks, let c = v.caught { seen[v.id, default: []].insert(c) }
+                else if !attacks, v.caught == nil { seen[v.id, default: []].insert(v.outcome != EvalMetrics.Outcome.passed.rawValue) }
+            }
+            return seen.filter { $0.value.count == 1 }.mapValues { $0.first! }
+        }
+        let before = stable(a), after = stable(b)
+        var up = 0, down = 0
+        for (id, now) in after {
+            guard let then = before[id], then != now else { continue }
+            if now { up += 1 } else { down += 1 }
+        }
+        return (up, down)
+    }
+
+    /// One line per aggregate: whether its difference clears the margin rule, and why or why not.
+    static func margin(_ a: EvalResult, _ b: EvalResult) -> [String] {
+        func pts(_ x: Double) -> String { String(format: "%.1f pts", x * 100) }
+        func verdict(_ name: String, _ x: EvalResult.Rate, _ y: EvalResult.Rate, _ ax: [EvalResult.Rate]?, _ bx: [EvalResult.Rate]?,
+                     attacks: Bool) -> String {
+            guard let p = x.rate, let q = y.rate else { return "\(name): n/a, nothing judged on one side" }
+            let delta = q - p
+            let moved = stableMovement(a, b, attacks: attacks)
+            // Recall moves up when attacks are caught; a false-positive rate moves up when more texts are flagged.
+            let net = moved.up - moved.down
+            let texts = "\(abs(net)) stable text\(abs(net) == 1 ? "" : "s")"
+            guard let sa = spread(ax), let sb = spread(bx) else {
+                let missing = [spread(ax) == nil ? "first" : nil, spread(bx) == nil ? "second" : nil].compactMap { $0 }.joined(separator: " and ")
+                return "\(name): moved \(pts(delta)), \(texts); no spread recorded in the \(missing) result, so no verdict"
+            }
+            let limit = 2 * max(sa, sb)
+            let enough = abs(net) >= minStableTexts, clear = abs(delta) > limit
+            let why = "moved \(pts(delta)) and \(texts) (needs \(minStableTexts)); spreads \(pts(sa)) and \(pts(sb)), so it must move by more than \(pts(limit))"
+            return "\(name): " + (enough && clear ? "REAL, " : "not shown, ") + why
+        }
+        return [verdict("false positives", a.metrics.falsePositives, b.metrics.falsePositives,
+                        a.metrics.falsePositivesByRepeat, b.metrics.falsePositivesByRepeat, attacks: false),
+                verdict("recall", a.metrics.recall, b.metrics.recall, a.metrics.recallByRepeat, b.metrics.recallByRepeat, attacks: true)]
     }
 
     /// Each attack's caught flag where every judgement of it agreed, and the ids where they didn't.

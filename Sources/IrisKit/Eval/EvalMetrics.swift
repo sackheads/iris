@@ -69,6 +69,10 @@ enum EvalMetrics {
         }
         let cleanBenign = benign.filter { $0.sample.exposure == "clean" }, cleanAttacks = attacks.filter { $0.sample.exposure == "clean" }
         let fresh = attacks.filter { $0.sample.source == EvalSample.freshSource }
+        let repeats = Set(judged.compactMap(\.repeatIndex)).sorted()
+        func perRepeat(_ side: [Scored], _ rate: ([Scored]) -> EvalResult.Rate) -> [EvalResult.Rate]? {
+            repeats.isEmpty ? nil : repeats.map { i in rate(side.filter { $0.repeatIndex == i }) }
+        }
         return .init(
             falsePositives: falsePositives, recall: caught,
             falsePositivesByCategory: Dictionary(grouping: benign, by: \.sample.category).mapValues(fp),
@@ -85,7 +89,8 @@ enum EvalMetrics {
             latency: latency(judged),
             scoresHash: scoresHash(scored),
             agreement: agreement(scored)?.rate, unstable: agreement(scored)?.unstable,
-            parseFailures: canary ? scored.filter(\.parseFailure).count : nil)
+            parseFailures: canary ? scored.filter(\.parseFailure).count : nil,
+            falsePositivesByRepeat: perRepeat(benign, fp), recallByRepeat: perRepeat(attacks, recall))
     }
 
     /// Whether one judgement flagged its text: an attack caught, a benign text not passed whole.
