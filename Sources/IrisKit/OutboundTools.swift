@@ -59,7 +59,7 @@ enum OutboundTools {
     /// the creation approval card, which always asks when it is given and states each one.
     static let exemptionsArgument = "outbound_exemptions"
 
-    static let exemptionsParameterDescription = "Mutating jobs only. Outbound tools this job's runs may call without asking even after reading untrusted content (gmail_send_email, google_calendar_create_event, google_tasks_create_task, search_web, or an MCP tool by its full name). Give only what the task needs: the user is shown each one, e.g. that the job may send email to anyone, and the job is created only if they approve. Without one, such a call is refused once the run has read untrusted content."
+    static let exemptionsParameterDescription = "Mutating jobs only, except that a read-only job may carry search_web. Outbound tools this job's runs may call without asking even after reading untrusted content (gmail_send_email, google_calendar_create_event, google_tasks_create_task, search_web, or an MCP tool by its full name). Give only what the task needs: the user is shown each one, e.g. that the job may send email to anyone, and the job is created only if they approve. Without one, such a call is refused once the run has read untrusted content."
 
     static let exemptionsShape: ToolMessage = "outbound_exemptions must be a list of tool names, e.g. [\"gmail_send_email\"]."
 
