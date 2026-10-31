@@ -957,3 +957,61 @@ struct ApproveAndRunTests {
                 "an approved run that ran does not stay in /jobs's failure list")
     }
 }
+
+
+@Suite("A cut body can be read whole before Approve and run (#834)")
+struct ViewWholeBlockedCallTests {
+    private func card(_ call: BlockedCall) -> EventCard {
+        EventCard(runId: UUID(), jobId: UUID(), jobName: "sweep", status: .blockedOnApproval,
+                  blockedTool: call.toolName, startedAt: Date(), finishedAt: Date(),
+                  blockedCall: EventCard.displayCopy(of: call))
+    }
+
+    @Test("a cut content argument is detected from the card's copy, and only that")
+    func detectsACutBody() {
+        let long = (1...100).map { "line \($0)" }.joined(separator: "\n")
+        let chars = String(repeating: "x", count: 2_000)
+        for body in [long, chars, long + chars] {
+            let call = BlockedCall(toolName: "write_file", args: ["path": .string("a.md"), "content": .string(body)],
+                                   cwd: "/w", reason: .approval)
+            #expect(card(call).hasCutArguments)
+        }
+        let short = BlockedCall(toolName: "write_file", args: ["path": .string("a.md"), "content": .string("hi")],
+                                cwd: "/w", reason: .approval)
+        #expect(!card(short).hasCutArguments)
+        let command = BlockedCall(toolName: "run_command", args: ["command": .string(String(repeating: "x", count: 2_000))],
+                                  cwd: "/w", reason: .approval)
+        #expect(!card(command).hasCutArguments, "a command is never cut, so there is nothing more to view")
+        let mail = BlockedCall(toolName: "gmail_send_email", args: ["body": .string(String(repeating: "x", count: 2_000))],
+                               reason: .approval)
+        #expect(!card(mail).hasCutArguments, "an outbound call is shown whole already")
+    }
+
+    @Test("the whole call carries the resolved target and every character the click writes")
+    func theWholeCall() {
+        let body = (1...300).map { "line \($0)" }.joined(separator: "\n")
+        let call = BlockedCall(toolName: "write_file", args: ["path": .string("notes/a.md"), "content": .string(body)],
+                               cwd: "/w", reason: .approval)
+        let whole = BlockedCallWhole(call: call)
+        #expect(whole.target == "/w/notes/a.md")
+        let content = whole.fields.first { $0.key == "content" }
+        #expect(content?.text == body, "uncut, with no cut note")
+        #expect(content?.size?.hasPrefix("\(body.count.formatted()) characters, 300 lines, ") == true)
+        #expect(whole.fields.first { $0.key == "path" }?.size == nil)
+        #expect(whole.fields.map(\.key) == ["content", "path"])
+    }
+
+    @Test("the size line says one character and one line in the singular")
+    func sizeLineSingular() {
+        #expect(BlockedCallWhole.sizeLine("x").hasPrefix("1 character, 1 line, "))
+    }
+
+    @Test("the ledger's copy is whole while the card's copy is cut")
+    func ledgerKeepsTheWholeBody() {
+        let body = String(repeating: "y", count: 5_000)
+        let call = BlockedCall(toolName: "write_file", args: ["path": .string("/w/a.md"), "content": .string(body)],
+                               cwd: "/w", reason: .approval)
+        #expect(card(call).blockedCall?.args["content"]?.stringValue != body)
+        #expect(BlockedCallWhole(call: call).fields.first { $0.key == "content" }?.text == body)
+    }
+}

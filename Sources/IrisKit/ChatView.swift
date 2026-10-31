@@ -1139,7 +1139,8 @@ struct MessageView: View {
                     if let card = EventCard.decode(message.content) {
                         EventCardView(card: card, onViewRun: viewRunAction(for: card),
                                       onApprove: approveAction(for: card),
-                                      onDismiss: dismissAction(for: card))
+                                      onDismiss: dismissAction(for: card),
+                                      onViewWhole: viewWholeAction(for: card))
                     } else {
                         // A card written by a newer build, or a hand-edited row: show the raw
                         // content as plain text rather than running it through Markdown.
@@ -1202,6 +1203,13 @@ struct MessageView: View {
     private func approveAction(for card: EventCard) -> (() -> Void)? {
         guard card.offersApproval else { return nil }
         return { state.approveBlockedCall(runId: card.runId) }
+    }
+
+    /// "View whole": the call as the ledger holds it, in a sheet. Offered only where the card's copy
+    /// has a cut argument (#834).
+    private func viewWholeAction(for card: EventCard) -> (() -> Void)? {
+        guard card.hasCutArguments else { return nil }
+        return { state.showWholeBlockedCall(runId: card.runId, jobName: card.jobName) }
     }
 
     /// The "Dismiss" action — acknowledging the run. Offered only where there is something to
