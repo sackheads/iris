@@ -12,7 +12,8 @@ public final class MLXEngine: AuxiliaryInferenceEngine, @unchecked Sendable {
     private var container: ModelContainer?
     private let lock = NSLock()
     
-    private init() {}
+    /// `shared` is the product's. An eval builds its own so a canary it scores is its alone (#815).
+    init() {}
     
     func loadModel(config: AuxiliaryModelConfig) async throws {
         let modelId = config.modelPathOrName

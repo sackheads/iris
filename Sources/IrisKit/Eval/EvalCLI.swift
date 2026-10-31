@@ -14,11 +14,11 @@ enum EvalCLI {
 
     static let usage = """
     usage: iris --eval run <task> --model <runtime:name> [--sample N | --full] [--split test|dev|all] [--dataset DIR] [--out DIR]
-           iris --eval run injection.verdict --model ollama:<name> [--think product|on|off] [--repeats N] [...]
-           iris --eval run injection.stack --stack 1+3|1+2+3 --tier3 ollama:<name> [--tier2 onnx:<bundle>] [--think …] [--repeats N] [...]
+           iris --eval run injection.verdict --model ollama:<name>|llamacpp:<file>|mlx:<id> [--think product|on|off] [--repeats N] [...]
+           iris --eval run injection.stack --stack 1+3|1+2+3 --tier3 ollama:<name>|llamacpp:<file>|mlx:<id> [--tier2 onnx:<bundle>] [--think …] [--repeats N] [...]
            iris --eval compare <a.json> <b.json> [--vary model|runtime|dataset|split|sample|think|repeats]
            iris --eval table [--results DIR] [--out FILE]
-    tasks: injection.classifier (onnx:, coreml:), injection.verdict (ollama:), injection.stack
+    tasks: injection.classifier (onnx:, coreml:), injection.verdict (ollama:, llamacpp:, mlx:), injection.stack
     """
 
     static let defaultSample = 60
