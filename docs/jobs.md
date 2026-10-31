@@ -1039,12 +1039,13 @@ never cut: a command, a path, a working directory or a destination is shown exac
 every line and character (#829). An outbound send refused after untrusted content (mail, calendar,
 tasks, an MCP tool) is never cut either: the click sends the body and recipients exactly as the run
 wrote them, so the card shows every argument whole. A long one scrolls in an area of capped height.
-Vibecop is asked about that same persisted call once the card is saved, and its verdict and reason are then written onto the card beside the button. The card does
-not wait for it, because a local model can take seconds and a run stopped in that wait would
-otherwise leave a blocked row with no card at all (#521). A verdict that comes back after you have
-approved or dismissed the run is not added. With Vibecop off there is no verdict line, only the
-button. A verdict is information, not a veto: a
-`DENY` still leaves the button there, and clicking it is you overruling Vibecop, not skipping it.
+Vibecop is asked about that same persisted call once the card is saved, and its verdict and reason
+are then written onto the card beside the button. The card does not wait for it, because a local
+model can take seconds and a run stopped in that wait would otherwise leave a blocked row with no
+card at all (#521). A verdict that comes back after you have approved or dismissed the run is not
+added. With Vibecop off there is no verdict line, only the button. A verdict is information, not a
+veto: a `DENY` still leaves the button there, and clicking it is you overruling Vibecop, not
+skipping it.
 
 **Approve and run** dispatches exactly that one call, once, as a tracked run of its own: a fresh
 hidden conversation titled `<job> · approved <tool>`, a `job_runs` row with the trigger kind
