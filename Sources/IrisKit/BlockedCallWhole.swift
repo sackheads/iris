@@ -13,16 +13,19 @@ struct BlockedCallWhole: Equatable, Sendable {
         let size: String?
     }
 
+    static let writingTools: Set<String> = ["write_file"]
+
     let toolName: String
-    /// Where a file tool lands: the call's `path` resolved against its working directory the way
-    /// the executor does, and so what the click writes to. nil for a tool with no `path`.
+    /// Where a file write lands: the call's `path` resolved against its working directory the way
+    /// the executor does, then through any symlink (as a held write's target is, #828), so a link's
+    /// spelling is not shown as the file. nil for a tool that does not write a file.
     let target: String?
     let fields: [Field]
 
     init(call: BlockedCall) {
         toolName = call.toolName
-        if let path = call.args["path"] {
-            target = ToolExecutor.resolvePath(path.stringValue, cwd: call.cwd)
+        if Self.writingTools.contains(call.toolName), let path = call.args["path"] {
+            target = IrisPaths.realPath(ToolExecutor.resolvePath(path.stringValue, cwd: call.cwd))
         } else {
             target = nil
         }
