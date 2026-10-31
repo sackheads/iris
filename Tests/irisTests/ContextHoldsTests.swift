@@ -88,6 +88,25 @@ struct ContextHoldsScopeTests {
                                        firstLine: "", createdAt: Date(), state: .pending)
         #expect(ContextHoldsReview.fields(fact).map(\.label) == ["content", "supersedes"])
     }
+
+    /// A held write lands on the resolved target, so the sheet's path is that file (#828).
+    @Test func theSheetShowsTheResolvedWriteTarget() {
+        func write(path: String, target: String?) -> PendingContextWrite {
+            PendingContextWrite(id: UUID(), conversationId: UUID(), toolName: "write_file",
+                                args: ["path": .string(path), "content": .string("x")],
+                                targetPath: target, firstLine: "", createdAt: Date(), state: .pending)
+        }
+        let moved = ContextHoldsReview.fields(write(path: "~/notes/a.md", target: "/real/notes/a.md"))
+        #expect(moved.map(\.label) == ["path", "as written", "content"])
+        #expect(moved[0].text == "/real/notes/a.md")
+        #expect(moved[1].text == "~/notes/a.md")
+        let same = ContextHoldsReview.fields(write(path: "/real/a.md", target: "/real/a.md"))
+        #expect(same.map(\.label) == ["path", "content"])
+        #expect(same[0].text == "/real/a.md")
+        let none = ContextHoldsReview.fields(write(path: "a.md", target: nil))
+        #expect(none.map(\.label) == ["path", "as written", "content"])
+        #expect(none[0].text.contains("refused"))
+    }
 }
 
 /// #813 and #817: the table round-trips, decisions persist, and the read-out counts it.
