@@ -126,15 +126,19 @@ enum EvalCompare {
             let moved = stableMovement(a, b, attacks: attacks)
             // Recall moves up when attacks are caught; a false-positive rate moves up when more texts are flagged.
             let net = moved.up - moved.down
-            let texts = "\(abs(net)) stable text\(abs(net) == 1 ? "" : "s")"
+            let texts = "\(abs(net)) stable text\(abs(net) == 1 ? "" : "s") net (\(moved.up) up, \(moved.down) down)"
             guard let sa = spread(ax), let sb = spread(bx) else {
                 let missing = [spread(ax) == nil ? "first" : nil, spread(bx) == nil ? "second" : nil].compactMap { $0 }.joined(separator: " and ")
                 return "\(name): moved \(pts(delta)), \(texts); no spread recorded in the \(missing) result, so no verdict"
             }
             let limit = 2 * max(sa, sb)
+            // The stable texts must move the way the aggregate does: unstable texts can carry an
+            // aggregate one way while the stable ones go the other (#842 review).
             let enough = abs(net) >= minStableTexts, clear = abs(delta) > limit
+            let sameWay = (net > 0) == (delta > 0)
             let why = "moved \(pts(delta)) and \(texts) (needs \(minStableTexts)); spreads \(pts(sa)) and \(pts(sb)), so it must move by more than \(pts(limit))"
-            return "\(name): " + (enough && clear ? "REAL, " : "not shown, ") + why
+            let opposite = enough && clear && !sameWay ? "; the stable texts moved the other way from the aggregate" : ""
+            return "\(name): " + (enough && clear && sameWay ? "REAL, " : "not shown, ") + why + opposite
         }
         return [verdict("false positives", a.metrics.falsePositives, b.metrics.falsePositives,
                         a.metrics.falsePositivesByRepeat, b.metrics.falsePositivesByRepeat, attacks: false),
