@@ -428,15 +428,15 @@ struct InjectionGuardTests {
     func fingerprintSensitiveToModelIdentityNotJustProvisioning() {
         let a = InjectionGuard.GuardConfigFingerprint(
             protectionEnabled: true, promptGuardEngine: "cloud", promptGuardModel: "model-a",
-            promptGuardCoreMLModel: "coreml-a", tier2ModelsDir: "/models", tier3ModelsDir: "/models",
+            promptGuardCoreMLModel: "coreml-a", tier3CloudModel: "", tier2ModelsDir: "/models", tier3ModelsDir: "/models",
             tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
         let differentModel = InjectionGuard.GuardConfigFingerprint(
             protectionEnabled: true, promptGuardEngine: "cloud", promptGuardModel: "model-b",
-            promptGuardCoreMLModel: "coreml-a", tier2ModelsDir: "/models", tier3ModelsDir: "/models",
+            promptGuardCoreMLModel: "coreml-a", tier3CloudModel: "", tier2ModelsDir: "/models", tier3ModelsDir: "/models",
             tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
         let differentEngine = InjectionGuard.GuardConfigFingerprint(
             protectionEnabled: true, promptGuardEngine: "ollama", promptGuardModel: "model-a",
-            promptGuardCoreMLModel: "coreml-a", tier2ModelsDir: "/models", tier3ModelsDir: "/models",
+            promptGuardCoreMLModel: "coreml-a", tier3CloudModel: "", tier2ModelsDir: "/models", tier3ModelsDir: "/models",
             tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
         #expect(a != differentModel, "same provisioning, different model name — must be a different guard config")
         #expect(a != differentEngine, "same provisioning, different engine — must be a different guard config")
@@ -449,6 +449,48 @@ struct InjectionGuardTests {
         #expect(live.promptGuardCoreMLModel == ConfigManager.shared.promptGuardCoreMLModel)
     }
 
+
+    /// #824: with the `cloud` engine tier 3 sends `vibecopCloudModel` (else the easy tier's), which
+    /// neither `promptGuardModel` nor provisioning shows. The scoped seams bypass the verdict cache,
+    /// so this pins the key and the fingerprint directly, over an isolated `ConfigManager`.
+    @Test("A cloud tier 3's model is in the fingerprint and the cache key (#824)")
+    func cloudTier3ModelMissesTheCache() {
+        let name = "iris-cloudkey-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: name)!
+        defer {
+            store.removePersistentDomain(forName: name)
+            IrisDefaults.removeSuiteFile(named: name, in: IrisDefaults.preferencesDirectory)
+        }
+        let settings = ConfigManager(store: store)
+        settings.promptGuardEngine = "cloud"
+        settings.vibecopCloudModel = "model-a"
+        func fingerprint() -> InjectionGuard.GuardConfigFingerprint {
+            InjectionGuard.currentConfigFingerprint(protectionEnabled: true, settings: settings)
+        }
+        func key(_ f: InjectionGuard.GuardConfigFingerprint) -> String {
+            InjectionGuard.cacheKey(clean: "text", source: "s", maxTier: .tier3_canary, fingerprint: f)
+        }
+        let a = fingerprint()
+        #expect(a.tier3CloudModel == "model-a")
+        settings.vibecopCloudModel = "  model-a \n"
+        #expect(key(fingerprint()) == key(a), "whitespace around the same model is the same model")
+        settings.vibecopCloudModel = "model-b"
+        let b = fingerprint()
+        #expect(a != b && key(a) != key(b), "a different cloud model must miss the cache")
+
+        settings.vibecopCloudModel = ""
+        let easy = fingerprint()
+        #expect(easy.tier3CloudModel == settings.getModel(for: .easy) && key(easy) != key(a))
+        settings.primaryProvider = LLMProvider.openai.rawValue
+        settings.openaiModelEasy = "easy-x"
+        #expect(fingerprint().tier3CloudModel == "easy-x", "the empty model follows the easy tier")
+
+        settings.promptGuardEngine = "ollama"
+        settings.vibecopCloudModel = "model-a"
+        let o1 = fingerprint()
+        settings.vibecopCloudModel = "model-b"
+        #expect(fingerprint() == o1 && o1.tier3CloudModel.isEmpty, "a non-cloud tier 3 ignores the cloud model")
+    }
 }
 
 final class MockInferenceEngine: AuxiliaryInferenceEngine, @unchecked Sendable {

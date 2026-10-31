@@ -221,6 +221,9 @@ public struct InjectionGuard {
         let promptGuardEngine: String
         let promptGuardModel: String
         let promptGuardCoreMLModel: String
+        /// The model a `cloud` tier 3 sends (#824): `vibecopCloudModel`, else the easy tier's. Empty
+        /// for any other engine, so a Settings change there cannot miss a cache it does not affect.
+        let tier3CloudModel: String
         let tier2ModelsDir: String
         let tier3ModelsDir: String
         let tier2Provisioning: Tier2Provisioning
@@ -246,13 +249,20 @@ public struct InjectionGuard {
             promptGuardEngine: config.promptGuardEngine,
             promptGuardModel: config.promptGuardModel,
             promptGuardCoreMLModel: config.promptGuardCoreMLModel,
+            tier3CloudModel: config.promptGuardEngine == "cloud" ? resolvedCloudModel(config) : "",
             tier2ModelsDir: resolvedTier2ModelsDir.path,
             tier3ModelsDir: resolvedTier3ModelsDir.path,
             tier2Provisioning: tier2Provisioning(modelName: config.promptGuardCoreMLModel, modelsDir: resolvedTier2ModelsDir),
             tier3Provisioning: tier3Provisioning(engine: config.promptGuardEngine, modelName: config.promptGuardModel, modelsDir: resolvedTier3ModelsDir))
     }
 
-    private static func cacheKey(clean: String, source: String, maxTier: SanitizationTier,
+    /// What `CloudAuxiliaryEngine` sends: the Vibecop cloud model, or the easy tier's when none is set.
+    private static func resolvedCloudModel(_ config: ConfigManager) -> String {
+        let chosen = config.vibecopCloudModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return chosen.isEmpty ? config.getModel(for: .easy) : chosen
+    }
+
+    static func cacheKey(clean: String, source: String, maxTier: SanitizationTier,
                                   fingerprint: GuardConfigFingerprint, delimiterLines: [Int: String] = [:]) -> String {
         // The tier-2 model path is in the key too, so correctness does not lean on CoreMLEvaluator
         // being load-once: a hot-swapped guard model can never be served a stale verdict. The
@@ -265,7 +275,7 @@ public struct InjectionGuard {
         // test that varies one independently of the other must still get its own cache entry.
         let parts = [clean, source, String(describing: maxTier), String(fingerprint.protectionEnabled),
                      fingerprint.promptGuardEngine, fingerprint.promptGuardModel, fingerprint.promptGuardCoreMLModel,
-                     fingerprint.tier2ModelsDir, fingerprint.tier3ModelsDir,
+                     fingerprint.tier3CloudModel, fingerprint.tier2ModelsDir, fingerprint.tier3ModelsDir,
                      String(describing: fingerprint.tier2Provisioning), String(describing: fingerprint.tier3Provisioning)]
             // #727: two inputs that strip to the same text are scored differently by what was stripped.
             + delimiterLines.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }
