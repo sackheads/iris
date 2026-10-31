@@ -221,7 +221,7 @@ public struct InjectionGuard {
         let promptGuardEngine: String
         let promptGuardModel: String
         let promptGuardCoreMLModel: String
-        /// The model a `cloud` tier 3 sends (#824): `vibecopCloudModel`, else the easy tier's. Empty
+        /// The provider and model a `cloud` tier 3 sends to (#824), from `resolvedCloudModel`. Empty
         /// for any other engine, so a Settings change there cannot miss a cache it does not affect.
         let tier3CloudModel: String
         let tier2ModelsDir: String
@@ -256,10 +256,14 @@ public struct InjectionGuard {
             tier3Provisioning: tier3Provisioning(engine: config.promptGuardEngine, modelName: config.promptGuardModel, modelsDir: resolvedTier3ModelsDir))
     }
 
-    /// What `CloudAuxiliaryEngine` sends: the Vibecop cloud model, or the easy tier's when none is set.
+    /// Who judges for a `cloud` tier 3: the primary provider (and OpenAI's base URL) and the model
+    /// `CloudAuxiliaryEngine` sends, the Vibecop cloud model or the easy tier's when none is set. The
+    /// provider counts even for a fixed model: another provider answers it, or 404s and falls back.
     private static func resolvedCloudModel(_ config: ConfigManager) -> String {
         let chosen = config.vibecopCloudModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        return chosen.isEmpty ? config.getModel(for: .easy) : chosen
+        let model = chosen.isEmpty ? config.getModel(for: .easy) : chosen
+        let baseURL = config.primaryProvider == LLMProvider.openai.rawValue ? config.openAIBaseURL : ""
+        return [config.primaryProvider, baseURL, model].joined(separator: "|")
     }
 
     static func cacheKey(clean: String, source: String, maxTier: SanitizationTier,

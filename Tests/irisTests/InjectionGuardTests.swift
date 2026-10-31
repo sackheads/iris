@@ -471,7 +471,7 @@ struct InjectionGuardTests {
             InjectionGuard.cacheKey(clean: "text", source: "s", maxTier: .tier3_canary, fingerprint: f)
         }
         let a = fingerprint()
-        #expect(a.tier3CloudModel == "model-a")
+        #expect(a.tier3CloudModel.hasSuffix("|model-a"))
         settings.vibecopCloudModel = "  model-a \n"
         #expect(key(fingerprint()) == key(a), "whitespace around the same model is the same model")
         settings.vibecopCloudModel = "model-b"
@@ -480,10 +480,24 @@ struct InjectionGuardTests {
 
         settings.vibecopCloudModel = ""
         let easy = fingerprint()
-        #expect(easy.tier3CloudModel == settings.getModel(for: .easy) && key(easy) != key(a))
+        #expect(easy.tier3CloudModel.hasSuffix("|" + settings.getModel(for: .easy)) && key(easy) != key(a))
         settings.primaryProvider = LLMProvider.openai.rawValue
         settings.openaiModelEasy = "easy-x"
-        #expect(fingerprint().tier3CloudModel == "easy-x", "the empty model follows the easy tier")
+        #expect(fingerprint().tier3CloudModel.hasSuffix("|easy-x"), "the empty model follows the easy tier")
+
+        // A fixed model under another provider (or OpenAI base URL) is a different judge (#837 review).
+        settings.vibecopCloudModel = "model-a"
+        settings.primaryProvider = LLMProvider.gemini.rawValue
+        let gemini = fingerprint()
+        settings.primaryProvider = LLMProvider.anthropic.rawValue
+        let anthropic = fingerprint()
+        #expect(gemini != anthropic && key(gemini) != key(anthropic), "same model, another provider must miss")
+        settings.primaryProvider = LLMProvider.openai.rawValue
+        settings.openAIBaseURL = "https://one.example/v1"
+        let one = fingerprint()
+        settings.openAIBaseURL = "https://two.example/v1"
+        #expect(key(one) != key(fingerprint()), "another OpenAI base URL must miss")
+        settings.openAIBaseURL = ""
 
         settings.promptGuardEngine = "ollama"
         settings.vibecopCloudModel = "model-a"
