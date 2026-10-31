@@ -125,10 +125,23 @@ struct ContextHoldsReview: View {
         let order = ["path", "content", "description", "body", "title", "tags", "supersedes", "action", "fact_id", "by_fact_id"]
         let keys = item.args.keys.filter { $0 != "name" }
             .sorted { (order.firstIndex(of: $0) ?? order.count, $0) < (order.firstIndex(of: $1) ?? order.count, $1) }
-        return keys.compactMap { key in
-            guard let value = item.args[key] else { return nil }
-            return (label: key, text: render(value))
+        return keys.flatMap { key -> [(label: String, text: String)] in
+            guard let value = item.args[key] else { return [] }
+            guard key == "path", item.toolName == "write_file" else { return [(label: key, text: render(value))] }
+            return pathFields(typed: render(value), item: item)
         }
+    }
+
+    /// A held write lands on `targetPath`, resolved when it was held, not on the spelling the model
+    /// typed (`~`, a relative path, a symlinked directory), so that is the path shown. The typed
+    /// spelling follows only when it differs. A write with no resolved target is refused at apply.
+    nonisolated private static func pathFields(typed: String, item: PendingContextWrite) -> [(label: String, text: String)] {
+        guard let target = item.targetPath else {
+            return [(label: "path", text: "no resolved target: approving this will be refused"),
+                    (label: "as written", text: typed)]
+        }
+        return target == typed ? [(label: "path", text: target)]
+            : [(label: "path", text: target), (label: "as written", text: typed)]
     }
 
     nonisolated private static func render(_ value: JSONValue) -> String {
