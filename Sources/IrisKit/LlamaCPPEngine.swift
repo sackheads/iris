@@ -12,15 +12,19 @@ enum LlamaError: Error {
 final class LlamaCPPEngine: AuxiliaryInferenceEngine, @unchecked Sendable {
     private var model: OpaquePointer?
     private var vocab: OpaquePointer?
-    
-    init() async throws {
+    /// Where a model name is looked for: the home's models folder in the product, and a model's own
+    /// folder when an eval scores a file wherever it sits (#815).
+    private let modelsDir: URL
+
+    init(modelsDir: URL = IrisPaths.default.modelsDir) async throws {
+        self.modelsDir = modelsDir
         llama_backend_init()
     }
     
     func loadModel(config: AuxiliaryModelConfig) async throws {
         let modelParams = llama_model_default_params()
         
-        let path = IrisPaths.default.modelsDir.appendingPathComponent(config.modelPathOrName).path
+        let path = modelsDir.appendingPathComponent(config.modelPathOrName).path
         guard let loadedModel = llama_model_load_from_file(path, modelParams) else {
             throw LlamaError.modelLoadFailed
         }

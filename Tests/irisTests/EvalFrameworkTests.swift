@@ -842,3 +842,98 @@ struct EvalMarginRuleTests {
         #expect(EvalCompare.spread(old.metrics.recallByRepeat) == nil)
     }
 }
+
+/// `llamacpp:` and `mlx:` canaries (#815): what can be checked without a model on disk.
+@Suite("Eval llamacpp and mlx canaries (#815)", .timeLimit(.minutes(1)))
+struct EvalOtherCanaryTests {
+    private func tempHub() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-hub-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// A hub cache as `HubClient` writes it: blobs, and a snapshot of symbolic links to them.
+    private func writeSnapshot(in hub: URL, id: String, revision: String, ref: Bool = true, files: [String: String]) throws -> URL {
+        let repo = hub.appendingPathComponent("models--" + id.replacingOccurrences(of: "/", with: "--"))
+        let snapshot = repo.appendingPathComponent("snapshots/\(revision)")
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: repo.appendingPathComponent("blobs"), withIntermediateDirectories: true)
+        for (name, text) in files {
+            let blob = repo.appendingPathComponent("blobs/\(name.hashValue.magnitude)")
+            try Data(text.utf8).write(to: blob)
+            try FileManager.default.createSymbolicLink(at: snapshot.appendingPathComponent(name), withDestinationURL: blob)
+        }
+        if ref {
+            try FileManager.default.createDirectory(at: repo.appendingPathComponent("refs"), withIntermediateDirectories: true)
+            try Data("\(revision)\n".utf8).write(to: repo.appendingPathComponent("refs/main"))
+        }
+        return snapshot
+    }
+
+    @Test func theSnapshotIsFoundThroughRefsMainAndItsLinkedFilesAreFingerprinted() throws {
+        let hub = try tempHub()
+        defer { try? FileManager.default.removeItem(at: hub) }
+        _ = try writeSnapshot(in: hub, id: "org/model", revision: "old", ref: false, files: ["config.json": "{}"])
+        let current = try writeSnapshot(in: hub, id: "org/model", revision: "abc123", files: ["config.json": "{\"a\":1}", "model.safetensors": "weights"])
+        let found = try EvalGuardTask.mlxSnapshot(id: "org/model", environment: ["HF_HUB_CACHE": hub.path], home: hub)
+        #expect(found.lastPathComponent == "abc123" && found.path == current.path, "refs/main wins over another snapshot")
+        #expect(try EvalFingerprint.files(at: found).isEmpty, "links are not regular files")
+        let files = try EvalFingerprint.files(at: found, followLinks: true)
+        #expect(files.map(\.path) == ["config.json", "model.safetensors"] && files.map(\.bytes) == [7, 7])
+        #expect(files.allSatisfy { $0.sha256.count == 64 })
+    }
+
+    @Test func theCacheIsFoundFromHFHubCacheThenHFHomeThenTheHome() throws {
+        let root = try tempHub()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let viaHome = try writeSnapshot(in: root.appendingPathComponent(".cache/huggingface/hub"), id: "o/m", revision: "r1", files: ["a": "1"])
+        #expect(try EvalGuardTask.mlxSnapshot(id: "o/m", environment: [:], home: root).path == viaHome.path)
+        let viaHF = try writeSnapshot(in: root.appendingPathComponent("hfhome/hub"), id: "o/m", revision: "r2", files: ["a": "1"])
+        #expect(try EvalGuardTask.mlxSnapshot(id: "o/m", environment: ["HF_HOME": root.appendingPathComponent("hfhome").path], home: root).path == viaHF.path)
+        let viaCache = try writeSnapshot(in: root.appendingPathComponent("cache"), id: "o/m", revision: "r3", files: ["a": "1"])
+        let env = ["HF_HUB_CACHE": root.appendingPathComponent("cache").path, "HF_HOME": root.appendingPathComponent("hfhome").path]
+        #expect(try EvalGuardTask.mlxSnapshot(id: "o/m", environment: env, home: root).path == viaCache.path)
+    }
+
+    @Test func aModelNotInTheCacheOrWithAnAmbiguousSnapshotIsMissingNotGuessed() throws {
+        let hub = try tempHub()
+        defer { try? FileManager.default.removeItem(at: hub) }
+        #expect(throws: EvalError.self) { try EvalGuardTask.mlxSnapshot(id: "no/such", environment: ["HF_HUB_CACHE": hub.path], home: hub) }
+        _ = try writeSnapshot(in: hub, id: "two/snaps", revision: "a", ref: false, files: ["f": "1"])
+        _ = try writeSnapshot(in: hub, id: "two/snaps", revision: "b", ref: false, files: ["f": "2"])
+        #expect(throws: EvalError.self) { try EvalGuardTask.mlxSnapshot(id: "two/snaps", environment: ["HF_HUB_CACHE": hub.path], home: hub) }
+    }
+
+    @Test func theRuntimeVersionIsThePinnedPackageOrAbsent() {
+        let resolved = Data(#"{"pins":[{"identity":"mlx-swift","state":{"revision":"0bb916c67f4b9e5c","version":"0.31.6"}},{"identity":"llama.swift","state":{"revision":"3c9ea6d66a6e94bd6dd5ed0e3160a26f64303f45"}}]}"#.utf8)
+        #expect(EvalGuardTask.dependencyVersion("mlx-swift", resolved: resolved) == "mlx-swift 0.31.6")
+        #expect(EvalGuardTask.dependencyVersion("llama.swift", resolved: resolved) == "llama.swift 3c9ea6d66a6e")
+        #expect(EvalGuardTask.dependencyVersion("absent", resolved: resolved) == nil)
+        #expect(EvalGuardTask.dependencyVersion("mlx-swift", resolved: Data("not json".utf8)) == nil)
+        // The repository's own file really pins both engines.
+        #expect(EvalGuardTask.dependencyVersion("mlx-swift") != nil && EvalGuardTask.dependencyVersion("llama.swift") != nil)
+    }
+
+    @Test func thePromptGuardEngineNameIsTheProductsForEachRuntime() {
+        #expect(EvalGuardTask.engineName(.llamacpp) == "llama_cpp" && EvalGuardTask.engineName(.mlx) == "mlx" && EvalGuardTask.engineName(.ollama) == "ollama")
+        let spec = EvalModelSpec(runtime: .llamacpp, name: "/m/x.gguf")
+        #expect(EvalGuardTask.guardConfig(canary: spec, tier2: false).promptGuardEngine == "llama_cpp")
+    }
+
+    @Test func aThinkingSwitchTheEngineLacksIsRefusedAndAMissingFileIsMissing() async {
+        for spec in [EvalModelSpec(runtime: .llamacpp, name: "/nope/x.gguf"), EvalModelSpec(runtime: .mlx, name: "o/m")] {
+            await #expect(throws: EvalError.self) { _ = try await EvalGuardTask.canary(spec, think: .on) }
+        }
+        await #expect(throws: EvalError.self) { _ = try await EvalGuardTask.canary(.init(runtime: .llamacpp, name: "/nope/x.gguf"), think: .product) }
+        await #expect(throws: EvalError.self) { _ = try await EvalGuardTask.canary(.init(runtime: .onnx, name: "/m"), think: .product) }
+    }
+
+    @Test func aLlamaEngineLooksForItsModelInTheFolderItWasGiven() async throws {
+        let dir = try tempHub()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let engine = try await LlamaCPPEngine(modelsDir: dir)
+        await #expect(throws: LlamaError.self) {
+            try await engine.loadModel(config: AuxiliaryModelConfig(role: "canary", engineType: .llamaCPP, modelPathOrName: "absent.gguf"))
+        }
+    }
+}

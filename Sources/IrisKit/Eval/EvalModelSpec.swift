@@ -56,7 +56,8 @@ struct EvalModelFile: Codable, Equatable, Sendable {
 
 enum EvalFingerprint {
     /// Every regular file under `url` (or `url` itself), by relative path, with its sha256.
-    static func files(at url: URL) throws -> [EvalModelFile] {
+    /// `followLinks`: a Hugging Face snapshot holds symbolic links to its blobs, which are the files.
+    static func files(at url: URL, followLinks: Bool = false) throws -> [EvalModelFile] {
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
             throw EvalError.modelMissing(url.path)
@@ -66,9 +67,10 @@ enum EvalFingerprint {
         var out: [EvalModelFile] = []
         let walker = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey])
         while let next = walker?.nextObject() as? URL {
-            guard (try? next.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
+            let target = followLinks ? next.resolvingSymlinksInPath() : next
+            guard (try? target.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
             let full = next.standardizedFileURL.path
-            out.append(try file(next, relative: String(full.dropFirst(base.count + 1))))
+            out.append(try file(target, relative: String(full.dropFirst(base.count + 1))))
         }
         return out.sorted { $0.path < $1.path }
     }

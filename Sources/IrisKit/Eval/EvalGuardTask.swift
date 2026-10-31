@@ -43,9 +43,16 @@ enum EvalGuardTask {
     }
 
     static func canary(_ spec: EvalModelSpec, think: Think) async throws -> Canary {
-        guard spec.runtime == .ollama else {
-            throw EvalError.unsupported("\(spec.runtime.rawValue): canaries aren't scored yet (#815); this slice runs ollama:<name>")
+        switch spec.runtime {
+        case .ollama: return try await ollamaCanary(spec, think: think)
+        case .llamacpp: return try await llamaCanary(spec, think: think)
+        case .mlx: return try await mlxCanary(spec, think: think)
+        case .onnx, .coreml:
+            throw EvalError.unsupported("\(spec.runtime.rawValue) models are classifiers, not canaries: use ollama:, llamacpp: or mlx:")
         }
+    }
+
+    private static func ollamaCanary(_ spec: EvalModelSpec, think: Think) async throws -> Canary {
         let suppress: Bool
         switch think {
         case .product: suppress = AuxiliaryModelManager.suppressesThinking(role: "canary")
@@ -66,12 +73,92 @@ enum EvalGuardTask {
                                              "think_sent": suppress ? "false, to a model that thinks" : "nothing (the model's default)"])
     }
 
+    /// `--think` switches Ollama's thinking; llama.cpp and MLX have no such switch to turn.
+    private static func requireProductThinking(_ spec: EvalModelSpec, _ think: Think) throws {
+        guard think == .product else {
+            throw EvalError.unsupported("\(spec.runtime.rawValue): the engine has no thinking switch, so --think \(think.rawValue) can't apply")
+        }
+    }
+
+    /// A GGUF file, loaded as the product loads the canary (greedy argmax, `LlamaCPPEngine`), its
+    /// sha256 as the fingerprint.
+    private static func llamaCanary(_ spec: EvalModelSpec, think: Think) async throws -> Canary {
+        try requireProductThinking(spec, think)
+        guard let url = spec.url else { throw EvalError.unsupported("llamacpp needs a file path") }
+        let files = try EvalFingerprint.files(at: url)
+        guard files.count == 1 else { throw EvalError.modelMissing("\(url.path): llamacpp: takes one GGUF file, not a folder") }
+        let engine = try await LlamaCPPEngine(modelsDir: url.deletingLastPathComponent())
+        try await engine.loadModel(config: AuxiliaryModelConfig(role: "canary", engineType: .llamaCPP, modelPathOrName: url.lastPathComponent))
+        return Canary(engine: engine, spec: spec, fingerprint: EvalFingerprint.digest(files),
+                      runtimeVersion: dependencyVersion("llama.swift"), think: "none",
+                      details: ["think_requested": think.rawValue, "think_sent": "nothing (no thinking switch)"])
+    }
+
+    /// A Hugging Face id, loaded as the product loads it, its local snapshot's files as the fingerprint.
+    /// Loading first: the first load downloads it into the cache.
+    private static func mlxCanary(_ spec: EvalModelSpec, think: Think) async throws -> Canary {
+        try requireProductThinking(spec, think)
+        let engine = MLXEngine()
+        try await engine.loadModel(config: AuxiliaryModelConfig(role: "canary", engineType: .mlx, modelPathOrName: spec.name))
+        let snapshot = try mlxSnapshot(id: spec.name)
+        let files = try EvalFingerprint.files(at: snapshot, followLinks: true)
+        guard !files.isEmpty else { throw EvalError.modelMissing("mlx:\(spec.name): the snapshot at \(snapshot.path) holds no files") }
+        return Canary(engine: engine, spec: spec, fingerprint: EvalFingerprint.digest(files),
+                      runtimeVersion: dependencyVersion("mlx-swift"), think: "none",
+                      details: ["think_requested": think.rawValue, "think_sent": "nothing (no thinking switch)",
+                                "mlx_snapshot": snapshot.lastPathComponent])
+    }
+
+    /// The Hugging Face cache's snapshot of `id` (`org/name`), as `HubClient` lays it out:
+    /// `<hub cache>/models--org--name/snapshots/<revision>`, the revision being `refs/main`'s. The
+    /// cache is `HF_HUB_CACHE`, else `HF_HOME/hub`, else `~/.cache/huggingface/hub`.
+    static func mlxSnapshot(id: String, environment: [String: String] = ProcessInfo.processInfo.environment,
+                            home: URL = FileManager.default.homeDirectoryForCurrentUser) throws -> URL {
+        let hub: URL
+        if let c = environment["HF_HUB_CACHE"], !c.isEmpty { hub = URL(fileURLWithPath: c) }
+        else if let h = environment["HF_HOME"], !h.isEmpty { hub = URL(fileURLWithPath: h).appendingPathComponent("hub") }
+        else { hub = home.appendingPathComponent(".cache/huggingface/hub") }
+        let repo = hub.appendingPathComponent("models--" + id.replacingOccurrences(of: "/", with: "--"))
+        let snapshots = repo.appendingPathComponent("snapshots")
+        if let ref = try? String(contentsOf: repo.appendingPathComponent("refs/main"), encoding: .utf8) {
+            let dir = snapshots.appendingPathComponent(ref.trimmingCharacters(in: .whitespacesAndNewlines))
+            if FileManager.default.fileExists(atPath: dir.path) { return dir }
+        }
+        let all = (try? FileManager.default.contentsOfDirectory(atPath: snapshots.path)) ?? []
+        guard all.count == 1 else {
+            throw EvalError.modelMissing("mlx:\(id): \(all.isEmpty ? "no snapshot" : "\(all.count) snapshots and no refs/main") under \(repo.path)")
+        }
+        return snapshots.appendingPathComponent(all[0])
+    }
+
+    /// The version of a package this checkout pins (its tag, else the first 12 characters of the
+    /// revision), read from `Package.resolved`: the engine compiled into a dev build is that one.
+    /// Nil when the file or the pin is missing: absent, never a guess.
+    static func dependencyVersion(_ identity: String, resolved: Data? = nil) -> String? {
+        let data = resolved ?? (try? Data(contentsOf: PerfPaths.repoRoot().appendingPathComponent("Package.resolved")))
+        guard let data, let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let pins = root["pins"] as? [[String: Any]],
+              let pin = pins.first(where: { ($0["identity"] as? String) == identity }),
+              let state = pin["state"] as? [String: Any] else { return nil }
+        if let version = state["version"] as? String { return "\(identity) \(version)" }
+        return (state["revision"] as? String).map { "\(identity) \($0.prefix(12))" }
+    }
+
     /// The guard's configuration for a run: protection on, the canary provisioned, and tier 2
     /// provisioned (the scoped model) or not configured (skipped, as an install without one).
     static func guardConfig(canary: EvalModelSpec, tier2: Bool) -> InjectionGuard.GuardConfigFingerprint {
-        .init(protectionEnabled: true, promptGuardEngine: "ollama", promptGuardModel: canary.name,
+        .init(protectionEnabled: true, promptGuardEngine: engineName(canary.runtime), promptGuardModel: canary.name,
               promptGuardCoreMLModel: tier2 ? "eval" : "", tier3CloudModel: "", tier2ModelsDir: "", tier3ModelsDir: "",
               tier2Provisioning: tier2 ? .provisioned : .notConfigured, tier3Provisioning: .provisioned)
+    }
+
+    /// The product's engine name for a canary runtime (`AuxiliaryEngineType`).
+    static func engineName(_ runtime: EvalModelSpec.Runtime) -> String {
+        switch runtime {
+        case .llamacpp: return AuxiliaryEngineType.llamaCPP.rawValue
+        case .mlx: return AuxiliaryEngineType.mlx.rawValue
+        default: return AuxiliaryEngineType.ollama.rawValue
+        }
     }
 
     /// What one canary call did.
