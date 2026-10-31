@@ -8,8 +8,10 @@ import Foundation
 enum EvalGuardTask {
     static let verdict = "injection.verdict"
     static let stack = "injection.stack"
-    /// Bump when what a metric means changes (spec, section 9).
-    static let scoringVersion = 1
+    /// Bump when what a metric means changes (spec, section 9). A stack's rows carry the blocking
+    /// tier from 2 on (#830), so older stack results read as having none; the verdict task's
+    /// rows are unchanged, and its results keep comparing.
+    static func scoringVersion(task: String) -> Int { task == stack ? 2 : 1 }
     /// LLM tasks repeat by default (spec, section 5): 3 catch a collapse, not a slow drift.
     static let defaultRepeats = 3
 
@@ -110,41 +112,58 @@ enum EvalGuardTask {
                                                 NSURLErrorDNSLookupFailed].contains(e.code)
     }
 
+    /// Which tier blocked a text and what tier 2 said, from the product's own result for that call
+    /// (#830): concurrent judgements each keep their own.
+    struct Trace: Equatable, Sendable {
+        var blockedBy: String
+        var tier2Verdict: String?
+
+        static func of(outcome: InjectionGuard.GuardOutcome, tier2: String?) -> Trace {
+            switch outcome {
+            case .passed: return Trace(blockedBy: "none", tier2Verdict: tier2)
+            case .blocked(let marker):
+                if marker.contains("TIER 2") { return Trace(blockedBy: "tier2", tier2Verdict: tier2) }
+                return Trace(blockedBy: tier2 == "partial" ? "tier3_after_partial" : "tier3", tier2Verdict: tier2)
+            }
+        }
+    }
+
     /// One text through the product up to tier 3. `tier2` nil: the verdict task, tier 2 passing
     /// everything. `stack`: tier 2 as given, or skipped for 1+3.
     static func product(_ text: String, canary: any AuxiliaryInferenceEngine, config: InjectionGuard.GuardConfigFingerprint,
-                        tier2: CoreMLEvaluator.ScopedModel) async -> (outcome: EvalMetrics.Outcome, shown: String, parseFailure: Bool) {
+                        tier2: CoreMLEvaluator.ScopedModel) async -> (outcome: EvalMetrics.Outcome, shown: String, parseFailure: Bool, trace: Trace) {
         let call = Call()
-        let (outcome, cacheable) = await $call.withValue(call) {
+        let (outcome, cacheable, tier2Verdict) = await $call.withValue(call) {
             await AuxiliaryModelManager.$scopedEngines.withValue(["canary": Recording(inner: canary)]) {
                 await CoreMLEvaluator.$scopedModel.withValue(tier2) {
-                    await InjectionGuard.classifyUntrustedDetailed(OutputCap.cap(text), contextTag: EvalClassifierTask.contextTag,
+                    await InjectionGuard.classifyUntrustedTraced(OutputCap.cap(text), contextTag: EvalClassifierTask.contextTag,
                                                                   maxTier: .tier3_canary, protectionEnabled: true, config: config)
                 }
             }
         }
+        let trace = Trace.of(outcome: outcome, tier2: tier2Verdict)
         switch outcome {
         case .passed(let clean):
-            return (clean.contains(EvalClassifierTask.withheldMarker) ? .withheld : .passed, clean, false)
+            return (clean.contains(EvalClassifierTask.withheldMarker) ? .withheld : .passed, clean, false, trace)
         case .blocked(let marker):
-            if let error = call.error { return (isInfra(error) ? .infra : .failClosed, marker, false) }
-            if !cacheable { return (.failClosed, marker, false) }
+            if let error = call.error { return (isInfra(error) ? .infra : .failClosed, marker, false, trace) }
+            if !cacheable { return (.failClosed, marker, false, trace) }
             // Tier 3 answered: the product blocks an answer with no clear verdict too (fail-closed).
             if marker.contains("TIER 3"), let answer = call.answer, InjectionGuard.canaryVerdict(answer) == .unreadable {
-                return (.failClosed, marker, true)
+                return (.failClosed, marker, true, trace)
             }
-            return (.blocked, marker, false)
+            return (.blocked, marker, false, trace)
         }
     }
 
     static func score(_ sample: EvalSample, repeatIndex: Int, canary: any AuxiliaryInferenceEngine,
                       config: InjectionGuard.GuardConfigFingerprint, tier2: CoreMLEvaluator.ScopedModel) async -> EvalMetrics.Scored {
         let start = MonotonicClock.nowMs()
-        let (outcome, shown, parse) = await product(sample.text, canary: canary, config: config, tier2: tier2)
+        let (outcome, shown, parse, trace) = await product(sample.text, canary: canary, config: config, tier2: tier2)
         let seconds = (MonotonicClock.nowMs() - start) / 1000
         let caught = sample.payload.map { EvalMetrics.caught(outcome, shown: shown, payload: $0) }
         return EvalMetrics.Scored(sample: sample, outcome: outcome, rawScore: nil, seconds: seconds, caught: caught,
-                                  repeatIndex: repeatIndex, parseFailure: parse)
+                                  repeatIndex: repeatIndex, parseFailure: parse, trace: trace)
     }
 }
 
@@ -226,7 +245,7 @@ extension EvalRunner {
                        datasetFamily: dataset.manifest.family, datasetVersion: dataset.manifest.version,
                        datasetSha256: dataset.sha256s, split: run.split, sample: run.sample,
                        runtime: runtime, runtimeVersion: canary.runtimeVersion, model: model, modelFingerprint: fingerprint,
-                       scoringVersion: EvalGuardTask.scoringVersion, think: canary.think, repeats: run.repeats),
+                       scoringVersion: EvalGuardTask.scoringVersion(task: run.task), think: canary.think, repeats: run.repeats),
             date: day,
             model: .init(spec: [run.tier2?.description, canary.spec.description].compactMap { $0 }.joined(separator: " + "),
                          files: tier2Files.isEmpty ? nil : tier2Files,
@@ -237,7 +256,9 @@ extension EvalRunner {
             modelChanged: changed, previousFingerprint: changed == true ? previous?.result.key.modelFingerprint : nil,
             metrics: metrics,
             verdicts: scored.map { .init(id: $0.sample.id, outcome: $0.outcome.rawValue, caught: $0.caught,
-                                         rawScore: nil, seconds: $0.seconds, repeatIndex: $0.repeatIndex) })
+                                         rawScore: nil, seconds: $0.seconds, repeatIndex: $0.repeatIndex,
+                                         blockedBy: run.stack == nil ? nil : $0.trace?.blockedBy,
+                                         tier2Verdict: run.stack == nil ? nil : $0.trace?.tier2Verdict) })
         try FileManager.default.createDirectory(at: taskDir, withIntermediateDirectories: true)
         let base = "\(day)-\(run.stack.map { "stack\($0.rawValue.replacingOccurrences(of: "+", with: ""))-" } ?? "")"
             + "\(canary.spec.slug)-think\(canary.think)-v\(dataset.manifest.version)-\(run.split)" + (run.sample.map { "-s\($0)" } ?? "-full")
