@@ -812,6 +812,17 @@ struct EvalMarginRuleTests {
         #expect(try recallLine(noisy, result { _, _ in false }).contains("not shown"))
     }
 
+    @Test func stableTextsMovingTheOtherWayFromTheAggregateIsNotReal() throws {
+        // a0..a2 are missed every time in the first result and caught every time in the second (3 stable
+        // texts better), but a3..a8 are each missed in two of three repeats there, so the aggregate
+        // falls from 70% to 60% with no spread between repeats (4 misses in each).
+        let miss: [Int: Set<Int>] = [3: [0, 1], 4: [0, 1], 5: [1, 2], 6: [1, 2], 7: [0, 2], 8: [0, 2]]
+        let before = result { a, _ in a < 3 }
+        let after = result { a, r in miss[a]?.contains(r) ?? false }
+        let line = try recallLine(before, after)
+        #expect(line.contains("not shown") && !line.contains("REAL") && line.contains("the other way") && line.contains("3 up"), "\(line)")
+    }
+
     @Test func aResultWithNoSpreadRecordedGetsNoVerdictNeverAZeroSpread() throws {
         let line = try recallLine(result(withSpread: false) { _, _ in false }, result { a, _ in a < 3 })
         #expect(line.contains("no spread recorded in the first result, so no verdict") && !line.contains("REAL"), "\(line)")
