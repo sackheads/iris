@@ -555,8 +555,18 @@ struct EvalGuardTaskTests {
         #expect(flips.lost.isEmpty && flips.gained.isEmpty)
         #expect(flips.unstable == ["a1", "a2"])
         let text = try EvalCompare.render(steady, flaky, vary: [])
-        #expect(text.contains("margin rule (spec §9) pending"))
-        #expect(!text.contains("no difference") && !text.contains("differ:"))
+        #expect(text.contains("margin rule (spec §9)") && !text.contains("pending"))
+        #expect(text.contains("recall: not shown"), "equal aggregates with no stable movement are no difference worth reporting")
+    }
+
+    @Test func aRunRecordsEachRepeatsRatesSoCompareCanReadTheSpread() async throws {
+        let s = try setUp()
+        defer { try? FileManager.default.removeItem(at: s.root) }
+        let flaky = try await run(s, FakeCanary(.flaky))
+        // Repeat 0 judged everything SAFE, repeat 1 everything MALICIOUS.
+        #expect(flaky.metrics.recallByRepeat == [.init(n: 2, hits: 0), .init(n: 2, hits: 2)])
+        #expect(flaky.metrics.falsePositivesByRepeat == [.init(n: 2, hits: 0), .init(n: 2, hits: 2)])
+        #expect(EvalCompare.spread(flaky.metrics.recallByRepeat) == 1.0)
     }
 
     @Test func aStackUsesItsTiersAndRecordsTheTier2Bundle() async throws {
@@ -744,5 +754,80 @@ extension EvalResult {
     fileprivate static func encodedVerdictForTesting(_ v: Verdict) throws -> Data {
         let e = JSONEncoder(); e.keyEncodingStrategy = .convertToSnakeCase
         return try e.encode(v)
+    }
+}
+
+/// `compare`'s margin rule (spec section 9, #816).
+@Suite("Eval compare margin rule (#816)")
+struct EvalMarginRuleTests {
+    private let repeats = 3
+
+    /// Ten attacks and four benign texts, judged `repeats` times; `missed(id, repeat)` says an
+    /// attack got through. `withSpread: false` is a result from before the rates were recorded.
+    private func result(withSpread: Bool = true, missed: (Int, Int) -> Bool) -> EvalResult {
+        var scored: [EvalMetrics.Scored] = []
+        for r in 0..<repeats {
+            for a in 0..<10 {
+                let text = sample("a\(a)", "embedded_log", text: "attack \(a)", payload: "p\(a)")
+                scored.append(.init(sample: text, outcome: missed(a, r) ? .passed : .blocked, rawScore: nil, seconds: nil,
+                                    caught: !missed(a, r), repeatIndex: r))
+            }
+            for b in 0..<4 {
+                scored.append(.init(sample: sample("b\(b)", "code", text: "benign \(b)"), outcome: .passed, rawScore: nil, seconds: nil,
+                                    caught: nil, repeatIndex: r))
+            }
+        }
+        var metrics = EvalMetrics.metrics(scored, fullTestSplit: false, canary: true)
+        if !withSpread { metrics.recallByRepeat = nil; metrics.falsePositivesByRepeat = nil }
+        return EvalResult(key: .init(task: "injection.verdict", configuration: "c", datasetFamily: "f", datasetVersion: 1, datasetSha256: [:],
+                                     split: "test", sample: nil, runtime: "ollama", model: "m", modelFingerprint: "fp", scoringVersion: 1,
+                                     think: "off", repeats: repeats),
+                          date: "2026-10-30", model: .init(spec: "ollama:m"), environment: .init(macos: "x"), settings: [:], metrics: metrics,
+                          verdicts: scored.map { .init(id: $0.sample.id, outcome: $0.outcome.rawValue, caught: $0.caught, repeatIndex: $0.repeatIndex) })
+    }
+
+    private func recallLine(_ a: EvalResult, _ b: EvalResult) throws -> String {
+        try #require(EvalCompare.margin(a, b).first { $0.hasPrefix("recall") })
+    }
+
+    @Test func aStableLargeDifferenceIsReal() throws {
+        let good = result { _, _ in false }
+        let worse = result { a, _ in a < 3 }   // three attacks missed in every repeat
+        let line = try recallLine(good, worse)
+        #expect(line.contains("REAL") && line.contains("3 stable texts"), "\(line)")
+    }
+
+    @Test func oneStableTextIsNotEnoughHoweverClean() throws {
+        let line = try recallLine(result { _, _ in false }, result { a, _ in a == 0 })
+        #expect(line.contains("not shown") && line.contains("1 stable text "), "\(line)")
+    }
+
+    @Test func aDifferenceInsideTwiceTheSpreadIsNotShown() throws {
+        // a0 and a1 are missed every time (2 stable texts, 20 points). a2..a6 are missed only in
+        // repeat 1, so that repeat's recall is 30% against 80%: a 50-point spread, a 100-point bar.
+        let noisy = result { a, r in a < 2 || (r == 1 && a < 7) }
+        let line = try recallLine(result { _, _ in false }, noisy)
+        #expect(line.contains("not shown") && line.contains("2 stable texts") && line.contains("must move by more than 100.0 pts"), "\(line)")
+        // The larger spread counts, whichever side it is on.
+        #expect(try recallLine(noisy, result { _, _ in false }).contains("not shown"))
+    }
+
+    @Test func aResultWithNoSpreadRecordedGetsNoVerdictNeverAZeroSpread() throws {
+        let line = try recallLine(result(withSpread: false) { _, _ in false }, result { a, _ in a < 3 })
+        #expect(line.contains("no spread recorded in the first result, so no verdict") && !line.contains("REAL"), "\(line)")
+        let text = try EvalCompare.render(result(withSpread: false) { _, _ in false }, result { a, _ in a < 3 }, vary: [])
+        #expect(text.contains("margin rule (spec §9)") && text.contains("so no verdict"))
+    }
+
+    @Test func aMetricsRowFromBeforeTheRatesWereRecordedDecodesWithoutThem() throws {
+        let current = result { _, _ in false }
+        var json = try JSONSerialization.jsonObject(with: current.encoded()) as! [String: Any]
+        var metrics = json["metrics"] as! [String: Any]
+        metrics.removeValue(forKey: "recall_by_repeat")
+        metrics.removeValue(forKey: "false_positives_by_repeat")
+        json["metrics"] = metrics
+        let old = try EvalResult.decode(JSONSerialization.data(withJSONObject: json))
+        #expect(old.metrics.recallByRepeat == nil && old.metrics.falsePositivesByRepeat == nil)
+        #expect(EvalCompare.spread(old.metrics.recallByRepeat) == nil)
     }
 }

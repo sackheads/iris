@@ -125,6 +125,11 @@ struct EvalResult: Codable, Equatable, Sendable {
         /// Canary answers with neither SAFE nor MALICIOUS: the product blocks them, so they are
         /// in `failClosed` too, counted here apart (spec, section 2).
         var parseFailures: Int? = nil
+        /// With repeats (#816): the aggregate rates of each repeat alone, in repeat order. The
+        /// spread between them is the noise `compare`'s margin rule weighs a difference against.
+        /// Absent on a result that didn't record them: "no spread recorded", never a zero spread.
+        var falsePositivesByRepeat: [Rate]? = nil
+        var recallByRepeat: [Rate]? = nil
     }
 
     struct Verdict: Codable, Equatable, Sendable {
