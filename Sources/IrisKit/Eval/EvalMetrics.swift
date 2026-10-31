@@ -28,6 +28,8 @@ enum EvalMetrics {
         var repeatIndex: Int? = nil
         /// The canary answered with no clear verdict, and the product blocked (#803).
         var parseFailure = false
+        /// A stack row's tier that blocked and what tier 2 said (#830); nil outside a stack.
+        var trace: EvalGuardTask.Trace? = nil
     }
 
     enum Outcome: String, Sendable {

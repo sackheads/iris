@@ -136,6 +136,11 @@ struct EvalResult: Codable, Equatable, Sendable {
         var seconds: Double?
         /// Which judgement of the text this is, from 0, when a run repeats (#789b).
         var repeatIndex: Int? = nil
+        /// `injection.stack` from scoring version 2 (#830): which tier blocked ("tier2", "tier3",
+        /// "tier3_after_partial" or "none") and tier 2's verdict ("safe", "partial", "malicious",
+        /// "error" or "skipped"). Absent on older rows and other tasks, never a guess.
+        var blockedBy: String? = nil
+        var tier2Verdict: String? = nil
     }
 
     var schemaVersion = EvalResult.schemaVersion
