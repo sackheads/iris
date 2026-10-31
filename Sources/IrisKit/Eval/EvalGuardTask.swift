@@ -314,9 +314,10 @@ extension EvalRunner {
                 if (n + 1) % 25 == 0 { print("eval: repeat \(r + 1), \(n + 1)/\(texts.count)") }
             }
         }
-        // Freed before the process exits: llama.cpp's Metal backend asserts at exit while a model
-        // is still resident (#815), after the result was written.
-        await canary.engine.unloadModel()
+        // An engine in this process is freed before it exits: llama.cpp's Metal backend asserts at
+        // exit while a model is still resident (#815), after the result was written. Ollama's is
+        // the person's own server, and unloading would evict their model (keep_alive 0).
+        if run.canary.runtime != .ollama { await canary.engine.unloadModel() }
         var metrics = EvalMetrics.metrics(scored, fullTestSplit: run.split == "test" && run.sample == nil, canary: true)
         metrics.costPerThousandUsd = 0   // local: measured as free; energy isn't measured
 

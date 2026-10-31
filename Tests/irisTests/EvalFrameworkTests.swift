@@ -485,8 +485,8 @@ struct EvalGuardTaskTests {
     }
 
     private func run(_ s: (root: URL, dataset: URL, tier2: URL), _ canary: any AuxiliaryInferenceEngine, task: String = EvalGuardTask.verdict,
-                     stack: EvalGuardTask.Stack? = nil, repeats: Int = 2) async throws -> EvalResult {
-        let spec = EvalModelSpec(runtime: .ollama, name: "fake:1b")
+                     stack: EvalGuardTask.Stack? = nil, repeats: Int = 2, runtime: EvalModelSpec.Runtime = .ollama) async throws -> EvalResult {
+        let spec = EvalModelSpec(runtime: runtime, name: "fake:1b")
         let run = EvalRunner.GuardRun(task: task, canary: spec, tier2: stack == .tier123 ? .init(runtime: .onnx, name: s.tier2.path) : nil,
                                       stack: stack, think: .off, repeats: repeats, split: "test", sample: nil,
                                       datasetDir: s.dataset.path, outDir: s.root.appendingPathComponent("results").path)
@@ -520,12 +520,17 @@ struct EvalGuardTaskTests {
         #expect(r.verdicts.filter { $0.id == "a1" }.allSatisfy { $0.outcome == "blocked" && $0.caught == true })
     }
 
-    @Test func theCanaryIsUnloadedOnceTheTextsAreJudged() async throws {
+    @Test func anInProcessCanaryIsUnloadedAfterJudgingButOllamasIsNotEvicted() async throws {
         let s = try setUp()
         defer { try? FileManager.default.removeItem(at: s.root) }
-        let canary = UnloadCountingCanary()
-        _ = try await run(s, canary, repeats: 1)
-        #expect(canary.unloads == 1, "llama.cpp's Metal backend aborts the process at exit with a model still loaded (#815)")
+        for runtime in [EvalModelSpec.Runtime.llamacpp, .mlx] {
+            let canary = UnloadCountingCanary()
+            _ = try await run(s, canary, repeats: 1, runtime: runtime)
+            #expect(canary.unloads == 1, "\(runtime): llama.cpp's Metal backend aborts the process at exit with a model resident (#815)")
+        }
+        let ollama = UnloadCountingCanary()
+        _ = try await run(s, ollama, repeats: 1)
+        #expect(ollama.unloads == 0, "unloading Ollama's model would evict the person's own server's model")
     }
 
     @Test func noVerdictWordFailsClosedAndCountsAsAParseFailure() async throws {
