@@ -1,0 +1,108 @@
+import Testing
+import Foundation
+@testable import IrisKit
+
+/// #867: a granted job's `write_file` runs on the host, where a write into a `.git` (hooks, the config
+/// git runs programs from) is the next `git` command's code. Every case hands the gate the dispatcher's
+/// "yes" for the mount (`grantedMount:`), so the refusal under test can only be this rule's, never the
+/// grant's or the executor's walk.
+@MainActor
+@Suite("A granted job's host writes into a .git (#867)", .timeLimit(.minutes(1)))
+struct GitDirHostWriteTests {
+    private typealias Tree = JobGrantAllowsTests.Tree
+    private func c(_ url: URL, _ tail: String = "") -> String { JobGrantAllowsTests.c(url, tail) }
+
+    private func background(_ t: Tree) -> (AppState, UUID) {
+        let app = AppState()
+        app.permissions = PermissionManager(paths: IrisPaths(root: t.home.appendingPathComponent(".iris")))
+        let cid = app.createNewConversation(isBackground: true, select: false)
+        app.setWorkspace(for: cid, path: c(t.proj))
+        app.setSandboxGrant(for: cid, t.grant)
+        return (app, cid)
+    }
+
+    /// The gate's answer for a `write_file` the grant already said yes to.
+    private func write(_ path: String, _ t: Tree, _ app: AppState, _ cid: UUID) async -> Bool {
+        await app.requestApproval(toolName: "write_file", details: path, args: ["path": .string(path)],
+                                  workspace: c(t.proj), conversationId: cid, grantedMount: t.grant.mounts[0])
+    }
+
+    @Test("each .git target is refused unattended, as a person's alone, though the grant covers it")
+    func gitTargetsAreRefused() async throws {
+        let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
+        let (app, cid) = background(t)
+        for rel in [".git/config", ".git/config.worktree", ".git/hooks/pre-commit", ".git/info/exclude", ".git/info/attributes", ".git/HEAD"] {
+            let target = c(t.proj, rel)
+            #expect(t.grant.allowedMount(toolName: "write_file", details: target, cwd: nil) != nil, "the grant says yes to \(rel); the refusal has to be this rule's")
+            #expect(await !write(target, t, app, cid), Comment(rawValue: rel))
+            let denial = try #require(app.takeBackgroundDenials(for: cid).first, Comment(rawValue: rel))
+            #expect(denial.toolName == "write_file" && denial.reason == .approval && denial.grantNearest == nil,
+                    "refused as an approval a person must give, not as 'outside the grant': \(rel)")
+        }
+        #expect(app.conversations.first { $0.id == cid }?.messages.last?.content == String(format: AppState.unattendedDenialNotice, "write_file"))
+    }
+
+    @Test("a sibling that is not a .git is still allowed")
+    func siblingsAreAllowed() async throws {
+        let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
+        let (app, cid) = background(t)
+        for rel in ["out.md", ".gitignore", ".gitattributes", ".github/workflows/ci.yml", "gitrepo/notes.md", "src/.gitkeep", "a.git/config"] {
+            #expect(await write(c(t.proj, rel), t, app, cid), Comment(rawValue: rel))
+        }
+        #expect(app.takeBackgroundDenials(for: cid).isEmpty)
+    }
+
+    @Test("a nested repository's .git, a .git that is a file, and another case are refused too")
+    func nestedFileAndCase() async throws {
+        let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
+        let (app, cid) = background(t)
+        let fm = FileManager.default
+        try fm.createDirectory(at: t.proj.appendingPathComponent("vendor/lib/.git"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: t.proj.appendingPathComponent("wt"), withIntermediateDirectories: true)
+        try "gitdir: ../.git/worktrees/wt\n".write(to: t.proj.appendingPathComponent("wt/.git"), atomically: true, encoding: .utf8)
+        for rel in ["vendor/lib/.git/config", "vendor/lib/.git/hooks/post-checkout", "wt/.git", ".GIT/config", "deep/a/b/.Git/hooks/x"] {
+            #expect(await !write(c(t.proj, rel), t, app, cid), Comment(rawValue: rel))
+            #expect(app.takeBackgroundDenials(for: cid).count == 1, Comment(rawValue: rel))
+        }
+    }
+
+    @Test("a link into a .git does not hide it: the real path is judged as well as the spelling")
+    func symlinkIntoGit() async throws {
+        let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
+        let (app, cid) = background(t)
+        let fm = FileManager.default
+        try fm.createDirectory(at: t.proj.appendingPathComponent(".git/hooks"), withIntermediateDirectories: true)
+        try fm.createSymbolicLink(at: t.proj.appendingPathComponent("link"), withDestinationURL: t.proj.appendingPathComponent(".git"))
+        try fm.createSymbolicLink(at: t.proj.appendingPathComponent("hooks"), withDestinationURL: t.proj.appendingPathComponent(".git/hooks"))
+        // Nothing in the spelling says `.git`; the real path does.
+        for rel in ["link/config", "hooks/pre-commit"] {
+            let spelled = t.proj.path + "/" + rel   // as the model typed it: not resolved
+            #expect(!spelled.split(separator: "/").contains(".git"), "the spelling holds no .git: \(rel)")
+            #expect(await !write(spelled, t, app, cid), Comment(rawValue: rel))
+            #expect(app.takeBackgroundDenials(for: cid).count == 1, Comment(rawValue: rel))
+        }
+    }
+
+    @Test("an attended turn keeps its approval flow: the rule is for unattended runs")
+    func attendedIsUnchanged() async throws {
+        let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
+        let app = AppState()
+        app.permissions = PermissionManager(paths: IrisPaths(root: t.home.appendingPathComponent(".iris")))
+        app.autoApproveTools = true    // a headless driver: approves what an attended turn would
+        let cid = app.createNewConversation(isBackground: false, select: false)
+        let ok = await app.requestApproval(toolName: "write_file", details: c(t.proj, ".git/config"), args: [:],
+                                           workspace: c(t.proj), conversationId: cid)
+        #expect(ok, "not a background conversation: today's flow, unchanged")
+        #expect(app.takeBackgroundDenials(for: cid).isEmpty)
+    }
+
+    @Test("the rule is about write_file: a read, or a command, is not it")
+    func onlyWriteFile() {
+        let permissions = PermissionManager(paths: IrisPaths(root: FileManager.default.temporaryDirectory.appendingPathComponent("iris-867-\(UUID().uuidString)")))
+        #expect(permissions.writesGitDir(toolName: "write_file", details: "/p/.git/config", workspace: nil))
+        #expect(!permissions.writesGitDir(toolName: "read_file", details: "/p/.git/config", workspace: nil))
+        #expect(!permissions.writesGitDir(toolName: "run_command", details: "git config core.x y", workspace: "/p/.git"))
+        #expect(!permissions.writesGitDir(toolName: "write_file", details: "/p/src/main.swift", workspace: nil))
+        #expect(permissions.writesGitDir(toolName: "write_file", details: ".git/config", workspace: "/p"), "a relative path is judged against the working directory")
+    }
+}

@@ -234,7 +234,7 @@ does not know).
 **Making one.** `schedule_job` and `register_directory_watcher` take `mounts` and `network`, and
 both take `profile` (new to the watch tool, since a watch that writes has to be `mutating`).
 `mounts` is an ordered list of `source[:target][:ro]` entries (a leading `~` is expanded) —
-read-write unless `:ro` (a read-write mount's own `.iris/` is still mounted read-only over it, #617, and so is the `.git/hooks` of a repository at its root, #623), and identity-mapped when no target is given, which is the form to prefer:
+read-write unless `:ro` (a read-write mount's own `.iris/` is still mounted read-only over it, #617, and so is the `.git/hooks` of a repository at its root, #623; that is the VM's view, and a command in a mount that holds a repository other than the one being worked on is refused outright; a host `write_file` has its own rule, below), and identity-mapped when no target is given, which is the form to prefer:
 a `write_file` names the host *source*, a command inside the container names the *target*, and
 with no target the two are the same path. `network` is a Bool and
 defaults to `false`. Only a `mutating` job may carry a grant; a read-only job created with `mounts`,
@@ -292,6 +292,14 @@ the file-tool gate applies the same innermost-wins rule. The result sentence nam
   host write at `/Users/me/proj/out.md` is the same bytes on the same disk the container would
   write through the mount, and keeping the host implementation keeps the self-write filter and the
   protected-directory rule exactly as they are.
+  An unattended `write_file` to a path with a `.git` component anywhere under a mount (the config git
+  runs programs from, hooks, `info/`, a `.git` file that points at a worktree's git dir, in a nested
+  repository as much as at the mount's root, and through a link, since the real path is judged too) is
+  refused as a person's alone, like a write to a workspace's `.iris/`: "needs approval, and this is an
+  unattended run", recorded on the run's card, where "Approve and run" is a person's own decision
+  (#867). Before that rule the VM's mounts protected `.git/hooks` and the host path did not, and a
+  planted request could replace a repository's `.git/config`. An attended turn keeps its own approval
+  flow.
 
 Everything else is left as it was. The memory and skill tools stay refused unattended; `save_fact`,
 the Google mutators and MCP tools are neither widened nor narrowed; every other tool still meets

@@ -4198,11 +4198,14 @@ class AppState {
         // #617: a write to a workspace's `.iris/` is a person's alone, whatever else would approve it.
         let irisWrite = permissions.writesWorkspaceIris(toolName: toolName, details: details, workspace: workspace,
                                                         inSandbox: inSandbox)
+        // #867: and a write into a `.git` (hooks, the config git runs programs from), granted or not.
+        // Unattended only: an attended turn keeps its approval flow.
+        let gitWrite = permissions.writesGitDir(toolName: toolName, details: details, workspace: workspace)
         if let id = conversationId, let conversation = conversations.first(where: { $0.id == id }), conversation.isBackground {
             // A call that only a person may approve has nobody to ask here, and the allowlist
             // below must not stand in for them (#599). Its one caller refuses unattended
             // conversations before it asks; this keeps the ladder right without relying on that.
-            if irisWrite || humanOnly {
+            if irisWrite || gitWrite || humanOnly {
                 recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval, hooksFired: beforeToolFired), in: id)
                 return nil
             }
