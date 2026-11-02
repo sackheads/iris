@@ -52,6 +52,48 @@ final class PeerLedger: Sendable {
         }
     }
 
+    /// One retained topic message (#696).
+    struct TopicMessage: Equatable, Sendable {
+        let seq: Int64
+        let topic: String
+        let fromSession: UUID
+        let fromLabel: String
+        let sentAt: Date
+        let body: String
+    }
+
+    /// Keeps `body` for a late subscriber and returns its per-topic-ordered sequence number. Prunes
+    /// the topic to its newest `Topics.retainedPerTopic` and drops anything older than the
+    /// retention window, in the same write.
+    @discardableResult
+    func appendTopicMessage(topic: String, from session: UUID, label: String, body: String, at: Date) throws -> Int64 {
+        try writer.write { db in
+            try db.execute(sql: "INSERT INTO topic_messages (topic, fromSession, fromLabel, sentAt, body) VALUES (?, ?, ?, ?, ?)",
+                           arguments: [topic, session.uuidString, label, at, body])
+            let seq = db.lastInsertedRowID
+            try db.execute(sql: "DELETE FROM topic_messages WHERE sentAt < ?", arguments: [at.addingTimeInterval(-Topics.retention)])
+            try db.execute(sql: """
+                DELETE FROM topic_messages WHERE topic = ? AND seq NOT IN (
+                    SELECT seq FROM topic_messages WHERE topic = ? ORDER BY seq DESC LIMIT ?)
+                """, arguments: [topic, topic, Topics.retainedPerTopic])
+            return seq
+        }
+    }
+
+    /// The newest `limit` messages on `topic` sent since `since`, oldest first.
+    func recentTopicMessages(topic: String, since: Date, limit: Int) throws -> [TopicMessage] {
+        try writer.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT * FROM (SELECT * FROM topic_messages WHERE topic = ? AND sentAt >= ? ORDER BY seq DESC LIMIT ?)
+                ORDER BY seq
+                """, arguments: [topic, since, limit]).compactMap { row in
+                guard let from = UUID(uuidString: row["fromSession"]) else { return nil }
+                return TopicMessage(seq: row["seq"], topic: row["topic"], fromSession: from, fromLabel: row["fromLabel"],
+                                    sentAt: row["sentAt"], body: row["body"])
+            }
+        }
+    }
+
     func openRequests(from session: UUID) throws -> [PeerMessageRecord] {
         try writer.read { db in
             try Row.fetchAll(db, sql: """

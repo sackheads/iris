@@ -37,10 +37,13 @@ struct SessionPeer: Equatable, Sendable {
     var lane: String? = nil
     var skills: [AgentSkill] = []
     var project: GitProject? = nil
+    /// #696: the topics it subscribes to (the harness's stored copy).
+    var topics: [String] = []
 
     init(id: UUID, name: String?, description: String?, workspace: String?, status: SessionStatus,
          lastActive: Date, kind: SessionKind = .worker, role: String? = nil, lane: String? = nil,
-         skills: [AgentSkill] = [], project: GitProject? = nil) {
+         skills: [AgentSkill] = [], project: GitProject? = nil, topics: [String] = []) {
+        self.topics = topics
         self.id = id; self.name = name; self.description = description; self.workspace = workspace
         self.status = status; self.lastActive = lastActive
         self.kind = kind; self.role = role; self.lane = lane; self.skills = skills; self.project = project
@@ -83,7 +86,8 @@ enum SessionDirectory {
                            lastActive: status == .busy ? now : c.updatedAt,
                            kind: kind, role: c.role, lane: c.sessionCard?.lane,
                            skills: c.role != nil ? (c.sessionCard?.skills ?? []) : [],
-                           project: project ? c.workspacePath.flatMap { GitHead.read(workspace: $0) } : nil)
+                           project: project ? c.workspacePath.flatMap { GitHead.read(workspace: $0) } : nil,
+                           topics: c.sessionCard?.topics ?? [])
     }
 
     /// Most recently active first (#418). When the set is over the cap, live sessions (busy or

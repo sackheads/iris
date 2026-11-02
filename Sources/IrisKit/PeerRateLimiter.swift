@@ -12,16 +12,22 @@ struct PeerRateLimiter {
     init(now: @escaping () -> Date = Date.init) { self.now = now }
 
     /// Takes one token for `sender`. Nil when taken; otherwise the seconds until one is available.
-    mutating func take(for sender: UUID) -> TimeInterval? {
+    mutating func take(for sender: UUID) -> TimeInterval? { take(for: sender, count: 1) }
+
+    /// Takes `count` tokens at once or none (#696: a topic publish is one send per subscriber woken).
+    /// Nil when taken; otherwise the seconds until `count` are available. A count above the
+    /// bucket's capacity can never be met, so callers keep it at or below `capacity`.
+    mutating func take(for sender: UUID, count: Int) -> TimeInterval? {
         let t = now()
+        let need = Double(count)
         var b = buckets[sender] ?? (Double(Self.capacity), t)
         b.tokens = min(Double(Self.capacity), b.tokens + t.timeIntervalSince(b.at) / Self.refillInterval)
         b.at = t
-        guard b.tokens >= 1 else {
+        guard b.tokens >= need else {
             buckets[sender] = b
-            return (1 - b.tokens) * Self.refillInterval
+            return (need - b.tokens) * Self.refillInterval
         }
-        b.tokens -= 1
+        b.tokens -= need
         buckets[sender] = b
         return nil
     }

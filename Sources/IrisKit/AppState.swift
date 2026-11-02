@@ -150,14 +150,16 @@ struct SessionCard: Codable, Equatable, Sendable {
     var lane: String? = nil
     /// #469 §4.4: role-holders only; the `set_session_card` handler refuses them elsewhere.
     var skills: [AgentSkill] = []
+    /// #696: the topics this session subscribes to, normalised names (`Topics.normalize`).
+    var topics: [String] = []
 
     init(name: String, description: String, updatedAt: Date = Date(), lane: String? = nil,
-         skills: [AgentSkill] = []) {
+         skills: [AgentSkill] = [], topics: [String] = []) {
         self.name = name; self.description = description; self.updatedAt = updatedAt
-        self.lane = lane; self.skills = skills
+        self.lane = lane; self.skills = skills; self.topics = topics
     }
 
-    enum CodingKeys: String, CodingKey { case name, description, updatedAt, lane, skills }
+    enum CodingKeys: String, CodingKey { case name, description, updatedAt, lane, skills, topics }
 
     // Invariant 1: every card stored before #469 lacks lane and skills.
     init(from decoder: Decoder) throws {
@@ -167,6 +169,7 @@ struct SessionCard: Codable, Equatable, Sendable {
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
         lane = try c.decodeIfPresent(String.self, forKey: .lane)
         skills = try c.decodeIfPresent([AgentSkill].self, forKey: .skills) ?? []
+        topics = try c.decodeIfPresent([String].self, forKey: .topics) ?? []
     }
 }
 
@@ -986,6 +989,8 @@ class AppState {
         /// own. nil for the rest: the composer's path and peer deliveries use `AppState.engine`.
         let engine: IrisEngine?
         var isPeer: Bool { origin == .peer }
+        /// #696: the peer delivery is a topic message, so the turn that reads it may not publish.
+        var isTopic = false
         /// An arrival rather than something the user typed: it waits for a goal follow-up too.
         var isArrival: Bool { origin != .user }
         init(text: String, attachments: [FileAttachment], isPeer: Bool = false) {
@@ -1060,6 +1065,8 @@ class AppState {
         if engineTurnCounts[conversationId] == nil {
             commitStreams(in: conversationId)
             markUnreadIfReplied(conversationId)
+            // #696: no turn is left that a topic message started; a drain below sets it again.
+            topicTurnConversations.remove(conversationId)
         }
         // An arrival turn — scheduler, watcher, subagent post-back — never passes through
         // `runThinkingTask`, so without this the message a user typed while one was running is
@@ -1353,8 +1360,11 @@ class AppState {
             || engine?.goalLoopIsLive(for: conversationId) == true
     }
 
-    func enqueuePendingUserMessage(text: String, attachments: [FileAttachment], for conversationId: UUID, isPeer: Bool = false) {
-        pendingUserMessages[conversationId, default: []].append(PendingUserMessage(text: text, attachments: attachments, isPeer: isPeer))
+    func enqueuePendingUserMessage(text: String, attachments: [FileAttachment], for conversationId: UUID, isPeer: Bool = false,
+                                   isTopic: Bool = false) {
+        var entry = PendingUserMessage(text: text, attachments: attachments, isPeer: isPeer)
+        entry.isTopic = isTopic
+        pendingUserMessages[conversationId, default: []].append(entry)
     }
 
     /// A background subagent's post-back, already sanitised, held for the turn in flight or the
@@ -1381,6 +1391,7 @@ class AppState {
         }
         pendingUserMessages[conversationId] = queue.isEmpty ? nil : queue
         if !taken.isEmpty { markReflectionBoundary(for: conversationId) }
+        if taken.contains(where: \.isTopic) { topicTurnConversations.insert(conversationId) }
         return taken
     }
 
@@ -1408,13 +1419,18 @@ class AppState {
         if queue[0].isArrival, owner?.goalFollowUpPending(for: conversationId) == true { return }
         if case .systemEvent = lead, owner == nil { return }
         var texts: [String] = []
+        var anyTopic = false
         while let first = queue.first, first.attachments.isEmpty, first.origin == lead {
             texts.append(first.text)
+            anyTopic = anyTopic || first.isTopic
             queue.removeFirst()
         }
-        let next = texts.isEmpty
+        var next = texts.isEmpty
             ? queue.removeFirst()
             : PendingUserMessage(text: texts.joined(separator: "\n\n"), attachments: [], origin: lead, engine: owner)
+        // A joined turn is a topic turn if any of its parts was (#696): the stricter reading.
+        if anyTopic { next.isTopic = true }
+        if next.isTopic { topicTurnConversations.insert(conversationId) }
         pendingUserMessages[conversationId] = queue.isEmpty ? nil : queue
         if case .systemEvent(let source) = next.origin {
             // Not `startTurn`: that is the composer's path, which runs as a "UI" turn. Reserved
@@ -2417,7 +2433,7 @@ class AppState {
         case skillsNeedRole
         /// Written. `laneTruncated`/`skillsTruncated` report whether `lane` or any `skills` field
         /// was cut to its cap — the caller already knows whether `name`/`description` were.
-        case stored(SessionCard, laneTruncated: Bool, skillsTruncated: Bool)
+        case stored(SessionCard, laneTruncated: Bool, skillsTruncated: Bool, newTopics: [String], topicsDropped: Bool)
     }
 
     /// `boundedName`/`boundedDescription` arrive already capped (#246) — that bound does not
@@ -2426,7 +2442,7 @@ class AppState {
     /// that DOES depend on current state (the role gate on `skills`) atomically with the rest.
     @discardableResult
     func setSessionCard(for conversationId: UUID, boundedName: String, boundedDescription: String,
-                         rawLane: String?, rawSkills: [JSONValue]?) -> SetSessionCardOutcome {
+                         rawLane: String?, rawSkills: [JSONValue]?, rawTopics: [JSONValue]? = nil) -> SetSessionCardOutcome {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return .gone }
         let clash = SessionRoles.sessions(named: boundedName, in: conversations, excluding: conversationId)
         if !clash.isEmpty {
@@ -2459,10 +2475,20 @@ class AppState {
             skills = parsed.map(\.0)
             skillsTruncated = parsed.contains { $0.1 } || validSkills.count > IrisEngine.skillsMax
         }
-        let card = SessionCard(name: boundedName, description: boundedDescription, lane: lane, skills: skills)
+        // #696: omitted keeps what was subscribed; an array replaces it (an empty one unsubscribes).
+        var topics = existing?.topics ?? []
+        var topicsDropped = false
+        if let items = rawTopics {
+            let parsed = Topics.parse(items)
+            topics = parsed.names
+            topicsDropped = parsed.dropped
+        }
+        let newTopics = topics.filter { !(existing?.topics.contains($0) ?? false) }
+        let card = SessionCard(name: boundedName, description: boundedDescription, lane: lane, skills: skills, topics: topics)
         conversations[idx].sessionCard = card
         markChanged(conversationId, .metadata)
-        return .stored(card, laneTruncated: laneTruncated, skillsTruncated: skillsTruncated)
+        return .stored(card, laneTruncated: laneTruncated, skillsTruncated: skillsTruncated,
+                       newTopics: newTopics, topicsDropped: topicsDropped)
     }
 
     enum RoleAssignment: Equatable {
@@ -2721,6 +2747,15 @@ class AppState {
 
     func peerDepth(for id: UUID) -> Int { peerDepths[id] ?? 0 }
 
+    /// The conversations whose running turn was started, or has been steered, by a topic message
+    /// (#696). Such a turn may not publish to a topic, so one broadcast cannot fan out into a
+    /// storm: the hop limit bounds depth, this bounds breadth. Cleared when the last turn on the
+    /// conversation ends; transient, on no `Codable` type (Invariants 1 and 5).
+    @ObservationIgnored private var topicTurnConversations: Set<UUID> = []
+
+    func markTopicTurn(_ id: UUID) { topicTurnConversations.insert(id) }
+    func isTopicTurn(_ id: UUID) -> Bool { topicTurnConversations.contains(id) }
+
     func notePeerArrival(depth: Int, at id: UUID) {
         peerDepths[id] = max(peerDepths[id] ?? 0, depth)
     }
@@ -2730,6 +2765,38 @@ class AppState {
     enum PeerSendDecision: Equatable {
         case allowed(target: UUID, depth: Int)
         case refused(String)
+    }
+
+    enum TopicPublishDecision: Equatable {
+        case allowed(targets: [UUID], depth: Int)
+        case refused(String)
+    }
+
+    /// One synchronous decision for a publish to `topic` (#696): the sender must be subscribed and
+    /// must not be in a turn a topic message started; the subscribers (the sender excluded) are
+    /// found now, at delivery time; the hop depth is checked as for any send; and the rate limit
+    /// takes one token per subscriber, all or none (a publish is shorthand for that many sends).
+    func decideTopicPublish(topic: String, from sender: UUID) -> TopicPublishDecision {
+        guard Topics.isSubscribed(sender, to: topic, in: conversations) else {
+            return .refused("Not sent: you are not subscribed to topic \"\(topic)\". Add it to `topics` with set_session_card first, so the others can see you are a member.")
+        }
+        guard !isTopicTurn(sender) else {
+            return .refused("Not sent: this turn was started by a topic message, and a turn like that does not publish to a topic. Answer the publisher with in_reply_to, or message a session directly.")
+        }
+        let targets = Topics.subscribers(of: topic, in: conversations, excluding: sender)
+        guard !targets.isEmpty else { return .refused("Not sent: nobody else is subscribed to topic \"\(topic)\".") }
+        guard targets.count <= Topics.maxSubscribers else {
+            return .refused("Not sent: topic \"\(topic)\" has \(targets.count) subscribers; a publish reaches at most \(Topics.maxSubscribers).")
+        }
+        let depth = peerDepth(for: sender) + 1
+        let limit = ConfigManager.shared.maxSessionCascade
+        guard depth <= limit else {
+            return .refused("Not sent: this chain of session messages is \(limit) hops deep, the limit. It resets when the user types into this session.")
+        }
+        if let wait = peerRateLimiter.take(for: sender, count: targets.count) {
+            return .refused("Not sent: rate limit — a publish to \(targets.count) subscribers spends \(targets.count) of this session's \(PeerRateLimiter.capacity) quick sends, and they are not all available yet. The next publish this size is allowed in about \(Int(wait.rounded(.up))) s.")
+        }
+        return .allowed(targets: targets, depth: depth)
     }
 
     /// One synchronous decision for a send: resolve the target, check depth, take a token. One
