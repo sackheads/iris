@@ -134,6 +134,13 @@ struct PermissionManager: Sendable {
         }
     }
 
+    /// Whether a call writes into a `.git` (#867). `write_file` is the host-side file writer under a
+    /// grant; a command's VM writes are the mount's business (#623). An unattended run never gets
+    /// this from the grant or the allowlist: the next `git` command a person runs would run it.
+    func writesGitDir(toolName: String, details: String, workspace: String?) -> Bool {
+        toolName == "write_file" && WorkspaceGitDir.isGitPath(details, cwd: workspace)
+    }
+
     /// The same question about a persisted call, asked of the path it would actually write (which
     /// is resolved against the run's directory, not the spelling the model sent).
     func isProtectedWrite(_ call: BlockedCall) -> Bool {
