@@ -276,6 +276,17 @@ struct ContainerExecGroupKillTests {
 
     /// The pgid-reuse half of #377, without the race of the two fires: a killer in its grace has
     /// already taken the note, so a second killer exits at once and signals nothing.
+    ///
+    /// The survivor has to outlive the test's look at it, and two real-time clocks decided how long it
+    /// did (#777). The killer's own grace was one. The other was `ProcessGroupRunner.strayGraceSeconds`:
+    /// the wrapper that leads the group dies on the TERM, and a member still holding the output pipes is
+    /// SIGKILLed 1 s after, so the survivor was gone about 1 s after the TERM whatever the killer's
+    /// grace. A test delayed past that (measured: 0.5 s of delay passes, 1.3 s fails; a full parallel
+    /// run delayed it up to 0.92 s unaided, and once past it) found the group dead. So the survivor
+    /// gives up the pipes (`exec >/dev/null 2>&1`), which leaves only the killer's grace, and the killer
+    /// under test runs with a long one of its own: the same script, only that sleep replaced. A second
+    /// killer that did NOT find the note gone would take it, signal, and sit in that grace until its
+    /// 10 s limit, so its exit code tells the two apart whatever the load.
     @Test("a killer takes the note before its grace, so a second killer signals nothing")
     func killerTakesNote() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-377-\(UUID().uuidString)")
@@ -283,23 +294,31 @@ struct ContainerExecGroupKillTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let pidFile = dir.appendingPathComponent("g.pid").path
         let nap = "30.\(Int.random(in: 100_000...999_999))"
-        defer { RunCommandProcessGroupTests.killAll(nap) }
+        let grace = 600 + Int.random(in: 0..<300)
+        defer {
+            RunCommandProcessGroupTests.killAll(nap)
+            RunCommandProcessGroupTests.killAll("\(grace)")
+        }
+        let product = CLIContainerRuntime.groupKiller(pidFile)
+        let killer = product.replacingOccurrences(of: "sleep \(Int(CLIProcessRunner.killGraceSeconds));", with: "sleep \(grace);")
+        #expect(killer != product, "the grace in the product's killer was replaced, or this tests nothing")
         // Ignores SIGTERM, so the first killer is still in its grace when the second runs.
         let command = Task {
             await ProcessGroupRunner().run(
                 executable: "/bin/bash",
-                arguments: ["-c", CLIContainerRuntime.recordingWrapper(pidFile), "iris-exec", "trap '' TERM; sleep \(nap); true"],
+                arguments: ["-c", CLIContainerRuntime.recordingWrapper(pidFile), "iris-exec", "exec >/dev/null 2>&1; trap '' TERM; sleep \(nap); true"],
                 environment: nil, currentDirectory: nil)
         }
         #expect(await RunCommandProcessGroupTests.appears("^sleep \(nap)", within: 5))
-        BlockingSpawn.detached("/bin/bash", ["-c", CLIContainerRuntime.groupKiller(pidFile)], timeoutSeconds: 30)
-        let taken = TestClock.deadline(1)
+        BlockingSpawn.detached("/bin/bash", ["-c", killer], timeoutSeconds: Double(grace + 30))
+        let taken = TestClock.deadline(10)
         while FileManager.default.fileExists(atPath: pidFile), TestClock.now() < taken { try await Task.sleep(nanoseconds: 20_000_000) }
         #expect(!FileManager.default.fileExists(atPath: pidFile), "the note was still there during the grace")
         #expect(RunCommandProcessGroupTests.exists("^sleep \(nap)"), "the first killer's grace should not be over yet")
-        let started = TestClock.now()
-        #expect(BlockingSpawn.run("/bin/bash", ["-c", CLIContainerRuntime.groupKiller(pidFile)], timeoutSeconds: 10) == 0)
-        #expect(TestClock.seconds(since: started) < 1, "the second killer waited out a grace: it signalled something")
+        #expect(BlockingSpawn.run("/bin/bash", ["-c", killer], timeoutSeconds: 10) == 0,
+                "the second killer waited out a grace: it found the note and signalled something")
+        // The first killer is still in its grace; end the group here instead of waiting it out.
+        RunCommandProcessGroupTests.killAll(nap)
         _ = try await value(of: command)
         #expect(!RunCommandProcessGroupTests.exists("^sleep \(nap)"))
     }
