@@ -21,7 +21,8 @@ swift run iris --bench scenarios/live.json --real     # hit a real provider (nee
   inferred from the timings.
 - `--dump-requests DIR` writes every model request of the run to `DIR/<turn>-<round>.json`,
   as `--perf run --dump-requests` does. The request of round N carries the tool results of
-  round N-1.
+  round N-1. With `--real` a request also carries the memory files Iris sends, so the
+  directory then holds them.
 - `--grant-read DIR` stamps a read-only grant on `DIR`, as a granted job has, so a
   `background` scenario can read a file inside it. Without a grant, an unattended run's read
   of a file outside the Iris folder needs an approval nobody can give and is refused.

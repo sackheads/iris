@@ -33,6 +33,8 @@ enum BenchCLI {
                 if i + 1 < rest.count, !rest[i + 1].hasPrefix("--") {
                     if rest[i] == "--grant-read" { grantRead = rest[i + 1] } else { dir = rest[i + 1] }
                     i += 1
+                } else {
+                    FileHandle.standardError.write(Data("iris --bench: \(rest[i]) needs a directory; ignored\n".utf8))
                 }
             } else if !rest[i].hasPrefix("--"), path == nil {
                 path = rest[i]
