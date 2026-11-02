@@ -146,6 +146,11 @@ struct EvalResult: Codable, Equatable, Sendable {
         /// "error" or "skipped"). Absent on older rows and other tasks, never a guess.
         var blockedBy: String? = nil
         var tier2Verdict: String? = nil
+        /// A paid row's own tokens as the provider reported them (input, answer, thought), summed over
+        /// the calls it took (#870). Absent on a local row and on a file written before this field.
+        var tokens: EvalCost.Tokens? = nil
+        /// True on a paid row whose call came back with no usage: said, not left blank or zero.
+        var usageMissing: Bool? = nil
     }
 
     var schemaVersion = EvalResult.schemaVersion

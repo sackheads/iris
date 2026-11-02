@@ -95,7 +95,7 @@ eval/datasets/<task-family>/v<N>/
 | **Warm latency** | p50 / p95 per judgement, after the model is loaded, by input size band (≤1 KB, ≤8 KB, ≤32 KB) |
 | **Cold start** | Process start → first verdict. Load time is separate, from #782's `ModelLoadTracker`. For Ollama, `load_duration`, plus a run after `ollama stop`. |
 | **Size** | on-disk bytes, plus resident memory added (`phys_footprint` before and after load, after judging; the #725 probe method) |
-| **Cost** | local: $0, with energy not measured. Cloud: tokens × price from #239's price list, reported per 1,000 judgements of the dataset's median text |
+| **Cost** | local: $0, with energy not measured. Cloud: tokens × price from #239's price list, reported per 1,000 judgements actually made. It is `n/a` only when no judgement reported usage or the list has no price; with partial usage it is the mean over the judgements that reported, with the reported total given as a lower bound and the figure for all of them beside it (#870) |
 | **Variance** | LLM tasks: N repeats (default 3), with the verdict agreement rate and the latency spread. Classifiers are deterministic on ONNX Runtime's CPU path, so their run-to-run check is a hash of all scores **rounded to 4 decimal places**. CoreML on the GPU or Neural Engine can differ in the last bits between runs and machines. |
 | **Fail-closed rate** | errors, timeouts and parse failures that make the product block, counted apart from real verdicts |
 | **Licence / gating / platforms** | recorded fields, so "it passed but we can't ship it" is visible in the table |
@@ -114,7 +114,7 @@ eval/datasets/<task-family>/v<N>/
   - `--full` takes the whole split.
   - A local 12B canary takes about 5 s per text (#778), so the full `injection` set is about 25 min per repeat. Sample by default for LLMs, and go full before a decision.
 - **Results:** `eval/results/<task>/<YYYY-MM-DD>-<model-slug>-<dataset-version>.json`, committed, with schema-versioned JSON. The per-text verdicts are included, so a later run can diff text by text.
-- **Paid runs:** a cloud model is never used unless `--model cloud:…` names it and its provider credentials are configured. The run says up front that it will make paid calls, and its results file records `paid: true` along with the token totals.
+- **Paid runs:** a cloud model is never used unless `--model cloud:…` names it and its provider credentials are configured. The run says up front that it will make paid calls, and its results file records `paid: true` along with the token totals and each row's own tokens. `--allow-paid` needs `--max-dollars N`, and the run stops before a call that would cross it (#870).
 - **Opt-in tests:** #770's `IRIS_ONNX_TEST_BUNDLE` tests become thin wrappers that call the runner on the sampled set. CI still skips them.
 
 ## 7. Where existing work goes
@@ -134,7 +134,7 @@ eval/datasets/<task-family>/v<N>/
 
    This is the slice that unblocks #783 phase 2 and #780.
 2. **Stack, adversarial variants and the frozen test split.** `injection.stack` (tier 1+2+3 as configured, plus named configurations), the adversarial generator, and contamination marking.
-3. **Cloud models and cost.** The `cloud:` model spec and cost from #239's price list. Its first paid run is recorded like any other. *Built in #790:* `cloud:<provider>/<model>` for the verdict and stack canaries, `--allow-paid` and `--estimate-only`, `paid`, token totals and cost per 1,000 judgements in the result and in `compare`. The cost is the run's actual tokens, per 1,000 judgements of the texts it judged, not of the dataset's median text (section 5). The first paid run on v2 is still to do.
+3. **Cloud models and cost.** The `cloud:` model spec and cost from #239's price list. Its first paid run is recorded like any other. *Built in #790:* `cloud:<provider>/<model>` for the verdict and stack canaries, `--allow-paid` and `--estimate-only`, `paid`, token totals and cost per 1,000 judgements in the result and in `compare`. The cost is the run's actual tokens, per 1,000 judgements of the texts it judged, not of the dataset's median text (section 5). The first paid run on v2 is still to do in-tree (it was run on the work machine; its result file is not merged). *Built in #870:* `--max-dollars`, the cost lower bound under partial usage, and per-row tokens.
 4. **`approval.vibecop`**, later (§10 Q1): its dataset and task.
 
 ## 9. Rules for honest comparison

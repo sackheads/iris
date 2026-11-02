@@ -192,14 +192,18 @@ enum EvalCompare {
         return s
     }
 
-    /// Why a paid result's cost is "n/a", so a reader of the table is not left with no reason: the model has
-    /// no listed price, or not every judgement reported usage (the coverage the run recorded). Empty when
-    /// there is a cost.
+    /// What a reader of a paid result needs beside its cost: why it is "n/a" (no listed price, or no
+    /// judgement reported usage), or that it is a mean over the judgements that did report, with the
+    /// reported total as a lower bound and the figure for all of them (#870). Empty for a complete cost.
     static func costNote(_ r: EvalResult) -> String {
-        guard r.paid == true, r.metrics.costPerThousandUsd == nil else { return "" }
-        if r.priceList == nil { return " (no listed price for the model)" }
-        if let coverage = r.settings["usage_coverage"] { return " (\(coverage))" }
-        return ""
+        guard r.paid == true else { return "" }
+        let coverage = r.settings["usage_coverage"]
+        if r.metrics.costPerThousandUsd == nil {
+            if r.priceList == nil { return " (no listed price for the model)" }
+            return coverage.map { " (\($0))" } ?? ""
+        }
+        guard let low = r.settings["cost_reported_usd"].flatMap(Double.init), let all = r.settings["cost_extrapolated_usd"].flatMap(Double.init) else { return "" }
+        return " (mean of the judgements that reported usage, \(coverage ?? "some did not"); reported total \(EvalCost.money(low)) is a lower bound, about \(EvalCost.money(all)) for all)"
     }
 
     static func label(_ r: EvalResult) -> String {

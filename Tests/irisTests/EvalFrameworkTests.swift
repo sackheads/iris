@@ -1007,9 +1007,9 @@ struct EvalCloudTests {
     }
 
     private func guardRun(_ s: (root: URL, dataset: URL), model: String = "gemini/gemini-3.8-flash", level: String? = "low",
-                          allowPaid: Bool = true, repeats: Int = 2) -> EvalRunner.GuardRun {
+                          allowPaid: Bool = true, repeats: Int = 2, maxDollars: Double? = 10) -> EvalRunner.GuardRun {
         .init(task: EvalGuardTask.verdict, canary: .init(runtime: .cloud, name: model), think: .product, thinkingLevel: level,
-              allowPaid: allowPaid, repeats: repeats, split: "test", sample: nil,
+              allowPaid: allowPaid, maxDollars: maxDollars, repeats: repeats, split: "test", sample: nil,
               datasetDir: s.dataset.path, outDir: s.root.appendingPathComponent("results").path)
     }
 
@@ -1090,34 +1090,42 @@ struct EvalCloudTests {
         #expect(stub.seen.levels.allSatisfy { $0 == nil } && r.key.think == "default")
     }
 
-    @Test func aPriceTheListLacksIsAbsentNotZero() async throws {
+    @Test func aPriceTheListLacksRefusesTheRunBecauseTheCapCannotBeEnforced() async throws {
         let s = try setUp()
         defer { try? FileManager.default.removeItem(at: s.root) }
-        let r = try await run(s, StubCloud(), guardRun(s, model: "gemini/gemini-unlisted-x", repeats: 1))
-        #expect(r.tokens?.calls == 4, "the tokens are still recorded")
-        #expect(r.metrics.costPerThousandUsd == nil, "no rate: the cost is absent, never $0")
-        let json = String(decoding: try r.encoded(), as: UTF8.self)
-        #expect(!json.contains("cost_per_thousand_usd"))
-        #expect(EvalCompare.summary(r).contains("PAID: cost n/a per 1,000 judgements (no listed price for the model)"))
+        let stub = StubCloud()
+        await #expect(throws: EvalError.self) { _ = try await run(s, stub, guardRun(s, model: "gemini/gemini-unlisted-x", repeats: 1)) }
+        #expect(stub.calls == 0, "no call without a price to cap")
     }
 
-    @Test func aPartialUsageReportIsNoReportAndAPartialCoverageLeavesTheCostAbsent() async throws {
+    @Test func aPartialUsageReportIsNoReportAndPartialCoverageGivesALowerBoundAndTheMean() async throws {
         // A count the provider left out is not 0: the whole report is dropped.
         #expect(EvalCost.Tokens(UsageMetadata(promptTokenCount: nil, candidatesTokenCount: 5, totalTokenCount: nil)) == nil)
         #expect(EvalCost.Tokens(UsageMetadata(promptTokenCount: 100, candidatesTokenCount: nil, totalTokenCount: 160)) == nil)
         #expect(EvalCost.Tokens(UsageMetadata(promptTokenCount: 100, candidatesTokenCount: 2, totalTokenCount: 160))
                 == EvalCost.Tokens(input: 100, output: 2, thought: 58, calls: 1))
-        // Usage on every second call only: the 4 that reported are recorded, the cost is not a number over them.
+        // Usage on every second call only: 2 of 4 reported. The cost is the mean over those 2 (never n/a
+        // while some usage came back), with the reported total as a lower bound and the figure for all 4.
         let s = try setUp()
         defer { try? FileManager.default.removeItem(at: s.root) }
         let r = try await run(s, StubCloud(usageEvery: 2), guardRun(s, repeats: 1))
         #expect(r.tokens?.calls == 2 && r.settings["usage_coverage"] == "2 of 4 judgements reported usage")
-        #expect(r.metrics.costPerThousandUsd == nil, "a partial sum over the calls that reported is not the run's cost")
-        #expect(EvalCompare.summary(r).contains("cost n/a per 1,000 judgements (2 of 4 judgements reported usage)"), "the n/a says why")
-        #expect(EvalTable.render([EvalTable.Loaded(file: "x.json", result: r)]).contains("(2 of 4 judgements reported usage)"))
-        // Every call reporting: the cost is there, over all of them, and the coverage says so.
+        let rates = try #require(EvalCost.rates(provider: .gemini, model: "gemini-3.8-flash"))
+        let perCall = 100 * rates.input + 60 * rates.output
+        #expect(abs((r.metrics.costPerThousandUsd ?? 0) - perCall * 1_000) < 1e-9)
+        #expect(abs((Double(r.settings["cost_reported_usd"] ?? "") ?? 0) - 2 * perCall) < 1e-4)
+        #expect(abs((Double(r.settings["cost_extrapolated_usd"] ?? "") ?? 0) - 4 * perCall) < 1e-4)
+        let line = EvalCompare.summary(r)
+        #expect(!line.contains("cost n/a") && line.contains("lower bound") && line.contains("2 of 4 judgements reported usage"), "\(line)")
+        #expect(EvalTable.render([EvalTable.Loaded(file: "x.json", result: r)]).contains("lower bound"))
+        // Each row says what it used, or that nothing came back.
+        let withUsage = r.verdicts.filter { $0.tokens != nil }, without = r.verdicts.filter { $0.usageMissing == true }
+        #expect(withUsage.count == 2 && without.count == 2 && withUsage.allSatisfy { $0.tokens == EvalCost.Tokens(input: 100, output: 2, thought: 58, calls: 1) && $0.usageMissing == nil })
+        // Every call reporting: no lower-bound wording, and the coverage says so.
         let full = try await run(s, StubCloud(), guardRun(s, repeats: 1))
         #expect(full.settings["usage_coverage"] == "4 of 4 judgements reported usage" && full.metrics.costPerThousandUsd != nil)
+        #expect(full.settings["cost_reported_usd"] == nil && !EvalCompare.summary(full).contains("lower bound"))
+        #expect(full.verdicts.allSatisfy { $0.tokens != nil && $0.usageMissing == nil })
     }
 
     @Test func aProviderThatReportsNoUsageLeavesTokensAndCostAbsent() async throws {
@@ -1125,6 +1133,8 @@ struct EvalCloudTests {
         defer { try? FileManager.default.removeItem(at: s.root) }
         let r = try await run(s, StubCloud(reportsUsage: false), guardRun(s, repeats: 1))
         #expect(r.tokens == nil && r.metrics.costPerThousandUsd == nil)
+        #expect(r.verdicts.allSatisfy { $0.tokens == nil && $0.usageMissing == true }, "each row says nothing came back")
+        #expect(EvalCompare.summary(r).contains("cost n/a"))
     }
 
     @Test func aLocalRunIsStillFreeAndNotPaid() async throws {
@@ -1157,8 +1167,15 @@ struct EvalCloudTests {
         func parse(_ extra: [String], task: String = "injection.verdict", model: String = "cloud:gemini/gemini-3.8-flash") -> Result<EvalCLI.Command, EvalError>? {
             EvalCLI.parse(["iris", "--eval", "run", task, "--model", model] + extra)
         }
-        guard case .success(.runGuard(let paid))? = parse(["--allow-paid", "--thinking-level", "low"]) else { Issue.record("expected a run"); return }
-        #expect(paid.allowPaid && paid.thinkingLevel == "low" && paid.canary.runtime == .cloud)
+        guard case .success(.runGuard(let paid))? = parse(["--allow-paid", "--max-dollars", "0.6", "--thinking-level", "low"]) else { Issue.record("expected a run"); return }
+        #expect(paid.allowPaid && paid.maxDollars == 0.6 && paid.thinkingLevel == "low" && paid.canary.runtime == .cloud)
+        // The cap goes with --allow-paid, both ways; it must be a positive amount.
+        for bad in [["--allow-paid"], ["--max-dollars", "1"], ["--allow-paid", "--max-dollars", "0"], ["--allow-paid", "--max-dollars", "-1"],
+                    ["--allow-paid", "--max-dollars", "nan"], ["--allow-paid", "--max-dollars", "x"]] {
+            guard case .failure? = parse(bad) else { Issue.record("expected a refusal for \(bad)"); continue }
+        }
+        guard case .success(.estimate(let capless))? = parse(["--estimate-only", "--allow-paid"]) else { Issue.record("an estimate needs no cap"); return }
+        #expect(capless.maxDollars == nil)
         guard case .success(.runGuard(let unflagged))? = parse([]) else { Issue.record("expected a run"); return }
         #expect(!unflagged.allowPaid && unflagged.thinkingLevel == nil, "paid is opt-in")
         guard case .success(.estimate(let estimate))? = parse(["--estimate-only"]) else { Issue.record("expected an estimate"); return }
@@ -1167,7 +1184,7 @@ struct EvalCloudTests {
             guard case .failure? = parse(bad) else { Issue.record("expected a refusal for \(bad)"); continue }
         }
         guard case .failure? = parse(["--thinking-level", "low"], model: "ollama:gemma4:12b") else { Issue.record("a level is for cloud"); return }
-        guard case .failure? = EvalCLI.parse(["iris", "--eval", "run", "injection.classifier", "--model", "onnx:/m", "--allow-paid"]) else {
+        guard case .failure? = EvalCLI.parse(["iris", "--eval", "run", "injection.classifier", "--model", "onnx:/m", "--allow-paid", "--max-dollars", "1"]) else {
             Issue.record("the classifier task takes no paid flags"); return
         }
         guard case .success(.estimate(let stack))? = EvalCLI.parse(["iris", "--eval", "run", "injection.stack", "--stack", "1+3",
@@ -1186,11 +1203,75 @@ struct EvalCloudTests {
         }
     }
 
+    @Test func theCapStopsTheRunBeforeACallThatWouldCrossItAndWritesAPartialResult() async throws {
+        let s = try setUp()
+        defer { try? FileManager.default.removeItem(at: s.root) }
+        let stub = StubCloud()
+        // Each stub call reports about $0.0003 and the estimate says about the same: $0.001 allows three.
+        var file = ""
+        do {
+            _ = try await EvalRunner.runGuard(guardRun(s, repeats: 2, maxDollars: 0.001), repoRoot: s.root, now: now, canaryFor: { spec, think, level in
+                try await EvalGuardTask.canary(spec, think: think, thinkingLevel: level, credentials: { _ in true }, send: stub.send, now: now)
+            })
+            Issue.record("the run should have been stopped by its cap")
+        } catch EvalError.capped(let f, let why) {
+            file = f
+            #expect(why.contains("--max-dollars $0.0010") && why.contains("before judgement 4 of 8"), "\(why)")
+        }
+        #expect(stub.calls == 3, "stopped before the call that would cross the cap")
+        let r = try EvalResult.decode(Data(contentsOf: URL(fileURLWithPath: file)))
+        #expect(r.verdicts.count == 3 && r.settings["capped"]?.contains("before judgement 4 of 8") == true && r.settings["max_dollars"] == "0.00")
+        #expect(r.tokens?.calls == 3 && EvalCompare.summary(r).contains("PAID"))
+    }
+
+    @Test func aCallWithNoUsageIsChargedAtTheEstimateNotAtZero() async throws {
+        var cap = EvalCost.SpendCap(cap: 1.0, perCall: 0.3)
+        #expect(cap.allowsNextCall())          // 0.3 <= 1.0
+        cap.record(dollars: nil)               // reached the provider, no usage: 0.3
+        cap.record(dollars: 0.2)               // 0.5 committed
+        #expect(abs(cap.committed - 0.5) < 1e-12 && cap.allowsNextCall())   // 0.8 <= 1.0
+        cap.record(dollars: nil)               // 0.8
+        #expect(!cap.allowsNextCall(), "0.8 + 0.3 crosses 1.0")
+        // End to end: a provider that never reports usage still runs into the cap.
+        let s = try setUp()
+        defer { try? FileManager.default.removeItem(at: s.root) }
+        let stub = StubCloud(reportsUsage: false)
+        await #expect(throws: EvalError.self) {
+            _ = try await EvalRunner.runGuard(guardRun(s, repeats: 2, maxDollars: 0.001), repoRoot: s.root, now: now, canaryFor: { spec, think, level in
+                try await EvalGuardTask.canary(spec, think: think, thinkingLevel: level, credentials: { _ in true }, send: stub.send, now: now)
+            })
+        }
+        #expect(stub.calls > 0 && stub.calls < 8)
+    }
+
+    @Test func aPaidRunWithoutACapIsRefusedBeforeAnyCall() async throws {
+        let s = try setUp()
+        defer { try? FileManager.default.removeItem(at: s.root) }
+        let stub = StubCloud()
+        await #expect(throws: EvalError.self) { _ = try await run(s, stub, guardRun(s, maxDollars: nil)) }
+        #expect(stub.calls == 0)
+    }
+
+    @Test func aResultWrittenBeforeTheRowTokensStillDecodes() throws {
+        // A committed result carries no `tokens` or `usage_missing` on its rows.
+        let dir = PerfPaths.repoRoot().appendingPathComponent("eval/results/injection.verdict")
+        let files = try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0.hasSuffix(".json") && !$0.contains("cloud") }
+        let name = try #require(files.first)
+        let old = try EvalResult.decode(Data(contentsOf: dir.appendingPathComponent(name)))
+        #expect(!old.verdicts.isEmpty && old.verdicts.allSatisfy { $0.tokens == nil && $0.usageMissing == nil })
+        let inline = #"{"id":"a","outcome":"passed"}"#
+        let d = JSONDecoder(); d.keyDecodingStrategy = .convertFromSnakeCase
+        let v = try d.decode(EvalResult.Verdict.self, from: Data(inline.utf8))
+        #expect(v.tokens == nil && v.usageMissing == nil)
+    }
+
     @Test func compareShowsCostAndPaidWithAbsentAsNA() async throws {
         let paidPriced = try await resultFor(model: "gemini/gemini-3.8-flash")
         let line = try #require(try EvalCompare.render(paidPriced, paidPriced, vary: []).split(separator: "\n").first { $0.hasPrefix("cost per 1,000") })
         #expect(line.contains("$") && line.contains("paid: yes → yes") && !line.contains("n/a"))
-        let unpriced = try await resultFor(model: "gemini/gemini-unlisted-x")
+        var unpriced = paidPriced   // a result for a model the list lacks: no price, so no cost (an old file, or a list that dropped it)
+        unpriced.priceList = nil
+        unpriced.metrics.costPerThousandUsd = nil
         let na = try #require(try EvalCompare.render(unpriced, unpriced, vary: []).split(separator: "\n").first { $0.hasPrefix("cost per 1,000") })
         #expect(na.contains("n/a → n/a") && !na.contains("$0"))
     }
