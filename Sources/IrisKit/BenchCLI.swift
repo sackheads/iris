@@ -106,10 +106,19 @@ enum BenchCLI {
         guard case .readWrite(let dir)? = grant else {
             return "a bench grant makes a mutating job; with a real model only --grant-write on a folder under the temp directory is allowed"
         }
-        let real = IrisPaths.realPath(dir)
-        let roots = Set([FileManager.default.temporaryDirectory.path, "/tmp"].map(IrisPaths.realPath))
+        // An allow: a path that cannot be resolved (a dangling link, a `..`) is refused, not stepped past.
+        guard let real = IrisPaths.realPathForAllow(dir) else { return "--grant-write with a real model needs a path that resolves: \(dir)" }
+        let roots = Set(tempRoots().map(IrisPaths.realPath))
         let under = roots.contains { real.hasPrefix($0 + "/") && real != $0 }
         return under ? nil : "--grant-write with a real model needs a folder under the temp directory (\(roots.sorted().joined(separator: ", "))); \(real) is not"
+    }
+
+    /// The user's temp folder from the system (`confstr`, not `$TMPDIR`, which a caller can point at
+    /// their home) and `/tmp`.
+    private static func tempRoots() -> [String] {
+        var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
+        let n = confstr(_CS_DARWIN_USER_TEMP_DIR, &buf, buf.count)
+        return (n > 0 ? [String(cString: buf)] : []) + ["/tmp"]
     }
 
     /// Load the scenario for these options, applying `--real` as an override.
