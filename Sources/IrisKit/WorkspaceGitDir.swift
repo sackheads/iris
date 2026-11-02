@@ -13,8 +13,26 @@ enum WorkspaceGitDir {
     /// much as a directory. Case-insensitive: APFS is, so `.GIT` is the same folder.
     static func isGitPath(_ path: String, cwd: String?) -> Bool {
         let spelled = ToolExecutor.resolvePath(path, cwd: cwd)
-        return [spelled, IrisPaths.realPath(spelled)].contains { candidate in
+        let real = IrisPaths.realPath(spelled)
+        return [spelled, real].contains { candidate in
             candidate.split(separator: "/").contains { $0.lowercased() == name }
+        } || insideGitDirByStructure(real)
+    }
+
+    /// A git dir is not always named `.git`: a bare repository (`x.git/`, or any name) and the
+    /// separate dir a `.git` gitfile points at (`store/real/`) hold the same hooks and config. An
+    /// ancestor of the real path that has a `HEAD` file and `objects/` and `refs/` folders is one
+    /// (the shape `ParentMount` finds a bare repository by); a plain folder named `a.git` is not.
+    private static func insideGitDirByStructure(_ realPath: String) -> Bool {
+        let fm = FileManager.default
+        var dir = (realPath as NSString).deletingLastPathComponent
+        while dir != "/" && !dir.isEmpty {
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: dir + "/HEAD", isDirectory: &isDir), !isDir.boolValue,
+               fm.fileExists(atPath: dir + "/objects", isDirectory: &isDir), isDir.boolValue,
+               fm.fileExists(atPath: dir + "/refs", isDirectory: &isDir), isDir.boolValue { return true }
+            dir = (dir as NSString).deletingLastPathComponent
         }
+        return false
     }
 }

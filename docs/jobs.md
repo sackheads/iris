@@ -294,7 +294,7 @@ the file-tool gate applies the same innermost-wins rule. The result sentence nam
   protected-directory rule exactly as they are.
   An unattended `write_file` to a path with a `.git` component anywhere under a mount (the config git
   runs programs from, hooks, `info/`, a `.git` file that points at a worktree's git dir, in a nested
-  repository as much as at the mount's root, and through a link, since the real path is judged too) is
+  repository as much as at the mount's root, through a link since the real path is judged too, and in a git dir of any name, i.e. a folder with a `HEAD` file and `objects/` and `refs/` inside it: a bare repository, or the dir a `.git` file points at) is
   refused as a person's alone, like a write to a workspace's `.iris/`: "needs approval, and this is an
   unattended run", recorded on the run's card, where "Approve and run" is a person's own decision
   (#867). Before that rule the VM's mounts protected `.git/hooks` and the host path did not, and a

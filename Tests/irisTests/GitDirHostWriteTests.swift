@@ -105,4 +105,30 @@ struct GitDirHostWriteTests {
         #expect(!permissions.writesGitDir(toolName: "write_file", details: "/p/src/main.swift", workspace: nil))
         #expect(permissions.writesGitDir(toolName: "write_file", details: ".git/config", workspace: "/p"), "a relative path is judged against the working directory")
     }
+
+    @Test("a git dir by its shape is refused whatever it is named: a bare repository, and the dir a .git file points at")
+    func gitDirByStructure() async throws {
+        let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
+        let (app, cid) = background(t)
+        let fm = FileManager.default
+        func gitDir(_ rel: String) throws {
+            let d = t.proj.appendingPathComponent(rel)
+            try fm.createDirectory(at: d.appendingPathComponent("objects"), withIntermediateDirectories: true)
+            try fm.createDirectory(at: d.appendingPathComponent("refs"), withIntermediateDirectories: true)
+            try fm.createDirectory(at: d.appendingPathComponent("hooks"), withIntermediateDirectories: true)
+            try "ref: refs/heads/main\n".write(to: d.appendingPathComponent("HEAD"), atomically: true, encoding: .utf8)
+        }
+        try gitDir("x.git")                       // a bare repository
+        try gitDir("store/real")                  // a separate git dir; its worktree's .git file points here
+        for rel in ["x.git/hooks/post-receive", "x.git/config", "store/real/hooks/pre-commit", "store/real/config"] {
+            #expect(await !write(c(t.proj, rel), t, app, cid), Comment(rawValue: rel))
+        }
+        // A folder that only looks like one (a name, or HEAD alone) stays writable.
+        try fm.createDirectory(at: t.proj.appendingPathComponent("plain.git"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: t.proj.appendingPathComponent("headonly"), withIntermediateDirectories: true)
+        try "x".write(to: t.proj.appendingPathComponent("headonly/HEAD"), atomically: true, encoding: .utf8)
+        for rel in ["plain.git/config", "headonly/notes.md"] {
+            #expect(await write(c(t.proj, rel), t, app, cid), Comment(rawValue: rel))
+        }
+    }
 }
