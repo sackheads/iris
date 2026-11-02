@@ -7,7 +7,8 @@ import Foundation
 /// What counts (planner ruling on #466): a pending tool approval, a goal contract to review, a
 /// checkpoint review, a goal judgement, and a job run blocked on approval that nobody has
 /// acknowledged. Not a failed run (news, not a request), not a peer's request (agent to agent),
-/// not a question at the end of a turn (nothing structured marks one yet: #592).
+/// not a question at the end of a turn (nothing structured marks one). #592 chose the unread dot
+/// for a reply that landed while the person was away (`ConversationMark`), which is not this mark.
 enum NeedsHuman {
     struct Ask: Equatable {
         /// The visible conversation the ask is charged to (`delegationRoot`), nil when unattributed.
