@@ -5198,8 +5198,30 @@ class AppState {
                 appendContentToHistory(for: r.fromSession, content: Self.eventLineContent(safeLine))
             }
         }
-        try? store.peers.closeOpenRequests(from: id, reason: "sender \(verb)", at: now)
+        // #881: the other direction. A request this session sent is closed too, and its addressee, which
+        // may be about to work on it, is told the same way, by a line in its transcript and history that
+        // wakes nothing: nobody is waiting for its reply any more. One line per request up to a cap, then a
+        // count, so a sender with many open requests does not fill the addressee's history.
+        guard let orphaned = try? store.peers.closeOpenRequests(from: id, reason: "sender \(verb)", at: now) else { return }
+        for (target, requests) in Dictionary(grouping: orphaned, by: \.toSession) where conversations.contains(where: { $0.id == target }) {
+            let shown = requests.prefix(Self.orphanedRequestLines)
+            var lines = shown.map { "[Event] Session \"\(IrisEngine.flattenCardField(name, cap: IrisEngine.cardNameCap))\" \(verb); msg \($0.msgId) closed: nobody is waiting for your reply." }
+            if requests.count > shown.count {
+                lines.append("[Event] \(requests.count - shown.count) more requests from that session closed the same way: nobody is waiting for your reply.")
+            }
+            for safeLine in lines {
+                appendMessage(role: .system, content: safeLine, to: target)
+                if hasTurnInFlight(for: target) {
+                    enqueueEventLine(safeLine, for: target)
+                } else {
+                    appendContentToHistory(for: target, content: Self.eventLineContent(safeLine))
+                }
+            }
+        }
     }
+
+    /// How many closed requests from one departed sender are named to one addressee before the rest are counted (#881).
+    static let orphanedRequestLines = 5
 
     /// #469 review item 4: `send_to_session` resolves and decides the send in `decidePeerSend`,
     /// then crosses an `await` (sanitisation) before the record lands in `peers.insert`. The user

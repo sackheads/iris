@@ -109,12 +109,23 @@ final class PeerLedger: Sendable {
         }
     }
 
-    func closeOpenRequests(from session: UUID, reason: String, at: Date) throws {
+    /// Closes the requests `session` sent that are still open, and returns them, closed, so the
+    /// sessions they were addressed to can be told (#881).
+    @discardableResult
+    func closeOpenRequests(from session: UUID, reason: String, at: Date) throws -> [PeerMessageRecord] {
         try writer.write { db in
+            var open = try Row.fetchAll(db, sql: """
+                SELECT * FROM peer_messages WHERE fromSession = ? AND expectsReply = 1 AND closedAt IS NULL ORDER BY sentAt
+                """, arguments: [session.uuidString]).compactMap(Self.decode)
             try db.execute(sql: """
                 UPDATE peer_messages SET closedAt = ?, closeReason = ?
                 WHERE fromSession = ? AND expectsReply = 1 AND closedAt IS NULL
                 """, arguments: [at, reason, session.uuidString])
+            for i in 0..<open.count {
+                open[i].closedAt = at
+                open[i].closeReason = reason
+            }
+            return open
         }
     }
 
