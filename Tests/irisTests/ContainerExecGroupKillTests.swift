@@ -294,7 +294,9 @@ struct ContainerExecGroupKillTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let pidFile = dir.appendingPathComponent("g.pid").path
         let nap = "30.\(Int.random(in: 100_000...999_999))"
-        let grace = 600 + Int.random(in: 0..<300)
+        // Fractional and random like `nap`, so the `pkill -f` below matches this test's sleeper and no other
+        // process on the machine (other tests run a plain `sleep 600`).
+        let grace = "600.\(Int.random(in: 100_000...999_999))"
         defer {
             RunCommandProcessGroupTests.killAll(nap)
             RunCommandProcessGroupTests.killAll("\(grace)")
@@ -310,7 +312,7 @@ struct ContainerExecGroupKillTests {
                 environment: nil, currentDirectory: nil)
         }
         #expect(await RunCommandProcessGroupTests.appears("^sleep \(nap)", within: 5))
-        BlockingSpawn.detached("/bin/bash", ["-c", killer], timeoutSeconds: Double(grace + 30))
+        BlockingSpawn.detached("/bin/bash", ["-c", killer], timeoutSeconds: 700)
         let taken = TestClock.deadline(10)
         while FileManager.default.fileExists(atPath: pidFile), TestClock.now() < taken { try await Task.sleep(nanoseconds: 20_000_000) }
         #expect(!FileManager.default.fileExists(atPath: pidFile), "the note was still there during the grace")
