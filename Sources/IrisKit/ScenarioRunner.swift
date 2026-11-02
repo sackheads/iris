@@ -89,7 +89,7 @@ enum ScenarioRunner {
                 // `JobRunner.openConversation` stamps it.
                 if scenario.background { state.setJobProfile(for: id, .readOnly) }
                 // A granted job's reads (`--bench --grant-read`): a read-only mount of one directory.
-                if let readGrantDir { state.setSandboxGrant(for: id, JobGrant(mounts: [ContainerMount(source: readGrantDir, readOnly: true)])) }
+                if let readGrantDir { state.setSandboxGrant(for: id, JobGrant(mounts: [ContainerMount(source: IrisPaths.canonicalPath(readGrantDir), readOnly: true)])) }
             }
             // Headless real-lane runs bind a scratch directory so workspace-relative file tools land
             // there rather than in the process cwd (#151). Only run_command is sandboxed.
