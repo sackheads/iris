@@ -414,6 +414,23 @@ class ConfigManager: @unchecked Sendable {
         didSet { store.set(promptGuardModel, forKey: "PROMPT_GUARD_MODEL") }
     }
     
+    /// The model a Cloud tier 3 asks (#800), on the primary provider. Empty, the default, is what
+    /// tier 3 did before this existed: Vibecop's cloud model, else the easy tier's. Its own key, so
+    /// choosing a tier-3 model no longer means borrowing Vibecop's.
+    var tier3CloudModel: String {
+        didSet { store.set(tier3CloudModel, forKey: "PROMPT_GUARD_CLOUD_MODEL") }
+    }
+
+    /// The thinking levels a Cloud tier 3 can ask for. The bake-off measured these two (#783).
+    static let tier3ThinkingLevels = ["low", "medium"]
+    /// A Cloud tier 3's thinking level (#800). Empty, the default, sends none, which is what it
+    /// always did. Only Gemini reads it; another primary provider ignores it. Anything outside
+    /// `tier3ThinkingLevels` reads as none, so a hand-edited value cannot send the provider a word
+    /// it rejects.
+    var tier3ThinkingLevel: String {
+        didSet { store.set(tier3ThinkingLevel, forKey: "PROMPT_GUARD_THINKING_LEVEL") }
+    }
+
     var promptGuardCoreMLModel: String {
         didSet { store.set(promptGuardCoreMLModel, forKey: "PROMPT_GUARD_COREML_MODEL") }
     }
@@ -704,6 +721,9 @@ class ConfigManager: @unchecked Sendable {
         
         let savedPromptModel = saved.string(forKey: "PROMPT_GUARD_MODEL") ?? ""
         self.promptGuardModel = savedPromptModel.isEmpty ? "Qwen3.5-2B-Q4_K_M.gguf" : savedPromptModel
+        self.tier3CloudModel = saved.string(forKey: "PROMPT_GUARD_CLOUD_MODEL") ?? ""
+        let savedThinking = saved.string(forKey: "PROMPT_GUARD_THINKING_LEVEL") ?? ""
+        self.tier3ThinkingLevel = Self.tier3ThinkingLevels.contains(savedThinking) ? savedThinking : ""
         
         // No tier-2 model by default (#781): a saved value, empty included, is the person's choice;
         // with none saved, only an already-downloaded old default is inherited.

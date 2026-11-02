@@ -125,6 +125,16 @@ extension ModelLEDBar {
             return [.init(label: "Model", value: orNotSet(config.promptGuardCoreMLModel)),
                     .init(label: "Models folder", value: IrisPaths.default.modelsDir.path)]
         case .tier3:
+            if config.promptGuardEngine == "cloud" {
+                // #800: the model a cloud tier 3 asks, not the local model name it does not use.
+                var facts: [LEDDetail.Fact] = [
+                    .init(label: "Engine", value: Self.engineName(config.promptGuardEngine)),
+                    .init(label: "Model", value: CloudAuxiliaryEngine.effectiveModel(role: CloudAuxiliaryEngine.canaryRole, config: config))]
+                if let level = CloudAuxiliaryEngine.thinkingLevel(role: CloudAuxiliaryEngine.canaryRole, config: config) {
+                    facts.append(.init(label: "Thinking", value: level))
+                }
+                return facts
+            }
             return [.init(label: "Engine", value: Self.engineName(config.promptGuardEngine)),
                     .init(label: "Model", value: orNotSet(config.promptGuardModel))]
         }

@@ -428,15 +428,15 @@ struct InjectionGuardTests {
     func fingerprintSensitiveToModelIdentityNotJustProvisioning() {
         let a = InjectionGuard.GuardConfigFingerprint(
             protectionEnabled: true, promptGuardEngine: "cloud", promptGuardModel: "model-a",
-            promptGuardCoreMLModel: "coreml-a", tier3CloudModel: "", tier2ModelsDir: "/models", tier3ModelsDir: "/models",
+            promptGuardCoreMLModel: "coreml-a", tier3CloudModel: "", tier3ThinkingLevel: "", tier2ModelsDir: "/models", tier3ModelsDir: "/models",
             tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
         let differentModel = InjectionGuard.GuardConfigFingerprint(
             protectionEnabled: true, promptGuardEngine: "cloud", promptGuardModel: "model-b",
-            promptGuardCoreMLModel: "coreml-a", tier3CloudModel: "", tier2ModelsDir: "/models", tier3ModelsDir: "/models",
+            promptGuardCoreMLModel: "coreml-a", tier3CloudModel: "", tier3ThinkingLevel: "", tier2ModelsDir: "/models", tier3ModelsDir: "/models",
             tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
         let differentEngine = InjectionGuard.GuardConfigFingerprint(
             protectionEnabled: true, promptGuardEngine: "ollama", promptGuardModel: "model-a",
-            promptGuardCoreMLModel: "coreml-a", tier3CloudModel: "", tier2ModelsDir: "/models", tier3ModelsDir: "/models",
+            promptGuardCoreMLModel: "coreml-a", tier3CloudModel: "", tier3ThinkingLevel: "", tier2ModelsDir: "/models", tier3ModelsDir: "/models",
             tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
         #expect(a != differentModel, "same provisioning, different model name — must be a different guard config")
         #expect(a != differentEngine, "same provisioning, different engine — must be a different guard config")
