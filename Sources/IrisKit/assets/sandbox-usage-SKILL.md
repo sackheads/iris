@@ -14,7 +14,7 @@ file written with `write_file` is visible to your commands at that path.
 
 ## What persists, what doesn't
 
-- **Disk state persists** within the session: packages you install, files you create, and build
+- **Disk state persists** in your container: packages you install, files you create, and build
   artifacts remain available to later commands. Install or build once, then reuse — don't
   reinstall every command.
 - **Shell state does NOT persist across separate `run_command` calls.** Each command is a fresh
@@ -30,10 +30,10 @@ file written with `write_file` is visible to your commands at that path.
 
 ## Idle resets
 
-An idle session's container may be reclaimed after a period of inactivity to free resources. When
+An idle container may be reclaimed after a period of inactivity to free resources. When
 that happens, in-container disk state is cleared (your **host workspace files are never touched**).
 You will see a notice prefixed to the next command's output:
 
-> `[sandbox] This session's container was reclaimed after being idle; ...`
+> `[sandbox] Your container was reclaimed after being idle; ...`
 
 Treat that notice as a signal to re-run any setup (installs/builds) before relying on it.

@@ -40,7 +40,7 @@ final class SubagentManager: @unchecked Sendable {
 
     /// The summary of a subagent stopped from its own row in the session strip (#236). Only this
     /// helper was stopped, so its post-back is delivered as usual for the parent to re-plan.
-    static let rowStoppedReason = "Cancelled: the user stopped this subagent from the session strip — its model call and any running command were cancelled, and it did not finish its task. The conversation that delegated to it was not stopped."
+    static let rowStoppedReason = "Cancelled: the user stopped this subagent — its model call and any running command were cancelled, and it did not finish its task. The conversation that delegated to it was not stopped."
 
     /// Appended when a user Stop was accepted after `goal_complete` had already decided the result
     /// (#236): the status stays completed, but its last turn was cut short and it was not graded.

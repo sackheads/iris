@@ -116,8 +116,8 @@ actor SandboxSessionManager {
     /// Always within `ContainerNames.maxLength`: the prefix is fixed-length (`ContainerNameLengthTests`).
     static func containerName(for id: UUID) -> String { "\(namePrefix)\(id.uuidString.lowercased())" }
 
-    private static let resetNotice = """
-    [sandbox] This session's container was reclaimed after being idle; previously installed \
+    static let resetNotice = """
+    [sandbox] Your container was reclaimed after being idle; previously installed \
     packages and temp files were cleared (your workspace files on disk are untouched). Re-run any \
     setup (installs/builds) before relying on them.
     """
