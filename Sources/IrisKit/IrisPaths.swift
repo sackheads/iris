@@ -200,6 +200,15 @@ struct IrisPaths: Sendable {
 
     var protectedWriteDirs: [URL] { [configDir, pluginsDir, exchangeDir] }
 
+    /// The protected directories as a phrase for a refusal, from `protectedWriteDirs` itself so a text
+    /// that names them cannot drift from the check that refuses (#889): "`config/`, `plugins/` or
+    /// `exchange/`". `prefix` goes before each name (`~/.iris/`), and `slash` is the trailing "/".
+    static func protectedWriteDirPhrase(prefix: String = "", slash: Bool = true) -> String {
+        let names = Self.default.protectedWriteDirs.map { "`\(prefix)\($0.lastPathComponent)\(slash ? "/" : "")`" }
+        guard let last = names.last, names.count > 1 else { return names.joined() }
+        return names.dropLast().joined(separator: ", ") + " or " + last
+    }
+
     /// True if `rawPath` resolves inside the exchange (#469 §7.6 B): read only through
     /// `iris-artifact://`, which checks the reader's reference and the content's hash.
     func isUnderExchangeDir(_ rawPath: String) -> Bool {

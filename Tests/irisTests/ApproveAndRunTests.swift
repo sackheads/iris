@@ -1029,3 +1029,22 @@ struct ViewWholeBlockedCallTests {
         #expect(BlockedCallWhole(call: call).fields.first { $0.key == "content" }?.text == body)
     }
 }
+
+/// #889: the texts that name the protected directories are built from `IrisPaths.protectedWriteDirs`,
+/// the list the check itself uses, so they name every one of them.
+@Suite("Protected directories are named from the list that protects them (#889)")
+struct ProtectedDirectoryTextTests {
+    @Test func theCardAndTheModelsRefusalNameEveryProtectedDirectory() {
+        let names = IrisPaths.default.protectedWriteDirs.map(\.lastPathComponent)
+        #expect(Set(names) == ["config", "plugins", "exchange"], "the check protects these three: \(names)")
+        for name in names {
+            #expect(EventCard.protectedNotApprovable.contains("`\(name)/`"), "card text omits \(name): \(EventCard.protectedNotApprovable)")
+            #expect(IrisEngine.protectedWriteRefusal(tool: "write_file").contains(name), "refusal omits \(name)")
+        }
+    }
+
+    @Test func thePhraseIsAReadableList() {
+        #expect(IrisPaths.protectedWriteDirPhrase() == "`config/`, `plugins/` or `exchange/`")
+        #expect(IrisPaths.protectedWriteDirPhrase(prefix: "~/.iris/", slash: false) == "`~/.iris/config`, `~/.iris/plugins` or `~/.iris/exchange`")
+    }
+}

@@ -1613,7 +1613,7 @@ actor JobRunner {
     /// R13: a `readOnly` job's call was not refused for want of a human, so no human can grant it.
     static let profileNotApprovableRefusal = "a read-only job's call cannot be approved; the job would have to be mutating"
     static let missingJobRefusal = "that job has been deleted"
-    /// R10: `~/.iris/config` and `~/.iris/plugins` are where permission is granted.
+    /// R10: `IrisPaths.protectedWriteDirs` (`config/`, `plugins/`, `exchange/`) are where permission is granted.
     static let protectedWriteRefusal = "it would write into a protected directory, which an approval cannot authorise"
     static let outsideGrantRefusal = "it was refused outside the job's grant, which an approval cannot widen; re-schedule the job with a grant that covers it"
     static let alreadyApprovedRefusal = "it has already been approved once"
