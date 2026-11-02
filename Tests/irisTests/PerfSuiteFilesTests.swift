@@ -9,7 +9,7 @@ struct PerfSuiteFilesTests {
     private let root = PerfPaths.repoRoot()
 
     @Test("every committed suite loads and every scenario it lists exists and decodes",
-          arguments: ["smoke", "ladder", "tool-eagerness", "tool-eagerness-2", "tool-eagerness-157"])
+          arguments: ["smoke", "ladder", "tool-eagerness", "tool-eagerness-2", "tool-eagerness-157", "tool-eagerness-157-vague"])
     func suitesLoad(name: String) throws {
         let suite = try PerfSuite.load(at: root.appendingPathComponent("perf/suites/\(name).json").path)
         #expect(suite.name == name)

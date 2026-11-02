@@ -1,0 +1,1 @@
+{"name": "schedule-reminder-vague", "clientMode": "real", "tier": "medium", "expectedTools": ["schedule_job"], "turns": [{"prompt": "Every weekday at 9, remind me to check the deploy dashboard."}]}
