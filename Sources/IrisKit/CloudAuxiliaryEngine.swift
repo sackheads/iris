@@ -107,7 +107,8 @@ struct CloudAuxiliaryEngine: AuxiliaryInferenceEngine {
     /// Sends `request`. A model that answers 400 to a request carrying a thinking level (Gemini 2.5 takes
     /// a budget, not a level) is remembered for the process and asked without it from then on, so the
     /// level costs the setting rather than failing tier 3 closed, and costs one failed round trip, not
-    /// one per check (#800 review). The message text is not matched: any 400 to a request with a level.
+    /// one per check (#800 review). The message text is not matched: a 400 to a request with a level counts
+    /// only once the request succeeds without it.
     private func sendAsking(_ request: GeminiRequest, _ model: String?) async throws -> GeminiResponse {
         guard let level = request.thinkingLevel else { return try await send(request, model) }
         let key = "thinking:\(model ?? "easy")|\(level)"
@@ -117,9 +118,12 @@ struct CloudAuxiliaryEngine: AuxiliaryInferenceEngine {
         do {
             return try await send(request, model)
         } catch let error as APIError where error.statusCode == 400 && !Self.isModelUnavailable(error) {
+            // The level is the cause only if the same request succeeds without it: a 400 for the text
+            // (oversized, malformed) fails both, and one such result must not drop the chosen level.
+            let response = try await send(plain, model)
             Self.markLevelRefused(key)
-            await notice("The \(model ?? "easy tier") model answered 400 to a request with thinking level \(level) (\(error.message)); asking without a level from now on. Only Gemini 3 models take a level; set Thinking to Not sent in Settings → Security to stop this.")
-            return try await send(plain, model)
+            await notice("The \(model ?? "easy tier") model answered 400 to a request with thinking level \(level) (\(error.message)) and accepted it without; asking without a level from now on. Only Gemini 3 models take a level; set Thinking to Not sent in Settings → Security to stop this.")
+            return response
         }
     }
 

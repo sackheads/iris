@@ -142,9 +142,30 @@ struct Tier3CloudSettingsTests {
         _ = try await engine.generate(prompt: "p", jsonSchema: nil)
         #expect(seen.all == ["low", nil, nil] && said.all.count == 1, "no second failed round trip, no second notice")
 
-        // A 400 that is not about the level still surfaces (the second ask fails the same way).
-        var failing = engine
-        failing.send = { _, _ in throw APIError(message: "bad request", statusCode: 400, provider: "Gemini") }
-        await #expect(throws: APIError.self) { _ = try await failing.generate(prompt: "p", jsonSchema: nil) }
+        // A 400 that is not about the level (the text is the problem) fails both asks, surfaces, and
+        // remembers nothing: a later call still sends the level.
+        let seenText = Seen()
+        var textProblem = CloudAuxiliaryEngine()
+        textProblem.thinkingLevel = { "low" }
+        let otherModel = "gemini-3-flash-\(UUID().uuidString)"
+        textProblem.model = { otherModel }
+        let rejectText = Flag()
+        textProblem.send = { request, _ in
+            seenText.add(request.thinkingLevel)
+            if rejectText.on { throw APIError(message: "bad request", statusCode: 400, provider: "Gemini") }
+            return ok
+        }
+        textProblem.notice = { _ in }
+        rejectText.on = true
+        await #expect(throws: APIError.self) { _ = try await textProblem.generate(prompt: "p", jsonSchema: nil) }
+        #expect(seenText.all == ["low", nil], "asked with the level, then without, and both failed")
+        rejectText.on = false
+        _ = try await textProblem.generate(prompt: "p", jsonSchema: nil)
+        #expect(seenText.all == ["low", nil, "low"], "the level is still sent after a 400 that was not about it")
+    }
+
+    private final class Flag: @unchecked Sendable {
+        private let lock = NSLock(); private var value = false
+        var on: Bool { get { lock.withLock { value } } set { lock.withLock { value = newValue } } }
     }
 }
