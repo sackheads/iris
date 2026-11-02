@@ -18,12 +18,16 @@ enum EvalCost {
             Tokens(input: a.input + b.input, output: a.output + b.output, thought: a.thought + b.thought, calls: a.calls + b.calls)
         }
 
-        /// One call's usage. Gemini's `thoughtsTokenCount` is not decoded into `UsageMetadata`, but the
-        /// total is prompt + candidates + thoughts, so the thought share is what the total leaves.
-        init(_ usage: UsageMetadata) {
-            input = usage.promptTokenCount ?? 0
-            output = usage.candidatesTokenCount ?? 0
-            thought = max(0, (usage.totalTokenCount ?? 0) - input - output)
+        /// One call's usage, or nil when the provider left any of the three counts out: a partial
+        /// report is no report (absent, never zero), so a nil count is never read as 0. Gemini's
+        /// `thoughtsTokenCount` is not decoded into `UsageMetadata`, but the total is prompt +
+        /// candidates + thoughts, so the thought share is what the total leaves.
+        init?(_ usage: UsageMetadata) {
+            guard let prompt = usage.promptTokenCount, let candidates = usage.candidatesTokenCount,
+                  let total = usage.totalTokenCount else { return nil }
+            input = prompt
+            output = candidates
+            thought = max(0, total - prompt - candidates)
             calls = 1
         }
 

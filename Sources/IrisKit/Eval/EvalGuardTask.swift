@@ -236,7 +236,10 @@ enum EvalGuardTask {
         var usage: EvalCost.Tokens? { lock.withLock { _usage } }
         func answered(_ a: String) { lock.withLock { _answer = a } }
         func failed(_ e: Error) { lock.withLock { _error = e } }
-        func used(_ u: UsageMetadata) { lock.withLock { _usage = (_usage ?? .zero) + EvalCost.Tokens(u) } }
+        func used(_ u: UsageMetadata) {
+            guard let t = EvalCost.Tokens(u) else { return }   // a partial report counts as none
+            lock.withLock { _usage = (_usage ?? .zero) + t }
+        }
     }
 
     @TaskLocal static var call: Call?
@@ -429,17 +432,27 @@ extension EvalRunner {
         // price list's rate, per 1,000 judgements; absent when either is missing, never zero.
         var tokens: EvalCost.Tokens?
         var priceNote: String?
+        var coverage: String?
         if canary.paid {
-            let judged = scored.compactMap(\.usage)
-            tokens = judged.isEmpty ? nil : judged.reduce(.zero, +)
+            // Per 1,000 judgements actually made, so the denominator is every judgement that reached the
+            // provider (infra ones never did), and the cost is absent unless every one of them reported
+            // its usage: a partial sum over the calls that did would be a smaller number passing for the
+            // whole (#860 review). What was reported is still recorded, with its coverage.
+            let judged = scored.filter { $0.outcome != .infra }
+            let reported = judged.compactMap(\.usage)
+            tokens = reported.isEmpty ? nil : reported.reduce(.zero, +)
             let rates = run.canary.cloudProvider.flatMap { EvalCost.rates(provider: $0, model: run.canary.cloudModelId, table: prices) }
-            metrics.costPerThousandUsd = tokens.flatMap { t in EvalCost.perThousand(EvalCost.dollars(t, rates: rates), judgements: t.calls) }
+            if !judged.isEmpty, reported.count == judged.count, let t = tokens {
+                metrics.costPerThousandUsd = EvalCost.perThousand(EvalCost.dollars(t, rates: rates), judgements: judged.count)
+            }
+            coverage = "\(reported.count) of \(judged.count) judgements reported usage"
             priceNote = rates.map { "snapshot \(ModelPriceSnapshot.asOf); input \($0.input * 1_000_000) and output \($0.output * 1_000_000) dollars per million tokens" }
         } else {
             metrics.costPerThousandUsd = 0
         }
 
         var settings = canary.details
+        if let coverage { settings["usage_coverage"] = coverage }
         settings["canary"] = canary.spec.description
         settings["context_tag"] = EvalClassifierTask.contextTag
         settings["output_cap_bytes"] = "\(OutputCap.limitBytes)"
