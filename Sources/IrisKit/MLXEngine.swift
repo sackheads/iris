@@ -12,8 +12,9 @@ public final class MLXEngine: AuxiliaryInferenceEngine, @unchecked Sendable {
     private var container: ModelContainer?
     private let lock = NSLock()
     
-    /// A canary only says SAFE or MALICIOUS. Without a cap a tiny or looping model babbled for minutes
-    /// (309 s and 406 s measured, #845); `LlamaCPPEngine` stops at the same 128.
+    /// A guard model only returns a short verdict: the canary's SAFE or MALICIOUS, Vibecop's small JSON
+    /// (this engine serves both). Without a cap a tiny or looping model babbled for minutes (309 s and
+    /// 406 s measured, #845); `LlamaCPPEngine` stops at the same 128 for both.
     static let maxTokens = 128
 
     static var generateParameters: GenerateParameters { GenerateParameters(maxTokens: maxTokens) }
