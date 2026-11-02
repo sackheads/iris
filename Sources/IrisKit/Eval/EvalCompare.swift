@@ -57,6 +57,12 @@ enum EvalCompare {
         if a.metrics.parseFailures != nil || b.metrics.parseFailures != nil {
             out.append("parse failures: \(a.metrics.parseFailures.map(String.init) ?? "n/a") → \(b.metrics.parseFailures.map(String.init) ?? "n/a")")
         }
+        // Cost per 1,000 judgements: a local run is $0, a paid one is its tokens at the price list's rate,
+        // and a price or usage the run lacks is "n/a", never $0 (spec, section 9).
+        if a.paid == true || b.paid == true || a.metrics.costPerThousandUsd != nil || b.metrics.costPerThousandUsd != nil {
+            out.append("cost per 1,000 judgements: \(EvalCost.money(a.metrics.costPerThousandUsd)) → \(EvalCost.money(b.metrics.costPerThousandUsd))"
+                       + "; paid: \(a.paid == true ? "yes" : "no") → \(b.paid == true ? "yes" : "no")")
+        }
         out += ["", "by category:"]
         for c in Set(a.metrics.falsePositivesByCategory.keys).union(b.metrics.falsePositivesByCategory.keys).sorted() {
             line("  benign \(c)", a.metrics.falsePositivesByCategory[c], b.metrics.falsePositivesByCategory[c])
@@ -179,6 +185,10 @@ enum EvalCompare {
         if let a = r.metrics.agreement { s += ", agreement \(pct(a.rate)) of \(a.n) texts" }
         if let p = r.metrics.passes { s += ", bar \(p ? "PASS" : "FAIL")" }
         if r.metrics.failClosed + r.metrics.infra > 0 { s += ", fail-closed \(r.metrics.failClosed), infra \(r.metrics.infra)" }
+        if r.paid == true {
+            s += ", PAID: cost \(EvalCost.money(r.metrics.costPerThousandUsd)) per 1,000 judgements"
+            if let t = r.tokens { s += " (\(t.calls) calls, \(t.input) input, \(t.output + t.thought) output tokens)" }
+        }
         return s
     }
 
@@ -236,6 +246,7 @@ enum EvalTable {
                 if m.failClosed > 0 { notes.append("fail-closed \(m.failClosed)") }
                 if m.infra > 0 { notes.append("infra \(m.infra)") }
                 if let t = r.key.think { notes.append("think \(t)") }
+                if r.paid == true { notes.append("paid: \(EvalCost.money(m.costPerThousandUsd)) per 1,000 judgements") }
                 if let a = m.agreement { notes.append("agreement \(pct(a)) of \(a.n), \(m.unstable?.count ?? 0) unstable") }
                 if let p = m.parseFailures, p > 0 { notes.append("parse failures \(p)") }
                 if r.environment.onBattery == true { notes.append("on battery") }

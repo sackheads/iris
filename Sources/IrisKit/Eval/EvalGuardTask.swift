@@ -40,16 +40,79 @@ enum EvalGuardTask {
         /// "on", "off", or "none" when the model has no thinking to switch.
         let think: String
         let details: [String: String]
+        /// A cloud canary: its calls are paid for, and price and tokens are recorded (#790).
+        var paid: Bool = false
+        /// The thinking level sent ("low", "medium"), or nil for none; cloud only.
+        var thinkingLevel: String? = nil
     }
 
-    static func canary(_ spec: EvalModelSpec, think: Think) async throws -> Canary {
+    static func canary(_ spec: EvalModelSpec, think: Think, thinkingLevel: String? = nil,
+                       credentials: (LLMProvider) -> Bool = { cloudCredentialsConfigured($0) },
+                       send: CloudAuxiliaryEngine.Send? = nil, now: Date = Date()) async throws -> Canary {
+        if spec.runtime != .cloud, thinkingLevel != nil {
+            throw EvalError.unsupported("--thinking-level is for cloud: models; \(spec.runtime.rawValue): has no such setting")
+        }
         switch spec.runtime {
+        case .cloud: return try cloudCanary(spec, think: think, thinkingLevel: thinkingLevel, credentials: credentials, send: send, now: now)
         case .ollama: return try await ollamaCanary(spec, think: think)
         case .llamacpp: return try await llamaCanary(spec, think: think)
         case .mlx: return try await mlxCanary(spec, think: think)
         case .onnx, .coreml:
-            throw EvalError.unsupported("\(spec.runtime.rawValue) models are classifiers, not canaries: use ollama:, llamacpp: or mlx:")
+            throw EvalError.unsupported("\(spec.runtime.rawValue) models are classifiers, not canaries: use ollama:, llamacpp:, mlx: or cloud:")
         }
+    }
+
+    /// Whether the provider's credentials are configured: a key, or for Gemini application default
+    /// credentials. Read-only; nothing in the settings is changed.
+    static func cloudCredentialsConfigured(_ provider: LLMProvider, config: ConfigManager = .shared) -> Bool {
+        switch provider {
+        case .gemini: return config.geminiAuthMode == GeminiAuthMode.adc.rawValue || !config.geminiAPIKey.isEmpty
+        case .anthropic: return !config.anthropicAPIKey.isEmpty || config.anthropicAuthMode == AnthropicAuthMode.vertex.rawValue
+        case .openai: return !config.openAIAPIKey.isEmpty
+        }
+    }
+
+    /// A cloud canary, built the way the product builds a cloud tier 3: `CloudAuxiliaryEngine` for the
+    /// canary role, with the model and the thinking level the product reads from tier 3's settings
+    /// (#800). Task-scoped: the provider comes from a `ProviderRoute` on this engine's own client, so no
+    /// global setting is changed, and the credentials are only read. The fingerprint is the model id
+    /// and the run date (cloud models change under one name; spec section 4).
+    private static func cloudCanary(_ spec: EvalModelSpec, think: Think, thinkingLevel: String?,
+                                    credentials: (LLMProvider) -> Bool, send: CloudAuxiliaryEngine.Send?, now: Date) throws -> Canary {
+        try requireProductThinking(spec, think)
+        guard let provider = spec.cloudProvider else {
+            throw EvalError.usage("cloud: takes <provider>/<model> with a provider of \(LLMProvider.allCases.map { $0.rawValue.lowercased() }.joined(separator: ", "))")
+        }
+        if let level = thinkingLevel {
+            guard ConfigManager.tier3ThinkingLevels.contains(level) else {
+                throw EvalError.usage("--thinking-level is \(ConfigManager.tier3ThinkingLevels.joined(separator: " or "))")
+            }
+            guard provider == .gemini else {
+                throw EvalError.unsupported("only Gemini takes a thinking level; \(provider.rawValue.lowercased()) would ignore --thinking-level \(level)")
+            }
+        }
+        guard credentials(provider) else {
+            throw EvalError.unsupported("no \(provider.rawValue) credentials are configured, so a paid cloud run can't be made")
+        }
+        let id = spec.cloudModelId
+        var engine = CloudAuxiliaryEngine()
+        engine.role = CloudAuxiliaryEngine.canaryRole
+        engine.model = { id }
+        engine.thinkingLevel = { thinkingLevel }
+        engine.notice = { print("eval: \($0)") }
+        if let send {
+            engine.send = send
+        } else {
+            let client = LLMClient(route: ProviderRoute(providerId: provider.rawValue.lowercased(), target: .builtIn(provider), model: id))
+            engine.send = { request, model in try await client.generateContent(request: request, tier: .easy, model: model ?? id) }
+        }
+        let date = Date.ISO8601FormatStyle(timeZone: .current).year().month().day().format(now)
+        return Canary(engine: engine, spec: spec, fingerprint: "\(spec.name) \(date)",
+                      runtimeVersion: "\(provider.rawValue.lowercased()) \(id) \(date)", think: thinkingLevel.map { "level \($0)" } ?? "default",
+                      details: ["think_requested": think.rawValue,
+                                "think_sent": thinkingLevel.map { "generationConfig.thinkingConfig.thinkingLevel \($0)" } ?? "nothing (the provider's default)",
+                                "provider": provider.rawValue.lowercased(), "model_id": id, "run_date": date],
+                      paid: true, thinkingLevel: thinkingLevel)
     }
 
     private static func ollamaCanary(_ spec: EvalModelSpec, think: Think) async throws -> Canary {
@@ -146,9 +209,10 @@ enum EvalGuardTask {
 
     /// The guard's configuration for a run: protection on, the canary provisioned, and tier 2
     /// provisioned (the scoped model) or not configured (skipped, as an install without one).
-    static func guardConfig(canary: EvalModelSpec, tier2: Bool) -> InjectionGuard.GuardConfigFingerprint {
+    static func guardConfig(canary: EvalModelSpec, tier2: Bool, thinkingLevel: String? = nil) -> InjectionGuard.GuardConfigFingerprint {
         .init(protectionEnabled: true, promptGuardEngine: engineName(canary.runtime), promptGuardModel: canary.name,
-              promptGuardCoreMLModel: tier2 ? "eval" : "", tier3CloudModel: "", tier3ThinkingLevel: "", tier2ModelsDir: "", tier3ModelsDir: "",
+              promptGuardCoreMLModel: tier2 ? "eval" : "", tier3CloudModel: canary.runtime == .cloud ? canary.name : "",
+              tier3ThinkingLevel: thinkingLevel ?? "", tier2ModelsDir: "", tier3ModelsDir: "",
               tier2Provisioning: tier2 ? .provisioned : .notConfigured, tier3Provisioning: .provisioned)
     }
 
@@ -157,6 +221,7 @@ enum EvalGuardTask {
         switch runtime {
         case .llamacpp: return AuxiliaryEngineType.llamaCPP.rawValue
         case .mlx: return AuxiliaryEngineType.mlx.rawValue
+        case .cloud: return AuxiliaryEngineType.cloud.rawValue
         default: return AuxiliaryEngineType.ollama.rawValue
         }
     }
@@ -164,11 +229,14 @@ enum EvalGuardTask {
     /// What one canary call did.
     final class Call: @unchecked Sendable {
         private let lock = NSLock()
-        private var _answer: String?, _error: Error?
+        private var _answer: String?, _error: Error?, _usage: EvalCost.Tokens?
         var answer: String? { lock.withLock { _answer } }
         var error: Error? { lock.withLock { _error } }
+        /// A cloud canary's reported usage for this text, summed over the calls it took.
+        var usage: EvalCost.Tokens? { lock.withLock { _usage } }
         func answered(_ a: String) { lock.withLock { _answer = a } }
         func failed(_ e: Error) { lock.withLock { _error = e } }
+        func used(_ u: UsageMetadata) { lock.withLock { _usage = (_usage ?? .zero) + EvalCost.Tokens(u) } }
     }
 
     @TaskLocal static var call: Call?
@@ -218,39 +286,44 @@ enum EvalGuardTask {
     /// One text through the product up to tier 3. `tier2` nil: the verdict task, tier 2 passing
     /// everything. `stack`: tier 2 as given, or skipped for 1+3.
     static func product(_ text: String, canary: any AuxiliaryInferenceEngine, config: InjectionGuard.GuardConfigFingerprint,
-                        tier2: CoreMLEvaluator.ScopedModel) async -> (outcome: EvalMetrics.Outcome, shown: String, parseFailure: Bool, trace: Trace) {
+                        tier2: CoreMLEvaluator.ScopedModel) async -> (outcome: EvalMetrics.Outcome, shown: String, parseFailure: Bool, trace: Trace, usage: EvalCost.Tokens?) {
         let call = Call()
+        // The product reports a cloud guard call's usage through `GuardUsage`; bound here, it lands on
+        // this text's call and nowhere else.
+        let sink = GuardUsage.Sink(record: { call.used($0) })
         let (outcome, cacheable, tier2Verdict) = await $call.withValue(call) {
-            await AuxiliaryModelManager.$scopedEngines.withValue(["canary": Recording(inner: canary)]) {
-                await CoreMLEvaluator.$scopedModel.withValue(tier2) {
-                    await InjectionGuard.classifyUntrustedTraced(OutputCap.cap(text), contextTag: EvalClassifierTask.contextTag,
-                                                                  maxTier: .tier3_canary, protectionEnabled: true, config: config)
+            await GuardUsage.$sink.withValue(sink) {
+                await AuxiliaryModelManager.$scopedEngines.withValue(["canary": Recording(inner: canary)]) {
+                    await CoreMLEvaluator.$scopedModel.withValue(tier2) {
+                        await InjectionGuard.classifyUntrustedTraced(OutputCap.cap(text), contextTag: EvalClassifierTask.contextTag,
+                                                                      maxTier: .tier3_canary, protectionEnabled: true, config: config)
+                    }
                 }
             }
         }
         let trace = Trace.of(outcome: outcome, tier2: tier2Verdict)
         switch outcome {
         case .passed(let clean):
-            return (clean.contains(EvalClassifierTask.withheldMarker) ? .withheld : .passed, clean, false, trace)
+            return (clean.contains(EvalClassifierTask.withheldMarker) ? .withheld : .passed, clean, false, trace, call.usage)
         case .blocked(let marker):
-            if let error = call.error { return (isInfra(error) ? .infra : .failClosed, marker, false, trace) }
-            if !cacheable { return (.failClosed, marker, false, trace) }
+            if let error = call.error { return (isInfra(error) ? .infra : .failClosed, marker, false, trace, call.usage) }
+            if !cacheable { return (.failClosed, marker, false, trace, call.usage) }
             // Tier 3 answered: the product blocks an answer with no clear verdict too (fail-closed).
             if marker.contains("TIER 3"), let answer = call.answer, InjectionGuard.canaryVerdict(answer) == .unreadable {
-                return (.failClosed, marker, true, trace)
+                return (.failClosed, marker, true, trace, call.usage)
             }
-            return (.blocked, marker, false, trace)
+            return (.blocked, marker, false, trace, call.usage)
         }
     }
 
     static func score(_ sample: EvalSample, repeatIndex: Int, canary: any AuxiliaryInferenceEngine,
                       config: InjectionGuard.GuardConfigFingerprint, tier2: CoreMLEvaluator.ScopedModel) async -> EvalMetrics.Scored {
         let start = MonotonicClock.nowMs()
-        let (outcome, shown, parse, trace) = await product(sample.text, canary: canary, config: config, tier2: tier2)
+        let (outcome, shown, parse, trace, usage) = await product(sample.text, canary: canary, config: config, tier2: tier2)
         let seconds = (MonotonicClock.nowMs() - start) / 1000
         let caught = sample.payload.map { EvalMetrics.caught(outcome, shown: shown, payload: $0) }
         return EvalMetrics.Scored(sample: sample, outcome: outcome, rawScore: nil, seconds: seconds, caught: caught,
-                                  repeatIndex: repeatIndex, parseFailure: parse, trace: trace)
+                                  repeatIndex: repeatIndex, parseFailure: parse, trace: trace, usage: usage)
     }
 }
 
@@ -264,6 +337,10 @@ extension EvalRunner {
         var tier2: EvalModelSpec?
         var stack: EvalGuardTask.Stack?
         var think: EvalGuardTask.Think = .product
+        /// `--thinking-level` for a cloud canary: "low" or "medium"; nil sends none (#800).
+        var thinkingLevel: String?
+        /// `--allow-paid`: without it a cloud run refuses before any call (spec, section 6).
+        var allowPaid = false
         var repeats: Int = EvalGuardTask.defaultRepeats
         var split: String = "test"
         var sample: Int?
@@ -272,12 +349,40 @@ extension EvalRunner {
         var outDir: String?
     }
 
+    /// What a run would make and cost, with no call and no credentials (`--estimate-only`, #790).
+    static func estimate(_ run: GuardRun, repoRoot: URL, table: PriceTable = .snapshot) throws -> String {
+        let dataset = try EvalDataset.load(from: run.datasetDir.map { EvalCLI.resolve($0, repoRoot) } ?? defaultDataset(repoRoot))
+        let texts = dataset.select(split: run.split, sample: run.sample)
+        let head = "eval estimate: \(run.task) \(run.canary.description), dataset \(dataset.manifest.family) v\(dataset.manifest.version) \(run.split)"
+            + (run.sample.map { ", sample \($0)" } ?? ", full") + ": \(texts.count) texts × \(run.repeats) = \(texts.count * run.repeats) judgements"
+        guard run.canary.runtime == .cloud, let provider = run.canary.cloudProvider else {
+            return head + "\nlocal model: no paid calls, no cost (energy isn't measured). Nothing was run."
+        }
+        let rates = EvalCost.rates(provider: provider, model: run.canary.cloudModelId, table: table)
+        let e = EvalCost.estimate(textBytes: texts.map { $0.text.utf8.count }, repeats: run.repeats, thinkingLevel: run.thinkingLevel, rates: rates)
+        var lines = [head, "PAID: \(e.calls) calls to \(provider.rawValue.lowercased())/\(run.canary.cloudModelId)"
+                     + " (~\(e.tokens.input) input, ~\(e.tokens.output + e.tokens.thought) output tokens including thinking)",
+                     "estimated cost: \(EvalCost.money(e.dollars)) (\(EvalCost.money(EvalCost.perThousand(e.dollars, judgements: e.calls))) per 1,000 judgements)"
+                     + (rates == nil ? "" : ", from the price list as of \(ModelPriceSnapshot.asOf)")]
+        lines += e.assumptions.map { "  - \($0)" }
+        lines.append("Nothing was run. The estimate is a guess from the token means above; the result records what the provider reports.")
+        return lines.joined(separator: "\n")
+    }
+
     static func runGuard(_ run: GuardRun, repoRoot: URL, now: Date = Date(),
-                         canaryFor: (EvalModelSpec, EvalGuardTask.Think) async throws -> EvalGuardTask.Canary = { try await EvalGuardTask.canary($0, think: $1) },
+                         canaryFor: ((EvalModelSpec, EvalGuardTask.Think, String?) async throws -> EvalGuardTask.Canary)? = nil,
+                         prices: PriceTable = .snapshot,
                          loadTier2: (EvalModelSpec) async throws -> CoreMLModelProtocol = { try await EvalClassifierTask.loadModel($0) }) async throws -> URL {
         let dataset = try EvalDataset.load(from: run.datasetDir.map { EvalCLI.resolve($0, repoRoot) } ?? defaultDataset(repoRoot))
         let texts = dataset.select(split: run.split, sample: run.sample)
-        let canary = try await canaryFor(run.canary, run.think)
+        // A paid run refuses before anything is built or called, and says what it would cost.
+        if run.canary.runtime == .cloud, !run.allowPaid {
+            throw EvalError.usage("this run makes paid calls to \(run.canary.name): add --allow-paid to make them. "
+                                  + "--estimate-only prints the call count and the expected cost without making any.\n"
+                                  + ((try? estimate(run, repoRoot: repoRoot, table: prices)) ?? ""))
+        }
+        if run.canary.runtime == .cloud { print("eval: PAID RUN: \(texts.count * run.repeats) calls to \(run.canary.name) (--allow-paid given)") }
+        let canary = try await (canaryFor ?? { spec, think, level in try await EvalGuardTask.canary(spec, think: think, thinkingLevel: level) })(run.canary, run.think, run.thinkingLevel)
 
         // A stack's tier 2, with its files' digests: the bundle path and sha256s go in the result,
         // since the folder may be renamed to switch the tier off on the machine that ran it.
@@ -289,7 +394,7 @@ extension EvalRunner {
         }
         let tier2Fingerprint = tier2Files.isEmpty ? nil : EvalFingerprint.digest(tier2Files)
         let scope: CoreMLEvaluator.ScopedModel = run.stack == nil ? .init(GuardProbeFixtures.PassingTier2()) : .init(tier2Model)
-        let config = EvalGuardTask.guardConfig(canary: run.canary, tier2: run.stack != .tier13)
+        let config = EvalGuardTask.guardConfig(canary: run.canary, tier2: run.stack != .tier13, thinkingLevel: canary.thinkingLevel)
 
         let model = [run.tier2?.displayName, canary.spec.displayName].compactMap { $0 }.joined(separator: " + ")
         let fingerprint = [tier2Fingerprint, canary.fingerprint].compactMap { $0 }.joined(separator: " + ")
@@ -299,7 +404,8 @@ extension EvalRunner {
             .filter { $0.result.key.task == run.task && $0.result.key.model == model }
             .max { $0.result.date < $1.result.date }
         var changed: Bool?
-        if let previous, previous.result.key.modelFingerprint != fingerprint {
+        // A cloud model's fingerprint holds the run date, so it always differs from the last result's.
+        if !canary.paid, let previous, previous.result.key.modelFingerprint != fingerprint {
             print("MODEL CHANGED: \(previous.result.key.modelFingerprint) → \(fingerprint) (last result \(previous.file))")
             changed = true
         }
@@ -317,9 +423,21 @@ extension EvalRunner {
         // An engine in this process is freed before it exits: llama.cpp's Metal backend asserts at
         // exit while a model is still resident (#815), after the result was written. Ollama's is
         // the person's own server, and unloading would evict their model (keep_alive 0).
-        if run.canary.runtime != .ollama { await canary.engine.unloadModel() }
+        if run.canary.runtime != .ollama, !canary.paid { await canary.engine.unloadModel() }
         var metrics = EvalMetrics.metrics(scored, fullTestSplit: run.split == "test" && run.sample == nil, canary: true)
-        metrics.costPerThousandUsd = 0   // local: measured as free; energy isn't measured
+        // Local: measured as free (energy isn't measured). Paid: the tokens the provider reported at the
+        // price list's rate, per 1,000 judgements; absent when either is missing, never zero.
+        var tokens: EvalCost.Tokens?
+        var priceNote: String?
+        if canary.paid {
+            let judged = scored.compactMap(\.usage)
+            tokens = judged.isEmpty ? nil : judged.reduce(.zero, +)
+            let rates = run.canary.cloudProvider.flatMap { EvalCost.rates(provider: $0, model: run.canary.cloudModelId, table: prices) }
+            metrics.costPerThousandUsd = tokens.flatMap { t in EvalCost.perThousand(EvalCost.dollars(t, rates: rates), judgements: t.calls) }
+            priceNote = rates.map { "snapshot \(ModelPriceSnapshot.asOf); input \($0.input * 1_000_000) and output \($0.output * 1_000_000) dollars per million tokens" }
+        } else {
+            metrics.costPerThousandUsd = 0
+        }
 
         var settings = canary.details
         settings["canary"] = canary.spec.description
@@ -346,6 +464,7 @@ extension EvalRunner {
             contaminated: contamination(dataset, texts),
             modelChanged: changed, previousFingerprint: changed == true ? previous?.result.key.modelFingerprint : nil,
             metrics: metrics,
+            paid: canary.paid ? true : nil, tokens: tokens, priceList: priceNote,
             verdicts: scored.map { .init(id: $0.sample.id, outcome: $0.outcome.rawValue, caught: $0.caught,
                                          rawScore: nil, seconds: $0.seconds, repeatIndex: $0.repeatIndex,
                                          blockedBy: run.stack == nil ? nil : $0.trace?.blockedBy,

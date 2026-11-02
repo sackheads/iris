@@ -37,7 +37,7 @@ enum EvalClassifierTask {
             #endif
         case .coreml:
             return "macOS \(ProcessInfo.processInfo.operatingSystemVersionString)"
-        case .ollama, .llamacpp, .mlx:
+        case .ollama, .llamacpp, .mlx, .cloud:
             return nil
         }
     }
@@ -60,7 +60,7 @@ enum EvalClassifierTask {
             #else
             throw EvalError.unsupported("this build has no tokenizers")
             #endif
-        case .ollama, .llamacpp, .mlx:
+        case .ollama, .llamacpp, .mlx, .cloud:
             throw EvalError.unsupported("\(spec.runtime.rawValue) models are canaries: injection.verdict and injection.stack (#803)")
         }
     }

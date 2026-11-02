@@ -8,17 +8,20 @@ enum EvalCLI {
         case run(task: String, model: EvalModelSpec, split: String, sample: Int?, datasetDir: String?, outDir: String?)
         /// `injection.verdict` and `injection.stack` (#803, #789b).
         case runGuard(EvalRunner.GuardRun)
+        /// `--estimate-only`: the call count and expected cost of a verdict or stack run; no call is made (#790).
+        case estimate(EvalRunner.GuardRun)
         case compare(a: String, b: String, vary: Set<String>)
         case table(resultsDir: String?, out: String?)
     }
 
     static let usage = """
     usage: iris --eval run <task> --model <runtime:name> [--sample N | --full] [--split test|dev|all] [--dataset DIR] [--out DIR]
-           iris --eval run injection.verdict --model ollama:<name>|llamacpp:<file>|mlx:<id> [--think product|on|off] [--repeats N] [...]
-           iris --eval run injection.stack --stack 1+3|1+2+3 --tier3 ollama:<name>|llamacpp:<file>|mlx:<id> [--tier2 onnx:<bundle>] [--think …] [--repeats N] [...]
+           iris --eval run injection.verdict --model ollama:<name>|llamacpp:<file>|mlx:<id>|cloud:<provider>/<model> [--think product|on|off] [--repeats N] [...]
+           iris --eval run injection.stack --stack 1+3|1+2+3 --tier3 ollama:<name>|llamacpp:<file>|mlx:<id>|cloud:<provider>/<model> [--tier2 onnx:<bundle>] [--think …] [--repeats N] [...]
+           cloud canary: --model / --tier3 cloud:<provider>/<model> [--thinking-level low|medium] needs --allow-paid; --estimate-only prints calls and cost, makes none
            iris --eval compare <a.json> <b.json> [--vary model|runtime|dataset|split|sample|think|repeats]
            iris --eval table [--results DIR] [--out FILE]
-    tasks: injection.classifier (onnx:, coreml:), injection.verdict (ollama:, llamacpp:, mlx:), injection.stack
+    tasks: injection.classifier (onnx:, coreml:), injection.verdict (ollama:, llamacpp:, mlx:, cloud:), injection.stack
     """
 
     static let defaultSample = 60
@@ -31,10 +34,12 @@ enum EvalCLI {
         var positional: [String] = []
         var flags: [String: String] = [:]
         var full = false
+        var booleans: Set<String> = []
         var i = 0
         while i < rest.count {
             let a = rest[i]
             if a == "--full" { full = true; i += 1; continue }
+            if a == "--allow-paid" || a == "--estimate-only" { booleans.insert(a); i += 1; continue }
             if a.hasPrefix("--") {
                 guard i + 1 < rest.count else { return .failure(.usage("\(a) needs a value")) }
                 flags[a] = rest[i + 1]; i += 2; continue
@@ -44,7 +49,8 @@ enum EvalCLI {
         switch verb {
         case "run":
             guard positional.count == 1 else { return .failure(.usage("run takes one task")) }
-            if [EvalGuardTask.verdict, EvalGuardTask.stack].contains(positional[0]) { return parseGuard(positional[0], flags: flags, full: full) }
+            if [EvalGuardTask.verdict, EvalGuardTask.stack].contains(positional[0]) { return parseGuard(positional[0], flags: flags, full: full, booleans: booleans) }
+            guard booleans.isEmpty, flags["--thinking-level"] == nil else { return .failure(.usage("--allow-paid, --estimate-only and --thinking-level are for injection.verdict and injection.stack")) }
             guard let m = flags["--model"], let model = EvalModelSpec.parse(m) else {
                 return .failure(.usage("--model runtime:name is required (runtimes: \(EvalModelSpec.Runtime.allCases.map(\.rawValue).joined(separator: ", ")))"))
             }
@@ -73,7 +79,7 @@ enum EvalCLI {
 
     /// A verdict or stack run's flags. Every model is explicit: verdict's `--model`, a stack's
     /// `--tier3` and, for 1+2+3, `--tier2`.
-    static func parseGuard(_ task: String, flags: [String: String], full: Bool) -> Result<Command, EvalError> {
+    static func parseGuard(_ task: String, flags: [String: String], full: Bool, booleans: Set<String> = []) -> Result<Command, EvalError> {
         var run: EvalRunner.GuardRun
         if task == EvalGuardTask.verdict {
             guard flags["--stack"] == nil, flags["--tier2"] == nil, flags["--tier3"] == nil else {
@@ -118,6 +124,15 @@ enum EvalCLI {
         }
         run.datasetDir = flags["--dataset"]
         run.outDir = flags["--out"]
+        if let level = flags["--thinking-level"] {
+            guard run.canary.runtime == .cloud else { return .failure(.usage("--thinking-level is for a cloud: canary")) }
+            guard ConfigManager.tier3ThinkingLevels.contains(level) else {
+                return .failure(.usage("--thinking-level is \(ConfigManager.tier3ThinkingLevels.joined(separator: " or "))"))
+            }
+            run.thinkingLevel = level
+        }
+        run.allowPaid = booleans.contains("--allow-paid")
+        if booleans.contains("--estimate-only") { return .success(.estimate(run)) }
         return .success(.runGuard(run))
     }
 
@@ -136,6 +151,8 @@ enum EvalCLI {
             case .runGuard(let run):
                 let url = try await EvalRunner.runGuard(run, repoRoot: repoRoot)
                 print("eval: wrote \(url.path)")
+            case .estimate(let run):
+                print(try EvalRunner.estimate(run, repoRoot: repoRoot))
             case .compare(let a, let b, let vary):
                 let ra = try EvalResult.decode(Data(contentsOf: resolve(a, repoRoot)))
                 let rb = try EvalResult.decode(Data(contentsOf: resolve(b, repoRoot)))

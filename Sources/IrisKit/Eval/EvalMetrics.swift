@@ -30,6 +30,8 @@ enum EvalMetrics {
         var parseFailure = false
         /// A stack row's tier that blocked and what tier 2 said (#830); nil outside a stack.
         var trace: EvalGuardTask.Trace? = nil
+        /// What a paid canary call reported using (#790); nil for a local one and when it reported none.
+        var usage: EvalCost.Tokens? = nil
     }
 
     enum Outcome: String, Sendable {
