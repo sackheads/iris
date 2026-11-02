@@ -186,10 +186,20 @@ enum EvalCompare {
         if let p = r.metrics.passes { s += ", bar \(p ? "PASS" : "FAIL")" }
         if r.metrics.failClosed + r.metrics.infra > 0 { s += ", fail-closed \(r.metrics.failClosed), infra \(r.metrics.infra)" }
         if r.paid == true {
-            s += ", PAID: cost \(EvalCost.money(r.metrics.costPerThousandUsd)) per 1,000 judgements"
+            s += ", PAID: cost \(EvalCost.money(r.metrics.costPerThousandUsd)) per 1,000 judgements\(costNote(r))"
             if let t = r.tokens { s += " (\(t.calls) calls, \(t.input) input, \(t.output + t.thought) output tokens)" }
         }
         return s
+    }
+
+    /// Why a paid result's cost is "n/a", so a reader of the table is not left with no reason: the model has
+    /// no listed price, or not every judgement reported usage (the coverage the run recorded). Empty when
+    /// there is a cost.
+    static func costNote(_ r: EvalResult) -> String {
+        guard r.paid == true, r.metrics.costPerThousandUsd == nil else { return "" }
+        if r.priceList == nil { return " (no listed price for the model)" }
+        if let coverage = r.settings["usage_coverage"] { return " (\(coverage))" }
+        return ""
     }
 
     static func label(_ r: EvalResult) -> String {
@@ -246,7 +256,7 @@ enum EvalTable {
                 if m.failClosed > 0 { notes.append("fail-closed \(m.failClosed)") }
                 if m.infra > 0 { notes.append("infra \(m.infra)") }
                 if let t = r.key.think { notes.append("think \(t)") }
-                if r.paid == true { notes.append("paid: \(EvalCost.money(m.costPerThousandUsd)) per 1,000 judgements") }
+                if r.paid == true { notes.append("paid: \(EvalCost.money(m.costPerThousandUsd)) per 1,000 judgements\(EvalCompare.costNote(r))") }
                 if let a = m.agreement { notes.append("agreement \(pct(a)) of \(a.n), \(m.unstable?.count ?? 0) unstable") }
                 if let p = m.parseFailures, p > 0 { notes.append("parse failures \(p)") }
                 if r.environment.onBattery == true { notes.append("on battery") }
