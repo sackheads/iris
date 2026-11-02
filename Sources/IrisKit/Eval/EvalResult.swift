@@ -161,6 +161,14 @@ struct EvalResult: Codable, Equatable, Sendable {
     var modelChanged: Bool?
     var previousFingerprint: String?
     var metrics: Metrics
+    /// True when the run made paid calls (spec, section 6); absent for a local run.
+    var paid: Bool? = nil
+    /// A paid run's tokens as the provider reported them, summed over every call (#790). Absent when
+    /// none were reported, never zero.
+    var tokens: EvalCost.Tokens? = nil
+    /// The price list the cost came from ("snapshot 2026-10-19"), and the rates in dollars per
+    /// million tokens (input, output). Absent when the list has no price for the model.
+    var priceList: String? = nil
     var verdicts: [Verdict]
     /// Results this one replaces, by file name. A wrong result is superseded, never edited.
     var supersedes: [String]?

@@ -3,10 +3,10 @@ import Foundation
 
 /// The model an eval run scores, always given as explicit config, never read from the home's
 /// settings: `onnx:<bundle dir>`, `coreml:<.mlmodelc dir>`, `ollama:<name>`, `llamacpp:<file>`,
-/// `mlx:<id>` (docs/specs/2026-10-28-model-eval-framework.md, section 6).
+/// `mlx:<id>`, `cloud:<provider>/<model>` (docs/specs/2026-10-28-model-eval-framework.md, section 6).
 struct EvalModelSpec: Equatable, Sendable {
     enum Runtime: String, Codable, CaseIterable, Sendable {
-        case onnx, coreml, ollama, llamacpp, mlx
+        case onnx, coreml, ollama, llamacpp, mlx, cloud
     }
 
     var runtime: Runtime
@@ -19,7 +19,23 @@ struct EvalModelSpec: Equatable, Sendable {
         let prefix = String(text[..<colon]).lowercased()
         let rest = String(text[text.index(after: colon)...])
         guard let runtime = Runtime(rawValue: prefix), !rest.isEmpty else { return nil }
-        return EvalModelSpec(runtime: runtime, name: rest)
+        let spec = EvalModelSpec(runtime: runtime, name: rest)
+        // A cloud model is named by its provider and its id, so a bare id is no spec.
+        if runtime == .cloud, spec.cloudProvider == nil || spec.cloudModelId.isEmpty { return nil }
+        return spec
+    }
+
+    /// `cloud:gemini/gemini-3.8-flash`: the provider before the first slash, its model id after it
+    /// (ids may hold slashes of their own). Nil for any other runtime or a provider Iris lacks.
+    var cloudProvider: LLMProvider? {
+        guard runtime == .cloud, let slash = name.firstIndex(of: "/") else { return nil }
+        let provider = name[..<slash].lowercased()
+        return LLMProvider.allCases.first { $0.rawValue.lowercased() == provider }
+    }
+
+    var cloudModelId: String {
+        guard runtime == .cloud, let slash = name.firstIndex(of: "/") else { return "" }
+        return String(name[name.index(after: slash)...])
     }
 
     var description: String { "\(runtime.rawValue):\(name)" }
@@ -28,7 +44,7 @@ struct EvalModelSpec: Equatable, Sendable {
     var url: URL? {
         switch runtime {
         case .onnx, .coreml, .llamacpp: return URL(fileURLWithPath: (name as NSString).expandingTildeInPath)
-        case .ollama, .mlx: return nil
+        case .ollama, .mlx, .cloud: return nil
         }
     }
 
