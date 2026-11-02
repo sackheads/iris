@@ -454,7 +454,7 @@ struct SandboxTimeoutTests {
 
         let out = await m.run(command: "b", conversationId: id, workspace: "/ws", timeoutSeconds: 30)
 
-        #expect(out.hasPrefix("[sandbox]"))
+        #expect(out.hasPrefix(SandboxSessionManager.resetNotice))
         #expect(out.contains("reclaimed"))
         #expect(out.hasSuffix("Error: command timed out after 30 seconds"))
     }

@@ -325,6 +325,8 @@ struct SandboxSessionManagerTests {
         let out = await m.run(command: "b", conversationId: id, workspace: "/ws")
         #expect(out.hasPrefix("[sandbox]"))
         #expect(out.contains("reclaimed"))
+        // The notice itself, whole: the shipped sandbox skill quotes its start (SessionWordingTests).
+        #expect(out.hasPrefix(SandboxSessionManager.resetNotice + "\n\n"))
     }
 
     @Test("first-ever creation emits no reset notice")
