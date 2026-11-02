@@ -4111,7 +4111,16 @@ actor IrisEngine {
             if already { return }
         }
         if await holdContextWriteIfTainted(call, conversationId: conversationId, workspacePath: workspacePath) != nil { return }
-        _ = try? factStore.saveFact(content: note, category: GoalLearnings.category, entity: nil, supersedes: nil)
+        do {
+            _ = try factStore.saveFact(content: note, category: GoalLearnings.category, entity: nil, supersedes: nil)
+        } catch {
+            // Said where the person looks, as a held write that fails to apply is (#813): a learnings note
+            // that was not saved is otherwise a silent loss.
+            let why = Self.factStoreFailure(error)
+            if let localState = state {
+                await MainActor.run { localState.appendMessage(role: .system, content: "The goal's learnings note was not saved: \(why)", to: conversationId) }
+            }
+        }
     }
 
     /// #813: applies an item the person approved, through the handler that would have applied
