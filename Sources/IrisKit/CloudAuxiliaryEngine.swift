@@ -76,7 +76,7 @@ struct CloudAuxiliaryEngine: AuxiliaryInferenceEngine {
         let response: GeminiResponse
         if let chosen, !chosen.isEmpty {
             do {
-                response = try await send(request, chosen)
+                response = try await sendAsking(request, chosen)
             } catch let error as APIError where Self.isModelUnavailable(error) {
                 if Self.firstFallback(for: chosen) {
                     // The provider's own words too: a 404 can also be a wrong project or region,
@@ -84,11 +84,11 @@ struct CloudAuxiliaryEngine: AuxiliaryInferenceEngine {
                     // the model alone.
                     await notice("Vibecop's cloud model \(chosen) couldn't be used on \(error.provider ?? "the primary provider") (\(error.message)); using the easy tier's model instead. Change it in Settings → Vibecop.")
                 }
-                response = try await send(request, nil)
+                response = try await sendAsking(request, nil)
             }
         } else {
             // The easy tier, as always: speed and cost.
-            response = try await send(request, nil)
+            response = try await sendAsking(request, nil)
         }
         
         // #689: the call's tokens go to whoever caused it, not nowhere.
@@ -109,6 +109,22 @@ struct CloudAuxiliaryEngine: AuxiliaryInferenceEngine {
     /// model's maximum context length", "max_tokens is not supported with this model" or "function
     /// calling is not enabled for models/…" are a real model refusing the request, and must surface
     /// rather than be retried on another model (#627 review).
+    /// Sends `request`; when a model answers 400 to the thinking level (Gemini 2.5 takes a budget, not a
+    /// level), asks again without it, with one notice per model, so a level the model does not know
+    /// costs the setting rather than failing tier 3 closed on every result (#800 review).
+    private func sendAsking(_ request: GeminiRequest, _ model: String?) async throws -> GeminiResponse {
+        do {
+            return try await send(request, model)
+        } catch let error as APIError where request.thinkingLevel != nil && error.statusCode == 400 && !Self.isModelUnavailable(error) {
+            if Self.firstFallback(for: "thinking:" + (model ?? "easy")) {
+                await notice("The \(model ?? "easy tier") model refused the thinking level \(request.thinkingLevel ?? "") (\(error.message)); asking without it. Only Gemini 3 models take a level; set Thinking to Not sent in Settings → Security to stop this.")
+            }
+            var plain = request
+            plain.thinkingLevel = nil
+            return try await send(plain, model)
+        }
+    }
+
     static func isModelUnavailable(_ error: APIError) -> Bool {
         guard let status = error.statusCode else { return false }
         if status == 404 { return true }

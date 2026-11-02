@@ -751,7 +751,7 @@ struct SettingsView: View {
                                 Text("Not sent").tag("")
                                 ForEach(ConfigManager.tier3ThinkingLevels, id: \.self) { Text($0.capitalized).tag($0) }
                             }
-                            .help("How much the model thinks before it answers. Not sent leaves the provider's default.")
+                            .help("How much the model thinks before it answers. Not sent leaves the provider's default. Only Gemini 3 models take a level; one that does not is asked again without it, and says so once.")
                             if config.primaryProvider != LLMProvider.gemini.rawValue {
                                 Text(config.tier3ThinkingLevel.isEmpty
                                      ? "Only Gemini uses a thinking level; \(config.primaryProvider) would ignore one."

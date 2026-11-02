@@ -116,13 +116,9 @@ enum GuardProbeFixtures {
     }
 
     /// `body` with Gemini's `generationConfig.thinkingConfig.thinkingLevel` set: the probe's own
-    /// run option, never the product's.
+    /// run option; the body edit is the product's own (`LLMClient.withThinkingLevel`, #800).
     static func withThinkingLevel(_ body: Data, level: String) throws -> Data {
-        guard var json = try JSONSerialization.jsonObject(with: body) as? [String: Any] else { return body }
-        var generation = json["generationConfig"] as? [String: Any] ?? [:]
-        generation["thinkingConfig"] = ["thinkingLevel": level]
-        json["generationConfig"] = generation
-        return try JSONSerialization.data(withJSONObject: json)
+        try LLMClient.withThinkingLevel(body, level: level)
     }
 
     struct Judgement {
