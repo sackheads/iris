@@ -1,0 +1,1282 @@
+{
+  "cacheCountsVersion" : 1,
+  "environment" : {
+    "buildConfiguration" : "debug",
+    "cpuCount" : 14,
+    "gitDirty" : true,
+    "gitSha" : "db87ba50",
+    "headless" : false,
+    "injectionGuardEnabled" : true,
+    "machineModel" : "Mac16,7",
+    "models" : {
+      "easy" : "gemini-3.5-flash-lite",
+      "hard" : "gemini-3.1-pro-preview",
+      "medium" : "gemini-3.8-flash"
+    },
+    "osVersion" : "Version 26.7.1 (Build 25G241)",
+    "promptGuardEngine" : "cloud",
+    "provider" : "Gemini",
+    "sandboxEnabled" : true,
+    "streaming" : true,
+    "toolDeclarationCount" : 17,
+    "toolSandbox" : "sandboxed",
+    "vibecopEnabled" : true,
+    "vibecopEngine" : "cloud"
+  },
+  "finishedAt" : "2026-11-02T08:23:02Z",
+  "scenarios" : [
+    {
+      "category" : "tool-use",
+      "lane" : "real",
+      "name" : "schedule-reminder-vague",
+      "path" : "perf\/prompts\/tool-use\/schedule-reminder-vague.json",
+      "rungs" : [
+        {
+          "medianMs" : 8725.117166042328,
+          "p90Ms" : 17133.341083049774,
+          "repetitions" : [
+            {
+              "coldStart" : true,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 3.5971250534057617
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 1203.8136253356934
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 18453.298082351685
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 19.907000064849854
+                    }
+                  },
+                  "finalText" : "Scheduled. Every weekday at 9:00 AM, you'll get pinged to check the deploy dashboard.",
+                  "finalTextLength" : 85,
+                  "modelCalls" : [
+                    {
+                      "firstTokenMs" : 5520.3704171180725,
+                      "latencyMs" : 5520.698457956314,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 62,
+                      "promptTokens" : 9704,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 7295,
+                      "firstTokenMs" : 12858.643084049225,
+                      "latencyMs" : 12932.748000137508,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 24,
+                      "promptTokens" : 10478,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 4.402332782745361
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 3.5897088050842285
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 1203.8369579315186
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.28924989700317383
+                    },
+                    "guard.tier2" : {
+                      "count" : 1,
+                      "ms" : 0.008334159851074219
+                    },
+                    "guard.tier3" : {
+                      "count" : 1,
+                      "ms" : 1201.1582922935486
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"cron\":\"0 9 * * 1-5\",\"intent\":\"Schedule weekday 9 AM reminder for deploy dashboard\",\"name\":\"check-deploy-dashboard\",\"prompt\":\"Remind Brian to check the deploy dashboard.\"}",
+                      "ms" : 19.605332985520363,
+                      "name" : "schedule_job",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 19692.123875021935
+                }
+              ],
+              "wallClockMs" : 19693.993792057037
+            },
+            {
+              "coldStart" : false,
+              "index" : 1,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 2.2491250038146973
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 1.9450836181640625
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 17122.04004240036
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 1.1129999160766602
+                    }
+                  },
+                  "finalText" : "Scheduled. You'll get poked every weekday at 9:00 AM to check the deploy dashboard.",
+                  "finalTextLength" : 83,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 7254,
+                      "firstTokenMs" : 5081.810541629791,
+                      "latencyMs" : 5129.485249985009,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 62,
+                      "promptTokens" : 9704,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 7292,
+                      "firstTokenMs" : 11790.805125236511,
+                      "latencyMs" : 11992.696249857545,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 22,
+                      "promptTokens" : 10444,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.521583080291748
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 2.2418341636657715
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 1.9574589729309082
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.5550413131713867
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"cron\":\"0 9 * * 1-5\",\"intent\":\"Schedule weekday deploy dashboard reminder at 9 AM\",\"name\":\"check-deploy-dashboard\",\"prompt\":\"Remind Brian to check the deploy dashboard.\"}",
+                      "ms" : 0.9516249410808086,
+                      "name" : "schedule_job",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 17133.08387482539
+                }
+              ],
+              "wallClockMs" : 17133.341083049774
+            },
+            {
+              "coldStart" : false,
+              "index" : 2,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 2.794583320617676
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 2.2730841636657715
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 9172.20454120636
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 2.0658750534057617
+                    }
+                  },
+                  "finalText" : "Scheduled. You'll get a reminder every weekday at 9:00 AM to check the deploy dashboard.",
+                  "finalTextLength" : 88,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 7254,
+                      "firstTokenMs" : 7024.713665962219,
+                      "latencyMs" : 7061.09012523666,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 58,
+                      "promptTokens" : 9704,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 7279,
+                      "firstTokenMs" : 2023.2356662750244,
+                      "latencyMs" : 2111.3063753582537,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 23,
+                      "promptTokens" : 10269,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.7122502326965332
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 2.7836661338806152
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 2.289458751678467
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.6427083015441895
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"cron\":\"0 9 * * 1-5\",\"intent\":\"Schedule weekday deploy dashboard reminder\",\"name\":\"check-deploy-dashboard\",\"prompt\":\"Remind Brian to check the deploy dashboard.\"}",
+                      "ms" : 1.7797499895095825,
+                      "name" : "schedule_job",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 9186.467707622796
+                }
+              ],
+              "wallClockMs" : 9186.703207969666
+            },
+            {
+              "coldStart" : false,
+              "index" : 3,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.6368746757507324
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 1.4410829544067383
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 12520.680666923523
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 1.1075410842895508
+                    }
+                  },
+                  "finalText" : "Scheduled for weekdays at 9:00 AM.",
+                  "finalTextLength" : 34,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 7254,
+                      "firstTokenMs" : 6247.688125133514,
+                      "latencyMs" : 6302.241750061512,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 63,
+                      "promptTokens" : 9704,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 7278,
+                      "firstTokenMs" : 6186.8156661987305,
+                      "latencyMs" : 6218.561292160302,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 11,
+                      "promptTokens" : 10268,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.48395776748657227
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 1.6317920684814453
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 1.4504170417785645
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.44049978256225586
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"cron\":\"0 9 * * 1-5\",\"intent\":\"Schedule weekday 9 AM reminder for deploy dashboard\",\"name\":\"remind-deploy-dashboard\",\"prompt\":\"Remind Brian to check the deploy dashboard.\"}",
+                      "ms" : 0.9458339773118496,
+                      "name" : "schedule_job",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 12529.505833983421
+                }
+              ],
+              "wallClockMs" : 12529.68416595459
+            },
+            {
+              "coldStart" : false,
+              "index" : 4,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.3184161186218262
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 1.1408333778381348
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 7776.400001049042
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 1.2260422706604004
+                    }
+                  },
+                  "finalText" : "Scheduled. You'll get pinged at 9:00 AM every Monday through Friday to check the deploy dashboard.",
+                  "finalTextLength" : 98,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 7254,
+                      "firstTokenMs" : 5726.260624885559,
+                      "latencyMs" : 5812.91295774281,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 62,
+                      "promptTokens" : 9704,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 7282,
+                      "firstTokenMs" : 1845.5523753166199,
+                      "latencyMs" : 1963.6199166998267,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 25,
+                      "promptTokens" : 10317,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.37937498092651367
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 1.3137917518615723
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 1.1484580039978027
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.3442502021789551
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"cron\":\"0 9 * * 1-5\",\"intent\":\"Schedule weekday 9am reminder for deploy dashboard\",\"name\":\"check-deploy-dashboard\",\"prompt\":\"Remind Brian to check the deploy dashboard.\"}",
+                      "ms" : 1.0440843179821968,
+                      "name" : "schedule_job",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 7784.606999717653
+                }
+              ],
+              "wallClockMs" : 7784.814708709717
+            },
+            {
+              "coldStart" : false,
+              "index" : 5,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.9005002975463867
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 1.762500286102295
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 8715.073999404907
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 0.987332820892334
+                    }
+                  },
+                  "finalText" : "Set. Scheduled for 9:00 AM every weekday.",
+                  "finalTextLength" : 41,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 7254,
+                      "firstTokenMs" : 5565.190290927887,
+                      "latencyMs" : 5621.077375020832,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 58,
+                      "promptTokens" : 9704,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 7288,
+                      "firstTokenMs" : 3060.3997497558594,
+                      "latencyMs" : 3094.10616569221,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 13,
+                      "promptTokens" : 10384,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.6027498245239258
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 1.8931660652160645
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 1.774749755859375
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.5266671180725098
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"cron\":\"0 9 * * 1-5\",\"intent\":\"Schedule weekday deploy dashboard reminder\",\"name\":\"check-deploy-dashboard\",\"prompt\":\"Remind Brian to check the deploy dashboard.\"}",
+                      "ms" : 0.8481252007186413,
+                      "name" : "schedule_job",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 8724.911750294268
+                }
+              ],
+              "wallClockMs" : 8725.117166042328
+            },
+            {
+              "coldStart" : false,
+              "index" : 6,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.5519580841064453
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 1.3718338012695312
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 6835.084332942963
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 1.5247082710266113
+                    }
+                  },
+                  "finalText" : "Scheduled. You'll get poked every weekday at 9:00 AM Toronto time to check the deploy dashboard.",
+                  "finalTextLength" : 96,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 7254,
+                      "firstTokenMs" : 5015.510665893555,
+                      "latencyMs" : 5022.489542141557,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 60,
+                      "promptTokens" : 9704,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 7272,
+                      "firstTokenMs" : 1652.839499950409,
+                      "latencyMs" : 1812.7304171212018,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 24,
+                      "promptTokens" : 10186,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.4529581069946289
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 1.5466251373291016
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 1.380791187286377
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.39345788955688477
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"cron\":\"0 9 * * 1-5\",\"intent\":\"Schedule weekday reminder to check deploy dashboard\",\"name\":\"check-deploy-dashboard\",\"prompt\":\"Remind Brian to check the deploy dashboard.\"}",
+                      "ms" : 1.2966250069439411,
+                      "name" : "schedule_job",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 6844.454082660377
+                }
+              ],
+              "wallClockMs" : 6844.618457794189
+            },
+            {
+              "coldStart" : false,
+              "index" : 7,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.4414582252502441
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 1.2024998664855957
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 8277.1155834198
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 2.034916877746582
+                    }
+                  },
+                  "finalText" : "Scheduled for weekdays at 9:00 AM.",
+                  "finalTextLength" : 34,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 7254,
+                      "firstTokenMs" : 5920.077125072479,
+                      "latencyMs" : 5955.47187468037,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 63,
+                      "promptTokens" : 9704,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 7285,
+                      "firstTokenMs" : 2177.598165988922,
+                      "latencyMs" : 2321.8054161407053,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 11,
+                      "promptTokens" : 10350,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.3696250915527344
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 1.4369592666625977
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 1.210583209991455
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.36762475967407227
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"cron\":\"0 9 * * 1-5\",\"intent\":\"Schedule weekday 9am reminder to check deploy dashboard\",\"name\":\"check-deploy-dashboard\",\"prompt\":\"Remind Brian to check the deploy dashboard.\"}",
+                      "ms" : 1.738457940518856,
+                      "name" : "schedule_job",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 8286.818583030254
+                }
+              ],
+              "wallClockMs" : 8286.97779083252
+            },
+            {
+              "coldStart" : false,
+              "index" : 8,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.7390003204345703
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 1.5954999923706055
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 6890.9397077560425
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 1.1303329467773438
+                    }
+                  },
+                  "finalText" : "Set for weekdays at 9:00 AM. I'll drop the reminder on schedule.",
+                  "finalTextLength" : 64,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 7254,
+                      "firstTokenMs" : 5023.283207893372,
+                      "latencyMs" : 5070.307333953679,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 60,
+                      "promptTokens" : 9704,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 7283,
+                      "firstTokenMs" : 1781.3077082633972,
+                      "latencyMs" : 1820.7771671004593,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 20,
+                      "promptTokens" : 10320,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.522125244140625
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 1.733208179473877
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 1.6064586639404297
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.48662519454956055
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"cron\":\"0 9 * * 1-5\",\"intent\":\"Schedule weekday reminder to check deploy dashboard\",\"name\":\"check-deploy-dashboard\",\"prompt\":\"Remind Brian to check the deploy dashboard.\"}",
+                      "ms" : 0.9595416486263275,
+                      "name" : "schedule_job",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 6901.5330001711845
+                }
+              ],
+              "wallClockMs" : 6901.914541244507
+            },
+            {
+              "coldStart" : false,
+              "index" : 9,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 3.0697498321533203
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 2.387791633605957
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 13089.726958751678
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 1.555875301361084
+                    }
+                  },
+                  "finalText" : "Scheduled. You'll get pinged at 09:00 every Monday through Friday to check the deploy dashboard.",
+                  "finalTextLength" : 96,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 7254,
+                      "firstTokenMs" : 7206.195334434509,
+                      "latencyMs" : 7237.003542017192,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 61,
+                      "promptTokens" : 9704,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 7300,
+                      "firstTokenMs" : 5800.126832962036,
+                      "latencyMs" : 5852.894417010248,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 25,
+                      "promptTokens" : 10546,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.817500114440918
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 3.0587501525878906
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 2.405125141143799
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.6963748931884766
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"cron\":\"0 9 * * 1-5\",\"intent\":\"Schedule weekday 9 AM deploy dashboard reminder\",\"name\":\"deploy-dashboard-reminder\",\"prompt\":\"Remind Brian to check the deploy dashboard.\"}",
+                      "ms" : 1.3191248290240765,
+                      "name" : "schedule_job",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 13103.868000209332
+                }
+              ],
+              "wallClockMs" : 13104.154209136963
+            },
+            {
+              "coldStart" : false,
+              "index" : 10,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.103874683380127
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 0.9614582061767578
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 7552.646208286285
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 1.1372089385986328
+                    }
+                  },
+                  "finalText" : "Scheduled. You'll get pinged at 9:00 AM every Monday through Friday to check the deploy dashboard.",
+                  "finalTextLength" : 98,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 7254,
+                      "firstTokenMs" : 4628.785124778748,
+                      "latencyMs" : 4678.547125309706,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 62,
+                      "promptTokens" : 9704,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 7280,
+                      "firstTokenMs" : 2630.102915763855,
+                      "latencyMs" : 2874.222209211439,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 25,
+                      "promptTokens" : 10283,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.3669581413269043
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 1.0999584197998047
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.968292236328125
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.2761249542236328
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"cron\":\"0 9 * * 1-5\",\"intent\":\"Schedule weekday 9am reminder for deploy dashboard\",\"name\":\"deploy-dashboard-reminder\",\"prompt\":\"Remind Brian to check the deploy dashboard.\"}",
+                      "ms" : 0.9715412743389606,
+                      "name" : "schedule_job",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 7559.966166969389
+                }
+              ],
+              "wallClockMs" : 7560.194333076477
+            },
+            {
+              "coldStart" : false,
+              "index" : 11,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.2898750305175781
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 1.1800832748413086
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 10388.479166030884
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 1.0537919998168945
+                    }
+                  },
+                  "finalText" : "Set. You'll get a reminder to check the deploy dashboard every weekday at 9:00 AM.",
+                  "finalTextLength" : 82,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 7254,
+                      "firstTokenMs" : 6923.966791629791,
+                      "latencyMs" : 6925.930374767631,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 59,
+                      "promptTokens" : 9704,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 7293,
+                      "firstTokenMs" : 3404.512542247772,
+                      "latencyMs" : 3464.3409163691103,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 23,
+                      "promptTokens" : 10460,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.4023747444152832
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 1.2848329544067383
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 1.1891250610351562
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.3440423011779785
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"cron\":\"0 9 * * 1-5\",\"intent\":\"Schedule weekday reminder for deploy dashboard\",\"name\":\"check-deploy-dashboard\",\"prompt\":\"Remind me to check the deploy dashboard.\"}",
+                      "ms" : 0.898249913007021,
+                      "name" : "schedule_job",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 10397.735042031854
+                }
+              ],
+              "wallClockMs" : 10397.908625125885
+            },
+            {
+              "coldStart" : false,
+              "index" : 12,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.4724159240722656
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 1.297957420349121
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 7727.382791042328
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 0.9689998626708984
+                    }
+                  },
+                  "finalText" : "Set up. You'll get a reminder to check the deploy dashboard every weekday at 9:00 AM.",
+                  "finalTextLength" : 85,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 7254,
+                      "firstTokenMs" : 5688.9416670799255,
+                      "latencyMs" : 5725.565459113568,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 61,
+                      "promptTokens" : 9704,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "firstTokenMs" : 1788.1350831985474,
+                      "latencyMs" : 2002.1813749335706,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 24,
+                      "promptTokens" : 10484,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.4331669807434082
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 1.467416763305664
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 1.3067913055419922
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.38666677474975586
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"cron\":\"0 9 * * 1-5\",\"intent\":\"Schedule weekday 9 AM deploy dashboard reminder\",\"name\":\"deploy-dashboard-reminder\",\"prompt\":\"Remind Brian to check the deploy dashboard.\"}",
+                      "ms" : 0.8190418593585491,
+                      "name" : "schedule_job",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 7736.051541753113
+                }
+              ],
+              "wallClockMs" : 7736.2361669540405
+            },
+            {
+              "coldStart" : false,
+              "index" : 13,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 2.7552499771118164
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 2.215458869934082
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 7330.049084186554
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 0.9934158325195312
+                    }
+                  },
+                  "finalText" : "Scheduled. You'll get poked at 9:00 AM every Monday through Friday to check the deploy dashboard.",
+                  "finalTextLength" : 97,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 7254,
+                      "firstTokenMs" : 5551.289166927338,
+                      "latencyMs" : 5551.6011249274015,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 62,
+                      "promptTokens" : 9704,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 7291,
+                      "firstTokenMs" : 1740.4794998168945,
+                      "latencyMs" : 1778.6427079699934,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 24,
+                      "promptTokens" : 10423,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.6482081413269043
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 2.745208263397217
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 2.2309579849243164
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.607750415802002
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"cron\":\"0 9 * * 1-5\",\"intent\":\"Schedule weekday 9 AM deploy dashboard reminder\",\"name\":\"check-deploy-dashboard\",\"prompt\":\"Remind the user to check the deploy dashboard.\"}",
+                      "ms" : 0.8531250059604645,
+                      "name" : "schedule_job",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 7344.080375041813
+                }
+              ],
+              "wallClockMs" : 7344.492332935333
+            },
+            {
+              "coldStart" : false,
+              "index" : 14,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 3.236208915710449
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 3.311624050140381
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 10016.445876121521
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 3.2912497520446777
+                    }
+                  },
+                  "finalText" : "Scheduled. You'll get pinged at 9:00 AM every weekday to check the deploy dashboard.",
+                  "finalTextLength" : 84,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 7254,
+                      "firstTokenMs" : 7559.096834182739,
+                      "latencyMs" : 7595.422166865319,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 58,
+                      "promptTokens" : 9704,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 7296,
+                      "firstTokenMs" : 2357.8171248435974,
+                      "latencyMs" : 2421.2769586592913,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 23,
+                      "promptTokens" : 10493,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.9822502136230469
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 3.219250202178955
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 3.350332736968994
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.8364591598510742
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"cron\":\"0 9 * * 1-5\",\"intent\":\"Schedule weekday deploy dashboard reminder\",\"name\":\"deploy-dashboard-reminder\",\"prompt\":\"Remind me to check the deploy dashboard.\"}",
+                      "ms" : 2.8537502512335777,
+                      "name" : "schedule_job",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 10036.093708127737
+                }
+              ],
+              "wallClockMs" : 10036.413834095001
+            }
+          ],
+          "rung" : 5
+        }
+      ],
+      "summary" : {
+        "medianFirstTokenMs" : 5301.090479373932,
+        "medianMs" : 8725.117166042328,
+        "missedExpectedToolRate" : 0,
+        "p90Ms" : 17133.341083049774,
+        "toolCallRate" : 1,
+        "toolCallsByName" : {
+          "schedule_job" : 15
+        },
+        "unexpectedToolCallRate" : 0,
+        "unexpectedToolCallsByName" : {
+
+        }
+      }
+    }
+  ],
+  "schemaVersion" : 1,
+  "startedAt" : "2026-11-02T08:20:05Z",
+  "suite" : "tool-eagerness-157-vague"
+}
