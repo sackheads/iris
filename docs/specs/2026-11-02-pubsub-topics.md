@@ -1,6 +1,6 @@
 # Pub/sub topics for sessions (#696)
 
-Status: proposal, no code. Written by iris-dev-3 for the planner; forks that are Brian's are marked **[Brian]**.
+Status: proposal, no code. Written by iris-dev-3; revised after the planner's rulings (wake, no gate, no approval: each by parity with `send_to_session`).
 
 The Overseer broadcasts decisions and warnings one session at a time. A topic lets one send reach every
 session that asked for it. Everything below reuses what peer messaging already built (#185, #469): the
@@ -17,10 +17,9 @@ Nobody "creates" one; the first subscribe does.
   Overseer wants to reach: three devs on one repo have three worktree paths. A scope can be a naming
   convention (`iris-dev`) until there is a real second use. Per-role topics are not needed: `to: role:<name>`
   already reaches the one holder of a role.
-- **Who may subscribe or publish: any session, open.** No approval to create. To publish you must be a
-  subscriber, so a session that broadcasts is visibly listed in `list_sessions` as a member. **[Brian]**
-  whether creating or joining should ever need the person's approval; recommendation: no, parity with
-  `send_to_session`, which reaches any session unasked today.
+- **Who may subscribe or publish: any session, open.** No approval to create or join, parity with
+  `send_to_session`, which reaches any session unasked today. To publish you must be a subscriber, so a
+  session that broadcasts is visibly listed in `list_sessions` as a member.
 
 ## 2. Publish and subscribe semantics
 
@@ -30,21 +29,34 @@ Nobody "creates" one; the first subscribe does.
 - **Publish** is `send_to_session` with `to: "topic:<name>"`, a fourth address form beside id, `role:` and
   `name:`. A reply (`in_reply_to`) goes privately to the publisher, never back to the topic. `expects_reply`
   is refused on a topic message (a request owed by N sessions is not trackable).
-- **Delivery: no turn is started.** Waking an idle subscriber costs a full model turn per message (tokens,
-  tool eagerness, an approval for whatever it then does), and a broadcast to N is N turns. Instead each
-  subscriber gets the message in an "Unread topic messages" section of its next turn's context (like
-  `Awaiting replies`: at most 10, 500 characters each, then "+N more"), and one transcript line so the
-  person sees it arrive (as `queuePeerArrival` does). A busy subscriber reads it at its next round. **[Brian]**
-  whether a broadcast may ever wake an idle session; recommendation: not in v1; a later `wake: true`
-  limited to role-holders, delivered through the existing `deliverPeerMessage` path with the same hop and
-  rate limits.
+- **Delivery: as `send_to_session` does.** A publish is shorthand for N sends: each subscriber is delivered
+  to through `deliverPeerMessage`, so an idle one is woken with a turn and a busy one queues it for its next
+  round (and the transcript shows the arrival either way). The feature's value is one call instead of N for
+  the publisher, not fewer subscriber turns; the Overseer's "tell every dev" is exactly a wake. A subscriber
+  whose turn is in flight also gets the message in its turn-context line, as queued peer messages do today.
 - **Ordering:** a per-topic sequence number assigned at publish; a subscriber sees a topic's messages in
   sequence order. No order across topics.
 - **Late subscribers** get the topic's last 5 messages from the past 24 hours, marked "(history)", once.
 - **Limits:** a body of at most 2 KB; at most 20 subscribers per topic (a publish to more is refused,
-  saying so); the publisher's existing `PeerRateLimiter` takes one token per publish; the hop depth +1 as for
-  any send, which stops topic-to-topic chains the way it stops peer chains.
+  saying so); hop depth +1 as for any send; and the rate limit is charged per subscriber reached, not per
+  publish (see Breadth below), so the 20-send budget means what it means today.
 - **Not subscribers:** job runs and subagents (no attended turn; "a subagent is not a session" stands).
+
+### Breadth storms
+
+The hop limit bounds depth, not fan-out: with 20 subscribers, if every woken subscriber publishes again, one
+message is 400 wakes at depth 2. Two v1 rules close it.
+1. **A turn started by a topic message may not publish to any topic.** The delivery marks the envelope with
+   its topic (`PeerEnvelope.topic`), and `AppState` records "this conversation's current turn was started
+   by a topic message" for the turn (set when the turn is claimed or the queued message is drained into one,
+   cleared when the turn ends or the person types). While it is set, `send_to_session` with a `topic:` target
+   is refused: "Not sent: this turn was started by a topic message; answer the publisher with in_reply_to, or
+   message a session directly." Replying to the publisher and direct sends stay allowed, under the normal rate
+   limit and hop depth. A person typing into the session clears it.
+2. **A publish costs one rate token per subscriber woken** (the publisher excluded), taken atomically before
+   anything is delivered: `PeerRateLimiter.take(for:count:)`, all-or-nothing, refused with the usual "next is
+   allowed in about N s" when the bucket cannot cover it. A 20-subscriber publish therefore spends the whole
+   20-send budget, as 20 direct sends would.
 
 ## 3. Trust
 
@@ -58,10 +70,9 @@ A topic message is a peer's text for N readers, so it is never an instruction fr
 - **Taint:** a subscriber that takes one into context is marked `markConversationTouchedByUnattendedInput`,
   as for a peer message (#187 §0.5). The header says "(the sender had read outside content)" when the
   publisher has `hasUntrustedToolOutput` (#813).
-- **Outbound gate (#812):** `send_to_session` is not outbound-gated today because it stays on the machine,
-  and a topic only multiplies reach. Gating tainted publishers would ask on nearly every Overseer broadcast
-  (its taint is sticky and it reads tool output constantly), which defeats the feature. **[Brian]**
-  recommendation: no gate in v1, the header mark and the limits above instead; revisit if a broadcast is ever
+- **Outbound gate (#812): none**, parity with `send_to_session`, which a direct send is not carded for either.
+  Gating tainted publishers would ask on nearly every Overseer broadcast (its taint is sticky), which defeats
+  the feature; the header mark and the breadth rules above are the controls. Revisit if a broadcast is ever
   used to spread an injection.
 
 ## 4. Tool surface
@@ -80,23 +91,46 @@ three descriptions, the briefing's "Active Sessions" line, `SYSTEM.md`'s session
 - One new SQLite table in the peer ledger, `topic_messages(seq, topic, from_session, sent_at, body)`, capped
   at 50 rows per topic and 7 days, pruned at publish. Not on any `Codable` type, so Invariant 1 does not apply
   to it; it needs a migration like the ledger's earlier ones.
-- Per-subscriber "last read" is in memory: after a restart a subscriber sees the last 5 once as history. Not
-  persisted, to avoid a cursor per (conversation, topic).
+- Per-subscriber "last seen sequence" is in memory: after a restart a subscriber is shown the last 5 once as
+  history on its next subscribe. Not persisted, to avoid a cursor per (conversation, topic). The "turn started
+  by a topic message" flag is transient too (`@ObservationIgnored`, on no `Codable` type; Invariants 1 and 5).
 - UI: the transcript line on delivery, and `topics:` in the existing session card display. No Settings, no
   slash command, no sidebar change.
 
 ## 6. Deliberately not in v1
 
-Waking an idle session; private or approved topics and per-topic ACLs; workspace or repo scoping; wildcard
+Private or approved topics and per-topic ACLs; workspace or repo scoping; wildcard
 or hierarchical names; delivery receipts or acks; search of old messages; editing or retracting a message;
 cross-machine topics; job-run or subagent subscribers; replies to the whole topic.
 
-## Forks summary
+## Tests (for the build)
 
-| fork | recommendation | whose |
-| --- | --- | --- |
-| scope: global vs per workspace | global names, scope by convention | planner |
-| wake an idle subscriber | no (unread section); `wake` for role-holders later | **Brian** |
-| gate a tainted publisher | no; mark the header, keep the limits | **Brian** |
-| create/join needs approval | no (parity with `send_to_session`) | **Brian** |
-| subscribe via card field vs a new tool | card field (zero new declarations) | planner |
+- A publish delivers to every subscriber except the publisher: an idle one is woken, a busy one queues and
+  its transcript shows the arrival; an archived or deleted subscriber is skipped, not reopened.
+- Publishing requires being subscribed; an unknown topic with no subscribers says so; more than 20
+  subscribers is refused; a body over 2 KB is refused.
+- Order: sequence numbers rise per topic; two topics are independent. A late subscriber gets the last 5 from the
+  past 24 hours once, marked "(history)", and nothing older.
+- Breadth: a turn started by a topic message cannot publish to a topic (refused, text as above); the same
+  turn can `in_reply_to` the publisher and direct-send; a person typing clears the flag; a turn started by a
+  direct peer message may publish. Mutation: drop the flag check, and the 400-wake test fails.
+- Rate: a publish to k subscribers takes k tokens atomically; with fewer than k left nothing is delivered and
+  the refusal names the wait; after 20 direct sends a publish is refused.
+- Hop depth +1 on every delivery; a chain past `maxSessionCascade` is refused.
+- Trust: framing before and after the body; guard judged once (a canary mock counts one call for N
+  subscribers); a withheld body is refused to the publisher and stored nowhere; a tainted publisher's header
+  carries the mark; a subscriber is marked touched by unattended input; `expects_reply` on a topic is refused.
+- Jobs and subagents cannot publish or subscribe (refusals as for `send_to_session`).
+- Persistence: a card without `topics` decodes; the replay table is capped at 50 per topic and 7 days.
+- Declarations: a plain turn with no peers declares neither tool; the descriptions' token count is not larger
+  than before (Invariant 6).
+
+## Forks, as ruled
+
+| fork | ruling |
+| --- | --- |
+| scope | global names, scope by convention |
+| wake an idle subscriber | yes, as `send_to_session` does; breadth rules above |
+| gate a tainted publisher | no, parity; header mark |
+| create/join needs approval | no, parity |
+| subscribe via card field vs a new tool | card field |
