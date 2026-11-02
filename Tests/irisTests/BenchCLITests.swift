@@ -63,10 +63,13 @@ struct BenchCLITests {
         #expect(a?.transcript == true)
         let b = BenchCLI.parse(["iris", "--bench", "foo.json"])
         #expect(b?.dumpRequestsDir == nil)
-        #expect(BenchCLI.parse(["iris", "--bench", "--grant-read", "w", "foo.json"])?.grantRead == "w")
+        #expect(BenchCLI.parse(["iris", "--bench", "--grant-read", "w", "foo.json"])?.grant == .readOnly("w"))
         // A grant makes a mutating job, so it is refused with a real model, whether --real or the file says so.
         var scenario = BenchCLI.defaultScenario
         let granted = BenchCLI.parse(["iris", "--bench", "--grant-read", "w", "foo.json"])!
+        #expect(BenchCLI.parse(["iris", "--bench", "--grant-write", "w", "foo.json"])?.grant == .readWrite("w"))
+        #expect(BenchCLI.parse(["iris", "--bench", "--mutating-no-grant", "foo.json"])?.grant == BenchGrant.none)
+        #expect(BenchCLI.parse(["iris", "--bench", "--mutating-no-grant", "foo.json"])?.scenarioPath == "foo.json")
         #expect(BenchCLI.refusal(granted, scenario: scenario) == nil)
         scenario.clientMode = .real
         #expect(BenchCLI.refusal(granted, scenario: scenario) != nil, "a real-mode scenario file")
@@ -113,7 +116,7 @@ struct BenchCLITests {
                     Scenario.ScriptedCall(name: "read_file", args: ["path": .string(file.path)])]),
                 Scenario.ScriptedResponse(kind: .text, text: "Done.", calls: nil)],
             background: true)
-        let result = await BenchCLI.runScenario(scenario, dumpRequestsTo: dump, readGrantDir: ws.path)
+        let result = await BenchCLI.runScenario(scenario, dumpRequestsTo: dump, grant: .readOnly(ws.path))
         let rendered = BenchSummary.renderTranscript(result)
         #expect(!rendered.contains("needs approval"), "a granted read is not an unattended approval: \(rendered)")
         let next = try String(contentsOf: dump.appendingPathComponent("1-1.json"), encoding: .utf8)
@@ -126,5 +129,41 @@ struct BenchCLITests {
         #expect(BenchSummary.renderTranscript(refused).contains("needs approval"))
         let after = (try? String(contentsOf: bare.appendingPathComponent("1-1.json"), encoding: .utf8)) ?? ""
         #expect(!after.contains("PLANTED-807-MARKER"))
+    }
+
+    /// One scripted `write_file` in a background scenario, the whole call in its own scenario (a denied call ends the turn).
+    private func writeOnce(to path: String, grant: BenchGrant) async -> (wrote: Bool, transcript: String) {
+        let scenario = Scenario(
+            name: "write", clientMode: .fake, tier: .medium,
+            turns: [Scenario.Turn(prompt: "go")],
+            scriptedResponses: [
+                Scenario.ScriptedResponse(kind: .toolCalls, text: nil, calls: [
+                    Scenario.ScriptedCall(name: "write_file", args: ["path": .string(path), "content": .string("bench-853")])]),
+                Scenario.ScriptedResponse(kind: .text, text: "Done.", calls: nil)],
+            background: true)
+        let result = await BenchCLI.runScenario(scenario, grant: grant)
+        return (FileManager.default.fileExists(atPath: path), BenchSummary.renderTranscript(result))
+    }
+
+    @Test("a read-write grant lets a background write_file land inside the mount and refuses one outside it; no grant refuses both")
+    @MainActor
+    func readWriteGrantAndNoGrant() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("bench-rw-\(UUID().uuidString)")
+        let mount = base.appendingPathComponent("mount"), outside = base.appendingPathComponent("outside")
+        try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let inside = await writeOnce(to: mount.appendingPathComponent("a.txt").path, grant: .readWrite(mount.path))
+        #expect(inside.wrote, "inside a read-write mount the write is allowed unattended: \(inside.transcript)")
+
+        let beyond = await writeOnce(to: outside.appendingPathComponent("b.txt").path, grant: .readWrite(mount.path))
+        #expect(!beyond.wrote && beyond.transcript.contains("outside the grant"), "outside the mount it is refused: \(beyond.transcript)")
+
+        let readOnly = await writeOnce(to: mount.appendingPathComponent("c.txt").path, grant: .readOnly(mount.path))
+        #expect(!readOnly.wrote, "a read-only mount is not written: \(readOnly.transcript)")
+
+        let bare = await writeOnce(to: outside.appendingPathComponent("d.txt").path, grant: .none)
+        #expect(!bare.wrote, "a mutating job with no grant cannot write: \(bare.transcript)")
     }
 }

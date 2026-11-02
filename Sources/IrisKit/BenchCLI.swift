@@ -1,5 +1,18 @@
 import Foundation
 
+/// What a `background` bench scenario's job carries (#853). Any of them makes it a `mutating` job: a
+/// read-only job may not carry a grant, and a job with none is the "no grant" case, where the VM has
+/// no mounts and a file tool outside the allowlist stops the run.
+enum BenchGrant: Equatable, Sendable {
+    /// A read-only mount of this directory (`--grant-read`).
+    case readOnly(String)
+    /// A read-write mount of this directory (`--grant-write`): a `write_file` under it is allowed, and
+    /// the container's commands write the host directory.
+    case readWrite(String)
+    /// A mutating job with no grant at all (`--mutating-no-grant`).
+    case none
+}
+
 /// Parsed `--bench` invocation options.
 struct BenchOptions: Sendable {
     var scenarioPath: String?
@@ -8,13 +21,14 @@ struct BenchOptions: Sendable {
     var dumpRequestsDir: String?
     /// `--grant-read DIR`: stamp a read-only grant on DIR, as a granted job has, so a file inside
     /// it can be read by a background run (otherwise that read needs an approval nobody can give).
-    var grantRead: String?
+    /// `--grant-write DIR` stamps a read-write one; `--mutating-no-grant` a mutating job with none.
+    var grant: BenchGrant?
     /// `--transcript`: print each turn's messages after the summary, so a refused or denied tool
     /// call can be read, not inferred from the timings.
     var transcript: Bool = false
 }
 
-/// Headless benchmark entry point: parse `--bench [scenario.json] [--real] [--dump-requests DIR] [--grant-read DIR] [--transcript]`, run a scenario
+/// Headless benchmark entry point: parse `--bench [scenario.json] [--real] [--dump-requests DIR] [--grant-read DIR | --grant-write DIR | --mutating-no-grant] [--transcript]`, run a scenario
 /// through `ScenarioRunner`, and print a timing breakdown. Invoked from `main.swift` before any
 /// SwiftUI window is created, so `swift run iris --bench …` behaves like a standalone tool.
 enum BenchCLI {
@@ -25,23 +39,29 @@ enum BenchCLI {
         let rest = Array(args[(benchIdx + 1)...])
         var path: String?
         var dir: String?
-        var grantRead: String?
+        var grant: BenchGrant?
         var i = 0
         while i < rest.count {
-            if rest[i] == "--dump-requests" || rest[i] == "--grant-read" {
+            if rest[i] == "--dump-requests" || rest[i] == "--grant-read" || rest[i] == "--grant-write" {
                 // A flag's value is not the scenario path.
                 if i + 1 < rest.count, !rest[i + 1].hasPrefix("--") {
-                    if rest[i] == "--grant-read" { grantRead = rest[i + 1] } else { dir = rest[i + 1] }
+                    switch rest[i] {
+                    case "--grant-read": grant = .readOnly(rest[i + 1])
+                    case "--grant-write": grant = .readWrite(rest[i + 1])
+                    default: dir = rest[i + 1]
+                    }
                     i += 1
                 } else {
                     FileHandle.standardError.write(Data("iris --bench: \(rest[i]) needs a directory; ignored\n".utf8))
                 }
+            } else if rest[i] == "--mutating-no-grant" {
+                grant = BenchGrant.none
             } else if !rest[i].hasPrefix("--"), path == nil {
                 path = rest[i]
             }
             i += 1
         }
-        return BenchOptions(scenarioPath: path, real: rest.contains("--real"), dumpRequestsDir: dir, grantRead: grantRead,
+        return BenchOptions(scenarioPath: path, real: rest.contains("--real"), dumpRequestsDir: dir, grant: grant,
                             transcript: rest.contains("--transcript"))
     }
 
@@ -65,8 +85,8 @@ enum BenchCLI {
     /// not), so the grant is for a scripted client only. Judged on the resolved scenario: the file
     /// can set `clientMode: "real"` itself.
     static func refusal(_ opts: BenchOptions, scenario: Scenario) -> String? {
-        opts.grantRead != nil && scenario.clientMode == .real
-            ? "--grant-read makes a mutating job; it is for a scripted run, not a real model" : nil
+        opts.grant != nil && scenario.clientMode == .real
+            ? "a bench grant makes a mutating job; it is for a scripted run, not a real model" : nil
     }
 
     /// Load the scenario for these options, applying `--real` as an override.
@@ -102,7 +122,7 @@ enum BenchCLI {
         // Bench runs never write to the user's real preferences.
         IrisDefaults.useVolatileCopyOfStandard()
         let result = await runScenario(scenario, dumpRequestsTo: opts.dumpRequestsDir.map { URL(fileURLWithPath: $0) },
-                                        readGrantDir: opts.grantRead)
+                                        grant: opts.grant)
         print(BenchSummary.render(scenarioName: scenario.name, result: result))
         if opts.transcript { print(BenchSummary.renderTranscript(result)) }
     }
@@ -116,13 +136,13 @@ enum BenchCLI {
     /// after, the scope in practice covers the whole remaining real-CLI run.
     @MainActor
     static func runScenario(_ scenario: Scenario, clientOverride: (any LLMClientProtocol)? = nil,
-                            dumpRequestsTo: URL? = nil, readGrantDir: String? = nil) async -> ScenarioResult {
+                            dumpRequestsTo: URL? = nil, grant: BenchGrant? = nil) async -> ScenarioResult {
         if scenario.clientMode == .fake {
             return await HeadlessMode.withEnabled {
-                await ScenarioRunner.run(scenario, clientOverride: clientOverride, readGrantDir: readGrantDir, dumpRequestsTo: dumpRequestsTo)
+                await ScenarioRunner.run(scenario, clientOverride: clientOverride, grant: grant, dumpRequestsTo: dumpRequestsTo)
             }
         }
-        return await ScenarioRunner.run(scenario, clientOverride: clientOverride, readGrantDir: readGrantDir, dumpRequestsTo: dumpRequestsTo)
+        return await ScenarioRunner.run(scenario, clientOverride: clientOverride, grant: grant, dumpRequestsTo: dumpRequestsTo)
     }
 }
 
