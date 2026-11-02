@@ -60,11 +60,13 @@ enum BenchCLI {
             ])
     }
 
-    /// Why these options cannot run, or nil. A grant makes a mutating job, and with `--real` a real
-    /// model would run unattended with write and run tools open (the mount is read-only, the profile
-    /// is not), so the grant is for a scripted client only.
-    static func refusal(_ opts: BenchOptions) -> String? {
-        opts.grantRead != nil && opts.real ? "--grant-read makes a mutating job; it is for a scripted run, not --real" : nil
+    /// Why this run cannot happen, or nil. A grant makes a mutating job, and with a real model that
+    /// would run unattended with write and run tools open (the mount is read-only, the profile is
+    /// not), so the grant is for a scripted client only. Judged on the resolved scenario: the file
+    /// can set `clientMode: "real"` itself.
+    static func refusal(_ opts: BenchOptions, scenario: Scenario) -> String? {
+        opts.grantRead != nil && scenario.clientMode == .real
+            ? "--grant-read makes a mutating job; it is for a scripted run, not a real model" : nil
     }
 
     /// Load the scenario for these options, applying `--real` as an override.
@@ -83,15 +85,15 @@ enum BenchCLI {
     /// a bad scenario file. Called on the main actor from `main.swift`.
     @MainActor
     static func run(_ opts: BenchOptions) async {
-        if let why = refusal(opts) {
-            FileHandle.standardError.write(Data("iris --bench: \(why)\n".utf8))
-            exit(1)
-        }
         let scenario: Scenario
         do {
             scenario = try resolveScenario(opts)
         } catch {
             FileHandle.standardError.write(Data("iris --bench: \(error.localizedDescription)\n".utf8))
+            exit(1)
+        }
+        if let why = refusal(opts, scenario: scenario) {
+            FileHandle.standardError.write(Data("iris --bench: \(why)\n".utf8))
             exit(1)
         }
         // A fake run needs no provider secrets; skip the Keychain so this ad-hoc-signed CLI

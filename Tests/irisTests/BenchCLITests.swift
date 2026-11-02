@@ -64,12 +64,14 @@ struct BenchCLITests {
         let b = BenchCLI.parse(["iris", "--bench", "foo.json"])
         #expect(b?.dumpRequestsDir == nil)
         #expect(BenchCLI.parse(["iris", "--bench", "--grant-read", "w", "foo.json"])?.grantRead == "w")
-        // A grant makes a mutating job, so it is refused with a real model.
-        let real = BenchCLI.parse(["iris", "--bench", "--grant-read", "w", "foo.json", "--real"])
-        #expect(real.flatMap(BenchCLI.refusal) != nil)
-        #expect(BenchCLI.parse(["iris", "--bench", "--grant-read", "w", "foo.json"]).flatMap(BenchCLI.refusal) == nil)
-        #expect(b?.transcript == false)
-        #expect(BenchCLI.parse(["iris", "--bench", "foo.json", "--dump-requests"])?.dumpRequestsDir == nil)
+        // A grant makes a mutating job, so it is refused with a real model, whether --real or the file says so.
+        var scenario = BenchCLI.defaultScenario
+        let granted = BenchCLI.parse(["iris", "--bench", "--grant-read", "w", "foo.json"])!
+        #expect(BenchCLI.refusal(granted, scenario: scenario) == nil)
+        scenario.clientMode = .real
+        #expect(BenchCLI.refusal(granted, scenario: scenario) != nil, "a real-mode scenario file")
+        let plain = BenchCLI.parse(["iris", "--bench", "foo.json"])!
+        #expect(BenchCLI.refusal(plain, scenario: scenario) == nil, "no grant, no refusal")
     }
 
     @Test("a background scenario's refused call reaches the transcript, and the requests are dumped")
