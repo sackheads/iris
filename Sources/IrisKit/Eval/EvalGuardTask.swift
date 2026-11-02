@@ -148,7 +148,7 @@ enum EvalGuardTask {
     /// provisioned (the scoped model) or not configured (skipped, as an install without one).
     static func guardConfig(canary: EvalModelSpec, tier2: Bool) -> InjectionGuard.GuardConfigFingerprint {
         .init(protectionEnabled: true, promptGuardEngine: engineName(canary.runtime), promptGuardModel: canary.name,
-              promptGuardCoreMLModel: tier2 ? "eval" : "", tier3CloudModel: "", tier2ModelsDir: "", tier3ModelsDir: "",
+              promptGuardCoreMLModel: tier2 ? "eval" : "", tier3CloudModel: "", tier3ThinkingLevel: "", tier2ModelsDir: "", tier3ModelsDir: "",
               tier2Provisioning: tier2 ? .provisioned : .notConfigured, tier3Provisioning: .provisioned)
     }
 

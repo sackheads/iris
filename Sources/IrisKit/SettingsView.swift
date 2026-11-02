@@ -731,6 +731,53 @@ struct SettingsView: View {
                                     }
                                 }
                             }
+                        } else if config.promptGuardEngine == "cloud" {
+                            // #800: its own field; Vibecop's cloud model is only the fallback.
+                            let effective = CloudAuxiliaryEngine.effectiveModel(role: CloudAuxiliaryEngine.canaryRole, config: config)
+                            TextField("Cloud Model", text: $config.tier3CloudModel,
+                                      prompt: Text(config.vibecopCloudModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                                   ? "Easy tier: \(config.getModel(for: .easy))"
+                                                   : "Vibecop's: \(config.vibecopCloudModel)"))
+                                .help("The \(config.primaryProvider) model the Tier 3 canary asks. Leave empty for Vibecop's cloud model, or the easy tier's model when that is empty too.")
+                            Text("Effective model: \(effective)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            if let mismatch = CloudAuxiliaryEngine.providerMismatch(model: effective, provider: config.primaryProvider) {
+                                Text("⚠️ \(mismatch) If it doesn't exist there, tier 3 uses the easy tier's model and says so once.")
+                                    .font(.caption)
+                                    .foregroundColor(.orange)
+                            }
+                            Picker("Thinking", selection: $config.tier3ThinkingLevel) {
+                                Text("Not sent").tag("")
+                                ForEach(ConfigManager.tier3ThinkingLevels, id: \.self) { Text($0.capitalized).tag($0) }
+                            }
+                            .help("How much the model thinks before it answers. Not sent leaves the provider's default.")
+                            if config.primaryProvider != LLMProvider.gemini.rawValue {
+                                Text(config.tier3ThinkingLevel.isEmpty
+                                     ? "Only Gemini uses a thinking level; \(config.primaryProvider) would ignore one."
+                                     : "⚠️ \(config.primaryProvider) ignores the thinking level; only Gemini uses it.")
+                                    .font(.caption)
+                                    .foregroundColor(config.tier3ThinkingLevel.isEmpty ? .secondary : .orange)
+                            }
+                            HStack {
+                                Button("Test Model") {
+                                    Task {
+                                        do {
+                                            let auxConfig = AuxiliaryModelConfig(role: "promptGuard", engineType: .cloud, modelPathOrName: effective)
+                                            let engine = try await AuxiliaryModelManager.shared.getEngine(for: "promptGuard", config: auxConfig)
+                                            _ = try await engine.generate(prompt: "Hello", jsonSchema: nil)
+                                            tier3TestStatus = "✅ Success"
+                                        } catch {
+                                            tier3TestStatus = "❌ Failed: \(error.localizedDescription)"
+                                        }
+                                    }
+                                }
+                                .buttonStyle(.link)
+                                .font(.caption)
+                                if let status = tier3TestStatus {
+                                    Text(status).font(.caption).foregroundColor(status.starts(with: "✅") ? .green : .red)
+                                }
+                            }
                         } else {
                             TextField("Model Name", text: $config.promptGuardModel)
                                 .help("The model to use for the Tier 3 Canary evaluation")

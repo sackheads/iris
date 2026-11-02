@@ -68,6 +68,8 @@ final class AuxiliaryModelManager: @unchecked Sendable {
                         // Nothing local to load.
                         var cloud = CloudAuxiliaryEngine()
                         cloud.role = role
+                        cloud.model = { CloudAuxiliaryEngine.configuredModel(role: role, config: .shared) }
+                        cloud.thinkingLevel = { CloudAuxiliaryEngine.thinkingLevel(role: role, config: .shared) }
                         engine = cloud
                     }
                     

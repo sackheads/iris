@@ -22,6 +22,10 @@ struct GeminiRequest: Codable {
     /// #314 decision 4: set only on the client's own retry after a binding 400, which proves the
     /// model checks, so the header and field go out whatever the table says. Never encoded.
     var forceBindingBeta: Bool = false
+    /// #800: Gemini's `generationConfig.thinkingConfig.thinkingLevel`, set by a cloud tier 3 that
+    /// has one. `LLMClient.encodeGeminiBody` adds it to the wire body; no other provider reads it.
+    /// Never encoded here.
+    var thinkingLevel: String? = nil
 
     private enum CodingKeys: String, CodingKey { case contents, systemInstruction, tools }
 }

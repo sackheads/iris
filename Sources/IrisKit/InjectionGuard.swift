@@ -227,6 +227,8 @@ public struct InjectionGuard {
         /// The provider and model a `cloud` tier 3 sends to (#824), from `resolvedCloudModel`. Empty
         /// for any other engine, so a Settings change there cannot miss a cache it does not affect.
         let tier3CloudModel: String
+        /// The thinking level a `cloud` tier 3 sends (#800); empty for none, and for any other engine.
+        let tier3ThinkingLevel: String
         let tier2ModelsDir: String
         let tier3ModelsDir: String
         let tier2Provisioning: Tier2Provisioning
@@ -253,6 +255,8 @@ public struct InjectionGuard {
             promptGuardModel: config.promptGuardModel,
             promptGuardCoreMLModel: config.promptGuardCoreMLModel,
             tier3CloudModel: config.promptGuardEngine == "cloud" ? resolvedCloudModel(config) : "",
+            tier3ThinkingLevel: config.promptGuardEngine == "cloud"
+                ? CloudAuxiliaryEngine.thinkingLevel(role: CloudAuxiliaryEngine.canaryRole, config: config) ?? "" : "",
             tier2ModelsDir: resolvedTier2ModelsDir.path,
             tier3ModelsDir: resolvedTier3ModelsDir.path,
             tier2Provisioning: tier2Provisioning(modelName: config.promptGuardCoreMLModel, modelsDir: resolvedTier2ModelsDir),
@@ -260,11 +264,11 @@ public struct InjectionGuard {
     }
 
     /// Who judges for a `cloud` tier 3: the primary provider (and OpenAI's base URL) and the model
-    /// `CloudAuxiliaryEngine` sends, the Vibecop cloud model or the easy tier's when none is set. The
+    /// `CloudAuxiliaryEngine` sends for the canary: tier 3's own cloud model (#800), else the Vibecop
+    /// cloud model, else the easy tier's. The
     /// provider counts even for a fixed model: another provider answers it, or 404s and falls back.
     private static func resolvedCloudModel(_ config: ConfigManager) -> String {
-        let chosen = config.vibecopCloudModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        let model = chosen.isEmpty ? config.getModel(for: .easy) : chosen
+        let model = CloudAuxiliaryEngine.effectiveModel(role: CloudAuxiliaryEngine.canaryRole, config: config)
         let baseURL = config.primaryProvider == LLMProvider.openai.rawValue ? config.openAIBaseURL : ""
         return [config.primaryProvider, baseURL, model].joined(separator: "|")
     }
@@ -282,7 +286,7 @@ public struct InjectionGuard {
         // test that varies one independently of the other must still get its own cache entry.
         let parts = [clean, source, String(describing: maxTier), String(fingerprint.protectionEnabled),
                      fingerprint.promptGuardEngine, fingerprint.promptGuardModel, fingerprint.promptGuardCoreMLModel,
-                     fingerprint.tier3CloudModel, fingerprint.tier2ModelsDir, fingerprint.tier3ModelsDir,
+                     fingerprint.tier3CloudModel, fingerprint.tier3ThinkingLevel, fingerprint.tier2ModelsDir, fingerprint.tier3ModelsDir,
                      String(describing: fingerprint.tier2Provisioning), String(describing: fingerprint.tier3Provisioning)]
             // #727: two inputs that strip to the same text are scored differently by what was stripped.
             + delimiterLines.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }

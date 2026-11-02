@@ -167,7 +167,18 @@ struct LLMClient {
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .useDefaultKeys
         encoder.outputFormatting = [.sortedKeys]
-        return try encoder.encode(wire)
+        let body = try encoder.encode(wire)
+        guard let level = wire.thinkingLevel else { return body }
+        return try withThinkingLevel(body, level: level)
+    }
+
+    /// `body` with Gemini's `generationConfig.thinkingConfig.thinkingLevel` set (#800).
+    static func withThinkingLevel(_ body: Data, level: String) throws -> Data {
+        guard var json = try JSONSerialization.jsonObject(with: body) as? [String: Any] else { return body }
+        var generation = json["generationConfig"] as? [String: Any] ?? [:]
+        generation["thinkingConfig"] = ["thinkingLevel": level]
+        json["generationConfig"] = generation
+        return try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])
     }
 
     var supportsStreaming: Bool { true }
