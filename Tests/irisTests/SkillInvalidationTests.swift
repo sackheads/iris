@@ -68,8 +68,12 @@ struct SkillInvalidationTests {
         let count = Count()
         _ = await SkillCurator.shared.curateSkills(paths: paths, onSkillsChanged: { count.bump() })
         #expect(count.value == 0, "nothing to prune")
-        try FileManager.default.createDirectory(at: paths.skillsDir.appendingPathComponent("empty"), withIntermediateDirectories: true)
+        let empty = paths.skillsDir.appendingPathComponent("empty")
+        try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -3 * 86_400)], ofItemAtPath: empty.path)
         _ = await SkillCurator.shared.curateSkills(paths: paths, onSkillsChanged: { count.bump() })
+        #expect(count.value == 0, "a dry run moves nothing and invalidates nothing")
+        _ = await SkillCurator.shared.curateSkills(paths: paths, apply: true, onSkillsChanged: { count.bump() })
         #expect(count.value == 1)
     }
 

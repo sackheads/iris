@@ -5229,9 +5229,16 @@ class AppState {
             guard let self = self else { return }
             if args.hasPrefix("curate") {
                 let engine = self.engine
-                let report = await SkillCurator.shared.curateSkills(onSkillsChanged: { await engine?.invalidateSystemPrompt() })
+                // Non-destructive by default (#48): `--apply` is what moves anything.
+                let apply = SkillCurator.curateApplies(String(args.dropFirst("curate".count)))
+                let report = await SkillCurator.shared.curateSkills(apply: apply, onSkillsChanged: { await engine?.invalidateSystemPrompt() })
                 let markdown = SkillCurator.shared.formatReportMarkdown(report)
                 self.emitCommandOutput(markdown, format: .markdown, to: convId)
+            } else if args.hasPrefix("restore") {
+                let engine = self.engine
+                let name = String(args.dropFirst("restore".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                let result = await SkillCurator.shared.restoreSkill(name: name, onSkillsChanged: { await engine?.invalidateSystemPrompt() })
+                self.emitCommandOutput(SkillCurator.restoreMessage(result), format: .markdown, to: convId)
             } else if args.hasPrefix("new ") {
                 let name = String(args.dropFirst(4)).trimmingCharacters(in: .whitespacesAndNewlines)
                 let templateBody = """

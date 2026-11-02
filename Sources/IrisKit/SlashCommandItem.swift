@@ -10,7 +10,7 @@ struct SlashCommandItem: Identifiable, Sendable, Equatable {
         SlashCommandItem(id: "goal", command: "/goal", usage: "/goal <description>", description: "Start an autonomous goal-driven loop"),
         SlashCommandItem(id: "loop", command: "/loop", usage: "/loop <interval> <prompt>", description: "Re-run a prompt in this conversation every interval (stop, pause, resume)"),
         SlashCommandItem(id: "stop", command: "/stop", usage: "/stop", description: "Cancel active goal mode or subagent tasks"),
-        SlashCommandItem(id: "skills", command: "/skills", usage: "/skills [reload|show <name>|curate]", description: "List, reload, view, or curate registered skills"),
+        SlashCommandItem(id: "skills", command: "/skills", usage: "/skills [reload|show <name>|curate [--apply]|restore <name>]", description: "List, reload, view, curate (dry run; --apply quarantines) or restore skills"),
         SlashCommandItem(id: "bundle", command: "/bundle", usage: "/bundle [save <name> s1,s2|<name>]", description: "List, save, or activate skill bundles"),
         SlashCommandItem(id: "jobs", command: "/jobs", usage: "/jobs [ack <run id>|pause|resume|enable|disable|run|delete <name>|reschedule <name> <cron> [timezone]|url <name> [on|off]]", description: "List background jobs, acknowledge a failed run, pause, resume, enable, disable, run, reschedule, or delete a job, or turn a job's link on or off"),
         SlashCommandItem(id: "journey", command: "/journey", usage: "/journey", description: "View chronological learning journey timeline"),
