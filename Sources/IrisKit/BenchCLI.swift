@@ -91,10 +91,25 @@ enum BenchCLI {
     static func refusal(_ opts: BenchOptions, scenario: Scenario) -> String? {
         if opts.grantConflict { return "--grant-read, --grant-write and --mutating-no-grant exclude each other: give one" }
         guard opts.grant != nil else { return nil }
-        if scenario.clientMode == .real { return "a bench grant makes a mutating job; it is for a scripted run, not a real model" }
+        if scenario.clientMode == .real, let why = realModelGrantRefusal(opts.grant) { return why }
         // The grant is stamped on a background conversation only; elsewhere it would do nothing, which reads as "granted and still refused".
         if !scenario.background { return "a bench grant applies to a background scenario: set \"background\": true in the scenario file" }
         return nil
+    }
+
+    /// A real model with a grant (#854, measuring whether it acts on a planted request): only a
+    /// read-write mount that is a folder under the temp root, judged by its REAL path (a link or
+    /// `/tmp` -> `/private/tmp` must not move it out), never the temp root itself. Read-only or no
+    /// grant with a real model stays refused: a mutating job runs unattended with write and run
+    /// tools open, and the mount is what bounds it.
+    static func realModelGrantRefusal(_ grant: BenchGrant?) -> String? {
+        guard case .readWrite(let dir)? = grant else {
+            return "a bench grant makes a mutating job; with a real model only --grant-write on a folder under the temp directory is allowed"
+        }
+        let real = IrisPaths.realPath(dir)
+        let roots = Set([FileManager.default.temporaryDirectory.path, "/tmp"].map(IrisPaths.realPath))
+        let under = roots.contains { real.hasPrefix($0 + "/") && real != $0 }
+        return under ? nil : "--grant-write with a real model needs a folder under the temp directory (\(roots.sorted().joined(separator: ", "))); \(real) is not"
     }
 
     /// Load the scenario for these options, applying `--real` as an override.
