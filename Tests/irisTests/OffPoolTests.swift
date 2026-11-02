@@ -89,17 +89,27 @@ struct OffPoolTests {
 
     @Test("a call that is already cancelled when it starts answers cancelled at once")
     func alreadyCancelledEntry() async throws {
-        let task = Task {
+        // The bound is on `OffPool.run` itself, timed inside the task around the call. Timed from the
+        // test, the clock also counted the task waiting for a cooperative-pool thread to start on, and
+        // under a saturated pool that wait alone passed 2 s in 2 of 115 full parallel runs (#858;
+        // measured: with the pool held for 1.4 to 3.0 s, all of that time went to the task starting,
+        // and `OffPool.run` took 0.000 s). That wait is accepted (Invariant 4: only delivering a result
+        // needs a pool thread). The call answers without one: the cancel handler resumes the answer
+        // while the call is entered, and `wait()` finds it already there.
+        let task = Task { () -> (answer: String, seconds: Double) in
             while !Task.isCancelled { await Task.yield() }
-            return await OffPool.run(cancelled: "cancelled") { _ in
+            let asked = TestClock.now()
+            let answer = await OffPool.run(cancelled: "cancelled") { _ in
                 Thread.sleep(forTimeInterval: 5)
                 return "late"
             }
+            return (answer, TestClock.seconds(since: asked))
         }
         task.cancel()
-        let asked = TestClock.now()
-        #expect(try await value(of: task, within: 3) == "cancelled")
-        #expect(TestClock.seconds(since: asked) < 2)
+        // Only a hang guard: the claim is the in-task time below, and a saturated pool may start the task late.
+        let (answer, seconds) = try await value(of: task, within: 30)
+        #expect(answer == "cancelled")
+        #expect(seconds < 2, "the call waited \(seconds) s: it must not wait out the 5 s of work")
     }
 
     @Test("the first answer wins: a second resume changes nothing")
