@@ -1098,7 +1098,7 @@ struct EvalCloudTests {
         #expect(r.metrics.costPerThousandUsd == nil, "no rate: the cost is absent, never $0")
         let json = String(decoding: try r.encoded(), as: UTF8.self)
         #expect(!json.contains("cost_per_thousand_usd"))
-        #expect(EvalCompare.summary(r).contains("PAID: cost n/a per 1,000"))
+        #expect(EvalCompare.summary(r).contains("PAID: cost n/a per 1,000 judgements (no listed price for the model)"))
     }
 
     @Test func aPartialUsageReportIsNoReportAndAPartialCoverageLeavesTheCostAbsent() async throws {
@@ -1113,6 +1113,8 @@ struct EvalCloudTests {
         let r = try await run(s, StubCloud(usageEvery: 2), guardRun(s, repeats: 1))
         #expect(r.tokens?.calls == 2 && r.settings["usage_coverage"] == "2 of 4 judgements reported usage")
         #expect(r.metrics.costPerThousandUsd == nil, "a partial sum over the calls that reported is not the run's cost")
+        #expect(EvalCompare.summary(r).contains("cost n/a per 1,000 judgements (2 of 4 judgements reported usage)"), "the n/a says why")
+        #expect(EvalTable.render([EvalTable.Loaded(file: "x.json", result: r)]).contains("(2 of 4 judgements reported usage)"))
         // Every call reporting: the cost is there, over all of them, and the coverage says so.
         let full = try await run(s, StubCloud(), guardRun(s, repeats: 1))
         #expect(full.settings["usage_coverage"] == "4 of 4 judgements reported usage" && full.metrics.costPerThousandUsd != nil)
