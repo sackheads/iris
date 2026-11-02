@@ -1094,7 +1094,12 @@ struct EvalCloudTests {
         let s = try setUp()
         defer { try? FileManager.default.removeItem(at: s.root) }
         let stub = StubCloud()
-        await #expect(throws: EvalError.self) { _ = try await run(s, stub, guardRun(s, model: "gemini/gemini-unlisted-x", repeats: 1)) }
+        do {
+            _ = try await run(s, stub, guardRun(s, model: "gemini/gemini-unlisted-x", repeats: 1))
+            Issue.record("an unpriced paid run must be refused")
+        } catch let EvalError.usage(message) {
+            #expect(message.contains("ModelPriceSnapshot.swift") && message.contains("gen-model-prices.py"), "the refusal names the fix: \(message)")
+        }
         #expect(stub.calls == 0, "no call without a price to cap")
     }
 
