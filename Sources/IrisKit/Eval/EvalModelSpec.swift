@@ -121,6 +121,8 @@ enum EvalError: Error, Equatable, LocalizedError {
     case datasetMismatch(String)
     case unsupported(String)
     case incomparable(String)
+    /// A paid run stopped by its `--max-dollars` cap; the partial result was written to `file`.
+    case capped(file: String, why: String)
 
     var errorDescription: String? {
         switch self {
@@ -129,6 +131,7 @@ enum EvalError: Error, Equatable, LocalizedError {
         case .datasetMismatch(let s): return "dataset doesn't match its manifest: \(s)"
         case .unsupported(let s): return s
         case .incomparable(let s): return "not comparable: \(s)"
+        case .capped(let file, let why): return "\(why); the partial result is in \(file)"
         }
     }
 }

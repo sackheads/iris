@@ -85,6 +85,31 @@ enum EvalCost {
         return Estimate(calls: calls, tokens: tokens, dollars: dollars(tokens, rates: rates), assumptions: notes)
     }
 
+    /// The `--max-dollars` cap on one paid run. Judgements run one after another, so it is checked
+    /// before every call: what the provider has reported so far, plus the estimate's per-call mean for
+    /// each call that reported nothing, plus the mean for the call about to be made, must stay within
+    /// the cap. A call that reached the provider and reported no usage still cost something, so it is
+    /// charged at the mean, never at zero (#870).
+    struct SpendCap: Equatable, Sendable {
+        let cap: Double
+        /// The estimate's dollars per call.
+        let perCall: Double
+        private(set) var reported = 0.0
+        private(set) var unreportedCalls = 0
+
+        init(cap: Double, perCall: Double) { self.cap = cap; self.perCall = perCall }
+
+        /// What the run is charged so far.
+        var committed: Double { reported + Double(unreportedCalls) * perCall }
+
+        func allowsNextCall() -> Bool { committed + perCall <= cap }
+
+        /// One call that reached the provider; `dollars` nil when it reported no usage.
+        mutating func record(dollars: Double?) {
+            if let dollars { reported += dollars } else { unreportedCalls += 1 }
+        }
+    }
+
     static func money(_ value: Double?) -> String {
         guard let value else { return "n/a" }
         return String(format: "$%.4f", value)

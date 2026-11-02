@@ -18,7 +18,7 @@ enum EvalCLI {
     usage: iris --eval run <task> --model <runtime:name> [--sample N | --full] [--split test|dev|all] [--dataset DIR] [--out DIR]
            iris --eval run injection.verdict --model ollama:<name>|llamacpp:<file>|mlx:<id>|cloud:<provider>/<model> [--think product|on|off] [--repeats N] [...]
            iris --eval run injection.stack --stack 1+3|1+2+3 --tier3 ollama:<name>|llamacpp:<file>|mlx:<id>|cloud:<provider>/<model> [--tier2 onnx:<bundle>] [--think …] [--repeats N] [...]
-           cloud canary: --model / --tier3 cloud:<provider>/<model> [--thinking-level low|medium] needs --allow-paid; --estimate-only prints calls and cost, makes none
+           cloud canary: --model / --tier3 cloud:<provider>/<model> [--thinking-level low|medium] needs --allow-paid --max-dollars N; --estimate-only prints calls and cost, makes none
            iris --eval compare <a.json> <b.json> [--vary model|runtime|dataset|split|sample|think|repeats]
            iris --eval table [--results DIR] [--out FILE]
     --sample N: about N texts, stratified by label and category, and every category keeps at least one: N below the number of categories (19 in injection v2) still judges one text per category.
@@ -51,7 +51,7 @@ enum EvalCLI {
         case "run":
             guard positional.count == 1 else { return .failure(.usage("run takes one task")) }
             if [EvalGuardTask.verdict, EvalGuardTask.stack].contains(positional[0]) { return parseGuard(positional[0], flags: flags, full: full, booleans: booleans) }
-            guard booleans.isEmpty, flags["--thinking-level"] == nil else { return .failure(.usage("--allow-paid, --estimate-only and --thinking-level are for injection.verdict and injection.stack")) }
+            guard booleans.isEmpty, flags["--thinking-level"] == nil, flags["--max-dollars"] == nil else { return .failure(.usage("--allow-paid, --max-dollars, --estimate-only and --thinking-level are for injection.verdict and injection.stack")) }
             guard let m = flags["--model"], let model = EvalModelSpec.parse(m) else {
                 return .failure(.usage("--model runtime:name is required (runtimes: \(EvalModelSpec.Runtime.allCases.map(\.rawValue).joined(separator: ", ")))"))
             }
@@ -133,6 +133,14 @@ enum EvalCLI {
             run.thinkingLevel = level
         }
         run.allowPaid = booleans.contains("--allow-paid")
+        if let m = flags["--max-dollars"] {
+            guard let d = Double(m), d > 0, d.isFinite else { return .failure(.usage("--max-dollars takes a positive dollar amount")) }
+            guard run.allowPaid else { return .failure(.usage("--max-dollars is the cap on a paid run: it goes with --allow-paid")) }
+            run.maxDollars = d
+        }
+        if run.allowPaid, run.maxDollars == nil, !booleans.contains("--estimate-only") {
+            return .failure(.usage("--allow-paid needs --max-dollars N: the most the run may spend"))
+        }
         if booleans.contains("--estimate-only") { return .success(.estimate(run)) }
         return .success(.runGuard(run))
     }

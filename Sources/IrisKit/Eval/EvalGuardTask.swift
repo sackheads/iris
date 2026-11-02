@@ -344,6 +344,8 @@ extension EvalRunner {
         var thinkingLevel: String?
         /// `--allow-paid`: without it a cloud run refuses before any call (spec, section 6).
         var allowPaid = false
+        /// `--max-dollars`: the most a paid run may spend. Required with `--allow-paid` (#870).
+        var maxDollars: Double?
         var repeats: Int = EvalGuardTask.defaultRepeats
         var split: String = "test"
         var sample: Int?
@@ -384,7 +386,20 @@ extension EvalRunner {
                                   + "--estimate-only prints the call count and the expected cost without making any.\n"
                                   + ((try? estimate(run, repoRoot: repoRoot, table: prices)) ?? ""))
         }
-        if run.canary.runtime == .cloud { print("eval: PAID RUN: \(texts.count * run.repeats) calls to \(run.canary.name) (--allow-paid given)") }
+        // The cap is worked from the estimate's per-call mean, so it needs a listed price to mean anything.
+        var spendCap: EvalCost.SpendCap?
+        if run.canary.runtime == .cloud {
+            guard let cap = run.maxDollars else {
+                throw EvalError.usage("a paid run needs --max-dollars N, the most it may spend; --estimate-only prints the expected cost without one")
+            }
+            guard let provider = run.canary.cloudProvider, let rates = EvalCost.rates(provider: provider, model: run.canary.cloudModelId, table: prices) else {
+                throw EvalError.usage("no listed price for \(run.canary.name): --max-dollars can't be enforced without one, so the run is refused")
+            }
+            let e = EvalCost.estimate(textBytes: texts.map { $0.text.utf8.count }, repeats: run.repeats, thinkingLevel: run.thinkingLevel, rates: rates)
+            if e.calls > 0, let dollars = e.dollars { spendCap = .init(cap: cap, perCall: dollars / Double(e.calls)) }
+            print("eval: PAID RUN: \(texts.count * run.repeats) calls to \(run.canary.name) (--allow-paid given), capped at \(EvalCost.money(cap)) (estimated \(EvalCost.money(e.dollars)))"
+                  + ((e.dollars ?? 0) > cap ? "; the estimate is over the cap, so the run will stop partway" : ""))
+        }
         let canary = try await (canaryFor ?? { spec, think, level in try await EvalGuardTask.canary(spec, think: think, thinkingLevel: level) })(run.canary, run.think, run.thinkingLevel)
 
         // A stack's tier 2, with its files' digests: the bundle path and sha256s go in the result,
@@ -417,9 +432,19 @@ extension EvalRunner {
         print("eval: \(run.task) [\(configuration)] \(model), think \(canary.think), dataset \(dataset.manifest.family) v\(dataset.manifest.version) \(run.split)"
               + (run.sample.map { ", sample \($0)" } ?? ", full") + ": \(texts.count) texts × \(run.repeats)")
         var scored: [EvalMetrics.Scored] = []
-        for r in 0..<run.repeats {
+        var cappedAt: String?
+        let rates = run.canary.cloudProvider.flatMap { EvalCost.rates(provider: $0, model: run.canary.cloudModelId, table: prices) }
+        runLoop: for r in 0..<run.repeats {
             for (n, sample) in texts.enumerated() {
-                scored.append(await EvalGuardTask.score(sample, repeatIndex: r, canary: canary.engine, config: config, tier2: scope))
+                if let cap = spendCap, !cap.allowsNextCall() {
+                    cappedAt = "stopped by --max-dollars \(EvalCost.money(cap.cap)) before judgement \(scored.count + 1) of \(texts.count * run.repeats): "
+                        + "\(EvalCost.money(cap.committed)) charged (reported \(EvalCost.money(cap.reported)) plus \(cap.unreportedCalls) call(s) with no usage at the estimate's \(EvalCost.money(cap.perCall)) each)"
+                    break runLoop
+                }
+                let row = await EvalGuardTask.score(sample, repeatIndex: r, canary: canary.engine, config: config, tier2: scope)
+                scored.append(row)
+                // An infra failure never reached the provider; any other call is charged.
+                if row.outcome != .infra { spendCap?.record(dollars: row.usage.flatMap { EvalCost.dollars($0, rates: rates) }) }
                 if (n + 1) % 25 == 0 { print("eval: repeat \(r + 1), \(n + 1)/\(texts.count)") }
             }
         }
@@ -433,6 +458,7 @@ extension EvalRunner {
         var tokens: EvalCost.Tokens?
         var priceNote: String?
         var coverage: String?
+        var partialCost: (reported: Double, extrapolated: Double)?
         if canary.paid {
             // Per 1,000 judgements actually made, so the denominator is every judgement that reached the
             // provider (infra ones never did), and the cost is absent unless every one of them reported
@@ -441,9 +467,14 @@ extension EvalRunner {
             let judged = scored.filter { $0.outcome != .infra }
             let reported = judged.compactMap(\.usage)
             tokens = reported.isEmpty ? nil : reported.reduce(.zero, +)
-            let rates = run.canary.cloudProvider.flatMap { EvalCost.rates(provider: $0, model: run.canary.cloudModelId, table: prices) }
-            if !judged.isEmpty, reported.count == judged.count, let t = tokens {
-                metrics.costPerThousandUsd = EvalCost.perThousand(EvalCost.dollars(t, rates: rates), judgements: judged.count)
+            // Absent only when nothing reported usage or the list has no price. With some usage, the
+            // cost is the mean over the judgements that reported it, and the reported total is
+            // recorded beside it as a lower bound (#870): a smaller number must not pass for the whole.
+            if let t = tokens, let reportedDollars = EvalCost.dollars(t, rates: rates) {
+                metrics.costPerThousandUsd = EvalCost.perThousand(reportedDollars, judgements: reported.count)
+                if reported.count < judged.count {
+                    partialCost = (reportedDollars, reportedDollars / Double(reported.count) * Double(judged.count))
+                }
             }
             coverage = "\(reported.count) of \(judged.count) judgements reported usage"
             priceNote = rates.map { "snapshot \(ModelPriceSnapshot.asOf); input \($0.input * 1_000_000) and output \($0.output * 1_000_000) dollars per million tokens" }
@@ -453,6 +484,14 @@ extension EvalRunner {
 
         var settings = canary.details
         if let coverage { settings["usage_coverage"] = coverage }
+        if let partialCost {
+            settings["cost_reported_usd"] = String(format: "%.4f", partialCost.reported)
+            settings["cost_extrapolated_usd"] = String(format: "%.4f", partialCost.extrapolated)
+        }
+        if let cappedAt, let spendCap {
+            settings["capped"] = cappedAt
+            settings["max_dollars"] = String(format: "%.2f", spendCap.cap)
+        }
         settings["canary"] = canary.spec.description
         settings["context_tag"] = EvalClassifierTask.contextTag
         settings["output_cap_bytes"] = "\(OutputCap.limitBytes)"
@@ -481,13 +520,15 @@ extension EvalRunner {
             verdicts: scored.map { .init(id: $0.sample.id, outcome: $0.outcome.rawValue, caught: $0.caught,
                                          rawScore: nil, seconds: $0.seconds, repeatIndex: $0.repeatIndex,
                                          blockedBy: run.stack == nil ? nil : $0.trace?.blockedBy,
-                                         tier2Verdict: run.stack == nil ? nil : $0.trace?.tier2Verdict) })
+                                         tier2Verdict: run.stack == nil ? nil : $0.trace?.tier2Verdict,
+                                         tokens: $0.usage, usageMissing: canary.paid && $0.outcome != .infra && $0.usage == nil ? true : nil) })
         try FileManager.default.createDirectory(at: taskDir, withIntermediateDirectories: true)
         let base = "\(day)-\(run.stack.map { "stack\($0.rawValue.replacingOccurrences(of: "+", with: ""))-" } ?? "")"
             + "\(canary.spec.slug)-think\(canary.think.replacingOccurrences(of: " ", with: "-"))-v\(dataset.manifest.version)-\(run.split)" + (run.sample.map { "-s\($0)" } ?? "-full")
         let url = freshFile(in: taskDir, base: base)
         try result.encoded().write(to: url, options: .withoutOverwriting)
         print(EvalCompare.summary(result))
+        if let cappedAt { throw EvalError.capped(file: url.path, why: cappedAt) }
         return url
     }
 }
