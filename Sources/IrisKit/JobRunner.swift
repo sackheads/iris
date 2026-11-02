@@ -1928,7 +1928,7 @@ actor JobRunner {
         return "\(Int((seconds / 3_600).rounded())) h"
     }
 
-    /// The run's own hidden conversation, registered in the session strip. Titled by the caller: an
+    /// The run's own hidden conversation, registered in the activity strip. Titled by the caller: an
     /// ordinary fire is named for when it started, an approved call for what it runs. `nil` when
     /// the app state has been released — there is nothing to run a turn against, and no row has been
     /// written yet, so the fire is simply dropped.
@@ -2117,7 +2117,7 @@ actor JobRunner {
         // The strip and the card flip first: a slow `container rm` must not hold up either one
         // just because the two happen to be closing together.
         if let state {
-            await MainActor.run { state.finishSession(id: conversationId, status: status) }
+            await MainActor.run { state.finishRun(id: conversationId, status: status) }
         }
         // The run's container goes with the run (§2): before this, a job's container stood until
         // the idle reaper or the next launch's sweep, holding its mounts open the whole time. A

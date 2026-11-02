@@ -16,12 +16,12 @@ struct ChatView: View {
     /// the same pass, and only coalescing to a single, later-evaluated scroll makes the pending
     /// search-reveal target reliably win regardless of which handler happened to run first.
     @State private var scrollPassScheduled = false
-    /// Toggled by the toolbar "cpu" badge; drives `SessionStripView`'s collapsed/expanded state.
+    /// Toggled by the toolbar "cpu" badge; drives `ActivityStripView`'s collapsed/expanded state.
     /// Replaces the old `SubagentPopoverView` popover (#217 + #19). Not persisted. Starts `true`:
     /// fix round 1's ruling is that the strip defaults to expanded whenever a subagent/evaluator
     /// session exists (a manual collapse is remembered only until the strip empties out, at which
-    /// point `SessionStripView` resets this back to `true` itself).
-    @State private var sessionStripExpanded = true
+    /// point `ActivityStripView` resets this back to `true` itself).
+    @State private var activityStripExpanded = true
     /// The goal progress popover (#882), opened from the toolbar.
     @State private var showGoalProgress = false
     /// Whether the Archived disclosure group is open. The single source of truth: the group
@@ -439,7 +439,7 @@ struct ChatView: View {
 
                     messageInputBar
 
-                    SessionStripView(state: state, isExpanded: $sessionStripExpanded)
+                    ActivityStripView(state: state, isExpanded: $activityStripExpanded)
                 }
                 .onDrop(of: [.fileURL], isTargeted: $isDraggingOver) { providers in
                     handleDrop(providers: providers)
@@ -528,7 +528,7 @@ struct ChatView: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 Button(action: {
-                    Motion.withAnimation { sessionStripExpanded.toggle() }
+                    Motion.withAnimation { activityStripExpanded.toggle() }
                 }) {
                     ZStack {
                         Image(systemName: "cpu")
@@ -543,7 +543,7 @@ struct ChatView: View {
                         }
                     }
                 }
-                .help("Toggle the session strip")
+                .help("Toggle the activity strip")
             }
         }
         // Global approval overlay: floats over the whole window so a request from ANY conversation
@@ -1031,11 +1031,11 @@ struct ChatView: View {
     }
 
     /// The message input bar: a multi-line field (Enter submits, Shift+Enter newlines) + send button.
-    /// The toolbar "cpu" badge's count: running subagent/evaluator sessions only (`state.sessions`
-    /// never holds the main session — see `AppState.visibleSessions`), matching what
-    /// `SessionStripView`'s expanded view lists.
+    /// The toolbar "cpu" badge's count: running subagent/evaluator sessions only (`state.stripRuns`
+    /// never holds the main session — see `AppState.visibleRuns`), matching what
+    /// `ActivityStripView`'s expanded view lists.
     private var runningSubagentCount: Int {
-        state.sessions.filter {
+        state.stripRuns.filter {
             if case .finished = $0.phase { return false }
             return true
         }.count
@@ -1207,7 +1207,7 @@ struct MessageView: View {
     /// The "View run" action for a card, or nil when there is no transcript to open — the run
     /// recorded none, or the conversation it recorded has since been pruned. Setting the id on
     /// `AppState` (rather than presenting a sheet from here) keeps one sheet with two openers:
-    /// the session strip owns the `.sheet`, on a view that stays mounted while it is up.
+    /// the activity strip owns the `.sheet`, on a view that stays mounted while it is up.
     private func viewRunAction(for card: EventCard) -> (() -> Void)? {
         guard transcriptAvailable, let convId = card.transcriptConversationId else { return nil }
         return { state.transcriptSheetConversationId = convId }

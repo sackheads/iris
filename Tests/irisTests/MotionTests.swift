@@ -64,7 +64,7 @@ struct MotionSourceScanTests {
 }
 
 /// Source scans, off the main actor for the reason `MotionSourceScanTests` gives (#642).
-@Suite("Composer popups and the session strip slide in (#598)")
+@Suite("Composer popups and the activity strip slide in (#598)")
 struct RevealTests {
     private static func source(_ name: String) throws -> String {
         let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
@@ -100,7 +100,7 @@ struct RevealTests {
 }
 
 @MainActor
-@Suite("Composer popups and the session strip slide in (#598): the slash model")
+@Suite("Composer popups and the activity strip slide in (#598): the slash model")
 struct RevealModelTests {
     @Test("the slash popup's model shows and clears, keeping its state right")
     func slashModel() {

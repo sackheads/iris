@@ -3,7 +3,7 @@ import Foundation
 @testable import IrisKit
 
 /// #236 — the user can stop a background subagent: Stop and `/stop` in its parent conversation
-/// reach it, and so does the Stop on its row in the session strip. Scripted clients only.
+/// reach it, and so does the Stop on its row in the activity strip. Scripted clients only.
 @MainActor
 @Suite("The user's Stop reaches background subagents (#236)", .timeLimit(.minutes(1)))
 struct SubagentUserStopTests {
@@ -95,8 +95,8 @@ struct SubagentUserStopTests {
         state.conversations.first { $0.title == "Subagent: \(role)" }?.id
     }
 
-    private func phase(of id: UUID, in state: AppState) -> SessionSummary.Phase? {
-        state.sessions.first { $0.id == id }?.phase
+    private func phase(of id: UUID, in state: AppState) -> ActivitySummary.Phase? {
+        state.stripRuns.first { $0.id == id }?.phase
     }
 
     private func finishedStatus(of id: UUID, in state: AppState) -> String? {

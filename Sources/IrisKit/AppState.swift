@@ -581,7 +581,7 @@ class AppState {
 
     /// What a message says right now: a streaming reply's latest text, else its content. For
     /// leaf rows and non-view readers only (copy, export, another session reading this one,
-    /// persistence) — never in the chat window's root, the sidebar, the session strip's list or
+    /// persistence) — never in the chat window's root, the sidebar, the activity strip's list or
     /// the message grouping, which would then re-evaluate on every token (#541).
     func liveContent(of message: ChatMessage) -> String {
         streaming.boxes[message.id]?.text ?? message.content
@@ -611,16 +611,16 @@ class AppState {
         }
     }
     var commandDurations: [UUID: TimeInterval] = [:]
-    /// Subagent/evaluator sessions only — the main session is synthesised by `visibleSessions`,
-    /// not stored here. A finished entry lingers (see `finishSession`) instead of disappearing so
+    /// Subagent/evaluator sessions only — the main session is synthesised by `visibleRuns`,
+    /// not stored here. A finished entry lingers (see `finishRun`) instead of disappearing so
     /// #19's "browse what a subagent just did" has something to click on right after it ends.
-    var sessions: [SessionSummary] = []
-    /// How long a `.finished` entry lingers in `sessions` before the sweep drops it.
-    static let sessionLingerWindow: TimeInterval = 60
+    var stripRuns: [ActivitySummary] = []
+    /// How long a `.finished` entry lingers in `stripRuns` before the sweep drops it.
+    static let runLingerWindow: TimeInterval = 60
     /// The conversation whose read-only transcript sheet is open, or nil. Transient UI state kept
     /// here — not on `Conversation`, not persisted — because there are two openers for the one
-    /// sheet: a session-strip row (#217/#19) and an event card's "View run" (#187). The `.sheet`
-    /// itself stays attached to `SessionStripView`'s outer `Group`, which is always mounted; a
+    /// sheet: a activity-strip row (#217/#19) and an event card's "View run" (#187). The `.sheet`
+    /// itself stays attached to `ActivityStripView`'s outer `Group`, which is always mounted; a
     /// second `.sheet` on `MessageView` would be torn down whenever the message row it is attached
     /// to scrolls out of the lazy stack.
     var transcriptSheetConversationId: UUID?
@@ -922,20 +922,20 @@ class AppState {
     /// evaluator) — a background subagent's turn bumped the same counter, so the main row stuck on
     /// a stale phase while a subagent ran, and switching conversations mid-turn showed
     /// conversation A's phase next to conversation B's tokens. Keyed by conversation id instead,
-    /// set in `beginEngineTurn`/`updateSessionPhase` (which run per-conversation already) and read
-    /// in `visibleSessions` for whichever conversation is currently selected. "Running" itself is
+    /// set in `beginEngineTurn`/`updateRunPhase` (which run per-conversation already) and read
+    /// in `visibleRuns` for whichever conversation is currently selected. "Running" itself is
     /// derived from `hasTurnInFlight(for:)`, not from a phase value, so a conversation with no
     /// recorded phase yet (the brief instant between `beginEngineTurn` and the first
-    /// `updateSessionPhase` call) still reads as active rather than idle.
+    /// `updateRunPhase` call) still reads as active rather than idle.
     /// Fix round 1 follow-up: pruned in `endEngineTurn` (when `engineTurnCounts` for that
     /// conversation returns to nil) and in `deleteConversation`. Without this, every conversation
     /// that ever ran a turn — including a deleted subagent/evaluator, whose id nothing will ever
-    /// look up again — left one entry behind here forever. `visibleSessions` only reads this while
+    /// look up again — left one entry behind here forever. `visibleRuns` only reads this while
     /// `hasTurnInFlight` says the conversation is running, so pruning it eagerly is safe: a running
     /// row with no entry yet (the brief window between `beginThinking`/`activeTasks` registering a
     /// turn and the engine's own `beginEngineTurn` call, e.g. during attachment/vision processing)
     /// simply reads as just-started rather than showing a previous turn's stale phase.
-    private var mainPhaseByConversation: [UUID: SessionSummary.Phase] = [:]
+    private var mainPhaseByConversation: [UUID: ActivitySummary.Phase] = [:]
     /// When each conversation's current run of turns began (0→1 on its own `engineTurnCounts`
     /// entry). Pruned alongside `mainPhaseByConversation` — see its comment.
     private var mainStartTimeByConversation: [UUID: Date] = [:]
@@ -1079,7 +1079,7 @@ class AppState {
             // Fix round 1 follow-up (#217/#19): these two dictionaries were never pruned —
             // conversations that had ever run a turn (deleted subagents/evaluators included) each
             // left one stale entry behind forever. A running row with no recorded start falls back
-            // to "0s"/no elapsed (`visibleSessions`) until the NEXT `beginEngineTurn` records one,
+            // to "0s"/no elapsed (`visibleRuns`) until the NEXT `beginEngineTurn` records one,
             // which is what makes it safe to drop this eagerly rather than only on delete.
             mainStartTimeByConversation[conversationId] = nil
             mainPhaseByConversation[conversationId] = nil
@@ -1142,7 +1142,7 @@ class AppState {
     /// here treats a reservation as busy, and in each case that is the answer the caller wants: a
     /// user message typed in that window takes the #172 inbox and is drained when the turn ends
     /// rather than starting a second one beside it; an event line waits for the same flush;
-    /// archiving refuses; `list_sessions` reports busy (waiting, if an approval is open); the session strip counts it as running.
+    /// archiving refuses; `list_sessions` reports busy (waiting, if an approval is open); the activity strip counts it as running.
     func hasTurnInFlight(for conversationId: UUID) -> Bool {
         if (engineTurnCounts[conversationId] ?? 0) > 0 { return true }
         if rotationHold == conversationId { return true }
@@ -1723,7 +1723,7 @@ class AppState {
         }
         // A background run's transcript is out of the sidebar, read-only, and refuses anything
         // sent to it (#187); selecting one would put that dead end in the main pane. The
-        // read-only sheet the session strip already owns is the right surface for it — same for a
+        // read-only sheet the activity strip already owns is the right surface for it — same for a
         // subagent log, hence `isUserFacing` and not `isBackground`. Archived is deliberately not
         // part of this: an archived hit selects like any other (#182 §11).
         guard conversation.isUserFacing else {
@@ -1743,11 +1743,11 @@ class AppState {
 
     /// Acquire one unit of "thinking". Balanced by `endThinking()`.
     ///
-    /// Fix round 1 (#217/#19), item 4: this used to also record the session strip's main-row start
+    /// Fix round 1 (#217/#19), item 4: this used to also record the activity strip's main-row start
     /// time and phase, but `thinkingCount` is one global counter shared by every engine (main,
     /// subagent, evaluator all call this), so a background subagent's turn corrupted the main
     /// row's timing. That bookkeeping moved to `beginEngineTurn`/`endEngineTurn` and
-    /// `updateSessionPhase`, which are already per-conversation — this stays a plain reference
+    /// `updateRunPhase`, which are already per-conversation — this stays a plain reference
     /// count for `isThinking`.
     func beginThinking() {
         thinkingCount += 1
@@ -2193,66 +2193,66 @@ class AppState {
     /// `kind` defaults to `.subagent`; `GoalEvaluator` passes `.evaluator` and `JobRunner` passes
     /// `.job` (#187), so the strip and the toolbar badge can tell an independent grader run, a
     /// background job run and a delegated unit of work apart.
-    func registerSubagent(id: UUID, role: String, kind: SessionSummary.Kind = .subagent) {
-        sessions.append(SessionSummary(id: id, kind: kind, role: role, startTime: Date(),
+    func registerSubagent(id: UUID, role: String, kind: ActivitySummary.Kind = .subagent) {
+        stripRuns.append(ActivitySummary(id: id, kind: kind, role: role, startTime: Date(),
                                         phase: .thinking, lastActivity: nil))
     }
 
     /// A subagent/evaluator/job run ended: mark it `.finished` rather than removing it outright, so
     /// the strip's transcript sheet still has a row to click on right after the run ends. It
-    /// lingers for `sessionLingerWindow` — a sweep dropped after that always clears it even if
-    /// nothing else touches `sessions` in the meantime. The write ledger is cleared unconditionally
+    /// lingers for `runLingerWindow` — a sweep dropped after that always clears it even if
+    /// nothing else touches `stripRuns` in the meantime. The write ledger is cleared unconditionally
     /// here (as `removeSubagent` used to), independent of whether the session is still tracked.
-    func finishSession(id: UUID, status: String) {
-        if let idx = sessions.firstIndex(where: { $0.id == id }) {
+    func finishRun(id: UUID, status: String) {
+        if let idx = stripRuns.firstIndex(where: { $0.id == id }) {
             // Fix round 1 (#217/#19), item 6: an evaluator's conversation is deleted by
             // `GoalEvaluator` immediately after this call — there is no transcript left for the
             // 60s linger to give a "browse it" row for, so a lingering evaluator entry was dead
             // weight (and a stale badge count) with nothing behind it. Only a subagent lingers.
-            if sessions[idx].kind == .evaluator {
-                sessions.remove(at: idx)
+            if stripRuns[idx].kind == .evaluator {
+                stripRuns.remove(at: idx)
             } else {
-                sessions[idx].phase = .finished(status: status, at: Date())
+                stripRuns[idx].phase = .finished(status: status, at: Date())
                 scheduleSessionSweep()
             }
         }
         subagentWriteLedger[id] = nil
     }
 
-    /// Drops `sessions` entries in one pass; scheduled once per `finishSession` call rather than on
+    /// Drops `stripRuns` entries in one pass; scheduled once per `finishRun` call rather than on
     /// a repeating timer, since nothing else needs the strip to update on a clock when idle.
     private func scheduleSessionSweep() {
-        let window = Self.sessionLingerWindow
+        let window = Self.runLingerWindow
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(window * 1_000_000_000))
             await MainActor.run {
                 guard let self else { return }
-                self.sessions = SessionSummary.sweep(self.sessions, now: Date(), lingerWindow: Self.sessionLingerWindow)
+                self.stripRuns = ActivitySummary.sweep(self.stripRuns, now: Date(), lingerWindow: Self.runLingerWindow)
             }
         }
     }
 
     /// The strip's data source: the synthesised main session first, then every subagent, evaluator
-    /// and background job-run entry. `sessions` only ever holds non-main kinds (`registerSubagent`
+    /// and background job-run entry. `stripRuns` only ever holds non-main kinds (`registerSubagent`
     /// is the sole writer and takes a non-main `kind`); the filter is belt-and-braces. The
     /// synthesised row's id can't collide with one of them either: `createNewConversation` never
     /// selects a subagent or background conversation, so `selectedConversationId` is never one.
-    var visibleSessions: [SessionSummary] {
+    var visibleRuns: [ActivitySummary] {
         // A stable fallback id, not a fresh `UUID()`, so the synthesised row's identity doesn't
         // change on every access (breaking `ForEach` diffing) on the practically-never-hit path
         // where nothing is selected.
         let mainId = selectedConversationId ?? Self.noSelectionSessionId
         // Fix round 1, item 4: "running" comes from `hasTurnInFlight`, not from whether a phase
         // happens to be recorded — so the brief window between `beginEngineTurn` and the first
-        // `updateSessionPhase` call still reads as active (defaulting to `.thinking`) instead of
+        // `updateRunPhase` call still reads as active (defaulting to `.thinking`) instead of
         // idle, and a conversation that finished its last turn reads `.idle` even if its last
         // recorded phase was never explicitly cleared.
         let isRunning = selectedConversationId.map(hasTurnInFlight(for:)) ?? false
-        let phase: SessionSummary.Phase = isRunning ? (mainPhaseByConversation[mainId] ?? .thinking) : .idle
-        let main = SessionSummary(id: mainId, kind: .main, role: "main",
+        let phase: ActivitySummary.Phase = isRunning ? (mainPhaseByConversation[mainId] ?? .thinking) : .idle
+        let main = ActivitySummary(id: mainId, kind: .main, role: "main",
                                    startTime: mainStartTimeByConversation[mainId] ?? Date(),
                                    phase: phase, lastActivity: nil)
-        return [main] + sessions.filter { $0.kind != .main }
+        return [main] + stripRuns.filter { $0.kind != .main }
     }
     private static let noSelectionSessionId = UUID()
 
@@ -2282,32 +2282,32 @@ class AppState {
 
     /// The engine calls this for every conversation it runs a turn on — the main conversation
     /// included, which is why this also updates `mainPhaseByConversation` rather than only looking
-    /// in `sessions`. Setting `.executing` also records `lastActivity` on `sessions` entries, so a
+    /// in `stripRuns`. Setting `.executing` also records `lastActivity` on `stripRuns` entries, so a
     /// test (or a future UI) can see what a subagent/evaluator last ran without racing the phase
     /// moving on to `.thinking`/`.responding`/`.finished`.
-    func updateSessionPhase(_ id: UUID, _ phase: SessionSummary.Phase) {
-        if let idx = sessions.firstIndex(where: { $0.id == id }) {
+    func updateRunPhase(_ id: UUID, _ phase: ActivitySummary.Phase) {
+        if let idx = stripRuns.firstIndex(where: { $0.id == id }) {
             // Fix round 1 (#217/#19): `goal_complete` fires `onSubagentComplete` from inside the
-            // tool handler, `SubagentManager`'s poller sees it and calls `finishSession` within
+            // tool handler, `SubagentManager`'s poller sees it and calls `finishRun` within
             // ~100ms — but the SAME engine turn that called `goal_complete` keeps running (its
             // next model round, producing a closing text reply), and that round's own
             // `.responding` update lands afterward and would silently resurrect a finished
             // session. Once `.finished`, nothing may move it off that phase; only a fresh
-            // `registerSubagent`/`finishSession` may.
-            if case .finished = sessions[idx].phase { return }
-            sessions[idx].phase = phase
+            // `registerSubagent`/`finishRun` may.
+            if case .finished = stripRuns[idx].phase { return }
+            stripRuns[idx].phase = phase
             if case .executing(let tool, let detail) = phase {
-                sessions[idx].lastActivity = SessionSummary.LastActivity(tool: tool, detail: detail)
+                stripRuns[idx].lastActivity = ActivitySummary.LastActivity(tool: tool, detail: detail)
             }
         } else if conversations.first(where: { $0.id == id })?.isSubagent == false {
             // Record it by conversation id regardless of whether this happens to be the SELECTED
-            // conversation right now (fix round 1, item 4) — `visibleSessions` looks this up for
+            // conversation right now (fix round 1, item 4) — `visibleRuns` looks this up for
             // whichever conversation is selected AT READ TIME, so a background turn's phase is
             // preserved even while the user is looking at a different conversation, and
             // reselecting it later shows the right thing.
             //
             // Fix round 1 follow-up: gated on `isSubagent == false` (not just "absent from
-            // `sessions`") — an evaluator's `finishSession` removes it from `sessions` immediately
+            // `sessions`") — an evaluator's `finishRun` removes it from `sessions` immediately
             // (no linger), but its SAME engine turn keeps running and reaches this call afterward
             // with its trailing `.responding` update. Without this guard that update fell through
             // to here and leaked a permanent entry for a conversation nothing ever reads back (an
@@ -4713,7 +4713,7 @@ class AppState {
         liveSubagentTasks[subagentId]?.stopRequest
     }
 
-    /// The user stops one subagent (#236): `.row` from its session-strip row, `.parent` from Stop,
+    /// The user stops one subagent (#236): `.row` from its activity-strip row, `.parent` from Stop,
     /// Esc or `/stop` in the conversation it works under. Through the same `stop` the run drain
     /// uses, so the loop is halted before its turn is cancelled. True when this call stopped it.
     ///

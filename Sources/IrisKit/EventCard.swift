@@ -506,7 +506,7 @@ struct EventCard: Codable, Equatable, Sendable {
         return kept.joined(separator: "\n")
     }
 
-    /// The run's wall time, in the same format the session strip uses so the two never show two
+    /// The run's wall time, in the same format the activity strip uses so the two never show two
     /// styles of elapsed time side by side.
     var elapsedText: String { SessionActivity.formatElapsed(finishedAt.timeIntervalSince(startedAt)) }
 

@@ -137,7 +137,7 @@ final class GoalEvaluator: Sendable {
                 // awaiting `evaluate` (#103).
                 app.recordEvaluation(for: originId, eval)
                 app.onEvaluationComplete[evalId] = nil
-                app.finishSession(id: evalId, status: "graded")
+                app.finishRun(id: evalId, status: "graded")
                 app.deleteConversation(evalId)
             }
         }
@@ -190,7 +190,7 @@ final class GoalEvaluator: Sendable {
             await MainActor.run {
                 app.recordEvaluation(for: originId, stopped)
                 app.onEvaluationComplete[evalId] = nil
-                app.finishSession(id: evalId, status: "stopped")
+                app.finishRun(id: evalId, status: "stopped")
                 app.deleteConversation(evalId)
             }
             return stopped
@@ -205,7 +205,7 @@ final class GoalEvaluator: Sendable {
         await MainActor.run {
             app.recordEvaluation(for: originId, failed)
             app.onEvaluationComplete[evalId] = nil
-            app.finishSession(id: evalId, status: "failed")
+            app.finishRun(id: evalId, status: "failed")
             app.deleteConversation(evalId)
         }
         return failed

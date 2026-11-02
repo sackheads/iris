@@ -358,7 +358,7 @@ final class SubagentManager: @unchecked Sendable {
         // status, which a completion can win over an accepted Stop (#236).
         let stoppedBy = await MainActor.run {
             appState.setSubagentResult(for: subagentId, result)
-            appState.finishSession(id: subagentId, status: termination.status.rawValue)
+            appState.finishRun(id: subagentId, status: termination.status.rawValue)
             return appState.subagentStopRequest(subagentId)
         }
         // Registered until the engine task has actually returned, not just until the parent has

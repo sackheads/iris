@@ -217,7 +217,7 @@ struct JobRunnerTests {
         #expect(state.conversations.first { $0.id == userConversation }?.history.isEmpty == true)
 
         // The strip shows the run as a job, and it is no longer running.
-        let session = try #require(state.sessions.first { $0.id == background.id })
+        let session = try #require(state.stripRuns.first { $0.id == background.id })
         #expect(session.kind == .job)
         #expect(session.role == "job:pr-sweep")
         if case .finished(let status, _) = session.phase {

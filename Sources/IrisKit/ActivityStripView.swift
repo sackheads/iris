@@ -12,7 +12,7 @@ import SwiftUI
 /// asked to close. `isExpanded` now means "the user has not manually collapsed it *this time*":
 /// collapsing is remembered only while at least one non-main session exists, and resets back to
 /// expanded once the strip has nothing but the main row left (`onChange` below).
-struct SessionStripView: View {
+struct ActivityStripView: View {
     var state: AppState
     @Binding var isExpanded: Bool
 
@@ -23,10 +23,10 @@ struct SessionStripView: View {
     /// Rows shown before the list scrolls (invariant 8: nothing unbounded in the composer stack).
     private static let maxVisibleRows = 6
 
-    private func expandedRows(_ sessions: [SessionSummary]) -> some View {
+    private func expandedRows(_ sessions: [ActivitySummary]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             ForEach(sessions) { session in
-                SessionRowView(state: state, sessionId: session.id, isMain: session.kind == .main) {
+                ActivityRowView(state: state, sessionId: session.id, isMain: session.kind == .main) {
                     state.transcriptSheetConversationId = session.id
                 }
             }
@@ -34,12 +34,12 @@ struct SessionStripView: View {
     }
 
     var body: some View {
-        // Fix round 1, item 8: `state.visibleSessions` rebuilds the synthesised main row (a couple
+        // Fix round 1, item 8: `state.visibleRuns` rebuilds the synthesised main row (a couple
         // of dictionary lookups plus an array filter) on every access; read it once per body
         // evaluation rather than through several computed properties that each called it again.
-        let sessions = state.visibleSessions
+        let sessions = state.visibleRuns
         let mainSession = sessions.first { $0.kind == .main }
-        let otherSessions = sessions.filter { $0.kind != .main }
+        let otherRuns = sessions.filter { $0.kind != .main }
         // Hidden entirely when there is nothing to show — the common case — so the strip doesn't
         // permanently occupy space below the composer. #187 fix round 1: this deliberately does
         // NOT consider whether the transcript sheet is open. It used to, so that hiding the strip
@@ -47,11 +47,11 @@ struct SessionStripView: View {
         // event card's "View run"), and keeping that term made opening a card's transcript pop an
         // otherwise-idle strip into view under the composer. The `else` branch below keeps the
         // sheet's host alive instead, which is what that term was really buying.
-        let isHidden = otherSessions.isEmpty && (mainSession?.phase ?? .idle) == .idle
+        let isHidden = otherRuns.isEmpty && (mainSession?.phase ?? .idle) == .idle
         // Expanded whenever there's anything besides the main row to show, unless the user has
         // manually collapsed it (and it hasn't emptied out since). With no other sessions,
         // "expanded" vs. "collapsed" is moot — there's only ever the one main line either way.
-        let showExpanded = !otherSessions.isEmpty && isExpanded
+        let showExpanded = !otherRuns.isEmpty && isExpanded
 
         return Group {
             if !isHidden {
@@ -68,13 +68,13 @@ struct SessionStripView: View {
                         } else {
                             expandedRows(sessions)
                         }
-                    } else if !otherSessions.isEmpty, let main = mainSession {
+                    } else if !otherRuns.isEmpty, let main = mainSession {
                         // Manually collapsed with background work still going: summarize rather
                         // than hide (`● main · idle · 2 subagents running`), so the badge isn't
                         // the only tell.
                         CollapsedSummaryRow(state: state, mainId: main.id)
                     } else if let main = mainSession {
-                        SessionRowView(state: state, sessionId: main.id, isMain: true, onTap: {})
+                        ActivityRowView(state: state, sessionId: main.id, isMain: true, onTap: {})
                     }
                 }
                 .padding(.horizontal, 12)
@@ -95,7 +95,7 @@ struct SessionStripView: View {
         // #598: the strip's slide transition runs only inside an animation, and its visibility
         // changes with the sessions, outside any; this gives that change one.
         .animation(Motion.animation(Motion.reveal), value: isHidden)
-        .onChange(of: otherSessions.isEmpty) { _, empty in
+        .onChange(of: otherRuns.isEmpty) { _, empty in
             // The strip emptied out (nothing left but main): drop any manual collapse so the
             // NEXT subagent/evaluator run starts expanded again, per the ruling above.
             if empty { isExpanded = true }
@@ -130,14 +130,14 @@ struct SessionStripView: View {
 }
 
 /// The collapsed-but-not-empty main line: `● main · <activity> · 2 subagents running` (or
-/// `1 finished`, or both). Reads `state` live like `SessionRowView`, not a captured value.
+/// `1 finished`, or both). Reads `state` live like `ActivityRowView`, not a captured value.
 private struct CollapsedSummaryRow: View {
     var state: AppState
     let mainId: UUID
 
     var body: some View {
-        if let main = state.visibleSessions.first(where: { $0.id == mainId }) {
-            let summary = SessionActivity.collapsedSummary(for: state.sessions)
+        if let main = state.visibleRuns.first(where: { $0.id == mainId }) {
+            let summary = SessionActivity.collapsedSummary(for: state.stripRuns)
             HStack(spacing: 8) {
                 statusGlyph(main.phase)
                     .frame(width: 10, alignment: .center)
@@ -161,17 +161,17 @@ private struct CollapsedSummaryRow: View {
     }
 }
 
-/// One row. Takes `sessionId`, not a `SessionSummary` value, and reads the live summary + token
+/// One row. Takes `sessionId`, not a `ActivitySummary` value, and reads the live summary + token
 /// count from `state` inside `body` — the #223/#224 lesson (`Conversation ==` compares by id
 /// only, so a struct value captured at construction time goes stale under SwiftUI's diffing).
-private struct SessionRowView: View {
+private struct ActivityRowView: View {
     var state: AppState
     let sessionId: UUID
     let isMain: Bool
     var onTap: () -> Void
 
     var body: some View {
-        if let session = state.visibleSessions.first(where: { $0.id == sessionId }) {
+        if let session = state.visibleRuns.first(where: { $0.id == sessionId }) {
             let tokens = state.conversations.first(where: { $0.id == sessionId })?.tokenUsage.totalTokenCount ?? 0
             HStack(spacing: 8) {
                 statusGlyph(session.phase)
@@ -208,7 +208,7 @@ private struct SessionRowView: View {
             .padding(.vertical, 1)
             .contentShape(Rectangle())
             .onTapGesture { if !isMain { onTap() } }
-            .help(isMain ? "" : "Click to view this session's transcript")
+            .help(isMain ? "" : "Click to view this run's transcript")
         }
     }
 
@@ -216,7 +216,7 @@ private struct SessionRowView: View {
     /// entirely rather than render one against a stale/placeholder start (fix round 1: this used
     /// to render as a multi-million-hour countdown for an idle main row).
     @ViewBuilder
-    private func elapsedView(_ session: SessionSummary) -> some View {
+    private func elapsedView(_ session: ActivitySummary) -> some View {
         if let start = session.elapsedStartTime {
             if case .finished(_, let at) = session.phase {
                 // A fixed duration for a row that finished in the past.
@@ -235,10 +235,10 @@ private struct SessionRowView: View {
     }
 }
 
-/// Shared by `SessionRowView` and `CollapsedSummaryRow` — a tiny status dot/spinner, not worth
+/// Shared by `ActivityRowView` and `CollapsedSummaryRow` — a tiny status dot/spinner, not worth
 /// making pure/testable (it's pure presentation, no logic).
 @ViewBuilder
-private func statusGlyph(_ phase: SessionSummary.Phase) -> some View {
+private func statusGlyph(_ phase: ActivitySummary.Phase) -> some View {
     switch phase {
     case .executing:
         ProgressView()
@@ -256,7 +256,7 @@ private func statusGlyph(_ phase: SessionSummary.Phase) -> some View {
 }
 
 /// #19's "dedicated way to browse subagent logs": a read-only transcript for one conversation.
-/// Never shown for the main row (`SessionStripView` never sets `transcriptSheetConversationId`
+/// Never shown for the main row (`ActivityStripView` never sets `transcriptSheetConversationId`
 /// for it).
 ///
 /// Internal rather than file-private since #187: an event card's "View run" opens this same
@@ -272,7 +272,7 @@ struct TranscriptSheet: View {
 
     private var conversation: Conversation? { state.conversations.first { $0.id == sessionId } }
     private var role: String {
-        state.sessions.first { $0.id == sessionId }?.role ?? conversation?.title ?? "Session"
+        state.stripRuns.first { $0.id == sessionId }?.role ?? conversation?.title ?? "Run"
     }
     /// The window is sized from this on the first layout pass, before `onGeometryChange` has
     /// reported, so until a measurement exists it comes from `TranscriptSizing`'s text estimate.

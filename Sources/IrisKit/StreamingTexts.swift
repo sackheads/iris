@@ -5,7 +5,7 @@ import Observation
 ///
 /// A streamed reply used to be written into `AppState.conversations` 20 times a second, and every
 /// view that had read `conversations` — the whole chat window from its root, the sidebar, the
-/// session strip — re-evaluated on each write: about 9% of a core at 40 messages and 21% at 200,
+/// activity strip — re-evaluated on each write: about 9% of a core at 40 messages and 21% at 200,
 /// growing with the conversation (measured on #541). Now the in-flight text lives here, and only
 /// the streaming row reads it, through `AppState.liveContent(of:)`; `conversations` gets the text
 /// once, at the stream's final write (`updateMessageContent(persist: true)`), which also removes

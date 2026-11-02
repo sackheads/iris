@@ -24,12 +24,12 @@ struct SubagentWriteLedgerTests {
         #expect(app.drainSubagentWrites(for: id) == [])
     }
 
-    @Test("finishSession clears the ledger entry")
+    @Test("finishRun clears the ledger entry")
     func finishClears() {
         let app = AppState(); let id = UUID()
         app.createNewConversation(id: id, isSubagent: true)
         app.recordSubagentWrite(conversationId: id, path: "a.swift")
-        app.finishSession(id: id, status: "completed")
+        app.finishRun(id: id, status: "completed")
         #expect(app.drainSubagentWrites(for: id) == [])
     }
 }

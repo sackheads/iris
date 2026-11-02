@@ -102,7 +102,7 @@ struct SidebarSearchTests {
     /// #187: a job run's transcript is a background conversation — out of the sidebar, read-only,
     /// and with a composer that would refuse anything typed into it. Selecting one from a search
     /// hit would put exactly that dead end in the main pane, so the hit opens the same read-only
-    /// sheet the session strip uses instead and the selection is left alone.
+    /// sheet the activity strip uses instead and the selection is left alone.
     @Test("a search hit on a background run opens the transcript sheet and never selects it")
     func revealBackgroundOpensSheetWithoutSelecting() throws {
         let store = try ConversationStore.inMemory()

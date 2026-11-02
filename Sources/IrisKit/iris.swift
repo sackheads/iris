@@ -3086,7 +3086,7 @@ actor IrisEngine {
                 activeRequest.maxOutputTokens = outputTokenCap
                 
                 await MainActor.run {
-                    localState?.updateSessionPhase(conversationId, .thinking)
+                    localState?.updateRunPhase(conversationId, .thinking)
                 }
                 // Measure at the seam so every client (real, fake, future) is attributed
                 // uniformly, and the span includes engine-side call overhead. Each attempt is
@@ -3146,7 +3146,7 @@ actor IrisEngine {
                 }
                 modelRound += 1
                 // No coarse "Executing..." mark here any more: this fires on every model round
-                // whether or not it actually returned a tool call. The session strip's `.executing`
+                // whether or not it actually returned a tool call. The activity strip's `.executing`
                 // phase (with the tool name + detail) is now set at the point a tool call is
                 // actually about to run, in `executeToolWithHooks` below.
 
@@ -6497,7 +6497,7 @@ actor IrisEngine {
         if let conversationId {
             let localState = state
             let detail = SessionActivity.detail(tool: name, args: execArgs)
-            await MainActor.run { localState?.updateSessionPhase(conversationId, .executing(tool: name, detail: detail)) }
+            await MainActor.run { localState?.updateRunPhase(conversationId, .executing(tool: name, detail: detail)) }
         }
 
         // Command hooks run in the agent's environment (per principal policy), independent of this
@@ -6702,7 +6702,7 @@ actor IrisEngine {
                 guard let self else { return }
                 await self.pushToUI(role: .agent, text: text, conversationId: conversationId, id: id)
                 let localState = await self.state
-                await MainActor.run { localState?.updateSessionPhase(conversationId, .responding) }
+                await MainActor.run { localState?.updateRunPhase(conversationId, .responding) }
             },
             update: { [weak self] id, text, isFinal, sequence in
                 await self?.updateStreamedMessage(id: id, content: text, isFinal: isFinal, sequence: sequence,
