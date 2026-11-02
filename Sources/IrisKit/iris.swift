@@ -5992,7 +5992,7 @@ actor IrisEngine {
         guard call.reason == .approval else {
             return Self.profileNotApprovableRefusal(tool: call.toolName)
         }
-        // R10, likewise. A write into `~/.iris/config` or `~/.iris/plugins` grants permission
+        // R10, likewise. A write into one of `IrisPaths.protectedWriteDirs` grants permission
         // rather than editing a file, and no click makes it legal. Asked again after the hooks
         // below, because a `BeforeTool` hook can rewrite the path this one read.
         let localState = state
@@ -6052,7 +6052,7 @@ actor IrisEngine {
     /// running. Also the run's outcome, so the card says why nothing happened.
     static func protectedWriteRefusal(tool: String) -> String {
         IrisPaths.standard.agentFacing(
-            "Not run: `\(tool)` would write into a protected directory (`~/.iris/config` or `~/.iris/plugins`), which an approval cannot authorise.")
+            "Not run: `\(tool)` would write into a protected directory (\(IrisPaths.protectedWriteDirPhrase(prefix: "~/.iris/", slash: false))), which an approval cannot authorise.")
     }
 
     /// What a call a read-only job's profile refused returns if it somehow reaches the

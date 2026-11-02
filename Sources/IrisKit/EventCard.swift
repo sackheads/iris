@@ -325,10 +325,11 @@ struct EventCard: Codable, Equatable, Sendable {
     static let profileNotApprovable =
         "This job is read-only, so nothing can approve this call. Recreate the job as mutating if it should be able to do this."
 
-    /// Shown in place of the button for a write into `~/.iris/config` or `~/.iris/plugins` (R10):
-    /// a write there grants further permission, so it is not a thing a click can authorise.
+    /// Shown in place of the button for a write into one of `IrisPaths.protectedWriteDirs` (R10):
+    /// a write there grants further permission, so it is not a thing a click can authorise. The
+    /// directories are named from that list, not typed again (#889).
     static let protectedNotApprovable =
-        "This writes into a protected directory (`config/` or `plugins/`), which grants permission rather than editing a file. Make the change yourself if you want it."
+        "This writes into a protected directory (\(IrisPaths.protectedWriteDirPhrase())), which grants permission rather than editing a file. Make the change yourself if you want it."
 
     /// Shown in place of the button for a file-tool call refused outside the job's grant (#282
     /// §0.13): a granted run has no host path for `write_file` or `read_file` to take, so the
