@@ -1,0 +1,10 @@
+[perf] 2026-11-02T14:16:11.894Z up=2307413110.6ms guard.tier2 start source=user_profile chars=2673
+[perf] 2026-11-02T14:16:11.894Z up=2307413110.7ms guard.tier2 end source=user_profile ms=0 verdict=skipped
+[perf] 2026-11-02T14:16:11.894Z up=2307413110.7ms guard.tier3 start source=user_profile chars=2673
+[perf] 2026-11-02T14:16:12.934Z up=2307414150.6ms guard.tier3 end source=user_profile ms=1039 verdict=safe
+[perf] 2026-11-02T14:16:12.939Z up=2307414155.4ms provider.request sent round=0
+[perf] 2026-11-02T14:16:26.212Z up=2307427428.5ms guard.tier2 start source=tool_output_read_file chars=384
+[perf] 2026-11-02T14:16:26.212Z up=2307427428.6ms guard.tier2 end source=tool_output_read_file ms=0 verdict=skipped
+[perf] 2026-11-02T14:16:26.212Z up=2307427428.6ms guard.tier3 start source=tool_output_read_file chars=384
+[perf] 2026-11-02T14:16:27.124Z up=2307428340.6ms guard.tier3 end source=tool_output_read_file ms=912 verdict=malicious
+[perf] 2026-11-02T14:16:27.125Z up=2307428341.5ms provider.request sent round=1
