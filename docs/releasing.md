@@ -107,7 +107,11 @@ expected `Contents/Frameworks` (`Sparkle.framework`, `llama.framework`, `onnxrun
 plus the `libswiftCompatibilitySpan.dylib` back-deploy dylib Xcode embeds unprompted) with no
 stray test or dylib artefacts, that every signed piece (the app, its frameworks, Sparkle's
 `Autoupdate`/`Updater.app`/XPC services) is signed by team `RMKGLPG4K4` without the
-`get-task-allow` entitlement, and that the built binary's architecture is exactly `arm64`.
+`get-task-allow` entitlement, and that the built binary's architecture is exactly `arm64`. It also refuses to start when
+`THIRD_PARTY_NOTICES.md` has no section for a `Package.resolved` pin, and asserts the exported app
+carries that file in `Contents/Resources`. After bumping a dependency, run `swift package resolve`
+and `scripts/third-party-notices.py generate`, and read any licence that changed (CI runs the same
+check).
 
 Versions: the argument becomes `CFBundleShortVersionString`; `CFBundleVersion` (what Sparkle
 compares) is `git rev-list --count HEAD`. No version-bump commit is needed or wanted, but every

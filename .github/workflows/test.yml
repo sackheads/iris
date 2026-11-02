@@ -54,6 +54,13 @@ jobs:
           scripts/eval-append-only-test.sh
           scripts/eval-append-only.sh "$BASE" HEAD
 
+      - name: Third-party notices cover every dependency
+        # #787: a Package.resolved pin with no section in THIRD_PARTY_NOTICES.md fails here, and the
+        # release app ships that file. Here, not in `test`: it needs no build and runs on every change.
+        run: |
+          scripts/third-party-notices-test.sh
+          python3 -I scripts/third-party-notices.py check
+
       - name: Classify the change
         id: classify
         env:

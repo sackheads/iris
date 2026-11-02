@@ -76,6 +76,8 @@ xcrun metal --version >/dev/null 2>&1 \
   || die "Metal Toolchain missing; install it with: xcodebuild -downloadComponent MetalToolchain"
 TREE_CHANGES=$(git status --porcelain) || die "git status failed"
 [[ -z "$TREE_CHANGES" ]] || die "working tree not clean"
+python3 -I "$REPO_ROOT/scripts/third-party-notices.py" check \
+  || die "THIRD_PARTY_NOTICES.md is out of date with Package.resolved"
 build_or_die "$REPO_ROOT/scripts/gen-xcodeproj.sh"
 # Pin the archive to the same dependency revisions `swift test` used: swift-sdk and llama.swift
 # track branch main. Every xcodebuild below passes -disableAutomaticPackageResolution.
@@ -180,6 +182,9 @@ step "Exporting with Developer ID"
 xcodebuild -exportArchive -archivePath "$ARCHIVE" -exportOptionsPlist "$EXPORT_OPTIONS" \
   -exportPath "$EXPORT_DIR" -quiet
 [[ -d "$APP" ]] || die "export did not produce $APP"
+
+[[ -s "$APP/Contents/Resources/THIRD_PARTY_NOTICES.md" ]] \
+  || die "exported app has no THIRD_PARTY_NOTICES.md in Resources; do NOT ship"
 
 APP_PLIST="$APP/Contents/Info.plist"
 BUILT_SHORT=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_PLIST") \

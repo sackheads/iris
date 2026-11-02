@@ -13,6 +13,8 @@ targets:
     sources:
       - path: App
         excludes: ["Info.plist", "Iris.entitlements"]
+      - path: THIRD_PARTY_NOTICES.md
+        buildPhase: resources
     dependencies:
       - package: iris
         product: IrisKit
