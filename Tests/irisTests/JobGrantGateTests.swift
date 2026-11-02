@@ -47,7 +47,8 @@ struct JobGrantAllowsTests {
         #expect(g.allows(toolName: "write_file", details: c(t.proj), cwd: nil, sandboxed: false), "the mount itself")
         // Spelled under the granted directory, not merely resolving there: the firmlink spelling reaches
         // the mount through `/private`, which the walk cannot descend from the mount's root.
-        #expect(!g.allows(toolName: "write_file", details: "/private" + c(t.proj, "out.md"), cwd: nil, sandboxed: false), "a spelling that is not under the granted directory falls to the allowlist")
+        // The `/private` spelling of a stored `/var`, `/tmp` or `/etc` source is the same directory (#872).
+        #expect(g.allows(toolName: "write_file", details: "/private" + c(t.proj, "out.md"), cwd: nil, sandboxed: false), "the /private spelling is under the granted directory")
         #expect(g.allowedMount(toolName: "write_file", details: c(t.proj, "new/dir/out.md"), cwd: nil)?.source == c(t.proj))
         #expect(g.relativeComponents(of: c(t.proj, "new/./dir/out.md"), cwd: nil, under: g.mounts[0]) == ["new", "dir", "out.md"])
     }

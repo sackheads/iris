@@ -282,8 +282,21 @@ extension JobGrant {
         relativeComponents(spelled: ToolExecutor.resolvePath(details, cwd: cwd), under: mount)
     }
 
+    /// A spelled path in the form a stored source takes. `IrisPaths.canonicalPath` strips `/private` from
+    /// `/var`, `/tmp` and `/etc` (the system's three root links), so a grant given as `/private/tmp/x` is
+    /// stored as `/tmp/x` and a call spelled `/private/tmp/x/f` (what `realpath` and Finder print) would
+    /// otherwise be spelled outside it (#872). Whole components only: `/privatefoo/tmp` and
+    /// `/private/varx` are left alone. Only this lexical spelling changes; `covering`'s real-path check
+    /// and the descriptor walk are what keep a link out of the mount refused.
+    static func storedSpelling(_ spelled: String) -> String {
+        let parts = spelled.split(separator: "/", omittingEmptySubsequences: false)
+        guard spelled.hasPrefix("/"), parts.count > 2, parts[1] == "private", ["var", "tmp", "etc"].contains(String(parts[2])) else { return spelled }
+        return "/" + parts[2...].joined(separator: "/")
+    }
+
     /// `relativeComponents` for a path `ToolExecutor.resolvePath` already resolved (it expands `~`).
-    private func relativeComponents(spelled: String, under mount: ContainerMount) -> [String]? {
+    private func relativeComponents(spelled rawSpelled: String, under mount: ContainerMount) -> [String]? {
+        let spelled = Self.storedSpelling(rawSpelled)
         let source = mount.source.count > 1 && mount.source.hasSuffix("/") ? String(mount.source.dropLast()) : mount.source
         guard spelled.lowercased() == source.lowercased() || spelled.lowercased().hasPrefix(source.lowercased() + "/") else { return nil }
         let components = spelled.dropFirst(source.count).split(separator: "/", omittingEmptySubsequences: true)
