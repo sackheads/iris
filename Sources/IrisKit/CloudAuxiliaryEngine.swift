@@ -104,27 +104,35 @@ struct CloudAuxiliaryEngine: AuxiliaryInferenceEngine {
         return text
     }
 
+    /// Sends `request`. A model that answers 400 to a request carrying a thinking level (Gemini 2.5 takes
+    /// a budget, not a level) is remembered for the process and asked without it from then on, so the
+    /// level costs the setting rather than failing tier 3 closed, and costs one failed round trip, not
+    /// one per check (#800 review). The message text is not matched: any 400 to a request with a level.
+    private func sendAsking(_ request: GeminiRequest, _ model: String?) async throws -> GeminiResponse {
+        guard let level = request.thinkingLevel else { return try await send(request, model) }
+        let key = "thinking:\(model ?? "easy")|\(level)"
+        var plain = request
+        plain.thinkingLevel = nil
+        if Self.levelRefused(key) { return try await send(plain, model) }
+        do {
+            return try await send(request, model)
+        } catch let error as APIError where error.statusCode == 400 && !Self.isModelUnavailable(error) {
+            Self.markLevelRefused(key)
+            await notice("The \(model ?? "easy tier") model answered 400 to a request with thinking level \(level) (\(error.message)); asking without a level from now on. Only Gemini 3 models take a level; set Thinking to Not sent in Settings → Security to stop this.")
+            return try await send(plain, model)
+        }
+    }
+
+    private static let levelLock = NSLock()
+    nonisolated(unsafe) private static var refusedLevels: Set<String> = []
+    private static func levelRefused(_ key: String) -> Bool { levelLock.withLock { refusedLevels.contains(key) } }
+    private static func markLevelRefused(_ key: String) { levelLock.withLock { _ = refusedLevels.insert(key) } }
+
     /// A provider's answer that the model does not exist: a 404 (Gemini, Anthropic, OpenAI's
     /// `model_not_found`), or a 400 in not-found words. Not any 400 that mentions a model: "this
     /// model's maximum context length", "max_tokens is not supported with this model" or "function
     /// calling is not enabled for models/…" are a real model refusing the request, and must surface
     /// rather than be retried on another model (#627 review).
-    /// Sends `request`; when a model answers 400 to the thinking level (Gemini 2.5 takes a budget, not a
-    /// level), asks again without it, with one notice per model, so a level the model does not know
-    /// costs the setting rather than failing tier 3 closed on every result (#800 review).
-    private func sendAsking(_ request: GeminiRequest, _ model: String?) async throws -> GeminiResponse {
-        do {
-            return try await send(request, model)
-        } catch let error as APIError where request.thinkingLevel != nil && error.statusCode == 400 && !Self.isModelUnavailable(error) {
-            if Self.firstFallback(for: "thinking:" + (model ?? "easy")) {
-                await notice("The \(model ?? "easy tier") model refused the thinking level \(request.thinkingLevel ?? "") (\(error.message)); asking without it. Only Gemini 3 models take a level; set Thinking to Not sent in Settings → Security to stop this.")
-            }
-            var plain = request
-            plain.thinkingLevel = nil
-            return try await send(plain, model)
-        }
-    }
-
     static func isModelUnavailable(_ error: APIError) -> Bool {
         guard let status = error.statusCode else { return false }
         if status == 404 { return true }

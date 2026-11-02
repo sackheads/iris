@@ -127,7 +127,8 @@ struct Tier3CloudSettingsTests {
         let said = Seen()
         var engine = CloudAuxiliaryEngine()
         engine.thinkingLevel = { "low" }
-        engine.model = { "gemini-2.5-flash-\(UUID().uuidString)" }
+        let model = "gemini-2.5-flash-\(UUID().uuidString)"   // one name for both calls, and not another test's
+        engine.model = { model }
         engine.send = { request, _ in
             seen.add(request.thinkingLevel)
             if request.thinkingLevel != nil { throw APIError(message: "Invalid value at thinking_level", statusCode: 400, provider: "Gemini") }
@@ -137,6 +138,9 @@ struct Tier3CloudSettingsTests {
         let text = try await engine.generate(prompt: "p", jsonSchema: nil)
         #expect(text == "SAFE" && seen.all == ["low", nil], "asked with the level, then without")
         #expect(said.all.count == 1)
+        // The refusal is remembered: the next check sends one request, without the level.
+        _ = try await engine.generate(prompt: "p", jsonSchema: nil)
+        #expect(seen.all == ["low", nil, nil] && said.all.count == 1, "no second failed round trip, no second notice")
 
         // A 400 that is not about the level still surfaces (the second ask fails the same way).
         var failing = engine
