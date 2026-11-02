@@ -152,7 +152,7 @@ Start a conversation as a reviewer, researcher or writer: a profile is a Markdow
 
 ### Sessions
 
-Conversations as sessions that can see and message each other, with roles, cards and limits: see [docs/sessions.md](sessions.md).
+Conversations as sessions that can see and message each other, with roles, cards, topics to broadcast on, and limits: see [docs/sessions.md](sessions.md).
 
 ## Memory and skills
 

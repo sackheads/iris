@@ -742,6 +742,19 @@ final class ConversationStore: Sendable {
                 try db.alter(table: "conversations") { t in t.add(column: column, .text) }
             }
         }
+        // #696: the topic messages kept for a late subscriber, at most 50 per topic and 7 days
+        // (`PeerLedger.appendTopicMessage` prunes). A new table, so no existing row is touched.
+        m.registerMigration("v34_topic_messages") { db in
+            try db.create(table: "topic_messages", ifNotExists: true) { t in
+                t.autoIncrementedPrimaryKey("seq")
+                t.column("topic", .text).notNull()
+                t.column("fromSession", .text).notNull()
+                t.column("fromLabel", .text).notNull()
+                t.column("sentAt", .datetime).notNull()
+                t.column("body", .text).notNull()
+            }
+            try db.create(index: "topic_messages_by_topic", on: "topic_messages", columns: ["topic", "seq"], ifNotExists: true)
+        }
         return m
     }
 
