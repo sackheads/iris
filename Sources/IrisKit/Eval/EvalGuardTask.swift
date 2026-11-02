@@ -471,7 +471,7 @@ extension EvalRunner {
                                          tier2Verdict: run.stack == nil ? nil : $0.trace?.tier2Verdict) })
         try FileManager.default.createDirectory(at: taskDir, withIntermediateDirectories: true)
         let base = "\(day)-\(run.stack.map { "stack\($0.rawValue.replacingOccurrences(of: "+", with: ""))-" } ?? "")"
-            + "\(canary.spec.slug)-think\(canary.think)-v\(dataset.manifest.version)-\(run.split)" + (run.sample.map { "-s\($0)" } ?? "-full")
+            + "\(canary.spec.slug)-think\(canary.think.replacingOccurrences(of: " ", with: "-"))-v\(dataset.manifest.version)-\(run.split)" + (run.sample.map { "-s\($0)" } ?? "-full")
         let url = freshFile(in: taskDir, base: base)
         try result.encoded().write(to: url, options: .withoutOverwriting)
         print(EvalCompare.summary(result))
