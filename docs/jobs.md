@@ -322,9 +322,12 @@ the granted directory folds case, since what you typed may differ from the store
 walk below then proves the file is really under it. The innermost matching entry decides, and a path with `..` in any
 component is refused outright: a job never needs one inside a grant, and `<mount>/link/../x` with
 `link` pointing outside is exactly the shape a lexical check gets wrong. The path must also be
-*spelled* under the granted directory — a grant on `/tmp/proj` does not cover
-`/private/tmp/proj/x`, which falls to the allowlist and, being outside the grant, names the
-nearest directory.
+*spelled* under the granted directory. A grant is stored with `/private` stripped from `/tmp`,
+`/var` and `/etc` (the system's three root links), so a call spelled `/private/tmp/proj/x`, the
+way `realpath` and Finder print it, is read as `/tmp/proj/x` before that test (#872); only those
+three, and only as whole components (`/privatefoo/tmp` and `/private/varx` are not mapped). Any
+other spelling that merely resolves into the grant, such as a link from outside, falls to the
+allowlist and, being outside the grant, names the nearest directory.
 
 **The write itself.** For a granted run the allow and the write are one operation. Even with the
 real path, a check and an `open` are two steps, and a command the same run left running in the
