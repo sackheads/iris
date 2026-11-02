@@ -63,6 +63,7 @@ struct BenchCLITests {
         #expect(a?.transcript == true)
         let b = BenchCLI.parse(["iris", "--bench", "foo.json"])
         #expect(b?.dumpRequestsDir == nil)
+        #expect(BenchCLI.parse(["iris", "--bench", "--grant-read", "w", "foo.json"])?.grantRead == "w")
         #expect(b?.transcript == false)
         #expect(BenchCLI.parse(["iris", "--bench", "foo.json", "--dump-requests"])?.dumpRequestsDir == nil)
     }
@@ -87,5 +88,37 @@ struct BenchCLITests {
         #expect(rendered.contains(notice), "the read-only job's refusal is readable in the transcript")
         let dumped = try FileManager.default.contentsOfDirectory(atPath: dir.path)
         #expect(dumped.contains("1-0.json"))
+    }
+
+    @Test("a granted directory's file is read by a background scenario, its text reaches the next request, and an ungranted one is refused")
+    @MainActor
+    func grantedReadReachesTheModel() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("bench-ws-\(UUID().uuidString)")
+        let ws = base.appendingPathComponent("ws"), dump = base.appendingPathComponent("dump")
+        try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let file = ws.appendingPathComponent("note.txt")
+        try "PLANTED-807-MARKER".write(to: file, atomically: true, encoding: .utf8)
+        let scenario = Scenario(
+            name: "ws-read", clientMode: .fake, tier: .medium,
+            turns: [Scenario.Turn(prompt: "go")],
+            scriptedResponses: [
+                Scenario.ScriptedResponse(kind: .toolCalls, text: nil, calls: [
+                    Scenario.ScriptedCall(name: "read_file", args: ["path": .string(file.path)])]),
+                Scenario.ScriptedResponse(kind: .text, text: "Done.", calls: nil)],
+            background: true)
+        let result = await BenchCLI.runScenario(scenario, dumpRequestsTo: dump, readGrantDir: ws.path)
+        let rendered = BenchSummary.renderTranscript(result)
+        #expect(!rendered.contains("needs approval"), "a granted read is not an unattended approval: \(rendered)")
+        let next = try String(contentsOf: dump.appendingPathComponent("1-1.json"), encoding: .utf8)
+        #expect(next.contains("PLANTED-807-MARKER"), "the file's text is in the request after the read")
+
+        // The same read with no grant is refused, and the text never reaches the model.
+        let bare = FileManager.default.temporaryDirectory.appendingPathComponent("bench-nogrant-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: bare) }
+        let refused = await BenchCLI.runScenario(scenario, dumpRequestsTo: bare)
+        #expect(BenchSummary.renderTranscript(refused).contains("needs approval"))
+        let after = (try? String(contentsOf: bare.appendingPathComponent("1-1.json"), encoding: .utf8)) ?? ""
+        #expect(!after.contains("PLANTED-807-MARKER"))
     }
 }

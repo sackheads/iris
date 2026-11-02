@@ -6,12 +6,15 @@ struct BenchOptions: Sendable {
     var real: Bool
     /// `--dump-requests DIR`: write every model request of the run to DIR (what `--perf` already does).
     var dumpRequestsDir: String?
+    /// `--grant-read DIR`: stamp a read-only grant on DIR, as a granted job has, so a file inside
+    /// it can be read by a background run (otherwise that read needs an approval nobody can give).
+    var grantRead: String?
     /// `--transcript`: print each turn's messages after the summary, so a refused or denied tool
     /// call can be read, not inferred from the timings.
     var transcript: Bool = false
 }
 
-/// Headless benchmark entry point: parse `--bench [scenario.json] [--real] [--dump-requests DIR] [--transcript]`, run a scenario
+/// Headless benchmark entry point: parse `--bench [scenario.json] [--real] [--dump-requests DIR] [--grant-read DIR] [--transcript]`, run a scenario
 /// through `ScenarioRunner`, and print a timing breakdown. Invoked from `main.swift` before any
 /// SwiftUI window is created, so `swift run iris --bench …` behaves like a standalone tool.
 enum BenchCLI {
@@ -22,17 +25,21 @@ enum BenchCLI {
         let rest = Array(args[(benchIdx + 1)...])
         var path: String?
         var dir: String?
+        var grantRead: String?
         var i = 0
         while i < rest.count {
-            if rest[i] == "--dump-requests" {
+            if rest[i] == "--dump-requests" || rest[i] == "--grant-read" {
                 // A flag's value is not the scenario path.
-                if i + 1 < rest.count, !rest[i + 1].hasPrefix("--") { dir = rest[i + 1]; i += 1 }
+                if i + 1 < rest.count, !rest[i + 1].hasPrefix("--") {
+                    if rest[i] == "--grant-read" { grantRead = rest[i + 1] } else { dir = rest[i + 1] }
+                    i += 1
+                }
             } else if !rest[i].hasPrefix("--"), path == nil {
                 path = rest[i]
             }
             i += 1
         }
-        return BenchOptions(scenarioPath: path, real: rest.contains("--real"), dumpRequestsDir: dir,
+        return BenchOptions(scenarioPath: path, real: rest.contains("--real"), dumpRequestsDir: dir, grantRead: grantRead,
                             transcript: rest.contains("--transcript"))
     }
 
@@ -79,7 +86,8 @@ enum BenchCLI {
         // first touched (inside ScenarioRunner.run). Real runs keep Keychain access for auth.
         // Bench runs never write to the user's real preferences.
         IrisDefaults.useVolatileCopyOfStandard()
-        let result = await runScenario(scenario, dumpRequestsTo: opts.dumpRequestsDir.map { URL(fileURLWithPath: $0) })
+        let result = await runScenario(scenario, dumpRequestsTo: opts.dumpRequestsDir.map { URL(fileURLWithPath: $0) },
+                                        readGrantDir: opts.grantRead)
         print(BenchSummary.render(scenarioName: scenario.name, result: result))
         if opts.transcript { print(BenchSummary.renderTranscript(result)) }
     }
@@ -93,13 +101,13 @@ enum BenchCLI {
     /// after, the scope in practice covers the whole remaining real-CLI run.
     @MainActor
     static func runScenario(_ scenario: Scenario, clientOverride: (any LLMClientProtocol)? = nil,
-                            dumpRequestsTo: URL? = nil) async -> ScenarioResult {
+                            dumpRequestsTo: URL? = nil, readGrantDir: String? = nil) async -> ScenarioResult {
         if scenario.clientMode == .fake {
             return await HeadlessMode.withEnabled {
-                await ScenarioRunner.run(scenario, clientOverride: clientOverride, dumpRequestsTo: dumpRequestsTo)
+                await ScenarioRunner.run(scenario, clientOverride: clientOverride, readGrantDir: readGrantDir, dumpRequestsTo: dumpRequestsTo)
             }
         }
-        return await ScenarioRunner.run(scenario, clientOverride: clientOverride, dumpRequestsTo: dumpRequestsTo)
+        return await ScenarioRunner.run(scenario, clientOverride: clientOverride, readGrantDir: readGrantDir, dumpRequestsTo: dumpRequestsTo)
     }
 }
 

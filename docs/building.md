@@ -62,6 +62,7 @@ swift run iris --bench                          # built-in default scenario
 swift run iris --bench scenarios/echo-latency.json   # a scenario file
 swift run iris --bench scenarios/live.json --real    # hit a real provider (needs keys)
 swift run iris --bench scenario.json --transcript --dump-requests out/   # read the messages and every model request
+swift run iris --bench scenario.json --grant-read dir/            # a background scenario may read files in dir/
 ```
 
 The binary runs the scenario headlessly and prints a per-category timing breakdown (primary

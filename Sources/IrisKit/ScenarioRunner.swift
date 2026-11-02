@@ -59,6 +59,7 @@ enum ScenarioRunner {
                     toolExecution: ToolExecutionMode = .asConfigured,
                     clientOverride: (any LLMClientProtocol)? = nil,
                     workspacePath: String? = nil,
+                    readGrantDir: String? = nil,
                     dumpRequestsTo: URL? = nil,
                     factStore: FactStoreManager? = nil,
                     retryDelays: [TimeInterval] = [2, 4, 8],
@@ -87,6 +88,8 @@ enum ScenarioRunner {
                 // A job run's surface (5c): unattended, narrowed to the readOnly profile, as
                 // `JobRunner.openConversation` stamps it.
                 if scenario.background { state.setJobProfile(for: id, .readOnly) }
+                // A granted job's reads (`--bench --grant-read`): a read-only mount of one directory.
+                if let readGrantDir { state.setSandboxGrant(for: id, JobGrant(mounts: [ContainerMount(source: readGrantDir, readOnly: true)])) }
             }
             // Headless real-lane runs bind a scratch directory so workspace-relative file tools land
             // there rather than in the process cwd (#151). Only run_command is sandboxed.
