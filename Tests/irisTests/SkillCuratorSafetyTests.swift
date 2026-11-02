@@ -132,6 +132,28 @@ struct SkillCuratorSafetyTests {
         }
     }
 
+    @Test("a copy that cannot be moved says so and stays in the quarantine; a name with two dots is a name")
+    func restoreFailureIsReported() async throws {
+        try await withTempDirectory(prefix: "iris-curator-failed") { root in
+            let paths = IrisPaths(root: root); try paths.ensureDirectories()
+            for name in ["gamma", "a..b"] {
+                let dir = trash(paths).appendingPathComponent("700_\(name)")
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            }
+            // The skills path is a file, so nothing can be moved into it.
+            try FileManager.default.removeItem(at: paths.skillsDir)
+            try "not a folder".write(to: paths.skillsDir, atomically: true, encoding: .utf8)
+            let result = await SkillCurator.shared.restoreSkill(name: "gamma", paths: paths)
+            guard case .failed(let name, let reason) = result else { Issue.record("expected .failed, got \(result)"); return }
+            #expect(name == "gamma" && !reason.isEmpty)
+            #expect(FileManager.default.fileExists(atPath: trash(paths).appendingPathComponent("700_gamma").path), "still quarantined")
+            let message = SkillCurator.restoreMessage(result)
+            #expect(message.contains("Could not restore") && !message.contains("No quarantined skill"))
+            // `a..b` is not refused as a path: it reaches the same failure (the skills path), not .invalidName.
+            #expect(await SkillCurator.shared.restoreSkill(name: "a..b", paths: paths) != .invalidName("a..b"))
+        }
+    }
+
     @Test("only the word --apply asks for the quarantine")
     func applyFlag() {
         #expect(!SkillCurator.curateApplies(""))

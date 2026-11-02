@@ -171,6 +171,9 @@ public final class SkillCurator: Sendable {
         /// No quarantined skill of that name; `available` are the names in the trash, newest first.
         case notFound(name: String, available: [String])
         case invalidName(String)
+        /// The quarantined copy is there but could not be moved (permissions, a full disk, a skills
+        /// path that is a file); it stays in the quarantine.
+        case failed(name: String, reason: String)
     }
 
     /// Moves the newest quarantined copy of `name` back into the skills folder (#48). Never
@@ -188,7 +191,7 @@ public final class SkillCurator: Sendable {
         }.sorted { $0.stamp > $1.stamp }
         var available: [String] = []
         for e in entries where !available.contains(e.name) { available.append(e.name) }
-        guard !name.isEmpty, !name.hasPrefix("."), !name.contains("/"), !name.contains("..") else {
+        guard !name.isEmpty, !name.hasPrefix("."), !name.contains("/") else {
             return name.isEmpty ? .notFound(name: name, available: available) : .invalidName(name)
         }
         guard let newest = entries.first(where: { $0.name == name }) else { return .notFound(name: name, available: available) }
@@ -198,7 +201,7 @@ public final class SkillCurator: Sendable {
             try fileManager.createDirectory(at: paths.skillsDir, withIntermediateDirectories: true)
             try fileManager.moveItem(at: trashDir.appendingPathComponent(newest.entry), to: target)
         } catch {
-            return .notFound(name: name, available: available)
+            return .failed(name: name, reason: error.localizedDescription)
         }
         await onSkillsChanged?()
         return .restored(name: name)
@@ -218,6 +221,8 @@ public final class SkillCurator: Sendable {
             return "A skill named **\(name)** already exists, so nothing was restored. Rename or delete it first."
         case .invalidName(let name):
             return "'\(name)' is not a skill name."
+        case .failed(let name, let reason):
+            return "Could not restore **\(name)**: \(reason) The quarantined copy is still in the trash."
         case .notFound(let name, let available):
             let list = available.isEmpty ? "The quarantine is empty." : "Quarantined: " + available.map { "`\($0)`" }.joined(separator: ", ") + "."
             return (name.isEmpty ? "Usage: `/skills restore <name>`. " : "No quarantined skill named **\(name)**. ") + list
