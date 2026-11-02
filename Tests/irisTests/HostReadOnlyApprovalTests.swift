@@ -140,6 +140,30 @@ struct HostReadOnlyApprovalTests {
         #expect(try await call(state, "/etc/hosts", tool: "read_file", in: cid, engine: vibecop) == .silent(true))
     }
 
+    @Test("a tier-2/3 block of a read counts like a Deny: no host command runs unprompted after it (#874)")
+    func blockEndsSilentApprovals() async throws {
+        let (state, home) = try app()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let cid = state.createNewConversation(isBackground: false, select: false)
+        let other = state.createNewConversation(isBackground: false, select: false)
+        let vibecop = Approver()
+        #expect(try await call(state, "cat /etc/hosts", in: cid, engine: vibecop) == .silent(true), "no block yet: a read runs unprompted")
+        state.recordGuardBlock(conversationId: cid, realPath: "/etc/hosts")
+        #expect(try await call(state, "cat /etc/hosts", in: cid, engine: vibecop) == .asked)
+        #expect(try await call(state, "ls", in: other, engine: vibecop) == .silent(true), "another conversation is untouched")
+    }
+
+    @Test("a blocked search_web does not: Vibecop still approves a read-only ls (#874)")
+    func blockedSearchDoesNotAsk() async throws {
+        let (state, home) = try app()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let cid = state.createNewConversation(isBackground: false, select: false)
+        let engine = IrisEngine(state: state, tier: .medium, principal: .main, client: ScriptedStreamClient([]),
+                                retryDelays: [], streamResponses: true, protectionEnabled: true, sessionPeerCount: 0)
+        await engine.recordGuardBlock(cid, tool: "search_web", path: nil)
+        #expect(try await call(state, "ls", in: cid, engine: Approver()) == .silent(true))
+    }
+
     @Test("the allowlist still approves after a Deny, since the person set it")
     func allowlistSurvivesDeny() async throws {
         let (state, home) = try app()

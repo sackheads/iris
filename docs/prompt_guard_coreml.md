@@ -367,6 +367,22 @@ reaching `loopDetectionThreshold` consecutive blocks (the same setting the ident
 uses, Settings → Agency) soft-stops the run with a summary. Outside a goal run nothing stops; the
 appended line is the whole intervention.
 
+A block also sticks (#874). When tier 2 or tier 3 withholds a whole `read_file` result, that file's
+real path (after symlinks) is remembered for the conversation, and a later `read_file` of it, for
+any line range, is answered with Iris's own "withheld" line at once: no guard call, and no approval
+prompt, since the answer is already known. It holds for the rest of the conversation even if the
+file changes, which fails closed; a new conversation starts clean, and the record is in memory
+only. A block of a `read_file` or a `run_command` result also counts like a Deny for Vibecop: it no
+longer approves a host command on its own in that conversation (a person still can, and an
+unattended run is refused as before), so a `cat` of the withheld file asks. A blocked `search_web`
+or MCP result does not: Vibecop's host APPROVE covers only read-only commands, which cannot fetch a
+URL, so asking there would buy nothing. A block caused by a tier that errored and failed closed
+(a timeout, a quota limit) is not remembered: it says nothing about the file. What this does not
+close: a text with only some lines withheld is not recorded, so a re-read gets a fresh draw; a
+command run in the sandbox is not matched against withheld paths (a string match is bypassable by
+spelling, glob or `sh -c`), so a `cat` there, or a narrower slice through `head`, is judged afresh
+at tier 3 like any other output.
+
 ## Regardless of model
 
 The following robustness improvements have been implemented for Tier 2 evaluation, which matter no matter which model (if any) is ultimately used:

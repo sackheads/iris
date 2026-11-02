@@ -582,6 +582,12 @@ public struct InjectionGuard {
         "\(openingTag(source: source))\n\(content)\n</untrusted_context>"
     }
 
+    /// Whether `wrapped` is a whole-content block by tier 2 or 3: the marker alone in the wrapper. A
+    /// passed text is wrapped with a newline either side, so one that merely quotes a marker is not (#874).
+    static func isWholeBlock(_ wrapped: String) -> Bool {
+        ["TIER 2 INJECTION GUARD", "TIER 3 CANARY GUARD"].contains { wrapped.hasSuffix("[CONTENT BLOCKED BY \($0)]</untrusted_context>") }
+    }
+
     private static func wrapBlocked(_ marker: String, source: String) -> String {
         "\(openingTag(source: source))\(marker)</untrusted_context>"
     }
