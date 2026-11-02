@@ -192,6 +192,10 @@ struct GoalContract: Codable, Equatable, Sendable {
     /// (the panel's Approve) calls that. Locking is not approval: graders, delegated units and the
     /// legacy migration lock contracts too, and `amend_goal_contract` changes checks with only a
     /// rationale. An amended check is not here.
+    /// Criteria any grade, or the person, found not met, in the order first seen (#883). Durable harness
+    /// state like `waivers` and `judgements`: `lastGoalEvaluation` is overwritten by each grade, so
+    /// without this the fact that a criterion once failed is gone by the time the goal completes.
+    var everNotMet: [UUID] = []
     var approvedChecks: [String] = []
     /// #334 — where those checks were approved to run: the goal's working directory when Approve
     /// was clicked, canonical. A check approved for one directory is not approved for another,
@@ -243,6 +247,7 @@ struct GoalContract: Codable, Equatable, Sendable {
         gateAttempts = try c.decodeIfPresent(Int.self, forKey: .gateAttempts) ?? 0
         awaitingHumanJudgement = try c.decodeIfPresent(Bool.self, forKey: .awaitingHumanJudgement) ?? false
         pendingCompletionSummary = try c.decodeIfPresent(String.self, forKey: .pendingCompletionSummary)
+        everNotMet = try c.decodeIfPresent([UUID].self, forKey: .everNotMet) ?? []
         approvedChecks = try c.decodeIfPresent([String].self, forKey: .approvedChecks) ?? []
         approvedWorkspace = try c.decodeIfPresent(String.self, forKey: .approvedWorkspace)
         waitingSince = try c.decodeIfPresent(Date.self, forKey: .waitingSince)
