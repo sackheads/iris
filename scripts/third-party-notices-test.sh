@@ -17,6 +17,9 @@ mkdir -p "$work/checkouts/alpha" "$work/checkouts/Beta"
 printf 'MIT alpha licence\n' > "$work/checkouts/alpha/LICENSE"
 printf 'Apache beta licence\n' > "$work/checkouts/Beta/LICENSE.txt"
 printf 'beta notice\n' > "$work/checkouts/Beta/NOTICE.txt"
+mkdir -p "$work/checkouts/alpha/Source/vendored/fmt" "$work/checkouts/alpha/Tests/x"
+printf 'vendored fmt licence\n' > "$work/checkouts/alpha/Source/vendored/fmt/LICENSE"
+printf 'test fixture licence\n' > "$work/checkouts/alpha/Tests/x/LICENSE"
 resolved() { # identity version [identity version ...]
     local first=1 body=""
     while (( $# )); do
@@ -33,6 +36,14 @@ expect 0 "generate" generate "${args[@]}"
 expect 0 "a generated file passes" check "${args[@]}"
 grep -q 'Apache beta licence' "$work/notices.md" && grep -q 'beta notice' "$work/notices.md" \
     && echo "ok   licence and NOTICE text are copied" || { echo "FAIL licence and NOTICE text are copied"; fail=1; }
+
+grep -q 'vendored fmt licence' "$work/notices.md" && ! grep -q 'test fixture licence' "$work/notices.md" \
+    && echo "ok   vendored licences are copied, test fixtures are not" || { echo "FAIL vendored licences"; fail=1; }
+grep -q '^## llama.cpp (' "$work/notices.md" && echo "ok   the llama.cpp section is written" || { echo "FAIL llama.cpp section"; fail=1; }
+cp "$work/notices.md" "$work/full.md"
+sed -i.bak '/^## llama.cpp/d' "$work/notices.md"
+expect 1 "a missing llama.cpp section fails" check "${args[@]}"
+cp "$work/full.md" "$work/notices.md"
 
 resolved alpha 1.0.0 beta 2.0.0 gamma 3.0.0 > "$work/resolved.json"
 expect 1 "a new dependency with no entry fails" check "${args[@]}"

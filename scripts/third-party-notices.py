@@ -34,6 +34,29 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE."""
+LLAMA_TAG = "b9957"  # llama.swift's binaryTarget; generate fails when it moves
+LLAMA_LICENCE = """MIT License
+
+Copyright (c) 2023-2026 The ggml authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE."""
+LLAMA_HEADING = "llama.cpp (%s)" % LLAMA_TAG
 EMOJI_HEADING = "emoji-data (%s)" % EMOJI_PIN[:7]
 HEAD = re.compile(r"^## (.+)$", re.M)
 
@@ -53,8 +76,9 @@ def headings(notices):
 def check(resolved, notices):
     have = headings(notices)
     missing = ["%s (%s)" % (i, v) for i, _, v in pins(resolved) if "%s (%s)" % (i, v) not in have]
-    if EMOJI_HEADING not in have:
-        missing.append(EMOJI_HEADING)
+    for h in (EMOJI_HEADING, LLAMA_HEADING):
+        if h not in have:
+            missing.append(h)
     if missing:
         print("THIRD_PARTY_NOTICES.md has no section for: " + ", ".join(missing), file=sys.stderr)
         print("run scripts/third-party-notices.py generate after `swift package resolve`", file=sys.stderr)
@@ -62,11 +86,27 @@ def check(resolved, notices):
     return 0
 
 
-def files_in(d):
-    names = sorted(n for n in (p.name for p in d.iterdir() if p.is_file())
-                   if re.match(r"(?i)^(licen[cs]e|copying)", n))
-    notice = sorted(p.name for p in d.iterdir() if p.is_file() and re.match(r"(?i)^notice", p.name))
-    return names, notice
+SKIP_DIRS = {"tests", "test", "examples", "example", "docs", ".git", ".build"}
+LICENCE = re.compile(r"(?i)^(licen[cs]e|copying|notice|thirdparty)")
+
+
+def files_in(roots):
+    """Licence, COPYING, NOTICE and ThirdParty files under each root, vendored ones included
+    (mlx-swift carries mlx, fmt, json and metal-cpp), minus tests and examples. Identical text
+    is listed once. Returns [(label, text)]."""
+    seen, out = set(), []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for p in sorted(root.rglob("*")):
+            rel = p.relative_to(root)
+            if not p.is_file() or not LICENCE.match(p.name) or any(x.lower() in SKIP_DIRS for x in rel.parts[:-1]):
+                continue
+            text = p.read_text(errors="replace").strip()
+            if text and text not in seen:
+                seen.add(text)
+                out.append((str(rel), text))
+    return out
 
 
 def generate(resolved, notices, checkouts):
@@ -81,18 +121,22 @@ the app's Resources.
     parts.append("## %s\n\nSource: https://github.com/iamcal/emoji-data, vendored as "
                  "`Sources/IrisKit/assets/emoji.json` (pinned in `scripts/fetch-emoji-data.sh`).\n\n"
                  "### Licence\n\n%s\n" % (EMOJI_HEADING, indent(EMOJI_LICENCE)))
+    llama = next((c for c in pathlib.Path(checkouts).iterdir() if c.name.lower() == "llama.swift"), None)
+    if llama is not None and "llama-%s-xcframework" % LLAMA_TAG not in (llama / "Package.swift").read_text():
+        sys.exit("llama.swift no longer ships llama.cpp %s: update LLAMA_TAG and LLAMA_LICENCE" % LLAMA_TAG)
+    parts.append("## %s\n\nSource: https://github.com/ggml-org/llama.cpp, the xcframework llama.swift "
+                 "downloads (it carries no licence file of its own).\n\n### LICENSE\n\n%s\n"
+                 % (LLAMA_HEADING, indent(LLAMA_LICENCE)))
     for ident, loc, ver in pins(resolved):
         d = next((c for c in pathlib.Path(checkouts).iterdir() if c.name.lower() == ident.lower()), None)
         if d is None:
             sys.exit("no checkout for %s under %s (run `swift package resolve`)" % (ident, checkouts))
-        lic, notice = files_in(d)
-        if not lic:
+        docs = files_in([d, pathlib.Path(checkouts).parent / "artifacts" / ident])
+        if not any(not n.lower().startswith("notice") for n, _ in docs):
             sys.exit("no LICENSE file in the checkout of %s" % ident)
         s = "## %s (%s)\n\nSource: %s\n" % (ident, ver, loc.removesuffix(".git"))
-        for n in lic:
-            s += "\n### %s\n\n%s\n" % (n, indent((d / n).read_text(errors="replace").strip()))
-        for n in notice:
-            s += "\n### %s\n\n%s\n" % (n, indent((d / n).read_text(errors="replace").strip()))
+        for n, text in docs:
+            s += "\n### %s\n\n%s\n" % (n, indent(text))
         parts.append(s)
     pathlib.Path(notices).write_text("\n".join(parts))
 
