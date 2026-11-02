@@ -382,9 +382,13 @@ struct SessionArtifactTests {
             try? await ProcessGroupRunner.capture(executable: "/bin/sh", arguments: ["-c", command], environment: nil,
                                                   timeoutSeconds: 10).get()
         }
-        let start = TestClock.now()
         let piped = await sh(SandboxArtifacts.readCommand(fifo))
-        #expect(piped?.status == 66 && piped?.timedOut == false && TestClock.seconds(since: start) < 5, "a FIFO is refused, not read")
+        // Timed from the spawn to the exit on the runner's own clock, not from this call: the call
+        // also counts the child's start-up and the result's wait for a free pool thread, which took up
+        // to 6.5 s in the first seconds of a full parallel run while the shell itself ran in
+        // milliseconds (#857, #759, #763). A shell blocked on the FIFO would be killed at the timeout.
+        let ran = piped.flatMap { out in out.timeline.finished.flatMap { end in out.timeline.spawned.map { end - $0 } } }
+        #expect(piped?.status == 66 && piped?.timedOut == false && (ran ?? .infinity) < 5, "a FIFO is refused, not read")
         let marker = dir.appendingPathComponent("ran").path
         let hostile = dir.path + "/x'; touch \(marker); echo '"
         _ = await sh(SandboxArtifacts.readCommand(hostile))
