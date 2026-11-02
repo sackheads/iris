@@ -67,7 +67,7 @@ struct BenchCLITests {
         #expect(BenchCLI.parse(["iris", "--bench", "foo.json", "--dump-requests"])?.dumpRequestsDir == nil)
     }
 
-    @Test("a background scenario's denied call reaches the transcript, and the requests are dumped")
+    @Test("a background scenario's refused call reaches the transcript, and the requests are dumped")
     @MainActor
     func transcriptAndDumpShowADeniedCall() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bench-dump-\(UUID().uuidString)")
@@ -82,9 +82,9 @@ struct BenchCLITests {
             background: true)
         let result = await BenchCLI.runScenario(scenario, dumpRequestsTo: dir)
         let rendered = BenchSummary.renderTranscript(result)
-        let notice = String(format: AppState.unattendedDenialNotice, "run_command")
+        let notice = String(format: AppState.profileDenialNotice, "run_command")
         #expect(rendered.contains("Transcript, turn 1:"))
-        #expect(rendered.contains(notice), "the unattended denial is readable in the transcript")
+        #expect(rendered.contains(notice), "the read-only job's refusal is readable in the transcript")
         let dumped = try FileManager.default.contentsOfDirectory(atPath: dir.path)
         #expect(dumped.contains("1-0.json"))
     }
