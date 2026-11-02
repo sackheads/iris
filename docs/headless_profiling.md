@@ -28,7 +28,7 @@ swift run iris --bench scenarios/live.json --real     # hit a real provider (nee
   under it is allowed, and the container's commands write the host directory), and
   `--mutating-no-grant` makes a mutating job with no grant. A grant goes with a `mutating` job (a
   read-only job may not carry one), so each makes the run's profile `mutating`, not `readOnly`; it
-  applies to a `background` scenario and is refused with `--real`. Without any of them, an unattended
+  applies to a `background` scenario. With `--real` (a paid, unattended run with write and run tools open) only `--grant-write` on a folder under the temp directory is allowed, judged by its real path and never the temp directory itself; every other grant is refused. Without any of them, an unattended
   run's read of a file outside the Iris folder needs an approval nobody can give and is refused.
 - `--real` forces the scenario onto a real provider regardless of what the file
   says (`clientMode` is overridden to `real`). This needs configured provider

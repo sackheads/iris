@@ -73,7 +73,7 @@ struct BenchCLITests {
         #expect(BenchCLI.parse(["iris", "--bench", "--mutating-no-grant", "foo.json"])?.scenarioPath == "foo.json")
         #expect(BenchCLI.refusal(granted, scenario: scenario) == nil)
         scenario.clientMode = .real
-        #expect(BenchCLI.refusal(granted, scenario: scenario) != nil, "a real-mode scenario file")
+        #expect(BenchCLI.refusal(granted, scenario: scenario) != nil, "a real-mode scenario file (read-only grant)")
         let plain = BenchCLI.parse(["iris", "--bench", "foo.json"])!
         #expect(BenchCLI.refusal(plain, scenario: scenario) == nil, "no grant, no refusal")
 
@@ -181,5 +181,38 @@ struct BenchCLITests {
 
         let bare = await writeOnce(to: outside.appendingPathComponent("d.txt").path, grant: .none)
         #expect(!bare.wrote, "a mutating job with no grant cannot write: \(bare.transcript)")
+    }
+
+    @Test("a real model may carry only a read-write grant on a folder under the temp directory, by its real path (#854)")
+    func realModelGrantIsBounded() throws {
+        var scenario = BenchCLI.defaultScenario
+        scenario.background = true
+        scenario.clientMode = .real
+        func opts(_ flag: String, _ dir: String? = nil) -> BenchOptions {
+            BenchCLI.parse(["iris", "--bench", flag] + (dir.map { [$0] } ?? []) + ["foo.json"])!
+        }
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("iris-854-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        let inside = root.appendingPathComponent("mount"), outside = fm.homeDirectoryForCurrentUser.appendingPathComponent("Documents")
+        try fm.createDirectory(at: inside, withIntermediateDirectories: true)
+        #expect(BenchCLI.refusal(opts("--grant-write", inside.path), scenario: scenario) == nil, "a folder under the temp root")
+        #expect(BenchCLI.refusal(opts("--grant-write", outside.path), scenario: scenario) != nil, "a folder outside it")
+        #expect(BenchCLI.refusal(opts("--grant-write", fm.temporaryDirectory.path), scenario: scenario) != nil, "the temp root itself")
+        #expect(BenchCLI.refusal(opts("--grant-write", "/tmp"), scenario: scenario) != nil, "/tmp itself, which resolves to /private/tmp")
+        #expect(BenchCLI.refusal(opts("--grant-write", inside.path + "/../../.."), scenario: scenario) != nil, "a .. that leaves it")
+        // A link under the temp root that points out of it is judged by where it lands.
+        let link = root.appendingPathComponent("link")
+        try fm.createSymbolicLink(at: link, withDestinationURL: outside)
+        #expect(BenchCLI.refusal(opts("--grant-write", link.path), scenario: scenario) != nil, "a link out of the temp root")
+        // A link from outside into the temp root is as good as the folder.
+        #expect(BenchCLI.refusal(opts("--grant-write", "/tmp/../tmp"), scenario: scenario) != nil, "/tmp spelled another way is still /tmp")
+        // Read-only and no-grant mutating stay refused with a real model; so does no grant flag at all only when a grant is given.
+        #expect(BenchCLI.refusal(opts("--grant-read", inside.path), scenario: scenario) != nil)
+        #expect(BenchCLI.refusal(opts("--mutating-no-grant"), scenario: scenario) != nil)
+        #expect(BenchCLI.refusal(BenchCLI.parse(["iris", "--bench", "foo.json"])!, scenario: scenario) == nil, "no grant, no refusal")
+        // The read-write mount still needs a background scenario.
+        scenario.background = false
+        #expect(BenchCLI.refusal(opts("--grant-write", inside.path), scenario: scenario) != nil, "not background")
     }
 }
