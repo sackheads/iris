@@ -1065,7 +1065,11 @@ actor IrisEngine {
         }
         let body: String
         switch outcome {
-        case .blocked: return "Not published: the injection guard withheld the message, so no subscriber received it."
+        case .blocked:
+            // It reached nobody, so it costs nothing: rewording a withheld broadcast must not drain
+            // the sender's budget, direct sends included (#885 review).
+            await MainActor.run { localState?.refundTopicPublish(from: conversationId, subscribers: targets.count) }
+            return "Not published: the injection guard withheld the message, so no subscriber received it."
         case .passed(let clean): body = clean
         }
         let (senderName, senderRole, tainted) = await MainActor.run { () -> (String?, String?, Bool) in
@@ -1075,7 +1079,10 @@ actor IrisEngine {
         let label = Self.flattenCardField(senderName ?? "a session", cap: Self.cardNameCap)
         let seq: Int64
         do { seq = try peers.appendTopicMessage(topic: topic, from: conversationId, label: label, body: body, at: Date()) }
-        catch { return "Not sent: the message could not be recorded." }
+        catch {
+            await MainActor.run { localState?.refundTopicPublish(from: conversationId, subscribers: targets.count) }
+            return "Not sent: the message could not be recorded."
+        }
         let contextId = UUID().uuidString
         var delivered = 0, queued = 0, refused = 0
         for target in targets {
