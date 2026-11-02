@@ -118,7 +118,7 @@ enum BenchCLI {
     private static func tempRoots() -> [String] {
         var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
         let n = confstr(_CS_DARWIN_USER_TEMP_DIR, &buf, buf.count)
-        return (n > 0 ? [String(cString: buf)] : []) + ["/tmp"]
+        return (n > 0 ? [String(decoding: buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)] : []) + ["/tmp"]
     }
 
     /// Load the scenario for these options, applying `--real` as an override.
