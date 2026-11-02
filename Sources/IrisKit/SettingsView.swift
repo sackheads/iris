@@ -1098,7 +1098,7 @@ struct SettingsView: View {
                         .help("How long to wait for the Vibecop guard before falling back to a manual approval prompt.")
                 }
 
-                // #187 §9: the five numbers every unattended run is bounded by. A job's own policy
+                // #187 §9: the six numbers every unattended run is bounded by (#283 added the watch breaker's). A job's own policy
                 // may override any of them except the global daily budget, which is the ceiling on
                 // the whole background system.
                 Section(header: Text("Job Limits").font(.headline)) {

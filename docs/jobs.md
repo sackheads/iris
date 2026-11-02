@@ -85,7 +85,7 @@ accepts:
 Ranges: minute `0-59`, hour `0-23`, day-of-month `1-31`, month `1-12`, day-of-week `0-6` (`0` =
 Sunday; `7` is also accepted and also means Sunday, the standard cron convention). Names like
 `MON` or `JAN` are not accepted. Anything else is a parse error, returned to the model as a
-sentence naming the field and the bad token.
+sentence naming the field and the bad value (or, for the wrong number of fields, the count).
 
 Two forms are refused rather than guessed at: an empty list element (`1,,2`, or a trailing comma
 in `1-5,`), and a range that wraps past the end of the field (`22-2` — write `22-23,0-2` if the
@@ -738,7 +738,7 @@ first time):
 It never copies a run's own outcome or failure text — those can carry words a run fetched; ask
 Iris, or use `get_job_run`, to read them. A day on which nothing ran posts nothing. A digest that
 cannot read the ledger posts a card saying so and records a **failed** run
-(`ledger unreadable`), not a completed one, so the next digest still covers the runs it missed. The card is
+(`daily digest: ledger unreadable`), not a completed one, so the next digest still covers the runs it missed. The card is
 capped at 4 KB, cut on a whole line with a count of what was left out. A Mac asleep through 10:00
 gets one digest when it wakes, covering everything since the last one (`catchUp: coalesce`).
 
@@ -1198,7 +1198,7 @@ engine, and the tier-3 canary when it runs on the primary provider, whether on a
 gate's output, or the verdict on a blocked run's card (that one is added to the run's row after it
 closes). A local guard engine (llama.cpp, MLX, Ollama) costs no tokens. A guard call with nothing
 to charge it to is logged once ("unattributed guard usage"), never silently dropped. Each of its turns also has a time limit of its own (#402),
-restarted every turn: 15 minutes by default (Settings → Agent Limits → Subagent turn timeout),
+restarted every turn: 15 minutes by default (Settings → Advanced → Agent Limits → Subagent turn timeout),
 past which the subagent ends `timed out`. That is longer than the run's own 10 minutes by default, so in a run
 the run's deadline is what stops a subagent that takes too long. A subagent whose next round the run's
 budget refuses ends there and then, with no further model call, and the run reads `status: failed`
@@ -1233,7 +1233,7 @@ A hand-started fire of a watch job does not retry either, for the same reason.
 not the next day, not a restart. `/jobs resume <name>` clears the pause *and* the retry ladder and
 recomputes the next fire from the job's own schedule.
 
-These global numbers are stored with Iris's API keys in its Keychain item, not in the defaults domain (#678), so a host command's `defaults write` doesn't change them; only Settings does. See [install.md](install.md) for what a Keychain prompt at launch means. The five are `ConfigManager` keys — `JOB_MAX_RUNS_PER_HOUR`,
+These global numbers are stored with Iris's API keys in its Keychain item, not in the defaults domain (#678), so a host command's `defaults write` doesn't change them; only Settings does. See [install.md](install.md) for what a Keychain prompt at launch means. The six are `ConfigManager` keys — `JOB_MAX_RUNS_PER_HOUR`, `JOB_MAX_RUNS_PER_HOUR_WATCH`,
 `JOB_DAILY_TOKEN_BUDGET`, `JOB_GLOBAL_DAILY_TOKEN_BUDGET`, `JOB_PER_RUN_TOKEN_BUDGET` and
 `JOB_RUN_TIMEOUT_SECONDS` — and **Settings → Advanced → Job Limits** has a stepper for each. A
 stepper wound down to zero reads as "default": the figure above is what the runner then uses, and
@@ -1365,7 +1365,7 @@ Without `--json` the row prints one field per line (`job`, `run`, `status`, `tri
 `duration`, `tokens`, `gate`, then `outcome` / `reason` / `blocked tool` when there is one). With
 `--json` it is a single object with sorted keys, which is what a script or `jq` should read; a
 refusal or an error prints its sentence to stderr and, under `--json`, a `{"error": …,
-"exitCode": …}` object on stdout too, so a pipeline is never handed an empty stdout.
+"exitCode": …, "dryRun": …}` object on stdout too, so a pipeline is never handed an empty stdout.
 
 **Stopping a run.** The first Ctrl-C, `kill` (SIGTERM) or closed terminal (SIGHUP) stops a
 `--run-job` cleanly:
