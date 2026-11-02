@@ -131,6 +131,15 @@ struct SandboxTimeoutTests {
         #expect(!Self.processExists(matching: marker), "the deadline killed the child it launched late")
     }
 
+    /// Hands a launch the means to cancel its own call. `set` comes right after the task is made;
+    /// `fire` waits for it (bounded) so a launch that starts first cannot miss it.
+    private final class CancelHandle: @unchecked Sendable {
+        private let armed = DispatchSemaphore(value: 0)
+        private var action: (@Sendable () -> Void)?
+        func set(_ action: @escaping @Sendable () -> Void) { self.action = action; armed.signal() }
+        func fire() { if armed.wait(timeout: .now() + 10) == .success { action?() } }
+    }
+
     /// #421, the cancel's half of the same window: its ladder ran during the launch, found no pid,
     /// and answered. The runner checks for a cancel once the launch is done and kills the child.
     @Test("a cancel that lands mid-launch still kills the child", .timeLimit(.minutes(1)))
@@ -141,20 +150,20 @@ struct SandboxTimeoutTests {
             Self.killAll(matching: "sleep \(nap)")
             Self.killAll(matching: marker)
         }
-        let launching = DispatchSemaphore(value: 0)
+        // The launch cancels its own call, from the thread that is launching. Cancelled from a
+        // `DispatchQueue.global()` block instead (what this did), the cancel waited for a free thread:
+        // in 40 full parallel runs it reached the runner 0.8-2.0 s after the launch began (median
+        // 1.25 s), after the 1 s launch was over in 32 of them, so the test mostly exercised a cancel
+        // of a running child, whose real result may beat the cancellation (#777).
+        let cancel = CancelHandle()
         let runner = CLIProcessRunner(executable: "/bin/sh", beforeLaunch: {
-            launching.signal()
+            cancel.fire()
             usleep(1_000_000)
         })
         let call = Task {
             try await runner.run(["-c", "while :; do sleep \(nap); done   # \(marker)"], timeoutSeconds: 60)
         }
-        // Cancelled from this queue the moment the launch begins, not after hopping back: the launch
-        // holds a pool thread for its whole second, and on a narrow pool the test body could not
-        // run again until it was over, so its cancel landed after the launch instead (#486).
-        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
-            DispatchQueue.global().async { launching.wait(); call.cancel(); c.resume() }
-        }
+        cancel.set { call.cancel() }
         var thrown: Error?
         do { _ = try await value(of: call) } catch { thrown = error }
         #expect(thrown is CancellationError)
