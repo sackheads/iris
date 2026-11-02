@@ -3747,7 +3747,27 @@ class AppState {
     func recordEvaluation(for conversationId: UUID, _ evaluation: GoalEvaluation) {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
         conversations[idx].lastGoalEvaluation = evaluation
+        // #883: the gate's grade and a checkpoint's both come through here. Only a real grade counts:
+        // a failed or stopped one carries placeholder verdicts.
+        if evaluation.status == .graded {
+            for verdict in evaluation.criteria where verdict.verdict == .notMet { noteNotMet(verdict.criterionId, at: idx) }
+        }
         markChanged(conversationId, .metadata)
+    }
+
+    /// Remembers that a criterion was found not met (#883); a criterion the contract does not have is not.
+    private func noteNotMet(_ criterionId: UUID, at idx: Int) {
+        guard var c = conversations[idx].goalContract, c.criteria.contains(where: { $0.id == criterionId }),
+              !c.everNotMet.contains(criterionId) else { return }
+        c.everNotMet.append(criterionId)
+        conversations[idx].goalContract = c
+    }
+
+    /// The learnings note this conversation's goal would leave if it passed its gate now (#883), read
+    /// while the contract is still there: `clearGoal` nils it.
+    func goalLearningsNote(for conversationId: UUID, outcome: GateOutcome) -> String? {
+        guard let conv = conversations.first(where: { $0.id == conversationId }), let contract = conv.goalContract else { return nil }
+        return GoalLearnings.note(contract: contract, final: conv.lastGoalEvaluation, outcome: outcome)
     }
 
     /// The gate refused completion: bump the attempt count and leave everything else alone. The
@@ -3813,6 +3833,7 @@ class AppState {
         eval.criteria[vIdx].verdict = accepted ? .met : .notMet
         eval.criteria[vIdx].method = .human
         conversations[idx].lastGoalEvaluation = eval
+        if !accepted { noteNotMet(criterionId, at: idx) }   // #883
         // D3: also record it on the contract. `lastGoalEvaluation` is transient — the next
         // `beginGoalEvaluation` overwrites it, and `sanitizeLoaded` clears it on load except while a
         // pause is open on the user (#191) — so a checkpoint re-grade, or a restart once the pause
@@ -3871,8 +3892,10 @@ class AppState {
             let waivers = conversations[idx].goalContract?.waivers ?? [:]
             // Captured before `clearGoal` nils the contract it lives on.
             let summary = conversations[idx].goalContract?.pendingCompletionSummary ?? ""
+            let learnings = goalLearningsNote(for: conversationId, outcome: .passed)   // #883, before the contract goes
             finishGatedGoal(for: conversationId, outcome: .passed, waivers: waivers)
             clearGoal(for: conversationId)
+            if let learnings, let engine { Task { await engine.writeGoalLearnings(learnings, conversationId: conversationId) } }
             appendMessage(role: .system, content: "Goal complete — your judgement resolved the last criteria.",
                           to: conversationId)
             // Spec §7: the goal "completes exactly as D1 completes it". The `goal_complete` handler

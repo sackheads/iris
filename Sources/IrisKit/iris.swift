@@ -4093,6 +4093,27 @@ actor IrisEngine {
         return held ? ContextHolds.heldResult(item) : nil
     }
 
+    /// The learnings note of a goal that passed its gate (#883), written as a fact through the same hold
+    /// every other memory write meets (#813): on a conversation that has read outside text (a delegate's
+    /// reads included) it is kept for the person to approve and nothing is stored before then, on a
+    /// clean one it is stored. The text is the harness's (`GoalLearnings`), never the model's. Written
+    /// once: identical content is stored once by the fact store, and a hold already pending for the
+    /// same note is not raised again.
+    func writeGoalLearnings(_ note: String, conversationId: UUID, workspacePath: String? = nil) async {
+        let args: [String: JSONValue] = ["content": .string(note), "category": .string(GoalLearnings.category)]
+        let call = FunctionCall(name: "save_fact", args: args, id: "goal-learnings")
+        if let localState = state {
+            let already = await MainActor.run {
+                localState.pendingContextWrites.contains {
+                    $0.conversationId == conversationId && $0.toolName == "save_fact" && $0.state == .pending && $0.args == args
+                }
+            }
+            if already { return }
+        }
+        if await holdContextWriteIfTainted(call, conversationId: conversationId, workspacePath: workspacePath) != nil { return }
+        _ = try? factStore.saveFact(content: note, category: GoalLearnings.category, entity: nil, supersedes: nil)
+    }
+
     /// #813: applies an item the person approved, through the handler that would have applied
     /// it, with the hold switched off for this call only. A held `write_file` runs as an approved
     /// call, past the permission ladder: the person's approval is the permission.
@@ -5797,9 +5818,11 @@ actor IrisEngine {
 
                 let outcome: GateOutcome = evaluation.status != .graded ? .ungatedGraderFailed
                                          : (blocking.isEmpty ? .passed : .ungatedAtCap)
+                let learnings = await MainActor.run { localState?.goalLearningsNote(for: conversationId, outcome: outcome) }
                 await MainActor.run {
                     localState?.finishGatedGoal(for: conversationId, outcome: outcome, waivers: c.waivers)
                 }
+                if let learnings { await writeGoalLearnings(learnings, conversationId: conversationId) }
             }
 
             await MainActor.run {
