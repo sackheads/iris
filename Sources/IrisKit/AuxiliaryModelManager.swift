@@ -66,11 +66,7 @@ final class AuxiliaryModelManager: @unchecked Sendable {
                         return MLXEngine.shared
                     case .cloud:
                         // Nothing local to load.
-                        var cloud = CloudAuxiliaryEngine()
-                        cloud.role = role
-                        cloud.model = { CloudAuxiliaryEngine.configuredModel(role: role, config: .shared) }
-                        cloud.thinkingLevel = { CloudAuxiliaryEngine.thinkingLevel(role: role, config: .shared) }
-                        engine = cloud
+                        engine = CloudAuxiliaryEngine.make(role: role)
                     }
                     
                     try await engine.loadModel(config: config)

@@ -44,6 +44,40 @@ struct CloudAuxiliaryEngine: AuxiliaryInferenceEngine {
     /// The thinking level to send, read at each call; nil sends none.
     var thinkingLevel: @Sendable () -> String? = { nil }
     var send: Send = { request, model in try await LLMClient().generateContent(request: request, tier: .easy, model: model) }
+    /// How long a request may go unanswered before a second one is sent beside it; nil sends one.
+    /// Only tier 3's canary sets it (#871). The first usable answer wins and the other request is
+    /// cancelled. A constant, not a setting.
+    var hedgeAfter: TimeInterval?
+    /// The hedge's request. Nil reuses `send`; the product's is on its own connection, since a stuck
+    /// one on a shared pool would carry both requests and the hedge would win nothing.
+    var sendFresh: Send?
+    /// Waits out `hedgeAfter`. The hedge is an optimisation, not a kill (Invariant 4's dispatch-queue
+    /// rule is for kills), so a held pool only makes it fire late; a test injects its own wait.
+    var hedgeSleep: @Sendable (TimeInterval) async throws -> Void = { seconds in try await Task.sleep(for: .seconds(seconds)) }
+
+    /// The canary's hedge delay: the p95 to p99 of 930 calls on gemini-3.8-flash (6.0 s median, 29.9 s
+    /// p99), so about 2.5% of calls are hedged and the 30 s to 110 s ones end near 20 s plus one call.
+    static let canaryHedgeSeconds: TimeInterval = 20
+
+    /// The engine for `role`: the Settings' model and level read at each call, and tier 3's canary alone hedged (#871).
+    static func make(role: String, config: ConfigManager = .shared) -> CloudAuxiliaryEngine {
+        var cloud = CloudAuxiliaryEngine()
+        cloud.role = role
+        cloud.model = { configuredModel(role: role, config: config) }
+        cloud.thinkingLevel = { thinkingLevel(role: role, config: config) }
+        if isTier3(role) {
+            cloud.hedgeAfter = canaryHedgeSeconds
+            cloud.sendFresh = freshConnectionSend
+        }
+        return cloud
+    }
+
+    /// A request on a connection of its own: an ephemeral session pools nothing with `.shared`'s.
+    static let freshConnectionSend: Send = { request, model in
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.finishTasksAndInvalidate() }
+        return try await LLMClient(providerSession: session).generateContent(request: request, tier: .easy, model: model)
+    }
     /// Which guard this engine serves ("vibecop", "canary"), for the unattributed-usage log.
     var role = "guard"
     var notice: @Sendable (String) async -> Void = { text in
@@ -110,21 +144,92 @@ struct CloudAuxiliaryEngine: AuxiliaryInferenceEngine {
     /// one per check (#800 review). The message text is not matched: a 400 to a request with a level counts
     /// only once the request succeeds without it.
     private func sendAsking(_ request: GeminiRequest, _ model: String?) async throws -> GeminiResponse {
-        guard let level = request.thinkingLevel else { return try await send(request, model) }
+        guard let level = request.thinkingLevel else { return try await sendHedged(request, model) }
         let key = "thinking:\(model ?? "easy")|\(level)"
         var plain = request
         plain.thinkingLevel = nil
-        if Self.levelRefused(key) { return try await send(plain, model) }
+        if Self.levelRefused(key) { return try await sendHedged(plain, model) }
         do {
-            return try await send(request, model)
+            return try await sendHedged(request, model)
         } catch let error as APIError where error.statusCode == 400 && !Self.isModelUnavailable(error) {
             // The level is the cause only if the same request succeeds without it: a 400 for the text
             // (oversized, malformed) fails both, and one such result must not drop the chosen level.
-            let response = try await send(plain, model)
+            let response = try await sendHedged(plain, model)
             Self.markLevelRefused(key)
             await notice("The \(model ?? "easy tier") model answered 400 to a request with thinking level \(level) (\(error.message)) and accepted it without; asking without a level from now on. Only Gemini 3 models take a level; set Thinking to Not sent in Settings → Security to stop this.")
             return response
         }
+    }
+
+    /// One request, or two when `hedgeAfter` is set and the first has no answer by then. A request that
+    /// fails before the delay fails the call as it always did (a 429 or a 400 is not doubled). Once
+    /// the second is out, the first usable answer wins and the other request is cancelled; both
+    /// failing throws the first request's error, which the 400 handling above matches on.
+    private func sendHedged(_ request: GeminiRequest, _ model: String?) async throws -> GeminiResponse {
+        guard let delay = hedgeAfter else { return try await send(request, model) }
+        let first = send
+        let second = sendFresh ?? send
+        let sleep = hedgeSleep
+        let role = role
+        enum Leg: Sendable {
+            case answer(hedge: Bool, Result<GeminiResponse, Error>)
+            case due, noTimer
+        }
+        return try await withThrowingTaskGroup(of: Leg.self) { group in
+            func run(_ hedge: Bool, _ call: @escaping Send) {
+                group.addTask {
+                    do {
+                        let response = try await call(request, model)
+                        guard Self.hasText(response) else {
+                            return .answer(hedge: hedge, .failure(APIError(message: "No text returned from cloud provider for Vibecop.")))
+                        }
+                        return .answer(hedge: hedge, .success(response))
+                    } catch {
+                        return .answer(hedge: hedge, .failure(error))
+                    }
+                }
+            }
+            run(false, first)
+            group.addTask {
+                do { try await sleep(delay); return .due } catch { return .noTimer }
+            }
+            var hedged = false
+            var firstError: Error?
+            var lastError: Error?
+            var failures = 0
+            while let leg = try await group.next() {
+                switch leg {
+                case .due:
+                    hedged = true
+                    run(true, second)
+                case .noTimer:
+                    break
+                case .answer(let hedge, .failure(let error)):
+                    failures += 1
+                    lastError = error
+                    if !hedge { firstError = error }
+                    if !hedged || failures == 2 {
+                        group.cancelAll()
+                        try Task.checkCancellation()
+                        throw firstError ?? lastError ?? error
+                    }
+                case .answer(_, .success(let response)):
+                    group.cancelAll()
+                    // The other request may have finished too before the cancel reached it; it was paid for.
+                    while let rest = try? await group.next() {
+                        if case .answer(_, .success(let extra)) = rest { await GuardUsage.report(extra.usageMetadata, role: role) }
+                    }
+                    return response
+                }
+            }
+            try Task.checkCancellation()
+            throw lastError ?? APIError(message: "No text returned from cloud provider for Vibecop.")
+        }
+    }
+
+    /// Whether `response` carries the text `generate` reads; one that does not is a failed answer.
+    private static func hasText(_ response: GeminiResponse) -> Bool {
+        response.candidates?.first?.content?.parts.first?.text != nil
     }
 
     private static let levelLock = NSLock()
