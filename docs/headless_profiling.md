@@ -25,7 +25,7 @@ swift run iris --bench scenarios/live.json --real     # hit a real provider (nee
   directory then holds them.
 - `--grant-read DIR` stamps a read-only grant on `DIR`, as a granted job has, so a
   `background` scenario can read a file inside it. A grant goes with a `mutating` job (a read-only job
-  may not carry one), so the run's profile is `mutating`, not `readOnly`. Without a grant, an unattended run's read
+  may not carry one), so the run's profile is `mutating`, not `readOnly`; it applies to a `background` scenario and is refused with `--real`. Without a grant, an unattended run's read
   of a file outside the Iris folder needs an approval nobody can give and is refused.
 - `--real` forces the scenario onto a real provider regardless of what the file
   says (`clientMode` is overridden to `real`). This needs configured provider
