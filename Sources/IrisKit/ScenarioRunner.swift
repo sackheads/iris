@@ -34,6 +34,8 @@ struct ScenarioResult: Sendable {
     /// Turns (1-based) whose scenario event card landed while the turn was still running, i.e. at
     /// its second model round. A turn with an `eventCard` that is missing here got it afterwards.
     var midTurnEventCards: [Int] = []
+    /// The messages each turn appended, as `role: content` (`--bench --transcript`).
+    var turnMessages: [[String]] = []
 }
 
 /// Drives the iris core end-to-end without any UI: stands up a fresh `AppState`, builds an
@@ -221,6 +223,7 @@ enum ScenarioRunner {
         // Collect this run's finished turn profiles via a task-local sink scoped to the turn loop.
         let collector = TurnCollector()
         var finalTexts: [String] = []
+        var transcript: [[String]] = []
         var turnErrors: [String?] = []
         let start = MonotonicClock.nowMs()
         await PerformanceProfiler.$runSink.withValue({ collector.append($0) }) {
@@ -254,6 +257,7 @@ enum ScenarioRunner {
                 let turnMessages = messages.dropFirst(before)
                 let last = turnMessages.last { $0.role == .agent }?.content ?? ""
                 finalTexts.append(last)
+                transcript.append(turnMessages.map { "\($0.role): \($0.content)" })
                 // An engine-level LLM failure is posted as a tagged system message rather than
                 // thrown, so it never reaches this loop's `catch` — scanning the turn's own slice
                 // is the only way to see it.
@@ -277,7 +281,7 @@ enum ScenarioRunner {
                               finalTexts: finalTexts, guardsWereOff: guardsOff, vibecopMeasured: state.vibecopUnderAutoApprove,
                               toolsSandboxed: sandboxed, conversationId: conversationId,
                               conversationIds: current.all, turnErrors: turnErrors,
-                              midTurnEventCards: cards.midTurn)
+                              midTurnEventCards: cards.midTurn, turnMessages: transcript)
     }
 
     /// Writes one turn's recorded requests as `<dir>/<turn>-<round>.json`, keyed on the engine's

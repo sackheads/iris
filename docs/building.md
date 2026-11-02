@@ -61,6 +61,7 @@ without clicking through the app. Run a benchmark scenario:
 swift run iris --bench                          # built-in default scenario
 swift run iris --bench scenarios/echo-latency.json   # a scenario file
 swift run iris --bench scenarios/live.json --real    # hit a real provider (needs keys)
+swift run iris --bench scenario.json --transcript --dump-requests out/   # read the messages and every model request
 ```
 
 The binary runs the scenario headlessly and prints a per-category timing breakdown (primary
