@@ -1074,6 +1074,11 @@ struct EvalCloudTests {
         #expect(r.verdicts.filter { $0.id == "a1" }.allSatisfy { $0.outcome == "blocked" && $0.caught == true })
         #expect(r.metrics.recall == .init(n: 4, hits: 2) && r.metrics.failClosed == 0)
         #expect(r.settings["model_id"] == "gemini-3.8-flash" && r.settings["provider"] == "gemini")
+        // Each judgement's own latency is in the result, so a long tail (a 150 s call in the smoke run) is visible.
+        #expect(r.verdicts.count == 8 && r.verdicts.allSatisfy { $0.seconds != nil })
+        // The file name holds no space (the level "low" is `thinklevel-low`), so it pastes into a shell and a URL.
+        let names = try FileManager.default.contentsOfDirectory(atPath: s.root.appendingPathComponent("results/\(EvalGuardTask.verdict)").path)
+        #expect(names.count == 1 && !names[0].contains(" ") && names[0].contains("thinklevel-low"), "\(names)")
     }
 
     @Test func noLevelSendsNone() async throws {

@@ -21,6 +21,7 @@ enum EvalCLI {
            cloud canary: --model / --tier3 cloud:<provider>/<model> [--thinking-level low|medium] needs --allow-paid; --estimate-only prints calls and cost, makes none
            iris --eval compare <a.json> <b.json> [--vary model|runtime|dataset|split|sample|think|repeats]
            iris --eval table [--results DIR] [--out FILE]
+    --sample N: about N texts, stratified by label and category, and every category keeps at least one: N below the number of categories (19 in injection v2) still judges one text per category.
     tasks: injection.classifier (onnx:, coreml:), injection.verdict (ollama:, llamacpp:, mlx:, cloud:), injection.stack
     """
 
