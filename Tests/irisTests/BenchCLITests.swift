@@ -205,6 +205,10 @@ struct BenchCLITests {
         let link = root.appendingPathComponent("link")
         try fm.createSymbolicLink(at: link, withDestinationURL: outside)
         #expect(BenchCLI.refusal(opts("--grant-write", link.path), scenario: scenario) != nil, "a link out of the temp root")
+        // A dangling link under the temp root, pointing outside, does not resolve: refused, not stepped past.
+        let dangling = root.appendingPathComponent("dangling")
+        try fm.createSymbolicLink(at: dangling, withDestinationURL: outside.appendingPathComponent("nonexistent-\(UUID().uuidString)"))
+        #expect(BenchCLI.refusal(opts("--grant-write", dangling.path), scenario: scenario) != nil, "a dangling link out of the temp root")
         // A link from outside into the temp root is as good as the folder.
         #expect(BenchCLI.refusal(opts("--grant-write", "/tmp/../tmp"), scenario: scenario) != nil, "/tmp spelled another way is still /tmp")
         // Read-only and no-grant mutating stay refused with a real model; so does no grant flag at all only when a grant is given.
