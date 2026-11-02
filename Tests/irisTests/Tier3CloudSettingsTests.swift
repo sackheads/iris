@@ -108,12 +108,39 @@ struct Tier3CloudSettingsTests {
     func wireBody() throws {
         var request = GeminiRequest(contents: [Content(role: "user", parts: [Part(text: "hi")])], systemInstruction: nil, tools: nil)
         let plain = try LLMClient.encodeGeminiBody(request)
-        #expect(!String(decoding: plain, as: UTF8.self).contains("thinkingLevel"))
+        // Every Gemini call goes through this encoder, so the no-level body is pinned byte for byte.
+        #expect(String(decoding: plain, as: UTF8.self) == #"{"contents":[{"parts":[{"text":"hi"}],"role":"user"}]}"#)
         request.thinkingLevel = "low"
         let body = try LLMClient.encodeGeminiBody(request)
         let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
         let thinking = ((json["generationConfig"] as? [String: Any])?["thinkingConfig"]) as? [String: Any]
         #expect(thinking?["thinkingLevel"] as? String == "low")
         #expect(json["contents"] != nil, "the rest of the body is still there")
+    }
+
+    @Test("a model that answers 400 to the level is asked again without it, once noticed")
+    func levelRefusedIsRetriedWithout() async throws {
+        let ok = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [
+            Part(text: "SAFE", functionCall: nil, functionResponse: nil, thought_signature: nil, thoughtSignature: nil)]))],
+                                usageMetadata: nil)
+        let seen = Seen()
+        let said = Seen()
+        var engine = CloudAuxiliaryEngine()
+        engine.thinkingLevel = { "low" }
+        engine.model = { "gemini-2.5-flash-\(UUID().uuidString)" }
+        engine.send = { request, _ in
+            seen.add(request.thinkingLevel)
+            if request.thinkingLevel != nil { throw APIError(message: "Invalid value at thinking_level", statusCode: 400, provider: "Gemini") }
+            return ok
+        }
+        engine.notice = { said.add($0) }
+        let text = try await engine.generate(prompt: "p", jsonSchema: nil)
+        #expect(text == "SAFE" && seen.all == ["low", nil], "asked with the level, then without")
+        #expect(said.all.count == 1)
+
+        // A 400 that is not about the level still surfaces (the second ask fails the same way).
+        var failing = engine
+        failing.send = { _, _ in throw APIError(message: "bad request", statusCode: 400, provider: "Gemini") }
+        await #expect(throws: APIError.self) { _ = try await failing.generate(prompt: "p", jsonSchema: nil) }
     }
 }
