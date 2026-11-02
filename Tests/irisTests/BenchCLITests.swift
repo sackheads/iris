@@ -64,6 +64,10 @@ struct BenchCLITests {
         let b = BenchCLI.parse(["iris", "--bench", "foo.json"])
         #expect(b?.dumpRequestsDir == nil)
         #expect(BenchCLI.parse(["iris", "--bench", "--grant-read", "w", "foo.json"])?.grantRead == "w")
+        // A grant makes a mutating job, so it is refused with a real model.
+        let real = BenchCLI.parse(["iris", "--bench", "--grant-read", "w", "foo.json", "--real"])
+        #expect(real.flatMap(BenchCLI.refusal) != nil)
+        #expect(BenchCLI.parse(["iris", "--bench", "--grant-read", "w", "foo.json"]).flatMap(BenchCLI.refusal) == nil)
         #expect(b?.transcript == false)
         #expect(BenchCLI.parse(["iris", "--bench", "foo.json", "--dump-requests"])?.dumpRequestsDir == nil)
     }
