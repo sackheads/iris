@@ -74,7 +74,8 @@ struct SkillCurationAdvancementsTests {
             try FileManager.default.createDirectory(at: corruptFolder, withIntermediateDirectories: true)
             try "".write(to: corruptFolder.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
 
-            let report = await SkillCurator.shared.curateSkills(paths: paths)
+            try ageFolder(corruptFolder)
+            let report = await SkillCurator.shared.curateSkills(paths: paths, apply: true)
             #expect(report.totalSkillsScanned == 2)
             #expect(report.validSkillsCount == 1)
             #expect(report.prunedSkillsCount == 1)
