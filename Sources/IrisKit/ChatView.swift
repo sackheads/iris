@@ -22,6 +22,8 @@ struct ChatView: View {
     /// session exists (a manual collapse is remembered only until the strip empties out, at which
     /// point `SessionStripView` resets this back to `true` itself).
     @State private var sessionStripExpanded = true
+    /// The goal progress popover (#882), opened from the toolbar.
+    @State private var showGoalProgress = false
     /// Whether the Archived disclosure group is open. The single source of truth: the group
     /// binds to it directly, so the disclosure triangle always does what it looks like it does.
     @State private var archivedExpanded = false
@@ -502,6 +504,20 @@ struct ChatView: View {
             }
         }
         .toolbar {
+            // #882: read-only, on demand, and outside the composer stack (a fourth goal chip there
+            // would crowd it, and an unbounded chip there has blanked the window twice, #62 and #164).
+            // Shown while there is a goal or a checkpoint on record to look at.
+            if let id = state.selectedConversationId,
+               let conv = state.conversations.first(where: { $0.id == id }),
+               conv.goalContract != nil || !conv.checkpointHistory.isEmpty {
+                ToolbarItem(placement: .primaryAction) {
+                    Button { showGoalProgress.toggle() } label: { Image(systemName: "target") }
+                        .help("Goal progress")
+                        .popover(isPresented: $showGoalProgress, arrowEdge: .bottom) {
+                            GoalProgressView(state: state, conversationId: id)
+                        }
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button(action: {
                     openWindow(id: "diagnostics")
