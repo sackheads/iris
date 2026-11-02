@@ -966,7 +966,7 @@ private final class StubCloud: @unchecked Sendable {
     private final class Box: @unchecked Sendable {
         private let lock = NSLock()
         private var levels: [String?] = [], models: [String?] = []
-        func record(_ l: String?, _ m: String?) { lock.withLock { levels.append(l); models.append(m) } }
+        func record(_ l: String?, _ m: String?) -> Int { lock.withLock { levels.append(l); models.append(m); return levels.count } }
         func snapshot() -> (levels: [String?], models: [String?]) { lock.withLock { (levels, models) } }
     }
 
@@ -975,14 +975,15 @@ private final class StubCloud: @unchecked Sendable {
     var seen: (levels: [String?], models: [String?]) { box.snapshot() }
     var calls: Int { box.snapshot().levels.count }
 
-    init(prompt: Int = 100, candidates: Int = 2, total: Int? = 160, reportsUsage: Bool = true) {
+    /// `usageEvery`: usage is reported on every nth call only (1 = every call), a provider that sometimes leaves it out.
+    init(prompt: Int = 100, candidates: Int = 2, total: Int? = 160, reportsUsage: Bool = true, usageEvery: Int = 1) {
         let box = self.box
         send = { request, model in
-            box.record(request.thinkingLevel, model)
+            let n = box.record(request.thinkingLevel, model)
             let text = request.contents.flatMap(\.parts).compactMap(\.text).joined()
             let part = Part(text: text.contains("IGNORE ALL RULES") ? "MALICIOUS" : "SAFE", functionCall: nil, functionResponse: nil,
                             thought_signature: nil, thoughtSignature: nil)
-            let usage = reportsUsage ? UsageMetadata(promptTokenCount: prompt, candidatesTokenCount: candidates, totalTokenCount: total) : nil
+            let usage = reportsUsage && n % usageEvery == 0 ? UsageMetadata(promptTokenCount: prompt, candidatesTokenCount: candidates, totalTokenCount: total) : nil
             return GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [part]))], usageMetadata: usage)
         }
     }
@@ -1098,6 +1099,23 @@ struct EvalCloudTests {
         let json = String(decoding: try r.encoded(), as: UTF8.self)
         #expect(!json.contains("cost_per_thousand_usd"))
         #expect(EvalCompare.summary(r).contains("PAID: cost n/a per 1,000"))
+    }
+
+    @Test func aPartialUsageReportIsNoReportAndAPartialCoverageLeavesTheCostAbsent() async throws {
+        // A count the provider left out is not 0: the whole report is dropped.
+        #expect(EvalCost.Tokens(UsageMetadata(promptTokenCount: nil, candidatesTokenCount: 5, totalTokenCount: nil)) == nil)
+        #expect(EvalCost.Tokens(UsageMetadata(promptTokenCount: 100, candidatesTokenCount: nil, totalTokenCount: 160)) == nil)
+        #expect(EvalCost.Tokens(UsageMetadata(promptTokenCount: 100, candidatesTokenCount: 2, totalTokenCount: 160))
+                == EvalCost.Tokens(input: 100, output: 2, thought: 58, calls: 1))
+        // Usage on every second call only: the 4 that reported are recorded, the cost is not a number over them.
+        let s = try setUp()
+        defer { try? FileManager.default.removeItem(at: s.root) }
+        let r = try await run(s, StubCloud(usageEvery: 2), guardRun(s, repeats: 1))
+        #expect(r.tokens?.calls == 2 && r.settings["usage_coverage"] == "2 of 4 judgements reported usage")
+        #expect(r.metrics.costPerThousandUsd == nil, "a partial sum over the calls that reported is not the run's cost")
+        // Every call reporting: the cost is there, over all of them, and the coverage says so.
+        let full = try await run(s, StubCloud(), guardRun(s, repeats: 1))
+        #expect(full.settings["usage_coverage"] == "4 of 4 judgements reported usage" && full.metrics.costPerThousandUsd != nil)
     }
 
     @Test func aProviderThatReportsNoUsageLeavesTokensAndCostAbsent() async throws {
