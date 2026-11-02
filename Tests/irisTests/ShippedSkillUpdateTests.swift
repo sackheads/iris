@@ -109,6 +109,19 @@ struct ShippedSkillUpdateTests {
         #expect(try String(contentsOf: target, encoding: .utf8) == "v1")
     }
 
+    @Test("a symlinked skill is the user's arrangement: its link and the file behind it are left alone")
+    func symlinkIsLeftAlone() throws {
+        let (paths, root) = try home(); defer { try? FileManager.default.removeItem(at: root) }
+        let target = item("v2", in: paths).target
+        let elsewhere = root.appendingPathComponent("kept-elsewhere.md")
+        try "v1".write(to: elsewhere, atomically: true, encoding: .utf8)   // an old shipped text
+        try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: target, withDestinationURL: elsewhere)
+        #expect(ShippedSkills.seed([item("v2", in: paths)], previous: ["demo": [hash("v1")]], ensuring: paths) == 0)
+        #expect((try? FileManager.default.destinationOfSymbolicLink(atPath: target.path)) == elsewhere.path, "the link is still a link")
+        #expect(try String(contentsOf: elsewhere, encoding: .utf8) == "v1")
+    }
+
     @Test("a dev install's spelling of an earlier version (~/.iris-dev) is found by its own hash")
     func devSpellingIsUpdated() throws {
         let (paths, root) = try home(); defer { try? FileManager.default.removeItem(at: root) }

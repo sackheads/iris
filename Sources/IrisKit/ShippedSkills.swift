@@ -59,6 +59,9 @@ enum ShippedSkills {
         var replaced = 0
         for item in items where !item.content.isEmpty {
             if fm.fileExists(atPath: item.target.path) {
+                // A symlink is the user's arrangement (a skill kept elsewhere): replacing the file
+                // would replace the link, not the text behind it.
+                if (try? fm.destinationOfSymbolicLink(atPath: item.target.path)) != nil { continue }
                 guard let installed = try? Data(contentsOf: item.target) else { continue }
                 let hash = sha256Hex(installed)
                 guard hash != sha256Hex(Data(item.content.utf8)),
