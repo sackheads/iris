@@ -2,7 +2,7 @@ import Testing
 import Foundation
 @testable import IrisKit
 
-/// Pure mappings behind the session strip (#217 + #19): the tool-argument → activity-text
+/// Pure mappings behind the activity strip (#217 + #19): the tool-argument → activity-text
 /// derivation and the token-count formatter. No SwiftUI here by design (AGENTS.md: no SwiftUI
 /// unit tests) — everything the strip renders from is testable as plain functions.
 @Suite("SessionActivity", .timeLimit(.minutes(1)))
@@ -105,8 +105,8 @@ struct SessionActivityTests {
         #expect(SessionActivity.formatElapsed(3_720) == "1h 02m")
     }
 
-    private static func session(_ phase: SessionSummary.Phase, kind: SessionSummary.Kind = .subagent) -> SessionSummary {
-        SessionSummary(id: UUID(), kind: kind, role: "r", startTime: Date(), phase: phase, lastActivity: nil)
+    private static func session(_ phase: ActivitySummary.Phase, kind: ActivitySummary.Kind = .subagent) -> ActivitySummary {
+        ActivitySummary(id: UUID(), kind: kind, role: "r", startTime: Date(), phase: phase, lastActivity: nil)
     }
 
     @Test("collapsed summary tells an evaluator apart from a subagent, like the expanded rows do")
@@ -138,8 +138,8 @@ struct SessionActivityTests {
     }
 }
 
-/// `AppState`'s session-tracking surface: `registerSubagent`, `updateSessionPhase`,
-/// `finishSession`, and `visibleSessions`. Uses the isolated in-memory constructor (AGENTS.md
+/// `AppState`'s session-tracking surface: `registerSubagent`, `updateRunPhase`,
+/// `finishRun`, and `visibleRuns`. Uses the isolated in-memory constructor (AGENTS.md
 /// invariant 7) so nothing here touches `~/.iris`.
 @MainActor
 @Suite("AppState session tracking (#217 + #19)", .timeLimit(.minutes(1)))
@@ -153,7 +153,7 @@ struct SessionTrackingTests {
         let app = isolatedApp()
         let id = UUID()
         app.registerSubagent(id: id, role: "researcher")
-        let session = app.sessions.first { $0.id == id }
+        let session = app.stripRuns.first { $0.id == id }
         #expect(session?.kind == .subagent)
         #expect(session?.role == "researcher")
         #expect(session?.phase != nil)
@@ -165,32 +165,32 @@ struct SessionTrackingTests {
         let app = isolatedApp()
         let id = UUID()
         app.registerSubagent(id: id, role: "evaluator", kind: .evaluator)
-        #expect(app.sessions.first { $0.id == id }?.kind == .evaluator)
+        #expect(app.stripRuns.first { $0.id == id }?.kind == .evaluator)
     }
 
-    @Test("updateSessionPhase changes the tracked phase and records lastActivity for .executing")
+    @Test("updateRunPhase changes the tracked phase and records lastActivity for .executing")
     func updatePhase() {
         let app = isolatedApp()
         let id = UUID()
         app.registerSubagent(id: id, role: "engineer")
-        app.updateSessionPhase(id, .executing(tool: "run_command", detail: "swift build"))
-        let session = app.sessions.first { $0.id == id }
+        app.updateRunPhase(id, .executing(tool: "run_command", detail: "swift build"))
+        let session = app.stripRuns.first { $0.id == id }
         if case .executing(let tool, let detail) = session?.phase {
             #expect(tool == "run_command")
             #expect(detail == "swift build")
         } else {
             Issue.record("expected .executing")
         }
-        #expect(session?.lastActivity == SessionSummary.LastActivity(tool: "run_command", detail: "swift build"))
+        #expect(session?.lastActivity == ActivitySummary.LastActivity(tool: "run_command", detail: "swift build"))
     }
 
-    @Test("finishSession marks the session finished with the given status and keeps it")
+    @Test("finishRun marks the session finished with the given status and keeps it")
     func finish() {
         let app = isolatedApp()
         let id = UUID()
         app.registerSubagent(id: id, role: "engineer")
-        app.finishSession(id: id, status: "completed")
-        let session = app.sessions.first { $0.id == id }
+        app.finishRun(id: id, status: "completed")
+        let session = app.stripRuns.first { $0.id == id }
         if case .finished(let status, _) = session?.phase {
             #expect(status == "completed")
         } else {
@@ -200,50 +200,50 @@ struct SessionTrackingTests {
 
     /// Fix round 1, item 1: `goal_complete` fires the completion callback from inside the tool
     /// handler while the SAME engine turn keeps running (its next round produces a closing text
-    /// reply), so a `.responding`/`.thinking` update can land AFTER `finishSession` already ran.
+    /// reply), so a `.responding`/`.thinking` update can land AFTER `finishRun` already ran.
     /// Once finished, nothing may move a session off that phase, and the sweep must still collect
     /// it (i.e. the guard doesn't also block the sweep from seeing it as finished).
-    @Test("updateSessionPhase after finishSession is a no-op; the sweep still removes it")
+    @Test("updateRunPhase after finishRun is a no-op; the sweep still removes it")
     func finishedSessionIgnoresLaterPhaseUpdates() {
         let app = isolatedApp()
         let id = UUID()
         app.registerSubagent(id: id, role: "engineer")
-        app.finishSession(id: id, status: "completed")
-        app.updateSessionPhase(id, .responding)
-        let session = app.sessions.first { $0.id == id }
+        app.finishRun(id: id, status: "completed")
+        app.updateRunPhase(id, .responding)
+        let session = app.stripRuns.first { $0.id == id }
         guard case .finished(let status, let at) = session?.phase else {
-            Issue.record("expected .finished to survive a later updateSessionPhase call")
+            Issue.record("expected .finished to survive a later updateRunPhase call")
             return
         }
         #expect(status == "completed")
-        let swept = SessionSummary.sweep(app.sessions, now: at.addingTimeInterval(61), lingerWindow: 60)
+        let swept = ActivitySummary.sweep(app.stripRuns, now: at.addingTimeInterval(61), lingerWindow: 60)
         #expect(swept.isEmpty)
     }
 
     /// Fix round 1, item 6: an evaluator's conversation is deleted by `GoalEvaluator` right after
-    /// `finishSession` — there's no transcript behind a lingering row, so it's removed immediately.
+    /// `finishRun` — there's no transcript behind a lingering row, so it's removed immediately.
     /// A subagent (not an evaluator) still lingers.
-    @Test("finishSession removes an evaluator session immediately, with no linger")
+    @Test("finishRun removes an evaluator session immediately, with no linger")
     func evaluatorFinishHasNoLinger() {
         let app = isolatedApp()
         let evaluatorId = UUID(), subagentId = UUID()
         app.registerSubagent(id: evaluatorId, role: "evaluator", kind: .evaluator)
         app.registerSubagent(id: subagentId, role: "engineer")
-        app.finishSession(id: evaluatorId, status: "graded")
-        app.finishSession(id: subagentId, status: "completed")
-        #expect(app.sessions.contains { $0.id == evaluatorId } == false)
-        #expect(app.sessions.first { $0.id == subagentId }.map {
+        app.finishRun(id: evaluatorId, status: "graded")
+        app.finishRun(id: subagentId, status: "completed")
+        #expect(app.stripRuns.contains { $0.id == evaluatorId } == false)
+        #expect(app.stripRuns.first { $0.id == subagentId }.map {
             if case .finished = $0.phase { return true } else { return false }
         } == true)
     }
 
-    @Test("visibleSessions puts the main session first and includes only subagent/evaluator kinds")
+    @Test("visibleRuns puts the main session first and includes only subagent/evaluator kinds")
     func visibleSessionsOrdering() {
         let app = isolatedApp()
         let subagentId = UUID(), evaluatorId = UUID()
         app.registerSubagent(id: subagentId, role: "engineer")
         app.registerSubagent(id: evaluatorId, role: "evaluator", kind: .evaluator)
-        let visible = app.visibleSessions
+        let visible = app.visibleRuns
         #expect(visible.first?.kind == .main)
         #expect(visible.first?.role == "main")
         #expect(Set(visible.dropFirst().map(\.id)) == [subagentId, evaluatorId])
@@ -262,13 +262,13 @@ struct SessionTrackingTests {
         let app = isolatedApp()
         let id = app.selectedConversationId!
         app.beginEngineTurn(for: id)
-        let firstStart = app.visibleSessions.first?.elapsedStartTime
+        let firstStart = app.visibleRuns.first?.elapsedStartTime
         #expect(firstStart != nil)
         app.beginEngineTurn(for: id)   // nested — must not reset the start
-        #expect(app.visibleSessions.first?.elapsedStartTime == firstStart)
+        #expect(app.visibleRuns.first?.elapsedStartTime == firstStart)
         app.endEngineTurn(for: id)     // 2→1: still running, start still held
         #expect(app.hasTurnInFlight(for: id))
-        #expect(app.visibleSessions.first?.elapsedStartTime == firstStart)
+        #expect(app.visibleRuns.first?.elapsedStartTime == firstStart)
         app.endEngineTurn(for: id)     // balance the nested begin above
     }
 
@@ -277,10 +277,10 @@ struct SessionTrackingTests {
         let app = isolatedApp()
         let id = app.selectedConversationId!
         app.beginEngineTurn(for: id)
-        #expect(app.visibleSessions.first?.elapsedStartTime != nil)
+        #expect(app.visibleRuns.first?.elapsedStartTime != nil)
         app.endEngineTurn(for: id)
         #expect(app.hasTurnInFlight(for: id) == false)
-        #expect(app.visibleSessions.first?.elapsedStartTime == nil)
+        #expect(app.visibleRuns.first?.elapsedStartTime == nil)
     }
 
     /// Fix round 1, item 4: two conversations, a turn running in A — selecting B must show B idle
@@ -294,14 +294,14 @@ struct SessionTrackingTests {
 
         app.selectedConversationId = a
         app.beginEngineTurn(for: a)
-        app.updateSessionPhase(a, .executing(tool: "run_command", detail: "echo hi"))
-        #expect(app.visibleSessions.first?.phase == .executing(tool: "run_command", detail: "echo hi"))
+        app.updateRunPhase(a, .executing(tool: "run_command", detail: "echo hi"))
+        #expect(app.visibleRuns.first?.phase == .executing(tool: "run_command", detail: "echo hi"))
 
         app.selectedConversationId = b
-        #expect(app.visibleSessions.first?.phase == .idle)
+        #expect(app.visibleRuns.first?.phase == .idle)
 
         app.selectedConversationId = a
-        #expect(app.visibleSessions.first?.phase == .executing(tool: "run_command", detail: "echo hi"))
+        #expect(app.visibleRuns.first?.phase == .executing(tool: "run_command", detail: "echo hi"))
         app.endEngineTurn(for: a)
     }
 
@@ -313,7 +313,7 @@ struct SessionTrackingTests {
         let app = isolatedApp()
         let id = app.selectedConversationId!
         app.beginEngineTurn(for: id)
-        app.updateSessionPhase(id, .thinking)
+        app.updateRunPhase(id, .thinking)
         #expect(app.hasMainTimingEntry(for: id))
         app.endEngineTurn(for: id)
         #expect(app.hasMainTimingEntry(for: id) == false)
@@ -328,47 +328,47 @@ struct SessionTrackingTests {
         let id = UUID()
         app.createNewConversation(id: id)
         app.beginEngineTurn(for: id)
-        app.updateSessionPhase(id, .thinking)
+        app.updateRunPhase(id, .thinking)
         #expect(app.hasMainTimingEntry(for: id))
         app.deleteConversation(id)
         #expect(app.hasMainTimingEntry(for: id) == false)
     }
 
-    /// Fix round 1 follow-up: an evaluator's `finishSession` removes it from `sessions`
+    /// Fix round 1 follow-up: an evaluator's `finishRun` removes it from `sessions`
     /// immediately (item 6), but its SAME engine turn keeps running and can still reach
-    /// `updateSessionPhase` afterward with a trailing `.responding`. That must not leak into
+    /// `updateRunPhase` afterward with a trailing `.responding`. That must not leak into
     /// `mainPhaseByConversation` — the guard is `isSubagent == false`, and an evaluator
     /// conversation (a) is `isSubagent == true` and (b) is usually already deleted by
     /// `GoalEvaluator` by the time this fires, so the lookup fails either way.
-    @Test("a subagent/evaluator's trailing phase update after finishSession does not leak into the main dictionary")
+    @Test("a subagent/evaluator's trailing phase update after finishRun does not leak into the main dictionary")
     func trailingPhaseUpdateForSubagentDoesNotLeak() {
         let app = isolatedApp()
         let id = UUID()
         app.createNewConversation(id: id, isSubagent: true)
         app.registerSubagent(id: id, role: "evaluator", kind: .evaluator)
-        app.finishSession(id: id, status: "graded")   // removes it from `sessions` immediately
-        app.updateSessionPhase(id, .responding)        // the trailing update from the same turn
+        app.finishRun(id: id, status: "graded")   // removes it from `sessions` immediately
+        app.updateRunPhase(id, .responding)        // the trailing update from the same turn
         #expect(app.hasMainTimingEntry(for: id) == false)
     }
 }
 
-/// The linger sweep is a pure function over `[SessionSummary]` + `now` (AppState schedules it via
+/// The linger sweep is a pure function over `[ActivitySummary]` + `now` (AppState schedules it via
 /// a `Task.sleep`, which is not itself worth testing) — this is what makes the 60s window testable
 /// without sleeping in a test.
-@Suite("SessionSummary.sweep", .timeLimit(.minutes(1)))
+@Suite("ActivitySummary.sweep", .timeLimit(.minutes(1)))
 struct SessionSweepTests {
-    private func finished(_ at: Date) -> SessionSummary {
-        SessionSummary(id: UUID(), kind: .subagent, role: "r", startTime: at, phase: .finished(status: "completed", at: at), lastActivity: nil)
+    private func finished(_ at: Date) -> ActivitySummary {
+        ActivitySummary(id: UUID(), kind: .subagent, role: "r", startTime: at, phase: .finished(status: "completed", at: at), lastActivity: nil)
     }
-    private func running() -> SessionSummary {
-        SessionSummary(id: UUID(), kind: .subagent, role: "r", startTime: Date(), phase: .thinking, lastActivity: nil)
+    private func running() -> ActivitySummary {
+        ActivitySummary(id: UUID(), kind: .subagent, role: "r", startTime: Date(), phase: .thinking, lastActivity: nil)
     }
 
     @Test("drops a finished entry older than the linger window")
     func dropsOld() {
         let now = Date()
         let old = finished(now.addingTimeInterval(-61))
-        let result = SessionSummary.sweep([old], now: now, lingerWindow: 60)
+        let result = ActivitySummary.sweep([old], now: now, lingerWindow: 60)
         #expect(result.isEmpty)
     }
 
@@ -376,14 +376,14 @@ struct SessionSweepTests {
     func keepsRecent() {
         let now = Date()
         let recent = finished(now.addingTimeInterval(-30))
-        let result = SessionSummary.sweep([recent], now: now, lingerWindow: 60)
+        let result = ActivitySummary.sweep([recent], now: now, lingerWindow: 60)
         #expect(result.count == 1)
     }
 
     @Test("never drops a running entry")
     func keepsRunning() {
         let now = Date()
-        let result = SessionSummary.sweep([running()], now: now, lingerWindow: 60)
+        let result = ActivitySummary.sweep([running()], now: now, lingerWindow: 60)
         #expect(result.count == 1)
     }
 }
@@ -417,7 +417,7 @@ struct ExecuteToolSessionActivityTests {
         let engine = IrisEngine(state: app, tier: .medium, principal: .subagent, client: client)
         await engine.processInput("go", source: "System", conversationId: id)
 
-        let session = app.sessions.first { $0.id == id }
-        #expect(session?.lastActivity == SessionSummary.LastActivity(tool: "run_command", detail: "echo hi"))
+        let session = app.stripRuns.first { $0.id == id }
+        #expect(session?.lastActivity == ActivitySummary.LastActivity(tool: "run_command", detail: "echo hi"))
     }
 }

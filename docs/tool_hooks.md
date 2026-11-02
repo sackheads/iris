@@ -8,7 +8,7 @@ These hooks are configured via `~/.iris/settings.json`.
 
 The tool hook lifecycle provides granular control over the agent's interactions:
 
-- **`SessionStart`**: Fired when a brand new conversation session is created.
+- **`SessionStart`**: Fired for every new conversation, subagent threads and job runs' hidden conversations included (so it is not limited to the sessions `list_sessions` shows).
 - **`PreCompress`**: Fired immediately before the conversation history is summarized or compressed to save context window tokens.
 - **`BeforeToolSelection`**: Fired before the LLM decides which tools are available for the current turn.
 - **`BeforeModel`**: Fired immediately before the HTTP request is sent to the LLM provider (Gemini, Anthropic, or OpenAI).

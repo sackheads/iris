@@ -35,7 +35,7 @@ enum Motion {
     /// cannot be compared.
     static func slides(_ reduceMotion: ReduceMotion = .system) -> Bool { !reduceMotion.isOn }
 
-    /// How a composer popup or the session strip slides in or out (#598).
+    /// How a composer popup or the activity strip slides in or out (#598).
     static let reveal = Animation.easeOut(duration: 0.18)
 
     /// SwiftUI's `withAnimation`, with `animation(_:_:)`'s rule.

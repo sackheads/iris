@@ -1,9 +1,9 @@
 import Foundation
 
-/// One running or recently-finished session shown in `SessionStripView` (#217 + #19): the main
+/// One running or recently-finished session shown in `ActivityStripView` (#217 + #19): the main
 /// conversation plus any subagent/evaluator conversations currently in flight. Replaces
 /// `ActiveSubagent`, which only tracked subagents and a coarse free-text status string.
-struct SessionSummary: Identifiable, Hashable, Sendable {
+struct ActivitySummary: Identifiable, Hashable, Sendable {
     enum Kind: Hashable, Sendable {
         case main
         case subagent
@@ -53,11 +53,11 @@ struct SessionSummary: Identifiable, Hashable, Sendable {
     }
 }
 
-extension SessionSummary {
+extension ActivitySummary {
     /// Pure sweep: drops `.finished` entries older than `lingerWindow` relative to `now`. A pure
     /// function over the array (rather than a method that reads `Date()` itself) is what makes the
     /// 60s linger window testable without sleeping in a test.
-    static func sweep(_ sessions: [SessionSummary], now: Date, lingerWindow: TimeInterval) -> [SessionSummary] {
+    static func sweep(_ sessions: [ActivitySummary], now: Date, lingerWindow: TimeInterval) -> [ActivitySummary] {
         sessions.filter { session in
             guard case .finished(_, let at) = session.phase else { return true }
             return now.timeIntervalSince(at) < lingerWindow
@@ -65,7 +65,7 @@ extension SessionSummary {
     }
 }
 
-/// Pure mappings the session strip renders from — no formatting logic lives in the SwiftUI layer,
+/// Pure mappings the activity strip renders from — no formatting logic lives in the SwiftUI layer,
 /// so it is all testable without standing up a view.
 enum SessionActivity {
     /// The activity text shown for an `.executing` phase, derived from the tool's own arguments —
@@ -165,7 +165,7 @@ enum SessionActivity {
 
     /// The activity text for a phase — shared by a session's own row and the collapsed
     /// main-row summary, so both describe `.executing` etc. identically.
-    static func activityText(for phase: SessionSummary.Phase) -> String {
+    static func activityText(for phase: ActivitySummary.Phase) -> String {
         switch phase {
         case .idle: return "idle"
         case .thinking: return "thinking"
@@ -182,8 +182,8 @@ enum SessionActivity {
     /// #19 asked to close. This summarizes what the expanded rows would show: `"2 subagents
     /// running"`, `"1 evaluator running"`, `"1 finished"`, or those joined, so the collapsed line
     /// still says something.
-    /// `sessions` here is non-main entries only (`AppState.sessions`).
-    static func collapsedSummary(for sessions: [SessionSummary]) -> String {
+    /// `sessions` here is non-main entries only (`AppState.stripRuns`).
+    static func collapsedSummary(for sessions: [ActivitySummary]) -> String {
         let running = sessions.filter {
             if case .finished = $0.phase { return false }
             return true

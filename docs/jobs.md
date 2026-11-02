@@ -716,7 +716,7 @@ nobody having asked. A run that thinks a job is warranted says so, and you creat
 A fire does not touch the conversation you are in. Each run gets a **background conversation** of
 its own — a real conversation, so its transcript can be read back afterwards, but flagged
 `isBackground`, so it is out of the sidebar and can never be selected. The model turn happens
-there. A run in flight shows up in the session strip under the composer as `job:<name>`; that is
+there. A run in flight shows up in the activity strip under the composer as `job:<name>`; that is
 the only place a running job is visible while it runs.
 
 ### Built-in jobs

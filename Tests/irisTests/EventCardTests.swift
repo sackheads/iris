@@ -293,7 +293,7 @@ struct EventCardTests {
         #expect(card(status: .blockedOnApproval).headline == "pr-sweep · blocked on approval")
     }
 
-    @Test("elapsedText is the run's wall time in the session strip's format")
+    @Test("elapsedText is the run's wall time in the activity strip's format")
     func elapsed() {
         #expect(card().elapsedText == "1m 15s")
     }

@@ -200,7 +200,7 @@ struct StreamingTextsSourceScanTests {
         let allowed: [String: Int] = [
             "AppState.swift": 1,              // the save's overlay
             "ChatView.swift": 4,              // MessageView's row, Cmd-C, Copy as…, Export
-            "SessionStripView.swift": 1,      // Copy Transcript
+            "ActivityStripView.swift": 1,      // Copy Transcript
             "iris.swift": 2,                  // read_conversation, get_job_run's excerpt
             "ConversationRotation.swift": 1,  // the rotation summary
         ]
