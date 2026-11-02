@@ -192,11 +192,11 @@ struct GoalContract: Codable, Equatable, Sendable {
     /// (the panel's Approve) calls that. Locking is not approval: graders, delegated units and the
     /// legacy migration lock contracts too, and `amend_goal_contract` changes checks with only a
     /// rationale. An amended check is not here.
+    var approvedChecks: [String] = []
     /// Criteria any grade, or the person, found not met, in the order first seen (#883). Durable harness
     /// state like `waivers` and `judgements`: `lastGoalEvaluation` is overwritten by each grade, so
     /// without this the fact that a criterion once failed is gone by the time the goal completes.
     var everNotMet: [UUID] = []
-    var approvedChecks: [String] = []
     /// #334 — where those checks were approved to run: the goal's working directory when Approve
     /// was clicked, canonical. A check approved for one directory is not approved for another,
     /// and the agent can move the conversation's workspace with `set_workspace` unasked.
