@@ -56,7 +56,7 @@ struct BenchCLITests {
     }
 
     @Test("--dump-requests takes a directory and its value is not taken for the scenario path")
-    func parseDumpRequests() {
+    func parseDumpRequests() throws {
         let a = BenchCLI.parse(["iris", "--bench", "--dump-requests", "out", "foo.json", "--transcript"])
         #expect(a?.scenarioPath == "foo.json")
         #expect(a?.dumpRequestsDir == "out")
@@ -66,6 +66,7 @@ struct BenchCLITests {
         #expect(BenchCLI.parse(["iris", "--bench", "--grant-read", "w", "foo.json"])?.grant == .readOnly("w"))
         // A grant makes a mutating job, so it is refused with a real model, whether --real or the file says so.
         var scenario = BenchCLI.defaultScenario
+        scenario.background = true
         let granted = BenchCLI.parse(["iris", "--bench", "--grant-read", "w", "foo.json"])!
         #expect(BenchCLI.parse(["iris", "--bench", "--grant-write", "w", "foo.json"])?.grant == .readWrite("w"))
         #expect(BenchCLI.parse(["iris", "--bench", "--mutating-no-grant", "foo.json"])?.grant == BenchGrant.none)
@@ -75,6 +76,21 @@ struct BenchCLITests {
         #expect(BenchCLI.refusal(granted, scenario: scenario) != nil, "a real-mode scenario file")
         let plain = BenchCLI.parse(["iris", "--bench", "foo.json"])!
         #expect(BenchCLI.refusal(plain, scenario: scenario) == nil, "no grant, no refusal")
+
+        // A grant on a scenario that is not background would do nothing, which reads as "granted and still refused".
+        var foreground = BenchCLI.defaultScenario
+        foreground.background = false
+        let message = BenchCLI.refusal(granted, scenario: foreground)
+        #expect(message?.contains("background") == true)
+        #expect(BenchCLI.refusal(plain, scenario: foreground) == nil, "no grant, nothing to refuse")
+
+        // The three flags exclude each other; the last one must not win silently.
+        for pair in [["--grant-read", "a", "--grant-write", "b"], ["--grant-write", "a", "--mutating-no-grant"],
+                     ["--mutating-no-grant", "--grant-read", "a"]] {
+            let both = try #require(BenchCLI.parse(["iris", "--bench"] + pair + ["foo.json"]))
+            #expect(both.grantConflict && BenchCLI.refusal(both, scenario: scenario)?.contains("exclude each other") == true, Comment(rawValue: "\(pair)"))
+        }
+        #expect(!granted.grantConflict)
     }
 
     @Test("a background scenario's refused call reaches the transcript, and the requests are dumped")

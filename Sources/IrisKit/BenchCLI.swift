@@ -23,6 +23,9 @@ struct BenchOptions: Sendable {
     /// it can be read by a background run (otherwise that read needs an approval nobody can give).
     /// `--grant-write DIR` stamps a read-write one; `--mutating-no-grant` a mutating job with none.
     var grant: BenchGrant?
+    /// More than one of the three grant flags was given. They exclude each other, and the one that came
+    /// last would win silently, which may be the safer one's loss, so the run refuses (#865 review).
+    var grantConflict = false
     /// `--transcript`: print each turn's messages after the summary, so a refused or denied tool
     /// call can be read, not inferred from the timings.
     var transcript: Bool = false
@@ -40,14 +43,15 @@ enum BenchCLI {
         var path: String?
         var dir: String?
         var grant: BenchGrant?
+        var grantFlags = 0
         var i = 0
         while i < rest.count {
             if rest[i] == "--dump-requests" || rest[i] == "--grant-read" || rest[i] == "--grant-write" {
                 // A flag's value is not the scenario path.
                 if i + 1 < rest.count, !rest[i + 1].hasPrefix("--") {
                     switch rest[i] {
-                    case "--grant-read": grant = .readOnly(rest[i + 1])
-                    case "--grant-write": grant = .readWrite(rest[i + 1])
+                    case "--grant-read": grant = .readOnly(rest[i + 1]); grantFlags += 1
+                    case "--grant-write": grant = .readWrite(rest[i + 1]); grantFlags += 1
                     default: dir = rest[i + 1]
                     }
                     i += 1
@@ -55,14 +59,14 @@ enum BenchCLI {
                     FileHandle.standardError.write(Data("iris --bench: \(rest[i]) needs a directory; ignored\n".utf8))
                 }
             } else if rest[i] == "--mutating-no-grant" {
-                grant = BenchGrant.none
+                grant = BenchGrant.none; grantFlags += 1
             } else if !rest[i].hasPrefix("--"), path == nil {
                 path = rest[i]
             }
             i += 1
         }
         return BenchOptions(scenarioPath: path, real: rest.contains("--real"), dumpRequestsDir: dir, grant: grant,
-                            transcript: rest.contains("--transcript"))
+                            grantConflict: grantFlags > 1, transcript: rest.contains("--transcript"))
     }
 
     /// A tiny fake goal loop used when no scenario file is supplied: run one command, then finish.
@@ -85,8 +89,12 @@ enum BenchCLI {
     /// not), so the grant is for a scripted client only. Judged on the resolved scenario: the file
     /// can set `clientMode: "real"` itself.
     static func refusal(_ opts: BenchOptions, scenario: Scenario) -> String? {
-        opts.grant != nil && scenario.clientMode == .real
-            ? "a bench grant makes a mutating job; it is for a scripted run, not a real model" : nil
+        if opts.grantConflict { return "--grant-read, --grant-write and --mutating-no-grant exclude each other: give one" }
+        guard opts.grant != nil else { return nil }
+        if scenario.clientMode == .real { return "a bench grant makes a mutating job; it is for a scripted run, not a real model" }
+        // The grant is stamped on a background conversation only; elsewhere it would do nothing, which reads as "granted and still refused".
+        if !scenario.background { return "a bench grant applies to a background scenario: set \"background\": true in the scenario file" }
+        return nil
     }
 
     /// Load the scenario for these options, applying `--real` as an override.
