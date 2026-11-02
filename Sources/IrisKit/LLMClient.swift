@@ -18,10 +18,15 @@ struct LLMClient {
     let route: ProviderRoute?
     /// A routed endpoint's session: one that follows no redirect. Injectable for a test's stub.
     let endpointSession: URLSession
+    /// The session a built-in provider's non-streaming call goes through. `.shared` pools one
+    /// connection per host, so a hedged canary request (#871) passes an ephemeral one to get its own.
+    let providerSession: URLSession
 
-    init(route: ProviderRoute? = nil, endpointSession: URLSession = NoRedirectSessionDelegate.session) {
+    init(route: ProviderRoute? = nil, endpointSession: URLSession = NoRedirectSessionDelegate.session,
+         providerSession: URLSession = .shared) {
         self.route = route
         self.endpointSession = endpointSession
+        self.providerSession = providerSession
     }
 
     /// The family a call goes to, or nil for a custom endpoint. Only an unrouted client reads
@@ -266,13 +271,15 @@ struct LLMClient {
                 response = try await endpoint.generate()
             } else if provider == LLMProvider.anthropic.rawValue {
                 response = try await AnthropicClient.generateContent(request: request, model: modelName,
-                                                                     transport: try await Self.anthropicTransport(config: config))
+                                                                     transport: try await Self.anthropicTransport(config: config),
+                                                                     session: providerSession)
             } else if provider == LLMProvider.openai.rawValue {
-                response = try await OpenAIClient.generateContent(request: request, model: modelName, apiKey: config.openAIAPIKey, baseURL: config.openAIBaseURL)
+                response = try await OpenAIClient.generateContent(request: request, model: modelName, apiKey: config.openAIAPIKey, baseURL: config.openAIBaseURL,
+                                                                  session: providerSession)
             } else {
                 // Fallback to Gemini
                 let urlRequest = try await makeGeminiURLRequest(request: request, modelName: modelName, streaming: false)
-                let (data, urlResponse) = try await URLSession.shared.data(for: urlRequest)
+                let (data, urlResponse) = try await providerSession.data(for: urlRequest)
                 
                 guard let httpResponse = urlResponse as? HTTPURLResponse else {
                     throw URLError(.badServerResponse)
