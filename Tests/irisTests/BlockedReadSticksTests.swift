@@ -91,6 +91,18 @@ struct BlockedReadSticksTests {
         #expect(canary.calls == one, "the second read made no guard call: \(canary.calls) calls against \(one)")
     }
 
+    @Test("a block of one slice withholds the whole file: an unranged read afterwards is refused with no guard call")
+    func rangedBlockWithholdsTheWholeFile() async throws {
+        let file = try temp("r.txt", "one\ntwo\nthree\nfour\nfive\nsix\n")
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let one = await baseline(file, verdict: "MALICIOUS")
+        let canary = CountingCanary("MALICIOUS")
+        let (_, _, results) = await run([read(file.path, 1, id: "c1"), read(file.path, id: "c2")], canary: canary)
+        #expect(results.first?.contains("CONTENT BLOCKED BY TIER 3") == true)
+        #expect(results.last?.contains(IrisEngine.withheldReadRefusal) == true, "\(results.last ?? "")")
+        #expect(canary.calls == one)
+    }
+
     @Test("a read through a symlink to the withheld file is refused too")
     func symlinkIsRefused() async throws {
         let file = try temp("b.txt", "secret\n")

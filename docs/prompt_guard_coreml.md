@@ -371,7 +371,8 @@ A block also sticks (#874). When tier 2 or tier 3 withholds a whole `read_file` 
 real path (after symlinks) is remembered for the conversation, and a later `read_file` of it, for
 any line range, is answered with Iris's own "withheld" line at once: no guard call, and no approval
 prompt, since the answer is already known. It holds for the rest of the conversation even if the
-file changes, which fails closed; a new conversation starts clean, and the record is in memory
+file changes, and a block of one slice (lines 1-5 of a long file) withholds the whole file, not just
+that slice, which fails closed; a new conversation starts clean, and the record is in memory
 only. A block of a `read_file` or a `run_command` result also counts like a Deny for Vibecop: it no
 longer approves a host command on its own in that conversation (a person still can, and an
 unattended run is refused as before), so a `cat` of the withheld file asks. A blocked `search_web`
