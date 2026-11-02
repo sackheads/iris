@@ -186,4 +186,81 @@ struct PeerLedgerLifecycleTests {
         let reopened = try ConversationStore.onDisk(at: dbURL)
         #expect(try reopened.peers.openRequests(from: a).first?.sentAt == sent)
     }
+
+    // MARK: - #881: the addressee of a request whose sender went away is told
+
+    private func historyText(_ app: AppState, _ id: UUID) -> String {
+        app.conversations.first { $0.id == id }!.history.flatMap(\.parts).compactMap(\.text).joined(separator: "\n")
+    }
+
+    @Test("archiving a sender tells an idle addressee in transcript and history, and starts nothing")
+    func senderArchivedTellsIdleAddressee() throws {
+        let app = AppState(); app.conversations.removeAll()
+        let a = UUID(), b = UUID()
+        for id in [a, b] { app.createNewConversation(id: id) }
+        try open(app, "aaaa0001", from: a, to: b)
+        #expect(app.archiveConversation(a) == nil)
+        #expect(try app.store.peers.message("aaaa0001")?.closeReason == "sender archived")
+        let transcript = app.conversations.first { $0.id == b }!.messages
+        #expect(transcript.contains { $0.role == .system && $0.content.contains("aaaa0001") && $0.content.contains("nobody is waiting for your reply") })
+        #expect(historyText(app, b).contains("aaaa0001") && historyText(app, b).contains("nobody is waiting for your reply"),
+                "an idle or archived addressee sees it on its next turn")
+        #expect(!app.hasTurnInFlight(for: b), "the line is appended, never a turn started for it")
+        #expect(app.takePendingEventLines(for: b).isEmpty)
+        #expect(historyText(app, a).isEmpty, "the sender is told nothing about its own archiving")
+    }
+
+    @Test("a busy addressee gets the line queued for its own turn, not cut into its history")
+    func senderArchivedQueuesForBusyAddressee() throws {
+        let app = AppState(); app.conversations.removeAll()
+        let a = UUID(), b = UUID()
+        for id in [a, b] { app.createNewConversation(id: id) }
+        app.beginEngineTurn(for: b)
+        try open(app, "aaaa0001", from: a, to: b)
+        #expect(app.archiveConversation(a) == nil)
+        #expect(app.conversations.first { $0.id == b }!.history.isEmpty)
+        #expect(app.takePendingEventLines(for: b).contains { $0.contains("aaaa0001") && $0.contains("nobody is waiting") })
+    }
+
+    @Test("a sender with many open requests to one addressee is named for five and counted for the rest")
+    func orphanedRequestsAreCapped() throws {
+        let app = AppState(); app.conversations.removeAll()
+        let a = UUID(), b = UUID()
+        for id in [a, b] { app.createNewConversation(id: id) }
+        for n in 0..<8 { try open(app, "aaaa000\(n)", from: a, to: b, at: Date(timeIntervalSince1970: 1000 + Double(n))) }
+        #expect(app.archiveConversation(a) == nil)
+        let lines = app.conversations.first { $0.id == b }!.messages.filter { $0.content.hasPrefix("[Event]") }.map(\.content)
+        #expect(lines.count == AppState.orphanedRequestLines + 1, "\(lines)")
+        #expect(lines.last?.contains("3 more requests") == true)
+        #expect(lines.prefix(5).allSatisfy { $0.contains("nobody is waiting for your reply") })
+    }
+
+    @Test("requests to different addressees are told separately; an answered request and one expecting no reply say nothing")
+    func onlyOpenRequestsAreAnnounced() throws {
+        let app = AppState(); app.conversations.removeAll()
+        let a = UUID(), b = UUID(), c = UUID()
+        for id in [a, b, c] { app.createNewConversation(id: id) }
+        try open(app, "aaaa0001", from: a, to: b)
+        try open(app, "aaaa0002", from: a, to: c)
+        try open(app, "aaaa0003", from: a, to: b)
+        _ = try app.store.peers.close("aaaa0003", reason: "answered", at: Date())
+        try app.store.peers.insert(PeerMessageRecord(msgId: "aaaa0004", fromSession: a, toSession: b, contextId: "c", inReplyTo: nil,
+                                                     depth: 1, firstLine: "x", sentAt: Date(), expectsReply: false,
+                                                     closedAt: nil, closeReason: nil))
+        #expect(app.archiveConversation(a) == nil)
+        let forB = historyText(app, b), forC = historyText(app, c)
+        #expect(forB.contains("aaaa0001") && !forB.contains("aaaa0002") && !forB.contains("aaaa0003") && !forB.contains("aaaa0004"))
+        #expect(forC.contains("aaaa0002") && !forC.contains("aaaa0001"))
+    }
+
+    @Test("deleting a sender tells the addressee too, naming the sender before it is gone")
+    func senderDeletedTellsAddressee() throws {
+        let app = AppState(); app.conversations.removeAll()
+        let a = UUID(), b = UUID()
+        for id in [a, b] { app.createNewConversation(id: id) }
+        app.setSessionCard(for: a, SessionCard(name: "planner", description: "x"))
+        try open(app, "aaaa0001", from: a, to: b)
+        app.deleteConversation(a)
+        #expect(historyText(app, b).contains("planner") && historyText(app, b).contains("aaaa0001") && historyText(app, b).contains("nobody is waiting"))
+    }
 }
