@@ -21,7 +21,7 @@ struct IrisPaletteTests {
     @Test func lightWindowKeepsWhiteTextReadable() {
         // White text sits on the bubble and on a disabled fill: a paler fill than the dark one
         // would lose it.
-        #expect(IrisPalette.bubbleFaintOpacity(.light) > IrisPalette.bubbleFaintOpacity(.dark))
+        #expect(IrisPalette.bubbleFaintOpacity(.light) == 0.9)
         #expect(IrisPalette.buttonFill(enabled: false, .light) == Color.irisIndigo.opacity(0.6))
         #expect(IrisPalette.buttonFill(enabled: true, .light) == Color.irisIndigo)
         #expect(IrisPalette.spectrumOpacity(.light) == 1)

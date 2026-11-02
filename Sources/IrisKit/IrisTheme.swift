@@ -32,7 +32,7 @@ enum IrisPalette {
     })
     /// The faint end of the user bubble's gradient. White text sits on it, so on a light window
     /// it stays dark enough to read.
-    static func bubbleFaintOpacity(_ scheme: ColorScheme) -> Double { scheme == .dark ? 0.55 : 0.8 }
+    static func bubbleFaintOpacity(_ scheme: ColorScheme) -> Double { scheme == .dark ? 0.55 : 0.9 }
     /// A filled indigo button with white text: its disabled fill must still carry the white.
     static func buttonFill(enabled: Bool, _ scheme: ColorScheme) -> Color {
         enabled ? .irisIndigo : Color.irisIndigo.opacity(scheme == .dark ? 0.4 : 0.6)
