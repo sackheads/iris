@@ -4742,6 +4742,29 @@ class AppState {
     /// clicked Deny on a `run_command` since launch (#600). There, Vibecop no longer approves any
     /// command on its own; the allowlist still does, since the person set it. Transient on purpose.
     @ObservationIgnored private var commandDeniedRoots: Set<UUID?> = []
+    /// The real paths whose content the guard withheld whole (tier 2 or 3) in each conversation, by
+    /// `delegationRoot` (#874). A later `read_file` of one of them, any range, is answered "withheld"
+    /// without a guard call: the block would otherwise be one more roll of the dice per re-ask. It
+    /// holds for the conversation even if the file changes, which fails closed. Transient: a new
+    /// session starts clean, and nothing here is on a `Codable` type (Invariants 1 and 5).
+    @ObservationIgnored private var withheldReadPaths: [UUID: Set<String>] = [:]
+
+    /// A `read_file` or `run_command` result of this conversation was withheld whole (#874): the
+    /// path, if a file read, is remembered, and a block counts like a Deny for Vibecop's host
+    /// APPROVE (`commandDenied`), so a `cat` of the same text asks the person. Only these two tools:
+    /// Vibecop's APPROVE covers `ReadOnlyCommand`, which has no way to fetch a URL, so a blocked
+    /// search or MCP result cannot be re-fetched by an auto-approved host command, and asking
+    /// there would buy nothing.
+    func recordGuardBlock(conversationId: UUID, realPath: String?) {
+        let root = delegationRoot(of: conversationId)
+        commandDeniedRoots.insert(root)
+        if let realPath { withheldReadPaths[root, default: []].insert(realPath) }
+    }
+
+    /// Whether `realPath` was withheld whole earlier in this conversation (#874).
+    func isWithheldRead(conversationId: UUID, realPath: String) -> Bool {
+        withheldReadPaths[delegationRoot(of: conversationId)]?.contains(realPath) ?? false
+    }
 
     /// Where a host command runs from, for the read-only gate (#606 review); a test injects its own.
     @ObservationIgnored var hostLookupOverride: (@MainActor () -> ReadOnlyCommand.HostLookup)?

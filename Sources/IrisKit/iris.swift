@@ -4036,6 +4036,25 @@ actor IrisEngine {
         await MainActor.run { localState?.markConversationReadUntrusted(conversationId) }
     }
 
+    /// #874: a tier-2/3 block of `name`'s result on `conversationId`: a file read's real path is
+    /// remembered and the conversation counts as having been denied, in one main-actor hop.
+    func recordGuardBlock(_ conversationId: UUID, tool name: String, path: String?) async {
+        guard name == "read_file" || name == "run_command" else { return }
+        let real = name == "read_file" ? path.map { IrisPaths.realPath($0) } : nil
+        let localState = state
+        await MainActor.run { localState?.recordGuardBlock(conversationId: conversationId, realPath: real) }
+    }
+
+    /// #874: whether this `read_file` target was withheld whole earlier in the conversation.
+    func isWithheldRead(_ conversationId: UUID, path: String) async -> Bool {
+        let real = IrisPaths.realPath(path)
+        let localState = state
+        return await MainActor.run { localState?.isWithheldRead(conversationId: conversationId, realPath: real) ?? false }
+    }
+
+    /// What a `read_file` of a path the guard already withheld whole returns (#874), for any range.
+    nonisolated static let withheldReadRefusal = "[Iris: the injection guard withheld this file's content earlier in this conversation and it stays withheld, whichever lines you ask for. Do not read it again — use a different source or report what you have.]"
+
     /// 5c §1: never declared to an unattended turn, whatever a sticky set says.
     nonisolated static let unattendedNeverDeclared: Set<String> =
         jobCreationTools.union(["set_workspace", "list_sessions", "describe_session", "send_to_session",
@@ -5876,6 +5895,11 @@ actor IrisEngine {
                 if IrisPaths.default.isUnderExchangeDir(details) || IrisPaths.release.isUnderExchangeDir(details) {
                     return functionCall.name == "read_file" ? Self.exchangePathReadRefusal : Self.artifactWriteRefusal
                 }
+                // #874: before any approval, so the person is never asked to approve a read whose answer is
+                // already "withheld".
+                if functionCall.name == "read_file", await isWithheldRead(conversationId, path: details) {
+                    return noteBlockedResult(Self.withheldReadRefusal, name: "read_file", conversationId: conversationId, blocked: true)
+                }
                 callArgs["path"] = .string(details)
                 if !walked { decidedPath = details }
             }
@@ -6425,6 +6449,8 @@ actor IrisEngine {
         // through to the whole-output path below rather than going unscored.
         var sanitizedResult: String
         var fullyBlockedSearch = false
+        // #874: a whole-content block that is the guard's verdict, not a tier that errored and failed closed.
+        var withheldByVerdict = false
 
         if name == "search_web",
            let outcome = await SearchResultFilter.filter(result, allowed: { text in
@@ -6451,7 +6477,9 @@ actor IrisEngine {
         } else {
             // Structural isolation, then tiers 2 and 3 (skipped for trusted tools), with the lines a
             // role delimiter was stripped from scored alone (#727).
-            sanitizedResult = await InjectionGuard.sanitizeUntrusted(result, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled)
+            let judged = await InjectionGuard.sanitizeUntrustedCacheable(result, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled)
+            sanitizedResult = judged.text
+            withheldByVerdict = judged.cacheable && InjectionGuard.isWholeBlock(judged.text)
         }
         if name == "search_web" { sanitizedResult = OutputCap.cap(sanitizedResult) }
 
@@ -6460,6 +6488,7 @@ actor IrisEngine {
         // because this sentence is Iris's own and must not be presented as tool output.
         guard let conversationId else { return sanitizedResult }
         let blocked = fullyBlockedSearch || sanitizedResult.contains("[CONTENT BLOCKED BY TIER")
+        if withheldByVerdict { await recordGuardBlock(conversationId, tool: name, path: execArgs["path"]?.stringValue) }
         return noteBlockedResult(sanitizedResult, name: name, conversationId: conversationId, blocked: blocked)
     }
     
