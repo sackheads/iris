@@ -4,9 +4,14 @@ import Foundation
 struct BenchOptions: Sendable {
     var scenarioPath: String?
     var real: Bool
+    /// `--dump-requests DIR`: write every model request of the run to DIR (what `--perf` already does).
+    var dumpRequestsDir: String?
+    /// `--transcript`: print each turn's messages after the summary, so a refused or denied tool
+    /// call can be read, not inferred from the timings.
+    var transcript: Bool = false
 }
 
-/// Headless benchmark entry point: parse `--bench [scenario.json] [--real]`, run a scenario
+/// Headless benchmark entry point: parse `--bench [scenario.json] [--real] [--dump-requests DIR] [--transcript]`, run a scenario
 /// through `ScenarioRunner`, and print a timing breakdown. Invoked from `main.swift` before any
 /// SwiftUI window is created, so `swift run iris --bench …` behaves like a standalone tool.
 enum BenchCLI {
@@ -14,10 +19,21 @@ enum BenchCLI {
     /// scenario path (first non-flag token after `--bench`) and the `--real` flag.
     static func parse(_ args: [String]) -> BenchOptions? {
         guard let benchIdx = args.firstIndex(of: "--bench") else { return nil }
-        let rest = args[(benchIdx + 1)...]
-        let path = rest.first { !$0.hasPrefix("--") }
-        let real = rest.contains("--real")
-        return BenchOptions(scenarioPath: path, real: real)
+        let rest = Array(args[(benchIdx + 1)...])
+        var path: String?
+        var dir: String?
+        var i = 0
+        while i < rest.count {
+            if rest[i] == "--dump-requests" {
+                // A flag's value is not the scenario path.
+                if i + 1 < rest.count, !rest[i + 1].hasPrefix("--") { dir = rest[i + 1]; i += 1 }
+            } else if !rest[i].hasPrefix("--"), path == nil {
+                path = rest[i]
+            }
+            i += 1
+        }
+        return BenchOptions(scenarioPath: path, real: rest.contains("--real"), dumpRequestsDir: dir,
+                            transcript: rest.contains("--transcript"))
     }
 
     /// A tiny fake goal loop used when no scenario file is supplied: run one command, then finish.
@@ -63,8 +79,9 @@ enum BenchCLI {
         // first touched (inside ScenarioRunner.run). Real runs keep Keychain access for auth.
         // Bench runs never write to the user's real preferences.
         IrisDefaults.useVolatileCopyOfStandard()
-        let result = await runScenario(scenario)
+        let result = await runScenario(scenario, dumpRequestsTo: opts.dumpRequestsDir.map { URL(fileURLWithPath: $0) })
         print(BenchSummary.render(scenarioName: scenario.name, result: result))
+        if opts.transcript { print(BenchSummary.renderTranscript(result)) }
     }
 
     /// Runs `scenario`, entering `HeadlessMode`'s scope first when it's a fake run. Separated from
@@ -75,11 +92,14 @@ enum BenchCLI {
     /// `HeadlessMode`. Since this is the process's outermost task and `main.swift` exits right
     /// after, the scope in practice covers the whole remaining real-CLI run.
     @MainActor
-    static func runScenario(_ scenario: Scenario, clientOverride: (any LLMClientProtocol)? = nil) async -> ScenarioResult {
+    static func runScenario(_ scenario: Scenario, clientOverride: (any LLMClientProtocol)? = nil,
+                            dumpRequestsTo: URL? = nil) async -> ScenarioResult {
         if scenario.clientMode == .fake {
-            return await HeadlessMode.withEnabled { await ScenarioRunner.run(scenario, clientOverride: clientOverride) }
+            return await HeadlessMode.withEnabled {
+                await ScenarioRunner.run(scenario, clientOverride: clientOverride, dumpRequestsTo: dumpRequestsTo)
+            }
         }
-        return await ScenarioRunner.run(scenario, clientOverride: clientOverride)
+        return await ScenarioRunner.run(scenario, clientOverride: clientOverride, dumpRequestsTo: dumpRequestsTo)
     }
 }
 
@@ -110,6 +130,19 @@ enum BenchSummary {
             lines.append(row(label, fmt(stat.ms), "\(stat.count)"))
         }
         lines.append(row("Total (turns)", fmt(grandTotalMs), ""))
+        return lines.joined(separator: "\n")
+    }
+
+    /// Each turn's messages as `role: content`, a message cut at 400 characters.
+    static func renderTranscript(_ result: ScenarioResult) -> String {
+        var lines = [""]
+        for (i, turn) in result.turnMessages.enumerated() {
+            lines.append("Transcript, turn \(i + 1):")
+            for m in turn {
+                let flat = m.replacingOccurrences(of: "\n", with: " ")
+                lines.append("  " + (flat.count > 400 ? String(flat.prefix(400)) + "..." : flat))
+            }
+        }
         return lines.joined(separator: "\n")
     }
 

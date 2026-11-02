@@ -16,6 +16,12 @@ swift run iris --bench scenarios/live.json --real     # hit a real provider (nee
 - With **no path**, a tiny built-in scenario runs (one command, then finish) — a
   smoke test that the harness itself works.
 - With a **path**, the JSON scenario at that path is loaded (see format below).
+- `--transcript` prints each turn's messages (`role: content`, a message cut at 400
+  characters) after the summary, so a refused or denied tool call can be read, not
+  inferred from the timings.
+- `--dump-requests DIR` writes every model request of the run to `DIR/<turn>-<round>.json`,
+  as `--perf run --dump-requests` does. The request of round N carries the tool results of
+  round N-1.
 - `--real` forces the scenario onto a real provider regardless of what the file
   says (`clientMode` is overridden to `real`). This needs configured provider
   keys/auth and makes network calls, so it never runs in CI.
