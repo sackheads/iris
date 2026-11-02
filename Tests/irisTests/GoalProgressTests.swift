@@ -116,6 +116,17 @@ struct GoalProgressTests {
         #expect(GoalProgressView.line(for: p.checkpoints[0]).contains("not graded"))
     }
 
+    @Test("a goal that ended without checkpoints still has a record to open, from its last grade")
+    func endedGoalWithoutCheckpoints() {
+        let ended = conversation(contract: nil, history: [], last: eval([verdict(a, .met, "done")]))
+        #expect(GoalProgress.hasRecord(ended))
+        let p = GoalProgress(ended)
+        #expect(!p.isLive && p.checkpoints.isEmpty && p.criteria.count == 1 && !p.isEmpty)
+        #expect(!GoalProgress.hasRecord(conversation(contract: nil)), "nothing to show: no button")
+        #expect(!GoalProgress.hasRecord(conversation(contract: nil, last: eval([verdict(a, .met)], status: .verifying))), "a grade still running is not a record")
+        #expect(GoalProgress.hasRecord(conversation(contract: GoalContract(objective: "o", criteria: [a], state: .locked))))
+    }
+
     @Test("after the goal ends, the newest goal's checkpoints and its last grade remain as a record")
     func endedGoal() {
         let id = UUID()

@@ -509,7 +509,7 @@ struct ChatView: View {
             // Shown while there is a goal or a checkpoint on record to look at.
             if let id = state.selectedConversationId,
                let conv = state.conversations.first(where: { $0.id == id }),
-               conv.goalContract != nil || !conv.checkpointHistory.isEmpty {
+               GoalProgress.hasRecord(conv) {
                 ToolbarItem(placement: .primaryAction) {
                     Button { showGoalProgress.toggle() } label: { Image(systemName: "target") }
                         .help("Goal progress")

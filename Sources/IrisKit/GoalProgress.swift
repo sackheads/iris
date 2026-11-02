@@ -44,6 +44,13 @@ struct GoalProgress: Equatable, Sendable {
 
     var isEmpty: Bool { objective == nil && criteria.isEmpty && checkpoints.isEmpty }
 
+    /// Whether there is anything to open the panel for: a goal, a checkpoint on record, or the last
+    /// grade of a goal that ended without checkpoints. The toolbar button is shown on this.
+    static func hasRecord(_ conversation: Conversation) -> Bool {
+        conversation.goalContract != nil || !conversation.checkpointHistory.isEmpty
+            || conversation.lastGoalEvaluation?.status == .graded
+    }
+
     init(_ conversation: Conversation) {
         let contract = conversation.goalContract
         isLive = contract != nil
