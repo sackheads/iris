@@ -12,6 +12,35 @@ extension Color {
     static let irisTeal = Color(red: 0.25, green: 0.80, blue: 0.78)     // ~#40CCC7
 }
 
+/// Colours that read differently on a light window than on a dark one (#277). Pure functions of
+/// the scheme, so a test can pin them without a view.
+enum IrisPalette {
+    /// The LED bar's well: a dark smoke on a dark window, a faint grey on a light one, where
+    /// the same 30% black read as a heavy slab.
+    static func ledWell(_ scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color.black.opacity(0.30) : Color.black.opacity(0.07)
+    }
+    /// The well's edge: a light hairline is invisible on a light window, so it goes dark there.
+    static func ledEdge(_ scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color.white.opacity(0.10) : Color.black.opacity(0.12)
+    }
+    /// The unlit LED: 35% grey vanishes on white.
+    /// Dynamic, because the dot is a layer that resolves it by its own appearance.
+    static let ledOff = Color(nsColor: NSColor(name: nil) { appearance in
+        let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        return NSColor.gray.withAlphaComponent(dark ? 0.35 : 0.5)
+    })
+    /// The faint end of the user bubble's gradient. White text sits on it, so on a light window
+    /// it stays dark enough to read.
+    static func bubbleFaintOpacity(_ scheme: ColorScheme) -> Double { scheme == .dark ? 0.55 : 0.8 }
+    /// A filled indigo button with white text: its disabled fill must still carry the white.
+    static func buttonFill(enabled: Bool, _ scheme: ColorScheme) -> Color {
+        enabled ? .irisIndigo : Color.irisIndigo.opacity(scheme == .dark ? 0.4 : 0.6)
+    }
+    /// The spectrum line: pastel hues washed to 70% vanish on white, so it is full there.
+    static func spectrumOpacity(_ scheme: ColorScheme) -> Double { scheme == .dark ? 0.7 : 1.0 }
+}
+
 // MARK: - Icon asset
 
 enum IrisAsset {
@@ -38,11 +67,12 @@ enum IrisAsset {
 /// one-shot 0.3 s fade to a brighter line and back rather than by speed (#538).
 struct SpectrumLine: View {
     var active: Bool
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         SpectrumLayerView(rate: active ? SpectrumClock.activeRate : SpectrumClock.idleRate)
             .frame(height: 2)
-            .opacity(0.7)
+            .opacity(IrisPalette.spectrumOpacity(scheme))
     }
 }
 
