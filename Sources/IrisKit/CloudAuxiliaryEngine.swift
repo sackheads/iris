@@ -52,8 +52,9 @@ struct CloudAuxiliaryEngine: AuxiliaryInferenceEngine {
     /// one on a shared pool would carry both requests and the hedge would win nothing.
     var sendFresh: Send?
     /// Waits out `hedgeAfter`. The hedge is an optimisation, not a kill (Invariant 4's dispatch-queue
-    /// rule is for kills), so a held pool only makes it fire late; a test injects its own wait.
-    var hedgeSleep: @Sendable (TimeInterval) async throws -> Void = { seconds in try await Task.sleep(for: .seconds(seconds)) }
+    /// rule is for kills), so a held pool only makes it fire late; a test injects its own wait. On the
+    /// suspending clock, so a Mac asleep mid-request does not fire a second paid call at the wake (#608).
+    var hedgeSleep: @Sendable (TimeInterval) async throws -> Void = { seconds in try await Task.sleep(for: .seconds(seconds), clock: .suspending) }
 
     /// The canary's hedge delay: the p95 to p99 of 930 calls on gemini-3.8-flash (6.0 s median, 29.9 s
     /// p99), so about 2.5% of calls are hedged and the 30 s to 110 s ones end near 20 s plus one call.
@@ -181,6 +182,8 @@ struct CloudAuxiliaryEngine: AuxiliaryInferenceEngine {
                     do {
                         let response = try await call(request, model)
                         guard Self.hasText(response) else {
+                            // Paid all the same (a thinking model can spend its budget on thoughts).
+                            await GuardUsage.report(response.usageMetadata, role: role)
                             return .answer(hedge: hedge, .failure(APIError(message: "No text returned from cloud provider for Vibecop.")))
                         }
                         return .answer(hedge: hedge, .success(response))

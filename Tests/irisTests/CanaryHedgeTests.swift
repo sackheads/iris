@@ -130,6 +130,23 @@ struct CanaryHedgeTests {
         #expect(try await value(of: task, within: 10) == "SAFE")
     }
 
+    @Test("an answer with no text is paid for all the same: its usage is reported")
+    func textlessAnswerIsCharged() async throws {
+        let due = Latch(), secondOut = Latch(), firstDone = Latch(), calls = Calls()
+        let engine = Self.engine(due: due, calls: calls,
+            first: { _ in try await secondOut.wait(); firstDone.open(); return Self.answer(nil, usage: Self.usage) },
+            second: { _ in secondOut.open(); try await firstDone.wait(); for _ in 0..<50 { await Task.yield() }; return Self.answer("SAFE", usage: Self.usage) })
+        let recorded = LockedUsage()
+        let task = Task {
+            try await GuardUsage.$sink.withValue(GuardUsage.Sink { recorded.add($0) }) {
+                try await engine.generate(prompt: "p", jsonSchema: nil)
+            }
+        }
+        due.open()
+        #expect(try await value(of: task, within: 10) == "SAFE")
+        #expect(recorded.prompt == 200, "the textless answer's, and the winner's")
+    }
+
     @Test("both requests fail: the first's error, which the caller fails closed on")
     func bothFail() async throws {
         let due = Latch(), secondOut = Latch(), calls = Calls()
