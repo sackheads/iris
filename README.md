@@ -47,4 +47,4 @@ Every slash command is in [docs/slash_commands.md](docs/slash_commands.md).
 
 Iris's working habits - brainstorm first, write the design down, plan, test first - come from [obra/superpowers](https://github.com/obra/superpowers).  [More on that](docs/features.md#inspiration).
 
-Iris is released under the [MIT License](LICENSE).
+Iris is released under the [MIT License](LICENSE). The software it bundles keeps its own licences: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
