@@ -1069,6 +1069,7 @@ struct ChatView: View {
 }
 
 struct MessageView: View {
+    @Environment(\.colorScheme) private var scheme
     let message: ChatMessage
     /// Written through by the `.event` branch, to open the transcript sheet. Every call site has an
     /// `AppState` in scope; it is a stored property rather than an environment value because
@@ -1124,7 +1125,7 @@ struct MessageView: View {
                                 .padding(10)
                                 .background(
                                     LinearGradient(
-                                        gradient: Gradient(colors: [Color.irisIndigo.opacity(0.55), Color.irisIndigo]),
+                                        gradient: Gradient(colors: [Color.irisIndigo.opacity(IrisPalette.bubbleFaintOpacity(scheme)), Color.irisIndigo]),
                                         startPoint: .topLeading,
                                         endPoint: .bottomTrailing
                                     )

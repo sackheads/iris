@@ -33,7 +33,7 @@ struct ModelLED: View {
 
         var color: Color {
             switch self {
-            case .off:           Color.gray.opacity(0.35)
+            case .off:           IrisPalette.ledOff
             case .configured:    Color.orange.opacity(0.55)
             case .ready:         Color.green
             case .active:        Color.green
@@ -129,6 +129,7 @@ struct ModelLEDBar: View {
     /// `IRIS_FORCE_ANIM=led` (Debug only): the primary LED goes active a second after the bar
     /// appears. Its pulse animates a change of state, so forcing it on from the start ran nothing.
     @State private var debugPulse = false
+    @Environment(\.colorScheme) private var scheme
 
     /// Opens Settings on a tab, from a popover's action. `ChatView` passes the scene's
     /// `openSettings` through `SettingsNavigation`; the default does nothing, for previews.
@@ -162,10 +163,10 @@ struct ModelLEDBar: View {
         .padding(.vertical, size.of(6))
         .background(
             RoundedRectangle(cornerRadius: size.of(7))
-                .fill(Color.black.opacity(0.30))
+                .fill(IrisPalette.ledWell(scheme))
                 .overlay(
                     RoundedRectangle(cornerRadius: size.of(7))
-                        .stroke(Color.white.opacity(0.10), lineWidth: 0.5)
+                        .stroke(IrisPalette.ledEdge(scheme), lineWidth: 0.5)
                 )
         )
     }
