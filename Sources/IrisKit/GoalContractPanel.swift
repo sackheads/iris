@@ -3,6 +3,7 @@ import SwiftUI
 /// Displays the draft `GoalContract` proposed by the model, lets the user edit it,
 /// and then either approves (locking the contract and starting the goal loop) or discards it.
 struct GoalContractPanel: View {
+    @Environment(\.colorScheme) private var scheme
     var state: AppState
     let conversation: Conversation
 
@@ -234,7 +235,7 @@ struct GoalContractPanel: View {
             .font(.subheadline.bold())
             .padding(.horizontal, 14)
             .padding(.vertical, 6)
-            .background(ladderOk ? Color.irisIndigo : Color.irisIndigo.opacity(0.4))
+            .background(IrisPalette.buttonFill(enabled: ladderOk, scheme))
             .clipShape(RoundedRectangle(cornerRadius: 6))
             .disabled(!ladderOk)
         }
@@ -487,6 +488,7 @@ fileprivate func judgementHandlers(state: AppState, conversation: Conversation,
 /// contract flipped to `pausedForReview`. Shows the UNVERIFIED self-report, the trusted grader
 /// verdict, and the resume controls (Send back / Approve & continue).
 struct CheckpointPauseChip: View {
+    @Environment(\.colorScheme) private var scheme
     var state: AppState
     /// #191 fix round 1: this chip takes the conversation's ID, not the `Conversation` value
     /// itself. `Conversation.==` compares by `id` only (AppState.swift), so a struct-value
@@ -589,7 +591,7 @@ struct CheckpointPauseChip: View {
                         .font(.subheadline.bold())
                         .padding(.horizontal, 14)
                         .padding(.vertical, 6)
-                        .background(approveBlockers.isEmpty ? Color.irisIndigo : Color.irisIndigo.opacity(0.35))
+                        .background(IrisPalette.buttonFill(enabled: approveBlockers.isEmpty, scheme))
                         .clipShape(RoundedRectangle(cornerRadius: 6))
                         .disabled(!approveBlockers.isEmpty)
                         .accessibilityHint(approveBlockers.isEmpty ? "" : "Decide the human-judged criteria first")
