@@ -19,7 +19,7 @@ enum EvalCLI {
            iris --eval run injection.verdict --model ollama:<name>|llamacpp:<file>|mlx:<id>|cloud:<provider>/<model> [--think product|on|off] [--repeats N] [...]
            iris --eval run injection.stack --stack 1+3|1+2+3 --tier3 ollama:<name>|llamacpp:<file>|mlx:<id>|cloud:<provider>/<model> [--tier2 onnx:<bundle>] [--think …] [--repeats N] [...]
            cloud canary: --model / --tier3 cloud:<provider>/<model> [--thinking-level low|medium] needs --allow-paid --max-dollars N; --estimate-only prints calls and cost, makes none
-           iris --eval compare <a.json> <b.json> [--vary model|runtime|dataset|split|sample|think|repeats]
+           iris --eval compare <a.json> <b.json> [--vary model|runtime|dataset|split|sample|think|repeats|partial]
            iris --eval table [--results DIR] [--out FILE]
     --sample N: about N texts, stratified by label and category, and every category keeps at least one: N below the number of categories (19 in injection v2) still judges one text per category.
     tasks: injection.classifier (onnx:, coreml:), injection.verdict (ollama:, llamacpp:, mlx:, cloud:), injection.stack
@@ -68,7 +68,7 @@ enum EvalCLI {
         case "compare":
             guard positional.count == 2 else { return .failure(.usage("compare takes two result files")) }
             let vary = Set((flags["--vary"] ?? "").split(separator: ",").map(String.init))
-            let known: Set<String> = ["model", "runtime", "dataset", "split", "sample", "think", "repeats"]
+            let known: Set<String> = ["model", "runtime", "dataset", "split", "sample", "think", "repeats", "partial"]
             guard vary.isSubset(of: known) else { return .failure(.usage("--vary takes \(known.sorted().joined(separator: ","))")) }
             return .success(.compare(a: positional[0], b: positional[1], vary: vary))
         case "table":

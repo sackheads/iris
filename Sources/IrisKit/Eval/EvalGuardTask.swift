@@ -490,7 +490,7 @@ extension EvalRunner {
         }
         if let cappedAt, let spendCap {
             settings["capped"] = cappedAt
-            settings["max_dollars"] = String(format: "%.2f", spendCap.cap)
+            settings["max_dollars"] = String(format: "%.4f", spendCap.cap)
         }
         settings["canary"] = canary.spec.description
         settings["context_tag"] = EvalClassifierTask.contextTag
@@ -525,6 +525,7 @@ extension EvalRunner {
         try FileManager.default.createDirectory(at: taskDir, withIntermediateDirectories: true)
         let base = "\(day)-\(run.stack.map { "stack\($0.rawValue.replacingOccurrences(of: "+", with: ""))-" } ?? "")"
             + "\(canary.spec.slug)-think\(canary.think.replacingOccurrences(of: " ", with: "-"))-v\(dataset.manifest.version)-\(run.split)" + (run.sample.map { "-s\($0)" } ?? "-full")
+            + (cappedAt != nil ? "-capped" : "")
         let url = freshFile(in: taskDir, base: base)
         try result.encoded().write(to: url, options: .withoutOverwriting)
         print(EvalCompare.summary(result))

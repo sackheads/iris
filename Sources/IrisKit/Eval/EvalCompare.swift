@@ -21,9 +21,12 @@ enum EvalCompare {
 
     /// Task, configuration and scoring version never vary: across them, a number means something else.
     static func check(_ a: EvalResult, _ b: EvalResult, vary: Set<String>) throws {
-        let d = differences(a.key, b.key)
+        var d = differences(a.key, b.key)
         let never = d.intersection(["task", "configuration", "scoring"])
         guard never.isEmpty else { throw EvalError.incomparable("\(never.sorted().joined(separator: ", ")) differ; those never compare") }
+        // A run stopped by its --max-dollars cap judged only the texts it reached, so its rates sit on a different
+        // mix of texts than a complete run's: they compare only when told to (#873 review).
+        if a.settings["capped"] != nil || b.settings["capped"] != nil { d.insert("partial") }
         let unexpected = d.subtracting(vary)
         guard unexpected.isEmpty else {
             throw EvalError.incomparable("\(unexpected.sorted().joined(separator: ", ")) differ; pass --vary \(unexpected.sorted().joined(separator: ",")) if that's the point")
@@ -179,7 +182,7 @@ enum EvalCompare {
 
     static func summary(_ r: EvalResult) -> String {
         func pct(_ x: Double?) -> String { x.map { String(format: "%.1f%%", $0 * 100) } ?? "n/a" }
-        var s = "\(r.key.task) \(label(r)): FP \(pct(r.metrics.falsePositives.rate)) of \(r.metrics.falsePositives.n), "
+        var s = (r.settings["capped"] != nil ? "PARTIAL (capped) " : "") + "\(r.key.task) \(label(r)): FP \(pct(r.metrics.falsePositives.rate)) of \(r.metrics.falsePositives.n), "
             + "recall \(pct(r.metrics.recall.rate)) of \(r.metrics.recall.n), ROC-AUC \(num(r.metrics.rocAuc))"
         if let f = r.metrics.freshRecall { s += ", fresh recall \(pct(f.rate)) of \(f.n)" }
         if let a = r.metrics.agreement { s += ", agreement \(pct(a.rate)) of \(a.n) texts" }
@@ -260,6 +263,7 @@ enum EvalTable {
                 if m.failClosed > 0 { notes.append("fail-closed \(m.failClosed)") }
                 if m.infra > 0 { notes.append("infra \(m.infra)") }
                 if let t = r.key.think { notes.append("think \(t)") }
+                if let capped = r.settings["capped"] { notes.append("**PARTIAL**: \(capped)") }
                 if r.paid == true { notes.append("paid: \(EvalCost.money(m.costPerThousandUsd)) per 1,000 judgements\(EvalCompare.costNote(r))") }
                 if let a = m.agreement { notes.append("agreement \(pct(a)) of \(a.n), \(m.unstable?.count ?? 0) unstable") }
                 if let p = m.parseFailures, p > 0 { notes.append("parse failures \(p)") }

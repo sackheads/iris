@@ -1220,7 +1220,16 @@ struct EvalCloudTests {
         }
         #expect(stub.calls == 3, "stopped before the call that would cross the cap")
         let r = try EvalResult.decode(Data(contentsOf: URL(fileURLWithPath: file)))
-        #expect(r.verdicts.count == 3 && r.settings["capped"]?.contains("before judgement 4 of 8") == true && r.settings["max_dollars"] == "0.00")
+        #expect(r.verdicts.count == 3 && r.settings["capped"]?.contains("before judgement 4 of 8") == true && r.settings["max_dollars"] == "0.0010")
+        #expect(file.hasSuffix("-capped.json"), "a partial result is named as one: \(file)")
+        #expect(EvalCompare.summary(r).hasPrefix("PARTIAL (capped) "))
+        #expect(EvalTable.render([EvalTable.Loaded(file: "x.json", result: r)]).contains("**PARTIAL**"))
+        // It does not compare with a complete run unless told to, and the same files compare once told.
+        let complete = try await run(s, StubCloud(), guardRun(s, repeats: 2))
+        #expect(throws: EvalError.self) { try EvalCompare.check(r, complete, vary: []) }
+        #expect(throws: EvalError.self) { try EvalCompare.check(complete, r, vary: ["sample"]) }
+        try EvalCompare.check(r, complete, vary: ["partial"])
+        try EvalCompare.check(complete, complete, vary: [])
         #expect(r.tokens?.calls == 3 && EvalCompare.summary(r).contains("PAID"))
     }
 
