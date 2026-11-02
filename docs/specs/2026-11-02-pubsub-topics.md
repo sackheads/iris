@@ -56,7 +56,11 @@ message is 400 wakes at depth 2. Two v1 rules close it.
 2. **A publish costs one rate token per subscriber woken** (the publisher excluded), taken atomically before
    anything is delivered: `PeerRateLimiter.take(for:count:)`, all-or-nothing, refused with the usual "next is
    allowed in about N s" when the bucket cannot cover it. A 20-subscriber publish therefore spends the whole
-   20-send budget, as 20 direct sends would.
+   20-send budget, as 20 direct sends would. A publish that then reaches nobody (the guard withheld it, or the
+   ledger could not record it) gets its tokens back, so rewording a withheld broadcast does not drain the
+   budget; and `Topics.maxSubscribers` may not exceed `PeerRateLimiter.capacity` (a test pins it), or a large
+   publish could never be paid for. The reply-then-republish loop (a woken session answers the publisher, who
+   publishes again) is bounded by hop depth and the same bucket.
 
 ## 3. Trust
 

@@ -11,6 +11,14 @@ struct PeerRateLimiter {
 
     init(now: @escaping () -> Date = Date.init) { self.now = now }
 
+    /// Gives back `count` tokens a publish took and did not use (#696): a broadcast the guard withheld
+    /// or the ledger could not record reached nobody, so it must not cost the sender its budget.
+    mutating func refund(for sender: UUID, count: Int) {
+        guard var b = buckets[sender] else { return }
+        b.tokens = min(Double(Self.capacity), b.tokens + Double(count))
+        buckets[sender] = b
+    }
+
     /// Takes one token for `sender`. Nil when taken; otherwise the seconds until one is available.
     mutating func take(for sender: UUID) -> TimeInterval? { take(for: sender, count: 1) }
 

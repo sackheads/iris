@@ -2772,6 +2772,11 @@ class AppState {
         case refused(String)
     }
 
+    /// Returns the tokens `decideTopicPublish` took for a publish that then reached nobody (#696).
+    func refundTopicPublish(from sender: UUID, subscribers: Int) {
+        peerRateLimiter.refund(for: sender, count: subscribers)
+    }
+
     /// One synchronous decision for a publish to `topic` (#696): the sender must be subscribed and
     /// must not be in a turn a topic message started; the subscribers (the sender excluded) are
     /// found now, at delivery time; the hop depth is checked as for any send; and the rate limit
