@@ -151,6 +151,11 @@ struct EvalResult: Codable, Equatable, Sendable {
         var tokens: EvalCost.Tokens? = nil
         /// True on a paid row whose call came back with no usage: said, not left blank or zero.
         var usageMissing: Bool? = nil
+        /// True when `--hedge-after` fired a second request for this text (#876): even a hedge whose
+        /// stalled leg lost the race and reported no usage sets this, so it's the only way to tell a
+        /// hedge happened from an ordinary single call (`tokens.calls` reads 1 either way). Absent on
+        /// an unhedged run and on a file written before this field.
+        var hedged: Bool? = nil
     }
 
     var schemaVersion = EvalResult.schemaVersion

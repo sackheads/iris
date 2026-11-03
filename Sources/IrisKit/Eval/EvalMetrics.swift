@@ -32,6 +32,10 @@ enum EvalMetrics {
         var trace: EvalGuardTask.Trace? = nil
         /// What a paid canary call reported using (#790); nil for a local one and when it reported none.
         var usage: EvalCost.Tokens? = nil
+        /// Whether a hedge fired for this text under `--hedge-after` (#876): true even when the
+        /// stalled leg lost the race and `usage.calls` stayed at 1, so this is the only way to tell
+        /// a hedge happened from an ordinary single call. False on an unhedged run.
+        var hedged = false
     }
 
     enum Outcome: String, Sendable {

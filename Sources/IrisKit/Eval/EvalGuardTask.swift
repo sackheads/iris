@@ -124,8 +124,14 @@ enum EvalGuardTask {
             }
         }
         let date = Date.ISO8601FormatStyle(timeZone: .current).year().month().day().format(now)
+        // A hedged result must not compare as like for like with an unhedged one of the same model
+        // and day (#900 review): a stalled call that would have timed out can come back as a verdict
+        // under a hedge, which changes what the run measures. Suffixing runtimeVersion puts it in
+        // EvalCompare's existing "runtime" key and --vary dimension, and leaves every unhedged
+        // result's key (the common case) exactly as it was.
+        let hedgeSuffix = hedgeAfter.map { " hedge \($0)s" } ?? ""
         return Canary(engine: engine, spec: spec, fingerprint: "\(spec.name) \(date)",
-                      runtimeVersion: "\(provider.rawValue.lowercased()) \(id) \(date)", think: thinkingLevel.map { "level \($0)" } ?? "default",
+                      runtimeVersion: "\(provider.rawValue.lowercased()) \(id) \(date)\(hedgeSuffix)", think: thinkingLevel.map { "level \($0)" } ?? "default",
                       details: ["think_requested": think.rawValue,
                                 "think_sent": thinkingLevel.map { "generationConfig.thinkingConfig.thinkingLevel \($0)" } ?? "nothing (the provider's default)",
                                 "provider": provider.rawValue.lowercased(), "model_id": id, "run_date": date,
@@ -247,17 +253,22 @@ enum EvalGuardTask {
     /// What one canary call did.
     final class Call: @unchecked Sendable {
         private let lock = NSLock()
-        private var _answer: String?, _error: Error?, _usage: EvalCost.Tokens?
+        private var _answer: String?, _error: Error?, _usage: EvalCost.Tokens?, _hedged = false
         var answer: String? { lock.withLock { _answer } }
         var error: Error? { lock.withLock { _error } }
         /// A cloud canary's reported usage for this text, summed over the calls it took.
         var usage: EvalCost.Tokens? { lock.withLock { _usage } }
+        /// Whether a hedge fired for this text (#876 review 3): true even when the stalled leg lost
+        /// the race and reported no usage, so `usage.calls` alone can't tell a hedge happened from
+        /// an ordinary single call.
+        var hedged: Bool { lock.withLock { _hedged } }
         func answered(_ a: String) { lock.withLock { _answer = a } }
         func failed(_ e: Error) { lock.withLock { _error = e } }
         func used(_ u: UsageMetadata) {
             guard let t = EvalCost.Tokens(u) else { return }   // a partial report counts as none
             lock.withLock { _usage = (_usage ?? .zero) + t }
         }
+        func markHedged() { lock.withLock { _hedged = true } }
     }
 
     @TaskLocal static var call: Call?
@@ -307,17 +318,21 @@ enum EvalGuardTask {
     /// One text through the product up to tier 3. `tier2` nil: the verdict task, tier 2 passing
     /// everything. `stack`: tier 2 as given, or skipped for 1+3.
     static func product(_ text: String, canary: any AuxiliaryInferenceEngine, config: InjectionGuard.GuardConfigFingerprint,
-                        tier2: CoreMLEvaluator.ScopedModel) async -> (outcome: EvalMetrics.Outcome, shown: String, parseFailure: Bool, trace: Trace, usage: EvalCost.Tokens?) {
+                        tier2: CoreMLEvaluator.ScopedModel) async -> (outcome: EvalMetrics.Outcome, shown: String, parseFailure: Bool, trace: Trace, usage: EvalCost.Tokens?, hedged: Bool) {
         let call = Call()
         // The product reports a cloud guard call's usage through `GuardUsage`; bound here, it lands on
-        // this text's call and nowhere else.
+        // this text's call and nowhere else. `HedgeSignal` is the same seam for whether a hedge fired
+        // at all (#876 review 3): a stalled leg that loses the race reports no usage, so usage alone
+        // can't say a hedge happened.
         let sink = GuardUsage.Sink(record: { call.used($0) })
         let (outcome, cacheable, tier2Verdict) = await $call.withValue(call) {
             await GuardUsage.$sink.withValue(sink) {
-                await AuxiliaryModelManager.$scopedEngines.withValue(["canary": Recording(inner: canary)]) {
-                    await CoreMLEvaluator.$scopedModel.withValue(tier2) {
-                        await InjectionGuard.classifyUntrustedTraced(OutputCap.cap(text), contextTag: EvalClassifierTask.contextTag,
-                                                                      maxTier: .tier3_canary, protectionEnabled: true, config: config)
+                await HedgeSignal.$onFired.withValue({ call.markHedged() }) {
+                    await AuxiliaryModelManager.$scopedEngines.withValue(["canary": Recording(inner: canary)]) {
+                        await CoreMLEvaluator.$scopedModel.withValue(tier2) {
+                            await InjectionGuard.classifyUntrustedTraced(OutputCap.cap(text), contextTag: EvalClassifierTask.contextTag,
+                                                                          maxTier: .tier3_canary, protectionEnabled: true, config: config)
+                        }
                     }
                 }
             }
@@ -325,26 +340,26 @@ enum EvalGuardTask {
         let trace = Trace.of(outcome: outcome, tier2: tier2Verdict)
         switch outcome {
         case .passed(let clean):
-            return (clean.contains(EvalClassifierTask.withheldMarker) ? .withheld : .passed, clean, false, trace, call.usage)
+            return (clean.contains(EvalClassifierTask.withheldMarker) ? .withheld : .passed, clean, false, trace, call.usage, call.hedged)
         case .blocked(let marker):
-            if let error = call.error { return (isInfra(error) ? .infra : .failClosed, marker, false, trace, call.usage) }
-            if !cacheable { return (.failClosed, marker, false, trace, call.usage) }
+            if let error = call.error { return (isInfra(error) ? .infra : .failClosed, marker, false, trace, call.usage, call.hedged) }
+            if !cacheable { return (.failClosed, marker, false, trace, call.usage, call.hedged) }
             // Tier 3 answered: the product blocks an answer with no clear verdict too (fail-closed).
             if marker.contains("TIER 3"), let answer = call.answer, InjectionGuard.canaryVerdict(answer) == .unreadable {
-                return (.failClosed, marker, true, trace, call.usage)
+                return (.failClosed, marker, true, trace, call.usage, call.hedged)
             }
-            return (.blocked, marker, false, trace, call.usage)
+            return (.blocked, marker, false, trace, call.usage, call.hedged)
         }
     }
 
     static func score(_ sample: EvalSample, repeatIndex: Int, canary: any AuxiliaryInferenceEngine,
                       config: InjectionGuard.GuardConfigFingerprint, tier2: CoreMLEvaluator.ScopedModel) async -> EvalMetrics.Scored {
         let start = MonotonicClock.nowMs()
-        let (outcome, shown, parse, trace, usage) = await product(sample.text, canary: canary, config: config, tier2: tier2)
+        let (outcome, shown, parse, trace, usage, hedged) = await product(sample.text, canary: canary, config: config, tier2: tier2)
         let seconds = (MonotonicClock.nowMs() - start) / 1000
         let caught = sample.payload.map { EvalMetrics.caught(outcome, shown: shown, payload: $0) }
         return EvalMetrics.Scored(sample: sample, outcome: outcome, rawScore: nil, seconds: seconds, caught: caught,
-                                  repeatIndex: repeatIndex, parseFailure: parse, trace: trace, usage: usage)
+                                  repeatIndex: repeatIndex, parseFailure: parse, trace: trace, usage: usage, hedged: hedged)
     }
 }
 
@@ -509,6 +524,10 @@ extension EvalRunner {
         }
 
         var settings = canary.details
+        if run.hedgeAfter != nil {
+            let fired = scored.count { $0.hedged }
+            settings["hedges_fired"] = "\(fired) of \(scored.count) judgements"
+        }
         if let coverage { settings["usage_coverage"] = coverage }
         if let partialCost {
             settings["cost_reported_usd"] = String(format: "%.4f", partialCost.reported)
@@ -547,7 +566,8 @@ extension EvalRunner {
                                          rawScore: nil, seconds: $0.seconds, repeatIndex: $0.repeatIndex,
                                          blockedBy: run.stack == nil ? nil : $0.trace?.blockedBy,
                                          tier2Verdict: run.stack == nil ? nil : $0.trace?.tier2Verdict,
-                                         tokens: $0.usage, usageMissing: canary.paid && $0.outcome != .infra && $0.usage == nil ? true : nil) })
+                                         tokens: $0.usage, usageMissing: canary.paid && $0.outcome != .infra && $0.usage == nil ? true : nil,
+                                         hedged: run.hedgeAfter != nil ? $0.hedged : nil) })
         try FileManager.default.createDirectory(at: taskDir, withIntermediateDirectories: true)
         let base = "\(day)-\(run.stack.map { "stack\($0.rawValue.replacingOccurrences(of: "+", with: ""))-" } ?? "")"
             + "\(canary.spec.slug)-think\(canary.think.replacingOccurrences(of: " ", with: "-"))-v\(dataset.manifest.version)-\(run.split)" + (run.sample.map { "-s\($0)" } ?? "-full")

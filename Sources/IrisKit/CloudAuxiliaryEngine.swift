@@ -1,5 +1,12 @@
 import Foundation
 
+/// Whether a hedge fired for the call in scope, independent of whether it also landed a usable
+/// answer (#876 review 2): a stalled leg that loses the race reports no usage, so `GuardUsage`
+/// alone can't say a hedge happened. Task-local, the same seam as `GuardUsage.sink`.
+enum HedgeSignal {
+    @TaskLocal static var onFired: (@Sendable () -> Void)?
+}
+
 /// A guard on the primary provider. Vibecop (#620) asks the model set in Settings
 /// (`vibecopCloudModel`), or the easy tier's when none is. Tier 3's canary (#800) asks
 /// `tier3CloudModel`, else Vibecop's, else the easy tier's, and may send a thinking level. A model the provider does not have falls back to the easy tier for
@@ -204,6 +211,7 @@ struct CloudAuxiliaryEngine: AuxiliaryInferenceEngine {
                 switch leg {
                 case .due:
                     hedged = true
+                    HedgeSignal.onFired?()
                     run(true, second)
                 case .noTimer:
                     break
