@@ -113,18 +113,24 @@ enum ViewerNavigationPolicy {
 /// one window can never be asked for another's page (section 1, rule 2). One instance per window.
 final class ViewerSchemeHandler: NSObject, WKURLSchemeHandler {
     private let document: Data
+    private let includeCSP: Bool
 
-    init(document: Data) {
+    /// `includeCSP` defaults to `true`, what every real window gets; `false` is a test-only seam
+    /// (#901 review finding 1) so a test can show the content rule list alone — with no CSP to
+    /// shadow it — still blocks every connection, rather than the two layers only ever being
+    /// exercised together.
+    init(document: Data, includeCSP: Bool = true) {
         self.document = document
+        self.includeCSP = includeCSP
     }
 
     func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
         guard let url = task.request.url, url == ViewerConfiguration.documentURL else {
-            task.didReceive(Self.response(for: task.request.url, statusCode: 404, contentLength: 0))
+            task.didReceive(response(for: task.request.url, statusCode: 404, contentLength: 0))
             task.didFinish()
             return
         }
-        task.didReceive(Self.response(for: url, statusCode: 200, contentLength: document.count))
+        task.didReceive(response(for: url, statusCode: 200, contentLength: document.count))
         task.didReceive(document)
         task.didFinish()
     }
@@ -133,13 +139,13 @@ final class ViewerSchemeHandler: NSObject, WKURLSchemeHandler {
         // Nothing in flight to cancel: the whole document is handed over in one `didReceive`.
     }
 
-    private static func response(for url: URL?, statusCode: Int, contentLength: Int) -> HTTPURLResponse {
+    private func response(for url: URL?, statusCode: Int, contentLength: Int) -> HTTPURLResponse {
         var headers = [
             "Content-Type": "text/html; charset=utf-8",
             "Content-Length": "\(contentLength)",
             "X-DNS-Prefetch-Control": ViewerConfiguration.dnsPrefetchControlHeader,
         ]
-        if statusCode == 200 {
+        if statusCode == 200, includeCSP {
             headers["Content-Security-Policy"] = ViewerConfiguration.contentSecurityPolicy
         }
         return HTTPURLResponse(
