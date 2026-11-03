@@ -5,17 +5,31 @@ import WebKit
 
 /// #896 phase 1, spec section 6: a document carrying every subresource channel a hostile page
 /// could try (`<img>`, `<link rel=stylesheet>`, `<form>`, `<meta refresh>`, CSS `url()` and
-/// `@import`) all pointed at a loopback listener, loaded as the one trusted main-frame URL. If the
-/// content rule list, the CSP and the navigation policy are doing their job together, the
-/// listener accepts nothing. This never navigates the main frame anywhere but
-/// `ViewerConfiguration.documentURL`, unlike a scheme-table test driving real top-level navigation
-/// to an untrusted URL would — see the note in `ViewerContentRulesTests` for why that shape is
-/// unsafe to write at all (it popped a LaunchServices dialog during this PR's own development).
+/// `@import`) all pointed at a loopback listener, loaded as the one trusted main-frame URL. This
+/// never navigates the main frame anywhere but `ViewerConfiguration.documentURL`, unlike a
+/// scheme-table test driving real top-level navigation to an untrusted URL would — see the note in
+/// `ViewerContentRulesTests` for why that shape is unsafe to write at all (it popped a
+/// LaunchServices dialog during this PR's own development).
+///
+/// Run as a 2x2 matrix over (CSP on/off) x (content rule list on/off) — #901 review finding 1: the
+/// original single test only ever ran both layers together, so a mutation that neutered the list's
+/// block rule, or dropped `add(list)` entirely, still passed (the CSP carried it), and dropping the
+/// CSP header still passed (the list carried it). Each layer alone must still block everything, and
+/// the "neither" arm is the positive control: it must show a connection, proving the listener and
+/// the matrix can actually detect an unblocked channel rather than passing by construction.
 @MainActor
 @Suite("Viewer: zero connections from a hostile document (#896)", .timeLimit(.minutes(1)))
 struct ViewerZeroConnectionsTests {
-    @Test("a hostile document loaded as the trusted document opens zero connections to the loopback listener")
-    func zeroConnections() async throws {
+    @Test(
+        "a hostile document's connections, by which of CSP and the content rule list are in effect",
+        arguments: [
+            (csp: true, ruleList: true, expectBlocked: true),
+            (csp: true, ruleList: false, expectBlocked: true),
+            (csp: false, ruleList: true, expectBlocked: true),
+            (csp: false, ruleList: false, expectBlocked: false),
+        ]
+    )
+    func matrix(_ arm: (csp: Bool, ruleList: Bool, expectBlocked: Bool)) async throws {
         let listener = try ConnectionCountingServer()
         defer { listener.close() }
 
@@ -37,9 +51,9 @@ struct ViewerZeroConnectionsTests {
         let list = try await ViewerContentRules.compile(identifier: id)
         defer { WKContentRuleListStore.default()!.removeContentRuleList(forIdentifier: id) { _ in } }
 
-        let handler = ViewerSchemeHandler(document: Data(html.utf8))
+        let handler = ViewerSchemeHandler(document: Data(html.utf8), includeCSP: arm.csp)
         let config = ViewerConfiguration.build(schemeHandler: handler)
-        config.userContentController.add(list)
+        if arm.ruleList { config.userContentController.add(list) }
 
         let webView = WKWebView(frame: .zero, configuration: config)
         let waiter = TrustedOnlyNavigationWaiter()
@@ -48,10 +62,14 @@ struct ViewerZeroConnectionsTests {
         await waiter.waitForFinish()
 
         // The meta refresh fires after load; give every channel, including it, a real window to
-        // reach the loopback listener before asserting none did.
+        // reach the loopback listener before asserting on the count.
         try? await Task.sleep(for: .seconds(1))
 
-        #expect(listener.acceptedCount == 0, "the loopback listener accepted a connection the viewer should have blocked")
+        if arm.expectBlocked {
+            #expect(listener.acceptedCount == 0, "csp=\(arm.csp) ruleList=\(arm.ruleList): the loopback listener accepted a connection that arm should have blocked")
+        } else {
+            #expect(listener.acceptedCount > 0, "the neither-layer control arm reached zero connections too — the matrix can't tell a blocked channel from an unblocked one")
+        }
     }
 }
 

@@ -25,7 +25,7 @@ import WebKit
 @MainActor
 @Suite("Viewer: a document-initiated navigation away from the trusted page (#896)", .timeLimit(.minutes(1)))
 struct ViewerDocumentInitiatedNavigationTests {
-    @Test("a meta refresh to an unregistered app scheme never reaches the loopback listener, and never hangs")
+    @Test("a meta refresh to an unregistered app scheme never navigates the main frame away, and never hangs")
     func metaRefreshToAppScheme() async throws {
         try await assertMetaRefreshDoesNotEscape(targetHost: "iris-view-test-unregistered-app://evil")
     }
@@ -40,7 +40,10 @@ struct ViewerDocumentInitiatedNavigationTests {
     /// `targetHost` is a scheme WebKit cannot resolve to anything real in this process (an
     /// unregistered custom scheme, or a loopback port with nothing listening at the time of the
     /// refresh unless `listener` is passed) — the point is only that the main-frame navigation the
-    /// page tries to make on its own never completes, hangs, or reaches a live listener.
+    /// page tries to make on its own never completes, hangs, or reaches a live listener. Without a
+    /// listener (the app-scheme case) there is nothing to count a connection to, so the only
+    /// observable is `webView.url` itself: if the refresh had navigated, it would no longer read
+    /// `documentURL` (#901 review finding 3 — the app-scheme arm previously asserted `0 == 0`).
     private func assertMetaRefreshDoesNotEscape(targetHost: String, listener: ConnectionCountingServer? = nil) async throws {
         let html = """
         <html><head><meta http-equiv="refresh" content="0;url=\(targetHost)"></head><body>trusted</body></html>
@@ -63,14 +66,28 @@ struct ViewerDocumentInitiatedNavigationTests {
         // going before asserting it got nowhere.
         try? await Task.sleep(for: .seconds(1))
 
+        #expect(webView.url == ViewerConfiguration.documentURL, "the main frame left the trusted document")
         #expect(listener?.acceptedCount ?? 0 == 0, "the meta refresh reached the loopback listener")
     }
 }
 
+/// Only `ViewerConfiguration.documentURL` is ever allowed — the same cancelling decision every
+/// other WKWebView-driving waiter in this PR has (#901 review finding 2). It doesn't fire offscreen
+/// today (see the suite doc comment), but this is the shape a PR 2 author copies, and it must
+/// default to cancel, not allow, if it ever does run.
 @MainActor
 private final class InitialLoadWaiter: NSObject, WKNavigationDelegate {
     private var continuation: CheckedContinuation<Void, Never>?
     private var finished = false
+
+    func webView(
+        _ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        let isAllowed = navigationAction.targetFrame?.isMainFrame == true
+            && navigationAction.request.url == ViewerConfiguration.documentURL
+        decisionHandler(isAllowed ? .allow : .cancel)
+    }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { resume() }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { resume() }
