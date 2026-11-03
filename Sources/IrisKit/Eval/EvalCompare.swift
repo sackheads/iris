@@ -197,16 +197,24 @@ enum EvalCompare {
 
     /// What a reader of a paid result needs beside its cost: why it is "n/a" (no listed price, or no
     /// judgement reported usage), or that it is a mean over the judgements that did report, with the
-    /// reported total as a lower bound and the figure for all of them (#870). Empty for a complete cost.
+    /// reported total as a lower bound and the figure for all of them (#870). Under `--hedge-after`
+    /// (#876 review 4) a cancelled hedge leg may still be billed by the provider, and the run never
+    /// sees it: cost, and the `--max-dollars` cap's running total, are a lower bound there too.
+    /// Empty for a complete, unhedged cost.
     static func costNote(_ r: EvalResult) -> String {
         guard r.paid == true else { return "" }
+        // "N of M judgements": the caveat only applies once a hedge actually fired. A run where
+        // none did (N == 0) really does have a complete cost, not a lower bound.
+        let hedgeCount = r.settings["hedges_fired"].flatMap { Int($0.split(separator: " ").first ?? "") }
+        let hedged = (hedgeCount ?? 0) > 0
+            ? " (a cancelled hedge leg may still be billed and go uncounted: a lower bound; \(r.settings["hedges_fired"] ?? "") hedged)" : ""
         let coverage = r.settings["usage_coverage"]
         if r.metrics.costPerThousandUsd == nil {
-            if r.priceList == nil { return " (no listed price for the model)" }
-            return coverage.map { " (\($0))" } ?? ""
+            if r.priceList == nil { return " (no listed price for the model)" + hedged }
+            return (coverage.map { " (\($0))" } ?? "") + hedged
         }
-        guard let low = r.settings["cost_reported_usd"].flatMap(Double.init), let all = r.settings["cost_extrapolated_usd"].flatMap(Double.init) else { return "" }
-        return " (mean of the judgements that reported usage, \(coverage ?? "some did not"); reported total \(EvalCost.money(low)) is a lower bound, about \(EvalCost.money(all)) for all)"
+        guard let low = r.settings["cost_reported_usd"].flatMap(Double.init), let all = r.settings["cost_extrapolated_usd"].flatMap(Double.init) else { return hedged }
+        return " (mean of the judgements that reported usage, \(coverage ?? "some did not"); reported total \(EvalCost.money(low)) is a lower bound, about \(EvalCost.money(all)) for all)" + hedged
     }
 
     static func label(_ r: EvalResult) -> String {

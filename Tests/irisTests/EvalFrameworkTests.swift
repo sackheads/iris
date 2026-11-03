@@ -1283,11 +1283,13 @@ struct EvalCloudTests {
         #expect(engine.hedgeAfter == 20)
         #expect(engine.sendFresh != nil, "on a connection of its own, like the product's canary hedge (#871)")
         #expect(hedged.details["hedge_after_seconds"] == "20.0")
+        #expect(hedged.runtimeVersion?.contains("hedge 20.0s") == true, "in the compare key, so a hedged result doesn't compare as like for like (#900 review)")
 
         let unhedged = try await EvalGuardTask.canary(.init(runtime: .cloud, name: "gemini/gemini-3.8-flash"), think: .product,
                                                        credentials: { _ in true })
         let plain = try #require(unhedged.engine as? CloudAuxiliaryEngine)
         #expect(plain.hedgeAfter == nil && plain.sendFresh == nil, "unhedged by default, so #790's numbers stay comparable")
+        #expect(unhedged.runtimeVersion?.contains("hedge") == false, "an unhedged result's key is unchanged")
         #expect(unhedged.details["hedge_after_seconds"] == "none (unhedged)")
     }
 
@@ -1368,6 +1370,73 @@ struct EvalCloudTests {
         let verdict = try #require(result.verdicts.first)
         #expect(verdict.tokens?.calls == 2, "both hedge legs answered and were both charged")
         #expect(verdict.tokens?.input == 200 && verdict.tokens?.output == 4)
+        #expect(verdict.hedged == true)
+        #expect(result.settings["hedges_fired"] == "1 of 1 judgements")
+    }
+
+    @Test("a hedge is recorded even when the stalled leg loses: tokens.calls alone can't tell (#876 review 3)")
+    func hedgedIsTrueEvenWhenOnlyOneLegAnswers() async throws {
+        let root = tempDir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("ds")
+        try writeDataset([sample("b1", "code", text: "let x = 1")], to: dataset)
+        let loserParked = CanaryHedgeTests.Latch()
+        var engine = CloudAuxiliaryEngine()
+        engine.role = CloudAuxiliaryEngine.canaryRole
+        engine.model = { "gemini-3.8-flash" }
+        engine.hedgeAfter = 20
+        engine.hedgeSleep = { _ in }   // fires at once
+        let calls = HedgeCallCounter()
+        engine.send = { _, _ in
+            if calls.next() == 1 {
+                // The primary: parks until cancelled by the hedge's win, like CanaryHedgeTests'
+                // loserIsCancelled, so it never reports usage.
+                do { try await loserParked.wait() } catch { throw CancellationError() }
+            }
+            let part = Part(text: "SAFE", functionCall: nil, functionResponse: nil, thought_signature: nil, thoughtSignature: nil)
+            let usage = UsageMetadata(promptTokenCount: 100, candidatesTokenCount: 2, totalTokenCount: 102)
+            return GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [part]))], usageMetadata: usage)
+        }
+        let canary = EvalGuardTask.Canary(engine: engine, spec: .init(runtime: .cloud, name: "gemini/gemini-3.8-flash"),
+                                          fingerprint: "sha256:fake", runtimeVersion: "gemini test", think: "default", details: [:], paid: true)
+        let run = EvalRunner.GuardRun(task: EvalGuardTask.verdict, canary: canary.spec, think: .product, hedgeAfter: 20,
+                                      allowPaid: true, maxDollars: 10, repeats: 1, split: "test", sample: nil,
+                                      datasetDir: dataset.path, outDir: root.appendingPathComponent("results").path)
+        let url = try await EvalRunner.runGuard(run, repoRoot: root, now: now, canaryFor: { _, _, _, _ in canary })
+        let result = try EvalResult.decode(Data(contentsOf: url))
+        let verdict = try #require(result.verdicts.first)
+        #expect(verdict.tokens?.calls == 1, "the stalled leg was cancelled, not charged")
+        #expect(verdict.hedged == true, "but a hedge really did fire for this text")
+    }
+
+    @Test("a hedged result's runtimeVersion carries the key that keeps it out of a like-for-like compare (#876 review 2)")
+    func hedgedRuntimeVersionIsInTheCompareKey() async throws {
+        let s = try setUp()
+        defer { try? FileManager.default.removeItem(at: s.root) }
+        let plain = try await run(s, StubCloud(), guardRun(s, repeats: 1))
+        var hedgedRun = guardRun(s, repeats: 1)
+        hedgedRun.hedgeAfter = 20
+        let hedged = try await run(s, StubCloud(), hedgedRun)
+        #expect(EvalCompare.differences(plain.key, hedged.key).contains("runtime"), "a hedge changes what the run measures (#876)")
+        #expect(throws: EvalError.self) { try EvalCompare.check(plain, hedged, vary: []) }
+        #expect(throws: Never.self) { try EvalCompare.check(plain, hedged, vary: ["runtime"]) }
+    }
+
+    @Test("runGuard's own default canaryFor really threads --hedge-after to EvalGuardTask.canary (#876 review 1)")
+    func defaultCanaryForThreadsHedgeAfter() async throws {
+        let root = tempDir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("ds")
+        try writeDataset([sample("b1", "code", text: "let x = 1")], to: dataset)
+        // A non-cloud canary with hedgeAfter set reaches EvalGuardTask.canary's own refusal only if
+        // runGuard's default canaryFor (every test above overrides it) actually forwards run.hedgeAfter;
+        // dropped silently, this run would instead try to load an ollama model and fail differently.
+        let run = EvalRunner.GuardRun(task: EvalGuardTask.verdict, canary: .init(runtime: .ollama, name: "x:1"), hedgeAfter: 20,
+                                      repeats: 1, split: "test", sample: nil, datasetDir: dataset.path,
+                                      outDir: root.appendingPathComponent("results").path)
+        await #expect(throws: EvalError.unsupported("--hedge-after is for cloud: models; ollama: has no such setting")) {
+            _ = try await EvalRunner.runGuard(run, repoRoot: root, now: now)
+        }
     }
 
     @Test func aResultWrittenBeforeTheRowTokensStillDecodes() throws {
