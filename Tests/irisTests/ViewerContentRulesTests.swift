@@ -84,14 +84,19 @@ private final class ContentRuleWaiter: NSObject, WKNavigationDelegate {
     private var continuation: CheckedContinuation<LoadOutcome, Never>?
     private var outcome: LoadOutcome?
 
-    func webView(
+    // `nonisolated`, matching house style for an ObjC delegate callback whose signature doesn't
+    // exactly match the protocol's optional requirement once the class is `@MainActor` (see
+    // `ModelDownloader.urlSession(_:downloadTask:...)`): CI's toolchain flagged this as "nearly
+    // matches optional requirement of WKNavigationDelegate" (#901 review round 2).
+    // `MainActor.assumeIsolated` is safe because WebKit only ever calls this on the main thread.
+    nonisolated func webView(
         _ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
         let isAllowed = navigationAction.targetFrame?.isMainFrame == true
             && navigationAction.request.url == ViewerConfiguration.documentURL
         decisionHandler(isAllowed ? .allow : .cancel)
-        if !isAllowed { resolve(.failed) }
+        if !isAllowed { MainActor.assumeIsolated { resolve(.failed) } }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { resolve(.finishedLoading) }

@@ -80,7 +80,12 @@ private final class TrustedOnlyNavigationWaiter: NSObject, WKNavigationDelegate 
     private var continuation: CheckedContinuation<Void, Never>?
     private var finished = false
 
-    func webView(
+    // `nonisolated`, matching house style for an ObjC delegate callback whose signature doesn't
+    // exactly match the protocol's optional requirement once the class is `@MainActor` (see
+    // `ModelDownloader.urlSession(_:downloadTask:...)`): CI's toolchain flagged this as "nearly
+    // matches optional requirement of WKNavigationDelegate" (#901 review round 2). This one
+    // touches no actor-isolated state, so no `MainActor.assumeIsolated` is needed.
+    nonisolated func webView(
         _ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
