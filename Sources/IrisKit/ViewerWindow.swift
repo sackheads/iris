@@ -59,28 +59,29 @@ final class ViewerWindowController: NSObject, NSWindowDelegate {
 
     private var window: NSWindow?
 
-    static func open(document: ViewerDocument, isTainted: Bool) {
+    static func open(document: ViewerDocument, conversationTitle: String, isTainted: Bool) {
         let controller = ViewerWindowController()
-        controller.show(document: document, isTainted: isTainted)
+        controller.show(document: document, conversationTitle: conversationTitle, isTainted: isTainted)
         openControllers[ObjectIdentifier(controller)] = controller
     }
 
     /// For a test that needs the window itself (the live `decidePolicyFor` acceptance pass):
     /// returns it without stashing a second strong reference beyond what showing already keeps.
     @discardableResult
-    static func openForTesting(document: ViewerDocument, isTainted: Bool) -> NSWindow {
+    static func openForTesting(document: ViewerDocument, conversationTitle: String = "", isTainted: Bool) -> NSWindow {
         let controller = ViewerWindowController()
-        controller.show(document: document, isTainted: isTainted)
+        controller.show(document: document, conversationTitle: conversationTitle, isTainted: isTainted)
         openControllers[ObjectIdentifier(controller)] = controller
         return controller.window!
     }
 
-    private func show(document: ViewerDocument, isTainted: Bool) {
+    private func show(document: ViewerDocument, conversationTitle: String, isTainted: Bool) {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 760, height: 560),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
-        window.title = "Viewer"
+        // Carries the conversation's title (spec section 2), not a bare constant.
+        window.title = conversationTitle.isEmpty ? "Viewer" : "\(conversationTitle) — Viewer"
         // Released on close (spec section 4): nothing else should reach for it afterward.
         window.isReleasedWhenClosed = false
         window.delegate = self
@@ -129,12 +130,23 @@ struct ViewerWindowView: View {
 struct ViewerBannerView: View {
     let isTainted: Bool
 
+    /// The exact wording is a pure function (#905 review finding 4), since nothing here could
+    /// otherwise be pinned by a test without a real window-server capture — which this session
+    /// could not take (see the PR body: these test-process windows never registered with
+    /// `CGWindowList` or System Events, so there was nothing to screenshot).
+    static let alwaysLine = "Model-generated content. It cannot run, and makes no network connections."
+    static let taintedLine = "This conversation has read untrusted content."
+
+    static func lines(isTainted: Bool) -> [String] {
+        isTainted ? [alwaysLine, taintedLine] : [alwaysLine]
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("Model-generated content. It cannot run, and makes no network connections.")
+            Text(Self.alwaysLine)
                 .font(.caption)
             if isTainted {
-                Text("This conversation has read untrusted content.")
+                Text(Self.taintedLine)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -278,14 +290,25 @@ final class ViewerNavigationDelegate: NSObject, WKNavigationDelegate, WKUIDelega
     /// How many times `decidePolicyFor` actually ran — only observable proof, in a live window,
     /// that the delegate engaged at all (PR 1 found it never fires for an offscreen web view).
     private(set) var decisionCount = 0
+    /// The pure policy, injectable only for the mutation-check suite (`ViewerGUINavigationTests`):
+    /// substituting an always-`.allow` function there exercises this exact class — the production
+    /// `decisionCount`/`hasAllowedOnce` bookkeeping included — rather than a parallel stub
+    /// delegate that proves nothing about what ships (#905 review finding 1).
+    private let decide: (URL, Bool, Bool) -> ViewerNavigationPolicy.Decision
+
+    init(decide: @escaping (URL, Bool, Bool) -> ViewerNavigationPolicy.Decision = ViewerNavigationPolicy.decide) {
+        self.decide = decide
+    }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
         decisionCount += 1
+        // A request with no URL cancels outright rather than substituting the trusted URL
+        // (#905 review finding 2): the substitution made an unreadable request count as the
+        // trusted one — allowed if it was first, and otherwise burning `hasAllowedOnce` so the
+        // real load that follows gets cancelled instead.
+        guard let url = navigationAction.request.url else { return .cancel }
         let isMainFrame = navigationAction.targetFrame?.isMainFrame == true
-        let decision = ViewerNavigationPolicy.decide(
-            url: navigationAction.request.url ?? ViewerConfiguration.documentURL,
-            isMainFrame: isMainFrame,
-            alreadyLoaded: hasAllowedOnce)
+        let decision = decide(url, isMainFrame, hasAllowedOnce)
         // Flips on ALLOW, not on `didFinish`: a fast `<meta http-equiv="refresh">` can fire its
         // second navigation before the first one finishes loading, and a flag set only at
         // `didFinish` would still read "not loaded yet" for that race (#896 PR 2 review).
