@@ -20,9 +20,15 @@ scripts/check-warnings.sh            # build + tests, fails on any warning in So
 **Zero warnings in our own code.** `scripts/check-warnings.sh` builds the package and the test
 target and fails on any compiler warning from `Sources/` or `Tests/`; dependency warnings are
 ignored. It touches our Swift files first, because an incremental build only prints warnings for
-what it recompiles, so it rebuilds our modules (about a minute) but not the dependencies. A new
-warning is fixed at its source: `_ =` for a result discarded on purpose, the right isolation for
-the code that warns. Do not suppress it (#286).
+what it recompiles, so it rebuilds our modules (about a minute) but not the dependencies. It also
+asks the build not to colour its diagnostics (`NO_COLOR=1`, `-no-color-diagnostics`) and strips
+escape codes before matching: SwiftPM colours a redirected log whenever `CLICOLOR`, `COLORTERM` or
+`TERM` say the terminal can, and an escape code inside the line hid every warning from the match, so
+the gate said "clean" on a build that printed some, in some sessions and not others (#902).
+`scripts/check-warnings-test.sh` pins that filter against a coloured fixture. A new warning is fixed
+at its source: `_ =` for a result discarded on purpose, the right isolation for the code that warns.
+Do not suppress it (#286). A toolchain newer than CI's can raise warnings CI's does not, and the
+reverse; CI's clean build is still the authority.
 
 **CI.** `.github/workflows/test.yml` runs `scripts/check-warnings.sh` (which builds the package
 and tests) and `swift test --no-parallel` on every PR and push to main, on GitHub's `macos-26`

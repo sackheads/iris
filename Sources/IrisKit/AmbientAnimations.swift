@@ -250,7 +250,9 @@ final class WelcomeGlowNSView: AmbientLayerView {
     }
 
     /// The glow as SwiftUI drew it, rendered once: a radial indigo fade, blurred.
-    @MainActor static let glowImage: CGImage? = {
+    @MainActor static let glowImage: CGImage? = renderGlow()
+
+    @MainActor private static func renderGlow() -> CGImage? {
         let renderer = ImageRenderer(content:
             Circle()
                 .fill(RadialGradient(gradient: Gradient(colors: [Color.irisIndigo.opacity(0.45), .clear]),
@@ -259,7 +261,7 @@ final class WelcomeGlowNSView: AmbientLayerView {
                 .blur(radius: 14))
         renderer.scale = 2
         return renderer.cgImage
-    }()
+    }
 }
 
 // MARK: - Model LED
