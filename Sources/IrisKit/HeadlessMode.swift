@@ -61,13 +61,12 @@ enum HeadlessMode {
     /// anywhere else, and a test that drives either entry point directly sees the scope end when
     /// `operation` returns, leaving the process as it found it.
     ///
-    /// `isolation` forwards the caller's actor (both call sites are `@MainActor`) so the compiler
-    /// doesn't treat handing an actor-isolated closure to this nonisolated function as crossing an
-    /// isolation boundary — the same parameter `TaskLocal.withValue` itself takes.
-    static func withEnabled<T>(
-        isolation: isolated (any Actor)? = #isolation,
-        _ operation: () async throws -> T
+    /// `nonisolated(nonsending)` runs the function, and so `operation`, on the caller's executor (both
+    /// call sites are `@MainActor`), so handing an actor-isolated closure in is not an isolation
+    /// crossing. It is the same contract `TaskLocal.withValue`'s overload of that name has.
+    nonisolated(nonsending) static func withEnabled<T>(
+        _ operation: nonisolated(nonsending) () async throws -> T
     ) async rethrows -> T {
-        try await $scoped.withValue(true, operation: operation, isolation: isolation)
+        try await $scoped.withValue(true, operation: operation)
     }
 }
