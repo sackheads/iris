@@ -1185,21 +1185,7 @@ struct MessageView: View {
                             // A copy button, not `.textSelection` (#32): the AttributeGraph cycle
                             // above is between SwiftUI's TextSelection and MarkdownUI's layout, so
                             // this sidesteps it entirely rather than risking it on a subview.
-                            ZStack(alignment: .topTrailing) {
-                                configuration.label
-                                    .relativeLineSpacing(.em(0.15))
-                                    .markdownTextStyle {
-                                        FontFamilyVariant(.monospaced)
-                                        FontSize(.em(0.94))
-                                    }
-                                    .padding(10)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(Color(NSColor.textBackgroundColor).opacity(0.5))
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                                CodeBlockCopyButton(text: configuration.content)
-                                    .padding(6)
-                            }
-                            .markdownMargin(top: .zero, bottom: .em(1))
+                            CodeBlockView(configuration: configuration)
                         }
                         .padding(.vertical, 4)
                 }
@@ -1260,6 +1246,35 @@ struct MessageView: View {
 
 }
 
+/// A fenced code block plus its Copy button (#32), hover-only (#894 review): at rest the button
+/// is invisible and takes no hits, so it never sits over the first line's last few characters
+/// when a line fills the block's width — only a deliberate hover reveals and arms it.
+private struct CodeBlockView: View {
+    let configuration: CodeBlockConfiguration
+    @State private var hovering = false
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            configuration.label
+                .relativeLineSpacing(.em(0.15))
+                .markdownTextStyle {
+                    FontFamilyVariant(.monospaced)
+                    FontSize(.em(0.94))
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(NSColor.textBackgroundColor).opacity(0.5))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            CodeBlockCopyButton(text: configuration.content)
+                .padding(6)
+                .opacity(hovering ? 1 : 0)
+                .allowsHitTesting(hovering)
+        }
+        .onHover { hovering = $0 }
+        .markdownMargin(top: .zero, bottom: .em(1))
+    }
+}
+
 /// The two pasteboard calls Copy makes, so a test can see them without touching the real
 /// clipboard (same seam as `URLTriggerLinkSheet.LinkPasteboard`).
 protocol CodeBlockPasteboard {
@@ -1299,6 +1314,7 @@ struct CodeBlockCopyButton: View {
         }
         .buttonStyle(.plain)
         .help(copied ? "Copied" : "Copy code")
+        .accessibilityLabel(copied ? "Copied" : "Copy code")
     }
 }
 
