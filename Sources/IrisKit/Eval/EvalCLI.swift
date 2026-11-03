@@ -18,7 +18,7 @@ enum EvalCLI {
     usage: iris --eval run <task> --model <runtime:name> [--sample N | --full] [--split test|dev|all] [--dataset DIR] [--out DIR]
            iris --eval run injection.verdict --model ollama:<name>|llamacpp:<file>|mlx:<id>|cloud:<provider>/<model> [--think product|on|off] [--repeats N] [...]
            iris --eval run injection.stack --stack 1+3|1+2+3 --tier3 ollama:<name>|llamacpp:<file>|mlx:<id>|cloud:<provider>/<model> [--tier2 onnx:<bundle>] [--think …] [--repeats N] [...]
-           cloud canary: --model / --tier3 cloud:<provider>/<model> [--thinking-level low|medium] needs --allow-paid --max-dollars N; --estimate-only prints calls and cost, makes none
+           cloud canary: --model / --tier3 cloud:<provider>/<model> [--thinking-level low|medium] [--hedge-after S] needs --allow-paid --max-dollars N; --estimate-only prints calls and cost, makes none
            iris --eval compare <a.json> <b.json> [--vary model|runtime|dataset|split|sample|think|repeats|partial]
            iris --eval table [--results DIR] [--out FILE]
     --sample N: about N texts, stratified by label and category, and every category keeps at least one: N below the number of categories (19 in injection v2) still judges one text per category.
@@ -51,7 +51,9 @@ enum EvalCLI {
         case "run":
             guard positional.count == 1 else { return .failure(.usage("run takes one task")) }
             if [EvalGuardTask.verdict, EvalGuardTask.stack].contains(positional[0]) { return parseGuard(positional[0], flags: flags, full: full, booleans: booleans) }
-            guard booleans.isEmpty, flags["--thinking-level"] == nil, flags["--max-dollars"] == nil else { return .failure(.usage("--allow-paid, --max-dollars, --estimate-only and --thinking-level are for injection.verdict and injection.stack")) }
+            guard booleans.isEmpty, flags["--thinking-level"] == nil, flags["--max-dollars"] == nil, flags["--hedge-after"] == nil else {
+                return .failure(.usage("--allow-paid, --max-dollars, --estimate-only, --thinking-level and --hedge-after are for injection.verdict and injection.stack"))
+            }
             guard let m = flags["--model"], let model = EvalModelSpec.parse(m) else {
                 return .failure(.usage("--model runtime:name is required (runtimes: \(EvalModelSpec.Runtime.allCases.map(\.rawValue).joined(separator: ", ")))"))
             }
@@ -131,6 +133,13 @@ enum EvalCLI {
                 return .failure(.usage("--thinking-level is \(ConfigManager.tier3ThinkingLevels.joined(separator: " or "))"))
             }
             run.thinkingLevel = level
+        }
+        if let h = flags["--hedge-after"] {
+            guard run.canary.runtime == .cloud else { return .failure(.usage("--hedge-after is for a cloud: canary")) }
+            guard let seconds = Double(h), seconds > 0, seconds.isFinite else {
+                return .failure(.usage("--hedge-after takes a positive number of seconds"))
+            }
+            run.hedgeAfter = seconds
         }
         run.allowPaid = booleans.contains("--allow-paid")
         if let m = flags["--max-dollars"] {
