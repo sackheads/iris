@@ -311,7 +311,9 @@ struct TranscriptSheet: View {
                             ForEach(conversation.messages) { message in
                                 MessageView(message: message, state: state,
                                             transcriptAvailable: EventCard.transcriptAvailable(
-                                                for: message, in: state.conversations))
+                                                for: message, in: state.conversations),
+                                            conversationId: conversation.id,
+                                            isTainted: conversation.hasUntrustedToolOutput)
                             }
                             // Scroll target for `scrollToBottom`, matching `ChatView`'s own
                             // "bottomAnchor" pattern rather than scrolling to a message id directly.

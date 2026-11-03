@@ -243,7 +243,9 @@ struct ChatView: View {
                                     case .single(let message):
                                         MessageView(message: message, state: state,
                                                     transcriptAvailable: EventCard.transcriptAvailable(
-                                                        for: message, in: state.conversations))
+                                                        for: message, in: state.conversations),
+                                                    conversationId: conv.id,
+                                                    isTainted: conv.hasUntrustedToolOutput)
                                     case .systemGroup(_, let messages):
                                         SystemGroupView(messages: messages, appState: state)
                                     }
@@ -1098,6 +1100,11 @@ struct MessageView: View {
     /// the message. Read from `state.conversations` in `body` instead, it would subscribe every
     /// event row to the whole conversation array and re-render them on unrelated mutations.
     var transcriptAvailable: Bool = false
+    /// The conversation this message belongs to (#896 PR 2): the viewer window is keyed by
+    /// (conversation id, message id), and its banner names the conversation's own #813 taint.
+    /// Resolved by the list that owns the message, same reasoning as `transcriptAvailable`.
+    var conversationId: UUID
+    var isTainted: Bool
 
     var body: some View {
         HStack(alignment: .top) {
@@ -1185,7 +1192,24 @@ struct MessageView: View {
                             // A copy button, not `.textSelection` (#32): the AttributeGraph cycle
                             // above is between SwiftUI's TextSelection and MarkdownUI's layout, so
                             // this sidesteps it entirely rather than risking it on a subview.
-                            CodeBlockView(configuration: configuration)
+                            CodeBlockView(
+                                configuration: configuration,
+                                // An open fence is not a document yet (#896 PR 2, spec section 2):
+                                // `state.streaming.boxes` is exactly what `liveContent(of:)` above
+                                // already reads, so this is the live answer, not a stale one.
+                                isStreaming: state.streaming.boxes[message.id] != nil,
+                                // Not reachable on merge (#896 PR 2): `ViewerFeatureGate` is off
+                                // until #904 confirms zero DNS lookups. `nil` here, not a disabled
+                                // button, so there is no chip to notice at all.
+                                onOpenViewer: ViewerFeatureGate.isEnabled ? {
+                                    ViewerWindowController.open(
+                                        document: ViewerDocument(
+                                            conversationId: conversationId,
+                                            messageId: message.id,
+                                            content: configuration.content),
+                                        isTainted: isTainted)
+                                } : nil
+                            )
                         }
                         .padding(.vertical, 4)
                 }
@@ -1251,7 +1275,13 @@ struct MessageView: View {
 /// when a line fills the block's width — only a deliberate hover reveals and arms it.
 private struct CodeBlockView: View {
     let configuration: CodeBlockConfiguration
+    let isStreaming: Bool
+    let onOpenViewer: (() -> Void)?
     @State private var hovering = false
+
+    private var offerViewerChip: Bool {
+        onOpenViewer != nil && ViewerChipPolicy.shouldOffer(language: configuration.language, isStreaming: isStreaming)
+    }
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -1265,13 +1295,38 @@ private struct CodeBlockView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color(NSColor.textBackgroundColor).opacity(0.5))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
-            CodeBlockCopyButton(text: configuration.content)
-                .padding(6)
-                .opacity(hovering ? 1 : 0)
-                .allowsHitTesting(hovering)
+            HStack(spacing: 4) {
+                if offerViewerChip, let onOpenViewer {
+                    ViewerChipButton(action: onOpenViewer)
+                }
+                CodeBlockCopyButton(text: configuration.content)
+            }
+            .padding(6)
+            .opacity(hovering ? 1 : 0)
+            .allowsHitTesting(hovering)
         }
         .onHover { hovering = $0 }
         .markdownMargin(top: .zero, bottom: .em(1))
+    }
+}
+
+/// "Open in viewer" (#896 PR 2): hover-revealed like the copy button beside it, so it never sits
+/// over the block's own text at rest.
+struct ViewerChipButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Label("Open in viewer", systemImage: "rectangle.on.rectangle")
+                .font(.caption)
+                .labelStyle(.iconOnly)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .padding(6)
+        .background(Color(NSColor.textBackgroundColor).opacity(0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .help("Open in viewer")
     }
 }
 
