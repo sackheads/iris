@@ -1182,17 +1182,24 @@ struct MessageView: View {
                         // That scroll view swallows trackpad scroll when hovered (#30); wrapping
                         // long lines instead keeps the outer list scrollable everywhere.
                         .markdownBlockStyle(\.codeBlock) { configuration in
-                            configuration.label
-                                .relativeLineSpacing(.em(0.15))
-                                .markdownTextStyle {
-                                    FontFamilyVariant(.monospaced)
-                                    FontSize(.em(0.94))
-                                }
-                                .padding(10)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color(NSColor.textBackgroundColor).opacity(0.5))
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
-                                .markdownMargin(top: .zero, bottom: .em(1))
+                            // A copy button, not `.textSelection` (#32): the AttributeGraph cycle
+                            // above is between SwiftUI's TextSelection and MarkdownUI's layout, so
+                            // this sidesteps it entirely rather than risking it on a subview.
+                            ZStack(alignment: .topTrailing) {
+                                configuration.label
+                                    .relativeLineSpacing(.em(0.15))
+                                    .markdownTextStyle {
+                                        FontFamilyVariant(.monospaced)
+                                        FontSize(.em(0.94))
+                                    }
+                                    .padding(10)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(Color(NSColor.textBackgroundColor).opacity(0.5))
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                CodeBlockCopyButton(text: configuration.content)
+                                    .padding(6)
+                            }
+                            .markdownMargin(top: .zero, bottom: .em(1))
                         }
                         .padding(.vertical, 4)
                 }
@@ -1251,6 +1258,48 @@ struct MessageView: View {
         }
     }
 
+}
+
+/// The two pasteboard calls Copy makes, so a test can see them without touching the real
+/// clipboard (same seam as `URLTriggerLinkSheet.LinkPasteboard`).
+protocol CodeBlockPasteboard {
+    func clearContents() -> Int
+    func setString(_ string: String, forType dataType: NSPasteboard.PasteboardType) -> Bool
+}
+
+extension NSPasteboard: CodeBlockPasteboard {}
+
+/// Copies a fenced code block's text to the clipboard (#32). Agent messages can't carry
+/// `.textSelection` — see the comment on `Markdown(state.liveContent(of:))` above — so this is
+/// the one piece of their content a user can grab without the whole-row Cmd-C fallback.
+struct CodeBlockCopyButton: View {
+    let text: String
+    @State private var copied = false
+
+    static func copy(_ text: String, to pasteboard: some CodeBlockPasteboard) {
+        _ = pasteboard.clearContents()
+        _ = pasteboard.setString(text, forType: .string)
+    }
+
+    var body: some View {
+        Button(action: {
+            Self.copy(text, to: NSPasteboard.general)
+            copied = true
+            Task {
+                try? await Task.sleep(for: .seconds(1.2))
+                copied = false
+            }
+        }) {
+            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .padding(5)
+                .background(Color(NSColor.textBackgroundColor).opacity(0.7))
+                .clipShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(copied ? "Copied" : "Copy code")
+    }
 }
 
 struct SystemGroupView: View {
