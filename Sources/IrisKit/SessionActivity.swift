@@ -177,7 +177,7 @@ enum SessionActivity {
         }
     }
 
-    /// Fix round 1 (#217/#19): while the strip is collapsed but subagent/evaluator sessions exist,
+    /// Fix round 1 (#217/#19): while the strip is collapsed but subagent/evaluator runs exist,
     /// the badge count used to be the ONLY sign of background work — exactly the visibility gap
     /// #19 asked to close. This summarizes what the expanded rows would show: `"2 subagents
     /// running"`, `"1 evaluator running"`, `"1 finished"`, or those joined, so the collapsed line
