@@ -619,7 +619,7 @@ class AppState {
     static let runLingerWindow: TimeInterval = 60
     /// The conversation whose read-only transcript sheet is open, or nil. Transient UI state kept
     /// here — not on `Conversation`, not persisted — because there are two openers for the one
-    /// sheet: a activity-strip row (#217/#19) and an event card's "View run" (#187). The `.sheet`
+    /// sheet: an activity-strip row (#217/#19) and an event card's "View run" (#187). The `.sheet`
     /// itself stays attached to `ActivityStripView`'s outer `Group`, which is always mounted; a
     /// second `.sheet` on `MessageView` would be torn down whenever the message row it is attached
     /// to scrolls out of the lazy stack.
@@ -1020,8 +1020,8 @@ class AppState {
     /// the second's.
     private var engineTurnCounts: [UUID: Int] = [:]
 
-    /// #469 §6 — each session's hop depth: the depth of the last peer message that reached it, 0
-    /// once the user types into it. A send carries the sender's depth + 1. Follows causation, not
+    /// #469 §6 — each session's hop depth: the deepest peer message that has reached it since the
+    /// user last typed into it (0 once they do). A send carries the sender's depth + 1. Follows causation, not
     /// `contextId`, so a loop cannot escape by starting a new thread on every hop. In memory.
     private var peerDepths: [UUID: Int] = [:]
     var peerRateLimiter = PeerRateLimiter()
@@ -2232,7 +2232,7 @@ class AppState {
         }
     }
 
-    /// The strip's data source: the synthesised main session first, then every subagent, evaluator
+    /// The strip's data source: the synthesised row for the conversation you have open first, then every subagent, evaluator
     /// and background job-run entry. `stripRuns` only ever holds non-main kinds (`registerSubagent`
     /// is the sole writer and takes a non-main `kind`); the filter is belt-and-braces. The
     /// synthesised row's id can't collide with one of them either: `createNewConversation` never

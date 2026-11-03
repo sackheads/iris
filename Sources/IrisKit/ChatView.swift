@@ -19,7 +19,7 @@ struct ChatView: View {
     /// Toggled by the toolbar "cpu" badge; drives `ActivityStripView`'s collapsed/expanded state.
     /// Replaces the old `SubagentPopoverView` popover (#217 + #19). Not persisted. Starts `true`:
     /// fix round 1's ruling is that the strip defaults to expanded whenever a subagent/evaluator
-    /// session exists (a manual collapse is remembered only until the strip empties out, at which
+    /// run exists (a manual collapse is remembered only until the strip empties out, at which
     /// point `ActivityStripView` resets this back to `true` itself).
     @State private var activityStripExpanded = true
     /// The goal progress popover (#882), opened from the toolbar.

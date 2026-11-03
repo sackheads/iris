@@ -6491,7 +6491,7 @@ actor IrisEngine {
                                       beforeToolFired: Bool = false) async -> String {
         var execArgs: [String: JSONValue] = args
 
-        // Session strip activity (#217/#19): the detail is derived from the tool's own arguments
+        // Activity strip detail (#217/#19): the detail is derived from the tool's own arguments
         // by a pure mapping, never model-written free text, before anything about the call (hooks,
         // sandbox, sanitization) can change what's shown.
         if let conversationId {

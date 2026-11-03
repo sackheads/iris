@@ -13,7 +13,7 @@ struct DelegatedUnit: Sendable {
 }
 
 /// Which Stop of the user's reached a subagent (#236): Stop, Esc or `/stop` in the conversation it
-/// works under, or the Stop on its own session-strip row.
+/// works under, or the Stop on its own activity-strip row.
 enum SubagentStopKind: Sendable, Equatable {
     case parent
     case row
@@ -38,7 +38,7 @@ final class SubagentManager: @unchecked Sendable {
     /// under (#236). Its post-back starts no turn: the user stopped everything there.
     static let parentStoppedReason = "Cancelled: the user stopped the conversation that delegated to this subagent, and this subagent with it — its model call and any running command were cancelled, and it did not finish its task."
 
-    /// The summary of a subagent stopped from its own row in the session strip (#236). Only this
+    /// The summary of a subagent stopped from its own row in the activity strip (#236). Only this
     /// helper was stopped, so its post-back is delivered as usual for the parent to re-plan.
     static let rowStoppedReason = "Cancelled: the user stopped this subagent — its model call and any running command were cancelled, and it did not finish its task. The conversation that delegated to it was not stopped."
 
