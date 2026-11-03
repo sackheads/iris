@@ -80,18 +80,16 @@ private final class TrustedOnlyNavigationWaiter: NSObject, WKNavigationDelegate 
     private var continuation: CheckedContinuation<Void, Never>?
     private var finished = false
 
-    // `nonisolated`, matching house style for an ObjC delegate callback whose signature doesn't
-    // exactly match the protocol's optional requirement once the class is `@MainActor` (see
-    // `ModelDownloader.urlSession(_:downloadTask:...)`): CI's toolchain flagged this as "nearly
-    // matches optional requirement of WKNavigationDelegate" (#901 review round 2). This one
-    // touches no actor-isolated state, so no `MainActor.assumeIsolated` is needed.
-    nonisolated func webView(
-        _ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
-    ) {
+    // The async overload, not the completion-handler one: the SDK's completion-handler type is
+    // `@MainActor @Sendable`, which a `@MainActor` class's plain override never exactly matches
+    // ("nearly matches optional requirement of WKNavigationDelegate" — #901 review round 3), and
+    // `nonisolated` only compounds it, since `navigationAction`'s own properties are main-actor.
+    // The async form needs neither `nonisolated` nor `MainActor.assumeIsolated` — confirmed
+    // warning-free by dev-3's review.
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
         let isAllowed = navigationAction.targetFrame?.isMainFrame == true
             && navigationAction.request.url == ViewerConfiguration.documentURL
-        decisionHandler(isAllowed ? .allow : .cancel)
+        return isAllowed ? .allow : .cancel
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { resume() }
