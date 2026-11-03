@@ -108,7 +108,10 @@ came from.
 the document is the fence's text, read from the stored message. There is no new persisted field, so
 Invariant 1 has nothing to protect: after a relaunch the chip is still on the fence and opens the same
 document. An open window is not restored at launch (a model-authored page should never reappear without a
-click). A document is capped (proposal: 256 KB; a larger fence shows the chip disabled with the reason).
+click). A document is capped at 1 MB of raw bytes, a code constant and not a setting (a slide or a page with a
+couple of `data:` images passes 256 KB quickly). Over the cap the window shows a Swift-drawn "content too
+large to display (N KB > 1 MB)" instead of rendering. The HTML is never truncated: a cut in the middle of a
+tag is worse than a refusal.
 
 ## 3. Formats, in order
 
@@ -136,7 +139,9 @@ These are estimates; PR 1 measures them.
 - **Binary size.** Nothing for phase 1 (WebKit is a system framework). Phase 2 adds the bundled library:
   Mermaid's minified build is about 2.5 MB, reveal.js under 1 MB.
 - **Memory.** A `WKWebView` runs its content in a separate WebContent process: tens of MB per open view,
-  estimated. One view per window, released on close, and a cap of a few windows open at once.
+  estimated. One view per window, released on close. Several viewer windows may be open at once (ordinary macOS
+  multi-window), with no cap in v1; WebContent memory is reclaimed on close. If memory ever bites, an
+  LRU that closes the oldest is the known lever, and not part of v1.
 - **Chat responsiveness.** Expected nil: the page renders out of process, in its own window, and shares
   no layout with the chat. PR 1 measures the chat's frame time with a large page open.
 
@@ -164,7 +169,7 @@ printing and "save the page" are out; each would need its own look at the rules 
   pointing at it, and an assertion that the listener accepts nothing. If `WKWebView` cannot run headless
   there, the pure tests above stand and this runs once as a GUI pass under the gui-test-lease (window-only
   capture, rule 34), recorded in the PR.
-- **The chip**: a test that a document over the cap is refused; the existing code-block rendering test is
+- **The chip**: a test that a document over 1 MB is refused with the message and not truncated; the existing code-block rendering test is
   untouched, which is the check that the fence's rendering did not change.
 
 ## 7. PR breakdown
@@ -180,7 +185,14 @@ printing and "save the page" are out; each would need its own look at the rules 
    threat-model review, library version pinned, advisories tracked, hostile-input tests, and the
    sanitizer. Not started until PRs 1 to 3 are in use and Brian has asked for diagrams or slides.
 
-## 8. Open questions for Brian
+## 8. Decisions
 
-- Is a 256 KB document cap and a few windows at a time acceptable?
-- Is "links do nothing" acceptable for the first version, or is a confirmed open-in-browser wanted?
+Planner decisions (rule 12; none changes a user-facing promise, so none is Brian's):
+
+1. **Content cap:** 1 MB of raw document bytes, a code constant. Over it, a Swift-drawn message; never a
+   truncated render.
+2. **Window count:** multiple viewer windows, one document each, each destroyed on close; no cap in v1.
+3. **Links are inert in v1.** The navigation delegate cancels every navigation after the first load. A
+   later "open this URL" is the human-confirmed `NSWorkspace` open showing the full URL (section 1, rule 3).
+
+No open question is left for Brian.
