@@ -38,6 +38,13 @@ private func tempDir() -> URL {
     FileManager.default.temporaryDirectory.appendingPathComponent("iris-eval-\(UUID().uuidString)")
 }
 
+/// Counts calls across the one `send` closure both hedge legs share when no `sendFresh` is set.
+private final class HedgeCallCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var n = 0
+    func next() -> Int { lock.withLock { n += 1; return n } }
+}
+
 @Suite("Eval model spec (#788)")
 struct EvalModelSpecTests {
     @Test func splitsOnTheFirstColonOnly() {
@@ -491,7 +498,7 @@ struct EvalGuardTaskTests {
                                       stack: stack, think: .off, repeats: repeats, split: "test", sample: nil,
                                       datasetDir: s.dataset.path, outDir: s.root.appendingPathComponent("results").path)
         let url = try await EvalRunner.runGuard(run, repoRoot: s.root, now: Date(timeIntervalSince1970: 1_800_000_000),
-                                                canaryFor: { spec, _, _ in
+                                                canaryFor: { spec, _, _, _ in
                                                     EvalGuardTask.Canary(engine: canary, spec: spec, fingerprint: "sha256:fake", runtimeVersion: "ollama test",
                                                                          think: "off", details: ["think_requested": "off"])
                                                 },
@@ -1015,8 +1022,8 @@ struct EvalCloudTests {
 
     private func run(_ s: (root: URL, dataset: URL), _ stub: StubCloud, _ run: EvalRunner.GuardRun,
                      credentials: Bool = true) async throws -> EvalResult {
-        let url = try await EvalRunner.runGuard(run, repoRoot: s.root, now: now, canaryFor: { spec, think, level in
-            try await EvalGuardTask.canary(spec, think: think, thinkingLevel: level, credentials: { _ in credentials }, send: stub.send, now: now)
+        let url = try await EvalRunner.runGuard(run, repoRoot: s.root, now: now, canaryFor: { spec, think, level, hedge in
+            try await EvalGuardTask.canary(spec, think: think, thinkingLevel: level, hedgeAfter: hedge, credentials: { _ in credentials }, send: stub.send, now: now)
         })
         return try EvalResult.decode(Data(contentsOf: url))
     }
@@ -1147,7 +1154,7 @@ struct EvalCloudTests {
         defer { try? FileManager.default.removeItem(at: s.root) }
         let local = EvalRunner.GuardRun(task: EvalGuardTask.verdict, canary: .init(runtime: .ollama, name: "fake:1b"), think: .off, repeats: 1,
                                         split: "test", sample: nil, datasetDir: s.dataset.path, outDir: s.root.appendingPathComponent("results").path)
-        let url = try await EvalRunner.runGuard(local, repoRoot: s.root, now: now, canaryFor: { spec, _, _ in
+        let url = try await EvalRunner.runGuard(local, repoRoot: s.root, now: now, canaryFor: { spec, _, _, _ in
             EvalGuardTask.Canary(engine: FakeCanary(), spec: spec, fingerprint: "sha256:fake", runtimeVersion: "ollama test", think: "off", details: [:])
         })
         let r = try EvalResult.decode(Data(contentsOf: url))
@@ -1215,8 +1222,8 @@ struct EvalCloudTests {
         // Each stub call reports about $0.0003 and the estimate says about the same: $0.001 allows three.
         var file = ""
         do {
-            _ = try await EvalRunner.runGuard(guardRun(s, repeats: 2, maxDollars: 0.001), repoRoot: s.root, now: now, canaryFor: { spec, think, level in
-                try await EvalGuardTask.canary(spec, think: think, thinkingLevel: level, credentials: { _ in true }, send: stub.send, now: now)
+            _ = try await EvalRunner.runGuard(guardRun(s, repeats: 2, maxDollars: 0.001), repoRoot: s.root, now: now, canaryFor: { spec, think, level, hedge in
+                try await EvalGuardTask.canary(spec, think: think, thinkingLevel: level, hedgeAfter: hedge, credentials: { _ in true }, send: stub.send, now: now)
             })
             Issue.record("the run should have been stopped by its cap")
         } catch EvalError.capped(let f, let why) {
@@ -1251,8 +1258,8 @@ struct EvalCloudTests {
         defer { try? FileManager.default.removeItem(at: s.root) }
         let stub = StubCloud(reportsUsage: false)
         await #expect(throws: EvalError.self) {
-            _ = try await EvalRunner.runGuard(guardRun(s, repeats: 2, maxDollars: 0.001), repoRoot: s.root, now: now, canaryFor: { spec, think, level in
-                try await EvalGuardTask.canary(spec, think: think, thinkingLevel: level, credentials: { _ in true }, send: stub.send, now: now)
+            _ = try await EvalRunner.runGuard(guardRun(s, repeats: 2, maxDollars: 0.001), repoRoot: s.root, now: now, canaryFor: { spec, think, level, hedge in
+                try await EvalGuardTask.canary(spec, think: think, thinkingLevel: level, hedgeAfter: hedge, credentials: { _ in true }, send: stub.send, now: now)
             })
         }
         #expect(stub.calls > 0 && stub.calls < 8)
@@ -1264,6 +1271,103 @@ struct EvalCloudTests {
         let stub = StubCloud()
         await #expect(throws: EvalError.self) { _ = try await run(s, stub, guardRun(s, maxDollars: nil)) }
         #expect(stub.calls == 0)
+    }
+
+    // MARK: - --hedge-after (#876)
+
+    @Test("--hedge-after reaches the cloud engine on its own connection; absent, the engine is unhedged")
+    func hedgeAfterReachesTheCloudEngine() async throws {
+        let hedged = try await EvalGuardTask.canary(.init(runtime: .cloud, name: "gemini/gemini-3.8-flash"), think: .product,
+                                                     hedgeAfter: 20, credentials: { _ in true })
+        let engine = try #require(hedged.engine as? CloudAuxiliaryEngine)
+        #expect(engine.hedgeAfter == 20)
+        #expect(engine.sendFresh != nil, "on a connection of its own, like the product's canary hedge (#871)")
+        #expect(hedged.details["hedge_after_seconds"] == "20.0")
+
+        let unhedged = try await EvalGuardTask.canary(.init(runtime: .cloud, name: "gemini/gemini-3.8-flash"), think: .product,
+                                                       credentials: { _ in true })
+        let plain = try #require(unhedged.engine as? CloudAuxiliaryEngine)
+        #expect(plain.hedgeAfter == nil && plain.sendFresh == nil, "unhedged by default, so #790's numbers stay comparable")
+        #expect(unhedged.details["hedge_after_seconds"] == "none (unhedged)")
+    }
+
+    @Test("--hedge-after is refused for a non-cloud canary and for a non-positive delay")
+    func hedgeAfterIsRefusedWhereItDoesNotApply() async {
+        await #expect(throws: EvalError.self) {
+            _ = try await EvalGuardTask.canary(.init(runtime: .ollama, name: "x:1"), think: .product, hedgeAfter: 20)
+        }
+        for bad: TimeInterval in [0, -1, -0.001] {
+            await #expect(throws: EvalError.self) {
+                _ = try await EvalGuardTask.canary(.init(runtime: .cloud, name: "gemini/gemini-3.8-flash"), think: .product,
+                                                   hedgeAfter: bad, credentials: { _ in true })
+            }
+        }
+    }
+
+    @Test func hedgeAfterFlagParsesAndRefusesWhereItDoesNotApply() {
+        func parse(_ extra: [String], task: String = "injection.verdict", model: String = "cloud:gemini/gemini-3.8-flash") -> Result<EvalCLI.Command, EvalError>? {
+            EvalCLI.parse(["iris", "--eval", "run", task, "--model", model, "--allow-paid", "--max-dollars", "0.6"] + extra)
+        }
+        guard case .success(.runGuard(let run))? = parse(["--hedge-after", "20"]) else { Issue.record("expected a run"); return }
+        #expect(run.hedgeAfter == 20)
+        guard case .success(.runGuard(let unflagged))? = parse([]) else { Issue.record("expected a run"); return }
+        #expect(unflagged.hedgeAfter == nil, "unhedged by default")
+        for bad in [["--hedge-after", "0"], ["--hedge-after", "-1"], ["--hedge-after", "nan"], ["--hedge-after", "x"]] {
+            guard case .failure? = parse(bad) else { Issue.record("expected a refusal for \(bad)"); continue }
+        }
+        guard case .failure? = parse(["--hedge-after", "20"], model: "ollama:gemma4:12b") else { Issue.record("hedging is for a cloud canary"); return }
+        guard case .failure? = EvalCLI.parse(["iris", "--eval", "run", "injection.classifier", "--model", "onnx:/m", "--hedge-after", "20"]) else {
+            Issue.record("the classifier task takes no --hedge-after"); return
+        }
+    }
+
+    @Test("the estimate notes --hedge-after without counting it: hedging is what the run measures")
+    func hedgeAfterIsNotedInTheEstimateButNotCounted() async throws {
+        let s = try setUp()
+        defer { try? FileManager.default.removeItem(at: s.root) }
+        var run = guardRun(s, allowPaid: false)
+        let unhedged = try EvalRunner.estimate(run, repoRoot: s.root)
+        run.hedgeAfter = 20
+        let hedged = try EvalRunner.estimate(run, repoRoot: s.root)
+        #expect(hedged.contains("--hedge-after 20.0s"))
+        // Same call count and cost either way: the estimate is a per-call mean, and whether any
+        // particular call doubles is exactly the unmeasured thing --hedge-after is run to find out.
+        #expect(unhedged.contains("PAID: 8 calls") && hedged.contains("PAID: 8 calls"))
+    }
+
+    @Test("a hedge that lands two answers sums both on the row's tokens, not just the winner's (#876)")
+    func bothHedgeLegsUsageIsSummedOnTheRowsTokens() async throws {
+        let root = tempDir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("ds")
+        try writeDataset([sample("b1", "code", text: "let x = 1")], to: dataset)
+        let due = CanaryHedgeTests.Latch(), secondOut = CanaryHedgeTests.Latch()
+        let calls = HedgeCallCounter()
+        let answer: @Sendable () -> GeminiResponse = {
+            let part = Part(text: "SAFE", functionCall: nil, functionResponse: nil, thought_signature: nil, thoughtSignature: nil)
+            let usage = UsageMetadata(promptTokenCount: 100, candidatesTokenCount: 2, totalTokenCount: 102)
+            return GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [part]))], usageMetadata: usage)
+        }
+        var engine = CloudAuxiliaryEngine()
+        engine.role = CloudAuxiliaryEngine.canaryRole
+        engine.model = { "gemini-3.8-flash" }
+        engine.hedgeAfter = 20
+        engine.hedgeSleep = { _ in try await due.wait() }
+        engine.send = { _, _ in
+            if calls.next() == 1 { try await secondOut.wait() } else { secondOut.open() }
+            return answer()
+        }
+        due.open()
+        let canary = EvalGuardTask.Canary(engine: engine, spec: .init(runtime: .cloud, name: "gemini/gemini-3.8-flash"),
+                                          fingerprint: "sha256:fake", runtimeVersion: "gemini test", think: "default", details: [:], paid: true)
+        let run = EvalRunner.GuardRun(task: EvalGuardTask.verdict, canary: canary.spec, think: .product, hedgeAfter: 20,
+                                      allowPaid: true, maxDollars: 10, repeats: 1, split: "test", sample: nil,
+                                      datasetDir: dataset.path, outDir: root.appendingPathComponent("results").path)
+        let url = try await EvalRunner.runGuard(run, repoRoot: root, now: now, canaryFor: { _, _, _, _ in canary })
+        let result = try EvalResult.decode(Data(contentsOf: url))
+        let verdict = try #require(result.verdicts.first)
+        #expect(verdict.tokens?.calls == 2, "both hedge legs answered and were both charged")
+        #expect(verdict.tokens?.input == 200 && verdict.tokens?.output == 4)
     }
 
     @Test func aResultWrittenBeforeTheRowTokensStillDecodes() throws {

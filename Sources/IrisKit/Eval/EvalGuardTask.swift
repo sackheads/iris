@@ -46,14 +46,17 @@ enum EvalGuardTask {
         var thinkingLevel: String? = nil
     }
 
-    static func canary(_ spec: EvalModelSpec, think: Think, thinkingLevel: String? = nil,
+    static func canary(_ spec: EvalModelSpec, think: Think, thinkingLevel: String? = nil, hedgeAfter: TimeInterval? = nil,
                        credentials: (LLMProvider) -> Bool = { cloudCredentialsConfigured($0) },
                        send: CloudAuxiliaryEngine.Send? = nil, now: Date = Date()) async throws -> Canary {
         if spec.runtime != .cloud, thinkingLevel != nil {
             throw EvalError.unsupported("--thinking-level is for cloud: models; \(spec.runtime.rawValue): has no such setting")
         }
+        if spec.runtime != .cloud, hedgeAfter != nil {
+            throw EvalError.unsupported("--hedge-after is for cloud: models; \(spec.runtime.rawValue): has no such setting")
+        }
         switch spec.runtime {
-        case .cloud: return try cloudCanary(spec, think: think, thinkingLevel: thinkingLevel, credentials: credentials, send: send, now: now)
+        case .cloud: return try cloudCanary(spec, think: think, thinkingLevel: thinkingLevel, hedgeAfter: hedgeAfter, credentials: credentials, send: send, now: now)
         case .ollama: return try await ollamaCanary(spec, think: think)
         case .llamacpp: return try await llamaCanary(spec, think: think)
         case .mlx: return try await mlxCanary(spec, think: think)
@@ -77,7 +80,7 @@ enum EvalGuardTask {
     /// (#800). Task-scoped: the provider comes from a `ProviderRoute` on this engine's own client, so no
     /// global setting is changed, and the credentials are only read. The fingerprint is the model id
     /// and the run date (cloud models change under one name; spec section 4).
-    private static func cloudCanary(_ spec: EvalModelSpec, think: Think, thinkingLevel: String?,
+    private static func cloudCanary(_ spec: EvalModelSpec, think: Think, thinkingLevel: String?, hedgeAfter: TimeInterval?,
                                     credentials: (LLMProvider) -> Bool, send: CloudAuxiliaryEngine.Send?, now: Date) throws -> Canary {
         try requireProductThinking(spec, think)
         guard let provider = spec.cloudProvider else {
@@ -90,6 +93,9 @@ enum EvalGuardTask {
             guard provider == .gemini else {
                 throw EvalError.unsupported("only Gemini takes a thinking level; \(provider.rawValue.lowercased()) would ignore --thinking-level \(level)")
             }
+        }
+        if let delay = hedgeAfter, delay <= 0 {
+            throw EvalError.usage("--hedge-after takes a positive number of seconds")
         }
         guard credentials(provider) else {
             throw EvalError.unsupported("no \(provider.rawValue) credentials are configured, so a paid cloud run can't be made")
@@ -106,12 +112,24 @@ enum EvalGuardTask {
             let client = LLMClient(route: ProviderRoute(providerId: provider.rawValue.lowercased(), target: .builtIn(provider), model: id))
             engine.send = { request, model in try await client.generateContent(request: request, tier: .easy, model: model ?? id) }
         }
+        if let delay = hedgeAfter {
+            engine.hedgeAfter = delay
+            // On its own connection, like the product's canary hedge (#871): a stuck request on a
+            // shared pool would carry both legs and the hedge would win nothing. A test double for
+            // `send` has no pool to share in the first place, so the two legs reuse it there.
+            if send == nil {
+                let client = LLMClient(route: ProviderRoute(providerId: provider.rawValue.lowercased(), target: .builtIn(provider), model: id),
+                                       providerSession: URLSession(configuration: .ephemeral))
+                engine.sendFresh = { request, model in try await client.generateContent(request: request, tier: .easy, model: model ?? id) }
+            }
+        }
         let date = Date.ISO8601FormatStyle(timeZone: .current).year().month().day().format(now)
         return Canary(engine: engine, spec: spec, fingerprint: "\(spec.name) \(date)",
                       runtimeVersion: "\(provider.rawValue.lowercased()) \(id) \(date)", think: thinkingLevel.map { "level \($0)" } ?? "default",
                       details: ["think_requested": think.rawValue,
                                 "think_sent": thinkingLevel.map { "generationConfig.thinkingConfig.thinkingLevel \($0)" } ?? "nothing (the provider's default)",
-                                "provider": provider.rawValue.lowercased(), "model_id": id, "run_date": date],
+                                "provider": provider.rawValue.lowercased(), "model_id": id, "run_date": date,
+                                "hedge_after_seconds": hedgeAfter.map { "\($0)" } ?? "none (unhedged)"],
                       paid: true, thinkingLevel: thinkingLevel)
     }
 
@@ -342,6 +360,10 @@ extension EvalRunner {
         var think: EvalGuardTask.Think = .product
         /// `--thinking-level` for a cloud canary: "low" or "medium"; nil sends none (#800).
         var thinkingLevel: String?
+        /// `--hedge-after` for a cloud canary, in seconds: a second request beside the first if it
+        /// has no answer by then (#876). Unhedged by default, so #790's numbers stay comparable —
+        /// hedging is opt-in per run, never the eval's own default the way the product's canary hedge is.
+        var hedgeAfter: TimeInterval?
         /// `--allow-paid`: without it a cloud run refuses before any call (spec, section 6).
         var allowPaid = false
         /// `--max-dollars`: the most a paid run may spend. Required with `--allow-paid` (#870).
@@ -370,12 +392,15 @@ extension EvalRunner {
                      "estimated cost: \(EvalCost.money(e.dollars)) (\(EvalCost.money(EvalCost.perThousand(e.dollars, judgements: e.calls))) per 1,000 judgements)"
                      + (rates == nil ? "" : ", from the price list as of \(ModelPriceSnapshot.asOf)")]
         lines += e.assumptions.map { "  - \($0)" }
+        if let hedgeAfter = run.hedgeAfter {
+            lines.append("  - --hedge-after \(hedgeAfter)s: not counted above — only a call still unanswered past the delay doubles, and how often that happens is exactly what the run measures")
+        }
         lines.append("Nothing was run. The estimate is a guess from the token means above; the result records what the provider reports.")
         return lines.joined(separator: "\n")
     }
 
     static func runGuard(_ run: GuardRun, repoRoot: URL, now: Date = Date(),
-                         canaryFor: ((EvalModelSpec, EvalGuardTask.Think, String?) async throws -> EvalGuardTask.Canary)? = nil,
+                         canaryFor: ((EvalModelSpec, EvalGuardTask.Think, String?, TimeInterval?) async throws -> EvalGuardTask.Canary)? = nil,
                          prices: PriceTable = .snapshot,
                          loadTier2: (EvalModelSpec) async throws -> CoreMLModelProtocol = { try await EvalClassifierTask.loadModel($0) }) async throws -> URL {
         let dataset = try EvalDataset.load(from: run.datasetDir.map { EvalCLI.resolve($0, repoRoot) } ?? defaultDataset(repoRoot))
@@ -401,7 +426,7 @@ extension EvalRunner {
             print("eval: PAID RUN: \(texts.count * run.repeats) calls to \(run.canary.name) (--allow-paid given), capped at \(EvalCost.money(cap)) (estimated \(EvalCost.money(e.dollars)))"
                   + ((e.dollars ?? 0) > cap ? "; the estimate is over the cap, so the run will stop partway" : ""))
         }
-        let canary = try await (canaryFor ?? { spec, think, level in try await EvalGuardTask.canary(spec, think: think, thinkingLevel: level) })(run.canary, run.think, run.thinkingLevel)
+        let canary = try await (canaryFor ?? { spec, think, level, hedge in try await EvalGuardTask.canary(spec, think: think, thinkingLevel: level, hedgeAfter: hedge) })(run.canary, run.think, run.thinkingLevel, run.hedgeAfter)
 
         // A stack's tier 2, with its files' digests: the bundle path and sha256s go in the result,
         // since the folder may be renamed to switch the tier off on the machine that ran it.
