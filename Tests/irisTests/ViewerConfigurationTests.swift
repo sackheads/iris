@@ -87,14 +87,21 @@ private final class NavigationFinishWaiter: NSObject, WKNavigationDelegate {
     /// unhandled scheme to LaunchServices, which pops a real dialog on whoever's desktop runs the
     /// suite (#896 PR 1 review). This waiter only ever loads the one safe URL today, but the
     /// policy decision is the right default for any WKWebView-driving test delegate regardless.
-    func webView(
+    // `nonisolated`, matching house style for an ObjC delegate callback whose signature doesn't
+    // exactly match the protocol's optional requirement once the class is `@MainActor` (see
+    // `ModelDownloader.urlSession(_:downloadTask:...)`): CI's toolchain flagged this as "nearly
+    // matches optional requirement of WKNavigationDelegate", a warning `check-warnings.sh` didn't
+    // show locally because an incremental build only prints a warning for what it recompiles
+    // (#901 review round 2). `MainActor.assumeIsolated` is safe because WebKit only ever calls
+    // this on the main thread.
+    nonisolated func webView(
         _ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
         let isAllowed = navigationAction.targetFrame?.isMainFrame == true
             && navigationAction.request.url == ViewerConfiguration.documentURL
         decisionHandler(isAllowed ? .allow : .cancel)
-        if !isAllowed { resume() }
+        if !isAllowed { MainActor.assumeIsolated { resume() } }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { resume() }
