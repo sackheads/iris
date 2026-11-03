@@ -62,6 +62,33 @@ struct ViewerDocumentCapTests {
     }
 }
 
+/// #905 review finding 4: pins the banner's exact wording and the `isTainted` branch without a
+/// window-server capture (none was taken — see the PR body for why). `@MainActor`: `ViewerBannerView`
+/// conforms to `View`, so Swift infers its whole type (including these static lets) main-actor
+/// isolated.
+@MainActor
+@Suite("ViewerBannerView wording (#896)")
+struct ViewerBannerViewTests {
+    @Test("untainted: only the always-shown line")
+    func untainted() {
+        #expect(ViewerBannerView.lines(isTainted: false) == [ViewerBannerView.alwaysLine])
+    }
+
+    @Test("tainted: the always-shown line plus the taint line")
+    func tainted() {
+        #expect(ViewerBannerView.lines(isTainted: true) == [ViewerBannerView.alwaysLine, ViewerBannerView.taintedLine])
+    }
+
+    @Test("the always-shown line claims no network connections and never mentions drag")
+    func wordingClaims() {
+        let line = ViewerBannerView.alwaysLine.lowercased()
+        #expect(line.contains("cannot run"))
+        #expect(line.contains("no network connections"))
+        #expect(!line.contains("drag"))
+        #expect(!line.contains("send"), "a 'send' claim would misstate drag-out, which Iris does not block")
+    }
+}
+
 @MainActor
 @Suite("ClosedSurfaceWebView context menu filter (#896)")
 struct ClosedSurfaceWebViewMenuTests {

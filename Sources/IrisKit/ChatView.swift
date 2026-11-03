@@ -245,6 +245,7 @@ struct ChatView: View {
                                                     transcriptAvailable: EventCard.transcriptAvailable(
                                                         for: message, in: state.conversations),
                                                     conversationId: conv.id,
+                                                    conversationTitle: conv.title,
                                                     isTainted: conv.hasUntrustedToolOutput)
                                     case .systemGroup(_, let messages):
                                         SystemGroupView(messages: messages, appState: state)
@@ -1104,6 +1105,7 @@ struct MessageView: View {
     /// (conversation id, message id), and its banner names the conversation's own #813 taint.
     /// Resolved by the list that owns the message, same reasoning as `transcriptAvailable`.
     var conversationId: UUID
+    var conversationTitle: String
     var isTainted: Bool
 
     var body: some View {
@@ -1207,6 +1209,7 @@ struct MessageView: View {
                                             conversationId: conversationId,
                                             messageId: message.id,
                                             content: configuration.content),
+                                        conversationTitle: conversationTitle,
                                         isTainted: isTainted)
                                 } : nil
                             )

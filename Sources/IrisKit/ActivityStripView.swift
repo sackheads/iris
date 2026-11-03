@@ -313,6 +313,7 @@ struct TranscriptSheet: View {
                                             transcriptAvailable: EventCard.transcriptAvailable(
                                                 for: message, in: state.conversations),
                                             conversationId: conversation.id,
+                                            conversationTitle: conversation.title,
                                             isTainted: conversation.hasUntrustedToolOutput)
                             }
                             // Scroll target for `scrollToBottom`, matching `ChatView`'s own
