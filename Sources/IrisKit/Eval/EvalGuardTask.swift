@@ -394,7 +394,7 @@ extension EvalRunner {
             }
             guard let provider = run.canary.cloudProvider, let rates = EvalCost.rates(provider: provider, model: run.canary.cloudModelId, table: prices) else {
                 throw EvalError.usage("no listed price for \(run.canary.name): --max-dollars can't be enforced without one, so the run is refused. "
-                                      + "The price list (Sources/IrisKit/ModelPriceSnapshot.swift, a snapshot of LiteLLM's table) has no row for it. Add a `family|model|input|output|cacheRead|cacheWrite` row (USD per token) there, noting in the commit that it was added by hand: the script its header names, scripts/gen-model-prices.py, is not in this repo.")
+                                      + "The price list (Sources/IrisKit/ModelPriceSnapshot.swift, a snapshot of LiteLLM's table) has no row for it. The file is generated, not edited: move the pin in scripts/gen-model-prices.py (--commit <sha> --as-of <date>) to a LiteLLM commit that has the model and rerun it.")
             }
             let e = EvalCost.estimate(textBytes: texts.map { $0.text.utf8.count }, repeats: run.repeats, thinkingLevel: run.thinkingLevel, rates: rates)
             if e.calls > 0, let dollars = e.dollars { spendCap = .init(cap: cap, perCall: dollars / Double(e.calls)) }

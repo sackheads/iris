@@ -1099,6 +1099,7 @@ struct EvalCloudTests {
             Issue.record("an unpriced paid run must be refused")
         } catch let EvalError.usage(message) {
             #expect(message.contains("ModelPriceSnapshot.swift") && message.contains("has no row for it"), "the refusal names the fix: \(message)")
+            #expect(message.contains("scripts/gen-model-prices.py") && !message.contains("not in this repo"), "the refusal points at the generator that exists: \(message)")
         }
         #expect(stub.calls == 0, "no call without a price to cap")
     }
