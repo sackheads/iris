@@ -37,18 +37,22 @@ enum ViewerChipPolicy {
 }
 
 /// Gates whether the viewer is reachable at all, independent of language/streaming. A code
-/// constant, not a `Settings` toggle: the spec's DNS zero-lookup result was a ship blocker ("the
+/// constant, not a `Settings` toggle: the spec's DNS zero-lookup result is a ship blocker ("the
 /// window does not ship unless that shows zero lookups") — PR 2 landed the window, chip and
-/// banner with the chip off; #904 then verified zero lookups with a SOCKS5h "resolver we control"
-/// (`SOCKS5ProxyTestHelper`), both headless (`ViewerZeroLookupTests`) and in a real, on-screen
-/// window under the gui-test-lease (`ViewerGUIZeroLookupTests` — PR 1 found `decidePolicyFor`
-/// never fires offscreen, and the same gap could apply to WebKit's speculative-loading heuristics,
-/// so an offscreen-only result would not have been trustworthy here). Both came back clean: every
-/// hostname a hostile document's dns-prefetch/preconnect/subresource channels tried stayed at
-/// zero, against a proxy a positive control confirmed does intercept a real, unblocked network
-/// load. This flips to `true` on that green result.
+/// banner with the chip off; #904 then measured with a SOCKS5h "resolver we control"
+/// (`SOCKS5ProxyTestHelper`). The instrument proved reliable for `rel=preconnect` and ordinary
+/// subresource loads (a positive control shows the proxy records a real, unblocked preconnect/
+/// network attempt, and the production config shows zero for both) — but NOT for
+/// `rel=dns-prefetch`/`rel=prefetch`: the same unmitigated control that catches preconnect records
+/// nothing for those two, meaning WebKit either never fires them in this setup or resolves them
+/// through the system resolver, bypassing `proxyConfigurations` entirely (dev-2's #904 review
+/// finding 1). The proxy cannot tell those apart, which is exactly the escape the planner's
+/// ruling named: "if WebKit does speculative DNS locally that bypasses proxyConfigurations ...
+/// escalate." This stays `false` until dns-prefetch is observed another way (a real resolver, or
+/// `tcpdump` under sudo — a planner-to-Brian ask, not this session's to make) or the planner
+/// rules otherwise.
 enum ViewerFeatureGate {
-    static let isEnabled = true
+    static let isEnabled = false
 }
 
 /// Opens one window per document, AppKit-managed rather than a SwiftUI `Scene`: a `WindowGroup`

@@ -8,9 +8,10 @@ import WebKit
 /// `<link rel=dns-prefetch>`/`rel=preconnect` can carry data in the hostname without loading
 /// anything, so "nothing here can send anything" is a claim to be proven, not assumed. This is
 /// the "resolver we control" the spec calls for: `SOCKS5ProxyTestHelper` sits where WebKit's own
-/// network stack would otherwise go via `WKWebsiteDataStore.proxyConfigurations`, so any hostname
-/// the page's channels try to resolve shows up here whether or not the resulting connection
-/// actually succeeds.
+/// network stack would otherwise go via `WKWebsiteDataStore.proxyConfigurations`. It proved
+/// reliable for `rel=preconnect` and ordinary network loads — see `hintChannelsControl` below —
+/// but NOT for `rel=dns-prefetch`/`rel=prefetch`, which never show up here whether or not WebKit
+/// actually resolves them, so `ViewerFeatureGate` stays off (dev-2's #904 review finding 1).
 @MainActor
 @Suite("Viewer: zero DNS lookups (#904)", .timeLimit(.minutes(1)))
 struct ViewerZeroLookupTests {
@@ -49,6 +50,50 @@ struct ViewerZeroLookupTests {
             proxy.recordedTargets.map(\.host).contains("iris-proxy-sanity-probe.invalid.example"),
             "the SOCKS5 harness never saw the control image load reach it — a zero-lookup result elsewhere would prove nothing"
         )
+    }
+
+    /// #904 review finding 1 (dev-2): the proxy is NOT a reliable instrument for every DNS-only
+    /// hint. Unmitigated — no scheme handler, no CSP, no rule list, only the proxy wired — it
+    /// records `rel=preconnect`'s host every time, but never `rel=dns-prefetch`'s or
+    /// `rel=prefetch`'s, even given a real window and a real wait. That means WebKit either never
+    /// resolves those two in this setup, or resolves them through the system resolver, bypassing
+    /// `WKWebsiteDataStore.proxyConfigurations` entirely — this instrument cannot tell those
+    /// apart. `ViewerFeatureGate` stays off until dns-prefetch/prefetch are observed another way
+    /// (a real resolver, or `tcpdump`, per the planner's escalation ruling): see
+    /// `productionConfigMakesZeroLookups` below, whose zero for dns-prefetch/prefetch is therefore
+    /// not proof of anything, only its zero for preconnect and ordinary loads is.
+    @Test("hint channels, unmitigated: preconnect is observable through the proxy, dns-prefetch and prefetch are not")
+    func hintChannelsControl() async throws {
+        let proxy = try SOCKS5ProxyTestHelper(holdOpen: false)
+        defer { proxy.close() }
+
+        let html = """
+        <html><head>
+        <link rel="dns-prefetch" href="//iris-hint-dnsprefetch-probe.invalid.example">
+        <link rel="preconnect" href="//iris-hint-preconnect-probe.invalid.example">
+        <link rel="prefetch" href="http://iris-hint-prefetch-probe.invalid.example/x">
+        </head><body>hello</body></html>
+        """
+
+        let config = WKWebViewConfiguration()
+        let store = WKWebsiteDataStore.nonPersistent()
+        store.proxyConfigurations = [socksProxyConfiguration(port: proxy.port)]
+        config.websiteDataStore = store
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        let waiter = AllowEverythingNavigationWaiter()
+        webView.navigationDelegate = waiter
+        webView.loadHTMLString(html, baseURL: URL(string: "http://iris-hint-base-probe.invalid.example/"))
+        await waiter.waitForFinish()
+        try? await Task.sleep(for: .seconds(2))
+
+        let hosts = proxy.recordedTargets.map(\.host)
+        #expect(hosts.contains("iris-hint-preconnect-probe.invalid.example"),
+                "the proxy no longer sees an unmitigated preconnect — the instrument itself may have regressed")
+        #expect(!hosts.contains("iris-hint-dnsprefetch-probe.invalid.example"),
+                "dns-prefetch became observable through the proxy — if WebKit changed this, re-check whether the gate can now rely on it")
+        #expect(!hosts.contains("iris-hint-prefetch-probe.invalid.example"),
+                "prefetch became observable through the proxy — if WebKit changed this, re-check whether the gate can now rely on it")
     }
 
     @Test("the production viewer config makes zero lookups for every DNS-only and network channel")

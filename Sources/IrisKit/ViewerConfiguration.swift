@@ -33,10 +33,15 @@ enum ViewerConfiguration {
     /// `proxyConfigurations` is never set in production — the real guarantee against a DNS-only
     /// channel (`<link rel=dns-prefetch>`/`rel=preconnect`) is `dnsPrefetchControlHeader` plus the
     /// CSP, not a proxy. #904 passes a `[ProxyConfiguration]` pointed at a controlled SOCKS5
-    /// listener so a test can observe whether any hostname reaches it despite those mitigations:
-    /// `WKWebsiteDataStore.proxyConfigurations` forces every connection the data store makes,
-    /// including WebKit's own speculative ones, through that listener instead of the real
-    /// network, so "zero lookups" becomes something the test can watch rather than assume.
+    /// listener so a test can observe whether a hostname reaches it despite those mitigations —
+    /// confirmed for `rel=preconnect` and for an ordinary network load, both caught by the proxy
+    /// unmitigated and shown at zero in production. **Not confirmed for `rel=dns-prefetch`/
+    /// `rel=prefetch`**: the same unmitigated control that catches preconnect records nothing for
+    /// either, so a zero result there could mean either WebKit never resolves them in this setup
+    /// or that it resolves them through the system resolver, bypassing `proxyConfigurations`
+    /// entirely — this instrument cannot tell the two apart (#904 review finding 1). Do not treat
+    /// a zero here as proof for dns-prefetch/prefetch specifically without a resolver or
+    /// `tcpdump`-based observation to back it.
     @MainActor
     static func build(
         schemeHandler: WKURLSchemeHandler,
