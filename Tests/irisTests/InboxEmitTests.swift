@@ -214,4 +214,26 @@ struct InboxEmitTests {
         #expect(result.contains("distinct ids"), Comment(rawValue: result))
         #expect(try app.store.inbox.openItems().isEmpty)
     }
+
+    @Test("route_back and notify may name only the emitter or roles: another session is refused and nothing is stored")
+    func emitRefusesArbitrarySessionTargets() async throws {
+        let (app, id) = app()
+        let victim = app.createNewConversation(select: false)
+        for bad in [victim.uuidString, "name:someone", "iris", "dev-1", ""] {
+            for key in ["route_back", "notify"] {
+                var call = emitCall()
+                call.args[key] = .array([.string(bad)])
+                let result = await runToolCall(call, on: app, as: id)
+                #expect(result.contains("may name only role"), Comment(rawValue: "\(key)=\(bad): \(result)"))
+            }
+        }
+        #expect(try app.store.inbox.openItems().isEmpty)
+        // Roles and itself are fine, and the refusals above spent no rate token.
+        var ok = emitCall()
+        ok.args["route_back"] = .array([.string("role:planner"), .string(id.uuidString)])
+        ok.args["notify"] = .array([.string("role:overseer")])
+        let result = await runToolCall(ok, on: app, as: id)
+        #expect(result.contains("Recorded"), Comment(rawValue: result))
+        #expect(try app.store.inbox.openItems().first?.routeBack == ["role:planner", id.uuidString])
+    }
 }

@@ -163,15 +163,6 @@ struct InboxVetoTests {
         _ = await engine.evaluateInboxVetoExpiries(now: t0.addingTimeInterval(1), deliver: sink.deliver)
         #expect(sink.calls.map(\.0) == [holder], "only the owner chain's role holder")
         #expect(!sink.calls.map(\.0).contains(stranger))
-        // The same item answered by Brian does reach the stranger he chose to route to.
-        let manual = try raise2(app, emitter: emitter, routeBack: [stranger.uuidString])
-        let sink2 = Sink()
-        _ = await engine.submitInboxAnswer(itemId: manual.id, choice: "a", freeText: nil, deliver: sink2.deliver)
-        #expect(sink2.calls.map(\.0) == [stranger])
-    }
-
-    private func raise2(_ app: AppState, emitter: UUID, routeBack: [String]) throws -> InboxItem {
-        try veto(app, emitter: emitter, deadline: t0.addingTimeInterval(3600), routeBack: routeBack)
     }
 
     @Test("an automatic answer for a gone emitter is stored and awaits delivery, never dropped")

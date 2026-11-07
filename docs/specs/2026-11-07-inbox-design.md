@@ -100,7 +100,12 @@ protections:
 ### Reply routing
 
 Each item carries a **route-back set** (the agents that get the answer) and a **notify set** (cc'd
-for awareness). On Submit, Brian's response — the chosen option id and/or free text — is delivered to
+for awareness).
+An emitter chooses which *chain* gets the answer, never an arbitrary session: an entry is the emitter
+itself or a role (`role:<name>`, the session holding it when the answer goes out). The emit tool
+refuses any other entry (a session id or name, the pinned conversation), and an answer drops one
+that a stored row carries. Otherwise Brian's click, or a veto timer, would push a message into any
+session the emitter named, without the peer gates (Brian, 2026-11-07: "agreed, a)"). On Submit, Brian's response — the chosen option id and/or free text — is delivered to
 each route-back agent under its own label, "inbox answer", not as a peer message: it wakes an idle
 agent and queues behind a busy one, expects no reply and is not declinable as a peer's request would
 be (Brian's decision is user authority). Only submitting an answer in the inbox can produce that
@@ -134,7 +139,7 @@ going back out to the agents.
 ## Agent-facing surface (emit contract)
 
 A way for an agent to create or append-to an item. Fields: `title`, `situation`, `options`
-(each `{label, pros, cons}`), `response_mode`, `route_back` (sessions/roles), `notify`, `thread_id`
+(each `{label, pros, cons}`), `response_mode`, `route_back` (`role:<name>` entries, or omitted for the emitter itself), `notify` (`role:<name>` entries), `thread_id`
 (omitted = new thread; present = append), and for a veto `deadline` + `default`. A matching way to
 mark a thread resolved. The emit tool's declaration must be **gated** per Invariant 6 (not broadcast
 on every plain turn) and its description swept per Invariant 9; the exact gate is a builder call
@@ -171,7 +176,7 @@ given the async premise and the trust model; I've settled those as planner calls
   usually gone by the time Brian answers hours later, and `send_to_session` delivery *fails* for an
   inactive session. So the Inbox does **not** fire-and-forget. A reply is **persisted on the thread**
   and delivery is best-effort and durable: the `route_back` set is resolved **at answer time**, a
-  **role** target goes to whoever holds it now, a dead **bare session** falls back to that emitter's
+  **role** target goes to whoever holds it now, a dead emitter (the only bare session an entry may name) falls back to its
   role/chain, and if no live recipient exists the thread stays *answered — awaiting delivery* and the
   reply is handed over when a matching session/role next appears. **A reply is never silently
   dropped.** The delivered payload **re-includes the item's situation and Brian's answer**, so a cold
