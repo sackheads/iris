@@ -1110,6 +1110,112 @@ actor IrisEngine {
         return "Published #\(seq) to topic \(topic) (\(targets.count) subscribers): \(parts.joined(separator: ", ")). A reply, if any, arrives as a message from one subscriber."
     }
 
+    /// `inbox_item` (#920 Task 2): raises a decision into Brian's inbox, independent of any
+    /// conversation (so a reply outlives a dead emitter). Ordered like `publishToTopic` above:
+    /// validate → `decideInboxEmit` (rate token + identity + taint, one hop) → guard-judge, fail
+    /// closed and refund on block → store via Task 1's `InboxStore` (append if `thread_id` names
+    /// an existing thread, else create a new one). The item is never delivered anywhere else; it
+    /// waits for Brian.
+    private func emitToInbox(args: [String: JSONValue], from conversationId: UUID, store: ConversationStore) async -> String {
+        guard let title = args["title"]?.stringValue.trimmingCharacters(in: .whitespaces), !title.isEmpty else {
+            return "A title is required."
+        }
+        guard let situation = args["situation"]?.stringValue.trimmingCharacters(in: .whitespaces), !situation.isEmpty else {
+            return "A situation is required."
+        }
+        guard let responseModeRaw = args["response_mode"]?.stringValue, let responseMode = InboxResponseMode(rawValue: responseModeRaw) else {
+            return "response_mode must be one of optionsAndFreeform, freeform, timedVeto, notification."
+        }
+        var options: [InboxOption] = []
+        if case .array(let items)? = args["options"] {
+            for item in items {
+                guard case .object(let fields) = item, let label = fields["label"]?.stringValue else { continue }
+                let id = fields["id"]?.stringValue ?? UUID().uuidString
+                let pros: [String] = { if case .array(let a)? = fields["pros"] { return a.map(\.stringValue) } else { return [] } }()
+                let cons: [String] = { if case .array(let a)? = fields["cons"] { return a.map(\.stringValue) } else { return [] } }()
+                options.append(InboxOption(id: id, label: label, pros: pros, cons: cons))
+            }
+        }
+        func stringArray(_ key: String) -> [String] {
+            guard case .array(let a)? = args[key] else { return [] }
+            return a.map(\.stringValue)
+        }
+        let routeBack = stringArray("route_back")
+        let notify = stringArray("notify")
+        let rawThreadId = args["thread_id"]?.stringValue.trimmingCharacters(in: .whitespaces) ?? ""
+        let threadId: String? = rawThreadId.isEmpty ? nil : rawThreadId
+        let deadlineRaw = args["deadline"]?.stringValue
+        let deadline: Date? = deadlineRaw.flatMap { ISO8601DateFormatter().date(from: $0) }
+        let rawVetoDefault = args["veto_default"]?.stringValue.trimmingCharacters(in: .whitespaces) ?? ""
+        let vetoDefault: String? = rawVetoDefault.isEmpty ? nil : rawVetoDefault
+
+        let localState = state
+        let decision = await MainActor.run { localState?.decideInboxEmit(from: conversationId) ?? .refused("The inbox is unavailable.") }
+        let ownerChain: String, emitterLabel: String?, tainted: Bool
+        switch decision {
+        case .refused(let why): return why
+        case .allowed(let chain, let label, let t): ownerChain = chain; emitterLabel = label; tainted = t
+        }
+
+        // Judged once, charged to the emitter, fail closed (the peer_topic/peer_artifact
+        // precedent): the whole decision's text, since an option is as able to carry an
+        // injection as the situation is.
+        let judgeText = ([title, situation] + options.flatMap { [$0.label] + $0.pros + $0.cons }).joined(separator: "\n")
+        let sink = await MainActor.run { GuardUsage.charging(conversationId, in: localState) }
+        let outcome = await GuardUsage.$sink.withValue(sink) {
+            await InjectionGuard.classifyUntrusted(judgeText, contextTag: "inbox_emit", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
+        }
+        switch outcome {
+        case .blocked:
+            await MainActor.run { localState?.refundInboxEmit(from: conversationId) }
+            return "Not raised: the injection guard withheld it."
+        case .passed: break
+        }
+
+        let label = Self.flattenCardField(emitterLabel ?? ownerChain, cap: Self.cardNameCap)
+        let now = Date()
+        do {
+            if let threadId {
+                let result = try store.inbox.appendFollowup(threadId: threadId, fromChain: ownerChain, author: label, body: situation, at: now)
+                switch result {
+                case .success:
+                    return "Appended to thread \(threadId) and reopened it."
+                case .failure(.notOwner):
+                    await MainActor.run { localState?.refundInboxEmit(from: conversationId) }
+                    return "Not raised: thread \(threadId) belongs to a different chain; you may not append to it."
+                case .failure(.itemClosed):
+                    await MainActor.run { localState?.refundInboxEmit(from: conversationId) }
+                    return "Not raised: thread \(threadId) is closed."
+                case .failure(.unknownThread):
+                    await MainActor.run { localState?.refundInboxEmit(from: conversationId) }
+                    return "Not raised: no thread \(threadId) exists."
+                case .failure:
+                    await MainActor.run { localState?.refundInboxEmit(from: conversationId) }
+                    return "Not raised: could not append to that thread."
+                }
+            } else {
+                let id = try store.inbox.newItemId()
+                let newThreadId = try store.inbox.newThreadId(ownerChain: ownerChain)
+                let item = InboxItem(id: id, threadId: newThreadId, ownerChain: ownerChain, emitter: conversationId,
+                                     emitterLabel: label, title: title, situation: situation, options: options,
+                                     responseMode: responseMode, routeBack: routeBack, notify: notify,
+                                     deadline: deadline, vetoDefaultOptionId: vetoDefault, emitterTainted: tainted,
+                                     state: .open, createdAt: now, lastActivityAt: now, answer: nil)
+                let result = try store.inbox.createItem(item, question: situation)
+                switch result {
+                case .success:
+                    return "Raised #\(id) (thread \(newThreadId)). It waits in the inbox for Brian."
+                case .failure:
+                    await MainActor.run { localState?.refundInboxEmit(from: conversationId) }
+                    return "Not raised: could not record it."
+                }
+            }
+        } catch {
+            await MainActor.run { localState?.refundInboxEmit(from: conversationId) }
+            return "Not raised: could not record it."
+        }
+    }
+
     /// What a session is shown when it newly subscribes to `topics` (#696): each topic's last few
     /// messages from the last day, flattened to one line, marked as history.
     private func topicHistory(_ topics: [String], peers: PeerLedger) -> String {
@@ -2785,6 +2891,34 @@ actor IrisEngine {
             ))
         }
 
+        // #920 Task 2: a decision raised into Brian's inbox — an open emit (any attended main
+        // session may raise one; the inbox's own rate limit, dedup-by-thread and shown source are
+        // the whole defense, not a curation gate in code — design spec "the firehose, precisely").
+        // Declared unconditionally for an attended `.main` turn, same shape as `schedule_job`
+        // above: it needs no peer and no prior state, so there is nothing to gate it on but
+        // attendance itself.
+        if !isUnattended && principal == .main {
+            toolsList.append(FunctionDeclaration(
+                name: "inbox_item",
+                description: "Raise a decision into Brian's inbox: a durable, human-facing question that outlives this conversation. Omit thread_id for a new item; give the thread_id of an item you raised before to append a followup and reopen it (only the chain that raised it may do this — a foreign followup is refused). Nothing is delivered anywhere else: the item waits in the inbox for Brian to answer, whenever he next looks.",
+                parameters: Schema(type: "OBJECT", properties: [
+                    "title": Schema(type: "STRING", description: "A short label for the item."),
+                    "situation": Schema(type: "STRING", description: "The full context: what's going on and why this needs a decision."),
+                    "options": Schema(type: "ARRAY", description: "The choices on the table, if any.", items: Schema(type: "OBJECT", properties: [
+                        "label": Schema(type: "STRING", description: "The choice, in a few words."),
+                        "pros": Schema(type: "ARRAY", description: "Reasons for it.", items: Schema(type: "STRING")),
+                        "cons": Schema(type: "ARRAY", description: "Reasons against it.", items: Schema(type: "STRING")),
+                    ], required: ["label"])),
+                    "response_mode": Schema(type: "STRING", description: "optionsAndFreeform | freeform | timedVeto | notification."),
+                    "route_back": Schema(type: "ARRAY", description: "Sessions or roles to notify once this is answered.", items: Schema(type: "STRING")),
+                    "notify": Schema(type: "ARRAY", description: "Sessions or roles to notify now, that this was raised.", items: Schema(type: "STRING")),
+                    "thread_id": Schema(type: "STRING", description: "Omit for a new item; give an existing one to append a followup and reopen it."),
+                    "deadline": Schema(type: "STRING", description: "ISO 8601. For response_mode timedVeto: when the default takes effect with no answer."),
+                    "veto_default": Schema(type: "STRING", description: "For response_mode timedVeto: the option id that takes effect at the deadline."),
+                ], required: ["title", "situation", "response_mode"])
+            ))
+        }
+
         // #187 §9, invariant 6: the job tools, search_conversations and read_conversation are
         // declared in a pinned conversation and nowhere else. Iris, the pinned conversation, is
         // the one place a person is already reading about runs and other chats, so it is the one
@@ -4211,7 +4345,7 @@ actor IrisEngine {
     /// 5c §1: never declared to an unattended turn, whatever a sticky set says.
     nonisolated static let unattendedNeverDeclared: Set<String> =
         jobCreationTools.union(["set_workspace", "list_sessions", "describe_session", "send_to_session",
-                                "set_session_card", "close_request"])
+                                "set_session_card", "close_request", "inbox_item"])
     /// OpenAI's `prompt_cache_key` (5c §0.9). It is a routing hint, so it names the prefix a
     /// request shares with others, not the conversation. An attended chat (Iris included) keeps
     /// its own history warm, so it uses its id. A job run, a subagent or an evaluator starts a
@@ -5312,6 +5446,23 @@ actor IrisEngine {
             let closeReason = "closed by sender: " + Self.flattenCardField(reason, cap: 80)
             _ = try? peers.close(msg, reason: closeReason, at: Date())
             result = "Closed request \(msg)."
+        } else if functionCall.name == "inbox_item" {
+            // Defense in depth, same reasoning as the other session tools above: declaration
+            // gating only stops a well-behaved model from being offered this, not from naming it
+            // in a forged call, so both checks are repeated here, where the call actually acts.
+            guard principal == .main else {
+                result = "Refused — a subagent is not a session."
+                return result
+            }
+            guard !isUnattended else {
+                result = Self.unattendedSessionMessageRefusal
+                return result
+            }
+            guard let store = await MainActor.run(body: { localState?.store }) else {
+                result = "The inbox is unavailable."
+                return result
+            }
+            result = await emitToInbox(args: functionCall.args, from: conversationId, store: store)
         } else if functionCall.name == "list_jobs" || functionCall.name == "get_job_run" {
             // Declaration gating stops a well-behaved model from being offered these; dispatch
             // reads the function name alone, so the invariant ("in no other conversation") is
@@ -6317,7 +6468,7 @@ actor IrisEngine {
         "reflect", "goal_complete", "search_memory", "update_user_profile", "update_soul",
         "update_memory", "propose_goal_contract", "list_sessions", "describe_session", "send_to_session",
         "set_session_card", "close_request", "amend_goal_contract", "reach_checkpoint", "waive_criterion",
-        "invoke_subagent", "delegate_milestone", scheduleNextTickTool,
+        "invoke_subagent", "delegate_milestone", "inbox_item", scheduleNextTickTool,
     ]
 
     /// Every tool name the app can ever declare to any conversation (main agent, subagent or
