@@ -156,6 +156,67 @@ struct RawHTMLSanitizerTests {
         #expect(out.contains("hello, a real page"))
         #expect(out.contains("a real link"))
     }
+
+    // MARK: - #915 review finding 1: rel splits on ASCII whitespace, not just space
+
+    @Test("a tab, LF, FF or CR between rel tokens still splits them — a space-only split let the speculative token through")
+    func relSplitsOnEveryASCIIWhitespaceCharacter() {
+        for separator in ["\t", "\n", "\r", "\u{0C}", "\r\n"] {
+            let out = RawHTMLSanitizer.sanitize("<link rel=\"foo\(separator)preconnect\" href=\"//evil.example\">")
+            #expect(!out.lowercased().contains("preconnect"),
+                    "separator \(separator.unicodeScalars.map(\.value)) did not split rel: \(out)")
+        }
+    }
+
+    // MARK: - #915 review finding 2: a combining mark after a quote must not desync the parser
+
+    @Test("a combining mark right after a closing quote does not let an attribute escape the allow-list")
+    func combiningMarkAfterQuoteDoesNotBreakParsing() {
+        // U+0301 (combining acute accent) right after the closing `"` — a Character-based
+        // tokenizer treats `"` + U+0301 as one grapheme cluster that isn't `"`, so it kept
+        // reading past the real end of the value. If that happened here, `onclick` would appear
+        // as if it were a value inside `title`, rather than its own attribute to filter.
+        let out = RawHTMLSanitizer.sanitize("<div title=\"a\"\u{301} onclick=\"evil()\" id=\"b\">hi</div>")
+        #expect(!out.contains("onclick"), "the on* filter never saw onclick as its own attribute: \(out)")
+    }
+
+    @Test("a combining mark after a quote cannot smuggle a speculative rel past the allow-list")
+    func combiningMarkCannotSmuggleSpeculativeRel() {
+        let out = RawHTMLSanitizer.sanitize("<link href=\"//evil.example\"\u{301} rel=preconnect dummy=\" rel=\"stylesheet\">")
+        #expect(!out.lowercased().contains("evil.example"), "a desynced parser let the preconnect link through: \(out)")
+    }
+
+    // MARK: - #915 review finding 3: channels that load with no speculative hint at all
+
+    @Test("link href is kept only for a data: URL — an external stylesheet/icon href is dropped")
+    func linkHrefDataOnly() {
+        let out = RawHTMLSanitizer.sanitize("<link rel=\"stylesheet\" href=\"https://evil.example/x.css\">")
+        #expect(!out.contains("evil.example"))
+    }
+
+    @Test("source srcset is dropped entirely, not value-checked")
+    func sourceSrcsetDropped() {
+        let out = RawHTMLSanitizer.sanitize("<source srcset=\"https://evil.example/x.png 1x\">")
+        #expect(!out.contains("evil.example"))
+    }
+
+    @Test("style url() and image-set() to a non-fragment target are dropped; a same-document fragment is kept")
+    func styleURLFunctionDropped() {
+        let hostile = RawHTMLSanitizer.sanitize("<div style=\"background:url(https://evil.example/x.png)\">hi</div>")
+        #expect(!hostile.contains("evil.example"))
+        let imageSet = RawHTMLSanitizer.sanitize("<div style=\"background:image-set(url(https://evil.example/x.png) 1x)\">hi</div>")
+        #expect(!imageSet.contains("evil.example"))
+        let fragment = RawHTMLSanitizer.sanitize("<div style=\"clip-path:url(#clip)\">hi</div>")
+        #expect(fragment.contains("url(#clip)"))
+    }
+
+    @Test("svg fill/stroke url() to a non-fragment target is dropped; a same-document fragment is kept")
+    func svgFillStrokeURLFunctionDropped() {
+        let hostile = RawHTMLSanitizer.sanitize("<path d=\"M0 0\" fill=\"url(https://evil.example/x.svg)\"></path>")
+        #expect(!hostile.contains("evil.example"))
+        let fragment = RawHTMLSanitizer.sanitize("<path d=\"M0 0\" fill=\"url(#gradient)\"></path>")
+        #expect(fragment.contains("url(#gradient)"))
+    }
 }
 
 // MARK: - Live oracle: preconnect through the SOCKS5h proxy (#904), mutation-checked
@@ -212,6 +273,54 @@ struct RawHTMLSanitizerLiveOracleTests {
             proxy.recordedTargets.map(\.host).contains("iris-sanitizer-oracle-preconnect-unsanitized.invalid.example"),
             "the oracle itself never saw an unsanitized preconnect — a green result above would be vacuous"
         )
+    }
+
+    // MARK: - #915 review finding 4: live cases for findings 1 and 2, each with its own control
+
+    @Test("a tab-split rel sanitizes to zero through the proxy")
+    func tabSplitRelSanitizesToZero() async throws {
+        let proxy = try SOCKS5ProxyTestHelper(holdOpen: false)
+        defer { proxy.close() }
+
+        let hostile = "<html><head><link rel=\"foo\tpreconnect\" href=\"//iris-sanitizer-oracle-tabsplit.invalid.example\"></head><body>hi</body></html>"
+        try await load(html: RawHTMLSanitizer.sanitize(hostile), proxy: proxy)
+
+        #expect(!proxy.recordedTargets.map(\.host).contains("iris-sanitizer-oracle-tabsplit.invalid.example"))
+    }
+
+    @Test("MUTATION CHECK: the same tab-split rel, unsanitized, reaches the proxy")
+    func tabSplitRelUnsanitizedReachesTheProxy() async throws {
+        let proxy = try SOCKS5ProxyTestHelper(holdOpen: false)
+        defer { proxy.close() }
+
+        let hostile = "<html><head><link rel=\"foo\tpreconnect\" href=\"//iris-sanitizer-oracle-tabsplit-unsanitized.invalid.example\"></head><body>hi</body></html>"
+        try await load(html: hostile, proxy: proxy)   // NOT run through the sanitizer
+
+        #expect(proxy.recordedTargets.map(\.host).contains("iris-sanitizer-oracle-tabsplit-unsanitized.invalid.example"),
+                "the oracle itself never saw the unsanitized tab-split preconnect — a green result above would be vacuous")
+    }
+
+    @Test("a combining-mark-after-quote injection sanitizes to zero through the proxy")
+    func combiningMarkInjectionSanitizesToZero() async throws {
+        let proxy = try SOCKS5ProxyTestHelper(holdOpen: false)
+        defer { proxy.close() }
+
+        let hostile = "<html><head><link href=\"//iris-sanitizer-oracle-combining.invalid.example\"\u{301} rel=preconnect dummy=\" rel=\"stylesheet\"></head><body>hi</body></html>"
+        try await load(html: RawHTMLSanitizer.sanitize(hostile), proxy: proxy)
+
+        #expect(!proxy.recordedTargets.map(\.host).contains("iris-sanitizer-oracle-combining.invalid.example"))
+    }
+
+    @Test("MUTATION CHECK: the same combining-mark-after-quote injection, unsanitized, reaches the proxy")
+    func combiningMarkInjectionUnsanitizedReachesTheProxy() async throws {
+        let proxy = try SOCKS5ProxyTestHelper(holdOpen: false)
+        defer { proxy.close() }
+
+        let hostile = "<html><head><link href=\"//iris-sanitizer-oracle-combining-unsanitized.invalid.example\"\u{301} rel=preconnect dummy=\" rel=\"stylesheet\"></head><body>hi</body></html>"
+        try await load(html: hostile, proxy: proxy)   // NOT run through the sanitizer
+
+        #expect(proxy.recordedTargets.map(\.host).contains("iris-sanitizer-oracle-combining-unsanitized.invalid.example"),
+                "the oracle itself never saw the unsanitized combining-mark injection — a green result above would be vacuous")
     }
 }
 

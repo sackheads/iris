@@ -48,11 +48,14 @@ enum ViewerChipPolicy {
 /// (2026-11-07) was to close dns-prefetch by construction rather than by observation: #912's
 /// `RawHTMLSanitizer` strips every speculative-load hint (`dns-prefetch`/`preconnect`/
 /// `prerender`/`prefetch`/`preload`/`modulepreload`, plus `<base>`/`<a ping>`/`<meta
-/// http-equiv>`) from the raw HTML before `ChatView` ever builds a `ViewerDocument` from it, so
-/// the proxy's blind spot is moot — the hint is never in the document WebKit sees. True as of
-/// #912: the gate flip IS that PR's deliverable, not a later one.
+/// http-equiv>`) from the raw HTML before `ChatView` ever builds a `ViewerDocument` from it — a
+/// defense alongside the viewer's existing CSP/content rule list, not a replacement for either.
+/// Stays `false` through #915 review round 1 (two live-confirmed holes: `rel` split on space only,
+/// and a combining mark after a quote desyncing the tokenizer from WebKit's own parser) — both
+/// fixed, with live mutation-checked tests, but the planner's call is this stays off until dev-3's
+/// round-2 re-review confirms it. Flip only once that lands.
 enum ViewerFeatureGate {
-    static let isEnabled = true
+    static let isEnabled = false
 }
 
 /// Opens one window per document, AppKit-managed rather than a SwiftUI `Scene`: a `WindowGroup`

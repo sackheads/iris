@@ -13,15 +13,15 @@ struct ViewerChipPolicyTests {
     /// at all is `ViewerFeatureGate`, wired at the `ChatView` call site. #904's SOCKS5 proxy
     /// instrument confirmed zero lookups for `rel=preconnect` and ordinary network loads, but
     /// could not observe `rel=dns-prefetch`/`rel=prefetch` at all (dev-2's #904 review finding 1).
-    /// #912 closed that gap by construction instead of by observation: `RawHTMLSanitizer` strips
-    /// every speculative-load hint from the raw HTML before a `ViewerDocument` is ever built, so
-    /// the proxy's blind spot no longer matters — the hint is never in what WebKit sees. This
-    /// test is the tripwire the other direction now: the gate turning back off is a real decision
-    /// (the sanitizer regressing, or a new hint class appearing), never a side effect of
-    /// refactoring this file.
-    @Test("the viewer is reachable now that #912's sanitizer closes dns-prefetch by construction")
-    func gateIsOnNowThatTheSanitizerClosesDNSByConstruction() {
-        #expect(ViewerFeatureGate.isEnabled == true)
+    /// #912 closes that gap by construction instead of by observation (`RawHTMLSanitizer`), but
+    /// dev-3's #915 review round 1 found two live-confirmed holes in the stripper itself (`rel`
+    /// split on space only; a combining mark after a quote desyncing the tokenizer from WebKit's
+    /// own parser) — both fixed, with live mutation-checked tests, but the planner's call is this
+    /// stays off until dev-3's round-2 re-review confirms it. This test is the tripwire: flipping
+    /// the gate on is that re-review's decision, never a side effect of refactoring this file.
+    @Test("the viewer is not reachable until #912's sanitizer passes dev-3's re-review")
+    func gateIsOffUntilTheSanitizerPassesReReview() {
+        #expect(ViewerFeatureGate.isEnabled == false)
     }
 
     @Test("html, not streaming: offered")
