@@ -36,6 +36,9 @@ struct ScenarioResult: Sendable {
     var midTurnEventCards: [Int] = []
     /// The messages each turn appended, as `role: content` (`--bench --transcript`).
     var turnMessages: [[String]] = []
+    /// The usage the run's turns reported, in the weighted tokens a `TurnBudget` reads (thinking included, cache reads at
+    /// their discount). nil when the run carried no budget.
+    var weightedTokens: Int? = nil
 }
 
 /// Drives the iris core end-to-end without any UI: stands up a fresh `AppState`, builds an
@@ -64,6 +67,7 @@ enum ScenarioRunner {
                     factStore: FactStoreManager? = nil,
                     retryDelays: [TimeInterval] = [2, 4, 8],
                     experiments: PerfExperiments = .init(),
+                    turnBudget: TurnBudget? = nil,
                     sleep: @Sendable (Int) async -> Void = { try? await Task.sleep(nanoseconds: UInt64($0) * 1_000_000_000) }) async -> ScenarioResult {
         // A scenario that writes ledger rows or pins gets an explicit in-memory store, never one
         // resolved from the environment: those writes must not be able to reach a real database.
@@ -258,7 +262,7 @@ enum ScenarioRunner {
                     if let card = turn.eventCard { cards.arm(turn: turnIndex + 1, run: card) }
                 }
                 let before = state.conversations.first { $0.id == conversationId }?.messages.count ?? 0
-                await engine.processInput(turn.prompt, source: turn.source, conversationId: conversationId)
+                await engine.processInput(turn.prompt, source: turn.source, conversationId: conversationId, turnBudget: turnBudget)
                 // A one-round turn never reached round 1: the card still arrives, after the turn.
                 if let ledger, let (turn, run) = cards.take() {
                     print("[ScenarioRunner] turn \(turn) ended after one model round; its event card was delivered after the turn")
@@ -291,11 +295,16 @@ enum ScenarioRunner {
         // for any exit path a future change adds, since a defer body cannot await.
         for id in current.all { await SandboxSessionManager.shared.endSession(id) }
 
-        return ScenarioResult(turnProfiles: collector.all, wallClockMs: wallClockMs,
+        let weightedTokens = turnBudget.map { budget in
+            current.all.reduce(0) { $0 + state.runUsage(for: $1).weighted(provider: budget.provider, model: budget.model) }
+        }
+        var scenarioResult = ScenarioResult(turnProfiles: collector.all, wallClockMs: wallClockMs,
                               finalTexts: finalTexts, guardsWereOff: guardsOff, vibecopMeasured: state.vibecopUnderAutoApprove,
                               toolsSandboxed: sandboxed, conversationId: conversationId,
                               conversationIds: current.all, turnErrors: turnErrors,
                               midTurnEventCards: cards.midTurn, turnMessages: transcript)
+        scenarioResult.weightedTokens = weightedTokens
+        return scenarioResult
     }
 
     /// Writes one turn's recorded requests as `<dir>/<turn>-<round>.json`, keyed on the engine's

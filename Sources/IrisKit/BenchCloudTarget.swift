@@ -26,12 +26,6 @@ struct BenchCloudTarget: Equatable, Sendable {
     /// The `--max-dollars` ceiling, so a typo (`500`) cannot become the cap.
     static let maxCapDollars = 50.0
 
-    /// Measured on #854's gemma pass: a primary request is ~42 KB (about 10.5k tokens) and a run makes 2 calls.
-    /// Rounded up by about 12%. `projectedOutputTokens` is the answer plus thinking per run, assumed (flash
-    /// thinks; the figure is the canary bake-off's medium level, doubled, over 2 calls).
-    static let projectedInputTokens = 24_000
-    static let projectedOutputTokens: [LLMProvider: Int] = [.gemini: 1_200, .anthropic: 600]
-
     /// Where the credentials come from. The key is never read from the Keychain.
     enum Auth: Equatable, Sendable {
         /// `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` in the environment.
@@ -63,25 +57,55 @@ struct BenchCloudTarget: Equatable, Sendable {
         return (provider, parts[1])
     }
 
-    /// Dollars one run is projected to cost, or nil when the price list has no rate for the model: never a
-    /// fallback rate, never zero.
-    static func projectedRunDollars(provider: LLMProvider, model: String) -> Double? {
-        let tokens = EvalCost.Tokens(input: projectedInputTokens, output: projectedOutputTokens[provider] ?? 0,
-                                     thought: 0, calls: 2)
-        return EvalCost.dollars(tokens, rates: EvalCost.rates(provider: provider, model: model))
+    /// The in-run bound (#916 review): once the turn's reported usage reaches this many weighted tokens (an input token
+    /// is 1, an output or thinking token 5, a cache read its discount), no further model round starts. A normal run is
+    /// two rounds of about 11k.
+    static let budgetWeightedTokens = 40_000
+    /// A run that has stopped responding ends here.
+    static let budgetSeconds = 900.0
+    /// The most one round can add past the budget beyond what the budget lets it spend: its own input. The budget
+    /// caps a request's output to what is left, so the round that crosses it cannot overshoot on output; its prompt
+    /// (the 10.5k-token request, plus a few capped tool results) is assumed to stay under this.
+    static let roundInputAllowanceTokens = 40_000
+
+    /// The turn budget a cloud run carries.
+    func turnBudget() -> TurnBudget {
+        TurnBudget(maxTokens: Self.budgetWeightedTokens, seconds: Self.budgetSeconds,
+                   provider: provider.rawValue.lowercased(), model: model)
     }
 
-    /// What a run actually cost, from the usage the provider reported for each model call, or nil when it
-    /// reported none. Thinking tokens are not in `outputTokens`, so this is a floor; the ledger settles at the
-    /// larger of it and the projection, so a run is never booked below what was reserved for it.
-    static func reportedDollars(_ calls: [ModelCallRecord], provider: LLMProvider, model: String) -> Double? {
+    /// The most one run can cost under its budget, in dollars: the budget plus one round's input, every weighted token
+    /// priced at the input rate (the weights are the price ratios). nil when the price list has no rate. This is what a
+    /// run reserves in the ledger.
+    static func boundDollars(provider: LLMProvider, model: String) -> Double? {
         guard let rates = EvalCost.rates(provider: provider, model: model) else { return nil }
-        let reported = calls.filter { $0.promptTokens != nil || $0.outputTokens != nil }
-        guard !reported.isEmpty else { return nil }
-        let tokens = EvalCost.Tokens(input: reported.reduce(0) { $0 + ($1.promptTokens ?? 0) },
-                                     output: reported.reduce(0) { $0 + ($1.outputTokens ?? 0) },
-                                     thought: 0, calls: reported.count)
-        return EvalCost.dollars(tokens, rates: rates)
+        return Double(budgetWeightedTokens + roundInputAllowanceTokens) * rates.input
+    }
+
+    /// What a run is booked at: the dollars of the weighted tokens its turns reported, never above what it reserved
+    /// (the budget is what keeps them under it) and never below the typical-run projection when it reported nothing.
+    static func bookedDollars(weightedTokens: Int?, bound: Double, provider: LLMProvider, model: String) -> Double {
+        guard let weightedTokens, let rates = EvalCost.rates(provider: provider, model: model) else { return bound }
+        return Double(weightedTokens) * rates.input
+    }
+
+    enum ReserveOutcome: Equatable {
+        case reserved(UUID, Double)
+        case refused(String)
+    }
+
+    /// The reserve-or-refuse decision of a run, pulled out of `run()` so it can be tested: reserve the run's bound in the
+    /// ledger, or say why not. A reserve of zero would let every run through, so the amount is the bound or nothing.
+    static func reserveRun(_ target: BenchCloudTarget, in ledger: SpendLedger) throws -> ReserveOutcome {
+        guard let bound = boundDollars(provider: target.provider, model: target.model) else {
+            return .refused("no listed price for \(target.model); not started")
+        }
+        guard let id = try ledger.reserve(bound) else {
+            let spent = (try? ledger.total()) ?? 0
+            return .refused(String(format: "one run is bounded at $%.3f and the ledger holds $%.3f of the $%.2f cap: not started",
+                                   bound, spent, target.maxDollars))
+        }
+        return .reserved(id, bound)
     }
 
     /// Why these options cannot be a cloud-primary run, or nil. `env` and `fileExists` are injectable so a test
@@ -136,11 +160,11 @@ struct BenchCloudTarget: Equatable, Sendable {
         default:
             return "--cloud-auth takes env or vertex-adc; \(opts.cloudAuth ?? "") is neither"
         }
-        guard let projected = projectedRunDollars(provider: provider, model: model) else {
-            return "no listed price for \(model): the cost cannot be projected, so the run is not started"
+        guard let bound = boundDollars(provider: provider, model: model) else {
+            return "no listed price for \(model): the cost cannot be bounded, so the run is not started"
         }
-        if projected > cap {
-            return String(format: "one run is projected at $%.3f, over --max-dollars %@: not started", projected, raw)
+        if bound > cap {
+            return String(format: "one run is bounded at $%.3f, over --max-dollars %@: not started", bound, raw)
         }
         return nil
     }
