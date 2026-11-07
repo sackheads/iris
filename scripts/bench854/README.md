@@ -23,3 +23,12 @@ Examples (a built, signed `iris`):
     # paid, the rows the gemma guard passed, guard bypassed, three passes, capped (key in the environment)
     ROWS=scripts/bench854/rows28.json REPS=3 ARM_ARGS="--cloud-primary anthropic:claude-opus-5-5 --allow-paid --max-dollars 11 --spend-ledger ~/bench854-ledger.jsonl --bypass-guard" \
       python3 -I scripts/bench854/run854.py BIN full
+
+On a machine with only Vertex ADC (no API keys), per arm and under one ledger so one cap covers both:
+
+    ROWS=scripts/bench854/rows28.json REPS=3 ARM_ARGS="--cloud-primary gemini:gemini-3.8-flash --allow-paid --max-dollars 3 --spend-ledger ~/bench854-ledger.jsonl --bypass-guard --cloud-auth vertex-adc" \
+      python3 -I scripts/bench854/run854.py BIN full
+    ROWS=scripts/bench854/rows28.json REPS=3 ARM_ARGS="--cloud-primary anthropic:claude-opus-5-5 --allow-paid --max-dollars 11 --spend-ledger ~/bench854-ledger.jsonl --bypass-guard --cloud-auth vertex-adc --vertex-project gke-claude-dev" \
+      python3 -I scripts/bench854/run854.py BIN full
+
+The ledger cap applies to the sum of both arms' bookings (each run books at least its projection), so size it for the total, or use a ledger file per arm.
