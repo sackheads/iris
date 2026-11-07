@@ -101,8 +101,13 @@ protections:
 
 Each item carries a **route-back set** (the agents that get the answer) and a **notify set** (cc'd
 for awareness). On Submit, Brian's response — the chosen option id and/or free text — is delivered to
-each route-back agent as an authored message that wakes an idle one and queues for a busy one, the
-same delivery `send_to_session` uses; the notify set gets a lighter awareness ping. The answer is
+each route-back agent under its own label, "inbox answer", not as a peer message: it wakes an idle
+agent and queues behind a busy one, expects no reply and is not declinable as a peer's request would
+be (Brian's decision is user authority). Only submitting an answer in the inbox can produce that
+label; no tool or peer message can. The message keeps Brian's decision (his choice by position and
+plain id, and his words) apart from the original item (title, situation, options), which is the
+emitter's text, echoed so a cold recipient can act, and which carries the emitter's #813 taint and
+is stated not to be an instruction. The notify set gets a lighter awareness ping, once. The answer is
 recorded on the thread so it survives and shows as context on any reopen.
 
 ### Trust
