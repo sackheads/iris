@@ -3118,7 +3118,7 @@ actor IrisEngine {
                     dumpSink?(requestToSend, roundForDump, retryAttempt?.get() ?? 0)
                     PerformanceProfiler.event("provider.request sent round=\(roundForDump)")
                     return try await measure(.primaryLLM) {
-                        try await self.consumeModelStream(request: requestToSend, streamed: streamed, streamer: streamer)
+                        try await self.consumeModelStream(request: requestToSend, streamed: streamed, streamer: streamer, conversationId: conversationId)
                     }
                 }
                 let response = outcome.response
@@ -4233,6 +4233,7 @@ actor IrisEngine {
         rewritten.cacheHints = request.cacheHints
         rewritten.prefixMismatchBehavior = request.prefixMismatchBehavior
         rewritten.forceBindingBeta = request.forceBindingBeta
+        rewritten.reasoningEffort = request.reasoningEffort
         return rewritten
     }
 
@@ -6671,21 +6672,32 @@ actor IrisEngine {
     /// One attempt at the model call: opens the native stream or a replayed plain call, feeds
     /// text to the streamer as it arrives, and returns the assembled response. A failure after
     /// the first token is wrapped in `StreamInterruptedError` so `LLMRetry` lets it through.
-    func consumeModelStream(request: GeminiRequest, streamed: Bool, streamer: MessageStreamer) async throws -> StreamOutcome {
+    func consumeModelStream(request: GeminiRequest, streamed: Bool, streamer: MessageStreamer, conversationId: UUID? = nil) async throws -> StreamOutcome {
         let start = MonotonicClock.nowMs()
         var assembler = StreamAssembler()
         let client = self.client, tier = currentTier
         let stream = streamed
             ? client.streamContent(request: request, tier: tier)
             : LLMStreamEvent.replay { try await client.generateContent(request: request, tier: tier) }
+        let localState = self.state
+        // The status line is gone when the round ends, normally or not, before the caller moves on.
+        let clearNote: () async -> Void = {
+            guard let conversationId else { return }
+            await MainActor.run { localState?.thinkingNotes.clear(conversationId) }
+        }
         do {
             for try await event in stream {
                 assembler.apply(event, now: MonotonicClock.nowMs())
                 if case .textDelta(let delta) = event { await streamer.append(delta) }
+                if case .thinkingText(let fragment) = event, let conversationId {
+                    await MainActor.run { localState?.thinkingNotes.append(fragment, to: conversationId) }
+                }
             }
+            await clearNote()
             // A cancelled consumer sees the stream end early instead of throwing; make it a Stop.
             try Task.checkCancellation()
         } catch {
+            await clearNote()
             if assembler.firstTokenAt != nil, !(error is CancellationError), !Task.isCancelled {
                 throw StreamInterruptedError(underlying: error)
             }

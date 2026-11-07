@@ -25,6 +25,10 @@ enum LLMStreamEvent: Sendable, Equatable {
     /// #314: the client retried with drop_block after a binding 400, and the retry completed.
     /// Yielded last, after the retry's own events; a failed retry never yields it. Not a token.
     case prefixMismatchFallback
+    /// #314 PR 7: a fragment of the thinking text the API returned (summarized or updates). For a
+    /// status line only: the assembler drops it, and it is not a token (the full text is already in
+    /// `anthropicBlocks`).
+    case thinkingText(String)
 }
 
 /// One Server-Sent Event: the optional `event:` name and the joined `data:` payload.
@@ -136,6 +140,8 @@ struct StreamAssembler: Sendable {
             prefixMismatchDiagnosis = value
         case .prefixMismatchFallback:
             bindingFallback = true
+        case .thinkingText:
+            break
         }
     }
 

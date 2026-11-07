@@ -574,6 +574,8 @@ class AppState {
     /// Agent replies still streaming in (#541): see `StreamingTexts`. A `let`, so reading the
     /// property subscribes to nothing; a view subscribes only to what it reads off it.
     let streaming = StreamingTexts()
+    /// The thinking text the API returns mid-reply, for the status line (#314 PR 7). Transient.
+    let thinkingNotes = ThinkingNotes()
     /// Fires with the conversation's id on each streamed update, for the transcript to follow the
     /// reply down. A subject rather than observable state: the chat window's root listens with
     /// `onReceive`, so a token never re-evaluates it.

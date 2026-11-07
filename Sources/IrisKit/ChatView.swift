@@ -270,6 +270,7 @@ struct ChatView: View {
                                     Text("Iris is thinking...")
                                         .font(.callout)
                                         .foregroundColor(.secondary)
+                                    ThinkingNoteLine(note: state.thinkingNotes.note(for: conv.id))
 
                                     Button(action: { state.interruptActiveConversation() }) {
                                         Label("Stop", systemImage: "stop.circle.fill")
@@ -1944,5 +1945,23 @@ struct LoopChip: View {
                 }
             }
             .padding(8)
+    }
+}
+
+
+/// The thinking text the API returned so far, on the "Iris is thinking..." row (#314 PR 7). Its own
+/// view so a note's per-update re-render stays here (see `ThinkingNotes`); empty when the model
+/// returned none.
+private struct ThinkingNoteLine: View {
+    let note: ThinkingNotes.Note
+
+    var body: some View {
+        if !note.text.isEmpty {
+            Text(note.text)
+                .font(.callout)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .truncationMode(.head)
+        }
     }
 }

@@ -26,6 +26,10 @@ struct GeminiRequest: Codable {
     /// has one. `LLMClient.encodeGeminiBody` adds it to the wire body; no other provider reads it.
     /// Never encoded here.
     var thinkingLevel: String? = nil
+    /// #314 PR 7: Anthropic's `output_config.effort`, the user's reasoning-effort setting for the
+    /// call's tier. Nil sends none, so the model keeps its own default. The client sends it only to
+    /// a model whose `AnthropicCapabilities` row lists the level. Never encoded.
+    var reasoningEffort: String? = nil
 
     private enum CodingKeys: String, CodingKey { case contents, systemInstruction, tools }
 }
