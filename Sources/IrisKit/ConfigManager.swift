@@ -451,6 +451,22 @@ class ConfigManager: @unchecked Sendable {
     }
 
     /// The thinking levels a Cloud tier 3 can ask for. The bake-off measured these two (#783).
+    /// The local guard model a fresh install uses for tier 3 and Vibecop: what the Setup Wizard offers first.
+    static let defaultLocalModel = "gemma-4-E2B-it-Q4_K_M.gguf"
+
+    /// Models Iris no longer offers (#932). Qwen3.5-2B blocked or fail-closed every text through the
+    /// `llama_cpp` canary, and the older Qwen-1.5B shipped before it; a saved choice of either becomes
+    /// `defaultLocalModel`, so an existing install's guard is not left on a model that cannot work.
+    static let retiredLocalModels: Set<String> = ["Qwen3.5-2B-Q4_K_M.gguf", "Qwen-1.5B-Q4_K_M.gguf"]
+
+    /// `saved` unless it names a retired model (raw name or source URL), which is replaced by the
+    /// default and written back to the store so it is migrated once.
+    static func migratedLocalModel(_ saved: String, key: String, in store: UserDefaults) -> String {
+        guard retiredLocalModels.contains(ModelDownloader.resolvedFilename(for: saved)) else { return saved }
+        store.set(defaultLocalModel, forKey: key)
+        return defaultLocalModel
+    }
+
     static let tier3ThinkingLevels = ["low", "medium"]
     /// A Cloud tier 3's thinking level (#800). Empty, the default, sends none, which is what it
     /// always did. Only Gemini reads it; another primary provider ignores it. Anything outside
@@ -708,8 +724,8 @@ class ConfigManager: @unchecked Sendable {
         let savedEngine = saved.string(forKey: "VIBECOP_ENGINE") ?? ""
         self.vibecopEngine = savedEngine.isEmpty ? "llama_cpp" : savedEngine
         
-        let savedVibecop = saved.string(forKey: "VIBECOP_MODEL") ?? ""
-        self.vibecopModel = savedVibecop.isEmpty ? "gemma-4-E2B-it-Q4_K_M.gguf" : savedVibecop
+        let savedVibecop = Self.migratedLocalModel(saved.string(forKey: "VIBECOP_MODEL") ?? "", key: "VIBECOP_MODEL", in: store)
+        self.vibecopModel = savedVibecop.isEmpty ? Self.defaultLocalModel : savedVibecop
         self.vibecopCloudModel = saved.string(forKey: "VIBECOP_CLOUD_MODEL") ?? ""
 
         let savedMaxIters = guardedInt(.maxGoalIterations, "MAX_GOAL_ITERATIONS")
@@ -757,8 +773,8 @@ class ConfigManager: @unchecked Sendable {
         let savedPromptEngine = saved.string(forKey: "PROMPT_GUARD_ENGINE") ?? ""
         self.promptGuardEngine = savedPromptEngine.isEmpty ? "llama_cpp" : savedPromptEngine
         
-        let savedPromptModel = saved.string(forKey: "PROMPT_GUARD_MODEL") ?? ""
-        self.promptGuardModel = savedPromptModel.isEmpty ? "Qwen3.5-2B-Q4_K_M.gguf" : savedPromptModel
+        let savedPromptModel = Self.migratedLocalModel(saved.string(forKey: "PROMPT_GUARD_MODEL") ?? "", key: "PROMPT_GUARD_MODEL", in: store)
+        self.promptGuardModel = savedPromptModel.isEmpty ? Self.defaultLocalModel : savedPromptModel
         self.tier3CloudModel = saved.string(forKey: "PROMPT_GUARD_CLOUD_MODEL") ?? ""
         let savedThinking = saved.string(forKey: "PROMPT_GUARD_THINKING_LEVEL") ?? ""
         self.tier3ThinkingLevel = Self.tier3ThinkingLevels.contains(savedThinking) ? savedThinking : ""

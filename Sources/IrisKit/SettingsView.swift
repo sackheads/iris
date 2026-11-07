@@ -559,7 +559,7 @@ struct SettingsView: View {
                             }
                         } else {
                             TextField("MLX Model", text: $config.vibecopModel)
-                                .help("The local model to use for Vibecop background evaluation (e.g. qwen3.5, gemma4:12b)")
+                                .help("The local model to use for Vibecop background evaluation (e.g. gemma4:12b)")
                             
                             HStack {
                                 Text("✅ Assuming model is ready via external daemon.")
