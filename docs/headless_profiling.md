@@ -37,6 +37,18 @@ swift run iris --bench scenarios/live.json --real     # hit a real provider (nee
   the run neither reads nor writes the Keychain, so it never prompts, and a seeded key can't reach a real item. The
   URL must be loopback (`127.0.0.1`, `localhost`, `::1`, exact host), else the run is refused, and so is a local flag
   without `--real`. Tier 2 still needs its own bundle. Bench-only: the flags exist nowhere in the app.
+- `--cloud-primary PROVIDER:MODEL --allow-paid --max-dollars N --spend-ledger FILE` plus exactly one of `--local-canary NAME`,
+  `--canary-gguf FILE` and `--bypass-guard` (#854) makes a `--real` run's primary a paid cloud model, for measuring a capable
+  driver's compliance with a planted request (`scripts/bench854/`). It is **paid**: only `gemini:gemini-3.8-flash` and
+  `anthropic:claude-opus-5-5` are accepted, the key is read from `GEMINI_API_KEY` or `ANTHROPIC_API_KEY` (never the Keychain, so it
+  cannot prompt), and the run is refused unless `--max-dollars` is at most 50. Before its first call a run reserves its projected cost
+  (about 24k input tokens and 2 calls, at `ModelPriceSnapshot` rates) in the `--spend-ledger` file, which every run that names the
+  same file shares: a reserve that would pass the cap stops the run (exit 2) and one run over the cap is never started. The run books
+  the larger of the usage the provider reported and the projection, so the ledger is a ceiling on the cumulative spend, off by at most
+  one run. The guard in front of the primary is never inherited from the machine's settings: pin the tier-3 canary
+  (`--local-canary` an Ollama model, `--canary-gguf` a `.gguf` file name in the dev home's models folder) or say `--bypass-guard`, which
+  switches the prompt-injection guard off to replay rows a guard already passed. The run prints a header with the machine's own guard
+  settings (not used), the tier-2 state and, bypassed, that the result measures the driver and not the guard. Excludes `--local-openai`.
 - `--real` forces the scenario onto a real provider regardless of what the file
   says (`clientMode` is overridden to `real`). This needs configured provider
   keys/auth and makes network calls, so it never runs in CI.
@@ -44,7 +56,7 @@ swift run iris --bench scenarios/live.json --real     # hit a real provider (nee
 A `swift run` binary is ad-hoc-signed. For **fake** runs the harness flips the
 in-process `HeadlessMode` switch, which routes the Keychain to an in-memory store
 (no access prompt) and skips the model-backed injection-guard tiers (2/3).
-`--real` runs keep Keychain access so provider auth resolves, except a `--local-openai` run, which uses an in-memory store.
+`--real` runs keep Keychain access so provider auth resolves, except a `--local-openai` or `--cloud-primary` run, which uses an in-memory store.
 
 `HeadlessMode` is deliberately not an environment variable: it disables an
 injection defense, so it must not be settable from outside the process.
