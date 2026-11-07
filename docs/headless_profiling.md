@@ -43,11 +43,14 @@ swift run iris --bench scenarios/live.json --real     # hit a real provider (nee
   `anthropic:claude-opus-5-5` are accepted, the key is read from `GEMINI_API_KEY` or `ANTHROPIC_API_KEY`, or with `--cloud-auth vertex-adc` from gcloud
   Application Default Credentials as the app's Vertex modes use them (Gemini rides the ADC quota project; Claude needs
   `--vertex-project ID` and takes `--vertex-location`, default `global`; the run stops before any model call if ADC gives no token),
-  never the Keychain, so it cannot prompt, and the run is refused unless `--max-dollars` is at most 50. Before its first call a run reserves its projected cost
-  (about 24k input tokens and 2 calls, at `ModelPriceSnapshot` rates) in the `--spend-ledger` file, which every run that names the
-  same file shares: a reserve that would pass the cap stops the run (exit 2) and one run over the cap is never started. The run books
-  the larger of the usage the provider reported and the projection, so the ledger is a ceiling on the cumulative spend, off by at most
-  one run. The guard in front of the primary is never inherited from the machine's settings: pin the tier-3 canary
+  never the Keychain, so it cannot prompt. A run is refused unless `--max-dollars` is at most 50. The cap holds in three places.
+  Before the run: it reserves its worst case (a 40,000-weighted-token budget plus one round's input, at the model's input rate) in
+  the `--spend-ledger` file, which every run naming the same file shares, and a reserve that would pass the cap stops it (exit 2).
+  Inside it: the run carries a `TurnBudget`, so no model round starts once the turn's reported usage (thinking included, an
+  output token weighing 5) reaches the budget, a request's output is capped to what is left, and each call gets one attempt (a retry
+  is a second bill the budget cannot see). After it: the usage the run reported is booked in place of the reserve, so a ledger is a
+  ceiling on cumulative spend. The one assumption is that a round's input stays under 40,000 tokens.
+  The guard in front of the primary is never inherited from the machine's settings: pin the tier-3 canary
   (`--local-canary` an Ollama model, `--canary-gguf` a `.gguf` file name in the dev home's models folder) or say `--bypass-guard`, which
   switches the prompt-injection guard off to replay rows a guard already passed. The run prints a header with the machine's own guard
   settings (not used), the tier-2 state and, bypassed, that the result measures the driver and not the guard. Excludes `--local-openai`.
