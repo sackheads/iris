@@ -12,24 +12,59 @@ enum InboxItemState: String, Codable, Sendable {
     case open, answered, awaitingDelivery, closed, stale
 }
 
-/// One choice in an item's decision, with its own pros and cons.
+/// One choice in an item's decision, with its own pros and cons. Persisted as a JSON blob
+/// (`optionsJSON`), so every field needs `decodeIfPresent ?? default` (Invariant 1): a field this
+/// build doesn't know about must not throw and lose the whole item.
 struct InboxOption: Codable, Equatable, Sendable {
     let id: String
     var label: String
     var pros: [String]
     var cons: [String]
+
+    init(id: String, label: String, pros: [String], cons: [String]) {
+        self.id = id
+        self.label = label
+        self.pros = pros
+        self.cons = cons
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        label = try c.decodeIfPresent(String.self, forKey: .label) ?? ""
+        pros = try c.decodeIfPresent([String].self, forKey: .pros) ?? []
+        cons = try c.decodeIfPresent([String].self, forKey: .cons) ?? []
+    }
 }
 
-/// Brian's verdict on a thread: a chosen option, free text, or both.
+/// Brian's verdict on a thread: a chosen option, free text, or both. Persisted as a JSON blob
+/// (`answerJSON`); same Invariant 1 requirement as `InboxOption`.
 struct InboxAnswer: Codable, Equatable, Sendable {
     var chosenOptionId: String?
     var freeText: String?
     var at: Date
+
+    init(chosenOptionId: String?, freeText: String?, at: Date) {
+        self.chosenOptionId = chosenOptionId
+        self.freeText = freeText
+        self.at = at
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        chosenOptionId = try c.decodeIfPresent(String.self, forKey: .chosenOptionId)
+        freeText = try c.decodeIfPresent(String.self, forKey: .freeText)
+        at = try c.decodeIfPresent(Date.self, forKey: .at) ?? Date()
+    }
 }
 
 /// One pending (or resolved) decision. `threadId` is namespaced to and owned by `ownerChain` —
-/// only that chain may append-and-reopen it (#920 spec: thread ownership / anti-goal #3).
-struct InboxItem: Codable, Equatable, Sendable {
+/// only that chain may append-and-reopen it (#920 spec: thread ownership / anti-goal #3), enforced
+/// by a UNIQUE index on `threadId` (one `inbox_items` row per thread) plus the ownership check in
+/// `appendFollowup`. Not `Codable`: the store decodes each column itself (`InboxStore.decode`),
+/// never this type as one JSON blob, so a synthesized `Decodable` here would be untested dead code
+/// that silently defaults `ownerChain` to `""` if anyone later wired it up (dev-2 #924 review).
+struct InboxItem: Equatable, Sendable {
     let id: String
     let threadId: String
     let ownerChain: String
@@ -48,55 +83,6 @@ struct InboxItem: Codable, Equatable, Sendable {
     let createdAt: Date
     var lastActivityAt: Date
     var answer: InboxAnswer?
-
-    init(id: String, threadId: String, ownerChain: String, emitter: UUID, emitterLabel: String,
-         title: String, situation: String, options: [InboxOption], responseMode: InboxResponseMode,
-         routeBack: [String], notify: [String], deadline: Date?, vetoDefaultOptionId: String?,
-         emitterTainted: Bool, state: InboxItemState, createdAt: Date, lastActivityAt: Date,
-         answer: InboxAnswer?) {
-        self.id = id
-        self.threadId = threadId
-        self.ownerChain = ownerChain
-        self.emitter = emitter
-        self.emitterLabel = emitterLabel
-        self.title = title
-        self.situation = situation
-        self.options = options
-        self.responseMode = responseMode
-        self.routeBack = routeBack
-        self.notify = notify
-        self.deadline = deadline
-        self.vetoDefaultOptionId = vetoDefaultOptionId
-        self.emitterTainted = emitterTainted
-        self.state = state
-        self.createdAt = createdAt
-        self.lastActivityAt = lastActivityAt
-        self.answer = answer
-    }
-
-    /// Invariant 1: every field decodes with a default, so one unreadable field never makes the
-    /// whole row — or an encode of this type elsewhere — throw.
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = try c.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
-        threadId = try c.decodeIfPresent(String.self, forKey: .threadId) ?? id
-        ownerChain = try c.decodeIfPresent(String.self, forKey: .ownerChain) ?? ""
-        emitter = try c.decodeIfPresent(UUID.self, forKey: .emitter) ?? UUID()
-        emitterLabel = try c.decodeIfPresent(String.self, forKey: .emitterLabel) ?? ""
-        title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
-        situation = try c.decodeIfPresent(String.self, forKey: .situation) ?? ""
-        options = try c.decodeIfPresent([InboxOption].self, forKey: .options) ?? []
-        responseMode = try c.decodeIfPresent(InboxResponseMode.self, forKey: .responseMode) ?? .notification
-        routeBack = try c.decodeIfPresent([String].self, forKey: .routeBack) ?? []
-        notify = try c.decodeIfPresent([String].self, forKey: .notify) ?? []
-        deadline = try c.decodeIfPresent(Date.self, forKey: .deadline)
-        vetoDefaultOptionId = try c.decodeIfPresent(String.self, forKey: .vetoDefaultOptionId)
-        emitterTainted = try c.decodeIfPresent(Bool.self, forKey: .emitterTainted) ?? false
-        state = try c.decodeIfPresent(InboxItemState.self, forKey: .state) ?? .open
-        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
-        lastActivityAt = try c.decodeIfPresent(Date.self, forKey: .lastActivityAt) ?? createdAt
-        answer = try c.decodeIfPresent(InboxAnswer.self, forKey: .answer)
-    }
 }
 
 /// One entry in a thread's history: the original question, Brian's answer, or a later followup.
@@ -110,8 +96,16 @@ struct InboxThreadEntry: Equatable, Sendable {
 }
 
 enum InboxError: Error, Equatable {
-    case notOwner
+    /// `appendFollowup`/`recordAnswer` on a thread/item that doesn't exist.
     case unknownThread
+    case unknownItem
+    /// `appendFollowup` from a chain other than the thread's own `ownerChain`.
+    case notOwner
+    /// `createItem` with a `threadId` that already has a row — one `inbox_items` row per thread,
+    /// enforced by the UNIQUE index; refused here before the database ever has to (dev-2 finding 1).
+    case threadAlreadyExists
+    /// A write that would resurrect a `.closed` item (dev-2 finding 4): closing is meant to be final.
+    case itemClosed
 }
 
 /// The `inbox_items` + `inbox_thread` tables: items and their thread entries, independent of any
@@ -130,41 +124,53 @@ final class InboxStore: Sendable {
         }
     }
 
-    /// A thread id namespaced to `ownerChain` so a later ownership check never needs to look the
-    /// owner up elsewhere — the id itself is only ever checked against the item that owns it.
+    /// A thread id namespaced to `ownerChain` (its sanitized prefix), re-rolled against the
+    /// `threadId` column until it is free — not the `id` column, which `newItemId` checks (dev-2
+    /// finding 2: the old version claimed namespacing but checked the wrong column and ignored
+    /// the parameter entirely).
     func newThreadId(ownerChain: String) throws -> String {
+        let prefix = ownerChain.lowercased().filter { $0.isLetter || $0.isNumber }.prefix(16)
         while true {
-            let id = String(UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "").prefix(12))
-            if try item(id: id) == nil { return id }
+            let suffix = String(UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "").prefix(12))
+            let id = prefix.isEmpty ? suffix : "\(prefix)-\(suffix)"
+            if try !threadExists(id) { return id }
         }
     }
 
-    /// Inserts the item and its opening `"question"` thread entry in one write.
+    /// Inserts the item and its opening `"question"` thread entry in one write. Refuses
+    /// `.threadAlreadyExists` when `threadId` already has a row (dev-2 finding 1): creating is for
+    /// a *new* thread only — reopening an existing one is `appendFollowup`'s job, and the UNIQUE
+    /// index on `threadId` makes this check race-free within the one write transaction.
     @discardableResult
-    func createItem(_ item: InboxItem, question: String) throws -> InboxItem {
+    func createItem(_ item: InboxItem, question: String) throws -> Result<InboxItem, InboxError> {
         try writer.write { db in
+            if try Self.threadExists(item.threadId, db: db) { return .failure(.threadAlreadyExists) }
             try Self.insert(item, db: db)
             try Self.appendEntry(itemId: item.id, kind: "question", author: item.emitterLabel,
                                  body: question, at: item.createdAt, db: db)
+            return .success(item)
         }
-        return item
     }
 
     /// Refuses with `.notOwner` when `ownerChain` is not the thread's own owner (#920 spec: thread
-    /// ownership) — a foreign chain cannot reopen a decision Brian already trusts. Else appends a
-    /// `"followup"` entry and flips the item back to `.open`.
+    /// ownership) — a foreign chain cannot reopen a decision Brian already trusts. Refuses with
+    /// `.itemClosed` once the thread is closed (dev-2 finding 4: closing is final). The owner
+    /// lookup is `threadId`'s UNIQUE row, not an `ORDER BY` over caller-supplied dates (dev-2
+    /// finding 1's root cause). Else appends a `"followup"` entry and flips the item back to `.open`.
     @discardableResult
     func appendFollowup(threadId: String, fromChain ownerChain: String, author: String, body: String,
                         at: Date) throws -> Result<Void, InboxError> {
         return try writer.write { db in
-            guard let row = try Row.fetchOne(db, sql: "SELECT id, ownerChain FROM inbox_items WHERE threadId = ? ORDER BY createdAt LIMIT 1",
+            guard let row = try Row.fetchOne(db, sql: "SELECT id, ownerChain, state FROM inbox_items WHERE threadId = ?",
                                              arguments: [threadId]) else {
                 return .failure(.unknownThread)
             }
-            guard let itemId = row["id"] as String?, let storedOwner = row["ownerChain"] as String? else {
+            guard let itemId = row["id"] as String?, let storedOwner = row["ownerChain"] as String?,
+                  let stateRaw = row["state"] as String? else {
                 return .failure(.unknownThread)
             }
             guard storedOwner == ownerChain else { return .failure(.notOwner) }
+            guard stateRaw != InboxItemState.closed.rawValue else { return .failure(.itemClosed) }
 
             try Self.appendEntry(itemId: itemId, kind: "followup", author: author, body: body, at: at, db: db)
             try db.execute(sql: "UPDATE inbox_items SET state = ?, lastActivityAt = ? WHERE id = ?",
@@ -173,20 +179,33 @@ final class InboxStore: Sendable {
         }
     }
 
-    /// Records Brian's verdict: writes the answer, appends an `"answer"` thread entry, sets `.answered`.
-    func recordAnswer(itemId: String, answer: InboxAnswer) throws {
+    /// Records Brian's verdict: writes the answer, appends an `"answer"` thread entry, sets
+    /// `.answered`. Refuses `.unknownItem` on an id with no row (dev-2 finding 4: used to insert an
+    /// orphan thread entry for nothing) and `.itemClosed` once the item is closed.
+    @discardableResult
+    func recordAnswer(itemId: String, answer: InboxAnswer) throws -> Result<Void, InboxError> {
         let answerJSON = String(decoding: try JSONEncoder().encode(answer), as: UTF8.self)
-        try writer.write { db in
+        return try writer.write { db in
+            guard let stateRaw = try String.fetchOne(db, sql: "SELECT state FROM inbox_items WHERE id = ?",
+                                                      arguments: [itemId]) else {
+                return .failure(.unknownItem)
+            }
+            guard stateRaw != InboxItemState.closed.rawValue else { return .failure(.itemClosed) }
+
             try db.execute(sql: "UPDATE inbox_items SET answerJSON = ?, state = ?, lastActivityAt = ? WHERE id = ?",
                            arguments: [answerJSON, InboxItemState.answered.rawValue, answer.at, itemId])
             let body = [answer.chosenOptionId, answer.freeText].compactMap { $0 }.joined(separator: ": ")
             try Self.appendEntry(itemId: itemId, kind: "answer", author: "brian", body: body, at: answer.at, db: db)
+            return .success(())
         }
     }
 
-    func setState(itemId: String, _ state: InboxItemState) throws {
+    /// Refuses `.unknownItem` when nothing was updated (dev-2 finding 4).
+    @discardableResult
+    func setState(itemId: String, _ state: InboxItemState) throws -> Result<Void, InboxError> {
         try writer.write { db in
             try db.execute(sql: "UPDATE inbox_items SET state = ? WHERE id = ?", arguments: [state.rawValue, itemId])
+            return db.changesCount > 0 ? .success(()) : .failure(.unknownItem)
         }
     }
 
@@ -203,25 +222,48 @@ final class InboxStore: Sendable {
         }
     }
 
+    /// Every open item, most recently active first. A row this build cannot decode is skipped
+    /// (never traps the whole load) but logged once — unlike a dropped chat message, a dropped
+    /// inbox row is a decision Brian is waiting on, so it must not vanish with no trace (dev-2
+    /// finding 5).
     func openItems() throws -> [InboxItem] {
         try writer.read { db in
-            try Row.fetchAll(db, sql: "SELECT * FROM inbox_items WHERE state = ? ORDER BY lastActivityAt DESC",
-                             arguments: [InboxItemState.open.rawValue])
-                .compactMap(Self.decode)
+            let rows = try Row.fetchAll(db, sql: "SELECT * FROM inbox_items WHERE state = ? ORDER BY lastActivityAt DESC",
+                                        arguments: [InboxItemState.open.rawValue])
+            var items: [InboxItem] = []
+            for row in rows {
+                if let decoded = Self.decode(row) {
+                    items.append(decoded)
+                } else {
+                    print("WARNING: unreadable inbox item row (id=\(row["id"] as String? ?? "?")); skipped")
+                }
+            }
+            return items
         }
     }
 
+    private func threadExists(_ threadId: String) throws -> Bool {
+        try writer.read { db in try Self.threadExists(threadId, db: db) }
+    }
+
+    private static func threadExists(_ threadId: String, db: Database) throws -> Bool {
+        try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM inbox_items WHERE threadId = ?)", arguments: [threadId]) ?? false
+    }
+
     /// Tests insert a row this build cannot decode through this; nothing in the app calls it.
-    func rawInsertForTesting(id: String, threadId: String, ownerChain: String, responseMode: String) throws {
+    func rawInsertForTesting(id: String, threadId: String, ownerChain: String = "test-chain",
+                             emitter: String = UUID().uuidString, responseMode: String = InboxResponseMode.notification.rawValue,
+                             state: String = InboxItemState.open.rawValue, optionsJSON: String = "[]",
+                             answerJSON: String? = nil) throws {
         try writer.write { db in
             try db.execute(sql: """
                 INSERT INTO inbox_items (id, threadId, ownerChain, emitter, emitterLabel, title, situation,
                     optionsJSON, responseMode, routeBackJSON, notifyJSON, deadline, vetoDefaultOptionId,
                     emitterTainted, state, createdAt, lastActivityAt, answerJSON)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, arguments: [id, threadId, ownerChain, UUID().uuidString, "test", "t", "s",
-                                 "[]", responseMode, "[]", "[]", nil, nil, false,
-                                 InboxItemState.open.rawValue, Date(), Date(), nil])
+                """, arguments: [id, threadId, ownerChain, emitter, "test", "t", "s",
+                                 optionsJSON, responseMode, "[]", "[]", nil, nil, false,
+                                 state, Date(), Date(), answerJSON])
         }
     }
 
@@ -252,7 +294,10 @@ final class InboxStore: Sendable {
 
     /// A row this build cannot read is skipped rather than failing the query (mirrors
     /// `PeerLedger.decode` / `ConversationStore.pendingWrites`): an unknown `responseMode` or
-    /// `state`, or malformed JSON, drops that row, never traps the load.
+    /// `state`, a non-UUID `emitter`, or malformed `optionsJSON`/`routeBackJSON`/`notifyJSON` drops
+    /// that row, never traps the load. An `answerJSON` that is present but fails to decode also
+    /// drops the row — an answered item with a silently-emptied answer (`answer == nil` while
+    /// `state == .answered`) would be worse than one that's absent entirely (dev-2 finding 3).
     private static func decode(_ row: Row) -> InboxItem? {
         guard let id = row["id"] as String?,
               let threadId = row["threadId"] as String?,
@@ -275,8 +320,10 @@ final class InboxStore: Sendable {
               let createdAt = row["createdAt"] as Date?,
               let lastActivityAt = row["lastActivityAt"] as Date? else { return nil }
 
-        let answer: InboxAnswer? = (row["answerJSON"] as String?).flatMap {
-            try? JSONDecoder().decode(InboxAnswer.self, from: Data($0.utf8))
+        var answer: InboxAnswer?
+        if let answerText = row["answerJSON"] as String? {
+            guard let decoded = try? JSONDecoder().decode(InboxAnswer.self, from: Data(answerText.utf8)) else { return nil }
+            answer = decoded
         }
 
         return InboxItem(id: id, threadId: threadId, ownerChain: ownerChain, emitter: emitter,
