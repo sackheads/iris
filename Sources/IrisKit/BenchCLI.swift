@@ -29,9 +29,61 @@ struct BenchOptions: Sendable {
     /// `--transcript`: print each turn's messages after the summary, so a refused or denied tool
     /// call can be read, not inferred from the timings.
     var transcript: Bool = false
+    /// `--local-openai URL`, `--local-model NAME`, `--local-canary NAME` (#854): a loopback OpenAI-compatible
+    /// server (Ollama) as the primary model of a `--real` run. Raw as typed; `refusal` judges them.
+    var localOpenAI: String?
+    var localModel: String?
+    var localCanary: String?
+
+    /// The target when both URL and model were given. Half a target is refused, never guessed.
+    var localTarget: BenchLocalTarget? {
+        guard let url = localOpenAI, let model = localModel else { return nil }
+        return BenchLocalTarget(baseURL: url, model: model, canaryModel: localCanary ?? BenchLocalTarget.defaultCanaryModel)
+    }
 }
 
-/// Headless benchmark entry point: parse `--bench [scenario.json] [--real] [--dump-requests DIR] [--grant-read DIR | --grant-write DIR | --mutating-no-grant] [--transcript]`, run a scenario
+/// #854: a loopback OpenAI-compatible server as the primary model of a `--bench --real` run, so a local model's
+/// compliance with a planted request can be measured for free. Bench-only: the flags exist in `BenchCLI.parse`
+/// and nowhere in the app. Its key is a placeholder held in memory (`KeychainManager.requestHeadlessBypass`
+/// before `ConfigManager.shared` loads), so the run neither reads nor writes the user's Keychain items, and the
+/// URL must be loopback, so no prompt, file or key can leave the Mac.
+struct BenchLocalTarget: Equatable, Sendable {
+    /// The canary #801 ships.
+    static let defaultCanaryModel = "gemma4:12b"
+
+    var baseURL: String
+    var model: String
+    var canaryModel: String
+
+    /// Why this URL cannot be the target, or nil. http or https, and a loopback host exactly (`EndpointURL`'s
+    /// check, which `127.0.0.1.evil.example` and `localhost.evil.example` do not pass).
+    static func urlRefusal(_ url: String) -> String? {
+        let scheme = URLComponents(string: url.trimmingCharacters(in: .whitespacesAndNewlines))?.scheme?.lowercased()
+        guard scheme == "http" || scheme == "https", EndpointURL.isLoopbackURL(url) else {
+            return "--local-openai needs a loopback http(s) URL (127.0.0.1, localhost or ::1); \(url.isEmpty ? "(empty)" : url) is not"
+        }
+        return nil
+    }
+
+    /// Points a config at the local server: the primary provider (every tier), a placeholder key, the tier-3
+    /// canary on the same server, and the guard and sandbox switches a granted background run relies on. The
+    /// config must be a volatile copy's (the caller has made it one), and its guarded settings in memory.
+    @MainActor
+    func apply(to config: ConfigManager) {
+        config.primaryProvider = LLMProvider.openai.rawValue
+        config.openAIBaseURL = baseURL
+        config.openAIAPIKey = "bench-local"
+        config.openaiModelEasy = model
+        config.openaiModelMedium = model
+        config.openaiModelHard = model
+        config.promptGuardEngine = "ollama"
+        config.promptGuardModel = canaryModel
+        config.enableAdvancedPromptInjectionProtection = true
+        config.enableSandboxing = true
+    }
+}
+
+/// Headless benchmark entry point: parse `--bench [scenario.json] [--real] [--dump-requests DIR] [--grant-read DIR | --grant-write DIR | --mutating-no-grant] [--local-openai URL --local-model NAME [--local-canary NAME]] [--transcript]`, run a scenario
 /// through `ScenarioRunner`, and print a timing breakdown. Invoked from `main.swift` before any
 /// SwiftUI window is created, so `swift run iris --bench …` behaves like a standalone tool.
 enum BenchCLI {
@@ -44,9 +96,21 @@ enum BenchCLI {
         var dir: String?
         var grant: BenchGrant?
         var grantFlags = 0
+        var localOpenAI: String?, localModel: String?, localCanary: String?
         var i = 0
         while i < rest.count {
-            if rest[i] == "--dump-requests" || rest[i] == "--grant-read" || rest[i] == "--grant-write" {
+            if rest[i] == "--local-openai" || rest[i] == "--local-model" || rest[i] == "--local-canary" {
+                if i + 1 < rest.count, !rest[i + 1].hasPrefix("--") {
+                    switch rest[i] {
+                    case "--local-openai": localOpenAI = rest[i + 1]
+                    case "--local-model": localModel = rest[i + 1]
+                    default: localCanary = rest[i + 1]
+                    }
+                    i += 1
+                } else {
+                    FileHandle.standardError.write(Data("iris --bench: \(rest[i]) needs a value; ignored\n".utf8))
+                }
+            } else if rest[i] == "--dump-requests" || rest[i] == "--grant-read" || rest[i] == "--grant-write" {
                 // A flag's value is not the scenario path.
                 if i + 1 < rest.count, !rest[i + 1].hasPrefix("--") {
                     switch rest[i] {
@@ -66,7 +130,8 @@ enum BenchCLI {
             i += 1
         }
         return BenchOptions(scenarioPath: path, real: rest.contains("--real"), dumpRequestsDir: dir, grant: grant,
-                            grantConflict: grantFlags > 1, transcript: rest.contains("--transcript"))
+                            grantConflict: grantFlags > 1, transcript: rest.contains("--transcript"),
+                            localOpenAI: localOpenAI, localModel: localModel, localCanary: localCanary)
     }
 
     /// A tiny fake goal loop used when no scenario file is supplied: run one command, then finish.
@@ -90,6 +155,12 @@ enum BenchCLI {
     /// can set `clientMode: "real"` itself.
     static func refusal(_ opts: BenchOptions, scenario: Scenario) -> String? {
         if opts.grantConflict { return "--grant-read, --grant-write and --mutating-no-grant exclude each other: give one" }
+        if opts.localOpenAI != nil || opts.localModel != nil || opts.localCanary != nil {
+            if opts.localOpenAI == nil { return "--local-model and --local-canary need --local-openai URL" }
+            if opts.localModel == nil { return "--local-openai needs --local-model NAME" }
+            if let why = BenchLocalTarget.urlRefusal(opts.localOpenAI ?? "") { return why }
+            if scenario.clientMode != .real { return "--local-openai applies to a real run: add --real" }
+        }
         guard opts.grant != nil else { return nil }
         if scenario.clientMode == .real, let why = realModelGrantRefusal(opts.grant) { return why }
         // The grant is stamped on a background conversation only; elsewhere it would do nothing, which reads as "granted and still refused".
@@ -150,9 +221,12 @@ enum BenchCLI {
         }
         // A fake run needs no provider secrets; skip the Keychain so this ad-hoc-signed CLI
         // binary doesn't block on an access prompt. Must be set before ConfigManager.shared is
-        // first touched (inside ScenarioRunner.run). Real runs keep Keychain access for auth.
+        // first touched (inside ScenarioRunner.run). Real runs keep Keychain access for auth, except a local target (below).
         // Bench runs never write to the user's real preferences.
+        // A local target keeps the run off the Keychain: in memory before `ConfigManager.shared` first loads its secrets.
+        if opts.localTarget != nil { KeychainManager.requestHeadlessBypass() }
         IrisDefaults.useVolatileCopyOfStandard()
+        opts.localTarget?.apply(to: ConfigManager.shared)
         let result = await runScenario(scenario, dumpRequestsTo: opts.dumpRequestsDir.map { URL(fileURLWithPath: $0) },
                                         grant: opts.grant)
         print(BenchSummary.render(scenarioName: scenario.name, result: result))

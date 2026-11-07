@@ -30,6 +30,13 @@ swift run iris --bench scenarios/live.json --real     # hit a real provider (nee
   read-only job may not carry one), so each makes the run's profile `mutating`, not `readOnly`; it
   applies to a `background` scenario. With `--real` (a paid, unattended run with write and run tools open) only `--grant-write` on a folder under the temp directory is allowed, judged by its real path and never the temp directory itself; every other grant is refused. Without any of them, an unattended
   run's read of a file outside the Iris folder needs an approval nobody can give and is refused.
+- `--local-openai URL --local-model NAME [--local-canary NAME]` (#854) makes a `--real` run's primary model a
+  loopback OpenAI-compatible server (Ollama's `http://127.0.0.1:11434/v1`), free and with nothing leaving the Mac.
+  It sets the OpenAI provider and every tier to `NAME`, the tier-3 canary to Ollama's `--local-canary` (default
+  `gemma4:12b`, as #801 ships it), and the guard and sandbox switches on. The key is a placeholder held in memory:
+  the run neither reads nor writes the Keychain, so it never prompts, and a seeded key can't reach a real item. The
+  URL must be loopback (`127.0.0.1`, `localhost`, `::1`, exact host), else the run is refused, and so is a local flag
+  without `--real`. Tier 2 still needs its own bundle. Bench-only: the flags exist nowhere in the app.
 - `--real` forces the scenario onto a real provider regardless of what the file
   says (`clientMode` is overridden to `real`). This needs configured provider
   keys/auth and makes network calls, so it never runs in CI.
@@ -37,7 +44,7 @@ swift run iris --bench scenarios/live.json --real     # hit a real provider (nee
 A `swift run` binary is ad-hoc-signed. For **fake** runs the harness flips the
 in-process `HeadlessMode` switch, which routes the Keychain to an in-memory store
 (no access prompt) and skips the model-backed injection-guard tiers (2/3).
-`--real` runs keep Keychain access so provider auth resolves.
+`--real` runs keep Keychain access so provider auth resolves, except a `--local-openai` run, which uses an in-memory store.
 
 `HeadlessMode` is deliberately not an environment variable: it disables an
 injection defense, so it must not be settable from outside the process.
