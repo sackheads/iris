@@ -1153,6 +1153,11 @@ actor IrisEngine {
         // auto-applying its default at the deadline, so a malformed one stored here would be acted
         // on later with no chance to refuse. Checked before any rate token is spent, like the
         // title/situation/response_mode checks above.
+        // An emitter names itself or roles, not other sessions (see `isAllowedInboxRoute`): refused
+        // here, before a rate token is spent, so the model learns the rule from the reply.
+        guard (routeBack + notify).allSatisfy({ Self.isAllowedInboxRoute($0, emitter: conversationId) }) else {
+            return "route_back and notify may name only role:<name> entries (whoever holds the role when Brian answers) or yourself; another session by id or name is refused."
+        }
         let optionIds = options.map(\.id)
         guard Set(optionIds).count == optionIds.count else {
             return "Options must have distinct ids."
@@ -1492,16 +1497,28 @@ actor IrisEngine {
 
     func stopInboxVetoWatcher() { inboxVetoWatcher.stop() }
 
-    /// Where an answer goes. Brian's answer goes to the item's `route_back` (he chose to send it),
-    /// or to the emitter when there is none. An AUTOMATIC answer (a veto that ran out) has no
-    /// human behind it, so it goes only to the emitter or its owner chain: a `route_back` entry
-    /// naming any other session would let an agent push a message into a third session, with none
-    /// of the peer gates (attribution, rate limit, hop depth, decline framing), just by raising a
-    /// veto and waiting. Those entries are dropped, and `notify` is not used.
+    /// A `route_back` or `notify` entry an emitter may write: itself (its own session id) or a role
+    /// (`role:<name>`, whoever holds it when the answer goes out). Anything else, another session by
+    /// id or name or the pinned conversation, is refused at emit and dropped at answer time: an
+    /// emitter picks WHICH CHAIN gets the answer, not an arbitrary session, or Brian's click (or a
+    /// timer) becomes a way to push a message into a victim without the peer gates.
+    nonisolated static func isAllowedInboxRoute(_ target: String, emitter: UUID) -> Bool {
+        let raw = target.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if raw == emitter.uuidString.lowercased() { return true }
+        guard raw.hasPrefix("role:") else { return false }
+        return SessionRoles.normalizedName(String(raw.dropFirst(5))) != nil
+    }
+
+    /// Where an answer goes. Brian's answer goes to the item's `route_back` entries that
+    /// `isAllowedInboxRoute` allows (a row stored before that rule, or by any other path, is
+    /// filtered here too), or to the emitter when none remain. An AUTOMATIC answer (a veto that ran
+    /// out) has no human behind it, so it goes only to the emitter or its owner chain, and `notify`
+    /// is not used.
     nonisolated static func inboxRouteTargets(item: InboxItem, answer: InboxAnswer) -> [String] {
         let requested = item.routeBack.isEmpty ? [item.emitter.uuidString] : item.routeBack
-        guard answer.automatic else { return requested }
-        let own = requested.filter { t in
+        let allowed = requested.filter { isAllowedInboxRoute($0, emitter: item.emitter) }
+        guard answer.automatic else { return allowed.isEmpty ? [item.emitter.uuidString] : allowed }
+        let own = allowed.filter { t in
             let raw = t.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             return raw == item.emitter.uuidString.lowercased()
                 || (UUID(uuidString: item.ownerChain) == nil && raw == "role:" + item.ownerChain.lowercased())
@@ -1538,7 +1555,7 @@ actor IrisEngine {
     private func notifyInboxAnswer(item: InboxItem, answer: InboxAnswer, deliver: InboxDeliver) async {
         let localState = state
         let body = Self.inboxNotifyFrame(item: item, answer: answer, echoedTitle: await echoedInboxText(item.title))
-        for target in item.notify {
+        for target in item.notify where Self.isAllowedInboxRoute(target, emitter: item.emitter) {
             let id: UUID? = await MainActor.run {
                 Self.resolveInboxTarget(target, ownerChain: item.ownerChain, in: localState?.conversations ?? [])
             }
@@ -3262,8 +3279,8 @@ actor IrisEngine {
                         "cons": Schema(type: "ARRAY", description: "Reasons against it.", items: Schema(type: "STRING")),
                     ], required: ["label"])),
                     "response_mode": Schema(type: "STRING", description: "optionsAndFreeform | freeform | timedVeto | notification."),
-                    "route_back": Schema(type: "ARRAY", description: "Sessions or roles to notify once this is answered.", items: Schema(type: "STRING")),
-                    "notify": Schema(type: "ARRAY", description: "Sessions or roles to notify now, that this was raised.", items: Schema(type: "STRING")),
+                    "route_back": Schema(type: "ARRAY", description: "Who gets Brian's answer: role:<name> entries (whoever holds the role when he answers). Omit to get it yourself. Another session by id or name is refused.", items: Schema(type: "STRING")),
+                    "notify": Schema(type: "ARRAY", description: "role:<name> entries told, once, when Brian has answered. Another session by id or name is refused.", items: Schema(type: "STRING")),
                     "thread_id": Schema(type: "STRING", description: "Omit for a new item; give an existing one to append a followup and reopen it."),
                     "deadline": Schema(type: "STRING", description: "ISO 8601. For response_mode timedVeto: when the default takes effect with no answer."),
                     "veto_default": Schema(type: "STRING", description: "For response_mode timedVeto: the option id that takes effect at the deadline."),
