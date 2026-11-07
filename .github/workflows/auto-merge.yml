@@ -1,0 +1,38 @@
+name: Auto-merge
+
+# A pull request that is out of draft is armed to merge on its own: once the code owner approves
+# and the required checks pass, it joins the merge queue. Approving is the last step.
+# A `hold` label disarms it (and takes it out of the queue); removing the label re-arms it.
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, labeled, unlabeled]
+
+permissions: {}
+
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number }}
+
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # pull_request_target runs this file as it is on main, with secrets. Nothing here checks out
+    # or runs the pull request's code, and it must stay that way.
+    steps:
+      - env:
+          # Not GITHUB_TOKEN: a merge armed by it would not start the push run on main (#729).
+          GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          PR_ID: ${{ github.event.pull_request.node_id }}
+          DRAFT: ${{ github.event.pull_request.draft }}
+          HOLD: ${{ contains(github.event.pull_request.labels.*.name, 'hold') }}
+        run: |
+          if [ "$HOLD" = true ]; then
+            # Either may fail when there is nothing to undo.
+            gh pr merge "$PR" -R "$GITHUB_REPOSITORY" --disable-auto || true
+            gh api graphql -f id="$PR_ID" \
+              -f query='mutation($id: ID!) { dequeuePullRequest(input: {id: $id}) { clientMutationId } }' || true
+          elif [ "$DRAFT" = false ]; then
+            # The merge queue sets the method (rebase); no strategy flag here.
+            gh pr merge "$PR" -R "$GITHUB_REPOSITORY" --auto
+          fi

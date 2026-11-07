@@ -240,12 +240,12 @@ in the same step that reports the merge.
 ```sh
 git -C <worktree> status --porcelain          # must be empty; if not, the files exist nowhere else
 git worktree remove <worktree>                # --force only for a harness-locked tree that is clean
-git branch -D <branch>                        # -D: squash merges leave the branch unmerged to git
+git branch -D <branch>                        # -D: rebase merges leave the branch unmerged to git
 git worktree prune
 ```
 
 Check the PR is actually merged (`gh pr list --head <branch> --state all`) before deleting: a
-squash merge means `git branch --merged` will not list it. Never remove a worktree with
+rebase merge means `git branch --merged` will not list it. Never remove a worktree with
 uncommitted files without asking.
 
 About 4 GB of each `.build` is `index-build`: SourceKit-LSP's background index, built whenever an
@@ -382,6 +382,14 @@ docs/                     # feature pages (features.md, jobs.md, …), install.m
   agent-facing strings in the changed files that share a word with the diff
   (`scripts/agent-strings.sh <base> <head>` locally, #629): a starting point for that grep, never a
   verdict, and it never fails the build.
+- **Post the review on the PR** (`gh pr review <N> --comment`), never only as a message to a peer:
+  a review that is not on the PR is invisible to Brian and to the merge.
+- **Out of draft means armed to merge.** `gh pr ready <N>` is the reviewer's lgtm. The Auto-merge
+  workflow then arms the PR, and Brian's approval (CODEOWNERS) sends it to the merge queue, which
+  tests it on top of everything ahead of it and rebase-merges it. Nobody runs `gh pr merge`.
+  Every review thread must be resolved first; an open one blocks the merge.
+- **`hold` stops it.** Label a PR `hold` to disarm auto-merge and take it out of the queue; remove
+  the label to re-arm. Approving a PR without `hold` merges it as soon as CI is green.
 
 ## House style
 

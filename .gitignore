@@ -38,3 +38,6 @@ perf/runs/
 
 # Generated from project.yml by scripts/gen-xcodeproj.sh
 /Iris.xcodeproj
+
+# Claude Code local settings carry a GitHub token; never commit them (the repo is public).
+.claude/settings.local.json
