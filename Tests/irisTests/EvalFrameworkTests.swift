@@ -189,6 +189,54 @@ struct EvalDatasetTests {
         }
     }
 
+    /// v4 is v3 unchanged plus the 24 disguised attacks and 24 benign look-alikes of #802. Every new
+    /// attack is scorable (payload once, under OutputCap, still there after tier 1) and the split is
+    /// the deterministic one the manifest states, never hand-assigned.
+    @Test func theCommittedV4KeepsV3AndItsDisguisedRowsAreScorable() throws {
+        let root = PerfPaths.repoRoot().appendingPathComponent("eval/datasets/injection")
+        let v3 = try EvalDataset.load(from: root.appendingPathComponent("v3"))
+        let v4 = try EvalDataset.load(from: root.appendingPathComponent("v4"))
+        #expect(v4.manifest.version == 4)
+        #expect(v4.samples.count == 502)
+        let byId = Dictionary(uniqueKeysWithValues: v4.samples.map { ($0.id, $0) })
+        #expect(byId.count == 502)
+        for old in v3.samples {
+            let row = try #require(byId[old.id])
+            #expect(row == old, "\(old.id)")
+        }
+        let v3Ids = Set(v3.samples.map(\.id))
+        let new = v4.samples.filter { !v3Ids.contains($0.id) }
+        #expect(new.count == 48)
+        #expect(new.allSatisfy { $0.source == "synthetic-gemini-802" && $0.exposure == "clean" && $0.category == "subtle" })
+        let attacks = new.filter(\.isAttack), benign = new.filter { !$0.isAttack }
+        #expect(attacks.count == 24 && benign.count == 24)
+        for row in new {
+            #expect(OutputCap.cap(row.text) == row.text, "\(row.id) is cut by OutputCap")
+        }
+        for row in attacks {
+            let payload = try #require(row.payload, "\(row.id)")
+            #expect(row.text.components(separatedBy: payload).count == 2, "\(row.id) payload is not in its text exactly once")
+            #expect(!payload.contains("\n"), "\(row.id)")
+            #expect(PromptInjectionGuard.sanitizeUntrustedInput(row.text).contains(payload), "\(row.id) loses its payload to tier 1")
+        }
+        // A twin never carries its attack's payload.
+        for twin in benign {
+            let pair = try #require(byId[twin.id.replacingOccurrences(of: "benign", with: "disg")], "\(twin.id)")
+            #expect(!twin.text.contains(try #require(pair.payload)), "\(twin.id) holds its attack's payload")
+        }
+        // The split is the manifest's rule: ids ordered by sha256("injection-v4:<id>"), first 17 of 24 test.
+        for group in [attacks, benign] {
+            let ordered = group.sorted { Self.v4Key($0.id) < Self.v4Key($1.id) }
+            for (i, row) in ordered.enumerated() {
+                #expect(row.split == (i < 17 ? "test" : "dev"), "\(row.id)")
+            }
+        }
+    }
+
+    private static func v4Key(_ id: String) -> String {
+        SHA256.hash(data: Data("injection-v4:\(id)".utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
     @Test func aResultCountsItsExposedTexts() {
         func ds(_ version: Int) -> EvalDataset { .init(manifest: .init(family: "injection", version: version, files: [:]), samples: []) }
         var old = sample("b1", "code", text: "x"), new = sample("b2", "code", text: "y")
