@@ -147,8 +147,10 @@ on every plain turn) and its description swept per Invariant 9; the exact gate i
 - The per-emitter rate-limit numbers, and whether the inbox badge/notification is on by default.
 - The SQLite schema specifics and migration id.
 - Whether the "notify set" reuses pub/sub or is a direct lighter send.
-- The timed-veto clock source (must pause while the Mac sleeps — use `UptimeClock`/dispatch, never
-  `Date()`, per AGENTS.md).
+- The timed-veto clock source: decided in Task 4 (planner, 2026-11-07). A veto deadline is a
+  wall-clock schedule ("by 5pm"), which AGENTS.md gives to `Date()`, so the stored absolute deadline
+  decides; a dispatch timer, a wake notification and the launch check only decide when to look
+  (never `Task.sleep`).
 
 ## Calls I made (Brian to sanity-check while reading)
 
@@ -157,7 +159,7 @@ on every plain turn) and its description swept per Invariant 9; the exact gate i
 - **Emit is open to any agent**, with curation as a team convention and inbox-side anti-flood —
   reconciling "the chain has value" with "non-Overseer agents might want to publish too."
 - Follow-ups **reopen and append** to the same item (his slight preference), not new linked items.
-- The timed-veto expiry behaviour is **left open for Brian** (auto-approve vs auto-hold); see below.
+- The timed-veto expiry behaviour was left open for Brian and is resolved below (auto-approve, auto-hold when tainted).
 
 ## Builder-check resolutions (planner calls, 2026-11-07)
 
@@ -199,8 +201,17 @@ given the async premise and the trust model; I've settled those as planner calls
 marker** (read outside content, #813). A clean internal decision proceeds if Brian is away; anything
 an injection could have shaped never auto-approves and instead goes overdue and waits.
 
-When the Mac was asleep or Iris wasn't running at the deadline, an auto-approve fires on next launch,
-flagged "decided while you were away," and routes the default through the durable-reply path above.
+When the Mac was asleep or Iris wasn't running at the deadline, an auto-approve fires on next launch
+or at the wake, flagged "decided while you were away," and routes the default through the
+durable-reply path above. The stored wall-clock deadline decides; it is checked at launch, on a
+dispatch timer and at wake, and fires once.
+
+**An auto-approved default is not Brian's decision.** The default is the emitter's own proposal, so
+the message the route-back targets receive says that nobody answered by the deadline, that the
+default the session itself proposed took effect, and that Brian did not choose it: none of the
+words of a decision by Brian (`InboxAnswer.automatic`, thread author `veto-timer`). Otherwise an
+agent could obtain user-authority framing for its own proposal by raising a veto and waiting. A veto
+whose default names no option is held, not fired.
 
 Rationale (Brian): the short-deadline "silent approval" worry is not much of a *new* risk, because an
 agent is never forced to raise a decision in the first place — the veto grants a malicious agent no
