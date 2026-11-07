@@ -89,11 +89,17 @@ like Iris itself (a fake approval card, a fake "Allow" button) to get a click th
   SVG/Mermaid sanitizer (section 3), which has not been built yet — that strips the whole class of
   speculative-load hints (`dns-prefetch`/`preconnect`/`prerender`/`prefetch`/`preload`/`modulepreload`
   link `rel` tokens, plus `<base href>`, `<a ping>`, and any `<meta http-equiv>`) before the raw HTML is
-  ever turned into a `ViewerDocument`, at the one production call site (`ChatView`). Dns-prefetch itself
-  still cannot be observed through the proxy; the sanitizer's correctness oracle is the one hint the proxy
-  *can* see — a mutation-checked test drives `rel=preconnect` to zero through the proxy for sanitized
-  input, and to a real recorded hit for the same input unsanitized. `ViewerFeatureGate.isEnabled` flipped
-  to `true` in #912: the chip is reachable now.
+  ever turned into a `ViewerDocument`, at the one production call site (`ChatView`) — a defense alongside
+  the viewer's existing CSP/content rule list, not a replacement for either (dev-3's #915 review finding
+  3: the claim is "sanitizer plus CSP," never "sanitizer alone"). Dns-prefetch itself still cannot be
+  observed through the proxy; the sanitizer's correctness oracle is the one hint the proxy *can* see — a
+  mutation-checked test drives `rel=preconnect` to zero through the proxy for sanitized input, and to a
+  real recorded hit for the same input unsanitized. #915 review round 1 found two live-confirmed holes in
+  the stripper itself (`rel` split on space only, letting a tab/newline-split token through; a combining
+  mark right after a quote desyncing the tokenizer from WebKit's own parser, letting an attribute escape
+  the allow-list) — both fixed, with their own live mutation-checked tests, but `ViewerFeatureGate.isEnabled`
+  stays `false` until dev-3's round-2 re-review confirms it (the planner's call, not flipped on this
+  session's own say).
 - **The tripwire.** If any later change gives the viewer script or a network load, it becomes an outbound
   tool and an input source. That change must add it to `OutboundTools` (and its gate), taint a conversation
   on whatever it reads back, and carry its own review. A test fails if the viewer's configuration allows
