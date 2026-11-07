@@ -83,6 +83,21 @@ struct BenchLocalTargetTests {
         #expect(config.enableSandboxing)
     }
 
+    @Test("a local target asks for the in-memory Keychain first, then the volatile defaults, then applies; no target does only the volatile step")
+    func prepareOrder() throws {
+        let local = try #require(BenchCLI.parse(["iris", "--bench", "--real", "--local-openai", Self.url, "--local-model", "m"]))
+        var steps: [String] = []
+        BenchCLI.prepareSettings(local, requestBypass: { steps.append("bypass") }, useVolatile: { steps.append("volatile") },
+                                 apply: { _ in steps.append("apply") })
+        #expect(steps == ["bypass", "volatile", "apply"])
+
+        let plain = try #require(BenchCLI.parse(["iris", "--bench", "--real"]))
+        steps = []
+        BenchCLI.prepareSettings(plain, requestBypass: { steps.append("bypass") }, useVolatile: { steps.append("volatile") },
+                                 apply: { _ in steps.append("apply") })
+        #expect(steps == ["volatile"], "a run with no local target must keep the Keychain as it was")
+    }
+
     private static var real: Scenario { var s = BenchCLI.defaultScenario; s.clientMode = .real; return s }
     private static var fake: Scenario { BenchCLI.defaultScenario }
 }

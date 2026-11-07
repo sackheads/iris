@@ -223,14 +223,26 @@ enum BenchCLI {
         // binary doesn't block on an access prompt. Must be set before ConfigManager.shared is
         // first touched (inside ScenarioRunner.run). Real runs keep Keychain access for auth, except a local target (below).
         // Bench runs never write to the user's real preferences.
-        // A local target keeps the run off the Keychain: in memory before `ConfigManager.shared` first loads its secrets.
-        if opts.localTarget != nil { KeychainManager.requestHeadlessBypass() }
-        IrisDefaults.useVolatileCopyOfStandard()
-        opts.localTarget?.apply(to: ConfigManager.shared)
+        prepareSettings(opts,
+                        requestBypass: { KeychainManager.requestHeadlessBypass() },
+                        useVolatile: { IrisDefaults.useVolatileCopyOfStandard() },
+                        apply: { $0.apply(to: ConfigManager.shared) })
         let result = await runScenario(scenario, dumpRequestsTo: opts.dumpRequestsDir.map { URL(fileURLWithPath: $0) },
                                         grant: opts.grant)
         print(BenchSummary.render(scenarioName: scenario.name, result: result))
         if opts.transcript { print(BenchSummary.renderTranscript(result)) }
+    }
+
+    /// The settings steps of a bench run, in the order that matters, as closures so a test can read the order:
+    /// a local target asks for the in-memory Keychain first (before `ConfigManager.shared` first loads its
+    /// secrets, or the real item is read), then the volatile copy of the defaults is made (so nothing written
+    /// reaches the user's), then the target is applied to that copy (#854, #909 review).
+    static func prepareSettings(_ opts: BenchOptions, requestBypass: () -> Void, useVolatile: () -> Void,
+                                apply: (BenchLocalTarget) -> Void) {
+        let target = opts.localTarget
+        if target != nil { requestBypass() }
+        useVolatile()
+        if let target { apply(target) }
     }
 
     /// Runs `scenario`, entering `HeadlessMode`'s scope first when it's a fake run. Separated from
