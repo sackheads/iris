@@ -9,6 +9,10 @@ struct ChatView: View {
     @State private var emojiModel = EmojiTokenModel()
     @State private var slashModel = SlashCommandModel()
     @State private var draftAttachments: [FileAttachment] = []
+    /// #933: Cmd-S's single stash slot. In-memory, like `inputText`/`draftAttachments` above —
+    /// never persisted, and not reset on a conversation switch either, matching how those two
+    /// already behave.
+    @State private var stashedPrompt: String? = nil
     @State private var isDraggingOver = false
     @State private var selectedMessageIDs = Set<UUID>()
     /// Guards `scrollAfterUpdate` so one SwiftUI update pass enqueues at most one scroll (#183 fix
@@ -1020,6 +1024,12 @@ struct ChatView: View {
         emojiModel.clear()
         slashModel.clear()
 
+        // #933: a pending stash refills the composer right away, not after the send resolves —
+        // the interim message is in flight, and the stashed one is ready to go back to.
+        let refill = PromptStash.refilling(stash: stashedPrompt)
+        if let newInput = refill.newInput { inputText = newInput }
+        stashedPrompt = refill.newStash
+
         state.sendMessage(text, attachments: attachments)
     }
 
@@ -1032,6 +1042,17 @@ struct ChatView: View {
         } else if state.hasInterruptibleWork(in: state.selectedConversationId) {
             state.interruptActiveConversation()
         }
+    }
+
+    /// Cmd-S (#933): stash the composer's current text and clear the input. Attachments are not
+    /// stashed — the issue describes stashing "the current prompt," and an emptied text field
+    /// beside an attachment still sitting in the bar would be a confusing half-stash, so Cmd-S
+    /// with a non-empty attachment list and empty text is left as the existing no-op (nothing to
+    /// stash) rather than silently dropping the attachment too.
+    private func handleStash() {
+        let result = PromptStash.stashing(input: inputText, existingStash: stashedPrompt)
+        inputText = result.newInput
+        stashedPrompt = result.newStash
     }
 
     /// The message input bar: a multi-line field (Enter submits, Shift+Enter newlines) + send button.
@@ -1060,7 +1081,7 @@ struct ChatView: View {
                 .help("Attach Files")
                 .padding(.bottom, 8)
 
-                ComposerTextView(text: $inputText, onSubmit: submit, emoji: emojiModel, slash: slashModel, onEscape: handleEscape, onHeightChange: { composerHeight = $0 }, focusTrigger: $composerShouldFocus)
+                ComposerTextView(text: $inputText, onSubmit: submit, emoji: emojiModel, slash: slashModel, onEscape: handleEscape, onStash: handleStash, onHeightChange: { composerHeight = $0 }, focusTrigger: $composerShouldFocus)
                     .frame(height: min(max(composerHeight, 24), 120))
                     .onAppear { emojiModel.defaultTone = SkinTone(rawValue: config.defaultEmojiSkinTone) ?? .none }
                     .onChange(of: config.defaultEmojiSkinTone) { _, new in
