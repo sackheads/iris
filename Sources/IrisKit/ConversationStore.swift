@@ -209,6 +209,9 @@ final class ConversationStore: Sendable {
     let peers: PeerLedger
     /// Session artifacts' references (#469 §7): who may read each, and what keeps it.
     let artifacts: ArtifactLedger
+    /// Pending human-decision items and their threads (#920): independent of any conversation, so
+    /// a reply outlives a dead emitter.
+    let inbox: InboxStore
 
     private init(writer: any DatabaseWriter, path: URL?, alreadyMigrated: Bool = false,
                  openFailure: String? = nil) throws {
@@ -219,6 +222,7 @@ final class ConversationStore: Sendable {
         self.ledger = JobLedger(writer: writer)
         self.peers = PeerLedger(writer: writer)
         self.artifacts = ArtifactLedger(writer: writer)
+        self.inbox = InboxStore(writer: writer)
     }
 
     static func inMemory() throws -> ConversationStore {
@@ -754,6 +758,42 @@ final class ConversationStore: Sendable {
                 t.column("body", .text).notNull()
             }
             try db.create(index: "topic_messages_by_topic", on: "topic_messages", columns: ["topic", "seq"], ifNotExists: true)
+        }
+        // #920: pending human-decision items and their thread entries. Standalone, no FK to
+        // `conversations` — a held decision must outlive the emitter that raised it, like
+        // `pending_context_writes` above.
+        m.registerMigration("v35_inbox") { db in
+            try db.create(table: "inbox_items", ifNotExists: true) { t in
+                t.column("id", .text).primaryKey()
+                t.column("threadId", .text).notNull()
+                t.column("ownerChain", .text).notNull()
+                t.column("emitter", .text).notNull()
+                t.column("emitterLabel", .text).notNull()
+                t.column("title", .text).notNull()
+                t.column("situation", .text).notNull()
+                t.column("optionsJSON", .text).notNull()
+                t.column("responseMode", .text).notNull()
+                t.column("routeBackJSON", .text).notNull()
+                t.column("notifyJSON", .text).notNull()
+                t.column("deadline", .datetime)
+                t.column("vetoDefaultOptionId", .text)
+                t.column("emitterTainted", .boolean).notNull()
+                t.column("state", .text).notNull()
+                t.column("createdAt", .datetime).notNull()
+                t.column("lastActivityAt", .datetime).notNull()
+                t.column("answerJSON", .text)
+            }
+            try db.create(index: "inbox_items_by_thread", on: "inbox_items", columns: ["threadId"], ifNotExists: true)
+            try db.create(index: "inbox_items_by_state", on: "inbox_items", columns: ["state", "lastActivityAt"], ifNotExists: true)
+            try db.create(table: "inbox_thread", ifNotExists: true) { t in
+                t.autoIncrementedPrimaryKey("seq")
+                t.column("itemId", .text).notNull()
+                t.column("kind", .text).notNull()
+                t.column("author", .text).notNull()
+                t.column("body", .text).notNull()
+                t.column("at", .datetime).notNull()
+            }
+            try db.create(index: "inbox_thread_by_item", on: "inbox_thread", columns: ["itemId", "seq"], ifNotExists: true)
         }
         return m
     }
