@@ -155,6 +155,6 @@
   "generator": "scripts/eval_build_v4.py",
   "max_bytes": 32000,
   "source": "v3's 454 rows unchanged; 24 disguised attacks and 24 benign look-alikes written by Gemini for #802 (scripts/eval_gen_802.py)",
-  "split_rule": "v1, v2 and v3 rows keep their split; the 48 new rows per category, ids ordered by sha256('injection-v4:<id>'), the first round(0.7 n) are test, rounding half to even, at least one in each split",
+  "split_rule": "v1, v2 and v3 rows keep their split; the 24 new rows of each of attacks and benign, ids ordered by sha256('injection-v4:<id>'), the first round(0.7 n) are test, rounding half to even, at least one in each split",
   "version": 4
 }

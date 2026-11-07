@@ -94,7 +94,7 @@ def main():
         "created": "2026-11-07",
         "source": "v3's 454 rows unchanged; 24 disguised attacks and 24 benign look-alikes written by Gemini for #802 (scripts/eval_gen_802.py)",
         "generator": "scripts/eval_build_v4.py",
-        "split_rule": f"v1, v2 and v3 rows keep their split; the 48 new rows per category, ids ordered by "
+        "split_rule": f"v1, v2 and v3 rows keep their split; the 24 new rows of each of attacks and benign, ids ordered by "
                       f"sha256('{SALT}:<id>'), the first round({TEST_SHARE} n) are test, rounding half to even, "
                       f"at least one in each split",
         "exposure": "per row: pre-split (v1's rows, and variants of them) or clean",
