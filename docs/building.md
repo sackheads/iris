@@ -63,6 +63,7 @@ swift run iris --bench scenarios/echo-latency.json   # a scenario file
 swift run iris --bench scenarios/live.json --real    # hit a real provider (needs keys)
 swift run iris --bench scenario.json --transcript --dump-requests out/   # read the messages and every model request
 swift run iris --bench scenario.json --grant-read dir/            # a background scenario may read files in dir/ (also --grant-write, --mutating-no-grant)
+swift run iris --bench scenario.json --real --local-openai http://127.0.0.1:11434/v1 --local-model gemma4:12b   # a real run on a local Ollama model, loopback only, no Keychain
 ```
 
 The binary runs the scenario headlessly and prints a per-category timing breakdown (primary
