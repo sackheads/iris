@@ -43,6 +43,10 @@ struct BenchOptions: Sendable {
     var spendLedger: String?
     var canaryGguf: String?
     var bypassGuard = false
+    /// `--cloud-auth env|vertex-adc`, `--vertex-project ID`, `--vertex-location L` (#854): where the cloud key comes from.
+    var cloudAuth: String?
+    var vertexProject: String?
+    var vertexLocation: String?
 
     /// The target when both URL and model were given. Half a target is refused, never guessed.
     var localTarget: BenchLocalTarget? {
@@ -107,10 +111,11 @@ enum BenchCLI {
         var grantFlags = 0
         var localOpenAI: String?, localModel: String?, localCanary: String?
         var cloudPrimary: String?, maxDollars: String?, spendLedger: String?, canaryGguf: String?
+        var cloudAuth: String?, vertexProject: String?, vertexLocation: String?
         var i = 0
         while i < rest.count {
             if ["--local-openai", "--local-model", "--local-canary", "--cloud-primary", "--max-dollars", "--spend-ledger",
-                "--canary-gguf"].contains(rest[i]) {
+                "--canary-gguf", "--cloud-auth", "--vertex-project", "--vertex-location"].contains(rest[i]) {
                 if i + 1 < rest.count, !rest[i + 1].hasPrefix("--") {
                     switch rest[i] {
                     case "--local-openai": localOpenAI = rest[i + 1]
@@ -119,6 +124,9 @@ enum BenchCLI {
                     case "--max-dollars": maxDollars = rest[i + 1]
                     case "--spend-ledger": spendLedger = rest[i + 1]
                     case "--canary-gguf": canaryGguf = rest[i + 1]
+                    case "--cloud-auth": cloudAuth = rest[i + 1]
+                    case "--vertex-project": vertexProject = rest[i + 1]
+                    case "--vertex-location": vertexLocation = rest[i + 1]
                     default: localCanary = rest[i + 1]
                     }
                     i += 1
@@ -148,7 +156,8 @@ enum BenchCLI {
                             grantConflict: grantFlags > 1, transcript: rest.contains("--transcript"),
                             localOpenAI: localOpenAI, localModel: localModel, localCanary: localCanary,
                             cloudPrimary: cloudPrimary, allowPaid: rest.contains("--allow-paid"), maxDollars: maxDollars,
-                            spendLedger: spendLedger, canaryGguf: canaryGguf, bypassGuard: rest.contains("--bypass-guard"))
+                            spendLedger: spendLedger, canaryGguf: canaryGguf, bypassGuard: rest.contains("--bypass-guard"),
+                            cloudAuth: cloudAuth, vertexProject: vertexProject, vertexLocation: vertexLocation)
     }
 
     /// A tiny fake goal loop used when no scenario file is supplied: run one command, then finish.
@@ -257,7 +266,8 @@ enum BenchCLI {
                             let tier2 = InjectionGuard.tier2Provisioning(modelName: ConfigManager.shared.promptGuardCoreMLModel,
                                                                          modelsDir: IrisPaths.default.modelsDir)
                             cloudHeader = BenchCloudTarget.header(for: target, settings: ConfigManager.shared, tier2: tier2)
-                            let key = ProcessInfo.processInfo.environment[BenchCloudTarget.keyVariable(for: target.provider)] ?? ""
+                            let key = target.auth == .env
+                                ? (ProcessInfo.processInfo.environment[BenchCloudTarget.keyVariable(for: target.provider)] ?? "") : ""
                             target.apply(to: ConfigManager.shared, key: key.trimmingCharacters(in: .whitespacesAndNewlines))
                         })
         // The cap is checked before the run starts, not after it: the projection is reserved in the shared ledger, and
@@ -265,6 +275,13 @@ enum BenchCLI {
         var reservation: (ledger: SpendLedger, id: UUID, projected: Double)?
         if let cloud {
             print(cloudHeader)
+            // ADC must resolve a token now, before any model call: a login that lapsed stops the run here.
+            if case .vertexADC = cloud.auth {
+                do { _ = try await ADCCredentialManager.shared.getAccessToken() } catch {
+                    FileHandle.standardError.write(Data("iris --bench: gcloud ADC gave no access token (\(error.localizedDescription)); not started\n".utf8))
+                    exit(1)
+                }
+            }
             guard let projected = BenchCloudTarget.projectedRunDollars(provider: cloud.provider, model: cloud.model) else {
                 FileHandle.standardError.write(Data("iris --bench: no listed price for \(cloud.model); not started\n".utf8))
                 exit(1)
