@@ -210,7 +210,11 @@ dispatch timer and at wake, and fires once.
 the message the route-back targets receive says that nobody answered by the deadline, that the
 default the session itself proposed took effect, and that Brian did not choose it: none of the
 words of a decision by Brian (`InboxAnswer.automatic`, thread author `veto-timer`). Otherwise an
-agent could obtain user-authority framing for its own proposal by raising a veto and waiting. A veto
+agent could obtain user-authority framing for its own proposal by raising a veto and waiting. An automatic
+answer also goes only to the emitter or its owner chain (its role's current holder when the emitter
+is gone), never to another session the emitter named in `route_back`, and tells no `notify` target:
+with no human in the loop the inbox must not become a way for an agent to send a message into a
+third session without the peer gates (planner ruling, dev-2's #941 review). A veto
 whose default names no option is held, not fired.
 
 Rationale (Brian): the short-deadline "silent approval" worry is not much of a *new* risk, because an
