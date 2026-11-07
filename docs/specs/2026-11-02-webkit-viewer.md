@@ -83,10 +83,13 @@ like Iris itself (a fake approval card, a fake "Allow" button) to get a click th
   so a zero result there cannot distinguish "WebKit never resolves them here" from "WebKit resolves them
   through the system resolver, bypassing `proxyConfigurations` entirely" — the escape this section's
   original "or `tcpdump`" fallback named, now actually hit. The window (PR 2) stays unshipped on this gate
-  (`ViewerFeatureGate.isEnabled = false`) on preconnect/proxy evidence alone; the planner's resolution is to
-  close dns-prefetch **by construction** rather than by further proxy observation — stripping
-  `dns-prefetch`/`preconnect`/`prerender`/`prefetch`/`preload` link hints in phase 2's sanitizer, making
-  zero-lookup structural, with the gate flip moving to phase 2 gated on that sanitizer rather than to this PR.
+  (`ViewerFeatureGate.isEnabled = false`) on preconnect/proxy evidence alone. **Not yet decided — Brian's
+  call, pending on the Overseer band:** whether to close dns-prefetch by a one-time `tcpdump`/sudo
+  observation, or by construction instead, with a planned (not yet built) allow-list sanitizer on the raw
+  HTML render path — independent of phase 2's SVG/Mermaid sanitizer (section 3) — stripping
+  `dns-prefetch`/`preconnect`/`prerender`/`prefetch`/`preload` link hints before the document is ever shown,
+  making zero-lookup structural rather than observed. Either way the gate flip is not this PR's: it waits
+  on whichever resolution Brian picks.
 - **The tripwire.** If any later change gives the viewer script or a network load, it becomes an outbound
   tool and an input source. That change must add it to `OutboundTools` (and its gate), taint a conversation
   on whatever it reads back, and carry its own review. A test fails if the viewer's configuration allows
