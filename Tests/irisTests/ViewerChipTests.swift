@@ -12,14 +12,16 @@ struct ViewerChipPolicyTests {
     /// check, tested on its own below); the one place that decides whether the chip is reachable
     /// at all is `ViewerFeatureGate`, wired at the `ChatView` call site. #904's SOCKS5 proxy
     /// instrument confirmed zero lookups for `rel=preconnect` and ordinary network loads, but
-    /// cannot observe `rel=dns-prefetch`/`rel=prefetch` at all (dev-2's #904 review finding 1: the
-    /// same unmitigated control that catches preconnect records nothing for either, so a zero
-    /// there is not proof) — the one thing the spec names as a ship blocker for the gate. This
-    /// test is the tripwire: flipping the gate on is a real decision once dns-prefetch is observed
-    /// another way, never a side effect of refactoring this file.
-    @Test("the viewer is not reachable until dns-prefetch/prefetch are observed, not just preconnect")
-    func gateIsOffUntilDNSIsVerified() {
-        #expect(ViewerFeatureGate.isEnabled == false)
+    /// could not observe `rel=dns-prefetch`/`rel=prefetch` at all (dev-2's #904 review finding 1).
+    /// #912 closed that gap by construction instead of by observation: `RawHTMLSanitizer` strips
+    /// every speculative-load hint from the raw HTML before a `ViewerDocument` is ever built, so
+    /// the proxy's blind spot no longer matters — the hint is never in what WebKit sees. This
+    /// test is the tripwire the other direction now: the gate turning back off is a real decision
+    /// (the sanitizer regressing, or a new hint class appearing), never a side effect of
+    /// refactoring this file.
+    @Test("the viewer is reachable now that #912's sanitizer closes dns-prefetch by construction")
+    func gateIsOnNowThatTheSanitizerClosesDNSByConstruction() {
+        #expect(ViewerFeatureGate.isEnabled == true)
     }
 
     @Test("html, not streaming: offered")

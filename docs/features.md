@@ -104,6 +104,17 @@ Includes a multi-tiered security pipeline (Structural Isolation + Behavioral Can
 
 Once a conversation has read untrusted content, sending mail, creating calendar events or tasks, searching the web (the query is a way out too, #825), and any MCP tool not marked read-only ask you first, and a job run refuses them unless the job exempts the tool (#812). The cost in prompts: an attended conversation asks on the first send of each such tool; Vibecop and the command allowlist (`PermissionManager`) can't answer, because the model wrote the recipient and body from the tainted content; **Allow in This Conversation** ends the prompts for that tool there; and an unattended run never asks. The per-job exemptions and the per-conversation allow are your exemption list, and only you set them. [Details](jobs.md#outbound-sends-after-untrusted-content)
 
+### WebKit Viewer
+
+A fenced ` ```html ` block gets an "Open in viewer" chip that opens the page in its own window,
+for styled layouts, tables and static diagrams (inline SVG) markdown can't say. The window can
+run no script and load nothing — no fetch, no form post, no `dns-prefetch`/`preconnect`, no
+cookies or storage — by several independent mechanisms, not just a filter: a raw-HTML allow-list
+sanitizer strips every speculative-load hint and bare link target before the page is ever shown,
+on top of WebKit's own script-off, custom-scheme, and deny-all content rule list. A banner, drawn
+outside the page and always visible, says so. Opened only by your click; never by a model, job,
+or subagent.
+
 ### Rich Native UI
 
 Beautiful macOS `NavigationSplitView` with multi-conversation support — a conversation you archive collapses into its own Archived section, out of the main list but one right-click away — `.regularMaterial` frosted glass input bars, and native markdown chat rendering powered by `swift-markdown-ui`. The sidebar's search field finds any past conversation by what was said in it, grouping ranked hits per conversation and jumping straight to the matching message when you pick one; hidden conversations (job runs, subagent logs) stay out of the results, the same as they stay out of the list.
