@@ -12,6 +12,28 @@ enum VibecopCallerRole: Sendable {
 
 final class VibecopService: @unchecked Sendable {
     static let shared = VibecopService()
+
+    /// The verdict's JSON schema, handed to the engine as the real thing (#914). It used to be the
+    /// placeholder "vibecop_schema", which Ollama read as generic JSON mode: `decision` was any
+    /// string, so a garbled "APPRORE" decoded fine and failed closed to a person prompt.
+    static let verdictSchema = #"{"type":"object","properties":{"decision":{"type":"string","enum":["APPROVE","ESCALATE","DENY"]},"reason":{"type":"string"}},"required":["decision","reason"]}"#
+
+    /// The three words that mean something. Anything else (a garbled word, a missing key) is not a
+    /// verdict: Iris asks once more, and a second non-verdict is a person prompt. Exact match, no
+    /// trimming or case folding: this is the same rule production acts on (AppState).
+    static func isVerdict(_ d: VibecopDecision) -> Bool {
+        ["APPROVE", "ESCALATE", "DENY"].contains(d.decision)
+    }
+
+    /// Decodes the reply's outermost {...}. nil when it is not a decision object.
+    static func decode(_ reply: String) -> VibecopDecision? {
+        var clean = reply
+        if let start = clean.firstIndex(of: "{"), let end = clean.lastIndex(of: "}"), start <= end {
+            clean = String(clean[start...end])
+        }
+        guard let data = clean.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(VibecopDecision.self, from: data)
+    }
     
     private let baselinePrompt = """
     You are Vibecop, an ultra-paranoid AI guardian. You evaluate terminal commands and tool executions proposed by an autonomous coding agent before they are executed on the user's macOS machine.
@@ -141,22 +163,22 @@ final class VibecopService: @unchecked Sendable {
         let startTime = UptimeClock.live.now()   // uptime: a sleep is not time spent (#640)
         
         do {
-            let responseJson = try await engine.generate(prompt: prompt, jsonSchema: "vibecop_schema")
-            let durationMs = UptimeClock.live.seconds(since: startTime) * 1000.0
-            
-            var cleanJson = responseJson
-            
-            if let startIndex = cleanJson.firstIndex(of: "{"),
-               let endIndex = cleanJson.lastIndex(of: "}") {
-                cleanJson = String(cleanJson[startIndex...endIndex])
+            var responseJson = try await engine.generate(prompt: prompt, jsonSchema: Self.verdictSchema)
+            var parsed = Self.decode(responseJson)
+            // One re-ask on a non-verdict (~4-5% of replies on a local model, #914). A real DENY or
+            // ESCALATE is never re-asked, so the second draw can only turn a garble into a verdict,
+            // and the second reply is read by the same strict rule.
+            if parsed.map(Self.isVerdict) != true {
+                print("Vibecop reply is not a verdict, asking once more: \(responseJson)")
+                responseJson = try await engine.generate(prompt: prompt, jsonSchema: Self.verdictSchema)
+                parsed = Self.decode(responseJson)
             }
-            
-            // Parse the JSON
-            if let data = cleanJson.data(using: .utf8),
-               let decision = try? JSONDecoder().decode(VibecopDecision.self, from: data) {
+            let durationMs = UptimeClock.live.seconds(since: startTime) * 1000.0
+
+            if let decision = parsed {
                 PerformanceProfiler.shared.record(turnID: PerformanceProfiler.currentTurnID, category: .vibecop, durationMs: durationMs)
                 PerformanceProfiler.shared.recordSpan(turnID: PerformanceProfiler.currentTurnID, name: "vibecop", durationMs: durationMs)
-                Self.trackLatency(model: config.modelPathOrName, durationMs: durationMs, success: true)
+                Self.trackLatency(model: config.modelPathOrName, durationMs: durationMs, success: Self.isVerdict(decision))
                 return decision
             }
 
