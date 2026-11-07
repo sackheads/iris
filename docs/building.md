@@ -52,6 +52,33 @@ building the app needs the team's Developer ID Application certificate in your k
 `AGENTS.md`'s "Build and test" section for the `Release` config and why not to launch it before
 your first real install.
 
+## Promoting a local build to your daily driver (`scripts/promote-local.sh`)
+
+To run a fresh build from the current source as your real Iris — against the production `~/.iris`,
+without cutting a formal (notarized/Sparkle) release:
+
+```sh
+scripts/promote-local.sh            # build Release, quit Iris, install to /Applications, relaunch
+scripts/promote-local.sh --dry-run  # print the plan, change nothing
+scripts/promote-local.sh --version 0.2.0-rc1   # pin the marketing version string
+scripts/promote-local.sh --no-launch --dest ~/Applications   # install elsewhere, don't relaunch
+```
+
+`~/.iris` is reachable only from the Release identity (`com.bnaylor.iris`) — there is no dev or
+debug build that opens it (the home is tied to `BuildIdentity`, with no env override), so a build
+you run against your real data is necessarily the Release config. The script:
+
+- **Refuses before a first real install** — it only replaces an existing `DEST/Iris.app` (`--force`
+  overrides), because the very first launch of a Release build spends the one-time
+  `AppDefaultsImport`; that must be a real install, not a local build.
+- Builds first, stages the new app next to the destination, then quits and swaps, so a failed build
+  or copy never leaves you without an app and the running app is down only for the swap.
+- **Quits a running Iris gracefully and never force-kills it** — if a dialog is open (e.g. a
+  Keychain prompt) and it won't quit, the script aborts rather than interrupt it (#578).
+- Stamps a Sparkle-safe local version (`0.0.0-local.<sha>` plus a date-based build number high
+  enough that the appcast won't offer to replace your dogfood build). To return to an official
+  release, install it by hand.
+
 ## Headless profiling (`--bench`)
 
 The core agent loop runs without the UI, so you can profile end-to-end turn performance

@@ -73,7 +73,11 @@ hotkey), signed with the Developer ID. Release builds "Iris.app" with the instal
 identity (`com.bnaylor.iris`) — **never launch a locally built Release config before your first
 real install**: `BuildIdentity` resolves that bundle id to `.release` exactly like the installed
 app, so it opens `~/.iris` and spends the one-time settings import (`AppDefaultsImport`) that a
-fresh install is meant to get once.
+fresh install is meant to get once. To adopt a local Release build as your daily driver *after*
+that first install (dogfooding without cutting a release), use `scripts/promote-local.sh`: it
+builds Release, quits a running Iris gracefully, installs over the existing app with a Sparkle-safe
+local version stamp, and relaunches — and it refuses to run unless an install already exists, so it
+can't trip the first-install hazard above. See [docs/building.md](docs/building.md).
 
 Dev builds share settings as well as `~/.iris-dev`: "Iris Dev.app" persists to its bundle id's
 domain, `com.bnaylor.iris.dev`, and the bundle-less `swift run`/`run-dev.sh` binary opens that same
