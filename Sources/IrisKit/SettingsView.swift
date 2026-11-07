@@ -1684,7 +1684,7 @@ private struct ReasoningEffortPicker: View {
                 Text("Model default").tag("")
                 ForEach(levels, id: \.self) { Text($0.capitalized).tag($0) }
             }
-            .help("How hard the model thinks before it answers. Model default sends nothing, so the model keeps its own (Opus 5.5 medium, Fable 5.1 high). Thinking cannot be turned off on Claude Opus 5.5 or Fable 5.1, only turned down. Changing this makes the next request re-read the prompt cache once. Unattended jobs and goal loops use the same setting.")
+            .help("How hard the model thinks before it answers. Model default sends nothing, so the model keeps its own (Opus 5.5 medium, Fable 5.1 high). Thinking cannot be turned off on Claude Opus 5.5 or Fable 5.1, only turned down. Changing this makes the next request re-read the prompt cache once. Unattended jobs, goal loops and subagents use the same setting, so a higher effort costs more and takes longer there too.")
         }
     }
 }
