@@ -93,6 +93,23 @@ struct InboxRoutingTests {
         #expect(sink2.calls.map(\.0) == [holder])
     }
 
+    @Test("the targets are stored before any delivery is tried, so a crash mid-delivery loses nothing")
+    func pendingTargetsAreStoredBeforeDelivery() async throws {
+        let (app, engine) = setup()
+        let live = session(app)
+        let item = try raise(app, emitter: live, ownerChain: live.uuidString, routeBack: [live.uuidString])
+        let store = app.store
+        final class Seen: @unchecked Sendable { var state: InboxItemState?; var pending: [String] = [] }
+        let seen = Seen()
+        let outcome = await engine.submitInboxAnswer(itemId: item.id, choice: "a", freeText: nil, deliver: { _, _, _ in
+            let mid = try? store.inbox.item(id: item.id)
+            seen.state = mid?.state; seen.pending = mid?.pendingTargets ?? []
+            return .delivered
+        })
+        #expect(outcome == .delivered(1))
+        #expect(seen.state == .awaitingDelivery && seen.pending == [live.uuidString])
+    }
+
     @Test("one live and one dead target is mixed, and only the dead one stays pending")
     func mixedKeepsOnlyTheUndelivered() async throws {
         let (app, engine) = setup()
@@ -218,6 +235,23 @@ struct InboxRoutingTests {
         #expect(app.conversations.first { $0.id == busyClean }?.hasUntrustedToolOutput == false)
         #expect(app.conversations.first { $0.id == busyTainted }?.hasUntrustedToolOutput == true)
         #expect(app.conversations.first { $0.id == busyClean }?.messages.last?.content.contains("Inbox answer") == true)
+    }
+
+    @Test("an idle target runs a turn on the answer under the inbox label, not a peer's")
+    func idleTargetRunsATurnUnderTheInboxLabel() async throws {
+        let app = AppState(); app.conversations.removeAll()
+        let client = CapturingLLMClient(reply: "noted")
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
+                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
+        let target = session(app)
+        let outcome = await engine.deliverInboxAnswerFrame("Inbox answer for item i1.\n\nHe wrote: go.", tainted: false, to: target)
+        #expect(outcome == .delivered)
+        let deadline = TestClock.deadline(20)
+        while client.requests.isEmpty, TestClock.seconds(since: deadline) < 0 { try await Task.sleep(nanoseconds: 20_000_000) }
+        let sent = try #require(client.requests.first)
+        let prompt = sent.contents.flatMap(\.parts).compactMap(\.text).joined(separator: "\n")
+        #expect(prompt.contains("System Event [inbox_answer]: Inbox answer for item i1."))
+        #expect(!prompt.contains("another session") && !prompt.contains("decline"))
     }
 
     @Test("an archived target is refused, never reopened")
