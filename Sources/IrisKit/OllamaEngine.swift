@@ -331,8 +331,15 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
             "stream": false
         ]
         
-        if jsonSchema != nil {
-            body["format"] = "json"
+        if let jsonSchema {
+            // A schema string goes to Ollama as one (structured outputs), so the sampler enforces
+            // an enum; anything else stays generic JSON mode.
+            if let data = jsonSchema.data(using: .utf8),
+               let schema = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                body["format"] = schema
+            } else {
+                body["format"] = "json"
+            }
         }
         
         if let images, !images.isEmpty {

@@ -70,6 +70,15 @@ struct OllamaThinkingTests {
         #expect(sent.showCount == 0)
     }
 
+    @Test func aRealSchemaGoesToOllamaAsAStructuredFormat() async throws {
+        let sent = Sent()
+        let engine = try await engine(suppress: false, capabilities: [], sent: sent)
+        _ = try await engine.generate(prompt: "p", jsonSchema: VibecopService.verdictSchema)
+        let format = try #require(sent.all[0]["format"] as? [String: Any], "a schema, not the string \"json\"")
+        let decision = (format["properties"] as? [String: Any])?["decision"] as? [String: Any]
+        #expect(decision?["enum"] as? [String] == ["APPROVE", "ESCALATE", "DENY"])
+    }
+
     @Test func aNon200ReplyStillThrows() async throws {
         var transport = OllamaEngine.Transport(ps: { nil }, preload: { _ in (200, Data("{}".utf8)) })
         transport.generate = { _ in (500, Data(#"{"error":"boom"}"#.utf8)) }
