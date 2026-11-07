@@ -43,11 +43,15 @@ struct InboxAnswer: Codable, Equatable, Sendable {
     var chosenOptionId: String?
     var freeText: String?
     var at: Date
+    /// True when nobody answered: a timed veto's deadline passed and the emitter's own default
+    /// took effect (#920 Task 4). Not Brian's decision, and delivered as not his.
+    var automatic: Bool = false
 
-    init(chosenOptionId: String?, freeText: String?, at: Date) {
+    init(chosenOptionId: String?, freeText: String?, at: Date, automatic: Bool = false) {
         self.chosenOptionId = chosenOptionId
         self.freeText = freeText
         self.at = at
+        self.automatic = automatic
     }
 
     init(from decoder: Decoder) throws {
@@ -55,6 +59,7 @@ struct InboxAnswer: Codable, Equatable, Sendable {
         chosenOptionId = try c.decodeIfPresent(String.self, forKey: .chosenOptionId)
         freeText = try c.decodeIfPresent(String.self, forKey: .freeText)
         at = try c.decodeIfPresent(Date.self, forKey: .at) ?? Date()
+        automatic = try c.decodeIfPresent(Bool.self, forKey: .automatic) ?? false
     }
 }
 
@@ -227,7 +232,9 @@ final class InboxStore: Sendable {
             try db.execute(sql: "UPDATE inbox_items SET answerJSON = ?, state = ?, lastActivityAt = ?, pendingTargetsJSON = ? WHERE id = ?",
                            arguments: [answerJSON, state.rawValue, answer.at, pendingJSON, itemId])
             let body = [answer.chosenOptionId, answer.freeText].compactMap { $0 }.joined(separator: ": ")
-            try Self.appendEntry(itemId: itemId, kind: "answer", author: "brian", body: body, at: answer.at, db: db)
+            try Self.appendEntry(itemId: itemId, kind: "answer", author: answer.automatic ? "veto-timer" : "brian",
+                                 body: answer.automatic ? "no answer by the deadline; default \(body) took effect" : body,
+                                 at: answer.at, db: db)
             return .success(())
         }
     }
@@ -246,6 +253,17 @@ final class InboxStore: Sendable {
                 """, arguments: [json, state.rawValue, itemId,
                                  InboxItemState.awaitingDelivery.rawValue, InboxItemState.answered.rawValue])
             return db.changesCount > 0 ? .success(()) : .failure(.notAnswerable)
+        }
+    }
+
+    /// `.open` timed-veto items whose absolute deadline is at or before `now`, oldest deadline
+    /// first. Whether each fires or holds is the caller's call (taint, a usable default).
+    func dueVetoItems(now: Date) throws -> [InboxItem] {
+        try writer.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT * FROM inbox_items WHERE state = ? AND responseMode = ? AND deadline IS NOT NULL AND deadline <= ?
+                ORDER BY deadline
+                """, arguments: [InboxItemState.open.rawValue, InboxResponseMode.timedVeto.rawValue, now]).compactMap(Self.decode)
         }
     }
 
