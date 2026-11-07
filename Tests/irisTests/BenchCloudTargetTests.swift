@@ -126,7 +126,7 @@ struct BenchCloudTargetTests {
         let flash = try #require(BenchCloudTarget.boundDollars(provider: .gemini, model: "gemini-3.8-flash"))
         let opus = try #require(BenchCloudTarget.boundDollars(provider: .anthropic, model: "claude-opus-5-5"))
         let rate = try #require(EvalCost.rates(provider: .gemini, model: "gemini-3.8-flash")).input
-        #expect(flash == Double(BenchCloudTarget.budgetWeightedTokens + BenchCloudTarget.roundAllowanceWeighted) * rate)
+        #expect(flash == Double(40_000 + 80_000) * rate, "the bound is the budget plus twice one round's input allowance")
         #expect(opus > flash)
         #expect(BenchCloudTarget.boundDollars(provider: .gemini, model: "no-such-model") == nil)
     }
@@ -194,12 +194,21 @@ struct BenchCloudTargetTests {
         #expect(unbudgeted.callCount == 5, "without a budget all four probe rounds and the answer run, got \(unbudgeted.callCount)")
     }
 
-    @Test("a cloud run makes one attempt per call: a failing client is asked once, not retried")
+    /// Fails every call with a 503, which the engine retries on its delays; counts the attempts.
+    private final class OverloadedClient: LLMClientProtocol, @unchecked Sendable {
+        private(set) var calls = 0
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            calls += 1
+            throw APIError(message: "overloaded", statusCode: 503)
+        }
+    }
+
+    @Test("a cloud run makes one attempt per call: a 503 is not retried (a retry is a second bill the budget cannot see)")
     @MainActor
     func oneAttemptPerCall() async {
-        let failing = FakeLLMClient(responses: [])   // throws "no responses queued" on every call
-        _ = await BenchCLI.runScenario(BenchCLI.defaultScenario, clientOverride: failing, cloud: target(3))
-        #expect(failing.callCount == 1, "a retry is a second bill the budget cannot see, got \(failing.callCount) calls")
+        let overloaded = OverloadedClient()
+        _ = await BenchCLI.runScenario(BenchCLI.defaultScenario, clientOverride: overloaded, cloud: target(3))
+        #expect(overloaded.calls == 1, "got \(overloaded.calls) calls")
         #expect(BenchCloudTarget.retryDelays.isEmpty && BenchCloudTarget.defaultRetryDelays == [2, 4, 8])
     }
 
