@@ -1027,6 +1027,10 @@ class AppState {
     /// `contextId`, so a loop cannot escape by starting a new thread on every hop. In memory.
     private var peerDepths: [UUID: Int] = [:]
     var peerRateLimiter = PeerRateLimiter()
+    /// #920 Task 2: a per-emitter token bucket for `inbox_item`, separate from `peerRateLimiter` —
+    /// an emitter raising decisions and one messaging peers are different kinds of flood, and one
+    /// must not spend the other's budget.
+    var inboxEmitRateLimiter = PeerRateLimiter()
 
     /// Called from `IrisEngine.processInput`'s own begin/end pair, which brackets every turn the
     /// engine runs — UI-initiated ones included, so a UI turn is counted by both sources.
@@ -2838,6 +2842,38 @@ class AppState {
             return .refused("Not sent: rate limit — this session has sent \(PeerRateLimiter.capacity) messages in quick succession. The next is allowed in about \(Int(wait.rounded(.up)))s.")
         }
         return .allowed(target: target, depth: depth)
+    }
+
+    enum InboxEmitDecision: Equatable {
+        /// `ownerChain` and `emitterLabel` are the emitter's own session identity (`role`, else
+        /// `sessionCard?.name`, else its id) — read here, on this one hop, never taken from the
+        /// tool's own arguments: a caller-supplied chain would let any emitter claim another's
+        /// threads (dev-2's #924 review of the same hazard in `InboxStore`, carried forward to
+        /// this caller).
+        case allowed(ownerChain: String, emitterLabel: String?, tainted: Bool)
+        case refused(String)
+    }
+
+    /// One synchronous decision for `inbox_item` (#920 Task 2): resolve the emitter's own identity
+    /// and taint, and take one rate token, on one hop — mirrors `decideTopicPublish`/
+    /// `decidePeerSend`, so nothing can be read here and acted on there after another session's
+    /// turn ran in between.
+    func decideInboxEmit(from sender: UUID) -> InboxEmitDecision {
+        guard let c = conversations.first(where: { $0.id == sender }) else {
+            return .refused("That conversation no longer exists.")
+        }
+        if let wait = inboxEmitRateLimiter.take(for: sender) {
+            return .refused("Not raised: rate limit — this session has raised \(PeerRateLimiter.capacity) inbox items in quick succession. The next is allowed in about \(Int(wait.rounded(.up)))s.")
+        }
+        let ownerChain = c.role ?? c.sessionCard?.name ?? sender.uuidString
+        return .allowed(ownerChain: ownerChain, emitterLabel: c.sessionCard?.name, tainted: c.hasUntrustedToolOutput)
+    }
+
+    /// Gives back the token `decideInboxEmit` took for an emit the guard then withheld, or that
+    /// could not be recorded — it reached nobody, so it must not cost the sender its budget
+    /// (dev-2's #924 "guard-block refund path" review focus, carried into Task 2).
+    func refundInboxEmit(from sender: UUID) {
+        inboxEmitRateLimiter.refund(for: sender, count: 1)
     }
 
     /// #469 §7.5: removes artifacts no conversation has referenced for the grace period. At launch,
