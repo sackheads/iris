@@ -12,6 +12,7 @@ test_*.py
 test_*.swift
 *.py
 !scripts/gen-model-prices.py
+!scripts/bench854/*.py
 .iris/
 errors.txt
 

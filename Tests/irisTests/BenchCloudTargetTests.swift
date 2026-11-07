@@ -112,47 +112,92 @@ struct BenchCloudTargetTests {
         #expect(try Self.refusal(Self.opus, env: ["GEMINI_API_KEY": "k"])?.contains("ANTHROPIC_API_KEY") == true, "the other provider's key must not do")
     }
 
-    @Test("a cap below one run's projection is refused before anything starts")
-    func capBelowProjection() throws {
-        let projected = try #require(BenchCloudTarget.projectedRunDollars(provider: .anthropic, model: "claude-opus-5-5"))
-        #expect(projected > 0.05 && projected < 0.2, "opus projects \(projected)")
+    @Test("a cap below one run's bound is refused before anything starts, and one just above it is not")
+    func capBelowBound() throws {
+        let bound = try #require(BenchCloudTarget.boundDollars(provider: .anthropic, model: "claude-opus-5-5"))
         var a = Self.opus; a[a.firstIndex(of: "--max-dollars")! + 1] = "0.01"
         #expect(try Self.refusal(a)?.contains("not started") == true)
+        a[a.firstIndex(of: "--max-dollars")! + 1] = String(bound * 1.01)
+        #expect(try Self.refusal(a) == nil)
     }
 
-    @Test("projection: flash is cheaper than opus, both from the price list, and an unlisted model has no projection")
-    func projection() throws {
-        let flash = try #require(BenchCloudTarget.projectedRunDollars(provider: .gemini, model: "gemini-3.8-flash"))
-        let opus = try #require(BenchCloudTarget.projectedRunDollars(provider: .anthropic, model: "claude-opus-5-5"))
-        #expect(flash > 0.01 && flash < 0.05, "flash projects \(flash)")
+    @Test("bound: the budget plus one round's input at the input rate; flash is cheaper than opus; an unlisted model has none")
+    func bound() throws {
+        let flash = try #require(BenchCloudTarget.boundDollars(provider: .gemini, model: "gemini-3.8-flash"))
+        let opus = try #require(BenchCloudTarget.boundDollars(provider: .anthropic, model: "claude-opus-5-5"))
+        let rate = try #require(EvalCost.rates(provider: .gemini, model: "gemini-3.8-flash")).input
+        #expect(flash == Double(BenchCloudTarget.budgetWeightedTokens + BenchCloudTarget.roundInputAllowanceTokens) * rate)
         #expect(opus > flash)
-        #expect(BenchCloudTarget.projectedRunDollars(provider: .gemini, model: "no-such-model") == nil)
+        #expect(BenchCloudTarget.boundDollars(provider: .gemini, model: "no-such-model") == nil)
     }
 
-    @Test("reported dollars come from the usage each call reported; none reported is nil, not zero")
-    func reported() {
-        func call(_ p: Int?, _ o: Int?) -> ModelCallRecord {
-            ModelCallRecord(round: 1, model: "m", latencyMs: 1, promptTokens: p, outputTokens: o, returnedToolCalls: false)
-        }
-        let rates = EvalCost.rates(provider: .gemini, model: "gemini-3.8-flash")
-        let expected = EvalCost.dollars(EvalCost.Tokens(input: 30_000, output: 300, thought: 0, calls: 2), rates: rates)
-        #expect(BenchCloudTarget.reportedDollars([call(10_000, 100), call(20_000, 200)], provider: .gemini, model: "gemini-3.8-flash") == expected)
-        #expect(BenchCloudTarget.reportedDollars([call(nil, nil)], provider: .gemini, model: "gemini-3.8-flash") == nil)
-        #expect(BenchCloudTarget.reportedDollars([], provider: .gemini, model: "gemini-3.8-flash") == nil)
+    @Test("a run is booked at its reported weighted tokens, and at its bound when it reported nothing")
+    func booking() throws {
+        let rate = try #require(EvalCost.rates(provider: .gemini, model: "gemini-3.8-flash")).input
+        #expect(BenchCloudTarget.bookedDollars(weightedTokens: 30_000, bound: 1, provider: .gemini, model: "gemini-3.8-flash") == 30_000 * rate)
+        #expect(BenchCloudTarget.bookedDollars(weightedTokens: nil, bound: 0.5, provider: .gemini, model: "gemini-3.8-flash") == 0.5)
     }
 
-    @Test("the ledger refuses a reserve that would pass the cap, across runs that share the file")
-    func ledgerCap() throws {
+    private func target(_ cap: Double) -> BenchCloudTarget {
+        BenchCloudTarget(provider: .gemini, model: "gemini-3.8-flash", canary: .bypassed, maxDollars: cap, ledgerPath: "l")
+    }
+
+    @Test("reserveRun reserves the run's bound in the ledger and refuses the run that would pass the cap, across runs that share the file")
+    func reserveRunHoldsTheCap() throws {
         let path = NSTemporaryDirectory() + "iris-bench-ledger-\(UUID().uuidString).jsonl"
         defer { try? FileManager.default.removeItem(atPath: path) }
-        let projected = try #require(BenchCloudTarget.projectedRunDollars(provider: .anthropic, model: "claude-opus-5-5"))
-        let cap = projected * 2.5
-        var held: [UUID] = []
+        let bound = try #require(BenchCloudTarget.boundDollars(provider: .gemini, model: "gemini-3.8-flash"))
+        let cap = bound * 2.5
+        var reserved = 0
         for n in 1...5 {
             let ledger = try SpendLedger(path: path, arm: "run\(n)", cap: cap)   // one ledger object per process, one file
-            if let id = try ledger.reserve(projected) { held.append(id) }
+            switch try BenchCloudTarget.reserveRun(target(cap), in: ledger) {
+            case .reserved(_, let amount): reserved += 1; #expect(amount == bound)
+            case .refused(let why): #expect(why.contains("not started"))
+            }
         }
-        #expect(held.count == 2, "a 2.5-run cap must admit exactly 2 runs, got \(held.count)")
+        #expect(reserved == 2, "a 2.5-run cap must admit exactly 2 runs, got \(reserved)")
+        let total = try SpendLedger(path: path, arm: "x", cap: cap).total()
+        #expect(abs(total - 2 * bound) < 1e-9, "the ledger must hold the bound for each admitted run, not less: \(total)")
+    }
+
+    @Test("a settled run frees its reserve: what it reported is booked in its place")
+    func settleReplacesReserve() throws {
+        let ledger = try SpendLedger(path: nil, arm: "a", cap: 10)
+        guard case .reserved(let id, let bound) = try BenchCloudTarget.reserveRun(target(10), in: ledger) else { Issue.record("refused"); return }
+        #expect(abs(try ledger.total() - bound) < 1e-12)
+        try ledger.settle(id, dollars: 0.01, tokens: (0, 0, 0))
+        #expect(abs(try ledger.total() - 0.01) < 1e-12)
+    }
+
+    private func probeRound(total: Int) -> GeminiResponse {
+        GeminiResponse(candidates: [Candidate(content: Content(
+            role: "model", parts: [Part(functionCall: FunctionCall(name: "noop_probe", args: [:]))]))],
+                       usageMetadata: UsageMetadata(promptTokenCount: total - 1, candidatesTokenCount: 1, totalTokenCount: total))
+    }
+
+    @Test("a looping run stops once its reported usage reaches the budget, and without the budget it does not")
+    @MainActor
+    func budgetStopsALoopingRun() async throws {
+        // Ends in a text answer: a FakeLLMClient repeats its last response for ever, so a list of probes alone never stops.
+        let rounds = (0..<4).map { _ in probeRound(total: 30_000) }
+            + [GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "done")]))], usageMetadata: nil)]
+        let budgeted = FakeLLMClient(responses: rounds)
+        let result = await BenchCLI.runScenario(BenchCLI.defaultScenario, clientOverride: budgeted,
+                                                turnBudget: target(3).turnBudget(), retryDelays: [])
+        #expect(budgeted.callCount == 2, "30k then 60k against a 40k budget: round three is never asked for, got \(budgeted.callCount)")
+        let weighted = try #require(result.weightedTokens)
+        #expect(weighted >= BenchCloudTarget.budgetWeightedTokens && weighted < 2 * BenchCloudTarget.budgetWeightedTokens)
+
+        let unbudgeted = FakeLLMClient(responses: rounds)
+        _ = await BenchCLI.runScenario(BenchCLI.defaultScenario, clientOverride: unbudgeted, retryDelays: [])
+        #expect(unbudgeted.callCount == 5, "without a budget all four probe rounds and the answer run, got \(unbudgeted.callCount)")
+    }
+
+    @Test("the budget a cloud run carries is the provider's and model's, so thinking and output weigh as they bill")
+    func budgetShape() {
+        let b = target(3).turnBudget()
+        #expect(b.maxTokens == BenchCloudTarget.budgetWeightedTokens && b.provider == "gemini" && b.model == "gemini-3.8-flash")
     }
 
     @Test("apply points the provider, every tier and the canary; the key stays in memory")

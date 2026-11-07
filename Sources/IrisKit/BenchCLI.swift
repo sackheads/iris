@@ -270,8 +270,11 @@ enum BenchCLI {
                                 ? (ProcessInfo.processInfo.environment[BenchCloudTarget.keyVariable(for: target.provider)] ?? "") : ""
                             target.apply(to: ConfigManager.shared, key: key.trimmingCharacters(in: .whitespacesAndNewlines))
                         })
-        // The cap is checked before the run starts, not after it: the projection is reserved in the shared ledger, and
-        // a reserve that would pass the cap stops the run before its first call (#854).
+        // The cap holds in three places: before the run (the worst case of one run is reserved in the shared ledger, and a
+        // reserve that would pass the cap stops the run), inside it (a `TurnBudget` stops the next model round once the
+        // reported usage, thinking included, reaches the budget, and a request's output is capped to what is left), and
+        // after it (what the run reported is booked in place of the reserve). One attempt per call: a retry is a second
+        // bill the budget cannot see (#854, #916 review).
         var reservation: (ledger: SpendLedger, id: UUID, projected: Double)?
         if let cloud {
             print(cloudHeader)
@@ -282,37 +285,31 @@ enum BenchCLI {
                     exit(1)
                 }
             }
-            guard let projected = BenchCloudTarget.projectedRunDollars(provider: cloud.provider, model: cloud.model) else {
-                FileHandle.standardError.write(Data("iris --bench: no listed price for \(cloud.model); not started\n".utf8))
-                exit(1)
-            }
             do {
                 let ledger = try SpendLedger(path: cloud.ledgerPath, arm: "\(cloud.model) \(scenario.name)", cap: cloud.maxDollars)
-                guard let id = try ledger.reserve(projected) else {
-                    let spent = (try? ledger.total()) ?? 0
-                    FileHandle.standardError.write(Data(String(format: "iris --bench: one run is projected at $%.3f and the ledger holds $%.3f of the $%.2f cap: not started\n",
-                                                               projected, spent, cloud.maxDollars).utf8))
+                switch try BenchCloudTarget.reserveRun(cloud, in: ledger) {
+                case .reserved(let id, let bound):
+                    reservation = (ledger, id, bound)
+                case .refused(let message):
+                    FileHandle.standardError.write(Data("iris --bench: \(message)\n".utf8))
                     exit(2)
                 }
-                reservation = (ledger, id, projected)
             } catch {
                 FileHandle.standardError.write(Data("iris --bench: \(error.localizedDescription)\n".utf8))
                 exit(1)
             }
         }
         let result = await runScenario(scenario, dumpRequestsTo: opts.dumpRequestsDir.map { URL(fileURLWithPath: $0) },
-                                        grant: opts.grant)
+                                        grant: opts.grant, turnBudget: cloud?.turnBudget(), retryDelays: cloud == nil ? [2, 4, 8] : [])
         if let cloud, let reservation {
-            // Booked at the larger of what the provider reported and the projection: thinking tokens are not in the
-            // reported count, so the report alone is a floor, and a run is never booked below its reserve.
-            let calls = result.turnProfiles.flatMap(\.modelCalls)
-            let reported = BenchCloudTarget.reportedDollars(calls, provider: cloud.provider, model: cloud.model)
-            let booked = max(reported ?? 0, reservation.projected)
+            // What the run's turns reported (thinking included, in the budget's own weighted tokens) is booked in place of
+            // the reserve. A run that reported nothing is booked at its reserve, never at zero.
+            let booked = BenchCloudTarget.bookedDollars(weightedTokens: result.weightedTokens, bound: reservation.projected,
+                                                        provider: cloud.provider, model: cloud.model)
             try? reservation.ledger.settle(reservation.id, dollars: booked,
-                                           tokens: (calls.reduce(0) { $0 + ($1.promptTokens ?? 0) },
-                                                    calls.reduce(0) { $0 + ($1.outputTokens ?? 0) }, 0))
-            print(String(format: "Bench spend: reported $%@ booked $%.4f (projection $%.4f)",
-                         reported.map { String(format: "%.4f", $0) } ?? "n/a", booked, reservation.projected))
+                                           tokens: (0, 0, result.weightedTokens ?? 0))
+            print(String(format: "Bench spend: %@ weighted tokens, booked $%.4f (reserved $%.4f)",
+                         result.weightedTokens.map(String.init) ?? "n/a", booked, reservation.projected))
         }
         print(BenchSummary.render(scenarioName: scenario.name, result: result))
         if opts.transcript { print(BenchSummary.renderTranscript(result)) }
@@ -341,13 +338,16 @@ enum BenchCLI {
     /// after, the scope in practice covers the whole remaining real-CLI run.
     @MainActor
     static func runScenario(_ scenario: Scenario, clientOverride: (any LLMClientProtocol)? = nil,
-                            dumpRequestsTo: URL? = nil, grant: BenchGrant? = nil) async -> ScenarioResult {
+                            dumpRequestsTo: URL? = nil, grant: BenchGrant? = nil,
+                            turnBudget: TurnBudget? = nil, retryDelays: [TimeInterval] = [2, 4, 8]) async -> ScenarioResult {
         if scenario.clientMode == .fake {
             return await HeadlessMode.withEnabled {
-                await ScenarioRunner.run(scenario, clientOverride: clientOverride, grant: grant, dumpRequestsTo: dumpRequestsTo)
+                await ScenarioRunner.run(scenario, clientOverride: clientOverride, grant: grant, dumpRequestsTo: dumpRequestsTo,
+                                         retryDelays: retryDelays, turnBudget: turnBudget)
             }
         }
-        return await ScenarioRunner.run(scenario, clientOverride: clientOverride, grant: grant, dumpRequestsTo: dumpRequestsTo)
+        return await ScenarioRunner.run(scenario, clientOverride: clientOverride, grant: grant, dumpRequestsTo: dumpRequestsTo,
+                                        retryDelays: retryDelays, turnBudget: turnBudget)
     }
 }
 
