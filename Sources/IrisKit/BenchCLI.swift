@@ -300,7 +300,7 @@ enum BenchCLI {
             }
         }
         let result = await runScenario(scenario, dumpRequestsTo: opts.dumpRequestsDir.map { URL(fileURLWithPath: $0) },
-                                        grant: opts.grant, turnBudget: cloud?.turnBudget(), retryDelays: cloud == nil ? [2, 4, 8] : [])
+                                        grant: opts.grant, cloud: cloud)
         if let cloud, let reservation {
             // What the run's turns reported (thinking included, in the budget's own weighted tokens) is booked in place of
             // the reserve. A run that reported nothing is booked at its reserve, never at zero.
@@ -310,6 +310,12 @@ enum BenchCLI {
                                            tokens: (0, 0, result.weightedTokens ?? 0))
             print(String(format: "Bench spend: %@ weighted tokens, booked $%.4f (reserved $%.4f)",
                          result.weightedTokens.map(String.init) ?? "n/a", booked, reservation.projected))
+            // A budgeted run always reports its weighted tokens. Without them the budget never reached the engine: say so
+            // loudly and fail the run, so a dropped bound cannot pass for a clean one.
+            if result.weightedTokens == nil {
+                FileHandle.standardError.write(Data("iris --bench: the run carried no turn budget (booked at its bound); treat its result as unbounded spend\n".utf8))
+                exit(3)
+            }
         }
         print(BenchSummary.render(scenarioName: scenario.name, result: result))
         if opts.transcript { print(BenchSummary.renderTranscript(result)) }
@@ -339,7 +345,10 @@ enum BenchCLI {
     @MainActor
     static func runScenario(_ scenario: Scenario, clientOverride: (any LLMClientProtocol)? = nil,
                             dumpRequestsTo: URL? = nil, grant: BenchGrant? = nil,
-                            turnBudget: TurnBudget? = nil, retryDelays: [TimeInterval] = [2, 4, 8]) async -> ScenarioResult {
+                            cloud: BenchCloudTarget? = nil) async -> ScenarioResult {
+        // A cloud run carries its in-run bound and makes one attempt per call; any other run is as it always was.
+        let turnBudget = cloud?.turnBudget()
+        let retryDelays = cloud == nil ? BenchCloudTarget.defaultRetryDelays : BenchCloudTarget.retryDelays
         if scenario.clientMode == .fake {
             return await HeadlessMode.withEnabled {
                 await ScenarioRunner.run(scenario, clientOverride: clientOverride, grant: grant, dumpRequestsTo: dumpRequestsTo,

@@ -126,7 +126,7 @@ struct BenchCloudTargetTests {
         let flash = try #require(BenchCloudTarget.boundDollars(provider: .gemini, model: "gemini-3.8-flash"))
         let opus = try #require(BenchCloudTarget.boundDollars(provider: .anthropic, model: "claude-opus-5-5"))
         let rate = try #require(EvalCost.rates(provider: .gemini, model: "gemini-3.8-flash")).input
-        #expect(flash == Double(BenchCloudTarget.budgetWeightedTokens + BenchCloudTarget.roundInputAllowanceTokens) * rate)
+        #expect(flash == Double(BenchCloudTarget.budgetWeightedTokens + BenchCloudTarget.roundAllowanceWeighted) * rate)
         #expect(opus > flash)
         #expect(BenchCloudTarget.boundDollars(provider: .gemini, model: "no-such-model") == nil)
     }
@@ -184,14 +184,23 @@ struct BenchCloudTargetTests {
             + [GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "done")]))], usageMetadata: nil)]
         let budgeted = FakeLLMClient(responses: rounds)
         let result = await BenchCLI.runScenario(BenchCLI.defaultScenario, clientOverride: budgeted,
-                                                turnBudget: target(3).turnBudget(), retryDelays: [])
+                                                cloud: target(3))
         #expect(budgeted.callCount == 2, "30k then 60k against a 40k budget: round three is never asked for, got \(budgeted.callCount)")
         let weighted = try #require(result.weightedTokens)
         #expect(weighted >= BenchCloudTarget.budgetWeightedTokens && weighted < 2 * BenchCloudTarget.budgetWeightedTokens)
 
         let unbudgeted = FakeLLMClient(responses: rounds)
-        _ = await BenchCLI.runScenario(BenchCLI.defaultScenario, clientOverride: unbudgeted, retryDelays: [])
+        _ = await BenchCLI.runScenario(BenchCLI.defaultScenario, clientOverride: unbudgeted)
         #expect(unbudgeted.callCount == 5, "without a budget all four probe rounds and the answer run, got \(unbudgeted.callCount)")
+    }
+
+    @Test("a cloud run makes one attempt per call: a failing client is asked once, not retried")
+    @MainActor
+    func oneAttemptPerCall() async {
+        let failing = FakeLLMClient(responses: [])   // throws "no responses queued" on every call
+        _ = await BenchCLI.runScenario(BenchCLI.defaultScenario, clientOverride: failing, cloud: target(3))
+        #expect(failing.callCount == 1, "a retry is a second bill the budget cannot see, got \(failing.callCount) calls")
+        #expect(BenchCloudTarget.retryDelays.isEmpty && BenchCloudTarget.defaultRetryDelays == [2, 4, 8])
     }
 
     @Test("the budget a cloud run carries is the provider's and model's, so thinking and output weigh as they bill")

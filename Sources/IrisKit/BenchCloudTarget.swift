@@ -67,6 +67,13 @@ struct BenchCloudTarget: Equatable, Sendable {
     /// caps a request's output to what is left, so the round that crosses it cannot overshoot on output; its prompt
     /// (the 10.5k-token request, plus a few capped tool results) is assumed to stay under this.
     static let roundInputAllowanceTokens = 40_000
+    /// That allowance in weighted tokens: a prompt written to a one-hour cache weighs up to 2x its tokens, so the bound
+    /// takes twice the plain figure.
+    static let roundAllowanceWeighted = 2 * roundInputAllowanceTokens
+    /// One attempt per call: a retry is a second bill the budget cannot see.
+    static let retryDelays: [TimeInterval] = []
+    /// The default of every other run.
+    static let defaultRetryDelays: [TimeInterval] = [2, 4, 8]
 
     /// The turn budget a cloud run carries.
     func turnBudget() -> TurnBudget {
@@ -79,7 +86,7 @@ struct BenchCloudTarget: Equatable, Sendable {
     /// run reserves in the ledger.
     static func boundDollars(provider: LLMProvider, model: String) -> Double? {
         guard let rates = EvalCost.rates(provider: provider, model: model) else { return nil }
-        return Double(budgetWeightedTokens + roundInputAllowanceTokens) * rates.input
+        return Double(budgetWeightedTokens + roundAllowanceWeighted) * rates.input
     }
 
     /// What a run is booked at: the dollars of the weighted tokens its turns reported, never above what it reserved
