@@ -41,11 +41,13 @@ struct InboxEmitTests {
 
     private func emitCall(title: String = "Ship it?", situation: String = "Here is the context.",
                           responseMode: String = "optionsAndFreeform", options: [JSONValue] = [],
-                          threadId: String? = nil) -> FunctionCall {
+                          threadId: String? = nil, deadline: String? = nil, vetoDefault: String? = nil) -> FunctionCall {
         var args: [String: JSONValue] = ["title": .string(title), "situation": .string(situation),
                                           "response_mode": .string(responseMode)]
         if !options.isEmpty { args["options"] = .array(options) }
         if let threadId { args["thread_id"] = .string(threadId) }
+        if let deadline { args["deadline"] = .string(deadline) }
+        if let vetoDefault { args["veto_default"] = .string(vetoDefault) }
         return FunctionCall(name: "inbox_item", args: args, id: "c1")
     }
 
@@ -76,7 +78,7 @@ struct InboxEmitTests {
                                               "cons": .array([.string("risky")])])]
         let result = await runToolCall(emitCall(title: "Ship the thing?", situation: "Full context here.",
                                                 options: options), on: app, as: id)
-        #expect(result.contains("Raised #"), Comment(rawValue: result))
+        #expect(result.contains("Recorded #"), Comment(rawValue: result))
 
         let items = try app.store.inbox.openItems()
         #expect(items.count == 1)
@@ -150,5 +152,66 @@ struct InboxEmitTests {
         let result = await runToolCall(emitCall(situation: "I'll take this one", threadId: item.threadId), on: appA, as: b)
         #expect(result.contains("Not raised"), Comment(rawValue: result))
         #expect(try appA.store.inbox.item(id: item.id)?.ownerChain != nil)
+    }
+
+    @Test("ownership never derives from a card name: a dead emitter's archived name is free to take, but its thread is not (dev-3 #929 review finding 1)")
+    func archivedEmitterNameIsNotOwnership() async throws {
+        let app = AppState(); app.conversations.removeAll()
+        let a = app.createNewConversation(select: false)
+        app.setSessionCard(for: a, SessionCard(name: "scout", description: "x"))
+        _ = await runToolCall(emitCall(), on: app, as: a)
+        let item = try #require(try app.store.inbox.openItems().first)
+
+        app.conversations[app.conversations.firstIndex { $0.id == a }!].isArchived = true
+        let b = app.createNewConversation(select: false)
+        app.setSessionCard(for: b, SessionCard(name: "scout", description: "y"))
+
+        let result = await runToolCall(emitCall(situation: "I'll take this one", threadId: item.threadId), on: app, as: b)
+        #expect(result.contains("Not raised"), Comment(rawValue: result))
+        #expect(try app.store.inbox.item(id: item.id)?.state == .open)
+    }
+
+    @Test("a followup from a session with untrusted tool output taints the item, even if it was created clean")
+    func followupTaintsItem() async throws {
+        let (app, id) = app()
+        _ = await runToolCall(emitCall(), on: app, as: id)
+        let item = try #require(try app.store.inbox.openItems().first)
+        #expect(item.emitterTainted == false)
+
+        app.conversations[app.conversations.firstIndex { $0.id == id }!].hasUntrustedToolOutput = true
+        _ = await runToolCall(emitCall(situation: "a followup", threadId: item.threadId), on: app, as: id)
+        #expect(try app.store.inbox.item(id: item.id)?.emitterTainted == true)
+    }
+
+    @Test("timedVeto with no deadline, a past deadline, or an unknown veto_default is refused")
+    func timedVetoValidatesDeadlineAndDefault() async throws {
+        let (app, id) = app()
+        let options: [JSONValue] = [.object(["id": .string("a"), "label": .string("Ship it")])]
+        let future = ISO8601DateFormatter().string(from: Date().addingTimeInterval(3600))
+        let past = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-3600))
+
+        let noDeadline = await runToolCall(emitCall(responseMode: "timedVeto", options: options, vetoDefault: "a"), on: app, as: id)
+        #expect(noDeadline.contains("deadline"), Comment(rawValue: noDeadline))
+
+        let pastDeadline = await runToolCall(emitCall(responseMode: "timedVeto", options: options, deadline: past, vetoDefault: "a"), on: app, as: id)
+        #expect(pastDeadline.contains("deadline"), Comment(rawValue: pastDeadline))
+
+        let unknownDefault = await runToolCall(emitCall(responseMode: "timedVeto", options: options, deadline: future, vetoDefault: "nope"), on: app, as: id)
+        #expect(unknownDefault.contains("veto_default"), Comment(rawValue: unknownDefault))
+
+        #expect(try app.store.inbox.openItems().isEmpty, "none of the malformed emits should have stored anything")
+
+        let ok = await runToolCall(emitCall(responseMode: "timedVeto", options: options, deadline: future, vetoDefault: "a"), on: app, as: id)
+        #expect(ok.contains("Recorded #"), Comment(rawValue: ok))
+    }
+
+    @Test("options with duplicate ids are refused")
+    func duplicateOptionIdsRefused() async throws {
+        let (app, id) = app()
+        let options: [JSONValue] = [.object(["id": .string("a"), "label": .string("One")]),
+                                    .object(["id": .string("a"), "label": .string("Two")])]
+        let result = await runToolCall(emitCall(options: options), on: app, as: id)
+        #expect(result.contains("distinct ids"), Comment(rawValue: result))
+        #expect(try app.store.inbox.openItems().isEmpty)
     }
 }

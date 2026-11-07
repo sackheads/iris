@@ -156,25 +156,28 @@ final class InboxStore: Sendable {
     /// ownership) — a foreign chain cannot reopen a decision Brian already trusts. Refuses with
     /// `.itemClosed` once the thread is closed (dev-2 finding 4: closing is final). The owner
     /// lookup is `threadId`'s UNIQUE row, not an `ORDER BY` over caller-supplied dates (dev-2
-    /// finding 1's root cause). Else appends a `"followup"` entry and flips the item back to `.open`.
+    /// finding 1's root cause). Else appends a `"followup"` entry and flips the item back to
+    /// `.open`. `tainted` ORs into the item's `emitterTainted` (dev-3's #929 review finding 2): the
+    /// flag was otherwise set once, at creation, so a followup from a session that has since read
+    /// untrusted content left a tainted item reading clean.
     @discardableResult
     func appendFollowup(threadId: String, fromChain ownerChain: String, author: String, body: String,
-                        at: Date) throws -> Result<Void, InboxError> {
+                        at: Date, tainted: Bool = false) throws -> Result<Void, InboxError> {
         return try writer.write { db in
-            guard let row = try Row.fetchOne(db, sql: "SELECT id, ownerChain, state FROM inbox_items WHERE threadId = ?",
+            guard let row = try Row.fetchOne(db, sql: "SELECT id, ownerChain, state, emitterTainted FROM inbox_items WHERE threadId = ?",
                                              arguments: [threadId]) else {
                 return .failure(.unknownThread)
             }
             guard let itemId = row["id"] as String?, let storedOwner = row["ownerChain"] as String?,
-                  let stateRaw = row["state"] as String? else {
+                  let stateRaw = row["state"] as String?, let wasTainted = row["emitterTainted"] as Bool? else {
                 return .failure(.unknownThread)
             }
             guard storedOwner == ownerChain else { return .failure(.notOwner) }
             guard stateRaw != InboxItemState.closed.rawValue else { return .failure(.itemClosed) }
 
             try Self.appendEntry(itemId: itemId, kind: "followup", author: author, body: body, at: at, db: db)
-            try db.execute(sql: "UPDATE inbox_items SET state = ?, lastActivityAt = ? WHERE id = ?",
-                           arguments: [InboxItemState.open.rawValue, at, itemId])
+            try db.execute(sql: "UPDATE inbox_items SET state = ?, lastActivityAt = ?, emitterTainted = ? WHERE id = ?",
+                           arguments: [InboxItemState.open.rawValue, at, wasTainted || tainted, itemId])
             return .success(())
         }
     }

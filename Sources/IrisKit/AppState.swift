@@ -2845,11 +2845,15 @@ class AppState {
     }
 
     enum InboxEmitDecision: Equatable {
-        /// `ownerChain` and `emitterLabel` are the emitter's own session identity (`role`, else
-        /// `sessionCard?.name`, else its id) — read here, on this one hop, never taken from the
-        /// tool's own arguments: a caller-supplied chain would let any emitter claim another's
-        /// threads (dev-2's #924 review of the same hazard in `InboxStore`, carried forward to
-        /// this caller).
+        /// `ownerChain` is `role`, else the session's own id — never `sessionCard?.name` (dev-3's
+        /// #929 review finding 1): a card name is the model's own claim through
+        /// `set_session_card`, whose clash check excludes archived sessions, so a roleless
+        /// session's name is free for another to take once it archives. Keying ownership on it
+        /// let a session that claimed a dead emitter's old name append to and reopen its threads.
+        /// `emitterLabel` is still the card name when there is one — a display label only, read
+        /// here, on this one hop, never taken from the tool's own arguments: a caller-supplied
+        /// chain would let any emitter claim another's threads (dev-2's #924 review of the same
+        /// hazard in `InboxStore`, carried forward to this caller).
         case allowed(ownerChain: String, emitterLabel: String?, tainted: Bool)
         case refused(String)
     }
@@ -2865,7 +2869,7 @@ class AppState {
         if let wait = inboxEmitRateLimiter.take(for: sender) {
             return .refused("Not raised: rate limit — this session has raised \(PeerRateLimiter.capacity) inbox items in quick succession. The next is allowed in about \(Int(wait.rounded(.up)))s.")
         }
-        let ownerChain = c.role ?? c.sessionCard?.name ?? sender.uuidString
+        let ownerChain = c.role ?? sender.uuidString
         return .allowed(ownerChain: ownerChain, emitterLabel: c.sessionCard?.name, tainted: c.hasUntrustedToolOutput)
     }
 
