@@ -775,8 +775,8 @@ public struct InjectionGuard {
         /// Content from outside: tool output, web results, memory, files, MCP descriptions. It is
         /// data the agent fetched, so a request to the agent in it is out of place.
         case external
-        /// A channel whose job is to carry requests to the agent: a peer's message, a topic post, a
-        /// system event, an inbox item. R3 flags any request to the agent, so on these it blocked
+        /// A channel whose job is to carry requests to the agent: a peer's message (also as it arrives
+        /// as a system event), a topic post, an inbox item. R3 flags any request to the agent, so on these it blocked
         /// ordinary ones (gemma4:12b: 8 of 8 peer requests, 2 of 2 inbox items). They get a prompt
         /// that flags an attempt to subvert the agent and not the presence of a request.
         case instructionChannel
@@ -784,13 +784,14 @@ public struct InjectionGuard {
 
     /// Provenance labels (the `contextTag`) of the instruction channels. Anything not named here,
     /// a label this table has never heard of included, is judged as external, the stricter prompt.
-    static let instructionChannelSources: Set<String> = ["peer_session", "peer_topic", "inbox_emit"]
-    static let instructionChannelPrefixes = ["system_event_"]
+    /// Named one by one, not by prefix: `system_event_<source>` is also what a background subagent's
+    /// post-back arrives under (`system_event_SubagentManager`), and that text derives from tool
+    /// output, so it keeps the external prompt. `system_event_peer_session` is a peer's message
+    /// arriving through the system-event path. A new label is a decision, made here with a test.
+    static let instructionChannelSources: Set<String> = ["peer_session", "peer_topic", "inbox_emit", "system_event_peer_session"]
 
     static func canaryPromptKind(source: String) -> CanaryPromptKind {
-        if instructionChannelSources.contains(source) { return .instructionChannel }
-        if instructionChannelPrefixes.contains(where: source.hasPrefix) { return .instructionChannel }
-        return .external
+        instructionChannelSources.contains(source) ? .instructionChannel : .external
     }
 
     /// The tier-3 canary's prompt (#906). External content: the text is tool output the agent

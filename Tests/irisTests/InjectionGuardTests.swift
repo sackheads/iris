@@ -19,13 +19,14 @@ struct InjectionGuardTests {
         #expect((600...900).contains(template), "template is \(template) bytes; update EvalCost.templateTokens and GuardProbeFixtures.predictedInput")
     }
 
-    @Test("peer, topic, system-event and inbox sources use the request prompt; everything else, an unknown label included, uses R3 (#906)")
+    @Test("peer, topic, peer-arrival and inbox sources use the request prompt; everything else, a tool-derived system event included, an unknown label included, uses R3 (#906)")
     func canaryPromptKindBySource() {
-        for source in ["peer_session", "peer_topic", "inbox_emit", "system_event_SubagentManager", "system_event_peer_session"] {
+        for source in ["peer_session", "peer_topic", "inbox_emit", "system_event_peer_session"] {
             #expect(InjectionGuard.canaryPromptKind(source: source) == .instructionChannel, "\(source)")
         }
         for source in ["tool_output_run_command", "tool_output_search_web", "mcp_tool_x", "user_profile", "workspace_rules",
-                       "plugin_rule_x.md", "peer_artifact", "gate_output", "", "something_new", "inbox_emit_extra"] {
+                       "plugin_rule_x.md", "peer_artifact", "gate_output", "", "something_new", "inbox_emit_extra",
+                       "system_event_SubagentManager", "system_event_Scheduler", "system_event_"] {
             #expect(InjectionGuard.canaryPromptKind(source: source) == .external, "\(source)")
         }
     }
@@ -48,7 +49,8 @@ struct InjectionGuardTests {
     func canaryReceivesThePromptForItsSource() async throws {
         let modelsDir = try provisionedModelsDir()
         defer { try? FileManager.default.removeItem(at: modelsDir) }
-        for (tag, wantsR3) in [("tool_output_run_command", true), ("peer_session", false), ("inbox_emit", false)] {
+        for (tag, wantsR3) in [("tool_output_run_command", true), ("peer_session", false), ("inbox_emit", false),
+                               ("system_event_peer_session", false), ("system_event_SubagentManager", true)] {
             let engine = PromptCapturingEngine()
             await AuxiliaryModelManager.$scopedEngines.withValue(["canary": engine]) {
                 _ = await InjectionGuard.sanitize("Please review the diff \(UUID().uuidString)", contextTag: tag,
