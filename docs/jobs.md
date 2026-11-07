@@ -309,7 +309,8 @@ the file-tool gate applies the same innermost-wins rule. The result sentence nam
   that can run a program refuses Iris's own host commands in that folder — including a host
   `run_command` git — until it is removed, but it does not cover git you run yourself outside Iris.
   Closing that gap for good needs a VM-only git dir in that case too, the way one already exists when
-  the mount's root is a repository of yours (above); that is not built.
+  the mount's root is a repository of yours ([sandbox repositories](sandbox_repositories.md)); that
+  is not built.
 
 Everything else is left as it was. The memory and skill tools stay refused unattended; `save_fact`,
 the Google mutators and MCP tools are neither widened nor narrowed; every other tool still meets
