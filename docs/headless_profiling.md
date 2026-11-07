@@ -40,8 +40,10 @@ swift run iris --bench scenarios/live.json --real     # hit a real provider (nee
 - `--cloud-primary PROVIDER:MODEL --allow-paid --max-dollars N --spend-ledger FILE` plus exactly one of `--local-canary NAME`,
   `--canary-gguf FILE` and `--bypass-guard` (#854) makes a `--real` run's primary a paid cloud model, for measuring a capable
   driver's compliance with a planted request (`scripts/bench854/`). It is **paid**: only `gemini:gemini-3.8-flash` and
-  `anthropic:claude-opus-5-5` are accepted, the key is read from `GEMINI_API_KEY` or `ANTHROPIC_API_KEY` (never the Keychain, so it
-  cannot prompt), and the run is refused unless `--max-dollars` is at most 50. Before its first call a run reserves its projected cost
+  `anthropic:claude-opus-5-5` are accepted, the key is read from `GEMINI_API_KEY` or `ANTHROPIC_API_KEY`, or with `--cloud-auth vertex-adc` from gcloud
+  Application Default Credentials as the app's Vertex modes use them (Gemini rides the ADC quota project; Claude needs
+  `--vertex-project ID` and takes `--vertex-location`, default `global`; the run stops before any model call if ADC gives no token),
+  never the Keychain, so it cannot prompt, and the run is refused unless `--max-dollars` is at most 50. Before its first call a run reserves its projected cost
   (about 24k input tokens and 2 calls, at `ModelPriceSnapshot` rates) in the `--spend-ledger` file, which every run that names the
   same file shares: a reserve that would pass the cap stops the run (exit 2) and one run over the cap is never started. The run books
   the larger of the usage the provider reported and the projection, so the ledger is a ceiling on the cumulative spend, off by at most
