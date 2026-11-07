@@ -32,11 +32,23 @@ struct BenchCloudTarget: Equatable, Sendable {
     static let projectedInputTokens = 24_000
     static let projectedOutputTokens: [LLMProvider: Int] = [.gemini: 1_200, .anthropic: 600]
 
+    /// Where the credentials come from. The key is never read from the Keychain.
+    enum Auth: Equatable, Sendable {
+        /// `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` in the environment.
+        case env
+        /// gcloud Application Default Credentials, as the app's Vertex modes use them. Gemini rides the ADC quota
+        /// project; Claude names its project (sent as `x-goog-user-project`) and a location.
+        case vertexADC(project: String?, location: String)
+    }
+
+    static let defaultVertexLocation = ConfigManager.defaultVertexLocation
+
     var provider: LLMProvider
     var model: String
     var canary: Canary
     var maxDollars: Double
     var ledgerPath: String
+    var auth: Auth = .env
 
     /// The environment variable the key is read from.
     static func keyVariable(for provider: LLMProvider) -> String {
@@ -77,10 +89,11 @@ struct BenchCloudTarget: Equatable, Sendable {
     static func refusal(_ opts: BenchOptions, scenario: Scenario, env: (String) -> String?,
                         modelsDir: URL, isRegularFile: (String) -> Bool) -> String? {
         let named = opts.cloudPrimary != nil || opts.allowPaid || opts.maxDollars != nil || opts.spendLedger != nil
-            || opts.canaryGguf != nil || opts.bypassGuard
+            || opts.canaryGguf != nil || opts.bypassGuard || opts.cloudAuth != nil || opts.vertexProject != nil
+            || opts.vertexLocation != nil
         guard named else { return nil }
         guard let spec = opts.cloudPrimary else {
-            return "--allow-paid, --max-dollars, --spend-ledger, --canary-gguf and --bypass-guard need --cloud-primary PROVIDER:MODEL"
+            return "--allow-paid, --max-dollars, --spend-ledger, --canary-gguf, --bypass-guard, --cloud-auth, --vertex-project and --vertex-location need --cloud-primary PROVIDER:MODEL"
         }
         guard let (provider, model) = parse(spec: spec) else {
             let list = allowed.map { "\($0.value.rawValue.lowercased()):\($0.key)" }.sorted().joined(separator: ", ")
@@ -109,9 +122,19 @@ struct BenchCloudTarget: Equatable, Sendable {
             let path = modelsDir.appendingPathComponent(gguf).path
             if !isRegularFile(path) { return "--canary-gguf \(gguf) is not a regular file in \(modelsDir.path)" }
         }
-        let variable = keyVariable(for: provider)
-        if (env(variable) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "--cloud-primary reads its key from \(variable), which is not set"
+        switch opts.cloudAuth {
+        case nil, "env":
+            if opts.vertexProject != nil || opts.vertexLocation != nil {
+                return "--vertex-project and --vertex-location need --cloud-auth vertex-adc"
+            }
+            let variable = keyVariable(for: provider)
+            if (env(variable) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return "--cloud-primary reads its key from \(variable), which is not set"
+            }
+        case "vertex-adc":
+            if let why = vertexRefusal(provider: provider, project: opts.vertexProject, location: opts.vertexLocation) { return why }
+        default:
+            return "--cloud-auth takes env or vertex-adc; \(opts.cloudAuth ?? "") is neither"
         }
         guard let projected = projectedRunDollars(provider: provider, model: model) else {
             return "no listed price for \(model): the cost cannot be projected, so the run is not started"
@@ -122,6 +145,35 @@ struct BenchCloudTarget: Equatable, Sendable {
         return nil
     }
 
+    /// The Vertex half of the refusal table. Gemini's project is the ADC quota project, as in the app, so naming one is
+    /// refused rather than quietly ignored; Claude needs an explicit project and a valid location.
+    static func vertexRefusal(provider: LLMProvider, project: String?, location: String?) -> String? {
+        switch provider {
+        case .gemini:
+            if project != nil || location != nil {
+                return "--vertex-project and --vertex-location are for anthropic: a gemini run uses the ADC quota project"
+            }
+        case .anthropic:
+            guard let project, isValidProject(project) else {
+                return "--cloud-auth vertex-adc with anthropic needs --vertex-project ID (lowercase letters, digits and hyphens)"
+            }
+            if let location, !isValidLocation(location) {
+                return "--vertex-location \(location) is not valid: use global, us, eu, or a region such as us-east5"
+            }
+        case .openai:
+            return "not an allowed provider"
+        }
+        return nil
+    }
+
+    static func isValidProject(_ s: String) -> Bool {
+        s.range(of: "^[a-z][a-z0-9-]{3,28}[a-z0-9]$", options: .regularExpression) != nil
+    }
+
+    static func isValidLocation(_ s: String) -> Bool {
+        s == "global" || s == "us" || s == "eu" || s.range(of: "^[a-z]+-[a-z]+[0-9]+$", options: .regularExpression) != nil
+    }
+
     /// The target when the options are valid (call after `refusal` returned nil).
     static func target(_ opts: BenchOptions) -> BenchCloudTarget? {
         guard let spec = opts.cloudPrimary, let (provider, model) = parse(spec: spec),
@@ -130,7 +182,9 @@ struct BenchCloudTarget: Equatable, Sendable {
         if let gguf = opts.canaryGguf { canary = .gguf(gguf) }
         else if opts.bypassGuard { canary = .bypassed }
         else { canary = .ollama(opts.localCanary ?? BenchLocalTarget.defaultCanaryModel) }
-        return BenchCloudTarget(provider: provider, model: model, canary: canary, maxDollars: cap, ledgerPath: ledger)
+        let auth: Auth = opts.cloudAuth == "vertex-adc"
+            ? .vertexADC(project: opts.vertexProject, location: opts.vertexLocation ?? defaultVertexLocation) : .env
+        return BenchCloudTarget(provider: provider, model: model, canary: canary, maxDollars: cap, ledgerPath: ledger, auth: auth)
     }
 
     /// Points a config at the cloud model: the provider on every tier, the key, the canary as pinned, and the
@@ -141,10 +195,16 @@ struct BenchCloudTarget: Equatable, Sendable {
         config.primaryProvider = provider.rawValue
         switch provider {
         case .anthropic:
-            config.anthropicAPIKey = key
+            if case .vertexADC(let project, let location) = auth {
+                config.anthropicAuthMode = AnthropicAuthMode.vertex.rawValue
+                config.anthropicVertexProject = project ?? ""
+                config.anthropicVertexLocation = location
+            } else {
+                config.anthropicAPIKey = key
+            }
             config.anthropicModelEasy = model; config.anthropicModelMedium = model; config.anthropicModelHard = model
         case .gemini:
-            config.geminiAPIKey = key
+            if case .vertexADC = auth { config.geminiAuthMode = GeminiAuthMode.adc.rawValue } else { config.geminiAPIKey = key }
             config.geminiModelEasy = model; config.geminiModelMedium = model; config.geminiModelHard = model
         case .openai:
             break   // not in `allowed`
@@ -174,6 +234,7 @@ struct BenchCloudTarget: Equatable, Sendable {
             "Bench target: cloud primary \(target.provider.rawValue.lowercased()):\(target.model), cap $\(target.maxDollars), ledger \(target.ledgerPath)",
             "Bench settings on this machine (not used): injection guard \(config.enableAdvancedPromptInjectionProtection ? "on" : "off"), tier-3 engine \(engine.isEmpty ? "(none)" : engine), model \(model.isEmpty ? "(none)" : model)",
             "Bench tier 2: \(describe(tier2))",
+            "Bench auth: \(describe(target.auth))",
         ]
         switch target.canary {
         case .ollama(let name): lines.append("Bench canary: pinned, ollama \(name) (tier 3)")
@@ -181,6 +242,14 @@ struct BenchCloudTarget: Equatable, Sendable {
         case .bypassed: lines.append("Bench guard: BYPASSED - replaying pre-passed rows. This run measures DRIVER compliance, not the guard.")
         }
         return lines.joined(separator: "\n")
+    }
+
+    static func describe(_ a: Auth) -> String {
+        switch a {
+        case .env: return "environment key"
+        case .vertexADC(let project, let location):
+            return "Vertex AI via gcloud ADC, project \(project ?? "(the ADC quota project)"), location \(project == nil ? "global" : location)"
+        }
     }
 
     static func describe(_ t: InjectionGuard.Tier2Provisioning) -> String {

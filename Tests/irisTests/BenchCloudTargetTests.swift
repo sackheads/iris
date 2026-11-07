@@ -215,4 +215,69 @@ struct BenchCloudTargetTests {
                                  apply: { _ in steps.append("local") }, cloud: target, applyCloud: { _ in steps.append("cloud") })
         #expect(steps == ["bypass", "volatile", "cloud"])
     }
+
+    // MARK: - Vertex ADC (work has no API keys)
+
+    private static let flashAdc = Array(flash.prefix(7)) + ["--bypass-guard", "--cloud-auth", "vertex-adc"]
+    private static let opusAdc = Array(opus.prefix(7)) + ["--bypass-guard", "--cloud-auth", "vertex-adc", "--vertex-project", "gke-claude-dev"]
+
+    @Test("vertex-adc needs no key in the environment: Gemini rides the ADC quota project, Claude names its project")
+    func vertexAllowed() throws {
+        #expect(try Self.refusal(Self.flashAdc, env: [:]) == nil)
+        #expect(try Self.refusal(Self.opusAdc, env: [:]) == nil)
+        let o = try #require(BenchCloudTarget.target(try Self.opts(Self.opusAdc)))
+        #expect(o.auth == .vertexADC(project: "gke-claude-dev", location: "global"))
+        let f = try #require(BenchCloudTarget.target(try Self.opts(Self.flashAdc)))
+        #expect(f.auth == .vertexADC(project: nil, location: "global"))
+    }
+
+    @Test("vertex-adc: Claude needs a valid project and location; Gemini refuses both flags; an unknown mode is refused")
+    func vertexRefusals() throws {
+        let noProject = Array(Self.opusAdc.dropLast(2))
+        #expect(try Self.refusal(noProject, env: [:])?.contains("--vertex-project") == true)
+        for bad in ["", "Gke-Claude", "gke_claude", "-gke", "a", "gke-claude-dev-", "x; rm"] {
+            let a = Array(Self.opusAdc.dropLast()) + [bad]
+            #expect(try Self.refusal(a, env: [:]) != nil, "project \(bad) was allowed")
+        }
+        for bad in ["Global", "us east5", "../x", "us-east"] {
+            #expect(try Self.refusal(Self.opusAdc + ["--vertex-location", bad], env: [:]) != nil, "location \(bad) was allowed")
+        }
+        for good in ["global", "us", "eu", "us-east5", "europe-west4"] {
+            #expect(try Self.refusal(Self.opusAdc + ["--vertex-location", good], env: [:]) == nil, "location \(good) was refused")
+        }
+        #expect(try Self.refusal(Self.flashAdc + ["--vertex-project", "p-12345"], env: [:])?.contains("quota project") == true)
+        #expect(try Self.refusal(Self.opus + ["--cloud-auth", "gcloud"])?.contains("neither") == true)
+        #expect(try Self.refusal(Self.opus + ["--vertex-project", "gke-claude-dev"])?.contains("vertex-adc") == true,
+                "a Vertex flag without vertex-adc must not be silently ignored")
+    }
+
+    @Test("apply with vertex-adc sets the app's own Vertex modes and no key")
+    @MainActor
+    func applyVertex() throws {
+        let name = "iris-benchvertex-\(UUID().uuidString)"
+        let store = try #require(UserDefaults(suiteName: name))
+        defer {
+            store.removePersistentDomain(forName: name)
+            IrisDefaults.removeSuiteFile(named: name, in: IrisDefaults.preferencesDirectory)
+        }
+        let config = ConfigManager(store: store, guardedSecrets: KeychainManager(serviceSuffix: ".benchvertex", inMemory: true))
+        BenchCloudTarget(provider: .anthropic, model: "claude-opus-5-5", canary: .bypassed, maxDollars: 11, ledgerPath: "l",
+                         auth: .vertexADC(project: "gke-claude-dev", location: "global")).apply(to: config, key: "")
+        #expect(config.anthropicAuthMode == AnthropicAuthMode.vertex.rawValue)
+        #expect(config.anthropicVertexProject == "gke-claude-dev")
+        #expect(config.effectiveVertexLocation == "global")
+        #expect(config.anthropicAPIKey.isEmpty)
+        BenchCloudTarget(provider: .gemini, model: "gemini-3.8-flash", canary: .bypassed, maxDollars: 3, ledgerPath: "l",
+                         auth: .vertexADC(project: nil, location: "global")).apply(to: config, key: "")
+        #expect(config.geminiAuthMode == GeminiAuthMode.adc.rawValue)
+        #expect(config.geminiAPIKey.isEmpty)
+    }
+
+    @Test("the header says which auth the run used")
+    @MainActor
+    func headerAuth() throws {
+        #expect(BenchCloudTarget.describe(.vertexADC(project: "gke-claude-dev", location: "global")).contains("gke-claude-dev"))
+        #expect(BenchCloudTarget.describe(.vertexADC(project: nil, location: "global")).contains("ADC quota project"))
+        #expect(BenchCloudTarget.describe(.env) == "environment key")
+    }
 }
