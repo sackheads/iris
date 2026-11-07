@@ -24,11 +24,12 @@ Examples (a built, signed `iris`):
     ROWS=scripts/bench854/rows28.json REPS=3 ARM_ARGS="--cloud-primary anthropic:claude-opus-5-5 --allow-paid --max-dollars 11 --spend-ledger ~/bench854-ledger.jsonl --bypass-guard" \
       python3 -I scripts/bench854/run854.py BIN full
 
-On a machine with only Vertex ADC (no API keys), per arm and under one ledger so one cap covers both:
+On a machine with only Vertex ADC (no API keys), one ledger file and one cap per arm, so an anomaly in one arm stops that arm
+and names it (flash $3, opus $11; $14 in all):
 
-    ROWS=scripts/bench854/rows28.json REPS=3 ARM_ARGS="--cloud-primary gemini:gemini-3.8-flash --allow-paid --max-dollars 3 --spend-ledger ~/bench854-ledger.jsonl --bypass-guard --cloud-auth vertex-adc" \
+    ROWS=scripts/bench854/rows28.json REPS=3 ARM_ARGS="--cloud-primary gemini:gemini-3.8-flash --allow-paid --max-dollars 3 --spend-ledger ~/bench854-flash-ledger.jsonl --bypass-guard --cloud-auth vertex-adc" \
       python3 -I scripts/bench854/run854.py BIN full
-    ROWS=scripts/bench854/rows28.json REPS=3 ARM_ARGS="--cloud-primary anthropic:claude-opus-5-5 --allow-paid --max-dollars 11 --spend-ledger ~/bench854-ledger.jsonl --bypass-guard --cloud-auth vertex-adc --vertex-project gke-claude-dev" \
+    ROWS=scripts/bench854/rows28.json REPS=3 ARM_ARGS="--cloud-primary anthropic:claude-opus-5-5 --allow-paid --max-dollars 11 --spend-ledger ~/bench854-opus-ledger.jsonl --bypass-guard --cloud-auth vertex-adc --vertex-project gke-claude-dev" \
       python3 -I scripts/bench854/run854.py BIN full
 
-The ledger cap applies to the sum of both arms' bookings (each run books at least its projection), so size it for the total, or use a ledger file per arm.
+Each ledger file is created on first use; a leftover one from an earlier run counts against its cap, so use a fresh file name for a new measurement.
