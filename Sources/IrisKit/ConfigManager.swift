@@ -431,6 +431,12 @@ class ConfigManager: @unchecked Sendable {
         didSet { store.set(tier3ThinkingLevel, forKey: "PROMPT_GUARD_THINKING_LEVEL") }
     }
 
+    /// Whether a Cloud tier 3 sends a second request when the first has no answer after 20 s (#871).
+    /// On by default, as it has been since #871; off sends one request and waits for it.
+    var tier3Hedge: Bool {
+        didSet { store.set(tier3Hedge, forKey: "PROMPT_GUARD_HEDGE") }
+    }
+
     var promptGuardCoreMLModel: String {
         didSet { store.set(promptGuardCoreMLModel, forKey: "PROMPT_GUARD_COREML_MODEL") }
     }
@@ -724,6 +730,7 @@ class ConfigManager: @unchecked Sendable {
         self.tier3CloudModel = saved.string(forKey: "PROMPT_GUARD_CLOUD_MODEL") ?? ""
         let savedThinking = saved.string(forKey: "PROMPT_GUARD_THINKING_LEVEL") ?? ""
         self.tier3ThinkingLevel = Self.tier3ThinkingLevels.contains(savedThinking) ? savedThinking : ""
+        self.tier3Hedge = saved.object(forKey: "PROMPT_GUARD_HEDGE") as? Bool ?? true
         
         // No tier-2 model by default (#781): a saved value, empty included, is the person's choice;
         // with none saved, only an already-downloaded old default is inherited.

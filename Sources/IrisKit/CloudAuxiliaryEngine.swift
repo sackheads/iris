@@ -53,8 +53,13 @@ struct CloudAuxiliaryEngine: AuxiliaryInferenceEngine {
     var send: Send = { request, model in try await LLMClient().generateContent(request: request, tier: .easy, model: model) }
     /// How long a request may go unanswered before a second one is sent beside it; nil sends one.
     /// Only tier 3's canary sets it (#871). The first usable answer wins and the other request is
-    /// cancelled. A constant, not a setting.
+    /// cancelled. The delay is a constant; whether tier 3 hedges at all is a setting (`hedgeEnabled`).
     var hedgeAfter: TimeInterval?
+    /// Read at each call, so a change in Settings applies at once. False sends one request whatever
+    /// `hedgeAfter` says.
+    var hedgeEnabled: @Sendable () -> Bool = { true }
+    /// Counts the calls that sent a second request and says when too many do (#871). Nil counts nothing.
+    var hedgeMonitor: HedgeRateMonitor?
     /// The hedge's request. Nil reuses `send`; the product's is on its own connection, since a stuck
     /// one on a shared pool would carry both requests and the hedge would win nothing.
     var sendFresh: Send?
@@ -75,6 +80,8 @@ struct CloudAuxiliaryEngine: AuxiliaryInferenceEngine {
         cloud.thinkingLevel = { thinkingLevel(role: role, config: config) }
         if isTier3(role) {
             cloud.hedgeAfter = canaryHedgeSeconds
+            cloud.hedgeEnabled = { config.tier3Hedge }
+            cloud.hedgeMonitor = HedgeRateMonitor.canary
             cloud.sendFresh = freshConnectionSend
         }
         return cloud
@@ -174,7 +181,9 @@ struct CloudAuxiliaryEngine: AuxiliaryInferenceEngine {
     /// the second is out, the first usable answer wins and the other request is cancelled; both
     /// failing throws the first request's error, which the 400 handling above matches on.
     private func sendHedged(_ request: GeminiRequest, _ model: String?) async throws -> GeminiResponse {
-        guard let delay = hedgeAfter else { return try await send(request, model) }
+        guard let delay = hedgeAfter, hedgeEnabled() else { return try await send(request, model) }
+        let monitor = hedgeMonitor
+        let call = monitor?.began()
         let first = send
         let second = sendFresh ?? send
         let sleep = hedgeSleep
@@ -212,6 +221,7 @@ struct CloudAuxiliaryEngine: AuxiliaryInferenceEngine {
                 case .due:
                     hedged = true
                     HedgeSignal.onFired?()
+                    if let call, let rate = monitor?.fired(call) { await notice(HedgeRateMonitor.warning(rate)) }
                     run(true, second)
                 case .noTimer:
                     break

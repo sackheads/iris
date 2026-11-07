@@ -752,6 +752,8 @@ struct SettingsView: View {
                                 ForEach(ConfigManager.tier3ThinkingLevels, id: \.self) { Text($0.capitalized).tag($0) }
                             }
                             .help("How much the model thinks before it answers. Not sent leaves the provider's default. Only Gemini 3 models take a level; one that does not is asked again without it, and says so once.")
+                            Toggle("Second request after 20 s", isOn: $config.tier3Hedge)
+                                .help("A check with no answer after 20 s sends a second request on its own connection and takes whichever answers first. About 2.5% of checks do, so it costs about 2.5% more. Iris says so here when more than 5% of recent checks need one.")
                             if config.primaryProvider != LLMProvider.gemini.rawValue {
                                 Text(config.tier3ThinkingLevel.isEmpty
                                      ? "Only Gemini uses a thinking level; \(config.primaryProvider) would ignore one."
