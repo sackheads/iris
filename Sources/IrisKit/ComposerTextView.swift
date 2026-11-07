@@ -178,12 +178,24 @@ extension NSTextView {
     }
 }
 
+extension NSEvent {
+    /// Whether this key event is Cmd-S, the letter, with no modifier besides Command (#933 review
+    /// finding 1). `keyCode` is the *physical* key, not the letter: the key at the US-layout S
+    /// position types "o" on Dvorak, so matching the code made the shortcut layout-dependent, and
+    /// `flags.contains(.command)` alone let Cmd-Shift-S / Cmd-Option-S / Cmd-Control-S through too.
+    var isStashShortcut: Bool {
+        charactersIgnoringModifiers?.lowercased() == "s"
+            && modifierFlags.intersection(.deviceIndependentFlagsMask) == .command
+    }
+}
+
 /// NSTextView that routes Return / arrows / Tab / Escape through the coordinator.
 final class KeyCatchingTextView: NSTextView {
     weak var coordinator: ComposerTextView.Coordinator?
 
     override func keyDown(with event: NSEvent) {
         guard let coordinator else { super.keyDown(with: event); return }
+        if event.isStashShortcut { coordinator.parent.onStash(); return }
         let flags = event.modifierFlags
         switch event.keyCode {
         case 36, 76: // Return / Enter
@@ -206,8 +218,6 @@ final class KeyCatchingTextView: NSTextView {
             // Popup open → dismiss it. Otherwise hand Escape to the app-level action
             // (clear message selection / interrupt) instead of letting NSTextView eat it.
             if !coordinator.handleNavKey(.escape) { coordinator.parent.onEscape() }
-        case 1 where flags.contains(.command): // Cmd-S: stash the composer (#933)
-            coordinator.parent.onStash()
         default:
             super.keyDown(with: event)
         }

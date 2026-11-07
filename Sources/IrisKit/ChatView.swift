@@ -1017,20 +1017,19 @@ struct ChatView: View {
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !draftAttachments.isEmpty else { return }
         selectedMessageIDs.removeAll()
-        let text = inputText
         let attachments = draftAttachments
-        inputText = ""
         draftAttachments = []
         emojiModel.clear()
         slashModel.clear()
 
-        // #933: a pending stash refills the composer right away, not after the send resolves —
-        // the interim message is in flight, and the stashed one is ready to go back to.
-        let refill = PromptStash.refilling(stash: stashedPrompt)
-        if let newInput = refill.newInput { inputText = newInput }
-        stashedPrompt = refill.newStash
+        // #933: the ordering — what's sent, then the field clearing, then a pending stash
+        // refilling it right away rather than after the send resolves — is one pure step, so it
+        // can be pinned by a test instead of only read off this call site.
+        let result = PromptStash.submitting(input: inputText, stash: stashedPrompt)
+        inputText = result.newInput
+        stashedPrompt = result.newStash
 
-        state.sendMessage(text, attachments: attachments)
+        state.sendMessage(result.send, attachments: attachments)
     }
 
     /// Escape behavior shared by the message list (`.onExitCommand`) and the composer:

@@ -40,4 +40,20 @@ struct PromptStashTests {
         #expect(result.newInput == nil)
         #expect(result.newStash == nil)
     }
+
+    @Test("submitting with a pending stash sends the typed text and refills from the stash (#933 review finding 2)")
+    func submittingRefillsFromPendingStash() {
+        let result = PromptStash.submitting(input: "an interim question", stash: "finish the refactor")
+        #expect(result.send == "an interim question", "what's sent is the field's own text, never the stash")
+        #expect(result.newInput == "finish the refactor")
+        #expect(result.newStash == nil, "consumed by this send")
+    }
+
+    @Test("submitting with no pending stash sends the typed text and leaves the field empty")
+    func submittingWithNoStashClearsTheField() {
+        let result = PromptStash.submitting(input: "an interim question", stash: nil)
+        #expect(result.send == "an interim question")
+        #expect(result.newInput == "", "nothing to refill, so the field stays cleared")
+        #expect(result.newStash == nil)
+    }
 }
