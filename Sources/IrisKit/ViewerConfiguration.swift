@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import WebKit
 
 /// #896 phase 1: a `WKWebView` that can show model-written HTML and SVG but has no way to run
@@ -28,8 +29,19 @@ enum ViewerConfiguration {
     static var documentURL: URL { URL(string: "\(scheme)://\(documentHost)")! }
 
     /// Built fresh per window. No script, no bridge to the page, nothing kept between windows.
+    ///
+    /// `proxyConfigurations` is never set in production — the real guarantee against a DNS-only
+    /// channel (`<link rel=dns-prefetch>`/`rel=preconnect`) is `dnsPrefetchControlHeader` plus the
+    /// CSP, not a proxy. #904 passes a `[ProxyConfiguration]` pointed at a controlled SOCKS5
+    /// listener so a test can observe whether any hostname reaches it despite those mitigations:
+    /// `WKWebsiteDataStore.proxyConfigurations` forces every connection the data store makes,
+    /// including WebKit's own speculative ones, through that listener instead of the real
+    /// network, so "zero lookups" becomes something the test can watch rather than assume.
     @MainActor
-    static func build(schemeHandler: WKURLSchemeHandler) -> WKWebViewConfiguration {
+    static func build(
+        schemeHandler: WKURLSchemeHandler,
+        proxyConfigurations: [ProxyConfiguration]? = nil
+    ) -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
 
         let pagePreferences = WKWebpagePreferences()
@@ -42,7 +54,11 @@ enum ViewerConfiguration {
         // page to Iris, and no user script is ever added.
         config.userContentController = WKUserContentController()
 
-        config.websiteDataStore = .nonPersistent()
+        let dataStore = WKWebsiteDataStore.nonPersistent()
+        if let proxyConfigurations {
+            dataStore.proxyConfigurations = proxyConfigurations
+        }
+        config.websiteDataStore = dataStore
 
         config.setURLSchemeHandler(schemeHandler, forURLScheme: scheme)
 
