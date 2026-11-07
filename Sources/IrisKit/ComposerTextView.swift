@@ -10,6 +10,7 @@ struct ComposerTextView: NSViewRepresentable {
     var emoji: EmojiTokenModel
     var slash: SlashCommandModel
     var onEscape: () -> Void = {}
+    var onStash: () -> Void = {}
     var onHeightChange: (CGFloat) -> Void = { _ in }
     var focusTrigger: Binding<Bool> = .constant(false)
 
@@ -205,6 +206,8 @@ final class KeyCatchingTextView: NSTextView {
             // Popup open → dismiss it. Otherwise hand Escape to the app-level action
             // (clear message selection / interrupt) instead of letting NSTextView eat it.
             if !coordinator.handleNavKey(.escape) { coordinator.parent.onEscape() }
+        case 1 where flags.contains(.command): // Cmd-S: stash the composer (#933)
+            coordinator.parent.onStash()
         default:
             super.keyDown(with: event)
         }
