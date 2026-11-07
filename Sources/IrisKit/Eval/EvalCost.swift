@@ -56,7 +56,7 @@ enum EvalCost {
     /// Measured on gemini-3.8-flash in #783's bake-off (eval/bakeoff-783: 401 judgements per arm):
     /// about 845 input tokens, 1.5 output and these thought tokens a judgement. Used only to
     /// estimate; a result records what the provider reported.
-    static let templateTokens = 90
+    static let templateTokens = 200
     static let outputTokens = 2
     static let thoughtTokens: [String: Int] = ["low": 62, "medium": 145]
     /// No level sent is unmeasured (#800): the larger measured figure stands in, said in the estimate.
