@@ -34,6 +34,15 @@ struct BenchOptions: Sendable {
     var localOpenAI: String?
     var localModel: String?
     var localCanary: String?
+    /// `--cloud-primary PROVIDER:MODEL --allow-paid --max-dollars N --spend-ledger FILE` and one of `--local-canary NAME`,
+    /// `--canary-gguf FILE`, `--bypass-guard` (#854): a paid cloud model as the primary. Raw as typed;
+    /// `BenchCloudTarget.refusal` judges them.
+    var cloudPrimary: String?
+    var allowPaid = false
+    var maxDollars: String?
+    var spendLedger: String?
+    var canaryGguf: String?
+    var bypassGuard = false
 
     /// The target when both URL and model were given. Half a target is refused, never guessed.
     var localTarget: BenchLocalTarget? {
@@ -97,13 +106,19 @@ enum BenchCLI {
         var grant: BenchGrant?
         var grantFlags = 0
         var localOpenAI: String?, localModel: String?, localCanary: String?
+        var cloudPrimary: String?, maxDollars: String?, spendLedger: String?, canaryGguf: String?
         var i = 0
         while i < rest.count {
-            if rest[i] == "--local-openai" || rest[i] == "--local-model" || rest[i] == "--local-canary" {
+            if ["--local-openai", "--local-model", "--local-canary", "--cloud-primary", "--max-dollars", "--spend-ledger",
+                "--canary-gguf"].contains(rest[i]) {
                 if i + 1 < rest.count, !rest[i + 1].hasPrefix("--") {
                     switch rest[i] {
                     case "--local-openai": localOpenAI = rest[i + 1]
                     case "--local-model": localModel = rest[i + 1]
+                    case "--cloud-primary": cloudPrimary = rest[i + 1]
+                    case "--max-dollars": maxDollars = rest[i + 1]
+                    case "--spend-ledger": spendLedger = rest[i + 1]
+                    case "--canary-gguf": canaryGguf = rest[i + 1]
                     default: localCanary = rest[i + 1]
                     }
                     i += 1
@@ -131,7 +146,9 @@ enum BenchCLI {
         }
         return BenchOptions(scenarioPath: path, real: rest.contains("--real"), dumpRequestsDir: dir, grant: grant,
                             grantConflict: grantFlags > 1, transcript: rest.contains("--transcript"),
-                            localOpenAI: localOpenAI, localModel: localModel, localCanary: localCanary)
+                            localOpenAI: localOpenAI, localModel: localModel, localCanary: localCanary,
+                            cloudPrimary: cloudPrimary, allowPaid: rest.contains("--allow-paid"), maxDollars: maxDollars,
+                            spendLedger: spendLedger, canaryGguf: canaryGguf, bypassGuard: rest.contains("--bypass-guard"))
     }
 
     /// A tiny fake goal loop used when no scenario file is supplied: run one command, then finish.
@@ -155,7 +172,13 @@ enum BenchCLI {
     /// can set `clientMode: "real"` itself.
     static func refusal(_ opts: BenchOptions, scenario: Scenario) -> String? {
         if opts.grantConflict { return "--grant-read, --grant-write and --mutating-no-grant exclude each other: give one" }
-        if opts.localOpenAI != nil || opts.localModel != nil || opts.localCanary != nil {
+        if let why = BenchCloudTarget.refusal(opts, scenario: scenario, env: { ProcessInfo.processInfo.environment[$0] },
+                                              modelsDir: IrisPaths.default.modelsDir,
+                                              isRegularFile: { path in
+                                                  var isDir: ObjCBool = false
+                                                  return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && !isDir.boolValue
+                                              }) { return why }
+        if opts.localOpenAI != nil || opts.localModel != nil || (opts.localCanary != nil && opts.cloudPrimary == nil) {
             if opts.localOpenAI == nil { return "--local-model and --local-canary need --local-openai URL" }
             if opts.localModel == nil { return "--local-openai needs --local-model NAME" }
             if let why = BenchLocalTarget.urlRefusal(opts.localOpenAI ?? "") { return why }
@@ -221,28 +244,75 @@ enum BenchCLI {
         }
         // A fake run needs no provider secrets; skip the Keychain so this ad-hoc-signed CLI
         // binary doesn't block on an access prompt. Must be set before ConfigManager.shared is
-        // first touched (inside ScenarioRunner.run). Real runs keep Keychain access for auth, except a local target (below).
+        // first touched (inside ScenarioRunner.run). Real runs keep Keychain access for auth, except a local or cloud target (below).
         // Bench runs never write to the user's real preferences.
+        let cloud = BenchCloudTarget.target(opts)
+        var cloudHeader = ""
         prepareSettings(opts,
                         requestBypass: { KeychainManager.requestHeadlessBypass() },
                         useVolatile: { IrisDefaults.useVolatileCopyOfStandard() },
-                        apply: { $0.apply(to: ConfigManager.shared) })
+                        apply: { $0.apply(to: ConfigManager.shared) },
+                        cloud: cloud,
+                        applyCloud: { target in
+                            let tier2 = InjectionGuard.tier2Provisioning(modelName: ConfigManager.shared.promptGuardCoreMLModel,
+                                                                         modelsDir: IrisPaths.default.modelsDir)
+                            cloudHeader = BenchCloudTarget.header(for: target, settings: ConfigManager.shared, tier2: tier2)
+                            let key = ProcessInfo.processInfo.environment[BenchCloudTarget.keyVariable(for: target.provider)] ?? ""
+                            target.apply(to: ConfigManager.shared, key: key.trimmingCharacters(in: .whitespacesAndNewlines))
+                        })
+        // The cap is checked before the run starts, not after it: the projection is reserved in the shared ledger, and
+        // a reserve that would pass the cap stops the run before its first call (#854).
+        var reservation: (ledger: SpendLedger, id: UUID, projected: Double)?
+        if let cloud {
+            print(cloudHeader)
+            guard let projected = BenchCloudTarget.projectedRunDollars(provider: cloud.provider, model: cloud.model) else {
+                FileHandle.standardError.write(Data("iris --bench: no listed price for \(cloud.model); not started\n".utf8))
+                exit(1)
+            }
+            do {
+                let ledger = try SpendLedger(path: cloud.ledgerPath, arm: "\(cloud.model) \(scenario.name)", cap: cloud.maxDollars)
+                guard let id = try ledger.reserve(projected) else {
+                    let spent = (try? ledger.total()) ?? 0
+                    FileHandle.standardError.write(Data(String(format: "iris --bench: one run is projected at $%.3f and the ledger holds $%.3f of the $%.2f cap: not started\n",
+                                                               projected, spent, cloud.maxDollars).utf8))
+                    exit(2)
+                }
+                reservation = (ledger, id, projected)
+            } catch {
+                FileHandle.standardError.write(Data("iris --bench: \(error.localizedDescription)\n".utf8))
+                exit(1)
+            }
+        }
         let result = await runScenario(scenario, dumpRequestsTo: opts.dumpRequestsDir.map { URL(fileURLWithPath: $0) },
                                         grant: opts.grant)
+        if let cloud, let reservation {
+            // Booked at the larger of what the provider reported and the projection: thinking tokens are not in the
+            // reported count, so the report alone is a floor, and a run is never booked below its reserve.
+            let calls = result.turnProfiles.flatMap(\.modelCalls)
+            let reported = BenchCloudTarget.reportedDollars(calls, provider: cloud.provider, model: cloud.model)
+            let booked = max(reported ?? 0, reservation.projected)
+            try? reservation.ledger.settle(reservation.id, dollars: booked,
+                                           tokens: (calls.reduce(0) { $0 + ($1.promptTokens ?? 0) },
+                                                    calls.reduce(0) { $0 + ($1.outputTokens ?? 0) }, 0))
+            print(String(format: "Bench spend: reported $%@ booked $%.4f (projection $%.4f)",
+                         reported.map { String(format: "%.4f", $0) } ?? "n/a", booked, reservation.projected))
+        }
         print(BenchSummary.render(scenarioName: scenario.name, result: result))
         if opts.transcript { print(BenchSummary.renderTranscript(result)) }
     }
 
     /// The settings steps of a bench run, in the order that matters, as closures so a test can read the order:
-    /// a local target asks for the in-memory Keychain first (before `ConfigManager.shared` first loads its
+    /// a local or cloud target asks for the in-memory Keychain first (before `ConfigManager.shared` first loads its
     /// secrets, or the real item is read), then the volatile copy of the defaults is made (so nothing written
     /// reaches the user's), then the target is applied to that copy (#854, #909 review).
     static func prepareSettings(_ opts: BenchOptions, requestBypass: () -> Void, useVolatile: () -> Void,
-                                apply: (BenchLocalTarget) -> Void) {
+                                apply: (BenchLocalTarget) -> Void,
+                                cloud: BenchCloudTarget? = nil, applyCloud: (BenchCloudTarget) -> Void = { _ in }) {
         let target = opts.localTarget
-        if target != nil { requestBypass() }
+        if target != nil || cloud != nil { requestBypass() }
         useVolatile()
         if let target { apply(target) }
+        if let cloud { applyCloud(cloud) }
     }
 
     /// Runs `scenario`, entering `HeadlessMode`'s scope first when it's a fake run. Separated from

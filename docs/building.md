@@ -64,6 +64,7 @@ swift run iris --bench scenarios/live.json --real    # hit a real provider (need
 swift run iris --bench scenario.json --transcript --dump-requests out/   # read the messages and every model request
 swift run iris --bench scenario.json --grant-read dir/            # a background scenario may read files in dir/ (also --grant-write, --mutating-no-grant)
 swift run iris --bench scenario.json --real --local-openai http://127.0.0.1:11434/v1 --local-model gemma4:12b   # a real run on a local Ollama model, loopback only, no Keychain
+ANTHROPIC_API_KEY=… swift run iris --bench scenario.json --real --cloud-primary anthropic:claude-opus-5-5 --allow-paid --max-dollars 11 --spend-ledger ledger.jsonl --bypass-guard   # PAID: a capped cloud primary, see headless_profiling.md
 ```
 
 The binary runs the scenario headlessly and prints a per-category timing breakdown (primary
