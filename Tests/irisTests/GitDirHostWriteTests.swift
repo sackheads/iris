@@ -106,6 +106,42 @@ struct GitDirHostWriteTests {
         #expect(permissions.writesGitDir(toolName: "write_file", details: ".git/config", workspace: "/p"), "a relative path is judged against the working directory")
     }
 
+    @Test("#907: config, HEAD, a hooks/ file and an info/ file are all refused before HEAD exists, the moment objects/ or refs/ does")
+    func completingWritesRefusedBeforeHeadExists() async throws {
+        let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
+        let (app, cid) = background(t)
+        let fm = FileManager.default
+        try fm.createDirectory(at: t.proj.appendingPathComponent("evil.git/objects"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: t.proj.appendingPathComponent("evil.git/refs/heads"), withIntermediateDirectories: true)
+        // No HEAD yet: insideGitDirByStructure alone would say this is not a git dir.
+        #expect(!FileManager.default.fileExists(atPath: t.proj.appendingPathComponent("evil.git/HEAD").path))
+
+        for rel in ["evil.git/config", "evil.git/HEAD", "evil.git/hooks/post-checkout", "evil.git/info/exclude"] {
+            #expect(await !write(c(t.proj, rel), t, app, cid), Comment(rawValue: rel))
+        }
+        #expect(app.takeBackgroundDenials(for: cid).count == 4)
+    }
+
+    @Test("#907: refs/ alone (no objects/) is enough, and a sibling file next to them is unaffected")
+    func refsAloneIsEnough() async throws {
+        let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
+        let (app, cid) = background(t)
+        let fm = FileManager.default
+        try fm.createDirectory(at: t.proj.appendingPathComponent("evil.git/refs"), withIntermediateDirectories: true)
+        #expect(await !write(c(t.proj, "evil.git/config"), t, app, cid))
+        #expect(await write(c(t.proj, "evil.git/notes.md"), t, app, cid), "a file that is not config/HEAD/hooks/info is not swept in")
+    }
+
+    @Test("neither objects/ nor refs/ exists: config and HEAD are not yet completing anything")
+    func neitherPresentIsUnaffected() async throws {
+        let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
+        let (app, cid) = background(t)
+        try FileManager.default.createDirectory(at: t.proj.appendingPathComponent("evil.git"), withIntermediateDirectories: true)
+        for rel in ["evil.git/config", "evil.git/HEAD"] {
+            #expect(await write(c(t.proj, rel), t, app, cid), Comment(rawValue: rel))
+        }
+    }
+
     @Test("a git dir by its shape is refused whatever it is named: a bare repository, and the dir a .git file points at")
     func gitDirByStructure() async throws {
         let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
