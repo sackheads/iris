@@ -62,8 +62,8 @@ eval/datasets/<task-family>/v<N>/
   - paraphrase without trigger words;
   - burying it deeper in benign text.
 
-  They're reported as their own category, so robustness is visible rather than averaged away. v3 has the case and whitespace, look-alike, line-split and buried transforms, 12 parents each; trigger-free paraphrase isn't mechanical, so it's left to #802.
-- **A known weakness, stated:** every v1 attack was written by this project, so a model tuned to our authors' phrasing would look better than it is. v2 adds 24 attacks from InjecAgent (MIT) as their own category, `subtle_plain`, plus 10 benign look-alikes built on its templates; they are plain requests planted in tool output, not disguised ones, and harder cases are #802.
+  They're reported as their own category, so robustness is visible rather than averaged away. v3 has the case and whitespace, look-alike, line-split and buried transforms, 12 parents each; trigger-free paraphrase isn't mechanical, so it went to #802: v4 adds 24 disguised attacks and 24 benign look-alikes written by Gemini (`synthetic-gemini-802`).
+- **A known weakness, stated:** every v1 attack was written by this project, so a model tuned to our authors' phrasing would look better than it is. v2 adds 24 attacks from InjecAgent (MIT) as their own category, `subtle_plain`, plus 10 benign look-alikes built on its templates; they are plain requests planted in tool output, not disguised ones; v4 adds the disguised ones (#802).
 - **Real traffic:** none for now (§10 Q2). The datasets hold synthetic and repository content only, apart from v2's InjecAgent rows (Brian, 2026-10-28, for that slice only). This can be revisited once Iris is used for work; a private local split would be the shape then.
 - **`approval.vibecop`** needs its own dataset: commands with cwd, the workspace shape and the conversation's recent denials, labelled safe-to-run-silently or must-ask. Seed it from the refusal tables of `ReadOnlyCommand` and the #600 cases. Deferred (§10 Q1).
 

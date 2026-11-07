@@ -1,0 +1,160 @@
+{
+  "created": "2026-11-07",
+  "exposure": "per row: pre-split (v1's rows, and variants of them) or clean",
+  "family": "injection",
+  "files": {
+    "attacks.jsonl": {
+      "by_category": {
+        "adversarial.buried": {
+          "dev": 1,
+          "test": 11
+        },
+        "adversarial.case_space": {
+          "dev": 1,
+          "test": 11
+        },
+        "adversarial.line_split": {
+          "dev": 1,
+          "test": 11
+        },
+        "adversarial.lookalike": {
+          "dev": 1,
+          "test": 11
+        },
+        "delimiter": {
+          "dev": 4,
+          "test": 16
+        },
+        "direct": {
+          "dev": 4,
+          "test": 18
+        },
+        "embedded_code": {
+          "dev": 2,
+          "test": 9
+        },
+        "embedded_docs": {
+          "dev": 3,
+          "test": 10
+        },
+        "embedded_json": {
+          "dev": 2,
+          "test": 10
+        },
+        "embedded_log": {
+          "dev": 2,
+          "test": 9
+        },
+        "embedded_search": {
+          "dev": 2,
+          "test": 4
+        },
+        "known_miss": {
+          "dev": 1,
+          "test": 3
+        },
+        "long_head": {
+          "dev": 2,
+          "test": 6
+        },
+        "long_middle": {
+          "dev": 2,
+          "test": 6
+        },
+        "long_tail": {
+          "dev": 2,
+          "test": 6
+        },
+        "subtle": {
+          "dev": 9,
+          "test": 21
+        },
+        "subtle_plain": {
+          "dev": 7,
+          "test": 17
+        }
+      },
+      "count": 225,
+      "sha256": "979e94b52a7fbcd5324a2d2964d961b0793b114cb62a5856e80d9c020b958692"
+    },
+    "benign.jsonl": {
+      "by_category": {
+        "build_log": {
+          "dev": 6,
+          "test": 15
+        },
+        "code": {
+          "dev": 9,
+          "test": 22
+        },
+        "config": {
+          "dev": 5,
+          "test": 10
+        },
+        "docs": {
+          "dev": 7,
+          "test": 18
+        },
+        "git": {
+          "dev": 9,
+          "test": 21
+        },
+        "json_api": {
+          "dev": 10,
+          "test": 25
+        },
+        "long_build_log": {
+          "dev": 2,
+          "test": 4
+        },
+        "long_code": {
+          "dev": 2,
+          "test": 4
+        },
+        "long_diff": {
+          "dev": 2,
+          "test": 4
+        },
+        "long_docs": {
+          "dev": 2,
+          "test": 4
+        },
+        "long_json": {
+          "dev": 2,
+          "test": 4
+        },
+        "long_listing": {
+          "dev": 2,
+          "test": 4
+        },
+        "long_test_log": {
+          "dev": 2,
+          "test": 4
+        },
+        "markdown": {
+          "dev": 4,
+          "test": 8
+        },
+        "search": {
+          "dev": 6,
+          "test": 14
+        },
+        "shell": {
+          "dev": 7,
+          "test": 15
+        },
+        "subtle": {
+          "dev": 7,
+          "test": 17
+        }
+      },
+      "count": 277,
+      "sha256": "bfb0d976516d9b17bac9ebc937603ccac8d2f13fe97ceb52f2dec86f9e1ab510"
+    }
+  },
+  "generator": "scripts/eval_build_v4.py",
+  "max_bytes": 32000,
+  "source": "v3's 454 rows unchanged; 24 disguised attacks and 24 benign look-alikes written by Gemini for #802 (scripts/eval_gen_802.py)",
+  "split_rule": "v1, v2 and v3 rows keep their split; the 48 new rows per category, ids ordered by sha256('injection-v4:<id>'), the first round(0.7 n) are test, rounding half to even, at least one in each split",
+  "version": 4
+}
