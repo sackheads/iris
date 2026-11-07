@@ -107,7 +107,8 @@ struct AnthropicStreamMapperTests {
             ("message_delta", #"{"type":"message_delta","delta":{"stop_reason":"refusal"},"usage":{"output_tokens":2}}"#),
             ("message_stop", #"{"type":"message_stop"}"#)
         ])
-        #expect(events == [.usage(UsageMetadata(promptTokenCount: nil, candidatesTokenCount: 2, totalTokenCount: nil)),
+        #expect(events == [.thinkingText("hmm"),
+                           .usage(UsageMetadata(promptTokenCount: nil, candidatesTokenCount: 2, totalTokenCount: nil)),
                            .anthropicBlocks(#"[{"type":"thinking","thinking":"hmm","signature":"abc"}]"#),
                            .done(finishReason: "refusal")])
     }

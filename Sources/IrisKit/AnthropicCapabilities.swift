@@ -29,4 +29,40 @@ enum AnthropicCapabilities {
         case .vertex: return bindingBetaModels.contains(key(model))
         }
     }
+
+    /// What a model does with reasoning effort and thinking display (#314 PR 7). Both read from
+    /// one place: the request builder, the Settings picker and the setting's own validation.
+    ///
+    /// Measured by work's Vertex (global) probe, 2026-11-07: all three models accept exactly
+    /// low, medium, high, xhigh and max for `output_config.effort` and answer 400 to anything else,
+    /// and all three accept `thinking: {type: adaptive, display: "summarized"}` with no beta. The
+    /// direct API route was NOT probed; it follows Vertex here, as `bindingBetaModels` does. An
+    /// empty `effortLevels` means the model takes no effort, and a nil `display` means none is sent.
+    struct ThinkingSupport: Equatable, Sendable {
+        var effortLevels: [String]
+        var display: String?
+    }
+
+    static let effortScale = ["low", "medium", "high", "xhigh", "max"]
+
+    static let thinkingSupport: [String: ThinkingSupport] = [
+        "claude-opus-5-5": ThinkingSupport(effortLevels: effortScale, display: "summarized"),
+        "claude-fable-5-1": ThinkingSupport(effortLevels: effortScale, display: "summarized"),
+        "claude-sonnet-5-5": ThinkingSupport(effortLevels: effortScale, display: "summarized"),
+    ]
+
+    /// The effort levels this model accepts, in the order the picker lists them. Empty for a
+    /// model with none and for an id the table does not know: a level a model rejects is a 400
+    /// on every request, so an unknown id is sent nothing.
+    static func effortLevels(model: String) -> [String] {
+        thinkingSupport[key(model)]?.effortLevels ?? []
+    }
+
+    /// The `thinking.display` mode to request, or nil to send none. It goes out only with a
+    /// user-picked effort (`effortChosen`): a user who picks nothing sees the request they always
+    /// had, which carries no `thinking` object unless the binding needs one (ruling 2). Whether
+    /// the default should also ask for a summary is Brian's call, raised in the PR.
+    static func thinkingDisplay(model: String, effortChosen: Bool) -> String? {
+        effortChosen ? thinkingSupport[key(model)]?.display : nil
+    }
 }

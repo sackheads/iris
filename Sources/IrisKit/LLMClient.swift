@@ -213,6 +213,8 @@ struct LLMClient {
         if let endpoint = endpointCall(request, model: modelName) {
             inner = endpoint.stream()
         } else if provider == LLMProvider.anthropic.rawValue {
+            var request = request
+            request.reasoningEffort = config.reasoningEffort(for: tier, model: modelName)
             inner = AnthropicClient.streamContent(request: request, model: modelName) {
                 try await Self.anthropicTransport(config: config)
             }
@@ -270,6 +272,10 @@ struct LLMClient {
             if let endpoint = endpointCall(request, model: modelName) {
                 response = try await endpoint.generate()
             } else if provider == LLMProvider.anthropic.rawValue {
+                // The tier's own model only: a `model` override (Vibecop's cloud model, #620) is a
+                // guard call and does not take the user's reasoning effort.
+                var request = request
+                if model == nil { request.reasoningEffort = config.reasoningEffort(for: tier, model: modelName) }
                 response = try await AnthropicClient.generateContent(request: request, model: modelName,
                                                                      transport: try await Self.anthropicTransport(config: config),
                                                                      session: providerSession)

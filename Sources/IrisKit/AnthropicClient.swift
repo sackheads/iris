@@ -323,9 +323,20 @@ struct AnthropicClient {
         // runs it on adaptive thinking.
         let takesBeta = AnthropicCapabilities.takesBindingBeta(model: model, transport: transport)
         let binding = (takesBeta || request.forceBindingBeta) ? request.prefixMismatchBehavior : nil
-        if let binding {
-            body["thinking"] = ["type": "adaptive", "block_binding": ["prefix_mismatch_behavior": binding.rawValue]] as [String: Any]
+        // #314 PR 7: `display` rides the same adaptive object, and only to a model the table says
+        // takes it (thinking is always on for those, so adaptive changes nothing else); it is why
+        // the stream carries thinking text at all, since the default is "omitted".
+        let effort = request.reasoningEffort.flatMap { AnthropicCapabilities.effortLevels(model: model).contains($0) ? $0 : nil }
+        var thinking: [String: Any] = [:]
+        if let display = AnthropicCapabilities.thinkingDisplay(model: model, effortChosen: effort != nil) { thinking["display"] = display }
+        if let binding { thinking["block_binding"] = ["prefix_mismatch_behavior": binding.rawValue] }
+        if !thinking.isEmpty {
+            thinking["type"] = "adaptive"
+            body["thinking"] = thinking
         }
+        // The user's reasoning effort, only a level this model's row lists. Outside the cached
+        // prefix, but changing it invalidates the prompt cache (spec "Facts").
+        if let effort { body["output_config"] = ["effort": effort] }
 
         if stream { body["stream"] = true }
 
