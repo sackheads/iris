@@ -1201,15 +1201,18 @@ struct MessageView: View {
                                 // already reads, so this is the live answer, not a stale one.
                                 isStreaming: state.streaming.boxes[message.id] != nil,
                                 // Not reachable on merge (#896 PR 2): `ViewerFeatureGate` is off
-                                // until dns-prefetch/prefetch are observed (#904 confirmed
-                                // preconnect and ordinary loads only). `nil` here, not a disabled
-                                // button, so there is no chip to notice at all.
+                                // pending Brian's resolution of the dns-prefetch gap (#904). `nil`
+                                // here, not a disabled button, so there is no chip to notice at
+                                // all. `RawHTMLSanitizer.sanitize` (#912) runs on the raw-HTML
+                                // render path before any document is ever shown — this is the
+                                // only production call site that turns chat content into a
+                                // `ViewerDocument`.
                                 onOpenViewer: ViewerFeatureGate.isEnabled ? {
                                     ViewerWindowController.open(
                                         document: ViewerDocument(
                                             conversationId: conversationId,
                                             messageId: message.id,
-                                            content: configuration.content),
+                                            content: RawHTMLSanitizer.sanitize(configuration.content)),
                                         conversationTitle: conversationTitle,
                                         isTainted: isTainted)
                                 } : nil

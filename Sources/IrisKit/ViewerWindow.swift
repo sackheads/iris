@@ -40,19 +40,19 @@ enum ViewerChipPolicy {
 /// constant, not a `Settings` toggle: the spec's DNS zero-lookup result is a ship blocker ("the
 /// window does not ship unless that shows zero lookups") — PR 2 landed the window, chip and
 /// banner with the chip off; #904 then measured with a SOCKS5h "resolver we control"
-/// (`SOCKS5ProxyTestHelper`). The instrument proved reliable for `rel=preconnect` and ordinary
-/// subresource loads (a positive control shows the proxy records a real, unblocked preconnect/
-/// network attempt, and the production config shows zero for both) — but NOT for
-/// `rel=dns-prefetch`/`rel=prefetch`: the same unmitigated control that catches preconnect records
-/// nothing for those two, meaning WebKit either never fires them in this setup or resolves them
-/// through the system resolver, bypassing `proxyConfigurations` entirely (dev-2's #904 review
-/// finding 1). The proxy cannot tell those apart, which is exactly the escape the planner's
-/// ruling named: "if WebKit does speculative DNS locally that bypasses proxyConfigurations ...
-/// escalate." This stays `false` until dns-prefetch is observed another way (a real resolver, or
-/// `tcpdump` under sudo — a planner-to-Brian ask, not this session's to make) or the planner
-/// rules otherwise.
+/// (`SOCKS5ProxyTestHelper`) and found the proxy reliable for `rel=preconnect` and ordinary
+/// subresource loads but NOT for `rel=dns-prefetch`/`rel=prefetch` — the same unmitigated control
+/// that catches preconnect records nothing for either, so a zero result there cannot distinguish
+/// "WebKit never resolves them" from "WebKit resolves them through the system resolver, bypassing
+/// `proxyConfigurations` entirely" (dev-2's #904 review finding 1). Brian's resolution
+/// (2026-11-07) was to close dns-prefetch by construction rather than by observation: #912's
+/// `RawHTMLSanitizer` strips every speculative-load hint (`dns-prefetch`/`preconnect`/
+/// `prerender`/`prefetch`/`preload`/`modulepreload`, plus `<base>`/`<a ping>`/`<meta
+/// http-equiv>`) from the raw HTML before `ChatView` ever builds a `ViewerDocument` from it, so
+/// the proxy's blind spot is moot — the hint is never in the document WebKit sees. True as of
+/// #912: the gate flip IS that PR's deliverable, not a later one.
 enum ViewerFeatureGate {
-    static let isEnabled = false
+    static let isEnabled = true
 }
 
 /// Opens one window per document, AppKit-managed rather than a SwiftUI `Scene`: a `WindowGroup`

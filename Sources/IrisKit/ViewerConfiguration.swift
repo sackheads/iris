@@ -41,7 +41,11 @@ enum ViewerConfiguration {
     /// or that it resolves them through the system resolver, bypassing `proxyConfigurations`
     /// entirely — this instrument cannot tell the two apart (#904 review finding 1). Do not treat
     /// a zero here as proof for dns-prefetch/prefetch specifically without a resolver or
-    /// `tcpdump`-based observation to back it.
+    /// `tcpdump`-based observation to back it. #912 closes the gap a different way: it strips the
+    /// hint from the raw HTML before any document reaches this configuration at all, so the
+    /// proxy's blindness to it stopped mattering for the viewer's own gate (`ViewerFeatureGate`)
+    /// — it remains a true limit of this specific instrument, which is why it is still documented
+    /// here.
     @MainActor
     static func build(
         schemeHandler: WKURLSchemeHandler,

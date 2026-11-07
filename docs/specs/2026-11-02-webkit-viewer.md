@@ -82,14 +82,18 @@ like Iris itself (a fake approval card, a fake "Allow" button) to get a click th
   reliable for `rel=dns-prefetch`/`rel=prefetch`: the same unmitigated control records nothing for either,
   so a zero result there cannot distinguish "WebKit never resolves them here" from "WebKit resolves them
   through the system resolver, bypassing `proxyConfigurations` entirely" — the escape this section's
-  original "or `tcpdump`" fallback named, now actually hit. The window (PR 2) stays unshipped on this gate
-  (`ViewerFeatureGate.isEnabled = false`) on preconnect/proxy evidence alone. **Not yet decided — Brian's
-  call, pending on the Overseer band:** whether to close dns-prefetch by a one-time `tcpdump`/sudo
-  observation, or by construction instead, with a planned (not yet built) allow-list sanitizer on the raw
-  HTML render path — independent of phase 2's SVG/Mermaid sanitizer (section 3) — stripping
-  `dns-prefetch`/`preconnect`/`prerender`/`prefetch`/`preload` link hints before the document is ever shown,
-  making zero-lookup structural rather than observed. Either way the gate flip is not this PR's: it waits
-  on whichever resolution Brian picks.
+  original "or `tcpdump`" fallback named, now actually hit. The window (PR 2) stayed unshipped on this gate
+  (`ViewerFeatureGate.isEnabled = false`) on preconnect/proxy evidence alone, through #911.
+  **Brian's decision (2026-11-07):** close dns-prefetch by construction rather than by observation. #912
+  added `RawHTMLSanitizer`, an allow-list sanitizer on the raw HTML render path — independent of phase 2's
+  SVG/Mermaid sanitizer (section 3), which has not been built yet — that strips the whole class of
+  speculative-load hints (`dns-prefetch`/`preconnect`/`prerender`/`prefetch`/`preload`/`modulepreload`
+  link `rel` tokens, plus `<base href>`, `<a ping>`, and any `<meta http-equiv>`) before the raw HTML is
+  ever turned into a `ViewerDocument`, at the one production call site (`ChatView`). Dns-prefetch itself
+  still cannot be observed through the proxy; the sanitizer's correctness oracle is the one hint the proxy
+  *can* see — a mutation-checked test drives `rel=preconnect` to zero through the proxy for sanitized
+  input, and to a real recorded hit for the same input unsanitized. `ViewerFeatureGate.isEnabled` flipped
+  to `true` in #912: the chip is reachable now.
 - **The tripwire.** If any later change gives the viewer script or a network load, it becomes an outbound
   tool and an input source. That change must add it to `OutboundTools` (and its gate), taint a conversation
   on whatever it reads back, and carry its own review. A test fails if the viewer's configuration allows
