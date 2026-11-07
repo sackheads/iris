@@ -783,7 +783,11 @@ final class ConversationStore: Sendable {
                 t.column("lastActivityAt", .datetime).notNull()
                 t.column("answerJSON", .text)
             }
-            try db.create(index: "inbox_items_by_thread", on: "inbox_items", columns: ["threadId"], ifNotExists: true)
+            // UNIQUE: exactly one inbox_items row per thread — a thread's followups are rows in
+            // inbox_thread, never a second inbox_items row. This is also the hijack defence
+            // (dev-2 #924 review finding 1): a second create for the same threadId fails at the
+            // database, never silently takes over the thread's ownerChain.
+            try db.create(index: "inbox_items_by_thread", on: "inbox_items", columns: ["threadId"], unique: true, ifNotExists: true)
             try db.create(index: "inbox_items_by_state", on: "inbox_items", columns: ["state", "lastActivityAt"], ifNotExists: true)
             try db.create(table: "inbox_thread", ifNotExists: true) { t in
                 t.autoIncrementedPrimaryKey("seq")
