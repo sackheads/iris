@@ -300,12 +300,16 @@ the file-tool gate applies the same innermost-wins rule. The result sentence nam
   (#867). Before that rule the VM's mounts protected `.git/hooks` and the host path did not, and a
   planted request could replace a repository's `.git/config`. An attended turn keeps its own approval
   flow.
-  This gate covers `write_file` only. A granted `run_command` can write the same bytes into the same
-  mount by shell redirection (`echo ... > evil.git/config`), on the host, with no gate in its way — the
-  grant is the approval for `run_command` itself, and nothing re-checks what it writes. Measured and
-  accepted as the cost of an explicit write grant (#907, #917): `GitConfigGuard` (#658) still catches a
-  planted git dir at the *next* git command it sees, but not within the same command that planted it.
-  Closing that gap structurally needs a VM-only git dir for read-write mounts, which is not built.
+  This gate covers `write_file` only. A granted `run_command` runs in the VM, but its shell
+  redirection (`echo ... > evil.git/config`) reaches the same identity-mapped mount and lands on your
+  disk from inside it, with no gate in its way — the grant is the approval for `run_command` itself,
+  and nothing re-checks what it writes. Measured and accepted as the cost of an explicit write grant
+  (#907, #917). For a repository the VM makes in a folder that had none, the #623 guard
+  ([details](sandbox_repositories.md)) judges it as it stands rather than restoring anything: a key
+  that can run a program refuses Iris's own host commands in that folder — including a host
+  `run_command` git — until it is removed, but it does not cover git you run yourself outside Iris.
+  Closing that gap for good needs a VM-only git dir in that case too, the way one already exists when
+  the mount's root is a repository of yours (above); that is not built.
 
 Everything else is left as it was. The memory and skill tools stay refused unattended; `save_fact`,
 the Google mutators and MCP tools are neither widened nor narrowed; every other tool still meets
