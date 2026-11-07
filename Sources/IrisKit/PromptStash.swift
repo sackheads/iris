@@ -24,4 +24,14 @@ enum PromptStash {
         guard let stash else { return (nil, nil) }
         return (stash, nil)
     }
+
+    /// The whole of what one send does to the composer text and a pending stash, as one ordered
+    /// step (#933 review finding 2): `send` is the field's own text, read before anything about
+    /// the stash is touched, and the refill then runs as if the field had already been cleared —
+    /// so the interim message goes out as the user typed it, never containing its own just-made
+    /// stash, and the stash reliably comes back right after, not before, the interim send.
+    static func submitting(input: String, stash: String?) -> (send: String, newInput: String, newStash: String?) {
+        let refilled = refilling(stash: stash)
+        return (input, refilled.newInput ?? "", refilled.newStash)
+    }
 }
