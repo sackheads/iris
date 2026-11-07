@@ -300,6 +300,12 @@ the file-tool gate applies the same innermost-wins rule. The result sentence nam
   (#867). Before that rule the VM's mounts protected `.git/hooks` and the host path did not, and a
   planted request could replace a repository's `.git/config`. An attended turn keeps its own approval
   flow.
+  This gate covers `write_file` only. A granted `run_command` can write the same bytes into the same
+  mount by shell redirection (`echo ... > evil.git/config`), on the host, with no gate in its way — the
+  grant is the approval for `run_command` itself, and nothing re-checks what it writes. Measured and
+  accepted as the cost of an explicit write grant (#907, #917): `GitConfigGuard` (#658) still catches a
+  planted git dir at the *next* git command it sees, but not within the same command that planted it.
+  Closing that gap structurally needs a VM-only git dir for read-write mounts, which is not built.
 
 Everything else is left as it was. The memory and skill tools stay refused unattended; `save_fact`,
 the Google mutators and MCP tools are neither widened nor narrowed; every other tool still meets
