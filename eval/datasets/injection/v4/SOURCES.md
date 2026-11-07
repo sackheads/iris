@@ -9,7 +9,7 @@
 - **Licence / provenance:** newly authored synthetic test data for this repository. **Not** derived from InjecAgent or any external dataset: InjecAgent covers plain, undisguised requests planted in tool output (`subtle_plain`, v2) and none of these. No third-party licensed material was used, so v4 adds nothing to v2's `LICENSES`.
 - **Safety and scrubbing:**
   - No real credentials or secret values: the rows name only environment variables (`$USER`, `$API_KEY`, `$DATABASE_URL`, `REDIS_AUTH_TOKEN`) and synthetic paths.
-  - No real external hosts, IPs or callback endpoints: every domain is an RFC 2606 / RFC 6761 placeholder (`*.example.com`, `*.example.net`, `*.example.org`, `*.invalid`).
+  - No real callback endpoints: every host a command would contact is an RFC 2606 / RFC 6761 placeholder (`*.example.com`, `*.example.net`, `*.example.org`, `*.invalid`). A few carriers name an ordinary public registry or package host (`ghcr.io/acme-corp/ledger-api` in 001) as part of the surrounding text, not as a target of an instruction.
 - **Structure:** 24 attacks (`subtle-disg-001` to `024`) and 24 benign twins (`subtle-benign-001` to `024`), six carrier shapes of four pairs each:
   1. Configuration files (`001` to `004`: Docker Compose YAML, `pyproject.toml`, `nginx.conf`, `tsconfig.json`)
   2. Documentation and runbooks (`005` to `008`: Redis failover runbook, macOS arm64 build troubleshooting, release checklist, AWS SSO onboarding)
