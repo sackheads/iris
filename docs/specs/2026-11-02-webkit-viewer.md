@@ -74,12 +74,19 @@ like Iris itself (a fake approval card, a fake "Allow" button) to get a click th
   applies.
 - **DNS is a channel the rules above do not obviously close.** `<link rel=dns-prefetch>` and
   `rel=preconnect` resolve an attacker-chosen hostname without loading anything, so data can ride in the
-  hostname; the content rule list and `default-src` need not cover them. This is stated from knowledge of
-  the API and is unmeasured. Mitigations to try, in order: `X-DNS-Prefetch-Control: off` on the handler's
-  response, and the CSP `prefetch-src`/`connect-src` forms WebKit honours. PR 1 observes DNS (a resolver we
-  control, or `tcpdump` on the one GUI pass) with a hostile page carrying both rels. The window (PR 2) does
-  not ship unless that shows zero lookups, or the banner's sentence and this note are narrowed to say what
-  is true. Until then "nothing here can send anything" is a claim to be proven, not assumed.
+  hostname; the content rule list and `default-src` need not cover them. Mitigations in place:
+  `X-DNS-Prefetch-Control: off` on the handler's response, and the CSP. **#904 measured this with a SOCKS5h
+  "resolver we control" (`WKWebsiteDataStore.proxyConfigurations`).** The instrument proved reliable for
+  `rel=preconnect` and ordinary network loads: an unmitigated control shows the proxy records a real,
+  unblocked preconnect/network attempt, and the production config shows zero for both. It is **not**
+  reliable for `rel=dns-prefetch`/`rel=prefetch`: the same unmitigated control records nothing for either,
+  so a zero result there cannot distinguish "WebKit never resolves them here" from "WebKit resolves them
+  through the system resolver, bypassing `proxyConfigurations` entirely" — the escape this section's
+  original "or `tcpdump`" fallback named, now actually hit. The window (PR 2) stays unshipped on this gate
+  (`ViewerFeatureGate.isEnabled = false`) on preconnect/proxy evidence alone; the planner's resolution is to
+  close dns-prefetch **by construction** rather than by further proxy observation — stripping
+  `dns-prefetch`/`preconnect`/`prerender`/`prefetch`/`preload` link hints in phase 2's sanitizer, making
+  zero-lookup structural, with the gate flip moving to phase 2 gated on that sanitizer rather than to this PR.
 - **The tripwire.** If any later change gives the viewer script or a network load, it becomes an outbound
   tool and an input source. That change must add it to `OutboundTools` (and its gate), taint a conversation
   on whatever it reads back, and carry its own review. A test fails if the viewer's configuration allows
