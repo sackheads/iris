@@ -8,14 +8,16 @@ import AppKit
 /// renders a view.
 @Suite("Viewer chip and cap (#896)")
 struct ViewerChipPolicyTests {
-    /// #896 PR 2: the viewer is not user-reachable on merge — `ViewerChipPolicy.shouldOffer`
-    /// is deliberately gate-free (it's a pure per-block check, tested on its own below); the
-    /// one place that decides whether the chip is reachable at all is `ViewerFeatureGate`, wired
-    /// at the `ChatView` call site. This test is the tripwire: flipping the gate on is a real
-    /// decision (#904's zero-lookup result), never a side effect of refactoring this file.
-    @Test("the viewer is not reachable until #904 confirms zero DNS lookups")
-    func gateIsOffUntilDNSIsVerified() {
-        #expect(ViewerFeatureGate.isEnabled == false)
+    /// #896 PR 2: `ViewerChipPolicy.shouldOffer` is deliberately gate-free (it's a pure per-block
+    /// check, tested on its own below); the one place that decides whether the chip is reachable
+    /// at all is `ViewerFeatureGate`, wired at the `ChatView` call site. #904 flipped this on
+    /// after a clean zero-DNS-lookup result, both headless and in a real on-screen window under
+    /// the gui-test-lease (see `ViewerZeroLookupTests`/`ViewerGUIZeroLookupTests`). This test is
+    /// the tripwire the other direction now: turning it back off is a real decision, never a side
+    /// effect of refactoring this file.
+    @Test("the viewer is reachable: #904 confirmed zero DNS lookups")
+    func gateIsOnAfterDNSWasVerified() {
+        #expect(ViewerFeatureGate.isEnabled == true)
     }
 
     @Test("html, not streaming: offered")

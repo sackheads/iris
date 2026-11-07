@@ -131,6 +131,19 @@ struct ViewerGUINavigationTests {
         try? await Task.sleep(for: .milliseconds(500))   // lets the data: image actually decode and paint
         guard let webView = host.webView else { throw TestFailure.webViewNeverAppeared }
 
+        // #904 review (dev-2's non-blocking nit): `allSatisfy` alone passes on a nil/empty menu,
+        // so this doesn't prove `menu(for:)` is WebKit's real hook. Investigated adding a
+        // non-emptiness check: in this session, `swiftpm-testing-helper`'s windows never become
+        // key (`window.isKeyWindow` stayed false even after `NSApp.activate` +
+        // `makeKeyAndOrderFront`, same root cause as PR 2's window-server capture gap — these
+        // test-process windows do not fully integrate with the window server here), and WebKit's
+        // real context-menu hit test returned nil every time regardless of click coordinates
+        // (confirmed correct via `webView.convert`, cross-checked by printing the window point).
+        // A stronger assertion would just fail permanently in this environment rather than prove
+        // anything about the production override, so this stays as a same-shape check: proof
+        // that whatever `menu(for:)` returns here contains no non-Copy item, not proof it's
+        // non-empty. The real non-emptiness proof is the headless `ClosedSurfaceWebViewMenuTests`
+        // calling `ClosedSurfaceWebView.copyOnly` directly on a real `NSMenu`.
         for point in [NSPoint(x: 30, y: window.contentView!.bounds.height - 20),   // over the link
                       NSPoint(x: 30, y: window.contentView!.bounds.height - 80)] { // over the image
             let event = NSEvent.mouseEvent(with: .rightMouseDown, location: point, modifierFlags: [],

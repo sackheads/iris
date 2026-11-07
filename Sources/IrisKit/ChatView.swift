@@ -1200,9 +1200,9 @@ struct MessageView: View {
                                 // `state.streaming.boxes` is exactly what `liveContent(of:)` above
                                 // already reads, so this is the live answer, not a stale one.
                                 isStreaming: state.streaming.boxes[message.id] != nil,
-                                // Not reachable on merge (#896 PR 2): `ViewerFeatureGate` is off
-                                // until #904 confirms zero DNS lookups. `nil` here, not a disabled
-                                // button, so there is no chip to notice at all.
+                                // `ViewerFeatureGate` is on (#904 confirmed zero DNS lookups).
+                                // `nil` here when off, not a disabled button, so there would be no
+                                // chip to notice at all.
                                 onOpenViewer: ViewerFeatureGate.isEnabled ? {
                                     ViewerWindowController.open(
                                         document: ViewerDocument(

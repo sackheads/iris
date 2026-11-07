@@ -1,4 +1,5 @@
 import AppKit
+import Network
 import SwiftUI
 import WebKit
 
@@ -36,14 +37,18 @@ enum ViewerChipPolicy {
 }
 
 /// Gates whether the viewer is reachable at all, independent of language/streaming. A code
-/// constant, not a `Settings` toggle: the spec's DNS zero-lookup result is a ship blocker ("the
-/// window does not ship unless that shows zero lookups"), not a PR-2 blocker — PR 2 lands the
-/// window, chip and banner with the chip off, so the viewer stays unreachable on merge exactly
-/// like PR 1's work exposed nothing. #904 (the SOCKS5h proxy verification) flips this to `true`
-/// on a green zero-lookup result. A user-flippable switch would expose the viewer before that
-/// verification ran, which is the one thing this flag exists to prevent.
+/// constant, not a `Settings` toggle: the spec's DNS zero-lookup result was a ship blocker ("the
+/// window does not ship unless that shows zero lookups") — PR 2 landed the window, chip and
+/// banner with the chip off; #904 then verified zero lookups with a SOCKS5h "resolver we control"
+/// (`SOCKS5ProxyTestHelper`), both headless (`ViewerZeroLookupTests`) and in a real, on-screen
+/// window under the gui-test-lease (`ViewerGUIZeroLookupTests` — PR 1 found `decidePolicyFor`
+/// never fires offscreen, and the same gap could apply to WebKit's speculative-loading heuristics,
+/// so an offscreen-only result would not have been trustworthy here). Both came back clean: every
+/// hostname a hostile document's dns-prefetch/preconnect/subresource channels tried stayed at
+/// zero, against a proxy a positive control confirmed does intercept a real, unblocked network
+/// load. This flips to `true` on that green result.
 enum ViewerFeatureGate {
-    static let isEnabled = false
+    static let isEnabled = true
 }
 
 /// Opens one window per document, AppKit-managed rather than a SwiftUI `Scene`: a `WindowGroup`
@@ -67,15 +72,23 @@ final class ViewerWindowController: NSObject, NSWindowDelegate {
 
     /// For a test that needs the window itself (the live `decidePolicyFor` acceptance pass):
     /// returns it without stashing a second strong reference beyond what showing already keeps.
+    /// `proxyConfigurations` is a test-only seam (#904's live zero-lookup pass needs a real,
+    /// on-screen window, not an offscreen one, to trust the result the same way PR 1 found
+    /// `decidePolicyFor` itself needed one) — production code never calls this overload with one.
     @discardableResult
-    static func openForTesting(document: ViewerDocument, conversationTitle: String = "", isTainted: Bool) -> NSWindow {
+    static func openForTesting(
+        document: ViewerDocument,
+        conversationTitle: String = "",
+        isTainted: Bool,
+        proxyConfigurations: [ProxyConfiguration]? = nil
+    ) -> NSWindow {
         let controller = ViewerWindowController()
-        controller.show(document: document, conversationTitle: conversationTitle, isTainted: isTainted)
+        controller.show(document: document, conversationTitle: conversationTitle, isTainted: isTainted, proxyConfigurations: proxyConfigurations)
         openControllers[ObjectIdentifier(controller)] = controller
         return controller.window!
     }
 
-    private func show(document: ViewerDocument, conversationTitle: String, isTainted: Bool) {
+    private func show(document: ViewerDocument, conversationTitle: String, isTainted: Bool, proxyConfigurations: [ProxyConfiguration]? = nil) {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 760, height: 560),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -85,7 +98,7 @@ final class ViewerWindowController: NSObject, NSWindowDelegate {
         // Released on close (spec section 4): nothing else should reach for it afterward.
         window.isReleasedWhenClosed = false
         window.delegate = self
-        window.contentView = NSHostingView(rootView: ViewerWindowView(document: document, isTainted: isTainted))
+        window.contentView = NSHostingView(rootView: ViewerWindowView(document: document, isTainted: isTainted, proxyConfigurations: proxyConfigurations))
         window.center()
         self.window = window
         window.makeKeyAndOrderFront(nil)
@@ -102,6 +115,7 @@ final class ViewerWindowController: NSObject, NSWindowDelegate {
 struct ViewerWindowView: View {
     let document: ViewerDocument
     let isTainted: Bool
+    var proxyConfigurations: [ProxyConfiguration]? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -110,7 +124,7 @@ struct ViewerWindowView: View {
             if document.isOverCap {
                 ViewerTooLargeView(byteCount: document.html.count)
             } else {
-                ViewerWebView(document: document)
+                ViewerWebView(document: document, proxyConfigurations: proxyConfigurations)
             }
         }
         .frame(minWidth: 480, minHeight: 320)
@@ -186,9 +200,10 @@ struct ViewerTooLargeView: View {
 /// `isInspectable`.
 struct ViewerWebView: NSViewRepresentable {
     let document: ViewerDocument
+    var proxyConfigurations: [ProxyConfiguration]? = nil
 
     func makeNSView(context: Context) -> ViewerWebViewHost {
-        ViewerWebViewHost(document: document)
+        ViewerWebViewHost(document: document, proxyConfigurations: proxyConfigurations)
     }
 
     func updateNSView(_ nsView: ViewerWebViewHost, context: Context) {}
@@ -200,18 +215,18 @@ final class ViewerWebViewHost: NSView {
     private(set) var webView: ClosedSurfaceWebView?
     private var loadTask: Task<Void, Never>?
 
-    init(document: ViewerDocument) {
+    init(document: ViewerDocument, proxyConfigurations: [ProxyConfiguration]? = nil) {
         super.init(frame: .zero)
-        loadTask = Task { [weak self] in await self?.load(document: document) }
+        loadTask = Task { [weak self] in await self?.load(document: document, proxyConfigurations: proxyConfigurations) }
     }
 
     required init?(coder: NSCoder) { fatalError("ViewerWebViewHost is created in code only") }
 
     deinit { loadTask?.cancel() }
 
-    private func load(document: ViewerDocument) async {
+    private func load(document: ViewerDocument, proxyConfigurations: [ProxyConfiguration]? = nil) async {
         let handler = ViewerSchemeHandler(document: document.html)
-        let config = ViewerConfiguration.build(schemeHandler: handler)
+        let config = ViewerConfiguration.build(schemeHandler: handler, proxyConfigurations: proxyConfigurations)
         do {
             let list = try await ViewerContentRules.compile()
             config.userContentController.add(list)

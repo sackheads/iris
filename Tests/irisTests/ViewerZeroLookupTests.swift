@@ -1,0 +1,160 @@
+import Testing
+import Foundation
+import Network
+import WebKit
+@testable import IrisKit
+
+/// #904: the spec's DNS ship blocker (docs/specs/2026-11-02-webkit-viewer.md, section 1) — a
+/// `<link rel=dns-prefetch>`/`rel=preconnect` can carry data in the hostname without loading
+/// anything, so "nothing here can send anything" is a claim to be proven, not assumed. This is
+/// the "resolver we control" the spec calls for: `SOCKS5ProxyTestHelper` sits where WebKit's own
+/// network stack would otherwise go via `WKWebsiteDataStore.proxyConfigurations`, so any hostname
+/// the page's channels try to resolve shows up here whether or not the resulting connection
+/// actually succeeds.
+@MainActor
+@Suite("Viewer: zero DNS lookups (#904)", .timeLimit(.minutes(1)))
+struct ViewerZeroLookupTests {
+    private func socksProxyConfiguration(port: UInt16) -> ProxyConfiguration {
+        ProxyConfiguration(socksv5Proxy: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!))
+    }
+
+    /// Without this control, a zero-lookup result below would be meaningless: it could just as
+    /// easily mean "nothing tried the network" as "the proxy wiring itself does not see what the
+    /// real network stack sees" (the same failure shape as #905's offscreen `decidePolicyFor`
+    /// gap). No CSP, no rule list, no scheme-handler restriction — only the proxy is wired in.
+    @Test("sanity: the proxy wiring intercepts a real, unblocked network load")
+    func proxyInterceptsAnUnblockedLoad() async throws {
+        // holdOpen: false — nothing here blocks the image load, so held open with no response it
+        // would never finish or fail, the page's `load` event would never fire, and `didFinish`
+        // never would either (the bug that hung this test for real; see the waiter below).
+        let proxy = try SOCKS5ProxyTestHelper(holdOpen: false)
+        defer { proxy.close() }
+
+        let config = WKWebViewConfiguration()
+        let store = WKWebsiteDataStore.nonPersistent()
+        store.proxyConfigurations = [socksProxyConfiguration(port: proxy.port)]
+        config.websiteDataStore = store
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        let waiter = AllowEverythingNavigationWaiter()
+        webView.navigationDelegate = waiter
+        webView.loadHTMLString(
+            "<html><body><img src=\"http://iris-proxy-sanity-probe.invalid.example/x.png\"></body></html>",
+            baseURL: URL(string: "http://iris-proxy-sanity-base.invalid.example/")
+        )
+        await waiter.waitForFinish()
+        try? await Task.sleep(for: .seconds(1))
+
+        #expect(
+            proxy.recordedTargets.map(\.host).contains("iris-proxy-sanity-probe.invalid.example"),
+            "the SOCKS5 harness never saw the control image load reach it — a zero-lookup result elsewhere would prove nothing"
+        )
+    }
+
+    @Test("the production viewer config makes zero lookups for every DNS-only and network channel")
+    func productionConfigMakesZeroLookups() async throws {
+        let proxy = try SOCKS5ProxyTestHelper()
+        defer { proxy.close() }
+
+        let html = """
+        <html><head>
+        <link rel="dns-prefetch" href="//iris-dns-prefetch-probe.invalid.example">
+        <link rel="preconnect" href="//iris-preconnect-probe.invalid.example">
+        <link rel="stylesheet" href="http://iris-link-probe.invalid.example/link.css">
+        <meta http-equiv="refresh" content="0;url=http://iris-refresh-probe.invalid.example/refresh">
+        <style>
+        body { background: url(http://iris-cssurl-probe.invalid.example/css-url); }
+        @import url(http://iris-cssimport-probe.invalid.example/import.css);
+        </style>
+        </head><body>
+        <img src="http://iris-img-probe.invalid.example/img.png">
+        <form action="http://iris-form-probe.invalid.example/form" method="post" id="f"></form>
+        </body></html>
+        """
+
+        let id = "iris-view-test-zero-lookup-\(UUID().uuidString)"
+        let list = try await ViewerContentRules.compile(identifier: id)
+        defer { WKContentRuleListStore.default()!.removeContentRuleList(forIdentifier: id) { _ in } }
+
+        let handler = ViewerSchemeHandler(document: Data(html.utf8))
+        let config = ViewerConfiguration.build(schemeHandler: handler, proxyConfigurations: [socksProxyConfiguration(port: proxy.port)])
+        config.userContentController.add(list)
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        let waiter = TrustedOnlyNavigationWaiterForZeroLookup()
+        webView.navigationDelegate = waiter
+        webView.load(URLRequest(url: ViewerConfiguration.documentURL))
+        await waiter.waitForFinish()
+
+        // Mirrors ViewerZeroConnectionsTests: the meta refresh fires after load, and dns-prefetch/
+        // preconnect are opportunistic, not synchronous with it — give every channel a real
+        // window to reach the proxy before asserting on what it recorded.
+        try? await Task.sleep(for: .seconds(1))
+
+        #expect(
+            proxy.recordedTargets.isEmpty,
+            "the production viewer config let a hostname reach the proxy: \(proxy.recordedTargets.map(\.description))"
+        )
+    }
+}
+
+@MainActor
+private final class AllowEverythingNavigationWaiter: NSObject, WKNavigationDelegate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var finished = false
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
+        .allow
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finish() }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { finish() }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { finish() }
+
+    private func finish() {
+        finished = true
+        continuation?.resume()
+        continuation = nil
+    }
+
+    /// Bounded, not a bare `await withCheckedContinuation`: a continuation ignores `.timeLimit`'s
+    /// cancellation same as the bare-task case `value(of:within:)` exists for (AGENTS.md #428,
+    /// #435) — this hung for real when the proxy held a resource fetch open with no response, so
+    /// `didFinish` never fired and the 2-minute suite `.timeLimit` never got a chance to end it.
+    func waitForFinish() async {
+        if finished { return }
+        let task = Task<Void, Never> { await withCheckedContinuation { self.continuation = $0 } }
+        _ = try? await irisTests.value(of: task, within: 10)
+    }
+}
+
+/// Same shape as `TrustedOnlyNavigationWaiter` in `ViewerZeroConnectionsTests.swift` (that one is
+/// `private` to its own file) — only the trusted document is ever allowed.
+@MainActor
+private final class TrustedOnlyNavigationWaiterForZeroLookup: NSObject, WKNavigationDelegate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var finished = false
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
+        let isAllowed = navigationAction.targetFrame?.isMainFrame == true
+            && navigationAction.request.url == ViewerConfiguration.documentURL
+        return isAllowed ? .allow : .cancel
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finish() }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { finish() }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { finish() }
+
+    private func finish() {
+        finished = true
+        continuation?.resume()
+        continuation = nil
+    }
+
+    /// Bounded for the same reason as `AllowEverythingNavigationWaiter.waitForFinish` above.
+    func waitForFinish() async {
+        if finished { return }
+        let task = Task<Void, Never> { await withCheckedContinuation { self.continuation = $0 } }
+        _ = try? await irisTests.value(of: task, within: 10)
+    }
+}
