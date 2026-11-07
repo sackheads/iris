@@ -146,6 +146,34 @@ struct InboxVetoTests {
         #expect(try app.store.inbox.thread(itemId: item.id).filter { $0.kind == "answer" }.count == 1)
     }
 
+    @Test("an automatic answer reaches only the emitter or its owner chain, never another session named in route_back, and tells no notify target")
+    func automaticAnswerStaysWithTheEmittersChain() async throws {
+        let (app, engine) = setup()
+        let emitter = session(app), stranger = session(app)
+        let holder = session(app)
+        app.conversations[app.conversations.firstIndex { $0.id == holder }!].role = "dev"
+        let item = InboxItem(id: try app.store.inbox.newItemId(), threadId: try app.store.inbox.newThreadId(ownerChain: "dev"),
+                             ownerChain: "dev", emitter: emitter, emitterLabel: "dev-1", title: "Ship at 5?", situation: "Ships unless vetoed.",
+                             options: [InboxOption(id: "a", label: "Ship", pros: [], cons: [])], responseMode: .timedVeto,
+                             routeBack: [stranger.uuidString, "role:dev", "name:someone"], notify: [stranger.uuidString],
+                             deadline: t0, vetoDefaultOptionId: "a", emitterTainted: false, state: .open,
+                             createdAt: t0, lastActivityAt: t0, answer: nil)
+        guard case .success = try app.store.inbox.createItem(item, question: item.situation) else { Issue.record("create"); return }
+        let sink = Sink()
+        _ = await engine.evaluateInboxVetoExpiries(now: t0.addingTimeInterval(1), deliver: sink.deliver)
+        #expect(sink.calls.map(\.0) == [holder], "only the owner chain's role holder")
+        #expect(!sink.calls.map(\.0).contains(stranger))
+        // The same item answered by Brian does reach the stranger he chose to route to.
+        let manual = try raise2(app, emitter: emitter, routeBack: [stranger.uuidString])
+        let sink2 = Sink()
+        _ = await engine.submitInboxAnswer(itemId: manual.id, choice: "a", freeText: nil, deliver: sink2.deliver)
+        #expect(sink2.calls.map(\.0) == [stranger])
+    }
+
+    private func raise2(_ app: AppState, emitter: UUID, routeBack: [String]) throws -> InboxItem {
+        try veto(app, emitter: emitter, deadline: t0.addingTimeInterval(3600), routeBack: routeBack)
+    }
+
     @Test("an automatic answer for a gone emitter is stored and awaits delivery, never dropped")
     func automaticAnswerToDeadEmitterWaits() async throws {
         let (app, engine) = setup()

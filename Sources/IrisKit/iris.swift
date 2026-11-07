@@ -1459,7 +1459,7 @@ actor IrisEngine {
     private func recordAndDeliverInboxAnswer(item: InboxItem, answer: InboxAnswer, store: ConversationStore,
                                              deliver: InboxDeliver) async -> InboxSubmitOutcome {
         let itemId = item.id
-        let targets = item.routeBack.isEmpty ? [item.emitter.uuidString] : item.routeBack
+        let targets = Self.inboxRouteTargets(item: item, answer: answer)
         do {
             switch try store.inbox.submitAnswer(itemId: itemId, answer: answer, pendingTargets: targets) {
             case .success: break
@@ -1473,7 +1473,8 @@ actor IrisEngine {
             return .awaitingDelivery
         }
         _ = try? store.inbox.setPendingTargets(itemId: itemId, result.remaining)
-        await notifyInboxAnswer(item: item, answer: answer, deliver: deliver)
+        // An automatic answer tells nobody but the emitter's own chain (see `inboxRouteTargets`).
+        if !answer.automatic { await notifyInboxAnswer(item: item, answer: answer, deliver: deliver) }
         switch (result.delivered, result.remaining.count) {
         case (_, 0): return .delivered(result.delivered)
         case (0, _): return .awaitingDelivery
@@ -1490,6 +1491,23 @@ actor IrisEngine {
     }
 
     func stopInboxVetoWatcher() { inboxVetoWatcher.stop() }
+
+    /// Where an answer goes. Brian's answer goes to the item's `route_back` (he chose to send it),
+    /// or to the emitter when there is none. An AUTOMATIC answer (a veto that ran out) has no
+    /// human behind it, so it goes only to the emitter or its owner chain: a `route_back` entry
+    /// naming any other session would let an agent push a message into a third session, with none
+    /// of the peer gates (attribution, rate limit, hop depth, decline framing), just by raising a
+    /// veto and waiting. Those entries are dropped, and `notify` is not used.
+    nonisolated static func inboxRouteTargets(item: InboxItem, answer: InboxAnswer) -> [String] {
+        let requested = item.routeBack.isEmpty ? [item.emitter.uuidString] : item.routeBack
+        guard answer.automatic else { return requested }
+        let own = requested.filter { t in
+            let raw = t.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return raw == item.emitter.uuidString.lowercased()
+                || (UUID(uuidString: item.ownerChain) == nil && raw == "role:" + item.ownerChain.lowercased())
+        }
+        return own.isEmpty ? [item.emitter.uuidString] : own
+    }
 
     /// Timed vetoes whose deadline has passed (#920 Task 4). The stored wall-clock `deadline`
     /// decides, so a veto that came due while the Mac slept or Iris was not running fires at the
