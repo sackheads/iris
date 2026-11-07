@@ -4,6 +4,19 @@ import Network
 import WebKit
 @testable import IrisKit
 
+/// `String.contains` is grapheme-cluster-based, so it is the wrong check for a parser (WebKit's
+/// HTML tokenizer, or our own) that operates on scalars — a test using it is exposed to the same
+/// grapheme/scalar trap #915's review round 1 found in the sanitizer itself.
+private func containsScalarSubsequence(_ haystack: String, _ needle: String) -> Bool {
+    let hay = Array(haystack.unicodeScalars)
+    let pin = Array(needle.unicodeScalars)
+    guard !pin.isEmpty, hay.count >= pin.count else { return pin.isEmpty }
+    for start in 0...(hay.count - pin.count) where Array(hay[start..<(start + pin.count)]) == pin {
+        return true
+    }
+    return false
+}
+
 /// #912: the allow-list sanitizer that closes the viewer's dns-prefetch gap by construction
 /// (docs/specs/2026-11-02-webkit-viewer.md section 1). Pure-function table tests pin the
 /// tokenizer and the per-tag rules; `hintFormsFixture` below drives a fixture of real hostile
@@ -188,10 +201,12 @@ struct RawHTMLSanitizerTests {
 
     // MARK: - #915 review finding 3: channels that load with no speculative hint at all
 
-    @Test("link href is kept only for a data: URL — an external stylesheet/icon href is dropped")
-    func linkHrefDataOnly() {
-        let out = RawHTMLSanitizer.sanitize("<link rel=\"stylesheet\" href=\"https://evil.example/x.css\">")
-        #expect(!out.contains("evil.example"))
+    @Test("link href is always dropped, including a data: URL — a data: stylesheet can still @import an external target")
+    func linkHrefAlwaysDropped() {
+        let external = RawHTMLSanitizer.sanitize("<link rel=\"stylesheet\" href=\"https://evil.example/x.css\">")
+        #expect(!external.contains("href"))
+        let dataCSS = RawHTMLSanitizer.sanitize("<link rel=\"stylesheet\" href=\"data:text/css,@import url(https://evil.example/x.css)\">")
+        #expect(!dataCSS.contains("href"), "a data: href still carries an attacker-controlled @import target")
     }
 
     @Test("source srcset is dropped entirely, not value-checked")
@@ -216,6 +231,55 @@ struct RawHTMLSanitizerTests {
         #expect(!hostile.contains("evil.example"))
         let fragment = RawHTMLSanitizer.sanitize("<path d=\"M0 0\" fill=\"url(#gradient)\"></path>")
         #expect(fragment.contains("url(#gradient)"))
+    }
+
+    // MARK: - #915 review round 2
+
+    @Test("round 2 finding 1: a CSS hex escape hiding url( is dropped from style, fill, and stroke")
+    func cssEscapedURLFunctionDropped() {
+        // `\75rl(` is `u` hex-escaped (CSS allows escaping any character), so a literal
+        // "url(" containment check alone misses it — dev-3's live-confirmed bypass.
+        #expect(!RawHTMLSanitizer.sanitize("<div style=\"background:\\75rl(https://evil.example/a.png)\">hi</div>").contains("evil.example"))
+        #expect(!RawHTMLSanitizer.sanitize("<div style=\"background:u\\72l(https://evil.example/a.png)\">hi</div>").contains("evil.example"))
+        #expect(!RawHTMLSanitizer.sanitize("<path d=\"M0 0\" fill=\"\\75rl(https://evil.example/a.svg)\"></path>").contains("evil.example"))
+    }
+
+    @Test("round 2 finding 3: fill/stroke is only kept on a tag whose own allow-list actually lists it")
+    func fillStrokeGatedOnTagAllowlist() {
+        // `div` has no per-tag entry for `fill`/`stroke` — these should never have survived at
+        // all, url() or not, since the global allow-list doesn't carry them either.
+        #expect(!RawHTMLSanitizer.sanitize("<div fill=\"red\">hi</div>").contains("fill"))
+        #expect(!RawHTMLSanitizer.sanitize("<a fill=\"red\">hi</a>").contains("fill"))
+        // A real SVG shape still keeps a safe fill.
+        #expect(RawHTMLSanitizer.sanitize("<path d=\"M0 0\" fill=\"red\"></path>").contains("fill=\"red\""))
+    }
+
+    @Test("round 2 finding 4 (test gap): escaping a quote within an already-parsed value is what prevents attribute injection, not just the tokenizer boundary")
+    func escapingWithinValuePreventsInjection() {
+        // The earlier combining-mark test (`combiningMarkAfterQuoteDoesNotBreakParsing`) attaches
+        // the mark to the DELIMITER, pinning the tokenizer's boundary-finding. This attaches it
+        // to a literal `"` INSIDE a single-quoted value (so the tokenizer parses the value
+        // correctly) to pin `escapeAttribute`'s own escaping — dev-3's finding that swapping
+        // `escapeAttribute` back to `replacingOccurrences` left every existing pure test green.
+        let out = RawHTMLSanitizer.sanitize("<div title='a\"\u{301} onclick=evil() x='>hi</div>")
+        // The whole payload is ONE single-quoted `title` value to our tokenizer (the only `'`
+        // that ends it is the last one), so "onclick" is always present as literal text inside
+        // it — the question is whether the embedded `"` got escaped to `&quot;`. If it did not
+        // (the old `replacingOccurrences` behaviour, which cannot match a `"` fused with a
+        // combining mark into one grapheme cluster), the rebuilt tag carries a raw, unescaped `"`
+        // that would close `title` early and turn `onclick=evil()` into a real attribute when
+        // WebKit re-parses this output — which this pure test cannot re-parse, but the absence of
+        // `&quot;` here is exactly that bug's signature.
+        // `String.contains` is grapheme-cluster-based: the `;` this escaper emits is immediately
+        // followed, in the ORIGINAL input, by the combining mark that was attached to the quote
+        // — so `";"` + U+0301 fuses into one grapheme that a plain `String.contains("&quot;")`
+        // does not match, even though the scalar sequence a, &, q, u, o, t, ; is genuinely
+        // present and WebKit's parser (which tokenizes scalars, not graphemes) reads it as the
+        // entity it is. Checking the scalar subsequence is the correct check — this is exactly
+        // the grapheme-vs-scalar trap this whole review round is about, this time in the test
+        // itself rather than the sanitizer.
+        #expect(containsScalarSubsequence(out, "&quot;"),
+                "the embedded quote was not escaped — a raw quote would close the attribute early in WebKit: \(out)")
     }
 }
 
