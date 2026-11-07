@@ -40,10 +40,10 @@ struct Tier3ProvisioningTests {
     func urlValuedModelNameResolves() throws {
         let dir = makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let modelFile = dir.appendingPathComponent("Qwen3.5-2B-Q4_K_M.gguf")
+        let modelFile = dir.appendingPathComponent("gemma-4-E2B-it-Q4_K_M.gguf")
         try "stub".write(to: modelFile, atomically: true, encoding: .utf8)
 
-        let urlName = "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf"
+        let urlName = "https://huggingface.co/example.com/models/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf"
         let result = InjectionGuard.tier3Provisioning(engine: "llama_cpp", modelName: urlName, modelsDir: dir)
         #expect(result == .provisioned)
 
@@ -51,7 +51,7 @@ struct Tier3ProvisioningTests {
         let missingDir = makeTempDir()
         defer { try? FileManager.default.removeItem(at: missingDir) }
         let missingResult = InjectionGuard.tier3Provisioning(engine: "llama_cpp", modelName: urlName, modelsDir: missingDir)
-        #expect(missingResult == .unprovisioned(modelName: "Qwen3.5-2B-Q4_K_M.gguf"))
+        #expect(missingResult == .unprovisioned(modelName: "gemma-4-E2B-it-Q4_K_M.gguf"))
     }
 
     @Test("non-llama_cpp engines are always provisioned, even with a nonexistent models dir")

@@ -15,14 +15,12 @@ class ModelDownloader: NSObject, URLSessionDownloadDelegate {
     
     // Some known models and their URLs for convenience
     let knownModels = [
-        "Qwen3.5-2B-Q4_K_M.gguf": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf",
         "gemma-4-E2B-it-Q4_K_M.gguf": "https://huggingface.co/bartowski/google_gemma-4-E2B-it-GGUF/resolve/main/google_gemma-4-E2B-it-Q4_K_M.gguf",
         "gemma-4-12B-it-Q4_K_M.gguf": "https://huggingface.co/bartowski/gemma-4-12B-it-GGUF/resolve/main/gemma-4-12B-it-Q4_K_M.gguf"
     ]
 
     // Approximate on-disk sizes for known models, for UI download prompts.
     let knownModelSizes = [
-        "Qwen3.5-2B-Q4_K_M.gguf": "1.3GB",
         "gemma-4-E2B-it-Q4_K_M.gguf": "3.1GB",
         "gemma-4-12B-it-Q4_K_M.gguf": "7.4GB"
     ]

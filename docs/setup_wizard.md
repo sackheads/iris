@@ -18,7 +18,7 @@ gently and explains a few things.
    - click to test connection, error/retry on failure
 5. Vibecop : explain what it does, enable/disable,
      give a few default models *and tell them accurate disk sizes*
-   - Default options: Qwen3.5 2B (~1.3GB, fast), Gemma 4 E2B (~3.1GB, fast), Gemma 4 12B (~7.4GB, heavy).
+   - Default options: Gemma 4 E2B (~3.1GB, fast), Gemma 4 12B (~7.4GB, heavy).
    - Gemma 4 12B is ~7.4GB, not 1-2 — always show accurate sizes.
    - execute the download
 6. Prompt injection protection: enable/disable, explain what it does.

@@ -330,7 +330,6 @@ struct VibecopStepView: View {
                     
                     if config.vibecopEngine == "llama_cpp" {
                         Picker("Model", selection: $config.vibecopModel) {
-                            Text("Qwen3.5 2B (Fast, ~\(downloader.approximateSize(for: "Qwen3.5-2B-Q4_K_M.gguf")))").tag("Qwen3.5-2B-Q4_K_M.gguf")
                             Text("Gemma 4 E2B (Fast, ~\(downloader.approximateSize(for: "gemma-4-E2B-it-Q4_K_M.gguf")))").tag("gemma-4-E2B-it-Q4_K_M.gguf")
                             Text("Gemma 4 12B (Heavy, ~\(downloader.approximateSize(for: "gemma-4-12B-it-Q4_K_M.gguf")))").tag("gemma-4-12B-it-Q4_K_M.gguf")
                         }
@@ -525,7 +524,6 @@ struct SecurityStepView: View {
                         
                         if config.promptGuardEngine == "llama_cpp" {
                             Picker("Model", selection: $config.promptGuardModel) {
-                                Text("Qwen3.5 2B (~\(downloader.approximateSize(for: "Qwen3.5-2B-Q4_K_M.gguf")))").tag("Qwen3.5-2B-Q4_K_M.gguf")
                                 Text("Gemma 4 E2B (~\(downloader.approximateSize(for: "gemma-4-E2B-it-Q4_K_M.gguf")))").tag("gemma-4-E2B-it-Q4_K_M.gguf")
                                 Text("Gemma 4 12B (~\(downloader.approximateSize(for: "gemma-4-12B-it-Q4_K_M.gguf")))").tag("gemma-4-12B-it-Q4_K_M.gguf")
                             }
