@@ -799,6 +799,12 @@ final class ConversationStore: Sendable {
             }
             try db.create(index: "inbox_thread_by_item", on: "inbox_thread", columns: ["itemId", "seq"], ifNotExists: true)
         }
+        // #920 Task 3: the route-back targets an answer has not reached yet (a JSON array of the
+        // original target strings, re-resolved at every attempt). Nullable: a row from before this
+        // migration reads as no pending target.
+        m.registerMigration("v36_inbox_pending_targets") { db in
+            try db.alter(table: "inbox_items") { t in t.add(column: "pendingTargetsJSON", .text) }
+        }
         return m
     }
 

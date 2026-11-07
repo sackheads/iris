@@ -2541,7 +2541,15 @@ class AppState {
             }
         }
         setRole(role, at: idx)
+        // #920 Task 3: an answer waiting for a holder of this role can go out now.
+        redeliverInboxAnswers()
         return .assigned(role: role, movedFrom: previous)
+    }
+
+    /// Retries inbox answers stored but not yet delivered (at launch, and when a role gains a
+    /// holder). Fire-and-forget; the engine guards against two runs on one item.
+    func redeliverInboxAnswers() {
+        Task { [weak self] in await self?.engine?.redeliverAwaitingInbox() }
     }
 
     /// Releases this session's role, returning it; nil when it held none.
@@ -5334,6 +5342,7 @@ class AppState {
             // of age. Best-effort; a failure here must not stop the app from finishing its load.
             try? store.peers.prune(before: Date().addingTimeInterval(-30 * 86_400))
             sweepArtifacts()
+            redeliverInboxAnswers()
         } catch {
             print("Failed to load conversations: \(error)")
             loadFailureHeadline = "\(error)"
