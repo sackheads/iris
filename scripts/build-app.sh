@@ -41,9 +41,16 @@ cp Package.resolved "$resolved_dir/Package.resolved"
 # -skipMacroValidation: mlx-swift-lm's MLXHuggingFaceMacros needs the same trust for macros.
 # -disableAutomaticPackageResolution: build from the pinned Package.resolved above, not whatever
 #   SwiftPM would re-resolve.
+# Optional version stamp — scripts/promote-local.sh sets these for Sparkle-safe dogfood builds;
+# both are unset in a normal build, so `verargs` is empty and nothing changes.
+verargs=()
+if [[ -n "${IRIS_MARKETING_VERSION:-}" ]]; then verargs+=("MARKETING_VERSION=$IRIS_MARKETING_VERSION"); fi
+if [[ -n "${IRIS_BUILD_VERSION:-}" ]]; then verargs+=("CURRENT_PROJECT_VERSION=$IRIS_BUILD_VERSION"); fi
+
 build_or_die xcodebuild build -project Iris.xcodeproj -scheme Iris -configuration "$config" \
   -destination 'generic/platform=macOS' -derivedDataPath "$derived" \
-  -skipPackagePluginValidation -skipMacroValidation -disableAutomaticPackageResolution
+  -skipPackagePluginValidation -skipMacroValidation -disableAutomaticPackageResolution \
+  "${verargs[@]}"
 
 apps=("$derived/Build/Products/$config/"*.app(N))
 (( ${#apps} == 1 )) || { echo "expected one .app in $derived/Build/Products/$config, found ${#apps}" >&2; exit 1; }
