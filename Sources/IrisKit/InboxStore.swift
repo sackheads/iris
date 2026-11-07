@@ -83,6 +83,9 @@ struct InboxItem: Equatable, Sendable {
     let createdAt: Date
     var lastActivityAt: Date
     var answer: InboxAnswer?
+    /// Route-back targets (as the emitter wrote them) the answer has not reached yet. Non-empty
+    /// exactly while `state == .awaitingDelivery`.
+    var pendingTargets: [String] = []
 }
 
 /// One entry in a thread's history: the original question, Brian's answer, or a later followup.
@@ -106,6 +109,8 @@ enum InboxError: Error, Equatable {
     case threadAlreadyExists
     /// A write that would resurrect a `.closed` item (dev-2 finding 4): closing is meant to be final.
     case itemClosed
+    /// `submitAnswer` on an item that is not waiting for one (already answered, awaiting delivery or closed).
+    case notAnswerable
 }
 
 /// The `inbox_items` + `inbox_thread` tables: items and their thread entries, independent of any
@@ -200,6 +205,55 @@ final class InboxStore: Sendable {
             let body = [answer.chosenOptionId, answer.freeText].compactMap { $0 }.joined(separator: ": ")
             try Self.appendEntry(itemId: itemId, kind: "answer", author: "brian", body: body, at: answer.at, db: db)
             return .success(())
+        }
+    }
+
+    /// Brian's answer plus the targets it still has to reach, in one write (#920 Task 3). Durable
+    /// first: the pending targets are stored before any delivery is tried, so a crash between the
+    /// answer and the delivery leaves an `.awaitingDelivery` item the next launch redelivers.
+    /// Refuses `.notAnswerable` unless the item is `.open` or `.stale`, so two submits cannot both
+    /// deliver. State is `.awaitingDelivery` while any target is pending, else `.answered`.
+    @discardableResult
+    func submitAnswer(itemId: String, answer: InboxAnswer, pendingTargets: [String]) throws -> Result<Void, InboxError> {
+        let answerJSON = String(decoding: try JSONEncoder().encode(answer), as: UTF8.self)
+        let pendingJSON = String(decoding: try JSONEncoder().encode(pendingTargets), as: UTF8.self)
+        return try writer.write { db in
+            guard let stateRaw = try String.fetchOne(db, sql: "SELECT state FROM inbox_items WHERE id = ?",
+                                                      arguments: [itemId]) else { return .failure(.unknownItem) }
+            guard stateRaw == InboxItemState.open.rawValue || stateRaw == InboxItemState.stale.rawValue else {
+                return .failure(stateRaw == InboxItemState.closed.rawValue ? .itemClosed : .notAnswerable)
+            }
+            let state: InboxItemState = pendingTargets.isEmpty ? .answered : .awaitingDelivery
+            try db.execute(sql: "UPDATE inbox_items SET answerJSON = ?, state = ?, lastActivityAt = ?, pendingTargetsJSON = ? WHERE id = ?",
+                           arguments: [answerJSON, state.rawValue, answer.at, pendingJSON, itemId])
+            let body = [answer.chosenOptionId, answer.freeText].compactMap { $0 }.joined(separator: ": ")
+            try Self.appendEntry(itemId: itemId, kind: "answer", author: "brian", body: body, at: answer.at, db: db)
+            return .success(())
+        }
+    }
+
+    /// What delivery left undone: no targets means the answer reached everyone (`.answered`), any
+    /// left keeps the item `.awaitingDelivery`. Only an item already in one of those two states is
+    /// touched, so a reopen or a close that happened meanwhile is not overwritten.
+    @discardableResult
+    func setPendingTargets(itemId: String, _ targets: [String]) throws -> Result<Void, InboxError> {
+        let json = String(decoding: try JSONEncoder().encode(targets), as: UTF8.self)
+        return try writer.write { db in
+            let state: InboxItemState = targets.isEmpty ? .answered : .awaitingDelivery
+            try db.execute(sql: """
+                UPDATE inbox_items SET pendingTargetsJSON = ?, state = ?
+                WHERE id = ? AND state IN (?, ?)
+                """, arguments: [json, state.rawValue, itemId,
+                                 InboxItemState.awaitingDelivery.rawValue, InboxItemState.answered.rawValue])
+            return db.changesCount > 0 ? .success(()) : .failure(.notAnswerable)
+        }
+    }
+
+    /// Items whose answer is stored but not fully delivered, oldest answer first.
+    func awaitingDeliveryItems() throws -> [InboxItem] {
+        try writer.read { db in
+            try Row.fetchAll(db, sql: "SELECT * FROM inbox_items WHERE state = ? ORDER BY lastActivityAt",
+                             arguments: [InboxItemState.awaitingDelivery.rawValue]).compactMap(Self.decode)
         }
     }
 
@@ -329,12 +383,19 @@ final class InboxStore: Sendable {
             answer = decoded
         }
 
+        // Nullable column: absent reads as none; present but unreadable drops the row like any other.
+        var pendingTargets: [String] = []
+        if let pendingText = row["pendingTargetsJSON"] as String? {
+            guard let decoded = try? JSONDecoder().decode([String].self, from: Data(pendingText.utf8)) else { return nil }
+            pendingTargets = decoded
+        }
+
         return InboxItem(id: id, threadId: threadId, ownerChain: ownerChain, emitter: emitter,
                          emitterLabel: emitterLabel, title: title, situation: situation, options: options,
                          responseMode: responseMode, routeBack: routeBack, notify: notify,
                          deadline: row["deadline"], vetoDefaultOptionId: row["vetoDefaultOptionId"],
                          emitterTainted: emitterTainted, state: state, createdAt: createdAt,
-                         lastActivityAt: lastActivityAt, answer: answer)
+                         lastActivityAt: lastActivityAt, answer: answer, pendingTargets: pendingTargets)
     }
 
     private static func decodeEntry(_ row: Row) -> InboxThreadEntry? {
