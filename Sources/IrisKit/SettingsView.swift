@@ -316,10 +316,13 @@ struct SettingsView: View {
                         }
                         TextField("Easy Subagent Model", text: $config.anthropicModelEasy)
                             .help("Used for simple and repetitive tasks.")
+                        ReasoningEffortPicker(title: "Easy reasoning effort", model: config.anthropicModelEasy, selection: $config.anthropicEffortEasy)
                         TextField("Primary / Medium Model", text: $config.anthropicModelMedium)
                             .help("Used for standard generation and reasoning.")
+                        ReasoningEffortPicker(title: "Medium reasoning effort", model: config.anthropicModelMedium, selection: $config.anthropicEffortMedium)
                         TextField("Hard Subagent Model", text: $config.anthropicModelHard)
                             .help("Used for complex reasoning and evaluation.")
+                        ReasoningEffortPicker(title: "Hard reasoning effort", model: config.anthropicModelHard, selection: $config.anthropicEffortHard)
                         Toggle("Replay Claude's thinking within a turn", isOn: $config.replayThinkingWithinTurn)
                             .help("Keeps reasoning across tool calls within a turn by resending each earlier signed thinking block on later requests. Costs about 15-25% more per task on Opus; whether it improves reasoning quality is unmeasured. Off by default.")
                     } else if config.primaryProvider == LLMProvider.openai.rawValue {
@@ -1654,6 +1657,34 @@ private struct ModelListSheet: View {
         Task {
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             if copiedId == modelId { copiedId = nil }
+        }
+    }
+}
+
+
+/// One tier's reasoning effort (#314 PR 7). It lists only the levels the tier's model accepts
+/// (`AnthropicCapabilities`); a model with none, or one the table does not know, gets a disabled
+/// row instead, because a level a model rejects is a 400 on every request. "Model default" sends
+/// nothing, which is what every request did before this setting existed.
+private struct ReasoningEffortPicker: View {
+    let title: String
+    let model: String
+    @Binding var selection: String
+
+    private var levels: [String] { AnthropicCapabilities.effortLevels(model: model) }
+
+    var body: some View {
+        if levels.isEmpty {
+            LabeledContent(title, value: "Not available for this model")
+                .foregroundStyle(.secondary)
+                .help("This model is not known to take a reasoning effort, so none is sent.")
+        } else {
+            Picker(title, selection: Binding(get: { levels.contains(selection) ? selection : "" },
+                                              set: { selection = $0 })) {
+                Text("Model default").tag("")
+                ForEach(levels, id: \.self) { Text($0.capitalized).tag($0) }
+            }
+            .help("How hard the model thinks before it answers. Model default sends nothing, so the model keeps its own (Opus 5.5 medium, Fable 5.1 high). Thinking cannot be turned off on Claude Opus 5.5 or Fable 5.1, only turned down. Changing this makes the next request re-read the prompt cache once. Unattended jobs, goal loops and subagents use the same setting, so a higher effort costs more and takes longer there too.")
         }
     }
 }

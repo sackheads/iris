@@ -208,6 +208,35 @@ class ConfigManager: @unchecked Sendable {
         didSet { store.set(anthropicModelHard, forKey: "ANTHROPIC_MODEL_HARD") }
     }
 
+    /// #314 PR 7: the reasoning effort each Anthropic tier asks for (`output_config.effort`). Empty,
+    /// the default, sends none, so the model keeps its own default and nothing changes until the
+    /// user picks. A stored word the tier's model does not list reads as none (`reasoningEffort`),
+    /// so a hand-edited value or a changed model can never send a level the model rejects.
+    var anthropicEffortEasy: String {
+        didSet { store.set(anthropicEffortEasy, forKey: "ANTHROPIC_EFFORT_EASY") }
+    }
+    var anthropicEffortMedium: String {
+        didSet { store.set(anthropicEffortMedium, forKey: "ANTHROPIC_EFFORT_MEDIUM") }
+    }
+    var anthropicEffortHard: String {
+        didSet { store.set(anthropicEffortHard, forKey: "ANTHROPIC_EFFORT_HARD") }
+    }
+
+    func anthropicEffort(for tier: ModelTier) -> String {
+        switch tier {
+        case .easy: return anthropicEffortEasy
+        case .medium: return anthropicEffortMedium
+        case .hard: return anthropicEffortHard
+        }
+    }
+
+    /// The effort to send for a call on `tier` to `model`: the tier's setting if that model lists
+    /// it, else nil.
+    func reasoningEffort(for tier: ModelTier, model: String) -> String? {
+        let level = anthropicEffort(for: tier)
+        return AnthropicCapabilities.effortLevels(model: model).contains(level) ? level : nil
+    }
+
     /// #314 Phase 1 — whether a later request in the same turn resends this turn's own earlier
     /// signed thinking blocks (Anthropic only; gates `IrisEngine.replaysThinking`). Default off:
     /// a paid measurement (PR #405) found replay costs about 18% more per task on Opus 5.5 with
@@ -622,6 +651,9 @@ class ConfigManager: @unchecked Sendable {
         self.anthropicModelHard = resolveModel(key: "ANTHROPIC_MODEL_HARD", provider: "Anthropic", migrated: oldHard, fallback: "claude-fable-5")
 
         self.replayThinkingWithinTurn = saved.bool(forKey: "REPLAY_THINKING_WITHIN_TURN")
+        self.anthropicEffortEasy = saved.string(forKey: "ANTHROPIC_EFFORT_EASY") ?? ""
+        self.anthropicEffortMedium = saved.string(forKey: "ANTHROPIC_EFFORT_MEDIUM") ?? ""
+        self.anthropicEffortHard = saved.string(forKey: "ANTHROPIC_EFFORT_HARD") ?? ""
 
         self.openaiModelEasy = resolveModel(key: "OPENAI_MODEL_EASY", provider: "OpenAI", migrated: oldEasy, fallback: "gpt-5.6-luna")
         self.openaiModelMedium = resolveModel(key: "OPENAI_MODEL_MEDIUM", provider: "OpenAI", migrated: oldMedium, fallback: "gpt-5.6-terra")

@@ -77,7 +77,10 @@ struct AnthropicStreamMapper: StreamMapper {
                     blocks[index]?.json += partial
                 }
             case "thinking_delta":
-                if let index, let thinking = delta["thinking"] as? String { blocks[index]?.thinking += thinking }
+                if let index, let thinking = delta["thinking"] as? String {
+                    blocks[index]?.thinking += thinking
+                    if !thinking.isEmpty { return [.thinkingText(thinking)] }
+                }
             case "signature_delta":
                 if let index, let signature = delta["signature"] as? String { blocks[index]?.signature += signature }
             default:
