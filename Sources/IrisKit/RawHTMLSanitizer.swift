@@ -82,7 +82,9 @@ enum RawHTMLSanitizer {
         // use case this phase-1 viewer needs to carry.
         "source": ["src", "type"],
         "a": [],   // href and ping are handled explicitly; nothing else is tag-specific
-        "link": ["rel", "href", "type"],
+        // `href` deliberately absent (#915 review round 2 finding 2): handled explicitly above,
+        // always dropped — a `data:` stylesheet could still `@import` an external URL.
+        "link": ["rel", "type"],
         "meta": ["charset", "name", "content"],
         "form": [],   // action is handled explicitly
         "input": ["type", "name", "value", "placeholder", "disabled", "checked"],
@@ -170,12 +172,12 @@ enum RawHTMLSanitizer {
                 if safe.isEmpty { return nil }   // nothing left but speculative hints: drop the whole tag
                 kept.append((key, safe.joined(separator: " ")))
             case ("link", "href"):
-                // #915 review finding 3: an external stylesheet/icon href loads a resource with
-                // no speculative hint involved at all — this sanitizer closes the dns-prefetch
-                // class, not every network channel (the CSP's `default-src 'none'` carries the
-                // rest in production), but it should not hand back a channel of its own either.
-                guard value.hasPrefix("data:") else { continue }
-                kept.append((key, value))
+                // #915 review round 2 finding 2: even a `data:` href isn't safe here — a
+                // `data:text/css,@import url(https://...)` stylesheet loads an external resource
+                // with no speculative hint at all once WebKit parses it as CSS. No legitimate
+                // phase-1 use needs a `<link>`'s target (inline `<style>` covers real CSS), so
+                // drop `href` on `<link>` unconditionally rather than try to sanitize CSS text.
+                continue
             case ("meta", "http-equiv"):
                 return nil   // refresh, CSP override via meta, etc. — no http-equiv value is safe to keep
             case ("img", "src"), ("source", "src"):
@@ -187,13 +189,19 @@ enum RawHTMLSanitizer {
                 // #915 review finding 3: `style="background:url(https://...)"` / `image-set(...)`
                 // loads without any speculative hint. Not a CSS parse — a conservative containment
                 // check that drops the whole declaration rather than trying to tell a `data:` url()
-                // apart from a network one.
-                guard !containsExternalURLFunction(value) else { continue }
+                // apart from a network one. Round 2 finding 1: CSS can escape any character
+                // (`\75rl(` is `url(`, hex-escaped) past a literal substring check, so any
+                // backslash at all makes the value untrusted — this never needed a backslash for
+                // an inline style in this viewer's actual use.
+                guard !value.contains("\\"), !containsExternalURLFunction(value) else { continue }
                 kept.append((key, value))
             case (_, "fill"), (_, "stroke"):
-                // Same finding, for SVG: `fill="url(https://...)"` references an external paint
-                // server. `url(#id)` (a same-document fragment) is left alone.
-                guard !containsExternalURLFunction(value) else { continue }
+                // Same findings, for SVG: `fill="url(https://...)"` references an external paint
+                // server (`url(#id)`, a same-document fragment, is left alone), and the same CSS
+                // escape applies to these presentation attributes too. Gated on the tag's own
+                // allow-list below (round 2 finding 3: this case matched any tag, not just the
+                // SVG shapes that actually list `fill`/`stroke`).
+                guard perTag.contains(key), !value.contains("\\"), !containsExternalURLFunction(value) else { continue }
                 kept.append((key, value))
             default:
                 if globalAttributeAllowlist.contains(key) || perTag.contains(key) {
