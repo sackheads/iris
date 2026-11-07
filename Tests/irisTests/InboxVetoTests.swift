@@ -131,6 +131,21 @@ struct InboxVetoTests {
         #expect(fired == 1 && sink.calls.count == 1)
     }
 
+    @Test("the store lets only one answer win, so an evaluation holding a stale due list cannot fire a veto twice")
+    func storeRefusesASecondAnswer() throws {
+        let (app, _) = setup()
+        let emitter = session(app)
+        let item = try veto(app, emitter: emitter, deadline: t0)
+        let answer = InboxAnswer(chosenOptionId: "a", freeText: nil, at: t0, automatic: true)
+        func submit() throws -> InboxError? {
+            if case .failure(let e) = try app.store.inbox.submitAnswer(itemId: item.id, answer: answer, pendingTargets: [emitter.uuidString]) { return e }
+            return nil
+        }
+        #expect(try submit() == nil)
+        #expect(try submit() == .notAnswerable)
+        #expect(try app.store.inbox.thread(itemId: item.id).filter { $0.kind == "answer" }.count == 1)
+    }
+
     @Test("an automatic answer for a gone emitter is stored and awaits delivery, never dropped")
     func automaticAnswerToDeadEmitterWaits() async throws {
         let (app, engine) = setup()
