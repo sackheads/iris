@@ -1845,6 +1845,19 @@ actor IrisEngine {
     nonisolated static let sessionIdentityHeading = "This Session"
     nonisolated static let cardDescriptionMaxBytes = 240
 
+    /// The wall-clock date and time, in the user's time zone (#951). Per turn on the turn's own
+    /// entry, never in the cached system prompt: that prompt lives for days of uptime and would
+    /// freeze the date. Minute resolution and a fixed en_US_POSIX format, so the text is the same
+    /// shape on every Mac and a model that is asked the date reads it rather than guesses it from
+    /// file mtimes.
+    nonisolated static func currentDateSection(now: Date, timeZone: TimeZone = .current) -> TurnContext.Section {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = timeZone
+        f.dateFormat = "EEEE, d MMMM yyyy, HH:mm zzz (VV)"
+        return .init(heading: "Current Date and Time", body: f.string(from: now))
+    }
+
     nonisolated static func sessionIdentitySection(id: UUID, title: String, card: SessionCard?, role: String? = nil,
                                                    hasPeers: Bool = false) -> TurnContext.Section {
         var body = "You are session \(id.uuidString), titled \(Briefing.quoted(title))."
@@ -2889,7 +2902,7 @@ actor IrisEngine {
 
         // Per-turn content rides this turn's own entry in the request, not the system prompt, so the
         // cached prefix (tools, system, older history) stays byte-stable across turns (5a §0.2).
-        var turnContext = TurnContext(sections: [])
+        var turnContext = TurnContext(sections: [Self.currentDateSection(now: Date())])
         if !facts.isEmpty {
             // The ids go in so `manage_fact` — first offered on these turns, then kept declared
             // (5c §0.1) — has something to name.
