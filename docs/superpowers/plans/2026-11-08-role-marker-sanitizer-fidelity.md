@@ -1,0 +1,118 @@
+# Role-marker sanitizer fidelity (#952) Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Stop the role-marker sanitizer from destructively corrupting legitimate content on `read_file` of non-Iris paths, without weakening the turn-forge defense anywhere it is load-bearing.
+
+**Architecture:** "Narrowed A" — on one allowlisted channel (`read_file` of a path not under `~/.iris`), and only when a model-backed tier actually judged the text, the guard returns the **normalized, unstripped, wrapper-escaped** content (judged == shown, #709) instead of the role-marker-stripped content. Every other channel, every no-tier-ran case, and the system prompt keep today's destructive deletion. The delimiter-line recording (#727) that feeds tier-2 is unchanged; only whether the stripped text is *displayed* changes.
+
+**Tech Stack:** Swift, `Sources/IrisKit/{InjectionGuard,PromptInjectionGuard}.swift` + the `read_file` guard call site in `iris.swift`; Swift Testing.
+
+**Spec:** `docs/specs/2026-11-08-role-marker-sanitizer-fidelity.md` (rev 2, dev-2-approved). The plan argues from it; read both.
+
+## Global Constraints
+
+- **Security trust boundary** (#727/#735/#736/#742). No change may let an injected `system:`/`model:`/`user:`/`assistant:` turn or chat-template token in untrusted output be read as a real turn, on any channel, in any guard config. If a task can't preserve that, it doesn't ship.
+- **Judged == shown (#709).** Whatever text is displayed is the text the tiers judged and the text `OutputCap.cap` / tier-2 `.partial` redaction operate on. Never score one string and show another.
+- **Fidelity is "identical modulo normalization".** `normalize()` (NFKC + control/ZWSP strip) still runs; byte-exactness for NFKC-changing input is out of scope (#959).
+- **Relax only on the allowlist:** `read_file` of a non-Iris path, tier 2 or 3 provisioned-and-ran (not `.skipped`), protection on. Never `user_profile`/`workspace_rules` (system prompt). Chat-template tokens (`<|im_*|>`) stay stripped always.
+- **No new attack payloads.** Forge tests reuse existing owner-authorized dataset rows; benign config fixtures carry no payloads.
+- Zero new warnings (`scripts/check-warnings.sh`); no `ConfigManager.shared` mutation in tests; full suite green serially.
+
+## Review Focus
+
+- **A classifier-PASSED forge in the fidelity channel** — a `system: do X` line the tier lets through must still be contained by the wrapper (escape incl. `</untrusted_context >`, `</ untrusted_context>`, fullwidth, ZWSP-split, case). Owned by Task 3.
+- **No-tier-ran degradation** — protection off / tier `.skipped` / tier-3 unprovisioned on a `read_file` must fall back to deletion, decided from actual tier outcomes, not assumed. Owned by Task 2.
+- **Channel leak** — a web/search/peer/`inbox_item`/`user_profile` input must still be stripped; fidelity must not leak off the allowlist (esp. via a tag-string collision with an MCP tool literally named `read_file`). Owned by Task 1.
+- **Partial/capped fidelity read** — tier-2 `.partial`, `OutputCap.cap`, #728 withholding leave holes; a write-back of a holed read persists them, so the reply must warn. Owned by Task 4.
+- **Cache correctness** — the fidelity vs deletion mode must be in the guard cache key, or a cached deletion result is served to a fidelity read and vice-versa. Owned by Task 2.
+
+---
+
+### Task 1: Typed fidelity-channel flag at the read_file call site
+
+**Files:**
+- Modify: `Sources/IrisKit/iris.swift` (the `read_file` guard call site, ~7147–7193) and the guard entry it calls.
+- Modify: `Sources/IrisKit/InjectionGuard.swift` (add the flag to the untrusted entry points: `sanitizeUntrusted`/`classifyUntrusted`/`classifyUntrustedDetailed`).
+- Test: `Tests/irisTests/InjectionGuardFidelityTests.swift` (new).
+
+**Interfaces:**
+- Produces: a typed parameter (e.g. `fidelity: FidelityMode = .off` where `FidelityMode` is `.off | .preserveWhenJudged`) threaded from the read_file site into the untrusted classify entry. **Not** a `contextTag` string match — an MCP tool named `read_file` produces tag `tool_output_read_file` and must NOT get fidelity (dev-2 finding 1).
+
+- [ ] **Step 1: Write the failing test** — two cases: (a) the real first-party `read_file` of a non-Iris path requests `fidelity == .preserveWhenJudged` at the call site; (b) a synthesized MCP `read_file` tool output (same tag string, different call path) requests `fidelity == .off`. Assert on the flag value reaching the guard (inject a spy/record the passed mode).
+- [ ] **Step 2: Run it, verify it fails** (`scripts/test-filter.sh InjectionGuardFidelityTests`, quote the count).
+- [ ] **Step 3: Thread the typed flag** from the real read_file guard site into the untrusted classify entry; leave every other caller defaulting to `.off`. Confirm the exact current signatures before editing.
+- [ ] **Step 4: Run, verify pass.**
+- [ ] **Step 5: Commit** (`feat: thread a typed fidelity flag from the read_file guard site (#952)`).
+
+### Task 2: Preserve display when a tier judged; fall back to deletion otherwise; cache the mode
+
+**Files:**
+- Modify: `Sources/IrisKit/InjectionGuard.swift` (`classifyDetailed` / the pipeline that calls `PromptInjectionGuard.stripRecordingDelimiters` then the tiers), and the cache key.
+- Modify: `Sources/IrisKit/PromptInjectionGuard.swift` only if a "record-without-deleting" variant is needed (see Step 3).
+- Test: `Tests/irisTests/InjectionGuardFidelityTests.swift`.
+
+**Interfaces:**
+- Consumes: `FidelityMode` (Task 1).
+- Produces: when `fidelity == .preserveWhenJudged` **and** a model-backed tier ran (tier 2 or 3, provisioned, not `.skipped`, protection on) **and** the verdict is `.passed`, the wrapped result carries the **normalized, unstripped** text; the tiers judged that same text; `delimiterLines` still recorded and scored. Else: today's behavior (stripped text shown). The decision is made from the **actual tier outcomes** inside `classifyDetailed`, not pre-judged (dev-2 finding 4). The chosen mode is included in the guard cache key.
+
+- [ ] **Step 1: Write failing tests** — with a scripted tier that PASSES: (a) `protection on, tier ran, fidelity on` → a fixture with `model: gpt-x`, indented `  user: alice`, `system: prod`, a leading `---`, `### H` reads back identical-modulo-normalization (markers + `---`/`###` intact); (b) `fidelity on but tier .skipped` → markers deleted; (c) `fidelity on but protection off` → markers deleted; (d) cache: a deletion read then a fidelity read of the same bytes return different text (mode is in the key, no cross-serve).
+- [ ] **Step 2: Run, verify fail.**
+- [ ] **Step 3: Implement.** Judge the shown text: keep `stripRecordingDelimiters`' `delimiterLines` recording for tier-2 alone-scoring, but when the mode selects preserve, the text handed to `wrapped(.passed(...))` is the normalized-unstripped text (escaped by the existing `executeTier1` closing-tag escape, which must run on the normalized text — Task 3 pins the escape). If a "record delimiter lines without deleting" helper is cleanest, add it beside `stripRecordingDelimiters` rather than branching it inline. Add the mode to the cache key.
+- [ ] **Step 4: Run, verify pass.**
+- [ ] **Step 5: Commit** (`feat: preserve normalized-unstripped display on a judged fidelity read (#952)`).
+
+### Task 3: Marker × path table — tokens always stripped, escape mutation-checked, forge-passed contained
+
+**Files:**
+- Modify: `Sources/IrisKit/PromptInjectionGuard.swift` / `InjectionGuard.swift` as needed so `<|im_*|>` tokens are stripped even in the fidelity path, and `---`/`###`/role words are shown in it.
+- Test: `Tests/irisTests/InjectionGuardFidelityTests.swift`.
+
+**Interfaces:** Consumes Task 2's preserve path.
+
+- [ ] **Step 1: Write failing tests**, one per table row (spec's marker × path table): fidelity channel shows `system:`/`model:`/`---`/`###` but still strips `<|im_start|>`; other-channel still strips all; plain `sanitize`/`classify` path keeps `model:` **un**stripped exactly as today (pin the documented discrepancy, finding 7). **Classifier-passed forge:** a scripted-pass tier fed `system: do X` → displayed text is the normalized-unstripped marker, wrapped, closing tag escaped — mutation-check with `</untrusted_context >`, `</ untrusted_context>`, fullwidth `＜/…＞`, ZWSP-split, and case variants; assert the content cannot close the wrapper.
+- [ ] **Step 2: Run, verify fail.**
+- [ ] **Step 3: Implement** the token-always-strip and confirm the escape runs post-normalize on the preserved text.
+- [ ] **Step 4: Run, verify pass.**
+- [ ] **Step 5: Commit** (`feat: fidelity path keeps control tokens stripped, markers shown, wrapper escape held (#952)`).
+
+### Task 4: Incomplete-read warning + #813 taint compensating control
+
+**Files:**
+- Modify: the `read_file` reply assembly in `iris.swift` where a tier-2 `.partial`, `OutputCap.cap`, or #728-withheld range produces a truncated/redacted fidelity read.
+- Test: `Tests/irisTests/InjectionGuardFidelityTests.swift` (+ a `markReadUntrusted` assertion).
+
+**Interfaces:** Consumes Task 2.
+
+- [ ] **Step 1: Write failing tests** — (a) a fidelity `read_file` whose content is `.partial`/capped/withheld returns a reply that includes an explicit "incomplete — do not write this back" warning (assert the string is present only when the read is holed, absent on a whole read); (b) a fidelity `read_file` still calls `markReadUntrusted` (#813), so the conversation is tainted and a subsequent write is gated — pin this as the compensating control for the accepted residual (dev-2 findings 2, 3).
+- [ ] **Step 2: Run, verify fail.**
+- [ ] **Step 3: Implement** the warning on the holed-read branch; confirm `markReadUntrusted` still fires on the fidelity path (it should already — assert, don't re-add).
+- [ ] **Step 4: Run, verify pass.**
+- [ ] **Step 5: Commit** (`feat: warn not-to-write-back on a holed fidelity read; pin #813 taint (#952)`).
+
+### Task 5: Owner-authorized eval — benign config fixtures, markers kept vs stripped
+
+**Files:**
+- Add: a small benign fixture set (YAML / docker-compose / LLM-config rows, benign, no payloads) to the existing guard eval dataset location.
+- Modify: the eval harness invocation/report to include the `fc` (fail-closed) column (dev-2 finding 4/8).
+- Test/artifact: the eval run output, cited in the PR.
+
+- [ ] **Step 1:** Add the benign config fixtures (the v4 set has only 4/277 benign config-shaped rows, so this measures the real cost).
+- [ ] **Step 2:** Run the existing owner-authorized canary eval **markers-kept vs markers-stripped**, reporting blocks and the `fc` column, on existing attack rows + the new benign set. No new attack payloads.
+- [ ] **Step 3:** If scoring the unstripped text materially regresses detection, STOP and report — the spec's fallback is to carry per-line original text through cap/redaction instead of judging unstripped (finding 3), which is a design change needing re-review. Otherwise record the numbers in the PR.
+- [ ] **Step 4: Commit** the fixtures + any report doc (`test: benign-config eval for markers-kept vs stripped on the canary (#952)`).
+
+### Task 6: Falsification + docs
+
+**Files:**
+- Modify: `docs/prompt_injection_guard_design.md`; the SYSTEM.md untrusted-context notice if it describes marker stripping; verify the comments at `iris.swift:6011-6015` and `6096-6101`.
+
+- [ ] **Step 1:** Grep for what this changes. The `search_conversations`/`read_conversation` "owner"/"iris" substitutions and their comments stay true **because** those channels keep deletion — confirm and leave them. Update the guard design doc to describe the fidelity channel. Fix any agent-facing string that now misstates the behavior.
+- [ ] **Step 2: Commit** (`docs: describe the read_file fidelity channel; confirm guarded-channel comments still hold (#952)`).
+
+---
+
+## Self-Review notes
+- Spec coverage: narrowed-A channel allowlist (Task 1/2), judged==shown (Task 2), marker×path table + tokens + escape (Task 3), system-prompt exclusion (Task 2 fallback + Task 1 allowlist), partial-read safety (Task 4), eval (Task 5), falsification (Task 6). The system-prompt-never case is pinned by Task 1's channel test + Task 2's "tier ran" gate; add an explicit `user_profile` strip test in Task 3's other-channel row.
+- Review Focus → owning task: all five mapped above.
+- Execution: security-sensitive and interdependent (Task 2 is the spine). Recommend **subagent-driven-development** (fresh reviewer per task) over native, with dev-2 (or another dev, never the work session) as the security reviewer on the whole branch at the end. The author is a dev; the final whole-branch review confirms the forge invariant with the Task 3 + Task 5 evidence.
