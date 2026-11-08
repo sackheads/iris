@@ -81,7 +81,7 @@ public struct InjectionGuard {
     /// invoked as `"<server>___<tool>"` (`JobProfile.mcpNameSeparator`) rather than bare — but
     /// that is an accident of today's naming scheme, not a security boundary; a future caller
     /// matching on the tag string would reintroduce exactly the hole this type avoids.
-    enum FidelityMode: Sendable {
+    enum FidelityMode: Equatable, Sendable {
         case off
         case preserveWhenJudged
     }

@@ -16,8 +16,9 @@ enum EvalCLI {
 
     static let usage = """
     usage: iris --eval run <task> --model <runtime:name> [--sample N | --full] [--split test|dev|all] [--dataset DIR] [--out DIR]
-           iris --eval run injection.verdict --model ollama:<name>|llamacpp:<file>|mlx:<id>|cloud:<provider>/<model> [--think product|on|off] [--repeats N] [...]
-           iris --eval run injection.stack --stack 1+3|1+2+3 --tier3 ollama:<name>|llamacpp:<file>|mlx:<id>|cloud:<provider>/<model> [--tier2 onnx:<bundle>] [--think …] [--repeats N] [...]
+           iris --eval run injection.verdict --model ollama:<name>|llamacpp:<file>|mlx:<id>|cloud:<provider>/<model> [--think product|on|off] [--repeats N] [--fidelity kept|stripped] [...]
+           iris --eval run injection.stack --stack 1+3|1+2+3 --tier3 ollama:<name>|llamacpp:<file>|mlx:<id>|cloud:<provider>/<model> [--tier2 onnx:<bundle>] [--think …] [--repeats N] [--fidelity kept|stripped] [...]
+    --fidelity kept|stripped (#952, measurement only; default stripped): judge and show the normalized-but-unstripped role-marker text instead of today's deletion, to measure whether it moves the canary's blocks.
            cloud canary: --model / --tier3 cloud:<provider>/<model> [--thinking-level low|medium] [--hedge-after S] needs --allow-paid --max-dollars N; --estimate-only prints calls and cost, makes none
            iris --eval compare <a.json> <b.json> [--vary model|runtime|dataset|split|sample|think|repeats|partial]
            iris --eval table [--results DIR] [--out FILE]
@@ -116,6 +117,18 @@ enum EvalCLI {
         if let r = flags["--repeats"] {
             guard let n = Int(r), n > 0 else { return .failure(.usage("--repeats takes a positive count")) }
             run.repeats = n
+        }
+        if let f = flags["--fidelity"] {
+            // #952 Task 5 (measurement only, never the product's default): "stripped" is every
+            // run before this flag existed — role markers/`---`/`###` deleted before judging.
+            // "kept" judges and shows the normalized-but-unstripped text instead, the same switch
+            // the product's `read_file` guard call makes, to measure whether it moves the
+            // canary's blocks either way.
+            switch f {
+            case "stripped": run.fidelity = .off
+            case "kept": run.fidelity = .preserveWhenJudged
+            default: return .failure(.usage("--fidelity is kept or stripped"))
+            }
         }
         run.split = flags["--split"] ?? "test"
         guard ["test", "dev", "all"].contains(run.split) else { return .failure(.usage("--split is test, dev or all")) }

@@ -317,8 +317,12 @@ enum EvalGuardTask {
 
     /// One text through the product up to tier 3. `tier2` nil: the verdict task, tier 2 passing
     /// everything. `stack`: tier 2 as given, or skipped for 1+3.
+    /// `fidelity` (#952 Task 5): `.off` is every eval run before this task — the deletion path.
+    /// `.preserveWhenJudged` judges the normalized-but-unstripped text instead, the same switch
+    /// `iris.swift`'s `read_file` guard call makes in the product; threaded here only to measure
+    /// whether it moves the canary's blocks, never read anywhere else in the eval path.
     static func product(_ text: String, canary: any AuxiliaryInferenceEngine, config: InjectionGuard.GuardConfigFingerprint,
-                        tier2: CoreMLEvaluator.ScopedModel) async -> (outcome: EvalMetrics.Outcome, shown: String, parseFailure: Bool, trace: Trace, usage: EvalCost.Tokens?, hedged: Bool) {
+                        tier2: CoreMLEvaluator.ScopedModel, fidelity: InjectionGuard.FidelityMode = .off) async -> (outcome: EvalMetrics.Outcome, shown: String, parseFailure: Bool, trace: Trace, usage: EvalCost.Tokens?, hedged: Bool) {
         let call = Call()
         // The product reports a cloud guard call's usage through `GuardUsage`; bound here, it lands on
         // this text's call and nowhere else. `HedgeSignal` is the same seam for whether a hedge fired
@@ -331,7 +335,8 @@ enum EvalGuardTask {
                     await AuxiliaryModelManager.$scopedEngines.withValue(["canary": Recording(inner: canary)]) {
                         await CoreMLEvaluator.$scopedModel.withValue(tier2) {
                             await InjectionGuard.classifyUntrustedTraced(OutputCap.cap(text), contextTag: EvalClassifierTask.contextTag,
-                                                                          maxTier: .tier3_canary, protectionEnabled: true, config: config)
+                                                                          maxTier: .tier3_canary, protectionEnabled: true, config: config,
+                                                                          fidelity: fidelity)
                         }
                     }
                 }
@@ -353,9 +358,10 @@ enum EvalGuardTask {
     }
 
     static func score(_ sample: EvalSample, repeatIndex: Int, canary: any AuxiliaryInferenceEngine,
-                      config: InjectionGuard.GuardConfigFingerprint, tier2: CoreMLEvaluator.ScopedModel) async -> EvalMetrics.Scored {
+                      config: InjectionGuard.GuardConfigFingerprint, tier2: CoreMLEvaluator.ScopedModel,
+                      fidelity: InjectionGuard.FidelityMode = .off) async -> EvalMetrics.Scored {
         let start = MonotonicClock.nowMs()
-        let (outcome, shown, parse, trace, usage, hedged) = await product(sample.text, canary: canary, config: config, tier2: tier2)
+        let (outcome, shown, parse, trace, usage, hedged) = await product(sample.text, canary: canary, config: config, tier2: tier2, fidelity: fidelity)
         let seconds = (MonotonicClock.nowMs() - start) / 1000
         let caught = sample.payload.map { EvalMetrics.caught(outcome, shown: shown, payload: $0) }
         return EvalMetrics.Scored(sample: sample, outcome: outcome, rawScore: nil, seconds: seconds, caught: caught,
@@ -384,6 +390,14 @@ extension EvalRunner {
         /// `--max-dollars`: the most a paid run may spend. Required with `--allow-paid` (#870).
         var maxDollars: Double?
         var repeats: Int = EvalGuardTask.defaultRepeats
+        /// `--fidelity kept|stripped` (#952 Task 5, measurement only): `.off` (stripped, every
+        /// run before this task) deletes role markers/`---`/`###` before judging and showing them;
+        /// `.preserveWhenJudged` (kept) judges and shows the normalized-but-unstripped text instead,
+        /// the same switch the product's `read_file` guard call makes. Nothing in the eval path
+        /// reads this for any purpose but the canary call itself — it is not part of `VersionKey`,
+        /// so a kept and a stripped result compare as the same configuration; `settings` records
+        /// which this run used.
+        var fidelity: InjectionGuard.FidelityMode = .off
         var split: String = "test"
         var sample: Int?
         /// As given on the command line; relative ones resolve against the repository.
@@ -482,7 +496,7 @@ extension EvalRunner {
                         + "\(EvalCost.money(cap.committed)) charged (reported \(EvalCost.money(cap.reported)) plus \(cap.unreportedCalls) call(s) with no usage at the estimate's \(EvalCost.money(cap.perCall)) each)"
                     break runLoop
                 }
-                let row = await EvalGuardTask.score(sample, repeatIndex: r, canary: canary.engine, config: config, tier2: scope)
+                let row = await EvalGuardTask.score(sample, repeatIndex: r, canary: canary.engine, config: config, tier2: scope, fidelity: run.fidelity)
                 scored.append(row)
                 // An infra failure never reached the provider; any other call is charged.
                 if row.outcome != .infra { spendCap?.record(dollars: row.usage.flatMap { EvalCost.dollars($0, rates: rates) }) }
@@ -540,6 +554,7 @@ extension EvalRunner {
         settings["canary"] = canary.spec.description
         settings["context_tag"] = EvalClassifierTask.contextTag
         settings["output_cap_bytes"] = "\(OutputCap.limitBytes)"
+        settings["fidelity"] = run.fidelity == .off ? "stripped" : "kept"
         if run.stack == .tier123, let spec = run.tier2 {
             settings.merge(EvalClassifierTask.settings) { a, _ in a }
             settings["tier2_bundle"] = spec.url?.path
@@ -571,6 +586,7 @@ extension EvalRunner {
         try FileManager.default.createDirectory(at: taskDir, withIntermediateDirectories: true)
         let base = "\(day)-\(run.stack.map { "stack\($0.rawValue.replacingOccurrences(of: "+", with: ""))-" } ?? "")"
             + "\(canary.spec.slug)-think\(canary.think.replacingOccurrences(of: " ", with: "-"))-v\(dataset.manifest.version)-\(run.split)" + (run.sample.map { "-s\($0)" } ?? "-full")
+            + (run.fidelity == .off ? "" : "-fidelity-kept")
             + (cappedAt != nil ? "-capped" : "")
         let url = freshFile(in: taskDir, base: base)
         try result.encoded().write(to: url, options: .withoutOverwriting)

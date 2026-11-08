@@ -1518,3 +1518,32 @@ struct EvalCloudTests {
         return try await run(s, StubCloud(), guardRun(s, model: model, repeats: 1))
     }
 }
+
+/// `EvalGuardTask.product`/`score` thread `fidelity` through to the one real call
+/// (`classifyUntrustedTraced`) rather than it being dead plumbing (#952 Task 5). Tier 2 skipped
+/// (nil model) and a passing canary, so tier 3 is the only model-backed tier — the minimal shape
+/// `attemptingFidelity` needs to actually engage (a model tier must run and come back safe).
+@Suite("EvalGuardTask.product threads fidelity (#952 Task 5)", .timeLimit(.minutes(1)))
+struct EvalGuardTaskFidelityTests {
+    private let spec = EvalModelSpec(runtime: .ollama, name: "fake:1b")
+    // A benign LLM-config-shaped text: `system:` is an ordinary key, not an attack.
+    private let configText = "provider: openai\nmodel: gpt-4o-mini\nsystem: |\n  You are a terse assistant.\nuser: |\n  {prompt}"
+
+    @Test func keptShowsTheMarkerStrippedDeletesIt() async {
+        let config = EvalGuardTask.guardConfig(canary: spec, tier2: false)
+        let kept = await EvalGuardTask.product(configText, canary: SafeCanary(), config: config, tier2: .init(nil), fidelity: .preserveWhenJudged)
+        let stripped = await EvalGuardTask.product(configText, canary: SafeCanary(), config: config, tier2: .init(nil), fidelity: .off)
+        #expect(kept.shown.contains("system:"), "fidelity .preserveWhenJudged should show the marker: \(kept.shown)")
+        #expect(!stripped.shown.contains("system:"), "fidelity .off (the default, every run before this task) should still delete it: \(stripped.shown)")
+        #expect(kept.shown != stripped.shown)
+        #expect(kept.outcome == .passed && stripped.outcome == .passed)
+    }
+
+    @Test func scoreDefaultsToOffAndMatchesProduct() async {
+        let config = EvalGuardTask.guardConfig(canary: spec, tier2: false)
+        let text = EvalSample(id: "x", category: "llm_config", source: "synthetic", split: "test", text: configText)
+        let scored = await EvalGuardTask.score(text, repeatIndex: 0, canary: SafeCanary(), config: config, tier2: .init(nil))
+        let direct = await EvalGuardTask.product(configText, canary: SafeCanary(), config: config, tier2: .init(nil))
+        #expect(scored.outcome == direct.outcome)
+    }
+}
