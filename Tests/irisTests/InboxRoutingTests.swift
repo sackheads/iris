@@ -121,6 +121,24 @@ struct InboxRoutingTests {
         #expect(stored.state == .awaitingDelivery && stored.pendingTargets == ["role:ops"])
     }
 
+    @Test("the targets shown to Brian are exactly the ones the answer uses")
+    func disclosedTargetsEqualRoutedTargets() async throws {
+        let (app, engine) = setup()
+        let emitter = session(app), victim = session(app), holder = session(app, role: "dev")
+        for route in [[], [victim.uuidString], ["role:dev", victim.uuidString, "name:x"], [emitter.uuidString, "role:dev"], ["iris"]] as [[String]] {
+            let item = try raise(app, emitter: emitter, ownerChain: emitter.uuidString, routeBack: route,
+                                 notify: [victim.uuidString, "role:dev"])
+            let shown = IrisEngine.inboxHumanRouteTargets(item: item)
+            let sink = Sink()
+            _ = await engine.submitInboxAnswer(itemId: item.id, choice: "a", freeText: nil, deliver: sink.deliver)
+            let reached = Set(sink.calls.map(\.0))
+            // Every target actually reached is one the disclosure lists (as the emitter's id or a role held by that session).
+            for id in reached where id != emitter && id != holder { Issue.record("\(route): reached an undisclosed session") }
+            #expect(shown.allSatisfy { IrisEngine.isAllowedInboxRoute($0, emitter: emitter) }, "\(route): shown \(shown)")
+            #expect(IrisEngine.inboxNotifyTargets(item: item) == ["role:dev"])
+        }
+    }
+
     @Test("Brian's answer reaches only the emitter and roles, never another session the emitter named")
     func humanAnswerIgnoresArbitrarySessionTargets() async throws {
         let (app, engine) = setup()
