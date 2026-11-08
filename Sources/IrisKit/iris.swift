@@ -1227,6 +1227,7 @@ actor IrisEngine {
                 let result = try store.inbox.createItem(item, question: situation)
                 switch result {
                 case .success:
+                    await MainActor.run { localState?.bumpInboxRevision() }
                     return "Recorded #\(id) (thread \(newThreadId)). Not yet surfaced to Brian — do not tell him you raised it."
                 case .failure:
                     await MainActor.run { localState?.refundInboxEmit(from: conversationId) }

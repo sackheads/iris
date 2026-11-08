@@ -34,6 +34,30 @@ enum InboxUIModel {
         return deadline <= now
     }
 
+    /// Words a resolved route target (the emitter's own id, or `role:<name>`) for display. Kept
+    /// SwiftUI-free, the same split as the rest of this file, so the wording is testable without a
+    /// view. `emitterLabel` and `roleHolderLabel` are each a card name the *session itself* chose —
+    /// an untrusted field — so neither is ever run into the surrounding sentence as if it were
+    /// trusted prose: both are set off in quotes, with any embedded quote flattened first so a
+    /// crafted name cannot break out of them (dev-3's #943 review finding 2).
+    static func routeTargetDescription(_ target: String, emitterId: UUID, emitterLabel: String,
+                                       roleHolderLabel: String?) -> String {
+        let raw = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        if raw.caseInsensitiveCompare(emitterId.uuidString) == .orderedSame {
+            return "the session that raised it (named \"\(quoted(emitterLabel))\")"
+        }
+        guard raw.lowercased().hasPrefix("role:") else { return raw }
+        let role = String(raw.dropFirst(5))
+        if let roleHolderLabel {
+            return "whoever holds the \(role) role (currently named \"\(quoted(roleHolderLabel))\")"
+        }
+        return "whoever holds the \(role) role"
+    }
+
+    private static func quoted(_ name: String) -> String {
+        name.replacingOccurrences(of: "\"", with: "'")
+    }
+
     /// The mailbox list's contents: open items needing attention, then awaiting-delivery ones —
     /// answered, but with no live recipient yet — so an answered item does not simply vanish once
     /// Brian has acted on it (dev-3's #943 review finding 3). The two states are mutually

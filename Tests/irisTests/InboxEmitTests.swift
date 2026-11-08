@@ -76,6 +76,7 @@ struct InboxEmitTests {
         let (app, id) = app()
         let options: [JSONValue] = [.object(["label": .string("Ship it"), "pros": .array([.string("fast")]),
                                               "cons": .array([.string("risky")])])]
+        let before = app.inboxRevision
         let result = await runToolCall(emitCall(title: "Ship the thing?", situation: "Full context here.",
                                                 options: options), on: app, as: id)
         #expect(result.contains("Recorded #"), Comment(rawValue: result))
@@ -88,6 +89,10 @@ struct InboxEmitTests {
         #expect(item.options.map(\.label) == ["Ship it"])
         #expect(item.state == .open)
         #expect(item.emitter == id)
+        // A first raise, not just a followup or an answer, must also bump the revision, or the
+        // badge/list stays stale until some other re-render happens to re-run the query
+        // (dev-3's #943 review finding 1).
+        #expect(app.inboxRevision > before)
     }
 
     @Test("a guard-blocked emit fails closed: nothing stored, and the rate token is refunded")
