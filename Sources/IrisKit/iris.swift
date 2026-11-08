@@ -415,10 +415,14 @@ actor IrisEngine {
         var composed = await composedSystemPrompt(workspacePath: workspacePath, agentProfile: agentProfile)
         // After the cached composition, never inside it: the date must not freeze in a cache entry.
         if let text = composed.parts.first?.text {
-            composed.parts[0].text = text + "\n\n" + Self.currentDateLine(now: Date())
+            composed.parts[0].text = text + "\n\n" + Self.currentDateLine(now: wallClock())
         }
         return composed
     }
+
+    /// Wall time for the system prompt's date line; a test sets it to roll the day over.
+    private var wallClock: @Sendable () -> Date = { Date() }
+    func setWallClockForTesting(_ clock: @escaping @Sendable () -> Date) { wallClock = clock }
 
     private func composedSystemPrompt(workspacePath: String?, agentProfile: AgentProfile? = nil) async -> Content {
         let base = await ensureSystemPrompt(skills: agentProfile?.skills)
