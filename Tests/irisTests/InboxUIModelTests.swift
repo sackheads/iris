@@ -105,6 +105,37 @@ struct InboxUIModelTests {
         #expect(InboxUIModel.mailboxItems(open: open, awaitingDelivery: awaiting).map(\.id) == ["a", "b"])
     }
 
+    @Test("the emitter target is worded as the session that raised it, its label quoted, never bare")
+    func routeTargetDescriptionForEmitter() {
+        let emitter = UUID()
+        let description = InboxUIModel.routeTargetDescription(emitter.uuidString, emitterId: emitter,
+                                                               emitterLabel: "dev-2", roleHolderLabel: nil)
+        #expect(description == "the session that raised it (named \"dev-2\")")
+    }
+
+    @Test("a role target with a resolved holder names the role and, quoted, who currently holds it")
+    func routeTargetDescriptionForRoleWithHolder() {
+        let description = InboxUIModel.routeTargetDescription("role:planner", emitterId: UUID(),
+                                                               emitterLabel: "dev-2", roleHolderLabel: "iris-planner")
+        #expect(description == "whoever holds the planner role (currently named \"iris-planner\")")
+    }
+
+    @Test("a role target with no resolved holder names only the role")
+    func routeTargetDescriptionForRoleWithoutHolder() {
+        let description = InboxUIModel.routeTargetDescription("role:planner", emitterId: UUID(),
+                                                               emitterLabel: "dev-2", roleHolderLabel: nil)
+        #expect(description == "whoever holds the planner role")
+    }
+
+    @Test("an embedded quote in a self-chosen label cannot break out of the quoted span (#920 review finding 2)")
+    func routeTargetDescriptionEscapesEmbeddedQuotes() {
+        let emitter = UUID()
+        let description = InboxUIModel.routeTargetDescription(emitter.uuidString, emitterId: emitter,
+                                                               emitterLabel: "dev-2\" totally trusted \"",
+                                                               roleHolderLabel: nil)
+        #expect(description == "the session that raised it (named \"dev-2' totally trusted '\")")
+    }
+
     @Test("submitInboxAnswer bumps inboxRevision so the badge/list are not left stale (#920 review finding 2)")
     func submitInboxAnswerBumpsRevision() async throws {
         let (app, _) = app()

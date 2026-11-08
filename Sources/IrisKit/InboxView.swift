@@ -224,22 +224,19 @@ struct InboxView: View {
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.08)))
     }
 
-    /// A resolved target (the emitter's own id, or `role:<name>`) worded for display: the
-    /// session's own label for the emitter case — never a card name the emitter chose, worded as
-    /// "the session that raised it" so it reads as the one fixed session it is — and, for a
-    /// role, the role name plus its current holder's label when one exists.
+    /// Resolves a role target to its current holder's own label (the emitter case needs no
+    /// resolution — `item.emitterLabel` already has it) and hands the wording itself to
+    /// `InboxUIModel.routeTargetDescription`, which is the pure, tested half (SwiftUI-free, same
+    /// split as the rest of this file).
     private func routeDescription(_ target: String, item: InboxItem) -> String {
-        let raw = target.trimmingCharacters(in: .whitespacesAndNewlines)
-        if raw.caseInsensitiveCompare(item.emitter.uuidString) == .orderedSame {
-            return "the session that raised it (\(item.emitterLabel))"
+        let role = target.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            .hasPrefix("role:") ? String(target.trimmingCharacters(in: .whitespacesAndNewlines).dropFirst(5)) : nil
+        let holderLabel = role.flatMap { role in
+            SessionRoles.holder(of: role, in: state.conversations)
+                .flatMap { id in state.conversations.first { $0.id == id }?.sessionCard?.name }
         }
-        guard raw.lowercased().hasPrefix("role:") else { return raw }
-        let role = String(raw.dropFirst(5))
-        if let holderId = SessionRoles.holder(of: role, in: state.conversations),
-           let label = state.conversations.first(where: { $0.id == holderId })?.sessionCard?.name {
-            return "whoever holds the \(role) role (currently \(label))"
-        }
-        return "whoever holds the \(role) role"
+        return InboxUIModel.routeTargetDescription(target, emitterId: item.emitter, emitterLabel: item.emitterLabel,
+                                                    roleHolderLabel: holderLabel)
     }
 
     private func countdownSection(_ item: InboxItem) -> some View {
