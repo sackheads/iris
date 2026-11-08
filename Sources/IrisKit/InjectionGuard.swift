@@ -69,6 +69,59 @@ public struct InjectionGuard {
     public static let sanitizationCacheCapacity = 128
     private static let cache = SanitizationCache(capacity: sanitizationCacheCapacity)
 
+    /// Whether an untrusted-channel caller wants the destructive role-marker/`---`/`###` strip
+    /// relaxed to a non-destructive, judged display (#952, "narrowed A"). `.off` is every
+    /// behavior the guard has today; `.preserveWhenJudged` is pure plumbing here — this task
+    /// threads the flag into `classifyDetailed`, but nothing reads it yet to change what gets
+    /// shown (that is #952 Task 2).
+    ///
+    /// Always an explicit parameter from the one real call site that may ask for it — never
+    /// inferred downstream from `contextTag` or a tool name. `contextTag` is caller-chosen free
+    /// text (`"tool_output_\(name)"`, `iris.swift`), and an MCP server's own tool happens to be
+    /// invoked as `"<server>___<tool>"` (`JobProfile.mcpNameSeparator`) rather than bare — but
+    /// that is an accident of today's naming scheme, not a security boundary; a future caller
+    /// matching on the tag string would reintroduce exactly the hole this type avoids.
+    enum FidelityMode: Sendable {
+        case off
+        case preserveWhenJudged
+    }
+
+    /// Test-only seam (#952 Task 1): every fidelity mode `classifyDetailed` actually received,
+    /// alongside the `contextTag` of that call, in call order. `classifyDetailed` is `private`
+    /// and returns no trace of its own parameters, so a test driving a call through several
+    /// layers of wrapper functions (or through a full `IrisEngine.processInput` turn) has no
+    /// other way to observe which mode reached it. Recorded unconditionally — an enum-plus-string
+    /// append behind a lock is cheap — but nothing in production reads it; only
+    /// `InjectionGuardFidelityTests` does, through `@testable import`. Never cleared, so it is
+    /// safe to read from parallel suites: entries only accumulate, and every assertion that reads
+    /// it checks for presence of a specific (tag, mode) pair, never an exact count or the absence
+    /// of unrelated entries. A class wrapping the lock and the array, exactly like
+    /// `SanitizationCache` above, because a bare mutable static array is the "nonisolated global
+    /// shared mutable state" Swift 6 strict concurrency refuses to compile; the static `let`
+    /// holding this `@unchecked Sendable` instance is what it accepts.
+    private final class FidelityCallRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var calls: [(contextTag: String, fidelity: FidelityMode)] = []
+        func record(_ contextTag: String, _ fidelity: FidelityMode) {
+            lock.lock(); defer { lock.unlock() }
+            calls.append((contextTag, fidelity))
+        }
+        func fidelities(for contextTag: String) -> [FidelityMode] {
+            lock.lock(); defer { lock.unlock() }
+            return calls.filter { $0.contextTag == contextTag }.map(\.fidelity)
+        }
+    }
+    private static let fidelityCallRecorder = FidelityCallRecorder()
+
+    private static func recordFidelityCall(contextTag: String, fidelity: FidelityMode) {
+        fidelityCallRecorder.record(contextTag, fidelity)
+    }
+
+    /// The fidelity modes recorded for calls with this `contextTag`, oldest first. Test-only.
+    static func recordedFidelityCalls(contextTag: String) -> [FidelityMode] {
+        fidelityCallRecorder.fidelities(for: contextTag)
+    }
+
     /// Whether a tier-3 check would actually run now (#330's card marker): protection on, and a
     /// canary that is provisioned (or a test's scoped one).
     static func tier3WillRun(protectionEnabled: Bool? = nil) -> Bool {
@@ -381,20 +434,23 @@ public struct InjectionGuard {
     /// 2. A caller that stripped first and then called `sanitize` hid those lines from tier 2.
     static func sanitizeUntrusted(_ rawInput: String, contextTag: String = "",
                                   maxTier: SanitizationTier = .tier1_structural,
-                                  protectionEnabled: Bool? = nil) async -> String {
+                                  protectionEnabled: Bool? = nil,
+                                  fidelity: FidelityMode = .off) async -> String {
         wrapped(await classifyUntrusted(rawInput, contextTag: contextTag, maxTier: maxTier,
-                                        protectionEnabled: protectionEnabled), contextTag: contextTag)
+                                        protectionEnabled: protectionEnabled, fidelity: fidelity), contextTag: contextTag)
     }
 
     /// `sanitizeUntrusted`, plus `sanitizeCacheable`'s bit and the line ranges tier 2 withheld
-    /// unjudged (#728), which the person's own files' notice names.
+    /// unjudged (#728), which the person's own files' notice names. The one real call site this
+    /// task threads fidelity from — `iris.swift`'s `read_file` guard call — uses this entry point.
     static func sanitizeUntrustedCacheable(_ rawInput: String, contextTag: String = "",
                                            maxTier: SanitizationTier = .tier1_structural,
-                                           protectionEnabled: Bool? = nil) async -> (text: String, cacheable: Bool, unjudged: [String]) {
+                                           protectionEnabled: Bool? = nil,
+                                           fidelity: FidelityMode = .off) async -> (text: String, cacheable: Bool, unjudged: [String]) {
         let stripped = PromptInjectionGuard.stripRecordingDelimiters(rawInput)
         let verdict = await classifyDetailed(stripped.text, contextTag: contextTag, maxTier: maxTier,
                                              protectionEnabled: protectionEnabled,
-                                             delimiterLines: stripped.delimiterLines)
+                                             delimiterLines: stripped.delimiterLines, fidelity: fidelity)
         return (wrapped(verdict.outcome, contextTag: contextTag), verdict.cacheable, verdict.unjudged)
     }
 
@@ -407,9 +463,10 @@ public struct InjectionGuard {
     static func classifyUntrustedDetailed(_ rawInput: String, contextTag: String = "",
                                           maxTier: SanitizationTier = .tier1_structural,
                                           protectionEnabled: Bool? = nil,
-                                          config: GuardConfigFingerprint? = nil) async -> (outcome: GuardOutcome, cacheable: Bool) {
+                                          config: GuardConfigFingerprint? = nil,
+                                          fidelity: FidelityMode = .off) async -> (outcome: GuardOutcome, cacheable: Bool) {
         let traced = await classifyUntrustedTraced(rawInput, contextTag: contextTag, maxTier: maxTier,
-                                                   protectionEnabled: protectionEnabled, config: config)
+                                                   protectionEnabled: protectionEnabled, config: config, fidelity: fidelity)
         return (traced.outcome, traced.cacheable)
     }
 
@@ -419,22 +476,24 @@ public struct InjectionGuard {
     static func classifyUntrustedTraced(_ rawInput: String, contextTag: String = "",
                                         maxTier: SanitizationTier = .tier1_structural,
                                         protectionEnabled: Bool? = nil,
-                                        config: GuardConfigFingerprint? = nil) async -> (outcome: GuardOutcome, cacheable: Bool, tier2: String?) {
+                                        config: GuardConfigFingerprint? = nil,
+                                        fidelity: FidelityMode = .off) async -> (outcome: GuardOutcome, cacheable: Bool, tier2: String?) {
         let stripped = PromptInjectionGuard.stripRecordingDelimiters(rawInput)
         let verdict = await classifyDetailed(stripped.text, contextTag: contextTag, maxTier: maxTier,
                                              protectionEnabled: protectionEnabled,
-                                             delimiterLines: stripped.delimiterLines, config: config)
+                                             delimiterLines: stripped.delimiterLines, config: config, fidelity: fidelity)
         return (verdict.outcome, verdict.cacheable, verdict.tier2)
     }
 
     /// `sanitizeUntrusted`'s verdict, unwrapped, as `classify` is `sanitize`'s.
     static func classifyUntrusted(_ rawInput: String, contextTag: String = "",
                                   maxTier: SanitizationTier = .tier1_structural,
-                                  protectionEnabled: Bool? = nil) async -> GuardOutcome {
+                                  protectionEnabled: Bool? = nil,
+                                  fidelity: FidelityMode = .off) async -> GuardOutcome {
         let stripped = PromptInjectionGuard.stripRecordingDelimiters(rawInput)
         return await classifyDetailed(stripped.text, contextTag: contextTag, maxTier: maxTier,
                                       protectionEnabled: protectionEnabled,
-                                      delimiterLines: stripped.delimiterLines).outcome
+                                      delimiterLines: stripped.delimiterLines, fidelity: fidelity).outcome
     }
 
     /// `classify`, plus whether the verdict is safe for a caller to keep (equivalently: whether it
@@ -446,13 +505,21 @@ public struct InjectionGuard {
     /// Factored out so `sanitizeCacheable` can report that bit without `IrisEngine` duplicating
     /// tier/cache logic that could then drift from this. `classify` is exactly this with the bit
     /// dropped; the body is unchanged from before this split.
+    /// `fidelity` (#952 Task 1) is pure plumbing at this point in the task: recorded for
+    /// `InjectionGuardFidelityTests` to observe, but not yet read by anything that decides what
+    /// gets shown or cached. The plain `sanitize`/`sanitizeCacheable`/`classify` path never passes
+    /// it, so it is always `.off` for those callers — the untrusted-entry wrappers above are the
+    /// only ones that can ask for anything else, and today only one real call site
+    /// (`iris.swift`'s `read_file` guard call) does.
     private static func classifyDetailed(_ rawInput: String, contextTag: String = "",
                          maxTier: SanitizationTier = .tier1_structural,
                          protectionEnabled: Bool? = nil,
                          tier2ModelsDir: URL? = nil,
                          tier3ModelsDir: URL? = nil,
                          delimiterLines: [Int: String] = [:],
-                         config: GuardConfigFingerprint? = nil) async -> Verdict {
+                         config: GuardConfigFingerprint? = nil,
+                         fidelity: FidelityMode = .off) async -> Verdict {
+        recordFidelityCall(contextTag: contextTag, fidelity: fidelity)
         let __turnID = PerformanceProfiler.currentTurnID
         let __start = MonotonicClock.nowMs()
         defer {

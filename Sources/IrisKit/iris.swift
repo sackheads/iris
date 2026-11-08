@@ -7219,7 +7219,15 @@ actor IrisEngine {
         } else {
             // Structural isolation, then tiers 2 and 3 (skipped for trusted tools), with the lines a
             // role delimiter was stripped from scored alone (#727).
-            let judged = await InjectionGuard.sanitizeUntrustedCacheable(result, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled)
+            // #952 Task 1: the real, first-party `read_file` tool, reached here only for a path
+            // outside ~/.iris (the Iris-dir branch above already returned). This is a typed
+            // parameter from this exact call site, not a `contextTag`/name string match applied
+            // downstream — an MCP server's own `read_file` tool is dispatched and recorded as
+            // `"<server>___read_file"` (`JobProfile.mcpNameSeparator`), never bare `"read_file"`,
+            // so this equality can't be satisfied from there. Task 1 is plumbing only: the mode
+            // does not yet change what the guard shows or caches (#952 Task 2).
+            let fidelity: InjectionGuard.FidelityMode = name == "read_file" ? .preserveWhenJudged : .off
+            let judged = await InjectionGuard.sanitizeUntrustedCacheable(result, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled, fidelity: fidelity)
             sanitizedResult = judged.text
             withheldByVerdict = judged.cacheable && InjectionGuard.isWholeBlock(judged.text)
         }
