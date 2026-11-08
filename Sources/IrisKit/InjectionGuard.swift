@@ -594,8 +594,11 @@ public struct InjectionGuard {
             candidate = candidate.replacingOccurrences(of: "<|im_start|>", with: "", options: [.caseInsensitive])
             candidate = candidate.replacingOccurrences(of: "<|im_end|>", with: "", options: [.caseInsensitive])
             // The same wrapper-breakout escape `executeTier1` applies to the deletion candidate
-            // (#709: the tiers must judge exactly the text a `.passed` verdict shows).
-            candidate = candidate.replacingOccurrences(of: "</untrusted_context>", with: "[escaped_tag]", options: [.caseInsensitive])
+            // (#709: the tiers must judge exactly the text a `.passed` verdict shows). Runs after
+            // `preserveCandidate` was built from `PromptInjectionGuard.normalize(rawInput)`
+            // (`preserveFidelityCandidate`), so a fullwidth closing tag is already NFKC-folded to
+            // ASCII by the time `escapeWrapperBreakout` sees it.
+            candidate = escapeWrapperBreakout(candidate)
             clean = candidate
         }
         // Whether a model actually judged `clean` as handed to it — set from the tiers' own
@@ -697,9 +700,32 @@ public struct InjectionGuard {
         // 2. Escape any breakout closing tag an attacker injected to escape the wrapper we
         // are about to apply. The wrapper is always <untrusted_context>, so that is the only
         // closing tag we need to neutralize.
-        clean = clean.replacingOccurrences(of: "</untrusted_context>", with: "[escaped_tag]", options: [.caseInsensitive])
+        clean = escapeWrapperBreakout(clean)
 
         return (clean, delimiterLines)
+    }
+
+    /// Matches every whitespace-tolerant shape of the `</untrusted_context>` closing tag (dev-2
+    /// review, #952 Task 3): `</untrusted_context >`, `</ untrusted_context>`, `< /untrusted_context>`
+    /// and any combination all close the wrapper exactly as the bare tag does, as far as a model
+    /// reading the text is concerned, even though the old exact-match compare let every one of
+    /// them through. Matches the tag's SHAPE (`<`, `/`, the literal word, `>`), not the bare
+    /// phrase "untrusted context" on its own — ordinary prose using those words with no tag
+    /// punctuation around them is never touched. Fullwidth (`＜`/`＞`, U+FF1C/U+FF1E) and
+    /// ZWSP-split forms (`</untrust\u{200B}ed_context>`) need no pattern of their own: NFKC
+    /// (`precomposedStringWithCompatibilityMapping`) folds the former to ASCII and
+    /// `PromptInjectionGuard.normalize`'s control-character strip removes U+200B, rejoining the
+    /// latter — confirmed directly (see `InjectionGuardFidelityTests`), not assumed. This escape
+    /// must run on text that has already been through `normalize()` for that folding to have
+    /// happened; every call site below is.
+    private static let wrapperBreakoutEscape = try! NSRegularExpression(
+        pattern: #"<\s*/\s*untrusted_context\s*>"#, options: [.caseInsensitive])
+
+    /// Neutralizes any shape `wrapperBreakoutEscape` recognizes in `text`, so it cannot close the
+    /// `<untrusted_context>` wrapper `InjectionGuard` is about to apply around it.
+    private static func escapeWrapperBreakout(_ text: String) -> String {
+        let range = NSRange(text.startIndex..., in: text)
+        return wrapperBreakoutEscape.stringByReplacingMatches(in: text, range: range, withTemplate: "[escaped_tag]")
     }
 
     /// The opening wrapper tag, carrying optional provenance as a `source` attribute.
