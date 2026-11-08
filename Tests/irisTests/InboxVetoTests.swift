@@ -19,8 +19,10 @@ struct InboxVetoTests {
 
     private let t0 = Date(timeIntervalSince1970: 1_800_000_000)
 
-    private func setup() -> (AppState, IrisEngine) {
+    private func setup() async throws -> (AppState, IrisEngine) {
         let app = AppState(); app.conversations.removeAll()
+        // The launch sweep runs on the app's own engine; let it finish before any item exists.
+        if let sweep = app.launchInboxRedeliver { try await value(of: sweep) }
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: FakeLLMClient(responses: []),
                                 retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
         return (app, engine)
@@ -49,7 +51,7 @@ struct InboxVetoTests {
 
     @Test("an untainted veto past its deadline takes its default as an automatic answer and routes it")
     func untaintedVetoAutoApproves() async throws {
-        let (app, engine) = setup()
+        let (app, engine) = try await setup()
         let emitter = session(app)
         let item = try veto(app, emitter: emitter, deadline: t0)
         let sink = Sink()
@@ -65,7 +67,7 @@ struct InboxVetoTests {
 
     @Test("a veto before its deadline, or answered by Brian first, does not fire")
     func notDueAndAlreadyAnsweredDoNotFire() async throws {
-        let (app, engine) = setup()
+        let (app, engine) = try await setup()
         let emitter = session(app)
         let future = try veto(app, emitter: emitter, deadline: t0.addingTimeInterval(600))
         let answered = try veto(app, emitter: emitter, deadline: t0)
@@ -80,7 +82,7 @@ struct InboxVetoTests {
 
     @Test("a tainted emitter's veto is held: still open, nothing routed, and held on every evaluation")
     func taintedVetoAutoHolds() async throws {
-        let (app, engine) = setup()
+        let (app, engine) = try await setup()
         let emitter = session(app)
         let item = try veto(app, emitter: emitter, deadline: t0, tainted: true)
         let sink = Sink()
@@ -95,7 +97,7 @@ struct InboxVetoTests {
 
     @Test("a veto whose default names no option is held rather than fired")
     func undefinedDefaultHolds() async throws {
-        let (app, engine) = setup()
+        let (app, engine) = try await setup()
         let emitter = session(app)
         let missing = try veto(app, emitter: emitter, deadline: t0, defaultId: nil)
         let unknown = try veto(app, emitter: emitter, deadline: t0, defaultId: "zzz")
@@ -107,7 +109,7 @@ struct InboxVetoTests {
 
     @Test("a veto that came due while asleep fires once on the next evaluation, and a second evaluation is a no-op")
     func asleepAtDeadlineFiresOnceOnNextEvaluate() async throws {
-        let (app, engine) = setup()
+        let (app, engine) = try await setup()
         let emitter = session(app)
         try veto(app, emitter: emitter, deadline: t0)
         let sink = Sink()
@@ -120,7 +122,7 @@ struct InboxVetoTests {
 
     @Test("two evaluations at once deliver a due veto once")
     func overlappingEvaluationsFireOnce() async throws {
-        let (app, engine) = setup()
+        let (app, engine) = try await setup()
         let emitter = session(app)
         try veto(app, emitter: emitter, deadline: t0)
         let sink = Sink()
@@ -132,8 +134,8 @@ struct InboxVetoTests {
     }
 
     @Test("the store lets only one answer win, so an evaluation holding a stale due list cannot fire a veto twice")
-    func storeRefusesASecondAnswer() throws {
-        let (app, _) = setup()
+    func storeRefusesASecondAnswer() async throws {
+        let (app, _) = try await setup()
         let emitter = session(app)
         let item = try veto(app, emitter: emitter, deadline: t0)
         let answer = InboxAnswer(chosenOptionId: "a", freeText: nil, at: t0, automatic: true)
@@ -148,7 +150,7 @@ struct InboxVetoTests {
 
     @Test("an automatic answer reaches only the emitter or its owner chain, never another session named in route_back, and tells no notify target")
     func automaticAnswerStaysWithTheEmittersChain() async throws {
-        let (app, engine) = setup()
+        let (app, engine) = try await setup()
         let emitter = session(app), stranger = session(app)
         let holder = session(app)
         app.conversations[app.conversations.firstIndex { $0.id == holder }!].role = "dev"
@@ -167,7 +169,7 @@ struct InboxVetoTests {
 
     @Test("an automatic answer for a gone emitter is stored and awaits delivery, never dropped")
     func automaticAnswerToDeadEmitterWaits() async throws {
-        let (app, engine) = setup()
+        let (app, engine) = try await setup()
         let gone = session(app, archived: true)
         let item = try veto(app, emitter: gone, deadline: t0)
         let sink = Sink()
@@ -179,7 +181,7 @@ struct InboxVetoTests {
 
     @Test("an automatic answer's frame carries no user authority and says nobody chose it")
     func automaticFrameHasNoUserAuthority() async throws {
-        let (app, engine) = setup()
+        let (app, engine) = try await setup()
         let emitter = session(app)
         let item = try veto(app, emitter: emitter, deadline: t0)
         let sink = Sink()
