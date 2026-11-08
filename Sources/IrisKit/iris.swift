@@ -412,6 +412,15 @@ actor IrisEngine {
     /// `agentProfile` (#465) is a layer after AGENTS.md. Keyed into the cache by name, so two
     /// conversations in one workspace with different profiles keep a cache entry each.
     private func assembledSystemPrompt(workspacePath: String?, agentProfile: AgentProfile? = nil) async -> Content {
+        var composed = await composedSystemPrompt(workspacePath: workspacePath, agentProfile: agentProfile)
+        // After the cached composition, never inside it: the date must not freeze in a cache entry.
+        if let text = composed.parts.first?.text {
+            composed.parts[0].text = text + "\n\n" + Self.currentDateLine(now: Date())
+        }
+        return composed
+    }
+
+    private func composedSystemPrompt(workspacePath: String?, agentProfile: AgentProfile? = nil) async -> Content {
         let base = await ensureSystemPrompt(skills: agentProfile?.skills)
         guard let baseText = base.parts.first?.text else { return base }
         let profileText = await guardedUserProfileText()
@@ -1845,17 +1854,18 @@ actor IrisEngine {
     nonisolated static let sessionIdentityHeading = "This Session"
     nonisolated static let cardDescriptionMaxBytes = 240
 
-    /// The wall-clock date and time, in the user's time zone (#951). Per turn on the turn's own
-    /// entry, never in the cached system prompt: that prompt lives for days of uptime and would
-    /// freeze the date. Minute resolution and a fixed en_US_POSIX format, so the text is the same
-    /// shape on every Mac and a model that is asked the date reads it rather than guesses it from
-    /// file mtimes.
-    nonisolated static func currentDateSection(now: Date, timeZone: TimeZone = .current) -> TurnContext.Section {
+    /// Today's date in the user's time zone, as the last line of the system prompt (#951). Whole
+    /// days, so the prompt changes once a day and the provider's prefix cache keeps hitting between
+    /// turns. A per-turn context block would not do: it rides the turn's own entry, which the next
+    /// request sends without it, so every turn would re-bill the whole previous turn. The cached
+    /// base prompt is untouched, since it lives for days of uptime and would freeze the date. A fixed
+    /// en_US_POSIX format keeps the text the same shape on every Mac.
+    nonisolated static func currentDateLine(now: Date, timeZone: TimeZone = .current) -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = timeZone
-        f.dateFormat = "EEEE, d MMMM yyyy, HH:mm zzz (VV)"
-        return .init(heading: "Current Date and Time", body: f.string(from: now))
+        f.dateFormat = "EEEE, d MMMM yyyy (VV)"
+        return "# Current Date\nToday is \(f.string(from: now)). Trust this over file dates and your own guess."
     }
 
     nonisolated static func sessionIdentitySection(id: UUID, title: String, card: SessionCard?, role: String? = nil,
@@ -2902,7 +2912,7 @@ actor IrisEngine {
 
         // Per-turn content rides this turn's own entry in the request, not the system prompt, so the
         // cached prefix (tools, system, older history) stays byte-stable across turns (5a §0.2).
-        var turnContext = TurnContext(sections: [Self.currentDateSection(now: Date())])
+        var turnContext = TurnContext(sections: [])
         if !facts.isEmpty {
             // The ids go in so `manage_fact` — first offered on these turns, then kept declared
             // (5c §0.1) — has something to name.
