@@ -52,4 +52,39 @@ struct CurrentDateTests {
         #expect(line.hasPrefix("# Current Date\nToday is "), "\(line)")
         #expect(line.contains(String(year)), "\(line)")
     }
+
+    @Test("the day rolling over moves only the date suffix: the composed prompt before it is byte-identical")
+    @MainActor
+    func dayRolloverMovesOnlyTheSuffix() async throws {
+        let app = AppState()
+        app.conversations.removeAll()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        let client = DateTurnClient()
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
+                                retryDelays: [], streamResponses: false,
+                                protectionEnabled: false, sessionPeerCount: 0)
+        let la = TimeZone.current
+        let day1 = instant, sameDay = instant.addingTimeInterval(60), day2 = instant.addingTimeInterval(2 * 86_400)
+        for t in [day1, sameDay, day2] {
+            await engine.setWallClockForTesting { t }
+            await engine.processInput("hello", source: "UI", conversationId: id)
+        }
+        let systems = client.requests.map { $0.systemInstruction?.parts.compactMap(\.text).joined() ?? "" }
+        try #require(systems.count == 3)
+        let marker = "\n\n# Current Date\n"
+        func split(_ s: String) throws -> (String, String) {
+            let r = try #require(s.range(of: marker, options: .backwards))
+            return (String(s[..<r.lowerBound]), String(s[r.lowerBound...]))
+        }
+        let (p1, d1) = try split(systems[0]), (p2, d2) = try split(systems[1]), (p3, d3) = try split(systems[2])
+        #expect(p1 == p2 && p2 == p3, "the cached composition must not move")
+        #expect(d1 == IrisEngine.currentDateLine(now: day1, timeZone: la).prependingBreak(), "\(d1)")
+        #expect(d1 == d2, "minutes later, same day: nothing changes")
+        #expect(d3 != d1 && d3.contains(IrisEngine.currentDateLine(now: day2, timeZone: la)), "\(d3)")
+    }
+}
+
+private extension String {
+    func prependingBreak() -> String { "\n\n" + self }
 }
