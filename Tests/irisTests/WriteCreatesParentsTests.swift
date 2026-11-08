@@ -17,8 +17,9 @@ struct WriteCreatesParentsTests {
     /// The kernel's own spelling (`/private/var/...`): an approved path is a real path, and
     /// `URL.resolvingSymlinksInPath` strips the `/private` the walk then finds a link under.
     private func realPath(_ url: URL) -> String {
-        var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
-        return realpath(url.path, &buf) != nil ? String(cString: buf) : url.path
+        guard let resolved = realpath(url.path, nil) else { return url.path }
+        defer { free(resolved) }
+        return String(cString: resolved)
     }
 
     private func tree() throws -> Tree {
