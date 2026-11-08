@@ -338,7 +338,7 @@ public struct InjectionGuard {
 
     static func cacheKey(clean: String, source: String, maxTier: SanitizationTier,
                                   fingerprint: GuardConfigFingerprint, delimiterLines: [Int: String] = [:],
-                                  fidelity: FidelityMode = .off) -> String {
+                                  fidelity: FidelityMode = .off, preserveCandidate: String? = nil) -> String {
         // The tier-2 model path is in the key too, so correctness does not lean on CoreMLEvaluator
         // being load-once: a hot-swapped guard model can never be served a stale verdict. The
         // provisioning results (#202 fix round 2, extended to tier 2 by #210) are what actually
@@ -356,7 +356,14 @@ public struct InjectionGuard {
                      // (or vice versa) even in the edge case where the two candidate texts happen
                      // to be byte-identical (a file with no role markers at all) — `clean` alone
                      // cannot be relied on to differ, so the mode goes in explicitly.
-                     String(describing: fidelity)]
+                     String(describing: fidelity),
+                     // #952 rev 3: `clean` is the judged/stripped text now, which case-folds (and
+                     // otherwise collapses) two different `preserveCandidate` originals to the
+                     // SAME stripped text — "SYSTEM: x" and "System: x" both strip to " x". Those
+                     // two calls carry different displays, so the cached STORED TEXT (the carry)
+                     // must not be shared between them; `clean` + `fidelity` alone can no longer
+                     // tell them apart, so the original goes in the key too.
+                     preserveCandidate.map { "preserve:\($0)" } ?? "preserve:none"]
             // #727: two inputs that strip to the same text are scored differently by what was stripped.
             + delimiterLines.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }
         let digest = SHA256.hash(data: Data(parts.joined(separator: "\u{0}").utf8))
@@ -578,29 +585,17 @@ public struct InjectionGuard {
             return Verdict(outcome: .passed(clean: clean), cacheable: true, unjudged: unjudged)
         }
 
-        // #952: optimistically switch to the preserve candidate before the cache lookup, so both
-        // the key and what tier 2/3 actually judge reflect it — but only when a model-backed tier
-        // can possibly run at all (protection on; tier 2/3 both no-op straight to `.safe` without
-        // reading `clean` otherwise, so there is nothing to gain by feeding them the preserved
-        // text in that case, and the invariant below needs `deleteCandidate` to still be exactly
-        // today's text). `deleteCandidate` is kept so every return point can fall back to it.
-        let deleteCandidate = clean
+        // #952 rev 3: `clean` is NEVER swapped to the preserve candidate before or during
+        // judging — rev-2 did that, and the eval (#952 Task 5) proved judging unstripped text
+        // measurably degrades the small canary (fail-closed rate up: benign +0.89pp, attack
+        // +0.59pp) and hands an attacker a withhold-this-read lever (force parse failures on
+        // demand by including markers). The canary judges `clean` exactly as production does,
+        // unconditionally; fidelity instead carries the per-line original to the DISPLAY only,
+        // once a verdict is about to pass (see `carriedDisplay` below). `clean` itself needs no
+        // separate "deletion candidate" any more: with no swap, it already IS that candidate at
+        // every return point below, mutated only by tier 2's own `.partial` redaction / `OutputCap`
+        // — the same mutations a non-fidelity call sees.
         let attemptingFidelity = fidelity == .preserveWhenJudged && preserveCandidate != nil && fingerprint.protectionEnabled
-        if attemptingFidelity, let preserveCandidate {
-            var candidate = preserveCandidate
-            // Chat-template tokens have no fidelity case, ever: real control tokens for local
-            // models, not a role word a human reader would want kept (spec: "always, even in the
-            // fidelity channel").
-            candidate = candidate.replacingOccurrences(of: "<|im_start|>", with: "", options: [.caseInsensitive])
-            candidate = candidate.replacingOccurrences(of: "<|im_end|>", with: "", options: [.caseInsensitive])
-            // The same wrapper-breakout escape `executeTier1` applies to the deletion candidate
-            // (#709: the tiers must judge exactly the text a `.passed` verdict shows). Runs after
-            // `preserveCandidate` was built from `PromptInjectionGuard.normalize(rawInput)`
-            // (`preserveFidelityCandidate`), so a fullwidth closing tag is already NFKC-folded to
-            // ASCII by the time `escapeWrapperBreakout` sees it.
-            candidate = escapeWrapperBreakout(candidate)
-            clean = candidate
-        }
         // Whether a model actually judged `clean` as handed to it — set from the tiers' own
         // verdicts below, never inferred from `attemptingFidelity` alone: protection can be on and
         // a tier still `.skipped` (unprovisioned), and that is exactly the case deletion must win.
@@ -612,7 +607,7 @@ public struct InjectionGuard {
         // in the process was served it (#375). Production never sets a scope.
         let cache: SanitizationCache? = Self.guardTierScopeActive ? nil : Self.cache
         let key = cacheKey(clean: clean, source: source, maxTier: maxTier, fingerprint: fingerprint,
-                           delimiterLines: delimiterLines, fidelity: fidelity)
+                           delimiterLines: delimiterLines, fidelity: fidelity, preserveCandidate: preserveCandidate)
         if let cached = cache?.get(key) {
             return cached
         }
@@ -654,10 +649,14 @@ public struct InjectionGuard {
         if case .skipped = tier2, maxTier == .tier3_canary, tier3Runs(fingerprint) { clean = OutputCap.cap(clean) }
 
         if maxTier == .tier2_coreML {
-            // #952: nothing model-backed judged the preserved text after all — fall back to the
-            // deletion candidate so the returned verdict is never unjudged content shown verbatim.
-            if attemptingFidelity, !modelTierRan { clean = deleteCandidate }
-            let passed = GuardOutcome.passed(clean: clean)
+            // #952 rev 3: `clean` here is the judged (stripped, possibly tier-2-redacted) text —
+            // never swapped. When a model-backed tier actually judged it, carry the per-line
+            // original to the display; otherwise (nothing judged it) show `clean` exactly as
+            // production does.
+            let shown = attemptingFidelity && modelTierRan
+                ? carriedDisplay(clean: clean, preserveCandidate: preserveCandidate!)
+                : clean
+            let passed = GuardOutcome.passed(clean: shown)
             cache?.set(key, passed, unjudged: unjudged)
             return Verdict(outcome: passed, cacheable: true, unjudged: unjudged, tier2: tier2.logName)
         }
@@ -682,10 +681,13 @@ public struct InjectionGuard {
             // `provisioning` (computed once above) is now part of the cache key: the moment the
             // model file appears on disk, the key changes and the stale skip can never be served.
             if attemptingFidelity, tier3 != .skipped { modelTierRan = true }
-            // #952: as at the tier-2 return above — nothing model-backed ultimately judged the
-            // preserved text (tier 2 skipped, and now tier 3 skipped too), so it must not be shown.
-            if attemptingFidelity, !modelTierRan { clean = deleteCandidate }
-            let passed = GuardOutcome.passed(clean: clean)
+            // #952 rev 3: as at the tier-2 return above — carry only when a model-backed tier
+            // actually judged `clean` (tier 2 skipped, and now tier 3 skipped too means nothing
+            // did); otherwise show `clean` exactly as production does.
+            let shown = attemptingFidelity && modelTierRan
+                ? carriedDisplay(clean: clean, preserveCandidate: preserveCandidate!)
+                : clean
+            let passed = GuardOutcome.passed(clean: shown)
             cache?.set(key, passed, unjudged: unjudged)
             return Verdict(outcome: passed, cacheable: true, unjudged: unjudged, tier2: tier2.logName)
         }
@@ -726,6 +728,90 @@ public struct InjectionGuard {
     private static func escapeWrapperBreakout(_ text: String) -> String {
         let range = NSRange(text.startIndex..., in: text)
         return wrapperBreakoutEscape.stringByReplacingMatches(in: text, range: range, withTemplate: "[escaped_tag]")
+    }
+
+    /// #952 rev 3 (spec §1, the per-line alignment invariant): the DISPLAY a fidelity read shows,
+    /// once a model-backed tier has judged `clean` and passed it — never a judging input. `clean`
+    /// is the judged text (stripped, possibly already tier-2-redacted); `preserveCandidate` is the
+    /// normalized-but-unstripped original the same raw input produced. Carries a line's original
+    /// only when that line, by itself, strips+escapes to exactly `clean`'s line at the same index —
+    /// i.e. the only difference the strip made on that line was whole marker tokens, so showing the
+    /// original back is safe. Any other line (a tier-2 `.partial` redaction, a real content
+    /// difference, a line count mismatch) is shown exactly as judged: fail-safe by construction,
+    /// with no special-casing for *why* it differs.
+    ///
+    /// Reproduces `clean`'s own derivation deliberately with `PromptInjectionGuard.malRolePatterns`
+    /// (the full strip the untrusted-channel pre-strip, `stripRecordingDelimiters`, already ran on
+    /// the whole text before `classifyDetailed` ever saw it) rather than `executeTier1`'s own local
+    /// 5-pattern list: by the time `executeTier1` runs a second, redundant pass inside
+    /// `classifyDetailed`, that pre-strip has already removed `model:`/chat-tokens/`Instruction:`/
+    /// `System Prompt:` from `clean`, so a check built only from `executeTier1`'s 5 patterns could
+    /// never match a line carrying any of those — losing exactly the markers the spec's marker ×
+    /// path table requires shown (`model: gpt-x`, the motivating case). Matching `clean`'s real
+    /// derivation, patterns and `escapeWrapperBreakout` both, is what makes the invariant hold for
+    /// every marker the table lists, not only the five `executeTier1` happens to repeat.
+    ///
+    /// Line counts between `clean` and `preserveCandidate` are NOT always equal: a tier-2
+    /// `.partial` outcome's withheld-range marker (`Judgement.redacting`) replaces a whole flagged
+    /// *span* — the flagged line plus one line of context either side (#723 review) — with one
+    /// marker line, collapsing the original's line count at that point. A plain index-for-index
+    /// zip would misalign every line after the first redaction in the text, including lines the
+    /// redaction never touched. Walking both line lists with two cursors and resynchronizing the
+    /// original's cursor past whatever a mismatched judged line consumed keeps every later,
+    /// unaffected line aligned and eligible to carry — the resync bound is "the rest of `clean`",
+    /// never a parse of the marker's own text (#728's caution against reparsing a marker applies
+    /// to treating file content that merely quotes one as real; this never reads the marker's
+    /// text at all, only compares surrounding lines).
+    private static func carriedDisplay(clean: String, preserveCandidate: String) -> String {
+        let cleanLines = clean.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let originalLines = preserveCandidate.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+
+        func singleLineJudgedForm(_ line: String) -> String {
+            let stripped = PromptInjectionGuard.stripRecording(line, patterns: PromptInjectionGuard.malRolePatterns).text
+            return escapeWrapperBreakout(stripped)
+        }
+        // Chat-template tokens have no fidelity case, ever (spec: "always, even in the fidelity
+        // channel") — real control tokens for local models, stripped even on a carried line.
+        func chatTokensStripped(_ line: String) -> String {
+            line.replacingOccurrences(of: "<|im_start|>", with: "", options: [.caseInsensitive])
+                .replacingOccurrences(of: "<|im_end|>", with: "", options: [.caseInsensitive])
+        }
+
+        var carried: [String] = []
+        var ci = 0
+        var oi = 0
+        while ci < cleanLines.count {
+            let cleanLine = cleanLines[ci]
+            if oi < originalLines.count, singleLineJudgedForm(originalLines[oi]) == cleanLine {
+                carried.append(chatTokensStripped(originalLines[oi]))
+                ci += 1
+                oi += 1
+                continue
+            }
+            // Misaligned at this cursor — fail safe: show exactly the judged line. Most commonly
+            // a redaction's marker line, which consumed one or more original lines; try to
+            // resynchronize `oi` to wherever a later original line matches the NEXT clean line
+            // again, so unaffected lines after it keep carrying. No match found means the rest of
+            // `clean` is shown as judged too — still safe, never shows anything past what was
+            // judged.
+            carried.append(cleanLine)
+            ci += 1
+            guard ci < cleanLines.count else { break }
+            let nextCleanLine = cleanLines[ci]
+            let searchFrom = oi + 1
+            if searchFrom < originalLines.count,
+               let resync = (searchFrom..<originalLines.count).first(where: { singleLineJudgedForm(originalLines[$0]) == nextCleanLine }) {
+                oi = resync
+            } else {
+                carried.append(contentsOf: cleanLines[ci...])
+                break
+            }
+        }
+        // The wrapper-breakout escape runs on the WHOLE assembled text, once, as the last step —
+        // never per-line — so a carried line's own breakout attempt is still neutralized (#952
+        // Task 3 widens this escape further; this call must exist before Task 3 lands so the
+        // carried text is never returned un-escaped even for one commit).
+        return escapeWrapperBreakout(carried.joined(separator: "\n"))
     }
 
     /// The opening wrapper tag, carrying optional provenance as a `source` attribute.
