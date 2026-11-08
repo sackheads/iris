@@ -109,4 +109,26 @@ struct InboxUIModelTests {
         let item = sampleItem(routeBack: [], emitterLabel: "dev-2")
         #expect(InboxUIModel.answerRouteTargets(item) == ["dev-2"])
     }
+
+    @Test("the mailbox list is open items, then awaiting-delivery ones, never dropped (#920 review finding 3)")
+    func mailboxItemsIncludesAwaitingDelivery() {
+        let open = [sampleItem(id: "a")]
+        let awaiting = [sampleItem(id: "b", state: .awaitingDelivery)]
+        #expect(InboxUIModel.mailboxItems(open: open, awaitingDelivery: awaiting).map(\.id) == ["a", "b"])
+    }
+
+    @Test("submitInboxAnswer bumps inboxRevision so the badge/list are not left stale (#920 review finding 2)")
+    func submitInboxAnswerBumpsRevision() async throws {
+        let (app, _) = app()
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: FakeLLMClient(responses: []),
+                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
+        let item = sampleItem(id: "a")
+        guard case .success(let created) = try app.store.inbox.createItem(item, question: "q") else {
+            Issue.record("createItem failed"); return
+        }
+        let before = app.inboxRevision
+        _ = await engine.submitInboxAnswer(itemId: created.id, choice: nil, freeText: "go ahead",
+                                           deliver: { _, _, _ in .refused("test") })
+        #expect(app.inboxRevision > before)
+    }
 }

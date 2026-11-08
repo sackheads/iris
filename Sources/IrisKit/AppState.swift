@@ -530,10 +530,21 @@ class AppState {
     var inboxSelected = false
     /// The inbox item open in the mailbox detail pane, or nil for the list alone.
     var selectedInboxItemId: String?
-    /// The open-item count the sidebar badge shows. Read live from the store rather than cached:
-    /// an inbox item is written by `emitToInbox`/`submitInboxAnswer`/Task 4's expiry sweep, none of
-    /// which routes through `AppState`, so there is no single write path to invalidate a cache from.
-    var inboxBadgeCount: Int { (try? store.inbox.openItems().count) ?? 0 }
+    /// Bumped by every inbox write (`emitToInbox`, `submitInboxAnswer`, `redeliverAwaitingInbox`,
+    /// the mailbox's own Dismiss, and Task 4's expiry sweep once it lands) so `@Observable` has
+    /// something to track: `inboxBadgeCount`/the mailbox's item list read straight from SQLite,
+    /// which carries no observation of its own, so a write from any of those paths — none of which
+    /// otherwise touches `AppState` — left the badge and list stale until an unrelated re-render
+    /// happened to re-run them (dev-3's #943 review finding 2). The value itself is never read for
+    /// anything; reading it is what registers the dependency.
+    private(set) var inboxRevision = 0
+    func bumpInboxRevision() { inboxRevision += 1 }
+    /// The open-item count the sidebar badge shows. Read live from the store, with `inboxRevision`
+    /// read too so a write elsewhere invalidates this.
+    var inboxBadgeCount: Int {
+        _ = inboxRevision
+        return (try? store.inbox.openItems().count) ?? 0
+    }
     /// Selects the mailbox instead of a conversation (#920 Task 5): clears the conversation
     /// selection without touching any conversation (no `clearUnread`/`touch` — selecting the inbox
     /// is not "looking at" any conversation).

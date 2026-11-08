@@ -11,8 +11,14 @@ struct InboxView: View {
     @State private var lastOutcome: String?
     @State private var submitting = false
 
+    /// Open items, needing attention, then awaiting-delivery ones (answered, but with no live
+    /// recipient yet) so an answered item does not simply vanish once Brian has acted on it
+    /// (dev-3's #943 review finding 3). `inboxRevision` is read so a write anywhere else (an
+    /// emit, a submit, a redeliver) invalidates this rather than leaving it stale (finding 2).
     private var items: [InboxItem] {
-        (try? state.store.inbox.openItems()) ?? []
+        _ = state.inboxRevision
+        return InboxUIModel.mailboxItems(open: (try? state.store.inbox.openItems()) ?? [],
+                                         awaitingDelivery: (try? state.store.inbox.awaitingDeliveryItems()) ?? [])
     }
 
     private var selected: InboxItem? {
@@ -77,12 +83,22 @@ struct InboxView: View {
 
     private func stateChip(for item: InboxItem) -> some View {
         let overdue = InboxUIModel.isOverdue(item, now: Date())
-        return Text(overdue ? "Overdue" : item.state.rawValue.capitalized)
+        return Text(overdue ? "Overdue" : stateLabel(item.state))
             .font(.caption2.weight(.semibold))
             .padding(.horizontal, 6)
             .padding(.vertical, 1)
             .background(Capsule().fill(overdue ? Color.red.opacity(0.8) : Color.secondary.opacity(0.25)))
             .foregroundColor(overdue ? .white : .secondary)
+    }
+
+    private func stateLabel(_ state: InboxItemState) -> String {
+        switch state {
+        case .open: return "Open"
+        case .answered: return "Answered"
+        case .awaitingDelivery: return "Awaiting delivery"
+        case .closed: return "Closed"
+        case .stale: return "Stale"
+        }
     }
 
     // MARK: Detail
@@ -102,18 +118,26 @@ struct InboxView: View {
 
                 Text(item.situation).font(.body)
 
-                switch item.responseMode.inboxAffordance {
-                case .optionsAndFreeform:
-                    optionsSection(item)
-                    freeTextSection(item, required: false)
-                case .freeformOnly:
-                    freeTextSection(item, required: true)
-                case .timedVetoCountdown:
-                    countdownSection(item)
-                    optionsSection(item)
-                    freeTextSection(item, required: false)
-                case .dismissOnly:
-                    EmptyView()
+                // #943 review finding 3: awaitingDeliveryItems() surfaces an item Brian already
+                // answered (no live recipient yet) so it doesn't vanish — but it is read-only
+                // here: re-offering the response area would invite submitting a second answer,
+                // which `submitInboxAnswer` would only refuse (`.notAnswerable`), confusingly.
+                if item.state == .open {
+                    switch item.responseMode.inboxAffordance {
+                    case .optionsAndFreeform:
+                        optionsSection(item)
+                        freeTextSection(item, required: false)
+                    case .freeformOnly:
+                        freeTextSection(item, required: true)
+                    case .timedVetoCountdown:
+                        countdownSection(item)
+                        optionsSection(item)
+                        freeTextSection(item, required: false)
+                    case .dismissOnly:
+                        EmptyView()
+                    }
+                } else if let answer = item.answer {
+                    answeredSummary(answer, item: item)
                 }
 
                 if let lastOutcome {
@@ -125,6 +149,18 @@ struct InboxView: View {
             .padding()
         }
         .id(item.id)
+    }
+
+    /// A read-only summary of Brian's own answer, for an item no longer `.open` (finding 3).
+    private func answeredSummary(_ answer: InboxAnswer, item: InboxItem) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let chosen = answer.chosenOptionId, let option = item.options.first(where: { $0.id == chosen }) {
+                Text("You chose: \(option.label)").font(.body)
+            }
+            if let text = answer.freeText {
+                Text("You wrote: \(text)").font(.body)
+            }
+        }
     }
 
     private func optionsSection(_ item: InboxItem) -> some View {
@@ -168,12 +204,18 @@ struct InboxView: View {
     /// deciding, not after. `routeBack` is the *emitter's* own text (#920 spec), and
     /// `submitInboxAnswer` routes Brian's answer, under his user authority, to exactly those
     /// targets: an emitter can name any session, so this is informed consent, not a courtesy
-    /// (planner, #920 Task 5 security requirement; dev-3's #936 review of the hazard). Falls back
-    /// to the emitter itself, matching `submitInboxAnswer`'s own fallback when `routeBack` is empty.
+    /// (planner, #920 Task 5 security requirement; dev-3's #936 review of the hazard). With an
+    /// empty `routeBack`, `answerRouteTargets` falls back to the emitter's own *label* — a
+    /// self-chosen card name an emitter could spell like a role (`"role:planner"`), which would
+    /// read as "resolved via that role" if shown bare. Worded as "the session that raised it" so
+    /// it reads as the one fixed session it actually is (dev-3's #943 review finding 1), never a
+    /// role lookup.
     private func routingDisclosure(_ item: InboxItem) -> some View {
-        let targets = InboxUIModel.answerRouteTargets(item)
+        let description = item.routeBack.isEmpty
+            ? "the session that raised it (\(item.emitterLabel))"
+            : InboxUIModel.answerRouteTargets(item).joined(separator: ", ")
         return VStack(alignment: .leading, spacing: 2) {
-            Label("Your answer, with your authority, goes to: \(targets.joined(separator: ", "))",
+            Label("Your answer, with your authority, goes to: \(description)",
                   systemImage: "arrow.turn.up.right")
                 .font(.caption.weight(.semibold))
             if !item.notify.isEmpty {
@@ -237,6 +279,7 @@ struct InboxView: View {
             await MainActor.run {
                 submitting = false
                 state.selectedInboxItemId = nil
+                state.bumpInboxRevision()
             }
         }
     }
