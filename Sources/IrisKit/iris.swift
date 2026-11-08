@@ -1526,6 +1526,18 @@ actor IrisEngine {
         return own.isEmpty ? [item.emitter.uuidString] : own
     }
 
+    /// The targets Brian's answer will go to, for showing him before he submits (#943): exactly
+    /// what `submitInboxAnswer` uses, as the role names and the emitter's id, never a label the
+    /// emitter chose. One resolver, so the disclosure cannot drift from the routing.
+    nonisolated static func inboxHumanRouteTargets(item: InboxItem) -> [String] {
+        inboxRouteTargets(item: item, answer: InboxAnswer(chosenOptionId: nil, freeText: nil, at: Date()))
+    }
+
+    /// The `notify` targets an answer will tell (same rule as `inboxHumanRouteTargets`).
+    nonisolated static func inboxNotifyTargets(item: InboxItem) -> [String] {
+        item.notify.filter { isAllowedInboxRoute($0, emitter: item.emitter) }
+    }
+
     /// Timed vetoes whose deadline has passed (#920 Task 4). The stored wall-clock `deadline`
     /// decides, so a veto that came due while the Mac slept or Iris was not running fires at the
     /// next evaluation (launch, a tick, a wake), once: `submitAnswer` refuses an item that is no
@@ -1555,7 +1567,7 @@ actor IrisEngine {
     private func notifyInboxAnswer(item: InboxItem, answer: InboxAnswer, deliver: InboxDeliver) async {
         let localState = state
         let body = Self.inboxNotifyFrame(item: item, answer: answer, echoedTitle: await echoedInboxText(item.title))
-        for target in item.notify where Self.isAllowedInboxRoute(target, emitter: item.emitter) {
+        for target in Self.inboxNotifyTargets(item: item) {
             let id: UUID? = await MainActor.run {
                 Self.resolveInboxTarget(target, ownerChain: item.ownerChain, in: localState?.conversations ?? [])
             }
