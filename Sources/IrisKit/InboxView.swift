@@ -201,30 +201,45 @@ struct InboxView: View {
     }
 
     /// Where Submit sends Brian's answer, shown immediately above the button — at the moment of
-    /// deciding, not after. `routeBack` is the *emitter's* own text (#920 spec), and
-    /// `submitInboxAnswer` routes Brian's answer, under his user authority, to exactly those
-    /// targets: an emitter can name any session, so this is informed consent, not a courtesy
-    /// (planner, #920 Task 5 security requirement; dev-3's #936 review of the hazard). With an
-    /// empty `routeBack`, `answerRouteTargets` falls back to the emitter's own *label* — a
-    /// self-chosen card name an emitter could spell like a role (`"role:planner"`), which would
-    /// read as "resolved via that role" if shown bare. Worded as "the session that raised it" so
-    /// it reads as the one fixed session it actually is (dev-3's #943 review finding 1), never a
-    /// role lookup.
+    /// deciding, not after. `routeBack` is the *emitter's* own text (#920 spec), and an emitter
+    /// could aim Brian's decision at an arbitrary session, so this is informed consent, not a
+    /// courtesy (planner, #920 Task 5 security requirement; dev-3's #936 review of the hazard).
+    /// Reads `IrisEngine.inboxHumanRouteTargets`/`inboxNotifyTargets` — the single authoritative
+    /// resolvers `submitInboxAnswer` itself uses (#944) — rather than re-deriving the rule here,
+    /// so the disclosure cannot drift from the real routing or show a label the emitter chose
+    /// (dev-3's #943 review finding 1).
     private func routingDisclosure(_ item: InboxItem) -> some View {
-        let description = item.routeBack.isEmpty
-            ? "the session that raised it (\(item.emitterLabel))"
-            : InboxUIModel.answerRouteTargets(item).joined(separator: ", ")
+        let targets = IrisEngine.inboxHumanRouteTargets(item: item).map { routeDescription($0, item: item) }
+        let notify = IrisEngine.inboxNotifyTargets(item: item).map { routeDescription($0, item: item) }
         return VStack(alignment: .leading, spacing: 2) {
-            Label("Your answer, with your authority, goes to: \(description)",
+            Label("Your answer, with your authority, goes to: \(targets.joined(separator: ", "))",
                   systemImage: "arrow.turn.up.right")
                 .font(.caption.weight(.semibold))
-            if !item.notify.isEmpty {
-                Text("Also notifying: \(item.notify.joined(separator: ", "))")
+            if !notify.isEmpty {
+                Text("Also notifying: \(notify.joined(separator: ", "))")
                     .font(.caption2).foregroundColor(.secondary)
             }
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.08)))
+    }
+
+    /// A resolved target (the emitter's own id, or `role:<name>`) worded for display: the
+    /// session's own label for the emitter case — never a card name the emitter chose, worded as
+    /// "the session that raised it" so it reads as the one fixed session it is — and, for a
+    /// role, the role name plus its current holder's label when one exists.
+    private func routeDescription(_ target: String, item: InboxItem) -> String {
+        let raw = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        if raw.caseInsensitiveCompare(item.emitter.uuidString) == .orderedSame {
+            return "the session that raised it (\(item.emitterLabel))"
+        }
+        guard raw.lowercased().hasPrefix("role:") else { return raw }
+        let role = String(raw.dropFirst(5))
+        if let holderId = SessionRoles.holder(of: role, in: state.conversations),
+           let label = state.conversations.first(where: { $0.id == holderId })?.sessionCard?.name {
+            return "whoever holds the \(role) role (currently \(label))"
+        }
+        return "whoever holds the \(role) role"
     }
 
     private func countdownSection(_ item: InboxItem) -> some View {

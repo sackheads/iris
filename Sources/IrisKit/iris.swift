@@ -1468,6 +1468,7 @@ actor IrisEngine {
     /// wins), then deliver and keep what did not arrive pending.
     private func recordAndDeliverInboxAnswer(item: InboxItem, answer: InboxAnswer, store: ConversationStore,
                                              deliver: InboxDeliver) async -> InboxSubmitOutcome {
+        let localState0 = state
         let itemId = item.id
         let targets = Self.inboxRouteTargets(item: item, answer: answer)
         do {
