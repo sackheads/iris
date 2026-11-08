@@ -247,8 +247,12 @@ struct ModelCatalogTests {
         }
         defer { remove() }
         let catalog = ModelCatalog(provider: .gemini, apiKey: "k", baseURL: "", session: session)
+        // The task spins until the cancel lands, so `listModels` always starts already cancelled and
+        // its first `checkCancellation` is what ends it. Cancelling right after `Task {}` raced the
+        // task's start: when it ran first, URLSession reported `-999` before the next check (#947).
         let task = Task {
-            try await catalog.listModels()
+            while !Task.isCancelled { await Task.yield() }
+            return try await catalog.listModels()
         }
         task.cancel()
         do {
