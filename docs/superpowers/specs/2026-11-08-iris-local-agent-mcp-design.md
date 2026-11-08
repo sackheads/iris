@@ -1,193 +1,184 @@
 ---
 type: design
-title: Iris MCP service — local agent interface (A2A-over-MCP)
-status: draft (for builder-check, then owner review)
+title: Iris MCP service + agent confinement (A2A-over-MCP, co-designed with #961/#966/#967)
+status: draft (rev 4 — folds Iris's four reviews)
 timestamp: 2026-11-08
+component_issues: ["964", "961", "966", "967", "965"]
 ---
 
-# Iris MCP service: exposing Iris to other agents (A2A-over-MCP)
+# Iris MCP service + agent confinement
 
-## Intent and why
+**Iris is a product that exposes services to other agents** (the Safari/Chrome-MCP, kube-agents
+category). This design makes Iris a first-class, opt-in **MCP service**, and — because the first
+real consumers are *untrusted, credentialed, public-posting* agents — it co-designs the
+**confinement model** that makes that safe. Iris's own reviews (#964/#966/#961 review docs on
+this branch, and #967) reshaped it: the four reviews found two blocker-class holes and corrected
+reuse claims that didn't survive the code. This rev folds them.
 
-**Iris is a product that can expose services to other agents** — the same category as Safari
-MCP, Chrome MCP, and kube-agents. This feature makes Iris a first-class, opt-in MCP service: a
-running Iris instance exposes its agent-messaging fabric (and, over time, more of its
-capabilities) to external agents over MCP. It is a real feature, not a debug hack.
+## The arc, at a glance
 
-The first and motivating consumer is the **Iris↔planner feedback loop**: a running Iris instance
-(the owner's real, daily-driver app) surfaces grounded observations from live use, and a Claude
-Code "planner" session triages them — verifies against the code, files issues, routes work to the
-dev team, brings decisions back to the owner. Today the **owner is the manual relay**, copying
-Iris's observations into the planner and the planner's questions back. That cut-and-paste
-middleman step is the bottleneck.
+One coupled design across the component issues:
 
-The owner's standing goal (the year's theme — culminating in the Overseer) is to get himself
-**out of the critical path without giving up oversight**: summaries, updates, approvals, a say in
-decisions — just not being the socket. So Iris and its consumers transact directly, while the
-owner stays the approver via mechanisms that already exist (the Overseer's summaries, approval
-gates on consequential actions).
+- **#964 — the MCP service** (this doc's spine): a loopback Streamable-HTTP MCP server, off by
+  default, that external agents connect to. The transport/entry.
+- **#961 — profile editor**: the UI for agent profiles, which become the confinement unit.
+- **#966 — credential registry + per-profile access**: typed credentials bound to profiles,
+  *enforced*.
+- **#967 — per-profile memory scoping**: the confidentiality half of profile confinement.
+- **#965 — Iris reviews as herself**: the first use case, which needs all of the above.
 
-**Why every consumer connects to Iris directly (not through the planner):** routing all agent
-traffic through one session to reach Iris would pollute that session's context with traffic it
-has no reason to hold — e.g. the planner should not accumulate dev-agent↔Iris chatter. Iris is
-the hub; each agent opens its own connection and keeps its own context clean. This is the
-architectural reason the server is multi-client, not a planner-only channel.
+The through-line: **a guest connects (per-token) → routes to an owner-created, role-holding,
+profiled session → whose credentials pin it to the sandbox and whose memory is scoped → and
+whose consequential actions are taint-gated and reach the owner for approval.**
 
-## Direction (decided)
+## Direction — the MCP service
 
-**Iris exposes a loopback MCP server that fronts its own local agent↔agent fabric; external MCP
-clients connect and appear to Iris as guest peers.** It is an ordinary multi-client MCP server
-(owner decision: don't assume a single client), off by default, enabled by an **opt-in feature
-setting** (a real feature, not a debug flag).
+- **Transport: Streamable HTTP** (SDK `StatefulHTTPServerTransport`) over an **HTTP-server
+  library** (Hummingbird/SwiftNIO — not hand-rolled), token-gated, bound to `127.0.0.1:<port>/mcp`.
+  Verified against Claude Code's MCP client: a URL server with a static `Authorization: Bearer`
+  header, no OAuth; the deprecated separate-SSE endpoint is not built. Caveats: 5-min idle timeout
+  (the poll-mailbox request/response model sidesteps it); a 401 reads as a connection failure.
+  Loopback only this increment; network exposure is #931's remote story, separately gated.
+- **Tool surface (A2A-over-MCP)**, inspired by gke-labs/kube-agents `a2a/mcpbridge` (Apache-2.0):
+  `send` (to a session/role), `poll` (a per-recipient pull mailbox), `discover`/`status`.
+- **Off by default, opt-in feature setting** in the config pane (shared with #931's a2a config) —
+  a real feature, not a debug flag. Binding the port is the only thing the toggle does; default
+  attack surface unchanged.
+- **Co-designed with #931**: one shared A2A envelope/adapter across the local-MCP and
+  remote-gateway transports.
 
-- **Transport: Streamable HTTP** (the SDK's `StatefulHTTPServerTransport`) over an **HTTP-server
-  library** (owner decision — Hummingbird, on SwiftNIO, is the likely pick; final choice is the
-  plan's, but hand-rolling the server is ruled out), token-gated, bound to
-  `127.0.0.1:<port>/mcp`. Verified: Claude Code consumes a URL-based Streamable-HTTP server with a
-  static `Authorization: Bearer` header — **no OAuth** (`claude mcp add --transport http … --header`,
-  token via `${ENV_VAR}`). The deprecated *separate*-SSE endpoint is **not** built — Claude Code
-  won't use it; Streamable HTTP carries server→client streaming on its own one endpoint. Loopback
-  only; the SDK transport already does localhost-origin validation. Caveats to design around: a
-  5-minute MCP idle timeout (`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`) — the poll-mailbox model
-  (request/response) sidesteps long-lived-stream idling; a 401 surfaces as a connection failure,
-  not an auth prompt; don't name the bridge-token env var one of Claude Code's reserved names
-  (`ANTHROPIC_API_KEY` etc., which expand empty).
-- **Tool surface (A2A-over-MCP), inspired by gke-labs/kube-agents `a2a/mcpbridge` (Apache-2.0,
-  inspiration not a port):** a small toolset fronting A2A semantics — `send` (to a session/role),
-  `poll` (a pull mailbox for "messages to me since X"), `discover`/`status` (who is addressable),
-  and a session-identity/alias tool.
-- **Connecting clients are guest peers (multi-client by default — owner decision):** the server is
-  an ordinary MCP server and does not assume a single client. Each authorized client gets a
-  synthetic session identity/card in `SessionDirectory`, with **no harness-observed liveness** (a
-  non-Iris process has no turn engine, so Iris cannot verify it the way it verifies its own
-  sessions). That is correct — a guest peer is intrinsically low-trust. Any number connect (the
-  planner, a reviewer loop, a dev session, antigravity); none is special-cased.
-- **Off by default, enabled by an opt-in feature setting in the configuration pane** (the same pane
-  #931's a2a config lives in) — a real, documented feature, not a hidden debug flag. It only binds
-  the port when enabled, so **the default attack surface is unchanged**. Loopback-only for this
-  increment; exposing the service beyond the local machine is a separate, later, separately-gated
-  step (and overlaps #931's remote story), not part of turning the feature on.
+## Guest identity, routing, and lifecycle (revised per the #964 review)
 
-### One agent-interface, co-designed with #931 (owner decision)
-Iris's local session fabric is already A2A-shaped (its `AgentCard`s). This local
-**A2A-over-MCP** channel and #931's remote **A2A-over-gateway** client are the same conceptual
-model over two transports/trust-models. **Owner decision: don't build two a2a adapters.** #931
-unparks far enough to co-design one shared A2A envelope + adapter layer now, so the remote
-transport isn't retrofitted onto an incompatible local one later. **Implementation of this
-channel sequences *after* the current inbox/guard work lands (owner decision)** — this is design
-now, build later.
+- **Per-token identity — not one shared token + self-naming.** The rev-1 "a bridge token +
+  `manage_identity` alias" let anything holding the token claim to be "planner" and read its
+  mailbox (review #1; violates our own anti-goal). **Each client gets its own token; the harness
+  binds identity and mailbox to the token** (as it assigns `session_id` today). Mailbox keyed by
+  token, not `Mcp-Session-Id`, so reconnects/idle-timeout churn don't lose messages (review #5).
+- **Guests route to role-holding sessions, never the pinned `iris` conversation.** Defaulting to
+  `iris` would permanently taint (#818) the session the owner uses most → approval fatigue
+  (review #2). Guests address `role:reviewer` / `role:feedback`; the pinned `iris` is forbidden as
+  a guest target in this increment.
+- **Owner-only session creation.** If a guest addresses an unheld role, it gets a distinct
+  "role unheld" signal (#955 F4 — now *required*, not polish) and Iris raises an **inbox item**
+  asking the owner to start the session from the menu. A guest **cannot** spawn a profiled
+  session — that would let a guest create one holding the `iris` credential, an escalation
+  (#964-routing review). Pre-authorized guest spawn is allowed *only* for profiles with **no
+  credential grants** (`spawnable_by_guests: true` in the protected profile dir).
+- **Lifecycle:** a role-holding session already survives the idle sweep (`sweepIdleSessions`
+  never archives a role-holder), so no new keep-alive flag. But a guest has no liveness, so an
+  `expects_reply` to a departed guest stays open forever (review #6): give guests a **TTL /
+  last-poll expiry** that closes outstanding requests and notifies the sender (as #881 does for
+  archived sessions).
+- **Rate limit / stop condition:** a guest↔Iris turn exchange can ping-pong unattended (review #4;
+  the direct-send loop the topic restriction doesn't cover). Enforce a **per-guest rate/turn
+  budget + a harness stop condition** — not either model's judgment.
+- **Provenance (review #8):** forbid guest→guest in this increment, or have the harness stamp each
+  message's origin as Iris-native vs guest, so a dev guest can't hand the planner something
+  shaped like an Iris observation.
+- **Wake contract (review #3):** a Claude Code consumer only polls when it has a turn — specify
+  what drives the planner's poll (a `/loop`, with its cost/latency) vs. whether a connected client
+  is woken by the stream. Partly a client-side concern; the design must state the contract.
 
-## What this reuses (the owner's "don't bend over backwards" test)
+## The confinement model (co-designed with #961/#966/#967)
 
-- **MCP protocol: free.** The MCP Swift SDK Iris already vendors ships the whole server side —
-  `Server` actor, `tools/list`/`tools/call`, `StatefulHTTPServerTransport` + `OriginValidator.localhost()`.
-  Zero protocol code. (`MCPManager` itself is client-only and not reused; the SDK beneath it is.
-  Supply-chain note: the SDK is pinned to branch `main`, not a tagged release — pin a tag before shipping.)
-- **Inbound send path (planner→Iris) reuses existing plumbing:** the `send` tool targeting the
-  pinned `iris` conversation (or a named session/role) maps onto `AppState.decidePeerSend` →
-  `IrisEngine.deliverPeerMessage` → run-a-turn/queue, with `PeerLedger` correlation. This leg is
-  reuse. **(The *outbound* Iris→planner leg is NOT this path — see net-new, it's the mailbox.)**
-- **A2A-shaped cards:** `SessionDirectory` / `PeerLedger` (#185/#469).
-- **Trust model: reused, not rebuilt** (see below).
+**Corrected reuse reality (the #966/#961 reviews caught my error):** there is **no**
+KeychainManager access-list and **no** `Principal` grant/deny model to reuse — KeychainManager
+scopes by service name only; `Principal` is `{main, subagent, evaluator}`. Enforcement is
+**new** dispatcher-side code. Do not size this as "reuse existing."
 
-## What is net-new
+- **Credentials (#966).** A typed credential registry (GitHub today, extensible — `type + id`),
+  N accounts, each `{identity metadata + creds}`; for GitHub `{username, API token, git author
+  name/email}` (both the API actor and the git author switch). A **dispatcher-side credential
+  broker** checks the conversation's profile allowlist before handing out a credential.
+  - **BLOCKER — sandbox pin:** the broker only gates what Iris *hands out*; a host `run_command`
+    already has the owner's `gh auth token`, git credential helper, and ssh-agent. So **assigning
+    any credential to a profile pins its `run_command` to the sandbox VM** (no home mount, no
+    ssh-agent, HTTPS remotes) and **fails closed** if no runtime. Without this, confinement is
+    theater.
+  - **BLOCKER — fail-closed grants:** a credential allowlist *is* a grant, which breaks #465's
+    "a profile grants nothing." Credential grants must come only from a live, cleanly-parsed
+    profile file — **no snapshot-fallback** (which fails *open*: breaking the file to revoke
+    leaves the grant live). Keep the allowlist in the protected `config/agent-profiles/` dir.
+  - **Taint-gates use, not just access:** credentialed actions are outbound+consequential (class
+    of `gmail_send_email`). After #818 taint they need approval unless an explicit exemption
+    covers them — else #965 becomes "any guest posts as Iris."
+  - **GitHub-side scoping (second layer):** the `iris` account gets a fine-grained PAT, triage/
+    write without bypass, branch protection, minimum repos/scopes. Treat the token as one that
+    will eventually leak.
+  - **Token exposure / git identity:** redact registry secrets from tool output (reuse Iris's
+    output filter) and/or a per-call credential helper in the VM; set `GIT_AUTHOR_*`/
+    `GIT_COMMITTER_*` via per-command env, never `git config` writes (no #832 collision).
+- **Profiles & the editor (#961).** The editor is independently landable. For credentials:
+  validate with `AgentProfileStore.parse()` before save (refuse broken writes); field-level
+  rewrite preserving unknown keys + body; `contentHash` concurrent-edit check; atomic write. UI:
+  a **Tools/skills** section labelled *focus/narrowing* (AgentProfile.swift:219: "not security")
+  kept distinct from a **Credentials** section labelled an *enforced boundary*, shown only once
+  the broker ships. Before saving a credential grant, show its blast radius ("N open
+  conversations use this profile, M tainted").
+- **Memory (#967).** Profiles confine tools and (soon) credentials but **not memory** — a
+  confined credentialed reviewer reads the owner's full fact store/USER.md and could be asked to
+  post it publicly. #813 holds *writes* from tainted conversations (integrity) but nothing
+  protects *reads* (confidentiality). Investigate per-profile memory scoping (namespace, or a
+  `memory: none|shared-readonly|shared` frontmatter key with a fact-store scope filter). Also a
+  likely **current** gap, separable from profiles: `ContextHolds` gates `write_file` by path but
+  not `run_command`'s shell, so a tainted host `echo >> ~/.iris/memory/...` may be unheld —
+  verify and, if so, harden #813 independently.
+- **The #965 reviewer is a standing session, not a job.** Profiles never apply to the pinned
+  Iris, a subagent, or a job run (#611) — so "Iris reviews PRs" is a long-lived, owner-created
+  session holding `role:reviewer` with the `iris`-account profile; #964 guests route there.
 
-- A loopback **Streamable-HTTP** listener subsystem. **Correction to an earlier estimate:** the
-  `OAuthManager` precedent is a *single-shot* `NWListener` (one request, one `200`, close) — it is
-  precedent for *binding loopback*, not for a persistent HTTP server with POST-bodies, streaming
-  responses, and `Mcp-Session-Id`. This is the bulk of the work and its size depends on the
-  dependency decision below (**owner question**): hand-roll HTTP/1.1 over `NWConnection`, or take an
-  HTTP-server library (SwiftNIO/Hummingbird — the SDK transport is bring-your-own-framework). The
-  multi-client decision pushes toward a real library (concurrent clients over raw sockets is a lot
-  of fragile glue, against a zero-warnings bar), but it adds a dependency to a repo that keeps them
-  lean — so it's the owner's call.
-- A `MCP.Server` instance with Iris's own `tools/list` and handlers (~tens of lines).
-- **The outbound (Iris→planner) delivery path.** `deliverPeerMessage` only delivers into a real
-  Iris `Conversation` (runs a turn / queues a transcript); a guest peer has none, so this leg
-  cannot reuse it. Decision: `send_to_session` *may* address a guest (uniform agent UX), and the
-  divert happens upstream in `decidePeerSend` — a guest-target branch writes to the mailbox and
-  returns, so `deliverPeerMessage` (turn execution) is **left untouched**. The routing branch is
-  the only core-code change.
-- **A pollable agent mailbox** — the one genuinely new concept, and the sink for the branch above.
-  Iris's delivery today *pushes into a live turn* or queues to the **human** inbox; there is no
-  per-recipient "messages since X" pull surface (`PeerLedger` stores only `firstLine`, not bodies,
-  so it can't back this). Per-client mailbox on GRDB like `PeerLedger`. (kube-agents confirms the
-  shape: its bridge exposes a `poll_events` tool.)
-- A synthetic guest-peer identity/card per connected client.
-- The opt-in feature setting + a bridge token (Keychain / `${ENV_VAR}` on the client), in the config pane.
+## Reuse vs net-new (corrected)
 
-## Trust and security (the crux)
+- **Genuine reuse:** the MCP SDK server side (zero protocol code); the `decidePeerSend` upstream
+  divert for the outbound mailbox leg (leaves `deliverPeerMessage` untouched); the #818 taint
+  model; `sweepIdleSessions`' role-holder protection; the protected profile dir.
+- **Net-new (do not undersize):** the library-backed loopback HTTP server; the `MCP.Server` +
+  tools; the per-token guest mailbox; the **dispatcher-side credential broker**; **sandbox-pin
+  enforcement** for credentialed profiles; per-profile memory scoping; guest TTL + rate limits.
 
-The owner is dropping the *transport* role, not the *approval* role. The design must enforce that.
+## Trust & security (the layered model)
 
-- **Opt-in, loopback, token-gated.** Not bound by default; localhost-only; a bridge token the
-  external client must present. Off = today's surface.
-- **The planner-peer is an untrusted guest.** Its messages into Iris **taint** the receiving
-  conversation exactly as any peer message does (#818), and drive turns subject to Iris's existing
-  guards. It has no harness-verified liveness or authority and **cannot stand in for the owner's
-  approval** — consequential actions still gate on the owner's band. (This is the
-  permission-laundering boundary the team already enforces: a peer cannot grant escalation.)
-- **Symmetric untrust.** Iris's observations may contain content Iris read from untrusted sources.
-  When they reach the planner and the planner acts (files an issue, briefs a dev), the planner
-  treats them as untrusted and never auto-executes a consequential action without the owner — which
-  is how the planner already operates. The loop automates the *transport*, not the *judgment*.
+Opt-in, loopback, per-token. Guests are untrusted and taint. A guest cannot self-assert
+authority, spawn a credentialed session, or stand in for owner approval. **"Owner stays approver"
+holds only if gate prompts actually reach him** — so **inbox *delivery* (not just recording) is a
+hard prerequisite** (review #7; the inbox is currently write-only). Layers: taint-gate →
+sandbox-pin → fail-closed grants → GitHub-side scoping → memory scoping. Each is defence the
+others don't provide.
+
+## Sequencing & dependency graph (revised)
+
+Hard prerequisites for the credentialed/guest increment, beyond "inbox/guard lands":
+1. **Inbox approval *delivery*** (not just recording).
+2. **Role-addressable sessions** + #955 F4 (unheld-role signal).
+3. The **credential broker + sandbox-pin** enforcement.
+
+Build order: profile-editor base (#961, independent) and the plain MCP service (loopback, guests
+→ roles, no credentials) can land first; credentialed guests wait on 1–3. Memory scoping (#967)
+and the standalone #813 `run_command` hardening proceed in parallel as investigation/fix.
 
 ## Goals / non-goals / anti-goals
 
-**Goals**
-- Make Iris a first-class, opt-in **MCP service** that exposes its agent-messaging fabric (and,
-  later, more capabilities) to external agents — the Safari/Chrome-MCP / kube-agents category.
-- Its first consumer: direct planner↔Iris messaging that removes the owner's cut-and-paste step.
-- Every consumer connects to Iris directly, keeping each session's context clean (no hub session).
-- Reuse the existing peer fabric + MCP SDK; owner stays informed/approving via Overseer + gates.
-- Default attack surface unchanged (off until the feature setting is turned on).
-
-**Non-goals**
-- Remote / cross-machine agent messaging (that is #931's gateway client).
-- Replacing the human inbox or the owner's approvals.
-- Full A2A spec compliance — a pragmatic local subset of the concepts.
-- Running by default.
-
-**Anti-goals**
-- Any new trust machinery, or a channel where untrusted content drives consequential actions
-  without the owner.
-- An always-on listening port.
-- A guest peer that can self-assert authority/liveness or launder an escalation.
+**Goals:** Iris as an opt-in MCP service; direct multi-client agent↔Iris messaging (each client's
+context stays clean — no hub session); confined, credentialed, memory-scoped guest-facing
+sessions; owner informed/approving via Overseer + *delivered* gates; default surface unchanged.
+**Non-goals:** remote/cross-machine (#931); replacing the human inbox or owner approval; running
+by default; full A2A compliance.
+**Anti-goals:** a guest that self-asserts authority, spawns a credentialed session, launders an
+escalation, or reaches the owner's creds/memory/token; an always-on port; credential confinement
+that is UI-only (unenforced); a credentialed job or pinned-Iris reviewer.
 
 ## Owner decisions (2026-11-08)
+Co-design with #931; sequence after inbox/guard; multi-client agnostic; HTTP-server library;
+feature-not-debug; dedicated reviewer profile holding the `iris` GitHub creds (not the owner's),
+as a standing owner-created `role:reviewer` session.
 
-1. **Co-design with #931** — one A2A adapter/envelope shared across the local-MCP and
-   remote-gateway transports; #931 unparks to co-design the shared layer.
-2. **Sequencing** — build this *after* the current inbox/guard work lands. Design now, build later.
-3. **Multi-client agnostic** — a standard MCP server; no single-peer assumption; each connecting
-   client is its own guest peer.
-4. **HTTP-server dependency** — take a library (Hummingbird/SwiftNIO), don't hand-roll the server.
-5. **It's a feature, not debug** — frame and ship it as a first-class opt-in MCP service (peer to
-   Safari/Chrome MCP, kube-agents), not a hidden debug flag; every consumer connects to Iris
-   directly so no session's context is polluted by traffic it doesn't need.
+## Review provenance
+Rev 4 folds four Iris reviews (session A2A970FB): the #964 design review + routing comment, the
+#966 and #961 reviews (which corrected the KeychainManager/`Principal` reuse errors and found the
+sandbox-pin and fail-closed blockers), and #967 (memory scoping). Review docs are on this branch;
+the issue threads carry the per-finding triage.
 
-All open questions are resolved; client-compat (static bearer header, no OAuth; Streamable HTTP,
-no separate SSE) was verified against Claude Code's MCP docs. The design is ready for a
-builder-check pass, then it waits behind inbox/guard before planning.
-
-### Multi-peer use cases (asked by the owner)
-- The **planner** — the primary triage/routing loop.
-- A dedicated **reviewer loop** (the owner already runs a separate romar reviewer loop; an Iris
-  reviewer is the same pattern).
-- **Dev sessions** querying Iris directly — "repro this in the live app", "what does the mailbox
-  show now" — without going through the planner.
-- The **Overseer** pulling Iris status for the dashboard.
-- **antigravity / other Claude surfaces**, and later non-Claude agents.
-Multi-client agnosticism covers all of these without special-casing any; the guest-peer + taint
-model applies uniformly.
-
-## What is left to the builder
-
-- Exact tool schemas (`send`/`poll`/`discover`/`manage_identity`), the mailbox table + retention,
-  the synthetic card's representation in `SessionDirectory`, the config-pane toggle + token
-  storage, and the concrete shape of the shared A2A envelope/adapter layer co-designed with #931.
-  These are implementation choices for the plan. (Resolved above, not builder's choice: transport
-  is Streamable HTTP over an HTTP-server library; the envelope is shared with #931; multi-client;
-  the outbound leg is a `decidePeerSend` guest-branch to the mailbox.) No open owner questions
-  remain — the plan can size the listener against the chosen library once it's scheduled (behind
-  inbox/guard).
+## Left to the builder
+Exact tool/mailbox schemas; the credential-broker interface (`type + id`); the sandbox-pin
+mechanism in `resolve()`; memory-scoping mechanism (namespace vs read-filter — #967 investigates);
+the shared A2A envelope with #931. No open owner questions remain for the MCP service itself.
