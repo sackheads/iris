@@ -1201,6 +1201,7 @@ actor IrisEngine {
                 let result = try store.inbox.appendFollowup(threadId: threadId, fromChain: ownerChain, author: label, body: situation, at: now, tainted: tainted)
                 switch result {
                 case .success:
+                    await MainActor.run { localState?.bumpInboxRevision() }
                     return "Appended to thread \(threadId) and reopened it."
                 case .failure(.notOwner):
                     await MainActor.run { localState?.refundInboxEmit(from: conversationId) }
@@ -1477,6 +1478,7 @@ actor IrisEngine {
             case .failure: return .refused("Could not record the answer.")
             }
         } catch { return .refused("Could not record the answer.") }
+        await MainActor.run { localState0?.bumpInboxRevision() }
 
         guard let result = await deliverInboxAnswer(item: item, answer: answer, targets: targets, deliver: deliver) else {
             return .awaitingDelivery
@@ -1593,6 +1595,7 @@ actor IrisEngine {
                   let result = await deliverInboxAnswer(item: item, answer: answer, targets: item.pendingTargets, deliver: deliver)
             else { continue }
             _ = try? store.inbox.setPendingTargets(itemId: item.id, result.remaining)
+            await MainActor.run { localState0?.bumpInboxRevision() }
         }
     }
 

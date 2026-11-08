@@ -44,4 +44,12 @@ enum InboxUIModel {
     static func answerRouteTargets(_ item: InboxItem) -> [String] {
         item.routeBack.isEmpty ? [item.emitterLabel] : item.routeBack
     }
+
+    /// The mailbox list's contents: open items needing attention, then awaiting-delivery ones —
+    /// answered, but with no live recipient yet — so an answered item does not simply vanish once
+    /// Brian has acted on it (dev-3's #943 review finding 3). The two states are mutually
+    /// exclusive by construction (`InboxStore`'s queries), so there is nothing to de-duplicate.
+    static func mailboxItems(open: [InboxItem], awaitingDelivery: [InboxItem]) -> [InboxItem] {
+        open + awaitingDelivery
+    }
 }
