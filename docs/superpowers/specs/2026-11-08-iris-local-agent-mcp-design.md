@@ -114,7 +114,7 @@ now, build later.
   so it can't back this). Per-client mailbox on GRDB like `PeerLedger`. (kube-agents confirms the
   shape: its bridge exposes a `poll_events` tool.)
 - A synthetic guest-peer identity/card per connected client.
-- The debug toggle + a bridge token (Keychain / `${ENV_VAR}` on the client), in the config pane.
+- The opt-in feature setting + a bridge token (Keychain / `${ENV_VAR}` on the client), in the config pane.
 
 ## Trust and security (the crux)
 
@@ -159,9 +159,8 @@ The owner is dropping the *transport* role, not the *approval* role. The design 
 1. **Co-design with #931** — one A2A adapter/envelope shared across the local-MCP and
    remote-gateway transports; #931 unparks to co-design the shared layer.
 2. **Sequencing** — build this *after* the current inbox/guard work lands. Design now, build later.
-3 & 4. **Multi-client agnostic** — a standard MCP server; no single-peer assumption; each
-   connecting client is its own guest peer.
-
+3. **Multi-client agnostic** — a standard MCP server; no single-peer assumption; each connecting
+   client is its own guest peer.
 4. **HTTP-server dependency** — take a library (Hummingbird/SwiftNIO), don't hand-roll the server.
 5. **It's a feature, not debug** — frame and ship it as a first-class opt-in MCP service (peer to
    Safari/Chrome MCP, kube-agents), not a hidden debug flag; every consumer connects to Iris
@@ -188,6 +187,7 @@ model applies uniformly.
   the synthetic card's representation in `SessionDirectory`, the config-pane toggle + token
   storage, and the concrete shape of the shared A2A envelope/adapter layer co-designed with #931.
   These are implementation choices for the plan. (Resolved above, not builder's choice: transport
-  is Streamable HTTP; the envelope is shared with #931; multi-client; the outbound leg is a
-  `decidePeerSend` guest-branch to the mailbox.) The HTTP-server dependency question is the one
-  item still needing the owner before the plan can size the listener.
+  is Streamable HTTP over an HTTP-server library; the envelope is shared with #931; multi-client;
+  the outbound leg is a `decidePeerSend` guest-branch to the mailbox.) No open owner questions
+  remain — the plan can size the listener against the chosen library once it's scheduled (behind
+  inbox/guard).
