@@ -1,7 +1,7 @@
 ---
 type: design
 title: Iris MCP service + agent confinement (A2A-over-MCP, co-designed with #961/#966/#967)
-status: draft (rev 4 — folds Iris's four reviews)
+status: draft (rev 5 — folds Iris's five reviews incl. the rev-4 review)
 timestamp: 2026-11-08
 component_issues: ["964", "961", "966", "967", "965"]
 ---
@@ -72,9 +72,9 @@ whose consequential actions are taint-gated and reach the owner for approval.**
 - **Rate limit / stop condition:** a guest↔Iris turn exchange can ping-pong unattended (review #4;
   the direct-send loop the topic restriction doesn't cover). Enforce a **per-guest rate/turn
   budget + a harness stop condition** — not either model's judgment.
-- **Provenance (review #8):** forbid guest→guest in this increment, or have the harness stamp each
-  message's origin as Iris-native vs guest, so a dev guest can't hand the planner something
-  shaped like an Iris observation.
+- **Provenance (review #8):** **both** — forbid guest→guest in this increment **and** stamp every
+  message's origin as Iris-native vs guest (stamping is near-free and #931's remote story needs
+  it), so a dev guest can't hand the planner something shaped like an Iris observation.
 - **Wake contract (review #3):** a Claude Code consumer only polls when it has a turn — specify
   what drives the planner's poll (a `/loop`, with its cost/latency) vs. whether a connected client
   is woken by the stream. Partly a client-side concern; the design must state the contract.
@@ -114,7 +114,10 @@ scopes by service name only; `Principal` is `{main, subagent, evaluator}`. Enfor
   a **Tools/skills** section labelled *focus/narrowing* (AgentProfile.swift:219: "not security")
   kept distinct from a **Credentials** section labelled an *enforced boundary*, shown only once
   the broker ships. Before saving a credential grant, show its blast radius ("N open
-  conversations use this profile, M tainted").
+  conversations use this profile, M tainted"). The #965 reviewer profile ships with a **narrow
+  `tools:` list as defence-in-depth** (no `gmail_send_email`, calendar/tasks, `schedule_job`,
+  `update_soul`/`update_user_profile`/`update_memory`, `invoke_subagent`, …) — narrowing is
+  focus, not a boundary, but it's near-free; enforcement stays broker + sandbox-pin + taint.
 - **Memory (#967).** Profiles confine tools and (soon) credentials but **not memory** — a
   confined credentialed reviewer reads the owner's full fact store/USER.md and could be asked to
   post it publicly. #813 holds *writes* from tainted conversations (integrity) but nothing
@@ -152,9 +155,20 @@ Hard prerequisites for the credentialed/guest increment, beyond "inbox/guard lan
 2. **Role-addressable sessions** + #955 F4 (unheld-role signal).
 3. The **credential broker + sandbox-pin** enforcement.
 
-Build order: profile-editor base (#961, independent) and the plain MCP service (loopback, guests
-→ roles, no credentials) can land first; credentialed guests wait on 1–3. Memory scoping (#967)
-and the standalone #813 `run_command` hardening proceed in parallel as investigation/fix.
+**The plain increment is not credential-free of obligations (review of rev 4).** Several guest
+controls apply whether or not credentials are involved and must gate the *plain* MCP service, not
+just the credentialed one: **per-guest rate/turn budget + stop condition** (an uncredentialed
+guest can still loop a role session's tokens), **guest TTL / last-poll expiry** (else departed-
+guest `expects_reply` stays open forever), and **provenance stamping** (needed the moment there
+are two guests). Inbox *delivery* is also required for the plain increment — a guest taints the
+role session, so its gated actions need approval — **or** the plain increment ships with guest-
+driven sessions **refusing gated actions outright rather than asking into a void**.
+
+Build order: profile-editor base (#961, independent) lands first. The **plain MCP service**
+(loopback, guests → roles, no credentials) requires rate-limit+stop, TTL, provenance stamping,
+and either inbox delivery or fail-closed gating. **Credentialed** guests additionally wait on the
+broker + sandbox-pin + role-addressable sessions (prereqs 1–3 above). Memory scoping (#967) and
+the standalone #813 `run_command` hardening proceed in parallel as investigation/fix.
 
 ## Goals / non-goals / anti-goals
 
@@ -173,10 +187,17 @@ feature-not-debug; dedicated reviewer profile holding the `iris` GitHub creds (n
 as a standing owner-created `role:reviewer` session.
 
 ## Review provenance
-Rev 4 folds four Iris reviews (session A2A970FB): the #964 design review + routing comment, the
-#966 and #961 reviews (which corrected the KeychainManager/`Principal` reuse errors and found the
-sandbox-pin and fail-closed blockers), and #967 (memory scoping). Review docs are on this branch;
-the issue threads carry the per-finding triage.
+Folds five Iris reviews (session A2A970FB). Durable records (the review files are **not** all
+committed — publishing the #964 review file was declined by the sandbox classifier, so it lives
+untracked in the `iris-design-mcp` worktree and can be committed on request):
+- #964 design review: untracked worktree file `…-iris-local-agent-mcp-design-review.md`.
+- #966 review: issue #966 `issuecomment-6726664075` (+ planner response `-6726701535`).
+- #961 review: issue #961 `issuecomment-6726762078` (+ planner response `-6726821145`).
+- #967 (memory scoping): issue #967 (+ planner note `issuecomment-6726872414`).
+- #964 rev-4 review (this one): guest-safety-for-the-plain-increment, narrow reviewer tools,
+  both-provenance-options, and this provenance fix.
+The #966/#961 reviews corrected the KeychainManager/`Principal` reuse errors and found the
+sandbox-pin and fail-closed blockers.
 
 ## Left to the builder
 Exact tool/mailbox schemas; the credential-broker interface (`type + id`); the sandbox-pin
