@@ -70,7 +70,7 @@ else
   set -e
   if (( rc != 0 )); then
     echo "$out" >&2
-    echo "promote-local: build failed (exit $rc) — your running app was NOT touched and nothing was installed. If this is the SwiftSyntax/MLXHuggingFaceMacros macro-plugin error, see issue #945 (a known build-app.sh Xcode-build failure)." >&2
+    echo "promote-local: build failed (exit $rc) — your running app was NOT touched and nothing was installed. The full build log is above. Known Xcode-build failures: a corrupt xcframework artifact extraction (build-app.sh now self-heals this, #950) and the SwiftSyntax/MLXHuggingFaceMacros macro-plugin error on a fresh worktree (#945)." >&2
     exit 1
   fi
   built="${out##*$'\n'}"

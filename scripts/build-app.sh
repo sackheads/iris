@@ -47,6 +47,23 @@ verargs=()
 if [[ -n "${IRIS_MARKETING_VERSION:-}" ]]; then verargs+=("MARKETING_VERSION=$IRIS_MARKETING_VERSION"); fi
 if [[ -n "${IRIS_BUILD_VERSION:-}" ]]; then verargs+=("CURRENT_PROJECT_VERSION=$IRIS_BUILD_VERSION"); fi
 
+# Self-heal a corrupt binary-artifact extraction. Xcode sometimes extracts a downloaded
+# xcframework (Sparkle, llama, onnxruntime) without its root Info.plist — usually after a
+# Package.resolved bump re-extracts the artifacts — and then every build fails with
+# "There is no Info.plist found at .../X.xcframework/Info.plist" (#950). We build with
+# -disableAutomaticPackageResolution, so xcodebuild reuses the broken extraction instead of
+# redoing it. The source zips in the global SwiftPM cache are intact, so removing SourcePackages
+# makes the build re-resolve and re-extract them cleanly (an absent SourcePackages is still
+# populated from the pinned Package.resolved under that flag). Check for the missing Info.plist
+# and clear it before building.
+while IFS= read -r xcf; do
+  if [[ ! -f "$xcf/Info.plist" ]]; then
+    echo "build-app: $xcf has no Info.plist — a corrupt artifact extraction; clearing $derived/SourcePackages so it re-extracts from the global cache." >&2
+    rm -rf "$derived/SourcePackages"
+    break
+  fi
+done < <(find "$derived/SourcePackages/artifacts" -type d -name '*.xcframework' 2>/dev/null)
+
 build_or_die xcodebuild build -project Iris.xcodeproj -scheme Iris -configuration "$config" \
   -destination 'generic/platform=macOS' -derivedDataPath "$derived" \
   -skipPackagePluginValidation -skipMacroValidation -disableAutomaticPackageResolution \
