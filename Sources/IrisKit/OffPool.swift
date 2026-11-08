@@ -81,6 +81,11 @@ enum StagedFileWrite {
         var st = stat()
         let existingMode: mode_t? = lstat(path, &st) == 0 ? st.st_mode & 0o7777 : nil
         if existingMode != nil, (st.st_mode & S_IFMT) == S_IFDIR { throw error(EISDIR, path) }
+        // A write to a new nested path makes the directories it needs (#954); a write that does
+        // not commit takes back the empty ones it made.
+        let created = try makeMissingDirectories(directory, path: path)
+        var committed = false
+        defer { if !committed { for dir in created.reversed() { rmdir(dir) } } }
         let fd = open(staging, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o666)
         guard fd >= 0 else { throw error(errno, path) }
         var renamed = false
@@ -99,6 +104,30 @@ enum StagedFileWrite {
         guard shouldCommit() else { throw CancellationError() }
         guard rename(staging, path) == 0 else { throw error(errno, path) }
         renamed = true
+        committed = true
+    }
+
+    /// Creates each missing directory on the way to `directory` (`0o755` less the umask), outermost
+    /// first, and returns the ones it made. An existing component, even a link to a directory, is
+    /// used as it is, as `open` has always done here; a file in the way fails as ENOTDIR.
+    private static func makeMissingDirectories(_ directory: String, path: String) throws -> [String] {
+        var missing: [String] = []
+        var probe = directory
+        var st = stat()
+        while probe.count > 1, stat(probe, &st) != 0, errno == ENOENT {
+            missing.append(probe)
+            probe = (probe as NSString).deletingLastPathComponent
+        }
+        var made: [String] = []
+        for dir in missing.reversed() {
+            if mkdir(dir, 0o755) == 0 { made.append(dir) }
+            else if errno != EEXIST {
+                let code = errno
+                for m in made.reversed() { rmdir(m) }
+                throw error(code, path)
+            }
+        }
+        return made
     }
 
     /// Foundation's own file errors, so the tool's sentence reads as it did before.
