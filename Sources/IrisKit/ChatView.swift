@@ -99,7 +99,15 @@ struct ChatView: View {
                     let trimmedQuery = sidebarQuery.trimmingCharacters(in: .whitespacesAndNewlines)
                     if trimmedQuery.isEmpty {
                         Section(header: Text("Conversations").font(.caption.weight(.bold)).foregroundColor(.secondary).padding(.bottom, 4)) {
-                            ForEach(SidebarOrdering.visible(state.conversations)) { conv in
+                            let visible = SidebarOrdering.visible(state.conversations)
+                            ForEach(visible.filter(\.isPinned)) { conv in
+                                conversationRow(conv)
+                            }
+                            // #920 Task 5: not a `Conversation`, so it does not go through the
+                            // List's `selectedConversationId` binding — no `.tag`, a tap selects
+                            // the mailbox directly instead.
+                            inboxRow
+                            ForEach(visible.filter { !$0.isPinned }) { conv in
                                 conversationRow(conv)
                             }
                         }
@@ -236,7 +244,9 @@ struct ChatView: View {
             }
             .navigationTitle("Iris")
         } detail: {
-            if let activeConvIndex = state.activeConversationIndex {
+            if state.inboxSelected {
+                InboxView(state: state)
+            } else if let activeConvIndex = state.activeConversationIndex {
                 let conv = state.conversations[activeConvIndex]
                 VStack(spacing: 0) {
                     ScrollViewReader { proxy in
@@ -662,6 +672,35 @@ struct ChatView: View {
                 EmptyView()
             }
         }
+    }
+
+    /// The mailbox's sidebar row (#920 Task 5), directly under the pinned Iris row. Not a
+    /// `Conversation` and carries no `.tag`, so the List's `selection` binding never sees it; a tap
+    /// calls `selectInbox()` directly. Highlighted by hand from `inboxSelected` since the List's
+    /// own selection highlighting only applies to tagged rows.
+    private var inboxRow: some View {
+        HStack {
+            Image(systemName: "tray.full")
+                .foregroundColor(.secondary)
+            Text("Inbox")
+                .font(.subheadline)
+            Spacer()
+            if state.inboxBadgeCount > 0 {
+                Text("\(state.inboxBadgeCount)")
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.accentColor))
+                    .foregroundColor(.white)
+            }
+        }
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .listRowBackground(state.inboxSelected ? Color.accentColor.opacity(0.2) : Color.clear)
+        .onTapGesture { state.selectInbox() }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(state.inboxBadgeCount > 0 ? "Inbox, \(state.inboxBadgeCount) open" : "Inbox")
+        .accessibilityAddTraits(.isButton)
     }
 
     /// Shared row body for both the Conversations and Archived sections, so archiving a

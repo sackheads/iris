@@ -340,7 +340,10 @@ struct InboxAnswerNoForgeTests {
     @Test("only the answer paths call the inbox delivery, and only the UI-facing entry points call them")
     func onlyTheAnswerPathsDeliver() throws {
         #expect(try occurrences(of: "deliverInboxAnswerFrame(") == ["iris.swift": 2])
-        #expect(try occurrences(of: "submitInboxAnswer(") == ["iris.swift": 1])
+        // #920 Task 5: InboxView's Submit button is the one real UI-facing call site (the
+        // definition in iris.swift is the other occurrence). A third occurrence is a new caller
+        // and must be looked at, same as the count above.
+        #expect(try occurrences(of: "submitInboxAnswer(") == ["iris.swift": 1, "InboxView.swift": 1])
         #expect(try occurrences(of: "redeliverAwaitingInbox(") == ["iris.swift": 1, "AppState.swift": 1])
     }
 

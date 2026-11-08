@@ -516,10 +516,36 @@ class AppState {
         // Opening a conversation reads its reply (#592).
         didSet {
             guard let selectedConversationId else { return }
+            inboxSelected = false
             clearUnread(selectedConversationId)
             // #231: opening a conversation counts as looking at it.
             if selectedConversationId != oldValue { touch(selectedConversationId) }
         }
+    }
+    /// #920 Task 5: the sidebar's inbox row is selected instead of any conversation — it is not
+    /// one, so it must not go through `selectedConversationId` (that would try to load it as a
+    /// conversation and touch nothing real as a side effect). Exclusive with a conversation
+    /// selection: picking either clears the other (see `selectedConversationId`'s own `didSet`
+    /// and `selectInbox()`/`selectConversation(_:)` below).
+    var inboxSelected = false
+    /// The inbox item open in the mailbox detail pane, or nil for the list alone.
+    var selectedInboxItemId: String?
+    /// The open-item count the sidebar badge shows. Read live from the store rather than cached:
+    /// an inbox item is written by `emitToInbox`/`submitInboxAnswer`/Task 4's expiry sweep, none of
+    /// which routes through `AppState`, so there is no single write path to invalidate a cache from.
+    var inboxBadgeCount: Int { (try? store.inbox.openItems().count) ?? 0 }
+    /// Selects the mailbox instead of a conversation (#920 Task 5): clears the conversation
+    /// selection without touching any conversation (no `clearUnread`/`touch` — selecting the inbox
+    /// is not "looking at" any conversation).
+    func selectInbox() {
+        selectedConversationId = nil
+        inboxSelected = true
+    }
+    /// Selects a conversation, exiting inbox mode. The same effect as setting
+    /// `selectedConversationId` directly (e.g. from the sidebar `List`'s own selection binding),
+    /// spelled out for callers that want the inbox-exit made explicit.
+    func selectConversation(_ id: UUID) {
+        selectedConversationId = id
     }
     /// User-facing conversations whose reply landed while the person was not looking (#592):
     /// a blue dot on the row. Transient: no field, no column, so a relaunch clears it. Changed only
