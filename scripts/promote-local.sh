@@ -62,9 +62,19 @@ if (( dry )); then
   built="<release-app-path>"
 else
   echo "building Release (a few minutes; the running app is left alone)..."
+  # Capture build output and status without letting errexit abort before we can report it. build
+  # happens before any quit/install, so a failure here leaves the running/installed app untouched.
+  set +e
   out=$(IRIS_MARKETING_VERSION="$marketing" IRIS_BUILD_VERSION="$buildno" scripts/build-app.sh Release)
+  rc=$?
+  set -e
+  if (( rc != 0 )); then
+    echo "$out" >&2
+    echo "promote-local: build failed (exit $rc) — your running app was NOT touched and nothing was installed. If this is the SwiftSyntax/MLXHuggingFaceMacros macro-plugin error, see issue #945 (a known build-app.sh Xcode-build failure)." >&2
+    exit 1
+  fi
   built="${out##*$'\n'}"
-  [[ -d "$built" ]] || { echo "build did not yield an .app (got: ${built:-<empty>})" >&2; exit 1; }
+  [[ -d "$built" ]] || { echo "promote-local: build produced no .app (got: ${built:-<empty>}) — app not touched." >&2; exit 1; }
 fi
 
 # 2. Stage the new app next to the destination (ditto preserves the signature). Still not touching
