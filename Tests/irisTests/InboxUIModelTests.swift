@@ -98,18 +98,6 @@ struct InboxUIModelTests {
         }
     }
 
-    @Test("the route disclosure shows the emitter's own routeBack targets, exactly where submitInboxAnswer sends the answer (#920 Task 5 security requirement)")
-    func answerRouteTargetsMatchesRouteBack() {
-        let item = sampleItem(routeBack: ["role:planner", "session-xyz"])
-        #expect(InboxUIModel.answerRouteTargets(item) == ["role:planner", "session-xyz"])
-    }
-
-    @Test("an empty routeBack falls back to the emitter, matching submitInboxAnswer's own fallback")
-    func answerRouteTargetsFallsBackToEmitter() {
-        let item = sampleItem(routeBack: [], emitterLabel: "dev-2")
-        #expect(InboxUIModel.answerRouteTargets(item) == ["dev-2"])
-    }
-
     @Test("the mailbox list is open items, then awaiting-delivery ones, never dropped (#920 review finding 3)")
     func mailboxItemsIncludesAwaitingDelivery() {
         let open = [sampleItem(id: "a")]

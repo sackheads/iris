@@ -34,17 +34,6 @@ enum InboxUIModel {
         return deadline <= now
     }
 
-    /// Where Submit actually routes Brian's answer, under his user authority (security
-    /// requirement, planner/#920 Task 5, from dev-3's #936 review): `routeBack` is the *emitter's*
-    /// own text, so an emitter can aim Brian's decision at an arbitrary session, and the UI must
-    /// show him the real targets before he submits, not after. Matches `submitInboxAnswer`'s own
-    /// fallback (`item.routeBack.isEmpty ? [item.emitter.uuidString] : item.routeBack`) exactly —
-    /// shown here as the emitter's label rather than its id, since that is what the UI already
-    /// displays everywhere else, but it is never a different answer from what actually gets used.
-    static func answerRouteTargets(_ item: InboxItem) -> [String] {
-        item.routeBack.isEmpty ? [item.emitterLabel] : item.routeBack
-    }
-
     /// The mailbox list's contents: open items needing attention, then awaiting-delivery ones —
     /// answered, but with no live recipient yet — so an answered item does not simply vanish once
     /// Brian has acted on it (dev-3's #943 review finding 3). The two states are mutually
