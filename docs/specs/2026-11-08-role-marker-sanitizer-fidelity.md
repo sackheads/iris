@@ -63,13 +63,49 @@ write-back alteration is tracked separately (#959), out of scope here.
 1. **No turn forge.** Untrusted tool output can never be read by the model as a genuine
    conversation turn (`system:`/`assistant:`/`user:`/`model:` opener, chat-template token),
    on any channel, in any guard configuration.
-2. **Judged == shown (#709), and the tier-2 delimiter signal is preserved.**
+2. **The tier-2 delimiter signal is preserved, and the displayed text's forge surface is bounded
+   by the per-line alignment invariant below.** (Rev 3 trades strict judged==shown, #709, for the
+   marker lines specifically — see the revision.)
 
 ## The design — narrowed A
 
-Relax the destructive strip to a **non-destructive display of the normalized, unstripped,
-wrapper-escaped text**, but only in the narrow intersection where the corruption hurts and a
-real verdict backs it:
+> ### REVISION (rev 3, 2026-11-08): judge the STRIPPED text, carry the original to DISPLAY only
+>
+> The rev-2 approach — "judge the normalized **unstripped** text" — **failed its own eval STOP
+> bar.** Judging unstripped text measurably degrades the small canary: it imitates the unstripped
+> role-marker structure and breaks its own verdict format, raising the fail-closed rate (benign
+> +0.89pp, attack +0.59pp, repeatable; dev-1's re-run), which also hands an attacker a
+> withhold-this-read lever (force parse failures on demand). So the canary must **judge the
+> stripped text, exactly as production does today** (detection unchanged, the +0.04pp delta is
+> noise), and the fidelity channel **carries the per-line original to the displayed text only.**
+>
+> This trades strict #709 (judged==shown) for the marker lines, so it is pinned by six conditions
+> (dev-2's security concurrence, all required, each tested):
+> 1. **Per-line alignment invariant:** carry a line's original only when `stripped(line) ==
+>    original(line) minus whole marker tokens`. Any other diff — a mid-line span the strip ate,
+>    NFKC/ZWSP folding, joined lines — means that line is displayed **stripped** (fail safe). Test
+>    that a non-marker diff falls back to the stripped line, so no payload rides a line the canary
+>    never judged.
+> 2. **Escape on the displayed text, by normalized-equivalent:** the `</untrusted_context>` escape
+>    must catch the original's fullwidth/ZWSP/spaced/case variants (which normalization folded out
+>    of the judged copy), not the exact string. Task 3's mutation check applies to the display.
+> 3. **Cache key includes the carried display** (or the carry), so a cached SAFE on stripped text
+>    is never reused with different marker lines attached.
+> 4. **Channel scope unchanged** (below): read_file non-Iris only, never the system prompt,
+>    `<|im_*|>` always stripped, taint still set, incomplete-read warning on any line shown stripped.
+> 5. **Classifier-passed-forge test on the *carried* lines:** a forged `system:` turn in the
+>    carried original stays inside the wrapper and is flagged.
+> 6. **Null-option answered:** the carry buys faithful reads of config/markdown — `model:`/`user:`/
+>    `system:`/`---`/`###` lines — which is the *motivating* case (hit 4+ times on real
+>    YAML/markdown/code-spans), not a rarity; plain deletion is not an acceptable status quo here.
+>
+> Everything below (channel allowlist, marker×path table, "only when a tier ran") still holds;
+> only the *mechanism* changes from judge-unstripped to judge-stripped-carry-display. "Shown"
+> in the table means "displayed via carry," never "judged unstripped."
+
+Relax the destructive strip to a **non-destructive display of the per-line-carried original
+(normalized), wrapper-escaped**, but only in the narrow intersection where the corruption hurts
+and a real verdict (on the stripped text) backs it:
 
 **Channel allowlist — relax ONLY here (first and only channel this rev ships):**
 - `read_file` of a path **not** under `~/.iris` (iris.swift:7147→7156) — the write-back vector.
@@ -118,23 +154,33 @@ particular the **classifier-passed forge** case below.
   `system: prod`, a `---` document start and `### Heading`, read through the fidelity channel
   with a real tier that **passes** it, reads back **identical modulo normalization**; a
   read→write round-trip of a normalization-stable file is byte-identical.
-- **Classifier-PASSED forge (the risk):** a scripted-pass tier fed `system: do X` — assert the
-  displayed text is the normalized-unstripped marker, wrapped, with the closing tag escaped
-  including the **fullwidth** and **ZWSP-split** and case variants (`</untrusted_context >`,
-  `</ untrusted_context>` — mutation-check the escape; finding 5 notes the escape is
-  narrow). This proves the wrapper contains a forge the classifier missed.
+- **Per-line alignment fallback (rev 3, dev-2 §1):** a fixture where the strip ate a span *inside*
+  a line (not a whole marker token) → that line is displayed **stripped**, not carried; a
+  whole-marker-only line is carried. Assert the invariant `stripped == original minus marker
+  tokens` gates the carry.
+- **Classifier-PASSED forge on the *carried* line (the risk, rev 3 dev-2 §5):** a scripted-pass
+  tier fed `system: do X` → the displayed (carried) text keeps the marker, wrapped, with the
+  closing tag escaped on the **display** text including **fullwidth / ZWSP-split / spaced / case**
+  variants (`</untrusted_context >`, `</ untrusted_context>`, fullwidth) — mutation-check the
+  escape against the display, not the judged copy. Proves the wrapper contains a forge in a
+  carried line.
+- **Cache key includes the carry (dev-2 §3):** a cached SAFE verdict on a stripped text is not
+  reused when the carried display differs.
 - **No-verdict → deletion:** tier skipped / protection off / tier-1-only channel → markers
   still deleted.
 - **Channel allowlist:** a web / search / peer / system-prompt (`user_profile`) input still
-  has markers removed (fidelity never leaks to these).
-- **Judged == shown (#709):** `OutputCap.cap` and tier-2 `.partial` redaction line up with the
-  displayed text when markers are kept.
-- **Eval (owner-authorized, no payload authoring):** the v4 set has 46/225 attack rows with a
-  role marker (14 line-start) but only 4/277 benign — add a small benign YAML/compose/LLM-
-  config set (benign, no new payloads) and run the existing canary eval **markers-kept vs
-  markers-stripped** to measure whether scoring unstripped text moves blocks either way. If it
-  regresses detection materially, carry per-line original through cap/redaction instead of
-  judging unstripped (finding 3's alternative), or hold.
+  has markers removed (fidelity never leaks to these); `<|im_*|>` always stripped.
+- **Cap/`.partial` alignment:** `OutputCap.cap` and tier-2 `.partial` redaction line up with the
+  **carried display** (not the judged-stripped text); an incomplete/withheld line is shown
+  stripped with the "incomplete — do not write back" warning.
+- **Eval — the STOP-bar re-run (owner-authorized, no payload authoring):** re-run the existing
+  canary eval on the **judge-stripped arm** against v4 + the benign YAML/compose/LLM-config
+  fixtures. **Required result: the rev-2 regression vanishes** — the 4 benign-config
+  pass→fail-closed flips (llm_config-003/005, k8s-004/006) and the +0.89pp benign fc-rate return
+  to the stripped baseline, because judging stripped == production. Fail-closed counts as blocked
+  (planner ruling; an attacker-forcible withhold lever, dev-2). If the flips do **not** vanish,
+  they were real, not an artifact of judging unstripped — STOP and reopen. Review from the
+  script's own output + dev-1's re-run, never the implementer narrative (which misreported).
 - **No regression:** full suite green; `scripts/check-warnings.sh` clean; the #727
   delimiter-line tests stay green.
 

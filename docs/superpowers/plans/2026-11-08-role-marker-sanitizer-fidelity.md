@@ -4,16 +4,22 @@
 
 **Goal:** Stop the role-marker sanitizer from destructively corrupting legitimate content on `read_file` of non-Iris paths, without weakening the turn-forge defense anywhere it is load-bearing.
 
-**Architecture:** "Narrowed A" — on one allowlisted channel (`read_file` of a path not under `~/.iris`), and only when a model-backed tier actually judged the text, the guard returns the **normalized, unstripped, wrapper-escaped** content (judged == shown, #709) instead of the role-marker-stripped content. Every other channel, every no-tier-ran case, and the system prompt keep today's destructive deletion. The delimiter-line recording (#727) that feeds tier-2 is unchanged; only whether the stripped text is *displayed* changes.
+**Architecture:** "Narrowed A" — on one allowlisted channel (`read_file` of a path not under `~/.iris`), and only when a model-backed tier actually judged the text, the fidelity channel displays the markers faithfully. Every other channel, every no-tier-ran case, and the system prompt keep today's destructive deletion. The delimiter-line recording (#727) that feeds tier-2 is unchanged.
+
+> **REVISION (rev 3, 2026-11-08) — read the spec's rev-3 block first.** The rev-2 mechanism ("judge the normalized **unstripped** text") **failed its eval STOP bar**: judging unstripped text degrades the small canary (fail-closed rate up benign +0.89pp/attack +0.59pp; an attacker-forcible withhold lever). New mechanism: **the canary judges the STRIPPED text (identical to production), and the fidelity channel carries the per-line original to the DISPLAY only**, gated by a per-line alignment invariant. Task deltas:
+> - **Task 2:** judge **stripped** (not unstripped); produce the display by carrying each line's original **only when `stripped(line) == original(line) minus whole marker tokens`**, else display that line stripped; the verdict **cache key includes the carried display**.
+> - **Task 3:** the closing-tag escape runs on the **display** text and matches normalized-equivalents (fullwidth/ZWSP/spaced/case); the mutation-check targets the display.
+> - **Task 4:** a line shown stripped (alignment fell back, or cap/`.partial`/withheld) carries the "incomplete — do not write back" warning.
+> - **Task 5:** re-run the eval on the **judge-stripped arm**; **required result: the rev-2 regression vanishes** (the 4 benign-config flips + the +0.89pp fc-rate return to the stripped baseline, since judging stripped == production). If not, reopen. Fail-closed counts as blocked. Review from the script output + dev-1's re-run, not the implementer report.
 
 **Tech Stack:** Swift, `Sources/IrisKit/{InjectionGuard,PromptInjectionGuard}.swift` + the `read_file` guard call site in `iris.swift`; Swift Testing.
 
-**Spec:** `docs/specs/2026-11-08-role-marker-sanitizer-fidelity.md` (rev 2, dev-2-approved). The plan argues from it; read both.
+**Spec:** `docs/specs/2026-11-08-role-marker-sanitizer-fidelity.md` (**rev 3** — judge-stripped/carry-display, dev-2-concurred). The plan argues from it; read both, rev-3 block first.
 
 ## Global Constraints
 
 - **Security trust boundary** (#727/#735/#736/#742). No change may let an injected `system:`/`model:`/`user:`/`assistant:` turn or chat-template token in untrusted output be read as a real turn, on any channel, in any guard config. If a task can't preserve that, it doesn't ship.
-- **Judged == shown (#709).** Whatever text is displayed is the text the tiers judged and the text `OutputCap.cap` / tier-2 `.partial` redaction operate on. Never score one string and show another.
+- **Judged vs shown (#709), rev-3 trade.** The tiers judge the **stripped** text (= production). The fidelity channel shows the **per-line-carried original**, which differs from the judged text only in whole marker tokens on lines that satisfy the alignment invariant (`stripped == original minus marker tokens`); every other line is shown exactly as judged (stripped). `OutputCap.cap` / tier-2 `.partial` redaction operate on, and line up with, the **carried display**. Outside the fidelity channel, judged == shown as before.
 - **Fidelity is "identical modulo normalization".** `normalize()` (NFKC + control/ZWSP strip) still runs; byte-exactness for NFKC-changing input is out of scope (#959).
 - **Relax only on the allowlist:** `read_file` of a non-Iris path, tier 2 or 3 provisioned-and-ran (not `.skipped`), protection on. Never `user_profile`/`workspace_rules` (system prompt). Chat-template tokens (`<|im_*|>`) stay stripped always.
 - **No new attack payloads.** Forge tests reuse existing owner-authorized dataset rows; benign config fixtures carry no payloads.
