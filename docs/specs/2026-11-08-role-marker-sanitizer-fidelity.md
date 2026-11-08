@@ -1,8 +1,8 @@
 ---
 type: spec
-title: Role-marker sanitizer — stop corrupting legitimate content
+title: Role-marker sanitizer — stop corrupting legitimate content (narrowed A)
 issue: 952
-status: draft (for review before planning)
+status: draft (rev 2, after dev-2 review of rev 1)
 timestamp: 2026-11-08
 ---
 
@@ -11,130 +11,135 @@ timestamp: 2026-11-08
 ## Intent
 
 The prompt-injection guard strips LLM role delimiters (`model:`, `user:`, `system:`,
-`assistant:`, `Instruction:`, `System Prompt:`, chat-template tokens, `---`/`###`) from
-untrusted tool output so an untrusted line cannot impersonate a real conversation turn. The
-strip is **destructive** and **anywhere-in-line**, and the stripped text is what the model
-*sees*. That silently corrupts legitimate content — and because `read_file` of a non-Iris
-path runs through this path, a read→edit→`write_file` round-trip **persists the corruption to
-disk**.
+`assistant:`, `Instruction:`, `System Prompt:`, chat-template tokens) **and** Markdown
+structure (`---`, `###`) from untrusted tool output so an untrusted line cannot impersonate a
+real conversation turn. The strip is destructive and anywhere-in-line, and the stripped text
+is what the model *sees*. That silently corrupts legitimate content — and because `read_file`
+of a non-Iris path runs through this path, a read→edit→`write_file` round-trip **persists the
+corruption to disk**.
 
-Goal: preserve the content faithfully while keeping the guard's turn-forge defense intact.
-This is a change to a security trust boundary; it must not be loosened in a way that lets an
-injected turn through.
+Goal: give back fidelity on the one channel where the corruption does real damage (a config
+or Markdown file read for editing) **without** weakening the turn-forge defense anywhere it
+is actually load-bearing. Rev 1 proposed removing the deletion broadly; the review
+(dev-2, #957) showed that is unsafe. This rev scopes it down — "narrowed A".
 
-## The bug, precisely (verified 2026-11-08)
+## Why rev 1's broad "stop deleting, trust the classifier + wrapper" is wrong
 
-- Untrusted text flows: `InjectionGuard.sanitizeUntrusted` → `classifyUntrusted` →
-  `PromptInjectionGuard.stripRecordingDelimiters` (`PromptInjectionGuard.swift:24-27`), using
-  `malRolePatterns` which **includes `model:`** (`PromptInjectionGuard.swift:53-64`).
-- The strip is a whole-word regex (`(?<![A-Za-z0-9_])`, `PromptInjectionGuard.swift:98-102`),
-  case-insensitive, matching **anywhere in a line, not only at line start** (deliberate,
-  comment `PromptInjectionGuard.swift:89-90`).
-- The **stripped** text becomes the model-visible content:
-  `sanitizeUntrusted` → `wrapped(.passed(clean))` where `clean` derives from the already-
-  stripped text (`InjectionGuard.swift:382-387`, `356-361`).
-- `read_file` of a path **not** under `~/.iris` is marked untrusted (`iris.swift:7147`) and
-  routed through this guard at tier 3 (`iris.swift:7156`). (A first-party read **under** the
-  Iris dir returns raw, `iris.swift:7139-7143`.) So an ordinary config/source read is
-  corrupted in the model's view, and writing it back persists the loss.
+1. **Deletion is the sole defense when no model-backed tier runs.** The strip also runs with
+   protection off, on `maxTier == .tier1_structural` channels (`inbox_item` iris.swift:1391,
+   `set_workspace`/watcher echoes), under `HeadlessMode`, when tier 3 is unprovisioned, and
+   when tier 2 is `.skipped` (default-off since #781). And where a tier *does* run, "passed"
+   includes the false negatives, which are large (E2B passes ~96% of peer/inbox injections,
+   ~97% of the disguised #802 rows). So the set deletion protects is exactly "everything the
+   classifier missed" — not belt-and-suspenders.
+2. **Showing original bytes reopens the wrapper breakout.** The closing-tag escape
+   (`executeTier1`, InjectionGuard.swift:571) runs on text that already went through
+   `normalize()` (NFKC + control/ZWSP strip). Fullwidth `＜/untrusted_context＞` and a
+   ZWSP-split close only get caught because normalize ran first. The safe display form is the
+   **normalized, unstripped** text, escaped after normalizing — never the raw bytes.
+3. **Judged text must equal shown text (#709, InjectionGuard.swift:~517).** Scoring stripped
+   text but showing unstripped text breaks it: the canary never sees the markers the model
+   sees, and `OutputCap.cap` / tier-2 `.partial` redaction operate on the stripped text so a
+   cut no longer lines up with what is displayed. We therefore **judge the shown
+   (normalized-unstripped) text**, keeping the per-line `delimiterLines` recording (#727) for
+   tier-2's alone-scoring. "Detection unchanged" is thus not automatic — see the eval in the
+   test plan.
+4. **`---`/`###` are the bigger casualty.** `remove()` strips every `---`/`###` anywhere in a
+   line, so every Markdown/YAML read loses headings, horizontal rules and `---` document
+   starts, and write-back persists it. They are not role words, and the real forge signal
+   (`---`/`###` at line start *before a role word*) is separately recorded by
+   `delimiterBeforeRole` (PromptInjectionGuard.swift:84-85) for tier 2. In the fidelity
+   channel they are kept.
 
-Common casualties: YAML/config keys `user:` (docker-compose, systemd), `system:`, `model:`
-(every LLM config). This is not a rare collision.
+## Fidelity is "modulo normalization", not byte-identical
 
-### Already mitigated — do NOT re-solve these
-- Word-boundary anchoring (#736/#742): `filesystem:`, `data_model:`, `subsystem:` are safe.
-- The "nesting bypass" `momodel:del:` does **not** collapse to a stripped `model:` here (the
-  inner `model:` is preceded by a letter; the lookbehind blocks it).
-- The `mo<ZWSP>del:` split is closed: `normalize()` NFKC-folds and strips U+200B + control
-  chars first (`PromptInjectionGuard.swift:35-48`).
+`normalize()` NFKC-folds and strips control chars + U+200B, so a file with ligatures,
+fullwidth forms, superscripts or stray controls is already altered on read, independent of
+this bug. The goal and fixtures say **identical modulo normalization**. The pre-existing NFKC
+write-back alteration is tracked separately (#959), out of scope here.
 
-The defect is the **destructive deletion of legitimate content**, not bypassability.
-
-## Inconsistency to reconcile
-
-Two marker lists disagree: the untrusted path strips `model:`
-(`PromptInjectionGuard.swift:53`), but `InjectionGuard`'s own internal strip does not
-(`InjectionGuard.swift:565`, only `system:`/`assistant:`/`user:`/`---`/`###`). The fix should
-leave one coherent story about which markers are neutralized where.
-
-## The invariant that must hold (non-negotiable)
+## Invariant that must hold (non-negotiable)
 
 1. **No turn forge.** Untrusted tool output can never be read by the model as a genuine
-   conversation turn (`system:`/`assistant:`/`user:`/`model:` opener, chat-template token).
-2. **Classifier signal preserved.** Tier 2/3 must still receive the per-line delimiter signal
-   (`delimiterLines`, #727) so a malicious forged-turn line is scored and blocked as today.
+   conversation turn (`system:`/`assistant:`/`user:`/`model:` opener, chat-template token),
+   on any channel, in any guard configuration.
+2. **Judged == shown (#709), and the tier-2 delimiter signal is preserved.**
 
-## Goals / non-goals
+## The design — narrowed A
 
-**Goals**
-- A benign file containing `model:`/`user:`/`system:` lines round-trips
-  `read_file → model → write_file` **byte-identical**.
-- The model reads faithful content from all untrusted channels (read_file, web, search,
-  conversation), not a holed version.
-- One coherent marker-handling story across the two code paths.
+Relax the destructive strip to a **non-destructive display of the normalized, unstripped,
+wrapper-escaped text**, but only in the narrow intersection where the corruption hurts and a
+real verdict backs it:
 
-**Non-goals**
-- Changing the tier-2/tier-3 classifiers or their thresholds.
-- Changing what counts as untrusted, or the `read_file` routing.
-- Time-of-day or any unrelated guard work.
+**Channel allowlist — relax ONLY here (first and only channel this rev ships):**
+- `read_file` of a path **not** under `~/.iris` (iris.swift:7147→7156) — the write-back vector.
 
-**Anti-goals**
-- Any change that lets an injected `system:`/`model:` turn in untrusted output be read as a
-  real turn. If the fidelity fix cannot preserve the forge defense, it does not ship.
+**Every other channel keeps today's deletion**, unchanged: web, search,
+`search_conversations`/`read_conversation` (their "owner"/"iris" substitutions stay), peer /
+system-event / `inbox_item`, MCP JSON (iris.swift:7187), `GateEvaluator.quoted` approval
+strings, Briefing, attachments. Do **not** change `sanitizeUntrustedInput` itself — it has
+~10 non-wrapped callers; add the fidelity path alongside, gated.
 
-## Design direction (recommended; the review validates it)
+**Never relax for the system prompt.** `user_profile` and `workspace_rules` (iris.swift:333,
+396) put untrusted text (e.g. an AGENTS.md from an untrusted repo) into the most trusted
+position. Deletion stays there.
 
-**Decouple classification from display.** Keep scoring the normalized + stripped text, with
-delimiter lines scored alone (unchanged detection). But present the model the **original
-bytes** of content the guard **passed**, inside the existing `<untrusted_context source=…>`
-wrapper (with its breakout-closing-tag escaping).
+**Only when a model-backed verdict actually covered the text:** tier 2 or tier 3 provisioned
+and ran (not `.skipped`), protection on. Otherwise fall back to today's deletion. So with
+protection off, or tier unprovisioned, a `read_file` still gets the deletion — acceptable
+degradation, because without a classifier the deletion is the only forge defense.
 
-The security argument this rests on, which the review must confirm:
-- The **classifier** is the real defense against a *malicious* forged turn: a line with a
-  strong delimiter is scored alone and a malicious one is **blocked** — it is never displayed
-  at all, marker or no marker. Deletion therefore only ever altered content that **passed**
-  (was judged benign), where neutralizing an incidental `model:` buys almost no security and
-  causes the corruption.
-- The **wrapper** is the backstop for classifier false-negatives: benign-scored content sits
-  inside `<untrusted_context>`, which the model is instructed to treat as data, and breakout
-  closing tags are escaped so the content cannot leave the wrapper and inject real turns.
+**Always, even in the fidelity channel:** chat-template tokens (`<|im_start|>`/`<|im_end|>`)
+stay stripped — they are real control tokens for local models, with no fidelity case. Role
+words and `---`/`###` are shown (normalized, escaped); their `delimiterLines` are still
+recorded and scored.
 
-So the deletion is belt-and-suspenders over two existing defenses, paid for in corrupted
-reads and corrupted write-backs.
+### Marker × path table (finding 7 — pin each row with a test)
 
-### Fallback if the review finds the wrapper insufficient
-Restrict neutralization to **line-start** markers only (where a real turn opener lives),
-matching the existing line-start logic for `---`/`###` (`delimiterBeforeRole`,
-`PromptInjectionGuard.swift:84-85`). This preserves every mid-line occurrence (`the model:`),
-which is the bulk of the collateral, while keeping a structural guard at the one position a
-forge needs. It does **not** fully fix a YAML key sitting at line-start; note that residue
-explicitly if chosen.
+| Marker | Untrusted path, fidelity channel (read_file non-Iris, tier ran, prot on) | Untrusted path, all other channels / tier skipped / prot off / system prompt | Plain `sanitize`/`classify` path (InjectionGuard.swift:565) |
+|---|---|---|---|
+| `system:`/`assistant:`/`user:`/`model:` | shown (recorded+scored) | deleted | today: system/assistant/user deleted, `model:` NOT — **keep as today, documented** |
+| `Instruction:`/`System Prompt:` | shown | deleted | today: not stripped — keep |
+| `---`/`###` | shown | deleted | deleted (markdown-only) |
+| `<\|im_*\|>` tokens | **deleted** (control tokens) | deleted | today: not stripped — keep |
+
+The rev-1 "resolve to one story" is wrong; the correct story is this table. The untrusted
+path's tier-1 second pass stays redundant-but-harmless; document it, don't refactor it here.
 
 ## Required review
 
-This reopens a security trust boundary (#727/#735/#736/#742). Route the review to a **dev**,
-not the work session (its classifier declines guard/sandbox reviews). The reviewer must
-confirm, with evidence, that the turn-forge invariant still holds under the chosen design —
-specifically that an existing malicious forged-turn dataset row is still blocked, and that no
-benign row leaks a readable-as-turn line.
+Security trust boundary (#727/#735/#736/#742). Review by a **dev**, not the work session. The
+reviewer confirms with evidence that the forge invariant holds under narrowed A — in
+particular the **classifier-passed forge** case below.
 
-## Acceptance / test matrix
+## Acceptance / test matrix (finding 8)
 
-- **Fidelity:** a fixture file with lines `model: gpt-x`, `user: alice`, `system: prod` reads
-  back through the untrusted guard byte-identical to disk; a read→write round-trip of that
-  file produces an identical file. (Use the real guard, `protectionEnabled: true`.)
-- **Mid-line prose:** "reaches the model: foo" survives intact.
-- **Forge still blocked:** an **existing** malicious injection row (reuse a dataset row framed
-  as tool output — do NOT author a new payload) that forges a `system:`/`model:` turn is still
-  blocked / cannot be read as a turn. Owner-authorized guard evals only.
-- **Classifier signal intact:** the existing #727 delimiter-line-scored tests stay green.
-- **Consistency:** the `model:`-list discrepancy between the two paths is resolved (one test
-  pins the intended behavior for both).
-- **No regression:** full suite green; `scripts/check-warnings.sh` clean.
+- **Fidelity (the fix):** a fixture file with `model: gpt-x`, indented `  user: alice`,
+  `system: prod`, a `---` document start and `### Heading`, read through the fidelity channel
+  with a real tier that **passes** it, reads back **identical modulo normalization**; a
+  read→write round-trip of a normalization-stable file is byte-identical.
+- **Classifier-PASSED forge (the risk):** a scripted-pass tier fed `system: do X` — assert the
+  displayed text is the normalized-unstripped marker, wrapped, with the closing tag escaped
+  including the **fullwidth** and **ZWSP-split** and case variants (`</untrusted_context >`,
+  `</ untrusted_context>` — mutation-check the escape; finding 5 notes the escape is
+  narrow). This proves the wrapper contains a forge the classifier missed.
+- **No-verdict → deletion:** tier skipped / protection off / tier-1-only channel → markers
+  still deleted.
+- **Channel allowlist:** a web / search / peer / system-prompt (`user_profile`) input still
+  has markers removed (fidelity never leaks to these).
+- **Judged == shown (#709):** `OutputCap.cap` and tier-2 `.partial` redaction line up with the
+  displayed text when markers are kept.
+- **Eval (owner-authorized, no payload authoring):** the v4 set has 46/225 attack rows with a
+  role marker (14 line-start) but only 4/277 benign — add a small benign YAML/compose/LLM-
+  config set (benign, no new payloads) and run the existing canary eval **markers-kept vs
+  markers-stripped** to measure whether scoring unstripped text moves blocks either way. If it
+  regresses detection materially, carry per-line original through cap/redaction instead of
+  judging unstripped (finding 3's alternative), or hold.
+- **No regression:** full suite green; `scripts/check-warnings.sh` clean; the #727
+  delimiter-line tests stay green.
 
 ## Falsification (Invariant 9)
-Grep for what this changes: the guard comments at `iris.swift:6011-6015` and `6096-6101` state
-that `sanitizeUntrustedInput` strips these markers from guarded text — if the fix stops doing
-that on display, those comments and the `search_conversations`/`read_conversation` "owner"/
-"iris" substitutions that exist *because* of the strip must be re-checked and corrected. Also
-`docs/prompt_injection_guard_design.md` and any agent-facing guard description.
+The comments at iris.swift:6011-6015 and 6096-6101 stay true **because** those channels keep
+deletion — confirm they still describe reality after the change. Update
+`docs/prompt_injection_guard_design.md` and the SYSTEM.md untrusted-context notice if the
+fidelity channel's behavior is described anywhere agent-facing.
