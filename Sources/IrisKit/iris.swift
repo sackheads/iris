@@ -6977,6 +6977,22 @@ actor IrisEngine {
         return sanitizedResult + "\n[Iris: the injection guard has withheld \(consecutive) consecutive results from \(name). Do not retry the same approach — use a different source or report what you have.]"
     }
 
+    /// #952 Task 4: a fidelity-preserved `read_file` result (markers intact) that is itself
+    /// incomplete — some lines withheld unjudged by tier 2 (#728) or the whole result truncated by
+    /// `OutputCap.cap` — must say so. Without this, a model that edits the holed text and calls
+    /// `write_file` silently bakes the holes into the file on disk (the spec's residual-risk
+    /// framing, dev-2 findings 2/3). Appended outside `<untrusted_context>`, exactly like
+    /// `noteBlockedResult`'s sentence: this is Iris's own commentary, not tool output, and #709
+    /// requires judged text to equal shown text inside the wrapper — this note is neither judged
+    /// nor shown there. Orthogonal to `noteBlockedResult` (that is about a guard-blocked result,
+    /// this is about a fidelity-preserved one being incomplete) — both can in principle apply to
+    /// the same text, so this stacks onto whatever `noteBlockedResult` already produced rather than
+    /// replacing it.
+    private func noteHoledFidelityRead(_ sanitizedResult: String, holed: Bool) -> String {
+        guard holed else { return sanitizedResult }
+        return sanitizedResult + "\n[Iris: this read may be incomplete — some content was withheld or truncated. Do not write this back as if it were the complete, original file.]"
+    }
+
     /// The rule file `path` names when it is directly in a workspace `.iris/`, or nil.
     nonisolated static func workspaceRuleFile(path: String) -> String? {
         let url = URL(fileURLWithPath: path)
@@ -7193,6 +7209,18 @@ actor IrisEngine {
         var fullyBlockedSearch = false
         // #874: a whole-content block that is the guard's verdict, not a tier that errored and failed closed.
         var withheldByVerdict = false
+        // #952 Task 4: a fidelity-preserved read_file result (markers intact, #952 Tasks 1-3) whose
+        // judged text is itself incomplete — tier 2 withheld some lines, judged or unjudged (#728
+        // `.partial`) — or `OutputCap.cap` truncated it (its own `"[output truncated:"` marker,
+        // embedded in the text at either of the two sites that can produce it: unconditionally on
+        // `result` above, before the guard ever sees it, or the tier-3 choke-point cap inside
+        // `classifyDetailed` when tier 2 is `.skipped` — the latter never reaches here with fidelity
+        // actually engaged, because a `.skipped` tier 2 means `modelTierRan` stayed false and the
+        // preserve candidate already fell back to deletion). Set only on the fidelity channel: the
+        // deletion channel's strip is lossy by design and already documented as such. See the
+        // comment at the assignment below for why this is detected from the redaction marker text,
+        // not `judged.unjudged`.
+        var holedFidelityRead = false
 
         if name == "search_web",
            let outcome = await SearchResultFilter.filter(result, allowed: { text in
@@ -7230,6 +7258,17 @@ actor IrisEngine {
             let judged = await InjectionGuard.sanitizeUntrustedCacheable(result, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled, fidelity: fidelity)
             sanitizedResult = judged.text
             withheldByVerdict = judged.cacheable && InjectionGuard.isWholeBlock(judged.text)
+            // `judged.unjudged` alone is NOT the right signal here: it names only the #723
+            // budget-overflow subset of withheld lines ("withheld unjudged"), not every withheld
+            // line — a line tier 2 actually scored, flagged, and redacted (the common case: a
+            // real injection caught and withheld) leaves `unjudged` empty, because that line WAS
+            // judged. A write-back corrupts either way: the shown text is missing bytes the real
+            // file has, judged or not. The marker `redacting(_:)` emits
+            // (`CoreMLEvaluator.Judgement.redacting`) names any withheld range, judged or
+            // unjudged, so it is the complete "tier 2 held something back" signal; `judged.unjudged`
+            // would under-warn on the ordinary flagged-and-withheld case.
+            holedFidelityRead = fidelity == .preserveWhenJudged
+                && (sanitizedResult.contains("withheld by the injection guard") || sanitizedResult.contains("[output truncated:"))
         }
         if name == "search_web" { sanitizedResult = OutputCap.cap(sanitizedResult) }
 
@@ -7239,7 +7278,8 @@ actor IrisEngine {
         guard let conversationId else { return sanitizedResult }
         let blocked = fullyBlockedSearch || sanitizedResult.contains("[CONTENT BLOCKED BY TIER")
         if withheldByVerdict { await recordGuardBlock(conversationId, tool: name, path: execArgs["path"]?.stringValue) }
-        return noteBlockedResult(sanitizedResult, name: name, conversationId: conversationId, blocked: blocked)
+        let noted = noteBlockedResult(sanitizedResult, name: name, conversationId: conversationId, blocked: blocked)
+        return noteHoledFidelityRead(noted, holed: holedFidelityRead)
     }
     
     /// One model round's assembled result plus when its first token arrived (spec §4).
