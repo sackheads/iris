@@ -106,18 +106,40 @@ struct PromptInjectionGuard {
         malRolePatterns.filter { $0.first?.isLetter == true }.map { ($0, wordRegex($0)) },
         uniquingKeysWith: { first, _ in first })
 
-    /// Strips `patterns` line by line, in order, exactly as a whole-text replace would (none spans
-    /// a newline), and records each line a delimiter was stripped from.
+    /// #970: a single pass over the pattern list can REASSEMBLE a marker it was supposed to
+    /// remove. `model:` is checked before `---` in `malRolePatterns`' order, so `mo---del:` finds
+    /// no `model:` on the `model:` step, then the `---` step joins the fragments into a live
+    /// `model:` — which nothing in that same pass checks again. The same happens across any two
+    /// patterns where an earlier-order pattern's removal exposes a later/already-passed one
+    /// (`<|im_<|im_end|>start|>` → removing `<|im_end|>` exposes `<|im_start|>`). Bounded: each
+    /// changing pass only ever removes characters (`remove` deletes matches, never inserts), so
+    /// the line strictly shrinks every time it changes — termination is guaranteed, this cap is
+    /// pure defense against a pathological input forcing needless extra passes, not a
+    /// correctness requirement. In practice reassembly across this fixed 10-pattern list bottoms
+    /// out in at most a couple of passes; this is a generous multiple of that.
+    private static let maxStripPasses = 20
+
+    /// Strips `patterns` line by line, in order, repeating the full pattern-list pass until a
+    /// whole pass makes no further change (fixed point, #970) or `maxStripPasses` is hit,
+    /// exactly as a whole-text replace would (none spans a newline), and records each line a
+    /// delimiter was stripped from — including one revealed only by a later pass's reassembly.
     static func stripRecording(_ text: String, patterns: [String]) -> (text: String, delimiterLines: [Int: String]) {
         var recorded: [Int: String] = [:]
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false).enumerated().map { index, raw -> String in
             let original = String(raw)
             var line = original
             var counts = false
-            for pattern in patterns {
-                let stripped = remove(pattern, from: line)
-                if stripped != line, !markdownOnly.contains(pattern) { counts = true }
-                line = stripped
+            for _ in 0..<maxStripPasses {
+                var changedThisPass = false
+                for pattern in patterns {
+                    let stripped = remove(pattern, from: line)
+                    if stripped != line {
+                        changedThisPass = true
+                        if !markdownOnly.contains(pattern) { counts = true }
+                    }
+                    line = stripped
+                }
+                if !changedThisPass { break }
             }
             if !counts, line != original,
                delimiterBeforeRole.firstMatch(in: original, range: NSRange(original.startIndex..., in: original)) != nil {
