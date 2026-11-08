@@ -97,6 +97,20 @@ struct SessionCardToolTests {
         #expect(card?.skills.isEmpty == true, "the attempted skills change is refused, not applied")
     }
 
+    @Test("skills dropped for no role AND an over-long lane in the same call: both notes compose")
+    func skillsNeedRoleAndTruncationCompose() async {
+        let app = AppState(); app.conversations.removeAll()
+        let a = UUID(); app.createNewConversation(id: a); app.createNewConversation(id: UUID())
+        let longLane = String(repeating: "x", count: IrisEngine.cardLaneCap + 50)
+        let out = await run(["name": .string("n"), "description": .string("d"), "lane": .string(longLane),
+                             "skills": .array([skill("s")])], on: app, as: a)
+        #expect(out.contains("role") && out.contains("dropped"), "\(out)")
+        #expect(out.contains("truncated"), "\(out)")
+        let card = app.conversations.first { $0.id == a }?.sessionCard
+        #expect(card?.lane?.count == IrisEngine.cardLaneCap + 1)
+        #expect(card?.skills.isEmpty == true)
+    }
+
     @Test("a role-holder's skills are stored, bounded, and kept when a later call omits them")
     func skillsKept() async {
         let app = AppState(); app.conversations.removeAll()
