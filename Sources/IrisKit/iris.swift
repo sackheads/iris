@@ -1418,11 +1418,15 @@ actor IrisEngine {
         let body = Self.inboxAnswerFrame(item: item, answer: answer, echoed: await echoedInboxText(Self.inboxOriginalItemText(item)))
         var delivered = 0
         var remaining: [String] = []
+        // Two entries that resolve to one session (`role:dev` and ` ROLE:Dev `) are one recipient.
+        var reached = Set<UUID>()
         for target in targets {
             let id: UUID? = await MainActor.run {
                 Self.resolveInboxTarget(target, ownerChain: item.ownerChain, in: localState?.conversations ?? [])
             }
             guard let id else { remaining.append(target); continue }
+            if reached.contains(id) { continue }
+            reached.insert(id)
             switch await deliver(id, body, item.emitterTainted) {
             case .delivered, .queued: delivered += 1
             case .refused: remaining.append(target)
@@ -1567,11 +1571,12 @@ actor IrisEngine {
     private func notifyInboxAnswer(item: InboxItem, answer: InboxAnswer, deliver: InboxDeliver) async {
         let localState = state
         let body = Self.inboxNotifyFrame(item: item, answer: answer, echoedTitle: await echoedInboxText(item.title))
+        var told = Set<UUID>()
         for target in Self.inboxNotifyTargets(item: item) {
             let id: UUID? = await MainActor.run {
                 Self.resolveInboxTarget(target, ownerChain: item.ownerChain, in: localState?.conversations ?? [])
             }
-            if let id { _ = await deliver(id, body, item.emitterTainted) }
+            if let id, told.insert(id).inserted { _ = await deliver(id, body, item.emitterTainted) }
         }
     }
 
