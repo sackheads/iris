@@ -113,8 +113,17 @@ and a real verdict (on the stripped text) backs it:
 **Every other channel keeps today's deletion**, unchanged: web, search,
 `search_conversations`/`read_conversation` (their "owner"/"iris" substitutions stay), peer /
 system-event / `inbox_item`, MCP JSON (iris.swift:7187), `GateEvaluator.quoted` approval
-strings, Briefing, attachments. Do **not** change `sanitizeUntrustedInput` itself — it has
-~10 non-wrapped callers; add the fidelity path alongside, gated.
+strings, Briefing, attachments, **and `run_command` stdout** (`tool_output_run_command`, tier-3
+at iris.swift:~line 50 — NOT the read_file carve-out). Do **not** change `sanitizeUntrustedInput`
+itself — it has ~10 non-wrapped callers; add the fidelity path alongside, gated.
+
+> **Note (gap raised in review):** `run_command` stdout is explicitly kept-deleting here, but it
+> is the *same* read-then-write-back vector as `read_file` — an agent reading code via `cat`/
+> `grep -n` and editing from the mangled view (a `sed`/heredoc built from a stripped line). Also
+> the guard strips its **own source** when read this way (`malRolePatterns` reads back as empty
+> strings). Extending fidelity to `run_command` stdout under the same "only when a tier ran"
+> condition, **and** a non-silent "deletion happened" notice on every deleting channel, are
+> tracked as a tightly-coupled fast-follow (so #952's core rework stays focused).
 
 **Never relax for the system prompt.** `user_profile` and `workspace_rules` (iris.swift:333,
 396) put untrusted text (e.g. an AGENTS.md from an untrusted repo) into the most trusted
@@ -153,7 +162,10 @@ particular the **classifier-passed forge** case below.
 - **Fidelity (the fix):** a fixture file with `model: gpt-x`, indented `  user: alice`,
   `system: prod`, a `---` document start and `### Heading`, read through the fidelity channel
   with a real tier that **passes** it, reads back **identical modulo normalization**; a
-  read→write round-trip of a normalization-stable file is byte-identical.
+  read→write round-trip of a normalization-stable file is byte-identical. **Include a Markdown
+  table** (`| a | b |` / `|---|---|`) — the `|---|---|` separator loses every `---` → `||||`
+  today; it is the most common `---` occurrence in real docs (more than frontmatter). Assert the
+  separator row survives in the fidelity channel.
 - **Per-line alignment fallback (rev 3, dev-2 §1):** a fixture where the strip ate a span *inside*
   a line (not a whole marker token) → that line is displayed **stripped**, not carried; a
   whole-marker-only line is carried. Assert the invariant `stripped == original minus marker
