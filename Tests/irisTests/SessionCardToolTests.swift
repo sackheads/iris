@@ -39,14 +39,15 @@ struct SessionCardToolTests {
         #expect(app.conversations.first { $0.id == a }?.sessionCard == nil)
     }
 
-    /// #480 review item 1: the clash check and the write are now one atomic call
+    /// #480 review item 1: the clash check and the write are one atomic call
     /// (`AppState.setSessionCard(for:boundedName:boundedDescription:rawLane:rawSkills:)`), so a
-    /// refused call — a name clash, or skills without a role — provably writes nothing. A race
-    /// test with two engines was deliberately not added: it would be nondeterministic, and the
-    /// single `MainActor` hop makes the interleaving the old two-hop version was vulnerable to
-    /// impossible by construction rather than merely unlikely.
-    @Test("a name clash or a missing role refuses atomically: no partial write of any field")
-    func refusedCallWritesNothingAtAll() async {
+    /// name clash provably writes nothing. A race test with two engines was deliberately not
+    /// added: it would be nondeterministic, and the single `MainActor` hop makes the interleaving
+    /// the old two-hop version was vulnerable to impossible by construction rather than merely
+    /// unlikely. (Skills without a role is a different kind of refusal — see `skillsNeedRole`
+    /// below: unlike a clash, it does not block the rest of the call, #953.)
+    @Test("a name clash refuses atomically: no partial write of any field")
+    func nameClashRefusesAtomically() async {
         let app = AppState(); app.conversations.removeAll()
         let a = UUID(), b = UUID()
         app.createNewConversation(id: a); app.createNewConversation(id: b)
@@ -55,11 +56,6 @@ struct SessionCardToolTests {
         _ = await run(["name": .string("taken"), "description": .string("y"), "lane": .string("z")], on: app, as: a)
         #expect(app.conversations.first { $0.id == a }?.sessionCard == nil,
                 "no name, description or lane was written on the clash path")
-
-        _ = await run(["name": .string("free"), "description": .string("d"), "lane": .string("l"),
-                       "skills": .array([skill("s")])], on: app, as: a)
-        #expect(app.conversations.first { $0.id == a }?.sessionCard == nil,
-                "a skills-without-role refusal must not partially write name/description/lane either")
     }
 
     @Test("\"iris\" is reserved as a card name, case- and look-alike-insensitively")
@@ -82,13 +78,23 @@ struct SessionCardToolTests {
         #expect(app.conversations.first { $0.id == a }?.sessionCard?.name == "w")
     }
 
-    @Test("skills are refused without a role")
+    /// #953: the old behaviour refused the whole call atomically, even though the reply's own
+    /// wording ("Not stored; set name, description and lane only") already implied only `skills`
+    /// was dropped. Name/description/lane/topics are now written and only the attempted skills
+    /// change is refused, matching what the message says.
+    @Test("skills without a role are dropped, but the rest of the card is still stored")
     func skillsNeedRole() async {
         let app = AppState(); app.conversations.removeAll()
         let a = UUID(); app.createNewConversation(id: a); app.createNewConversation(id: UUID())
-        let out = await run(["name": .string("n"), "description": .string("d"), "skills": .array([skill("s")])], on: app, as: a)
-        #expect(out.contains("role"))
-        #expect(app.conversations.first { $0.id == a }?.sessionCard == nil)
+        let out = await run(["name": .string("n"), "description": .string("d"), "lane": .string("l"),
+                             "skills": .array([skill("s")])], on: app, as: a)
+        #expect(out.contains("role"), "\(out)")
+        #expect(out.contains("dropped"), "\(out)")
+        let card = app.conversations.first { $0.id == a }?.sessionCard
+        #expect(card?.name == "n")
+        #expect(card?.description == "d")
+        #expect(card?.lane == "l")
+        #expect(card?.skills.isEmpty == true, "the attempted skills change is refused, not applied")
     }
 
     @Test("a role-holder's skills are stored, bounded, and kept when a later call omits them")

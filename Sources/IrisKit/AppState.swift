@@ -2472,17 +2472,21 @@ class AppState {
         /// first, then up to 19 other active names, so the refusal is useful even when several
         /// sessions share the name.
         case nameTaken([String])
-        /// `skills` was non-empty but this session holds no role. Nothing was written.
-        case skillsNeedRole
         /// Written. `laneTruncated`/`skillsTruncated` report whether `lane` or any `skills` field
         /// was cut to its cap — the caller already knows whether `name`/`description` were.
-        case stored(SessionCard, laneTruncated: Bool, skillsTruncated: Bool, newTopics: [String], topicsDropped: Bool)
+        /// `skillsDroppedNoRole`: `skills` was non-empty but this session holds no role, so
+        /// `name`/`description`/`lane`/`topics` are still written and `skills` keeps whatever it
+        /// already held (#953) — a non-role-holder cannot lose skills it never has either.
+        case stored(SessionCard, laneTruncated: Bool, skillsTruncated: Bool, skillsDroppedNoRole: Bool,
+                    newTopics: [String], topicsDropped: Bool)
     }
 
     /// `boundedName`/`boundedDescription` arrive already capped (#246) — that bound does not
     /// depend on any other session's state, so the caller applies it before this call. `rawLane`
     /// and `rawSkills` are the tool call's raw, uncapped arguments; this method does the capping
     /// that DOES depend on current state (the role gate on `skills`) atomically with the rest.
+    /// The role gate only drops the attempted `skills` change (#953) — a missing role never
+    /// blocks `name`/`description`/`lane`/`topics`, which this call still writes.
     @discardableResult
     func setSessionCard(for conversationId: UUID, boundedName: String, boundedDescription: String,
                          rawLane: String?, rawSkills: [JSONValue]?, rawTopics: [JSONValue]? = nil) -> SetSessionCardOutcome {
@@ -2508,15 +2512,22 @@ class AppState {
         }
         var skills = existing?.skills ?? []
         var skillsTruncated = false
+        var skillsDroppedNoRole = false
         if let items = rawSkills {
-            guard role != nil || items.isEmpty else { return .skillsNeedRole }
-            // Drop malformed items first, then cap the count — so up to `skillsMax` VALID skills
-            // survive even when an earlier item in the model's array was malformed, rather than a
-            // bad item at position 2 silently costing a good one at position 6.
-            let validSkills = items.compactMap(IrisEngine.boundedSkill)
-            let parsed = validSkills.prefix(IrisEngine.skillsMax)
-            skills = parsed.map(\.0)
-            skillsTruncated = parsed.contains { $0.1 } || validSkills.count > IrisEngine.skillsMax
+            if role == nil, !items.isEmpty {
+                // #953: the rest of the call (name/description/lane/topics) still applies — only
+                // the attempted skills change is refused, and `skills` is left exactly as it was
+                // (empty for a non-role-holder, per #469 §4.4's clearing on role loss).
+                skillsDroppedNoRole = true
+            } else {
+                // Drop malformed items first, then cap the count — so up to `skillsMax` VALID
+                // skills survive even when an earlier item in the model's array was malformed,
+                // rather than a bad item at position 2 silently costing a good one at position 6.
+                let validSkills = items.compactMap(IrisEngine.boundedSkill)
+                let parsed = validSkills.prefix(IrisEngine.skillsMax)
+                skills = parsed.map(\.0)
+                skillsTruncated = parsed.contains { $0.1 } || validSkills.count > IrisEngine.skillsMax
+            }
         }
         // #696: omitted keeps what was subscribed; an array replaces it (an empty one unsubscribes).
         var topics = existing?.topics ?? []
@@ -2531,7 +2542,7 @@ class AppState {
         conversations[idx].sessionCard = card
         markChanged(conversationId, .metadata)
         return .stored(card, laneTruncated: laneTruncated, skillsTruncated: skillsTruncated,
-                       newTopics: newTopics, topicsDropped: topicsDropped)
+                       skillsDroppedNoRole: skillsDroppedNoRole, newTopics: newTopics, topicsDropped: topicsDropped)
     }
 
     enum RoleAssignment: Equatable {

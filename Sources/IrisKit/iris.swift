@@ -5782,9 +5782,7 @@ actor IrisEngine {
                 result = "Name taken — another active session uses it. Names in use: "
                     + taken.map { "\"\(Self.flattenCardField($0, cap: Self.cardNameCap))\"" }.joined(separator: ", ")
                     + ". Pick a different name."
-            case .skillsNeedRole:
-                result = "Skills are for sessions holding a role, which the user assigns. Not stored; set name, description and lane only."
-            case .stored(let card, let laneTruncated, let skillsTruncated, let newTopics, let topicsDropped):
+            case .stored(let card, let laneTruncated, let skillsTruncated, let skillsDroppedNoRole, let newTopics, let topicsDropped):
                 // Echo what was stored, as the listing will render it (#418), and say so when it
                 // was cut: `list_sessions` shows a session its peers, never its own row, so this
                 // reply is where a session learns what peers actually read.
@@ -5803,9 +5801,13 @@ actor IrisEngine {
                 if !newTopics.isEmpty, let peers = await MainActor.run(body: { localState?.store.peers }) {
                     history = topicHistory(newTopics, peers: peers)
                 }
-                result = (truncated
-                    ? "Card updated — over-long fields were truncated to what the peer listing shows. "
-                    : "Card updated. ") + shown + history
+                // #953: the two prefixes are independent and can both apply — a call can both
+                // attempt skills with no role AND supply an over-long field in the same turn.
+                var notes: [String] = []
+                if skillsDroppedNoRole { notes.append("skills are for sessions holding a role, which the user assigns — dropped") }
+                if truncated { notes.append("over-long fields were truncated to what the peer listing shows") }
+                let prefix = notes.isEmpty ? "Card updated. " : "Card updated (" + notes.joined(separator: "; ") + "). "
+                result = prefix + shown + history
             }
         } else if functionCall.name == "close_request", let rawMsg = functionCall.args["msg"]?.stringValue {
             // #469 review item 6: normalised the same way `in_reply_to` is above — the model
