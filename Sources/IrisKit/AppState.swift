@@ -2548,9 +2548,15 @@ class AppState {
 
     /// Retries inbox answers stored but not yet delivered (at launch, and when a role gains a
     /// holder). Fire-and-forget; the engine guards against two runs on one item.
-    func redeliverInboxAnswers() {
+    @discardableResult
+    func redeliverInboxAnswers() -> Task<Void, Never> {
         Task { [weak self] in await self?.engine?.redeliverAwaitingInbox() }
     }
+
+    /// The sweep `loadConversations` starts at launch, kept so a test can let it finish before it
+    /// raises an item: it runs on `engine`, a different engine from a test's own, so a late one
+    /// would deliver the test's half-delivered item behind its back (#947).
+    private(set) var launchInboxRedeliver: Task<Void, Never>?
 
     /// Releases this session's role, returning it; nil when it held none.
     @discardableResult
@@ -5342,7 +5348,7 @@ class AppState {
             // of age. Best-effort; a failure here must not stop the app from finishing its load.
             try? store.peers.prune(before: Date().addingTimeInterval(-30 * 86_400))
             sweepArtifacts()
-            redeliverInboxAnswers()
+            launchInboxRedeliver = redeliverInboxAnswers()
         } catch {
             print("Failed to load conversations: \(error)")
             loadFailureHeadline = "\(error)"
