@@ -150,6 +150,15 @@ struct InboxRoutingTests {
         #expect(await engine.submitInboxAnswer(itemId: item.id, choice: "a", freeText: nil, deliver: sink.deliver) == .delivered(1))
         #expect(sink.calls.map(\.0) == [holder], "only the role the emitter named")
         #expect(!sink.calls.map(\.0).contains(victim) && !sink.calls.map(\.0).contains(bystander))
+        // Case and whitespace are one role, and one session named twice is told once.
+        let spelled = try raise(app, emitter: emitter, ownerChain: emitter.uuidString,
+                                routeBack: ["ROLE:Dev", " role:dev ", "role:dev"], notify: [" Role:DEV ", "role:dev"])
+        let sink3 = Sink()
+        #expect(await engine.submitInboxAnswer(itemId: spelled.id, choice: "a", freeText: nil, deliver: sink3.deliver) == .delivered(1))
+        #expect(sink3.calls.map(\.0) == [holder, holder], "one answer, one awareness line, never a third copy")
+        #expect(sink3.calls.first?.1.hasPrefix("Inbox answer") == true && sink3.calls.last?.1.hasPrefix("Inbox notice") == true)
+        #expect(IrisEngine.isAllowedInboxRoute("ROLE:Dev", emitter: emitter) && IrisEngine.isAllowedInboxRoute(" role:dev ", emitter: emitter))
+        #expect(!IrisEngine.isAllowedInboxRoute("role:dev x", emitter: emitter) && !IrisEngine.isAllowedInboxRoute("role:", emitter: emitter))
         // Nothing allowed left: the emitter gets it.
         let only = try raise(app, emitter: emitter, ownerChain: emitter.uuidString, routeBack: [victim.uuidString])
         let sink2 = Sink()
