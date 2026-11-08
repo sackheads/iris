@@ -116,7 +116,7 @@ struct ToolExecutor {
         ),
         FunctionDeclaration(
             name: "write_file",
-            description: "Writes content to a file, overwriting existing content. Writing a skill's own SKILL.md this way still works (for hand-editing), but prefer create_skill/update_skill for a skill's frontmatter — they take title/tags and keep the prompt cache in sync for you.",
+            description: "Writes content to a file, overwriting existing content; missing parent directories are created. Writing a skill's own SKILL.md this way still works (for hand-editing), but prefer create_skill/update_skill for a skill's frontmatter — they take title/tags and keep the prompt cache in sync for you.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
