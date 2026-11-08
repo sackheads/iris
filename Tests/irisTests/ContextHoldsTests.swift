@@ -334,7 +334,12 @@ struct ContextHoldsEngineTests {
     /// An approved item whose handler reports it did not write is recorded as failed, with the
     /// reason, never as approved (#826 review).
     @Test func aFailedApplyIsRecordedAsFailed() async throws {
-        let target = IrisPaths.default.rulesDir.appendingPathComponent("missing-\(UUID().uuidString)/x.md")
+        // A write now makes a missing directory (#954), so the failure is a file where one is needed.
+        let blocker = IrisPaths.default.rulesDir.appendingPathComponent("blocker-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: IrisPaths.default.rulesDir, withIntermediateDirectories: true)
+        try "f".write(to: blocker, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: blocker) }
+        let target = blocker.appendingPathComponent("x.md")
         let s = session([FunctionCall(name: "write_file", args: ["path": .string(target.path), "content": .string("x")], id: "c1")],
                         tainted: true)
         #expect(await run(s))
