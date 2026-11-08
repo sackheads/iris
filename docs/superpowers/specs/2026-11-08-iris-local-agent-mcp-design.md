@@ -1,34 +1,48 @@
 ---
 type: design
-title: Iris local agent interface — A2A-over-MCP debug channel
+title: Iris MCP service — local agent interface (A2A-over-MCP)
 status: draft (for builder-check, then owner review)
 timestamp: 2026-11-08
 ---
 
-# Iris local agent interface: a loopback A2A-over-MCP channel
+# Iris MCP service: exposing Iris to other agents (A2A-over-MCP)
 
 ## Intent and why
 
-The Iris↔planner feedback loop has high value: a running Iris instance (the owner's real,
-daily-driver app) surfaces grounded observations from live use, and a Claude Code "planner"
-session triages them — verifies against the code, files issues, routes work to the dev team,
-and brings decisions back to the owner. Today the **owner is the manual relay**: he copies
-Iris's observations into the planner and the planner's questions back into Iris. That
-cut-and-paste middleman step is the bottleneck.
+**Iris is a product that can expose services to other agents** — the same category as Safari
+MCP, Chrome MCP, and kube-agents. This feature makes Iris a first-class, opt-in MCP service: a
+running Iris instance exposes its agent-messaging fabric (and, over time, more of its
+capabilities) to external agents over MCP. It is a real feature, not a debug hack.
+
+The first and motivating consumer is the **Iris↔planner feedback loop**: a running Iris instance
+(the owner's real, daily-driver app) surfaces grounded observations from live use, and a Claude
+Code "planner" session triages them — verifies against the code, files issues, routes work to the
+dev team, brings decisions back to the owner. Today the **owner is the manual relay**, copying
+Iris's observations into the planner and the planner's questions back. That cut-and-paste
+middleman step is the bottleneck.
 
 The owner's standing goal (the year's theme — culminating in the Overseer) is to get himself
-**out of the critical path without giving up oversight**. He still wants summaries, updates,
-approvals, and a say in decisions — he just doesn't want to be the socket. So: let Iris and the
-planner transact directly, while the owner stays the approver via the mechanisms that already
-exist (the Overseer's summaries, and approval gates on consequential actions).
+**out of the critical path without giving up oversight**: summaries, updates, approvals, a say in
+decisions — just not being the socket. So Iris and its consumers transact directly, while the
+owner stays the approver via mechanisms that already exist (the Overseer's summaries, approval
+gates on consequential actions).
+
+**Why every consumer connects to Iris directly (not through the planner):** routing all agent
+traffic through one session to reach Iris would pollute that session's context with traffic it
+has no reason to hold — e.g. the planner should not accumulate dev-agent↔Iris chatter. Iris is
+the hub; each agent opens its own connection and keeps its own context clean. This is the
+architectural reason the server is multi-client, not a planner-only channel.
 
 ## Direction (decided)
 
 **Iris exposes a loopback MCP server that fronts its own local agent↔agent fabric; external MCP
 clients connect and appear to Iris as guest peers.** It is an ordinary multi-client MCP server
-(owner decision: don't assume a single client), off by default, opt-in via a debug toggle.
+(owner decision: don't assume a single client), off by default, enabled by an **opt-in feature
+setting** (a real feature, not a debug flag).
 
-- **Transport: Streamable HTTP** (the SDK's `StatefulHTTPServerTransport`), token-gated, bound to
+- **Transport: Streamable HTTP** (the SDK's `StatefulHTTPServerTransport`) over an **HTTP-server
+  library** (owner decision — Hummingbird, on SwiftNIO, is the likely pick; final choice is the
+  plan's, but hand-rolling the server is ruled out), token-gated, bound to
   `127.0.0.1:<port>/mcp`. Verified: Claude Code consumes a URL-based Streamable-HTTP server with a
   static `Authorization: Bearer` header — **no OAuth** (`claude mcp add --transport http … --header`,
   token via `${ENV_VAR}`). The deprecated *separate*-SSE endpoint is **not** built — Claude Code
@@ -48,9 +62,11 @@ clients connect and appear to Iris as guest peers.** It is an ordinary multi-cli
   non-Iris process has no turn engine, so Iris cannot verify it the way it verifies its own
   sessions). That is correct — a guest peer is intrinsically low-trust. Any number connect (the
   planner, a reviewer loop, a dev session, antigravity); none is special-cased.
-- **Off by default, behind a debug toggle in the configuration pane** (the same pane #931's a2a
-  config lives in). It only binds the port when enabled. **The default attack surface is
-  unchanged** — this is for the subset of people doing agent-loop work (initially: the owner).
+- **Off by default, enabled by an opt-in feature setting in the configuration pane** (the same pane
+  #931's a2a config lives in) — a real, documented feature, not a hidden debug flag. It only binds
+  the port when enabled, so **the default attack surface is unchanged**. Loopback-only for this
+  increment; exposing the service beyond the local machine is a separate, later, separately-gated
+  step (and overlaps #931's remote story), not part of turning the feature on.
 
 ### One agent-interface, co-designed with #931 (owner decision)
 Iris's local session fabric is already A2A-shaped (its `AgentCard`s). This local
@@ -119,10 +135,12 @@ The owner is dropping the *transport* role, not the *approval* role. The design 
 ## Goals / non-goals / anti-goals
 
 **Goals**
-- Direct planner↔Iris messaging that removes the owner's cut-and-paste step.
-- Reuse the existing peer fabric + MCP SDK + loopback-listener precedent.
-- Owner stays informed and approving via existing Overseer summaries + approval gates.
-- Default attack surface unchanged (opt-in debug toggle).
+- Make Iris a first-class, opt-in **MCP service** that exposes its agent-messaging fabric (and,
+  later, more capabilities) to external agents — the Safari/Chrome-MCP / kube-agents category.
+- Its first consumer: direct planner↔Iris messaging that removes the owner's cut-and-paste step.
+- Every consumer connects to Iris directly, keeping each session's context clean (no hub session).
+- Reuse the existing peer fabric + MCP SDK; owner stays informed/approving via Overseer + gates.
+- Default attack surface unchanged (off until the feature setting is turned on).
 
 **Non-goals**
 - Remote / cross-machine agent messaging (that is #931's gateway client).
@@ -144,11 +162,14 @@ The owner is dropping the *transport* role, not the *approval* role. The design 
 3 & 4. **Multi-client agnostic** — a standard MCP server; no single-peer assumption; each
    connecting client is its own guest peer.
 
-### Remaining open question (verified items folded into the doc above)
-- **HTTP-server dependency:** hand-roll HTTP/1.1 over `NWConnection`, or add SwiftNIO/Hummingbird?
-  (Recommendation: a library, given multi-client + the zero-warnings bar — but it's a dependency in
-  a lean repo, so owner's call. See net-new.) Client-compat (static bearer header, no OAuth) and
-  the SSE-vs-Streamable-HTTP question are **resolved** (verified against Claude Code's MCP docs).
+4. **HTTP-server dependency** — take a library (Hummingbird/SwiftNIO), don't hand-roll the server.
+5. **It's a feature, not debug** — frame and ship it as a first-class opt-in MCP service (peer to
+   Safari/Chrome MCP, kube-agents), not a hidden debug flag; every consumer connects to Iris
+   directly so no session's context is polluted by traffic it doesn't need.
+
+All open questions are resolved; client-compat (static bearer header, no OAuth; Streamable HTTP,
+no separate SSE) was verified against Claude Code's MCP docs. The design is ready for a
+builder-check pass, then it waits behind inbox/guard before planning.
 
 ### Multi-peer use cases (asked by the owner)
 - The **planner** — the primary triage/routing loop.
