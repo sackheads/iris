@@ -81,11 +81,15 @@ write-back alteration is tracked separately (#959), out of scope here.
 >
 > This trades strict #709 (judged==shown) for the marker lines, so it is pinned by six conditions
 > (dev-2's security concurrence, all required, each tested):
-> 1. **Per-line alignment invariant:** carry a line's original only when `stripped(line) ==
->    original(line) minus whole marker tokens`. Any other diff — a mid-line span the strip ate,
->    NFKC/ZWSP folding, joined lines — means that line is displayed **stripped** (fail safe). Test
->    that a non-marker diff falls back to the stripped line, so no payload rides a line the canary
->    never judged.
+> 1. **Per-line alignment invariant (precise — clomp's catch):** carry a line's `normalize(raw)`
+>    original iff **(a)** no `<|im_*|>` chat-template token was stripped from it (those show
+>    stripped — Task 3) **and (b)** it maps **1:1** to a judged line (no structural join/split).
+>    `---`/`###`/`####`/`----` and **pipe-bounded `|---|---|`** are marker-token removals and
+>    **carry** (the motivating markdown case — `remove()` strips `---`/`###` as unanchored
+>    substrings, `PromptInjectionGuard.swift:91-97`, so do NOT require whitespace boundaries or
+>    `|---|---|`/`####` will wrongly fail-safe). NFKC/ZWSP is not a diff (carry is from the same
+>    `normalize(raw)` the tiers judged, minus the marker removals). Test both: `|---|---|`/`####`
+>    carry; a `<|im_*|>` line shows stripped.
 > 2. **Escape on the displayed text, by normalized-equivalent:** the `</untrusted_context>` escape
 >    must catch the original's fullwidth/ZWSP/spaced/case variants (which normalization folded out
 >    of the judged copy), not the exact string. Task 3's mutation check applies to the display.
