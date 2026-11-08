@@ -122,6 +122,16 @@ public struct InjectionGuard {
         fidelityCallRecorder.fidelities(for: contextTag)
     }
 
+    /// The normalized-but-UNSTRIPPED candidate `classifyDetailed` may judge and show instead of
+    /// the destructively pre-stripped one (#952 Task 2), when the caller's `fidelity` asks for
+    /// it; `nil` for `.off`. Computed from the same `rawInput` the caller is about to run through
+    /// `PromptInjectionGuard.stripRecordingDelimiters` — never instead of that call, which still
+    /// runs unconditionally below to produce the deletion candidate every return point can fall
+    /// back to when nothing model-backed ends up judging this one.
+    private static func preserveFidelityCandidate(_ rawInput: String, fidelity: FidelityMode) -> String? {
+        fidelity == .preserveWhenJudged ? PromptInjectionGuard.normalize(rawInput) : nil
+    }
+
     /// Whether a tier-3 check would actually run now (#330's card marker): protection on, and a
     /// canary that is provisioned (or a test's scoped one).
     static func tier3WillRun(protectionEnabled: Bool? = nil) -> Bool {
@@ -327,7 +337,8 @@ public struct InjectionGuard {
     }
 
     static func cacheKey(clean: String, source: String, maxTier: SanitizationTier,
-                                  fingerprint: GuardConfigFingerprint, delimiterLines: [Int: String] = [:]) -> String {
+                                  fingerprint: GuardConfigFingerprint, delimiterLines: [Int: String] = [:],
+                                  fidelity: FidelityMode = .off) -> String {
         // The tier-2 model path is in the key too, so correctness does not lean on CoreMLEvaluator
         // being load-once: a hot-swapped guard model can never be served a stale verdict. The
         // provisioning results (#202 fix round 2, extended to tier 2 by #210) are what actually
@@ -340,7 +351,12 @@ public struct InjectionGuard {
         let parts = [clean, source, String(describing: maxTier), String(fingerprint.protectionEnabled),
                      fingerprint.promptGuardEngine, fingerprint.promptGuardModel, fingerprint.promptGuardCoreMLModel,
                      fingerprint.tier3CloudModel, fingerprint.tier3ThinkingLevel, fingerprint.tier2ModelsDir, fingerprint.tier3ModelsDir,
-                     String(describing: fingerprint.tier2Provisioning), String(describing: fingerprint.tier3Provisioning)]
+                     String(describing: fingerprint.tier2Provisioning), String(describing: fingerprint.tier3Provisioning),
+                     // #952: a deletion-mode result must never be served to a fidelity-mode caller
+                     // (or vice versa) even in the edge case where the two candidate texts happen
+                     // to be byte-identical (a file with no role markers at all) — `clean` alone
+                     // cannot be relied on to differ, so the mode goes in explicitly.
+                     String(describing: fidelity)]
             // #727: two inputs that strip to the same text are scored differently by what was stripped.
             + delimiterLines.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }
         let digest = SHA256.hash(data: Data(parts.joined(separator: "\u{0}").utf8))
@@ -450,7 +466,8 @@ public struct InjectionGuard {
         let stripped = PromptInjectionGuard.stripRecordingDelimiters(rawInput)
         let verdict = await classifyDetailed(stripped.text, contextTag: contextTag, maxTier: maxTier,
                                              protectionEnabled: protectionEnabled,
-                                             delimiterLines: stripped.delimiterLines, fidelity: fidelity)
+                                             delimiterLines: stripped.delimiterLines, fidelity: fidelity,
+                                             preserveCandidate: preserveFidelityCandidate(rawInput, fidelity: fidelity))
         return (wrapped(verdict.outcome, contextTag: contextTag), verdict.cacheable, verdict.unjudged)
     }
 
@@ -481,7 +498,8 @@ public struct InjectionGuard {
         let stripped = PromptInjectionGuard.stripRecordingDelimiters(rawInput)
         let verdict = await classifyDetailed(stripped.text, contextTag: contextTag, maxTier: maxTier,
                                              protectionEnabled: protectionEnabled,
-                                             delimiterLines: stripped.delimiterLines, config: config, fidelity: fidelity)
+                                             delimiterLines: stripped.delimiterLines, config: config, fidelity: fidelity,
+                                             preserveCandidate: preserveFidelityCandidate(rawInput, fidelity: fidelity))
         return (verdict.outcome, verdict.cacheable, verdict.tier2)
     }
 
@@ -493,7 +511,8 @@ public struct InjectionGuard {
         let stripped = PromptInjectionGuard.stripRecordingDelimiters(rawInput)
         return await classifyDetailed(stripped.text, contextTag: contextTag, maxTier: maxTier,
                                       protectionEnabled: protectionEnabled,
-                                      delimiterLines: stripped.delimiterLines, fidelity: fidelity).outcome
+                                      delimiterLines: stripped.delimiterLines, fidelity: fidelity,
+                                      preserveCandidate: preserveFidelityCandidate(rawInput, fidelity: fidelity)).outcome
     }
 
     /// `classify`, plus whether the verdict is safe for a caller to keep (equivalently: whether it
@@ -505,11 +524,17 @@ public struct InjectionGuard {
     /// Factored out so `sanitizeCacheable` can report that bit without `IrisEngine` duplicating
     /// tier/cache logic that could then drift from this. `classify` is exactly this with the bit
     /// dropped; the body is unchanged from before this split.
-    /// `fidelity` (#952 Task 1) is pure plumbing at this point in the task: recorded for
-    /// `InjectionGuardFidelityTests` to observe, but not yet read by anything that decides what
-    /// gets shown or cached. The plain `sanitize`/`sanitizeCacheable`/`classify` path never passes
-    /// it, so it is always `.off` for those callers — the untrusted-entry wrappers above are the
-    /// only ones that can ask for anything else, and today only one real call site
+    /// `fidelity` (#952): `.off` is recorded only, exactly as Task 1 left it. `.preserveWhenJudged`
+    /// judges and tentatively shows `preserveCandidate` (the normalized-but-unstripped text the
+    /// caller computed from the same `rawInput`, before the destructive strip) instead of the
+    /// deletion candidate tier 1 produces below — but only for as long as it still looks possible
+    /// that a model-backed tier will cover it. Every return point below falls back to the
+    /// deletion candidate instead if, once the tiers have actually run, nothing model-backed
+    /// judged the preserved text: deletion is the only defense when no classifier ran at all
+    /// (spec "narrowed A"), and judged text must equal shown text (#709) in either case. The plain
+    /// `sanitize`/`sanitizeCacheable`/`classify` path never passes `fidelity` or
+    /// `preserveCandidate`, so this is a no-op for those callers — the untrusted-entry wrappers
+    /// above are the only ones that can ask for anything else, and today only one real call site
     /// (`iris.swift`'s `read_file` guard call) does.
     private static func classifyDetailed(_ rawInput: String, contextTag: String = "",
                          maxTier: SanitizationTier = .tier1_structural,
@@ -518,7 +543,8 @@ public struct InjectionGuard {
                          tier3ModelsDir: URL? = nil,
                          delimiterLines: [Int: String] = [:],
                          config: GuardConfigFingerprint? = nil,
-                         fidelity: FidelityMode = .off) async -> Verdict {
+                         fidelity: FidelityMode = .off,
+                         preserveCandidate: String? = nil) async -> Verdict {
         recordFidelityCall(contextTag: contextTag, fidelity: fidelity)
         let __turnID = PerformanceProfiler.currentTurnID
         let __start = MonotonicClock.nowMs()
@@ -552,13 +578,38 @@ public struct InjectionGuard {
             return Verdict(outcome: .passed(clean: clean), cacheable: true, unjudged: unjudged)
         }
 
+        // #952: optimistically switch to the preserve candidate before the cache lookup, so both
+        // the key and what tier 2/3 actually judge reflect it — but only when a model-backed tier
+        // can possibly run at all (protection on; tier 2/3 both no-op straight to `.safe` without
+        // reading `clean` otherwise, so there is nothing to gain by feeding them the preserved
+        // text in that case, and the invariant below needs `deleteCandidate` to still be exactly
+        // today's text). `deleteCandidate` is kept so every return point can fall back to it.
+        let deleteCandidate = clean
+        let attemptingFidelity = fidelity == .preserveWhenJudged && preserveCandidate != nil && fingerprint.protectionEnabled
+        if attemptingFidelity, let preserveCandidate {
+            var candidate = preserveCandidate
+            // Chat-template tokens have no fidelity case, ever: real control tokens for local
+            // models, not a role word a human reader would want kept (spec: "always, even in the
+            // fidelity channel").
+            candidate = candidate.replacingOccurrences(of: "<|im_start|>", with: "", options: [.caseInsensitive])
+            candidate = candidate.replacingOccurrences(of: "<|im_end|>", with: "", options: [.caseInsensitive])
+            // The same wrapper-breakout escape `executeTier1` applies to the deletion candidate
+            // (#709: the tiers must judge exactly the text a `.passed` verdict shows).
+            candidate = candidate.replacingOccurrences(of: "</untrusted_context>", with: "[escaped_tag]", options: [.caseInsensitive])
+            clean = candidate
+        }
+        // Whether a model actually judged `clean` as handed to it — set from the tiers' own
+        // verdicts below, never inferred from `attemptingFidelity` alone: protection can be on and
+        // a tier still `.skipped` (unprovisioned), and that is exactly the case deletion must win.
+        var modelTierRan = false
+
         // A verdict reached under a task-scoped model or engine (#237) is that scope's, not the
         // process's: it neither reads nor writes the shared cache. Otherwise one suite's hijacking
         // canary cached a block on shared text (the default empty USER.md) and every later engine
         // in the process was served it (#375). Production never sets a scope.
         let cache: SanitizationCache? = Self.guardTierScopeActive ? nil : Self.cache
         let key = cacheKey(clean: clean, source: source, maxTier: maxTier, fingerprint: fingerprint,
-                           delimiterLines: delimiterLines)
+                           delimiterLines: delimiterLines, fidelity: fidelity)
         if let cached = cache?.get(key) {
             return cached
         }
@@ -580,11 +631,15 @@ public struct InjectionGuard {
             // The flagged lines are withheld and the rest goes on (#725 ruling (d)): tier 3, and
             // the result, see the redacted text.
             clean = redacted
-        case .safe, .skipped:
+            if attemptingFidelity { modelTierRan = true }
+        case .safe:
+            if attemptingFidelity { modelTierRan = true }
+        case .skipped:
             // A tier-2 skip (unprovisioned/notConfigured) IS cached, exactly like `.safe` — same
             // reasoning as tier 3's cache (#210 mirrors #202 fix round 2): `tier2Provisioning`
             // (computed once above) is part of the cache key, so the moment the model appears on
-            // disk the key changes and a stale skip can never be served.
+            // disk the key changes and a stale skip can never be served. It also never set
+            // `modelTierRan`: nothing judged `clean` here.
             break
         }
         // #709: tier 3 judges at most the cap. With tier 2 skipped (no model yet, #210) nothing
@@ -596,6 +651,9 @@ public struct InjectionGuard {
         if case .skipped = tier2, maxTier == .tier3_canary, tier3Runs(fingerprint) { clean = OutputCap.cap(clean) }
 
         if maxTier == .tier2_coreML {
+            // #952: nothing model-backed judged the preserved text after all — fall back to the
+            // deletion candidate so the returned verdict is never unjudged content shown verbatim.
+            if attemptingFidelity, !modelTierRan { clean = deleteCandidate }
             let passed = GuardOutcome.passed(clean: clean)
             cache?.set(key, passed, unjudged: unjudged)
             return Verdict(outcome: passed, cacheable: true, unjudged: unjudged, tier2: tier2.logName)
@@ -620,6 +678,10 @@ public struct InjectionGuard {
             // "tiers 1/2 are cheap enough to redo" was not true. What makes this safe is that
             // `provisioning` (computed once above) is now part of the cache key: the moment the
             // model file appears on disk, the key changes and the stale skip can never be served.
+            if attemptingFidelity, tier3 != .skipped { modelTierRan = true }
+            // #952: as at the tier-2 return above — nothing model-backed ultimately judged the
+            // preserved text (tier 2 skipped, and now tier 3 skipped too), so it must not be shown.
+            if attemptingFidelity, !modelTierRan { clean = deleteCandidate }
             let passed = GuardOutcome.passed(clean: clean)
             cache?.set(key, passed, unjudged: unjudged)
             return Verdict(outcome: passed, cacheable: true, unjudged: unjudged, tier2: tier2.logName)
