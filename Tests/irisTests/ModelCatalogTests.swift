@@ -251,7 +251,8 @@ struct ModelCatalogTests {
         // its first `checkCancellation` is what ends it. Cancelling right after `Task {}` raced the
         // task's start: when it ran first, URLSession reported `-999` before the next check (#947).
         let task = Task {
-            while !Task.isCancelled { await Task.yield() }
+            let giveUp = TestClock.deadline(10)
+            while !Task.isCancelled && TestClock.now() < giveUp { await Task.yield() }
             return try await catalog.listModels()
         }
         task.cancel()
