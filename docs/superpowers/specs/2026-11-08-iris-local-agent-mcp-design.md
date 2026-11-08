@@ -24,52 +24,81 @@ exist (the Overseer's summaries, and approval gates on consequential actions).
 
 ## Direction (decided)
 
-**Iris exposes a loopback MCP server that fronts its own local agent↔agent fabric; an external
-Claude Code session connects as an MCP client and appears to Iris as a guest peer.** Off by
-default; opt-in via a debug toggle.
+**Iris exposes a loopback MCP server that fronts its own local agent↔agent fabric; external MCP
+clients connect and appear to Iris as guest peers.** It is an ordinary multi-client MCP server
+(owner decision: don't assume a single client), off by default, opt-in via a debug toggle.
 
-- **Transport:** a token-gated MCP server bound to `127.0.0.1:<port>` (Streamable HTTP + SSE).
-  Claude Code's side is a config URL. Loopback only; the MCP SDK's server transport already does
-  localhost-origin validation.
+- **Transport: Streamable HTTP** (the SDK's `StatefulHTTPServerTransport`), token-gated, bound to
+  `127.0.0.1:<port>/mcp`. Verified: Claude Code consumes a URL-based Streamable-HTTP server with a
+  static `Authorization: Bearer` header — **no OAuth** (`claude mcp add --transport http … --header`,
+  token via `${ENV_VAR}`). The deprecated *separate*-SSE endpoint is **not** built — Claude Code
+  won't use it; Streamable HTTP carries server→client streaming on its own one endpoint. Loopback
+  only; the SDK transport already does localhost-origin validation. Caveats to design around: a
+  5-minute MCP idle timeout (`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`) — the poll-mailbox model
+  (request/response) sidesteps long-lived-stream idling; a 401 surfaces as a connection failure,
+  not an auth prompt; don't name the bridge-token env var one of Claude Code's reserved names
+  (`ANTHROPIC_API_KEY` etc., which expand empty).
 - **Tool surface (A2A-over-MCP), inspired by gke-labs/kube-agents `a2a/mcpbridge` (Apache-2.0,
   inspiration not a port):** a small toolset fronting A2A semantics — `send` (to a session/role),
   `poll` (a pull mailbox for "messages to me since X"), `discover`/`status` (who is addressable),
-  and a session-identity/alias tool. SSE carries server→client push so it is not pure polling.
-- **The external agent is a guest peer:** a synthetic session identity/card in `SessionDirectory`,
-  with **no harness-observed liveness** (a non-Iris process has no turn engine, so Iris cannot
-  verify it the way it verifies its own sessions). That is correct: the planner-peer is
-  intrinsically low-trust.
+  and a session-identity/alias tool.
+- **Connecting clients are guest peers (multi-client by default — owner decision):** the server is
+  an ordinary MCP server and does not assume a single client. Each authorized client gets a
+  synthetic session identity/card in `SessionDirectory`, with **no harness-observed liveness** (a
+  non-Iris process has no turn engine, so Iris cannot verify it the way it verifies its own
+  sessions). That is correct — a guest peer is intrinsically low-trust. Any number connect (the
+  planner, a reviewer loop, a dev session, antigravity); none is special-cased.
 - **Off by default, behind a debug toggle in the configuration pane** (the same pane #931's a2a
   config lives in). It only binds the port when enabled. **The default attack surface is
   unchanged** — this is for the subset of people doing agent-loop work (initially: the owner).
 
-### One agent-interface, two transports
+### One agent-interface, co-designed with #931 (owner decision)
 Iris's local session fabric is already A2A-shaped (its `AgentCard`s). This local
 **A2A-over-MCP** channel and #931's remote **A2A-over-gateway** client are the same conceptual
-model over two transports/trust-models. They can share the A2A envelope types. #931 stays parked;
-this is its local sibling, not a replacement.
+model over two transports/trust-models. **Owner decision: don't build two a2a adapters.** #931
+unparks far enough to co-design one shared A2A envelope + adapter layer now, so the remote
+transport isn't retrofitted onto an incompatible local one later. **Implementation of this
+channel sequences *after* the current inbox/guard work lands (owner decision)** — this is design
+now, build later.
 
 ## What this reuses (the owner's "don't bend over backwards" test)
 
 - **MCP protocol: free.** The MCP Swift SDK Iris already vendors ships the whole server side —
-  `Server` actor, `tools/list`/`tools/call`, stdio + HTTP/SSE server transports. Zero protocol
-  code. (`MCPManager` itself is client-only and not reused; the SDK beneath it is.)
-- **Loopback listener precedent:** `OAuthManager` already runs a localhost `NWListener` + raw HTTP.
-- **Send path:** `send` maps onto `AppState.decidePeerSend` → `IrisEngine.deliverPeerMessage` →
-  `PeerLedger` — the existing peer-message plumbing, correlation and persistence.
+  `Server` actor, `tools/list`/`tools/call`, `StatefulHTTPServerTransport` + `OriginValidator.localhost()`.
+  Zero protocol code. (`MCPManager` itself is client-only and not reused; the SDK beneath it is.
+  Supply-chain note: the SDK is pinned to branch `main`, not a tagged release — pin a tag before shipping.)
+- **Inbound send path (planner→Iris) reuses existing plumbing:** the `send` tool targeting the
+  pinned `iris` conversation (or a named session/role) maps onto `AppState.decidePeerSend` →
+  `IrisEngine.deliverPeerMessage` → run-a-turn/queue, with `PeerLedger` correlation. This leg is
+  reuse. **(The *outbound* Iris→planner leg is NOT this path — see net-new, it's the mailbox.)**
 - **A2A-shaped cards:** `SessionDirectory` / `PeerLedger` (#185/#469).
 - **Trust model: reused, not rebuilt** (see below).
 
 ## What is net-new
 
-- A loopback HTTP+SSE listener subsystem (the bulk; ~a few hundred LOC, mostly socket/HTTP glue).
+- A loopback **Streamable-HTTP** listener subsystem. **Correction to an earlier estimate:** the
+  `OAuthManager` precedent is a *single-shot* `NWListener` (one request, one `200`, close) — it is
+  precedent for *binding loopback*, not for a persistent HTTP server with POST-bodies, streaming
+  responses, and `Mcp-Session-Id`. This is the bulk of the work and its size depends on the
+  dependency decision below (**owner question**): hand-roll HTTP/1.1 over `NWConnection`, or take an
+  HTTP-server library (SwiftNIO/Hummingbird — the SDK transport is bring-your-own-framework). The
+  multi-client decision pushes toward a real library (concurrent clients over raw sockets is a lot
+  of fragile glue, against a zero-warnings bar), but it adds a dependency to a repo that keeps them
+  lean — so it's the owner's call.
 - A `MCP.Server` instance with Iris's own `tools/list` and handlers (~tens of lines).
-- **A pollable agent mailbox** — the one genuinely new concept. Iris's delivery today *pushes into
-  a live turn* or queues to the **human** inbox; there is no per-recipient "messages since X" pull
-  surface. The mailbox sits on GRDB exactly like `PeerLedger`. (kube-agents confirms this shape:
-  its bridge exposes a `poll_events` tool.)
-- A synthetic guest-peer identity/card for the external client.
-- The debug toggle + a bridge token (Keychain), in the config pane.
+- **The outbound (Iris→planner) delivery path.** `deliverPeerMessage` only delivers into a real
+  Iris `Conversation` (runs a turn / queues a transcript); a guest peer has none, so this leg
+  cannot reuse it. Decision: `send_to_session` *may* address a guest (uniform agent UX), and the
+  divert happens upstream in `decidePeerSend` — a guest-target branch writes to the mailbox and
+  returns, so `deliverPeerMessage` (turn execution) is **left untouched**. The routing branch is
+  the only core-code change.
+- **A pollable agent mailbox** — the one genuinely new concept, and the sink for the branch above.
+  Iris's delivery today *pushes into a live turn* or queues to the **human** inbox; there is no
+  per-recipient "messages since X" pull surface (`PeerLedger` stores only `firstLine`, not bodies,
+  so it can't back this). Per-client mailbox on GRDB like `PeerLedger`. (kube-agents confirms the
+  shape: its bridge exposes a `poll_events` tool.)
+- A synthetic guest-peer identity/card per connected client.
+- The debug toggle + a bridge token (Keychain / `${ENV_VAR}` on the client), in the config pane.
 
 ## Trust and security (the crux)
 
@@ -107,21 +136,37 @@ The owner is dropping the *transport* role, not the *approval* role. The design 
 - An always-on listening port.
 - A guest peer that can self-assert authority/liveness or launder an escalation.
 
-## Open questions for the owner (the "theirs" pile — brought after builder-check)
+## Owner decisions (2026-11-08)
 
-1. **Sequencing vs #931:** build this now as an independent local channel, or wait and share the
-   A2A envelope types with the (parked) #931 so they're designed together?
-2. **Priority vs current work:** the dev team is loaded (inbox/guard). Where does this sit —
-   after the guard/inbox work, or does it jump ahead as "primary path" infra?
-3. **One peer or many:** a single well-known planner identity, or support several external agents
-   (e.g. a reviewer loop + the planner) each as their own guest peer?
-4. **Scope of the mesh:** Iris↔planner only first, or expose the same channel so dev sessions can
-   query Iris directly too?
+1. **Co-design with #931** — one A2A adapter/envelope shared across the local-MCP and
+   remote-gateway transports; #931 unparks to co-design the shared layer.
+2. **Sequencing** — build this *after* the current inbox/guard work lands. Design now, build later.
+3 & 4. **Multi-client agnostic** — a standard MCP server; no single-peer assumption; each
+   connecting client is its own guest peer.
+
+### Remaining open question (verified items folded into the doc above)
+- **HTTP-server dependency:** hand-roll HTTP/1.1 over `NWConnection`, or add SwiftNIO/Hummingbird?
+  (Recommendation: a library, given multi-client + the zero-warnings bar — but it's a dependency in
+  a lean repo, so owner's call. See net-new.) Client-compat (static bearer header, no OAuth) and
+  the SSE-vs-Streamable-HTTP question are **resolved** (verified against Claude Code's MCP docs).
+
+### Multi-peer use cases (asked by the owner)
+- The **planner** — the primary triage/routing loop.
+- A dedicated **reviewer loop** (the owner already runs a separate romar reviewer loop; an Iris
+  reviewer is the same pattern).
+- **Dev sessions** querying Iris directly — "repro this in the live app", "what does the mailbox
+  show now" — without going through the planner.
+- The **Overseer** pulling Iris status for the dashboard.
+- **antigravity / other Claude surfaces**, and later non-Claude agents.
+Multi-client agnosticism covers all of these without special-casing any; the guest-peer + taint
+model applies uniformly.
 
 ## What is left to the builder
 
 - Exact tool schemas (`send`/`poll`/`discover`/`manage_identity`), the mailbox table + retention,
-  the synthetic card's representation in `SessionDirectory`, SSE-push vs poll wiring, the
-  config-pane toggle + token storage, and whether to factor the A2A envelope types as shared with
-  #931 on day one or local-only first. These are implementation choices for the plan, once the
-  owner answers the four questions above.
+  the synthetic card's representation in `SessionDirectory`, the config-pane toggle + token
+  storage, and the concrete shape of the shared A2A envelope/adapter layer co-designed with #931.
+  These are implementation choices for the plan. (Resolved above, not builder's choice: transport
+  is Streamable HTTP; the envelope is shared with #931; multi-client; the outbound leg is a
+  `decidePeerSend` guest-branch to the mailbox.) The HTTP-server dependency question is the one
+  item still needing the owner before the plan can size the listener.
