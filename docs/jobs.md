@@ -357,7 +357,9 @@ walked with `openat(O_DIRECTORY | O_NOFOLLOW)`, the final component is opened `O
 is staged as `<name>.sb-…` beside its target (`O_CREAT | O_EXCL`, the shape Foundation's own atomic
 save uses, so the watches' ignore set and the self-write filter treat it as they always did) and
 renamed into place with `renameat` inside that directory's descriptor; a rewrite keeps the file's
-mode bits, as Foundation's atomic save does, so a script the job maintains stays executable. A symlink anywhere in the
+mode bits, as Foundation's atomic save does, so a script the job maintains stays executable. A directory the
+path needs that does not exist yet is made with `mkdirat` inside the descriptor just opened (so only ever inside the
+granted directory; a write that does not commit takes back the empty directories it made, #954). A symlink anywhere in the
 path is a refusal, not a resolution — `the path crosses a symlink at …; a granted run may not read
 or write through symlinks — name the real directory instead` — a directory named as a file to
 write is refused, `read_file` of a directory returns its listing (read from the walked
