@@ -160,8 +160,13 @@ struct GrantedFileAccess: Sendable {
         try Self.validate(relative)
         let rootFD = try openRoot()
         defer { close(rootFD) }
-        let dirFD = try descend(relative.dropLast(), from: rootFD)
-        defer { if dirFD != rootFD { close(dirFD) } }
+        // A missing directory is made, one `mkdirat` at a time inside the descriptor just opened,
+        // so a write to a new nested path lands (#954) and nothing above the root is ever touched:
+        // `validate` has refused `..`, and a link on the way is refused by the walk, never followed.
+        let walk = DirectoryWalk()
+        var committed = false
+        defer { walk.finish(keepingCreated: committed) }
+        let dirFD = try descendCreating(relative.dropLast(), from: rootFD, walk: walk)
         // `renameat` would replace a symlink rather than follow it, but a run may not write
         // *through* one either way (§0.13): refuse before anything is staged. A regular file's
         // mode bits are kept for the rewrite: Foundation's atomic write — the attended path —
@@ -198,6 +203,7 @@ struct GrantedFileAccess: Sendable {
         guard shouldCommit() else { throw GrantedFileError.cancelled }
         guard renameat(dirFD, staging, dirFD, name) == 0 else { throw GrantedFileError.io(call: "renameat", errno: errno) }
         renamed = true
+        committed = true
     }
 
     // MARK: - The walk
@@ -256,6 +262,42 @@ struct GrantedFileAccess: Sendable {
             }
         }
         return .symlink(component: (root as NSString).lastPathComponent)
+    }
+
+    /// The descriptors a creating walk holds open, and the directories it made, so a write that
+    /// does not commit (a failure, a cancel) takes back the empty directories it created.
+    private final class DirectoryWalk {
+        var opened: [Int32] = []
+        var created: [(parent: Int32, name: String)] = []
+        func finish(keepingCreated: Bool) {
+            if !keepingCreated {
+                // Deepest first; a directory that is not empty (or was swapped) is left alone.
+                for dir in created.reversed() { _ = unlinkat(dir.parent, dir.name, AT_REMOVEDIR) }
+            }
+            for fd in opened { close(fd) }
+        }
+    }
+
+    /// `descend`, but a component that is missing is created (`0o755` less the umask, as
+    /// Foundation's `createDirectory` does) and opened the same way. Only ENOENT creates: a link,
+    /// a file in the way or any other failure is the walk's usual refusal. The returned descriptor
+    /// is owned by `walk`.
+    private func descendCreating(_ directories: ArraySlice<String>, from start: Int32, walk: DirectoryWalk) throws -> Int32 {
+        var dirFD = start
+        for component in directories {
+            var next = openat(dirFD, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            var code = errno
+            if next < 0, code == ENOENT {
+                if mkdirat(dirFD, component, 0o755) == 0 { walk.created.append((dirFD, component)) }
+                else if errno != EEXIST { throw Self.error(errno, at: component, call: "mkdirat") }
+                next = openat(dirFD, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                code = errno
+            }
+            guard next >= 0 else { throw Self.directoryError(code, in: dirFD, at: component) }
+            walk.opened.append(next)
+            dirFD = next
+        }
+        return dirFD
     }
 
     /// Opens each directory component in turn, each relative to the one before, none through a
