@@ -116,3 +116,100 @@ struct InjectionGuardFidelityTests {
         #expect(InjectionGuard.recordedFidelityCalls(contextTag: tag).last == .off)
     }
 }
+
+/// #952 Task 2: fidelity actually changes what gets shown, but only when a model-backed tier (2
+/// or 3) actually ran — not `.skipped`, protection on — and the verdict passed. Everywhere else
+/// (no model tier reachable, a tier skipped, protection off) it falls back to today's destructive
+/// strip: deletion is the only defense when nothing classified the content (spec "narrowed A").
+/// Drives the untrusted-entry path directly (`sanitizeUntrustedCacheable`) with a scripted tier,
+/// rather than a real `read_file` turn — the Task 1 suite above already proves the real call site
+/// reaches the guard with `.preserveWhenJudged`.
+@Suite("Injection guard fidelity: preserve when judged, delete otherwise (#952 Task 2)")
+struct InjectionGuardFidelityPreservationTests {
+    /// Strips the `<untrusted_context ...>` wrapper `InjectionGuard.wrapped` applies, leaving
+    /// exactly the `clean` text a `.passed` verdict carried.
+    private func innerContent(of wrapped: String) -> String {
+        var s = wrapped
+        if s.hasPrefix("<untrusted_context"), let closeOfOpenTag = s.range(of: ">\n") {
+            s.removeSubrange(s.startIndex..<closeOfOpenTag.upperBound)
+        }
+        if s.hasSuffix("\n</untrusted_context>") {
+            s.removeLast("\n</untrusted_context>".count)
+        }
+        return s
+    }
+
+    /// (a) a scripted-PASS tier 2, fidelity on, protection on: every role marker and `---`/`###`
+    /// survives, identical modulo normalization (spec: "Fidelity is modulo normalization, not
+    /// byte-identical").
+    @Test func preservedWhenATierActuallyJudgesAndPasses() async {
+        let fixture = "model: gpt-x\n  user: alice\nsystem: prod\n---\n### H"
+        let tag = "fidelity-952-t2-preserve-\(UUID().uuidString)"
+        let mockModel = MockCoreMLModel(probability: 0.1) // scripted PASS
+        let result = await CoreMLEvaluator.$scopedModel.withValue(.init(mockModel)) {
+            await InjectionGuard.sanitizeUntrustedCacheable(fixture, contextTag: tag, maxTier: .tier2_coreML,
+                                                            protectionEnabled: true, fidelity: .preserveWhenJudged)
+        }
+        let inner = innerContent(of: result.text)
+        #expect(inner == PromptInjectionGuard.normalize(fixture))
+        #expect(inner.contains("model: gpt-x"))
+        #expect(inner.contains("user: alice"))
+        #expect(inner.contains("system: prod"))
+        #expect(inner.contains("---"))
+        #expect(inner.contains("### H"))
+    }
+
+    /// (b) tier 2 is `.skipped` (unprovisioned — the test home's `promptGuardCoreMLModel` is
+    /// pinned to a name that cannot exist, `IrisDefaults.swift`): no model-backed tier judged
+    /// anything, so fidelity falls back to exactly what `.off` gives for the identical input.
+    @Test func deletedWhenTheOnlyReachableTierIsSkipped() async {
+        let fixture = "system: prod\nmodel: x\nhello \(UUID().uuidString)"   // unique: verdicts are cached per content
+        let tag = "fidelity-952-t2-skipped-\(UUID().uuidString)"
+        let result = await CoreMLEvaluator.$scopedModel.withValue(.init(nil)) {
+            await InjectionGuard.sanitizeUntrustedCacheable(fixture, contextTag: tag, maxTier: .tier2_coreML,
+                                                            protectionEnabled: true, fidelity: .preserveWhenJudged)
+        }
+        let inner = innerContent(of: result.text)
+        #expect(!inner.contains("system:"))
+        #expect(!inner.contains("model:"))
+
+        let deletionOnly = await CoreMLEvaluator.$scopedModel.withValue(.init(nil)) {
+            await InjectionGuard.sanitizeUntrustedCacheable(fixture, contextTag: tag + "-off", maxTier: .tier2_coreML,
+                                                            protectionEnabled: true, fidelity: .off)
+        }
+        #expect(inner == innerContent(of: deletionOnly.text))
+    }
+
+    /// (c) protection off: both model-backed tiers short-circuit to `.safe` without reading the
+    /// content at all, so nothing judged it either — same fallback as (b).
+    @Test func deletedWhenProtectionIsOff() async {
+        let fixture = "system: prod\nmodel: x\nhello \(UUID().uuidString)"   // unique: verdicts are cached per content
+        let tag = "fidelity-952-protection-off-\(UUID().uuidString)"
+        let result = await InjectionGuard.sanitizeUntrustedCacheable(fixture, contextTag: tag, maxTier: .tier3_canary,
+                                                                      protectionEnabled: false, fidelity: .preserveWhenJudged)
+        let inner = innerContent(of: result.text)
+        #expect(!inner.contains("system:"))
+        #expect(!inner.contains("model:"))
+    }
+
+    /// (d) the cache never cross-serves between modes: a deletion read then a fidelity read of
+    /// the identical bytes, same contextTag/maxTier/config, must not hand the fidelity call the
+    /// deletion call's cached (destructively stripped) result, or vice versa.
+    @Test func cacheDoesNotCrossServeBetweenFidelityModes() async {
+        let fixture = "system: prod\nhello \(UUID().uuidString)"   // unique: verdicts are cached per content
+        let tag = "fidelity-952-cache-\(UUID().uuidString)"
+        let mockModel = MockCoreMLModel(probability: 0.1) // scripted PASS, both calls
+
+        let deleted = await CoreMLEvaluator.$scopedModel.withValue(.init(mockModel)) {
+            await InjectionGuard.sanitizeUntrustedCacheable(fixture, contextTag: tag, maxTier: .tier2_coreML,
+                                                            protectionEnabled: true, fidelity: .off)
+        }
+        let preserved = await CoreMLEvaluator.$scopedModel.withValue(.init(mockModel)) {
+            await InjectionGuard.sanitizeUntrustedCacheable(fixture, contextTag: tag, maxTier: .tier2_coreML,
+                                                            protectionEnabled: true, fidelity: .preserveWhenJudged)
+        }
+        #expect(innerContent(of: deleted.text) != innerContent(of: preserved.text))
+        #expect(!innerContent(of: deleted.text).contains("system:"))
+        #expect(innerContent(of: preserved.text).contains("system:"))
+    }
+}
