@@ -48,18 +48,24 @@ struct InboxView: View {
             .frame(minWidth: 240, idealWidth: 280)
             .listStyle(.sidebar)
 
-            if let item = selected {
-                detail(for: item)
-                    .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            } else {
-                VStack {
-                    Spacer()
-                    Text(items.isEmpty ? "No open items." : "Select an item.")
-                        .foregroundColor(.secondary)
-                    Spacer()
+            // One stable view in this HSplitView slot, not an if/else swapping two view
+            // identities in it — the latter can make the NSSplitView it bridges to re-derive
+            // (and reset) the divider position the first time the branch flips (dev-3's #987
+            // review). The frame is applied once, outside the content switch.
+            Group {
+                if let item = selected {
+                    detail(for: item).frame(maxWidth: .infinity, alignment: .topLeading)
+                } else {
+                    VStack {
+                        Spacer()
+                        Text(items.isEmpty ? "No open items." : "Select an item.")
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity)
                 }
-                .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
             }
+            .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .navigationTitle("Inbox")
     }
