@@ -385,3 +385,36 @@ final class LockedBox<T>: @unchecked Sendable {
     init(_ value: T) { self.value = value }
     func withLock<R>(_ body: (inout T) -> R) -> R { lock.withLock { body(&value) } }
 }
+
+/// #990: the extra-models field erased the comma as it was typed, because each keystroke was
+/// normalised and the field re-read from the saved list.
+@Suite("Extra subagent models field (#990)")
+struct ExtraModelsEditorTests {
+    @Test("typing a separator keeps it in the field while the saved list stays normalised")
+    func separatorSurvivesTyping() {
+        var editor = ExtraModelsEditor(stored: [])
+        #expect(editor.edit("claude-x") == ["claude-x"])
+        #expect(editor.edit("claude-x,") == ["claude-x"])
+        #expect(editor.text == "claude-x,")
+        #expect(editor.edit("claude-x, ") == ["claude-x"])
+        #expect(editor.text == "claude-x, ")
+        #expect(editor.edit("claude-x, claude-y") == ["claude-x", "claude-y"])
+        #expect(editor.text == "claude-x, claude-y")
+    }
+
+    @Test("the field starts from the saved list, and an emptied field saves an empty list")
+    func seedsFromStoredAndClears() {
+        var editor = ExtraModelsEditor(stored: ["a", "b"])
+        #expect(editor.text == "a, b")
+        #expect(editor.edit("") == [])
+        #expect(editor.text == "")
+        #expect(editor.edit(" , ,") == [])
+    }
+
+    @Test("a pasted list, with newlines, saves each id once trimmed")
+    func pastedList() {
+        var editor = ExtraModelsEditor(stored: [])
+        #expect(editor.edit("a ,b\n c") == ["a", "b", "c"])
+        #expect(editor.text == "a ,b\n c")
+    }
+}

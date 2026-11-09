@@ -1,5 +1,43 @@
 import SwiftUI
 
+/// The typed text of a family's extra-models field and the list it saves (#990). The text is the
+/// field's own state and is never rebuilt from the saved list: normalising on each keystroke
+/// erased the comma the moment it was typed, so a second id could not be started.
+struct ExtraModelsEditor: Equatable {
+    private(set) var text: String
+
+    init(stored: [String]) { text = stored.joined(separator: ", ") }
+
+    /// Takes what the person typed as it is and returns the list to save.
+    mutating func edit(_ typed: String) -> [String] {
+        text = typed
+        return EndpointDraft.split(typed)
+    }
+}
+
+/// The extra-models field of one built-in family. Its text is seeded from the saved list when the
+/// row appears (the family's switch turning on, or the pane opening) and is not re-read while the
+/// person types.
+private struct ExtraModelsField: View {
+    @State private var editor: ExtraModelsEditor
+    let save: ([String]) -> Void
+
+    init(stored: [String], save: @escaping ([String]) -> Void) {
+        _editor = State(initialValue: ExtraModelsEditor(stored: stored))
+        self.save = save
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            TextField("Extra subagent models (comma-separated, exact ids)", text: Binding(
+                get: { editor.text },
+                set: { save(editor.edit($0)) }))
+            Text("Model ids a subagent may use on this family besides its tier models. Saved as you type.")
+                .font(.caption).foregroundColor(.secondary)
+        }
+    }
+}
+
 /// Settings → Models → Subagent providers (#239): the built-in families' switches and the
 /// custom OpenAI-compatible endpoints. Never shows a key's value, only `KeyHint`'s suffix (#702).
 struct SubagentProvidersSection: View {
@@ -80,12 +118,10 @@ struct SubagentProvidersSection: View {
                  : "No key set for \(family.rawValue). Add one under LLM Providers to use it for subagents.")
                 .font(.caption).foregroundColor(.secondary)
             if use.enabled {
-                TextField("Extra subagent models (comma-separated, exact ids)", text: Binding(
-                    get: { use.extraModels.joined(separator: ", ") },
-                    set: { text in
-                        config.setSubagentUse(BuiltInSubagentUse(enabled: true, extraModels: EndpointDraft.split(text)), for: family)
-                        revision += 1
-                    }))
+                ExtraModelsField(stored: use.extraModels) { models in
+                    config.setSubagentUse(BuiltInSubagentUse(enabled: true, extraModels: models), for: family)
+                    revision += 1
+                }
             }
         }
     }
