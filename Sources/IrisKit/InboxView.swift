@@ -27,7 +27,11 @@ struct InboxView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
+        // HSplitView draws its own draggable divider, so the explicit Divider() below is gone
+        // (#920: Brian wants the items pane horizontally resizable). The list keeps a minWidth so
+        // it can't be dragged to nothing, and the old 360 maxWidth cap is dropped so the drag has
+        // somewhere to go; the detail pane gets its own minWidth so a wide list can't crush it.
+        HSplitView {
             List(selection: Binding(
                 get: { state.selectedInboxItemId },
                 set: { newId in
@@ -41,14 +45,12 @@ struct InboxView: View {
                     inboxRowSummary(item).tag(Optional(item.id))
                 }
             }
-            .frame(minWidth: 240, idealWidth: 280, maxWidth: 360)
+            .frame(minWidth: 240, idealWidth: 280)
             .listStyle(.sidebar)
-
-            Divider()
 
             if let item = selected {
                 detail(for: item)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
                 VStack {
                     Spacer()
@@ -56,7 +58,7 @@ struct InboxView: View {
                         .foregroundColor(.secondary)
                     Spacer()
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .navigationTitle("Inbox")
