@@ -152,7 +152,9 @@ a disclosure-request to the owner broker"; the broker is an `owner`-profile run 
 - **Sensitivity dial:** low-sensitivity → auto-disclose within the envelope; higher → becomes an
   **Inbox item Brian approves** before it returns. Every disclosure is logged regardless. This is the
   convergence with the just-shipped Inbox: a proxied disclosure to a guest is exactly a human-decision
-  surface.
+  surface. "Auto-disclose" means *without Brian in the loop* — it still requires a live owner-authority
+  run to decide and read the source (see **R4**); with no owner context available it does not fall back
+  to a cache, it stays pending.
 
 The broker runs the requester's task text under the injection guard (external `contextTag`) even
 though the broker itself is high-privilege — the request explaining the task is untrusted.
@@ -214,8 +216,10 @@ a new decision from Brian; each resolves from decisions already made plus verifi
   on a single-machine install nothing can answer a disclosure needing owner memory without a running
   owner-authority context, so there is **no auto-disclosure from a cache** — no available owner
   context ⇒ the request stays pending (fail-closed to "later," never answered by a lesser authority).
-  Feature feel: guest disclosures are answered when your Iris is around, not instantly 24/7. *(planner's
-  call — flagged for Brian's check because it sets the feel.)*
+  This is what bounds the "auto-disclose within the envelope" path in the broker section above: even
+  the no-Brian-in-the-loop case needs a live owner-authority run; it is "auto" w.r.t. Brian, never
+  w.r.t. an owner process. Feature feel: guest disclosures are answered when your Iris is around, not
+  instantly 24/7. *(planner's call — flagged for Brian's check because it sets the feel.)*
 - **R5 — Identity→profile routing.** The mapping lives **on the Profile** (a Profile declares which
   authenticated identities resolve to it) — one place, stays "configure profiles only." Each transport
   supplies the identity: A2A from the gateway's verified peer id; MCP guest from #965's own guest-auth
