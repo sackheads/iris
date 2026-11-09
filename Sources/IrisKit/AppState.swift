@@ -2422,18 +2422,34 @@ class AppState {
 
     /// #962 — "Add Directory...": appends a directory to this conversation's `additionalRoots`,
     /// the same kind of thing `workspacePath` already is (feeds AGENTS.md pickup and, when
-    /// sandboxed, the mount list), never a second, parallel allow-list. A no-op if the canonical
-    /// path is already the workspace or already in the list — set-like append, not a growing log.
-    /// Does NOT widen what auto-approves without asking: that stays Vibecop/the dialog's call
-    /// until #974 turns these into part of the profile's own FS grant.
-    func addAdditionalRoot(for conversationId: UUID, path: String) {
-        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
+    /// sandboxed, the mount list), never a second, parallel allow-list. A no-op (returns nil, not
+    /// a refusal) if the canonical path is already the workspace or already in the list — set-like
+    /// append, not a growing log. Does NOT widen what auto-approves without asking: that stays
+    /// Vibecop/the dialog's call until #974 turns these into part of the profile's own FS grant.
+    ///
+    /// Returns the refusal reason, or nil on success/no-op. Two refusals, both #962 review
+    /// (dev-2): (1) a path #611's `HomeMount.reason` guards — unlike the workspace, an additional
+    /// root has no opt-in route at all, so this is refused outright rather than silently mounted
+    /// read-write with no warning. (2) a path containing `:` or `,` — the mount-entry string
+    /// format (`source[:target][:ro]`, comma-delimited directives) would misparse it, e.g. a
+    /// directory literally named `.../x:ro` is read back as a read-only mount of `.../x`.
+    @discardableResult
+    func addAdditionalRoot(for conversationId: UUID, path: String) -> String? {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return nil }
         let canonical = IrisPaths.canonicalPath(IrisEngine.expandTilde(path))
-        guard canonical != conversations[idx].workspacePath,
-              !conversations[idx].additionalRoots.contains(canonical) else { return }
+        let canonicalWorkspace = conversations[idx].workspacePath
+            .map { IrisPaths.canonicalPath(IrisEngine.expandTilde($0)) }
+        guard canonical != canonicalWorkspace, !conversations[idx].additionalRoots.contains(canonical) else { return nil }
+        if canonical.contains(":") || canonical.contains(",") {
+            return "Not added: \(canonical) contains a \(canonical.contains(":") ? "colon" : "comma"), which the sandbox's mount format can't spell safely."
+        }
+        if let reason = HomeMount.reason(for: canonical) {
+            return HomeMount.additionalRootRefusal(path: canonical, reason: reason)
+        }
         writableRoots.record([canonical])   // #616: a sandbox in this conversation can write it, same as setWorkspace
         conversations[idx].additionalRoots.append(canonical)
         markChanged(conversationId, .metadata)
+        return nil
     }
 
     /// #962 — "Manage Directories...": drops exactly `path` (already canonical, as stored) from

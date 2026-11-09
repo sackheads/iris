@@ -82,7 +82,7 @@ When a sandboxed workspace is a git repository, the VM can't choose what git on 
 
 ### Workspace Binding
 
-Link chat sessions to local filesystem directories. Iris will automatically load the project's `AGENTS.md` instructions and execute terminal commands from within that project context. **Add Directory…** (#962) appends more directories to a session's scope beyond its one primary workspace — each one's own `AGENTS.md` is picked up too, labeled by its path, and when the session is sandboxed each becomes an extra read-write mount, the same way the workspace itself does. **Manage Directories…** lists them and lets you remove one. This widens scope only — it does not pre-approve anything: a command or write under an added directory still asks, exactly as it would anywhere else.
+Link chat sessions to local filesystem directories. Iris will automatically load the project's `AGENTS.md` instructions and execute terminal commands from within that project context. **Add Directory…** (#962) appends more directories to a session's scope beyond its one primary workspace — each one's own `AGENTS.md` is picked up too, labeled by its path, and when the session is sandboxed each becomes an extra read-write mount, the same way the workspace itself does (refused for a folder the #611 Home Mount guard already protects the workspace from — home, a startup location, a credential store, your login PATH, or Iris's own settings; unlike the workspace, an added directory has no opt-in for those). **Manage Directories…** lists them and lets you remove one. This widens scope only — it does not change what's approved: a command or write under an added directory is judged exactly as one under the workspace is.
 
 ### Autonomous Goal Loops
 

@@ -569,13 +569,34 @@ struct ToolExecutor {
                !HomeMount.isCovered(source, by: homeWritableOptIn) {
                 return HomeMount.refusal(path: source, reason: reason)
             }
+            // #962 review (dev-2): additionalRoots get the #611 guard too, with no opt-in bypass —
+            // unlike the workspace, an additional root has none. `addAdditionalRoot` already
+            // refuses a guarded path at add time; this catches a root stored before that fix, or
+            // edited into the store directly, so the guard can never be bypassed by stale data.
+            if grant == nil {
+                for root in additionalRoots {
+                    if let reason = HomeMount.reason(for: root) {
+                        return HomeMount.refusal(path: root, reason: reason)
+                    }
+                }
+            }
             // #962: without a grant (an ordinary attended conversation), additionalRoots become
             // extra read-write mounts, the same role a grant's own extraMountEntries play — scope
             // only, never auto-approve (that's #974's). A grant already fully determines a job
-            // run's mounts, so additionalRoots don't apply there. Filtered against the workspace's
-            // own source so a stale root that now matches it is never mounted twice.
+            // run's mounts, so additionalRoots don't apply there. Compared canonical-to-canonical
+            // against the workspace's own source (dev-2's review: `workspace?.source` is only
+            // tilde-expanded, additionalRoots are stored canonical, so a workspace reached through
+            // a symlink used to dodge the dedup and mount the same directory twice) so a root that
+            // matches it is never mounted twice. A root containing `:` or `,` is dropped, never
+            // mounted: `addAdditionalRoot` already refuses one at add time, so this only guards
+            // against a root stored before that fix — the mount-entry string format would
+            // misparse it, never crash the whole run for one bad legacy entry.
+            let canonicalWorkspace = workspace.map { IrisPaths.canonicalPath($0.source) }
             let extraMounts = grant?.extraMountEntries()
-                ?? additionalRoots.filter { $0 != workspace?.source }.map { ContainerMount(source: $0).entry }
+                ?? additionalRoots
+                    .filter { IrisPaths.canonicalPath($0) != canonicalWorkspace }
+                    .filter { !$0.contains(":") && !$0.contains(",") }
+                    .map { ContainerMount(source: $0).entry }
             let network = NetworkMode.forGrant(grant)
             if let sandboxSession {
                 return await sandboxSession(command, conversationId, workspace, extraMounts, network, deadline)
