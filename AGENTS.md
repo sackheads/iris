@@ -246,7 +246,7 @@ git -C <worktree> status --porcelain          # must be empty; if not, the files
 git worktree remove <worktree>                # --force only for a harness-locked tree that is clean
 git branch -D <branch>                        # -D: rebase merges leave the branch unmerged to git
 git worktree prune
-rm -rf "${TMPDIR}"iris-app-*-"$(print -rn -- <worktree> | shasum | cut -c1-8)"   # its app build's derived data, if it ever ran build-app.sh
+rm -rf "${TMPDIR}"iris-app-*-"$(print -rn -- <worktree> | shasum | cut -c1-8)"(N)   # its app build's derived data, if it ever ran build-app.sh
 ```
 
 Check the PR is actually merged (`gh pr list --head <branch> --state all`) before deleting: a
