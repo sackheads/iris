@@ -729,8 +729,11 @@ nobody having asked. A run that thinks a job is warranted says so, and you creat
 A fire does not touch the conversation you are in. Each run gets a **background conversation** of
 its own — a real conversation, so its transcript can be read back afterwards, but flagged
 `isBackground`, so it is out of the sidebar and can never be selected. The model turn happens
-there. A run in flight shows up in the activity strip under the composer as `job:<name>`; that is
-the only place a running job is visible while it runs.
+there. A run in flight is tracked as `job:<name>` in the same place a subagent or evaluator run is,
+but under the strip's per-session scope (#986) it never surfaces in any focused conversation's
+strip — a job has no interactive parent to belong to there. It will become visible once #988's
+global "all running tasks" view ships; until then, `list_jobs` and `get_job_run` are how you check
+on a run in flight.
 
 ### Built-in jobs
 

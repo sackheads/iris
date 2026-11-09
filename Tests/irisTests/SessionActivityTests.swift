@@ -106,7 +106,7 @@ struct SessionActivityTests {
     }
 
     private static func session(_ phase: ActivitySummary.Phase, kind: ActivitySummary.Kind = .subagent) -> ActivitySummary {
-        ActivitySummary(id: UUID(), kind: kind, role: "r", startTime: Date(), phase: phase, lastActivity: nil)
+        ActivitySummary(id: UUID(), kind: kind, role: "r", owner: nil, startTime: Date(), phase: phase, lastActivity: nil)
     }
 
     @Test("collapsed summary tells an evaluator apart from a subagent, like the expanded rows do")
@@ -237,17 +237,84 @@ struct SessionTrackingTests {
         } == true)
     }
 
-    @Test("visibleRuns puts the main session first and includes only subagent/evaluator kinds")
+    @Test("visibleRuns puts the main session first and includes only subagent/evaluator kinds owned by the focused conversation")
     func visibleSessionsOrdering() {
         let app = isolatedApp()
+        let main = UUID()
+        app.createNewConversation(id: main)
+        app.selectedConversationId = main
         let subagentId = UUID(), evaluatorId = UUID()
-        app.registerSubagent(id: subagentId, role: "engineer")
-        app.registerSubagent(id: evaluatorId, role: "evaluator", kind: .evaluator)
+        app.registerSubagent(id: subagentId, role: "engineer", owner: main)
+        app.registerSubagent(id: evaluatorId, role: "evaluator", kind: .evaluator, owner: main)
         let visible = app.visibleRuns
         #expect(visible.first?.kind == .main)
         #expect(visible.first?.role == "main")
         #expect(Set(visible.dropFirst().map(\.id)) == [subagentId, evaluatorId])
         #expect(visible.dropFirst().allSatisfy { $0.kind == .subagent || $0.kind == .evaluator })
+    }
+
+    /// #986: Brian's decision B — the strip is scoped per focused session, not process-global.
+    @Test("visibleRuns excludes runs owned by a different conversation")
+    func visibleRunsIsolatesByOwner() {
+        let app = isolatedApp()
+        let a = UUID(), b = UUID()
+        app.createNewConversation(id: a)
+        app.createNewConversation(id: b)
+        let subagentOfA = UUID()
+        app.registerSubagent(id: subagentOfA, role: "engineer", owner: a)
+
+        app.selectedConversationId = a
+        #expect(app.visibleRuns.dropFirst().map(\.id) == [subagentOfA])
+
+        app.selectedConversationId = b
+        #expect(app.visibleRuns.dropFirst().isEmpty)
+    }
+
+    /// #986: an evaluator grading conversation A is attributed to A, not to whoever happens to be
+    /// focused when it's registered.
+    @Test("an evaluator is attributed to the conversation it grades")
+    func evaluatorAttributedToGradedConversation() {
+        let app = isolatedApp()
+        let a = UUID(), b = UUID()
+        app.createNewConversation(id: a)
+        app.createNewConversation(id: b)
+        let evaluatorOfA = UUID()
+        app.registerSubagent(id: evaluatorOfA, role: "evaluator", kind: .evaluator, owner: a)
+
+        app.selectedConversationId = b
+        #expect(app.visibleRuns.dropFirst().isEmpty)
+
+        app.selectedConversationId = a
+        #expect(app.visibleRuns.dropFirst().map(\.id) == [evaluatorOfA])
+    }
+
+    /// #986: a background job has no interactive parent (`owner` nil) and must not surface in any
+    /// focused session's strip — it belongs to the global #988 view only.
+    @Test("a background job never appears in a focused session's visibleRuns")
+    func jobOwnerNilNeverVisibleInFocusedStrip() {
+        let app = isolatedApp()
+        let a = UUID()
+        app.createNewConversation(id: a)
+        app.selectedConversationId = a
+        let jobId = UUID()
+        app.registerSubagent(id: jobId, role: "job:nightly", kind: .job, owner: nil)
+        #expect(app.visibleRuns.dropFirst().isEmpty)
+        // stripRuns itself still holds it — this is a visibleRuns-level scope, not a tracking gap.
+        #expect(app.stripRuns.contains { $0.id == jobId })
+    }
+
+    /// #986: the linger sweep is independent of ownership — it must keep working on the raw
+    /// `stripRuns` array regardless of the new scoping in `visibleRuns`.
+    @Test("the finished-run sweep still works under the new owner filter")
+    func sweepStillWorksWithOwner() {
+        let app = isolatedApp()
+        let owner = UUID()
+        let id = UUID()
+        app.registerSubagent(id: id, role: "engineer", owner: owner)
+        app.finishRun(id: id, status: "completed")
+        let at = Date()
+        let swept = ActivitySummary.sweep(app.stripRuns, now: at.addingTimeInterval(61), lingerWindow: 60)
+        #expect(swept.isEmpty)
     }
 
     /// Fix round 1 (#217/#19), items 1 + 4: the main row's elapsed time rendered as a
@@ -358,10 +425,10 @@ struct SessionTrackingTests {
 @Suite("ActivitySummary.sweep", .timeLimit(.minutes(1)))
 struct SessionSweepTests {
     private func finished(_ at: Date) -> ActivitySummary {
-        ActivitySummary(id: UUID(), kind: .subagent, role: "r", startTime: at, phase: .finished(status: "completed", at: at), lastActivity: nil)
+        ActivitySummary(id: UUID(), kind: .subagent, role: "r", owner: nil, startTime: at, phase: .finished(status: "completed", at: at), lastActivity: nil)
     }
     private func running() -> ActivitySummary {
-        ActivitySummary(id: UUID(), kind: .subagent, role: "r", startTime: Date(), phase: .thinking, lastActivity: nil)
+        ActivitySummary(id: UUID(), kind: .subagent, role: "r", owner: nil, startTime: Date(), phase: .thinking, lastActivity: nil)
     }
 
     @Test("drops a finished entry older than the linger window")
@@ -425,7 +492,7 @@ struct ExecuteToolSessionActivityTests {
 @Suite("Activity strip toggle (#982)")
 struct ActivityStripToggleTests {
     private func run(_ kind: ActivitySummary.Kind, _ phase: ActivitySummary.Phase = .thinking) -> ActivitySummary {
-        ActivitySummary(id: UUID(), kind: kind, role: "r", startTime: Date(), phase: phase, lastActivity: nil)
+        ActivitySummary(id: UUID(), kind: kind, role: "r", owner: nil, startTime: Date(), phase: phase, lastActivity: nil)
     }
 
     @Test("with no runs, or only the main row, the toggle has nothing to do")

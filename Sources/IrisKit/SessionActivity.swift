@@ -36,6 +36,11 @@ struct ActivitySummary: Identifiable, Hashable, Sendable {
     let id: UUID              // conversation id
     let kind: Kind
     let role: String          // "main" for the main session, the subagent role otherwise
+    /// The interactive conversation this run belongs to (#986): the spawning conversation for a
+    /// subagent/evaluator, `nil` for a background job, which has no interactive parent and is
+    /// scoped out of every focused session's strip by design — it surfaces only in the global
+    /// #988 view.
+    let owner: UUID?
     let startTime: Date
     var phase: Phase
     var lastActivity: LastActivity?

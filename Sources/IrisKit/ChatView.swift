@@ -1101,11 +1101,14 @@ struct ChatView: View {
     }
 
     /// The message input bar: a multi-line field (Enter submits, Shift+Enter newlines) + send button.
-    /// The toolbar "cpu" badge's count: running subagent/evaluator sessions only (`state.stripRuns`
-    /// never holds the main session — see `AppState.visibleRuns`), matching what
-    /// `ActivityStripView`'s expanded view lists.
+    /// The toolbar "cpu" badge's count: running subagent/evaluator sessions owned by the focused
+    /// conversation only (#986 — matches `AppState.visibleRuns`'s scope), so the badge never counts
+    /// a run `ActivityStripView`'s expanded view wouldn't show here. A background job (`owner` nil)
+    /// never matches a real selection.
     private var runningSubagentCount: Int {
-        state.stripRuns.filter {
+        let focusedId = state.selectedConversationId
+        return state.stripRuns.filter {
+            guard focusedId != nil, $0.owner == focusedId else { return false }
             if case .finished = $0.phase { return false }
             return true
         }.count
