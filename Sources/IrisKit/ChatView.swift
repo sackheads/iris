@@ -524,6 +524,8 @@ struct ChatView: View {
                                 }
                             }
                             .font(.caption)
+                            // The toolbar item sits flush against the window's edge (#1004).
+                            .padding(.trailing, 8)
                         }
                     }
                 }
