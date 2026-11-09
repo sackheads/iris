@@ -166,7 +166,7 @@ enum SessionAddressError: Error, Equatable {
     var message: String {
         switch self {
         case .notFound: return "No active session matches that."
-        case .roleVacant(let role): return "Nobody holds role:\(role) right now (it may be unassigned or its holder archived). It is a valid address: retry later, or use list_sessions to see who is active."
+        case .roleVacant(let role): return "Nobody holds role:\(role) right now (it is unassigned or was released). It is a valid address: retry later, or use list_sessions to see who is active."
         case .unknownName: return "No active session has that name. Names are the sessions' own claims and change: use list_sessions to see the names in use, or a session_id."
         case .ambiguous(let n): return "\(n) sessions share that name; use a session_id from list_sessions."
         case .inactive: return "That session is no longer active."
