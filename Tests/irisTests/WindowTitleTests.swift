@@ -27,6 +27,14 @@ struct WindowTitleTests {
         #expect(WindowTitle.safe(long) == String(repeating: "x", count: WindowTitle.maxLength) + "...")
     }
 
+    @Test("the cap counts scalars, so stacked combining marks cannot slip past it")
+    func cappedByScalars() {
+        let stacked = "a" + String(repeating: "\u{0301}", count: 5000)
+        let out = WindowTitle.safe(stacked)
+        #expect(out.unicodeScalars.count == WindowTitle.maxLength + 3)
+        #expect(out.hasSuffix("..."))
+    }
+
     @Test("an all-control title is empty")
     func empty() {
         #expect(WindowTitle.safe("\u{0000}\u{200B}\n") == "")
