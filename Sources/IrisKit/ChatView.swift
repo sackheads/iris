@@ -513,6 +513,15 @@ struct ChatView: View {
                                 .foregroundColor(.primary)
                                 .bold()
                                 .help("Total Tokens Used")
+
+                                if let cost = state.conversationCost(for: conv.id) {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "dollarsign.circle")
+                                        Text(cost.label)
+                                    }
+                                    .foregroundColor(.secondary)
+                                    .help(cost.help)
+                                }
                             }
                             .font(.caption)
                         }
