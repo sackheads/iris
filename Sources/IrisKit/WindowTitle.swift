@@ -26,6 +26,11 @@ enum WindowTitle {
             }
         }
         let trimmed = out.trimmingCharacters(in: .whitespaces)
-        return trimmed.count > maxLength ? String(trimmed.prefix(maxLength)) + "..." : trimmed
+        // Scalars, not Characters: 5000 combining marks on one letter is one Character (#998 review).
+        let scalars = trimmed.unicodeScalars
+        guard scalars.count > maxLength else { return trimmed }
+        var capped = String.UnicodeScalarView()
+        capped.append(contentsOf: scalars.prefix(maxLength))
+        return String(capped) + "..."
     }
 }
