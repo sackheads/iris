@@ -43,6 +43,12 @@ struct ActivityStripView: View {
         requested && !hasRunsToToggle(sessions)
     }
 
+    /// The request survives main going idle (the person asked for the note), but a turn starting
+    /// ends it: sending a message means the strip is about to show real work.
+    nonisolated static func idleNoteRequest(_ requested: Bool, mainIsIdle: Bool) -> Bool {
+        mainIsIdle ? requested : false
+    }
+
     static let idleNoteText = "No active runs"
 
     private func expandedRows(_ sessions: [ActivitySummary]) -> some View {
@@ -123,6 +129,9 @@ struct ActivityStripView: View {
         // #598: the strip's slide transition runs only inside an animation, and its visibility
         // changes with the sessions, outside any; this gives that change one.
         .animation(Motion.animation(Motion.reveal), value: isHidden)
+        .onChange(of: (mainSession?.phase ?? .idle) == .idle) { _, idle in
+            idleNoteRequested = Self.idleNoteRequest(idleNoteRequested, mainIsIdle: idle)
+        }
         .onChange(of: otherRuns.isEmpty) { _, empty in
             // The strip emptied out (nothing left but main): drop any manual collapse so the
             // NEXT subagent/evaluator run starts expanded again, per the ruling above.

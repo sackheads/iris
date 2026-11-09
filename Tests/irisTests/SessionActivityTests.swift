@@ -459,4 +459,11 @@ struct ActivityStripToggleTests {
         #expect(!ActivityStripView.showsIdleNote([run(.main), run(.subagent)], requested: true))
         #expect(ActivityStripView.idleNoteText == "No active runs")
     }
+
+    @Test("a turn starting ends the idle-note request; main going idle keeps it (#989 review)")
+    func idleNoteRequestFollowsMain() {
+        #expect(!ActivityStripView.idleNoteRequest(true, mainIsIdle: false))
+        #expect(ActivityStripView.idleNoteRequest(true, mainIsIdle: true))
+        #expect(!ActivityStripView.idleNoteRequest(false, mainIsIdle: true))
+    }
 }
