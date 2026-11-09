@@ -1212,7 +1212,10 @@ struct MessageView: View {
                             }
                         }
                         if !message.content.isEmpty {
+                            // A person types single newlines (Shift-Return, pasted logs); MarkdownUI's
+                            // default turns them into spaces, which the old plain Text never did.
                             messageMarkdown(message.content)
+                                .markdownSoftBreakMode(.lineBreak)
                                 .padding(10)
                                 .background(
                                     LinearGradient(
@@ -1279,8 +1282,8 @@ struct MessageView: View {
                 CodeBlockView(
                     configuration: configuration,
                     // An open fence is not a document yet (#896 PR 2, spec section 2):
-                    // `state.streaming.boxes` is exactly what `liveContent(of:)` above
-                    // already reads, so this is the live answer, not a stale one.
+                    // `state.streaming.boxes` is what the agent call site's `liveContent(of:)`
+                    // reads, so this is the live answer there; always nil for a user message.
                     isStreaming: state.streaming.boxes[message.id] != nil,
                     // Not reachable on merge (#896 PR 2): `ViewerFeatureGate` is off
                     // pending Brian's resolution of the dns-prefetch gap (#904). `nil`
@@ -1299,6 +1302,9 @@ struct MessageView: View {
                             isTainted: isTainted)
                     } : nil
                 )
+                // The user bubble sets a white foreground outside this helper; the block's own
+                // fill is pale in light mode, so pin its text to primary (a no-op for the agent).
+                .foregroundStyle(.primary)
             }
     }
 
