@@ -5,9 +5,41 @@ import Foundation
 /// shell's PATH (captured once per launch) plus the common install locations. Iris never
 /// installs runtimes itself.
 enum BinaryResolver {
-    /// Login-shell PATH entries, captured once. Falls back to empty on any failure.
-    private static let loginShellPath: [String] = {
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+    /// Login-shell PATH entries, captured once per process. Falls back to empty on any failure.
+    ///
+    /// Not a `static let`: that initializer spawned a login shell and waited with
+    /// `waitUntilExit()`, which pumps the main run loop, so on the main thread SwiftUI re-entered
+    /// a sidebar row's body mid-initialisation, touched the still-initialising static again and
+    /// died on libdispatch's non-reentrant once lock (#1001). The capture now waits on a
+    /// semaphore, which pumps nothing, behind a plain lock, and `warmUp()` runs it off the main
+    /// thread before the first window is built.
+    private static let cache = LoginPathCache()
+
+    private final class LoginPathCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: [String]?
+        func get() -> [String] {
+            lock.lock(); defer { lock.unlock() }
+            if let value { return value }
+            let captured = BinaryResolver.captureLoginPath()
+            value = captured
+            return captured
+        }
+    }
+
+    private static var loginShellPath: [String] { cache.get() }
+
+    /// Resolves the login-shell PATH on a background queue, so the first reader on the main thread
+    /// (a sidebar row's context menu, #1001) finds it cached instead of waiting on a subprocess.
+    static func warmUp() {
+        DispatchQueue.global(qos: .utility).async { _ = cache.get() }
+    }
+
+    /// Runs `shell -lc 'echo $PATH'` and returns its entries; empty on any failure or after
+    /// `timeout`. Waits on the process's termination handler, never `waitUntilExit()`, so a caller
+    /// on the main thread does not pump the run loop while it waits.
+    static func captureLoginPath(shell: String = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh",
+                                 timeout: TimeInterval = 5) -> [String] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: shell)
         process.arguments = ["-lc", "echo $PATH"]
@@ -15,20 +47,23 @@ enum BinaryResolver {
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
         process.standardInput = FileHandle.nullDevice
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
         do {
             try process.run()
-            let timeout = DispatchWorkItem { process.terminate() }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 5, execute: timeout)
-            process.waitUntilExit()
-            timeout.cancel()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            guard let output = String(data: data, encoding: .utf8) else { return [] }
-            return output.trimmingCharacters(in: .whitespacesAndNewlines)
-                .components(separatedBy: ":").filter { !$0.isEmpty }
         } catch {
             return []
         }
-    }()
+        if exited.wait(timeout: .now() + timeout) == .timedOut {
+            process.terminate()
+            _ = exited.wait(timeout: .now() + 1)
+            return []
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8) else { return [] }
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+            .components(separatedBy: ":").filter { !$0.isEmpty }
+    }
 
     static func defaultSearchDirs() -> [String] {
         let common = ["~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
