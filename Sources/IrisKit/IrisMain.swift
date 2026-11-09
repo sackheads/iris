@@ -92,6 +92,8 @@ public enum IrisMain {
             exit(code)
         } else {
             ProcessRole.set(.app)
+            // Off the main thread, before the first window: a sidebar row reads it (#1001).
+            BinaryResolver.warmUp()
             IrisApp.main()
         }
     }
