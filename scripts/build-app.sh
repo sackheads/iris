@@ -18,7 +18,13 @@ case "$config" in
   *) echo "usage: scripts/build-app.sh [Debug|Release] [derived-data-dir]" >&2; exit 64 ;;
 esac
 tmp="${TMPDIR:-/tmp}"
-derived="${2:-${tmp%/}/iris-app-$config}"
+# One derived-data dir per checkout, not one per config: its module and plugin caches hold absolute
+# paths, so a dir shared by every worktree was reused with another tree's paths in it (the same
+# trap as moving a worktree, see docs/building.md). The hash is of this tree's root; an explicit
+# argument still wins.
+tree_id="$(print -rn -- "$PWD" | shasum | cut -c1-8)"
+derived="${2:-${tmp%/}/iris-app-$config-$tree_id}"
+echo "derived data: $derived" >&2
 
 # Runs the compiler rather than just locating it, so this fails when the build would.
 if ! xcrun metal --version >/dev/null 2>&1; then
