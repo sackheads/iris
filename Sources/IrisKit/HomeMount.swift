@@ -78,4 +78,11 @@ enum HomeMount {
     static func refusal(path: String, reason: String) -> String {
         "Not run: the sandbox would mount \(path) read-write, and \(reason). The person can allow it for this conversation (right-click it in the sidebar: Let the Sandbox Write This Folder…), or the work can move to a project folder."
     }
+
+    /// #962 review (dev-2): why "Add Directory..." refused `path`. Deliberately not `refusal`'s
+    /// wording — an additional root has no opt-in route at all (#611's opt-in is a workspace
+    /// decision only), so this never points at "Let the Sandbox Write This Folder…".
+    static func additionalRootRefusal(path: String, reason: String) -> String {
+        "Not added: the sandbox would be able to mount \(path) read-write, and \(reason). An additional directory has no opt-in for this — make it the conversation's workspace instead if you need that, or add a different folder."
+    }
 }

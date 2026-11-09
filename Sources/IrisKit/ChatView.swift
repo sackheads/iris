@@ -927,9 +927,11 @@ struct ChatView: View {
 
     /// #962: "Add Directory..." — appends a read-write directory to the conversation's scope,
     /// the same kind of thing `linkWorkspace` already does for the primary workspace. Worded as
-    /// scope, not a grant: this does NOT stop Vibecop or the approval dialog from asking about a
-    /// call under it — that stays exactly as it is today until #974 turns these roots into part
-    /// of the owner profile's own FS grant.
+    /// scope, not a grant: this does not change what's APPROVED — a sandboxed command Vibecop
+    /// approves under it runs exactly as it would under the workspace, silently; only an
+    /// unapproved call still asks. That stays exactly as it is today until #974 turns these roots
+    /// into part of the owner profile's own FS grant. `addAdditionalRoot` refuses a path #611
+    /// guards (dev-2's #1012 review) — unlike the workspace, an additional root has no opt-in.
     private func addDirectory(to id: UUID) {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -938,8 +940,11 @@ struct ChatView: View {
         panel.prompt = "Add Directory"
 
         if panel.runModal() == .OK, let url = panel.url {
-            state.addAdditionalRoot(for: id, path: url.path)
-            state.appendMessage(role: .system, content: "Added \(url.path) to this session's scope (AGENTS.md and, when sandboxed, its mount). It still asks before a call under it, same as everywhere else.", to: id)
+            if let refusal = state.addAdditionalRoot(for: id, path: url.path) {
+                state.appendMessage(role: .system, content: refusal, to: id)
+            } else {
+                state.appendMessage(role: .system, content: "Added \(url.path) to this session's scope (AGENTS.md and, when sandboxed, its mount). Does not change what's approved: a call under it is judged exactly as one under the workspace is.", to: id)
+            }
         }
     }
 
@@ -2019,7 +2024,7 @@ struct ManageDirectoriesSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Directories").font(.headline)
-            Text("Scoped to this session: AGENTS.md from each, and the sandbox mount when it's sandboxed. This does not change whether a call under one still asks for approval.")
+            Text("Scoped to this session: AGENTS.md from each, and the sandbox mount when it's sandboxed. Does not change what's approved: a call under one is judged exactly as one under the workspace is.")
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             List {
