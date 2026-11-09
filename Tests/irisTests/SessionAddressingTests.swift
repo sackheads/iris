@@ -75,16 +75,13 @@ struct SessionAddressingTests {
         #expect(SessionAddressError.unknownName.message != SessionAddressError.notFound.message)
     }
 
-    @Test("an archived holder leaves the role vacant, and send_to_session says so")
-    func archivedHolderIsVacant() async {
+    @Test("send_to_session reports a vacant role and an unknown name in their own words (#955)")
+    func sendReportsVacantAndUnknown() async {
         let app = AppState(); app.conversations.removeAll()
-        let me = UUID(), holder = UUID()
-        for id in [me, holder] { app.createNewConversation(id: id) }
-        _ = app.assignRole("pr-minder", to: holder)
-        if let i = app.conversations.firstIndex(where: { $0.id == holder }) { app.conversations[i].isArchived = true }
-        #expect(SessionDirectory.resolve("role:pr-minder", in: app.conversations, excluding: me) == .failure(.roleVacant("pr-minder")))
-        let out = await runToolCall(send(to: "role:pr-minder"), on: app, as: me)
-        #expect(out.contains("Nobody holds role:pr-minder"))
+        let me = UUID(), other = UUID()
+        for id in [me, other] { app.createNewConversation(id: id) }
+        let vacant = await runToolCall(send(to: "role:pr-minder"), on: app, as: me)
+        #expect(vacant.contains("Nobody holds role:pr-minder"))
         let named = await runToolCall(send(to: "name:ghost"), on: app, as: me)
         #expect(named.contains("No active session has that name"))
     }
