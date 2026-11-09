@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import os
 @testable import IrisKit
 
 /// #1001: the login-shell PATH capture must not pump the main run loop while it waits, or SwiftUI
@@ -38,14 +39,14 @@ struct LoginPathCaptureTests {
     @Test("waiting on the shell does not run the main run loop")
     func doesNotPumpRunLoop() throws {
         let shell = try script("sleep 0.5; echo /a/bin")
-        var fired = false
+        let fired = OSAllocatedUnfairLock(initialState: false)
         // A timer in the default mode: `waitUntilExit()` services it while it waits, which is how a
         // SwiftUI body re-entered mid-initialisation. A semaphore wait does not.
-        let timer = Timer(timeInterval: 0.05, repeats: false) { _ in fired = true }
+        let timer = Timer(timeInterval: 0.05, repeats: false) { _ in fired.withLock { $0 = true } }
         RunLoop.main.add(timer, forMode: .default)
         defer { timer.invalidate() }
         _ = BinaryResolver.captureLoginPath(shell: shell)
-        #expect(!fired)
+        #expect(!fired.withLock { $0 })
     }
 
     @Test("HomeMount.reason still takes an explicit login PATH, and the home folder is refused")
