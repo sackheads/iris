@@ -1241,7 +1241,7 @@ actor IrisEngine {
                 switch result {
                 case .success:
                     await MainActor.run { localState?.bumpInboxRevision() }
-                    return "Recorded #\(id) (thread \(newThreadId)). Not yet surfaced to Brian — do not tell him you raised it."
+                    return "Recorded #\(id) (thread \(newThreadId)). It's in Brian's inbox now (sidebar row, unread badge) — you may tell him you raised it."
                 case .failure:
                     await MainActor.run { localState?.refundInboxEmit(from: conversationId) }
                     return "Not raised: could not record it."
@@ -3318,7 +3318,7 @@ actor IrisEngine {
         if !isUnattended && principal == .main {
             toolsList.append(FunctionDeclaration(
                 name: "inbox_item",
-                description: "Record a decision for Brian to answer: a durable, human-facing question that outlives this conversation. Omit thread_id for a new item; give the thread_id of an item you raised before to append a followup and reopen it (only the chain that raised it may do this — a foreign followup is refused). Nothing is delivered anywhere else — it is recorded, not surfaced to him yet, so do not tell him you raised something here.",
+                description: "Record a decision for Brian to answer: a durable, human-facing question that outlives this conversation. Omit thread_id for a new item; give the thread_id of an item you raised before to append a followup and reopen it (only the chain that raised it may do this — a foreign followup is refused). It appears in Brian's inbox (sidebar row, unread badge) — you may tell him you raised it.",
                 parameters: Schema(type: "OBJECT", properties: [
                     "title": Schema(type: "STRING", description: "A short label for the item."),
                     "situation": Schema(type: "STRING", description: "The full context: what's going on and why this needs a decision."),
