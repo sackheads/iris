@@ -487,7 +487,7 @@ struct ChatView: View {
                     }
                 }
                 .background(Color(NSColor.textBackgroundColor))
-                .navigationTitle(conv.title)
+                .navigationTitle(WindowTitle.safe(conv.title))
                 .toolbar {
                     if conv.tokenUsage.totalTokenCount > 0 {
                         ToolbarItem(placement: .automatic) {
