@@ -157,10 +157,17 @@ enum SessionDirectory {
 
 enum SessionAddressError: Error, Equatable {
     case notFound, ambiguous(Int), inactive, archived, isSelf, malformed
+    /// `role:<name>` with no active holder: the address is well-formed, so the sender can wait or
+    /// escalate. Told apart from `unknownName`, where retrying the same address cannot help (#955).
+    case roleVacant(String)
+    /// `name:<name>` that no active session carries.
+    case unknownName
 
     var message: String {
         switch self {
         case .notFound: return "No active session matches that."
+        case .roleVacant(let role): return "Nobody holds role:\(role) right now (it may be unassigned or its holder archived). It is a valid address: retry later, or use list_sessions to see who is active."
+        case .unknownName: return "No active session has that name. Names are the sessions' own claims and change: use list_sessions to see the names in use, or a session_id."
         case .ambiguous(let n): return "\(n) sessions share that name; use a session_id from list_sessions."
         case .inactive: return "That session is no longer active."
         // #231: archiving is now often automatic, so the sender is told it can come back.
@@ -183,11 +190,11 @@ extension SessionDirectory {
             target = c.id
         } else if raw.lowercased().hasPrefix("role:") {
             guard let role = SessionRoles.normalizedName(String(raw.dropFirst(5))) else { return .failure(.malformed) }
-            guard let id = SessionRoles.holder(of: role, in: conversations) else { return .failure(.notFound) }
+            guard let id = SessionRoles.holder(of: role, in: conversations) else { return .failure(.roleVacant(role)) }
             target = id
         } else if raw.lowercased().hasPrefix("name:") {
             let ids = SessionRoles.sessions(named: String(raw.dropFirst(5)), in: conversations, excluding: nil)
-            guard !ids.isEmpty else { return .failure(.notFound) }
+            guard !ids.isEmpty else { return .failure(.unknownName) }
             guard ids.count == 1 else { return .failure(.ambiguous(ids.count)) }
             target = ids[0]
         } else if let id = UUID(uuidString: raw) {
