@@ -1212,8 +1212,7 @@ struct MessageView: View {
                             }
                         }
                         if !message.content.isEmpty {
-                            Text(message.content)
-                                .textSelection(.enabled)
+                            messageMarkdown(message.content)
                                 .padding(10)
                                 .background(
                                     LinearGradient(
@@ -1252,39 +1251,7 @@ struct MessageView: View {
                     // Trade-off: no drag-to-select of partial text inside an agent bubble; whole-
                     // message copy still works via row selection + Cmd-C.
                     // Live: a reply still streaming reads its box (#541); only this row does.
-                    Markdown(state.liveContent(of: message))
-                        // Render fenced code blocks WITHOUT MarkdownUI's default horizontal
-                        // ScrollView (Theme.basic wraps the label in ScrollView(.horizontal)).
-                        // That scroll view swallows trackpad scroll when hovered (#30); wrapping
-                        // long lines instead keeps the outer list scrollable everywhere.
-                        .markdownBlockStyle(\.codeBlock) { configuration in
-                            // A copy button, not `.textSelection` (#32): the AttributeGraph cycle
-                            // above is between SwiftUI's TextSelection and MarkdownUI's layout, so
-                            // this sidesteps it entirely rather than risking it on a subview.
-                            CodeBlockView(
-                                configuration: configuration,
-                                // An open fence is not a document yet (#896 PR 2, spec section 2):
-                                // `state.streaming.boxes` is exactly what `liveContent(of:)` above
-                                // already reads, so this is the live answer, not a stale one.
-                                isStreaming: state.streaming.boxes[message.id] != nil,
-                                // Not reachable on merge (#896 PR 2): `ViewerFeatureGate` is off
-                                // pending Brian's resolution of the dns-prefetch gap (#904). `nil`
-                                // here, not a disabled button, so there is no chip to notice at
-                                // all. `RawHTMLSanitizer.sanitize` (#912) runs on the raw-HTML
-                                // render path before any document is ever shown — this is the
-                                // only production call site that turns chat content into a
-                                // `ViewerDocument`.
-                                onOpenViewer: ViewerFeatureGate.isEnabled ? {
-                                    ViewerWindowController.open(
-                                        document: ViewerDocument(
-                                            conversationId: conversationId,
-                                            messageId: message.id,
-                                            content: RawHTMLSanitizer.sanitize(configuration.content)),
-                                        conversationTitle: conversationTitle,
-                                        isTainted: isTainted)
-                                } : nil
-                            )
-                        }
+                    messageMarkdown(state.liveContent(of: message))
                         .padding(.vertical, 4)
                 }
             }
@@ -1295,6 +1262,46 @@ struct MessageView: View {
         }
     }
     
+    /// Agent and user bubbles share this renderer. It deliberately does NOT apply
+    /// `.textSelection(.enabled)` (see the comment at the agent call site, #28): that is why the user
+    /// bubble lost drag-to-select when it moved here (#968). Whole-message copy still works.
+    @ViewBuilder
+    private func messageMarkdown(_ content: String) -> some View {
+        Markdown(content)
+            // Render fenced code blocks WITHOUT MarkdownUI's default horizontal
+            // ScrollView (Theme.basic wraps the label in ScrollView(.horizontal)).
+            // That scroll view swallows trackpad scroll when hovered (#30); wrapping
+            // long lines instead keeps the outer list scrollable everywhere.
+            .markdownBlockStyle(\.codeBlock) { configuration in
+                // A copy button, not `.textSelection` (#32): the AttributeGraph cycle
+                // above is between SwiftUI's TextSelection and MarkdownUI's layout, so
+                // this sidesteps it entirely rather than risking it on a subview.
+                CodeBlockView(
+                    configuration: configuration,
+                    // An open fence is not a document yet (#896 PR 2, spec section 2):
+                    // `state.streaming.boxes` is exactly what `liveContent(of:)` above
+                    // already reads, so this is the live answer, not a stale one.
+                    isStreaming: state.streaming.boxes[message.id] != nil,
+                    // Not reachable on merge (#896 PR 2): `ViewerFeatureGate` is off
+                    // pending Brian's resolution of the dns-prefetch gap (#904). `nil`
+                    // here, not a disabled button, so there is no chip to notice at
+                    // all. `RawHTMLSanitizer.sanitize` (#912) runs on the raw-HTML
+                    // render path before any document is ever shown — this is the
+                    // only production call site that turns chat content into a
+                    // `ViewerDocument`.
+                    onOpenViewer: ViewerFeatureGate.isEnabled ? {
+                        ViewerWindowController.open(
+                            document: ViewerDocument(
+                                conversationId: conversationId,
+                                messageId: message.id,
+                                content: RawHTMLSanitizer.sanitize(configuration.content)),
+                            conversationTitle: conversationTitle,
+                            isTainted: isTainted)
+                    } : nil
+                )
+            }
+    }
+
     /// The "View run" action for a card, or nil when there is no transcript to open — the run
     /// recorded none, or the conversation it recorded has since been pruned. Setting the id on
     /// `AppState` (rather than presenting a sheet from here) keeps one sheet with two openers:
