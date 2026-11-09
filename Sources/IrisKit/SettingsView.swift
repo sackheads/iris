@@ -406,9 +406,9 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Vibecop Guardian").font(.headline)
                         // #991: Brian's copy — Vibecop screens each command/file op with a small
-                        // model so most of them never prompt, the way macOS's auto-mode approves
-                        // known-safe actions, but the engine and threshold are configurable here
-                        // rather than fixed to one provider.
+                        // model so most of them never prompt, the way an agent harness's auto-mode
+                        // approves known-safe actions, but the engine and threshold are
+                        // configurable here rather than fixed to one provider.
                         Text("Like auto-mode but for any model. Tunable.")
                             .font(.caption)
                             .foregroundColor(.secondary)
