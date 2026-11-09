@@ -70,6 +70,15 @@ while IFS= read -r xcf; do
   fi
 done < <(find "$derived/SourcePackages/artifacts" -type d -name '*.xcframework' 2>/dev/null)
 
+# Resolve the pinned packages into THIS derived-data dir before building. With
+# -disableAutomaticPackageResolution the build step fetches nothing, so a tree whose xcodebuild
+# state has never held the packages (a fresh worktree's first app build) fails in the macro plugin
+# with "Unable to resolve module dependency: 'SwiftSyntax' ... in target 'MLXHuggingFaceMacros'"
+# (#945). release.sh does the same step. It must use the same -derivedDataPath as the build:
+# resolving into xcodebuild's default location leaves this directory empty. Cheap when warm.
+build_or_die xcodebuild -resolvePackageDependencies -project Iris.xcodeproj -scheme Iris \
+  -derivedDataPath "$derived" -disableAutomaticPackageResolution -quiet
+
 build_or_die xcodebuild build -project Iris.xcodeproj -scheme Iris -configuration "$config" \
   -destination 'generic/platform=macOS' -derivedDataPath "$derived" \
   -skipPackagePluginValidation -skipMacroValidation -disableAutomaticPackageResolution \
