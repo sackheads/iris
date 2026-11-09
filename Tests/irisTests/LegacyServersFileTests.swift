@@ -30,6 +30,17 @@ struct LegacyServersFileTests {
         #expect(try Data(contentsOf: url) == body)
     }
 
+    @Test("the pre-create hook runs once for a missing file and never for an existing one (#995 review)")
+    func hookOnlyWhenCreating() throws {
+        let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("mcp_servers.json")
+        var calls = 0
+        #expect(LegacyServersFile.ensureExists(at: url, beforeCreating: { calls += 1 }))
+        #expect(calls == 1)
+        #expect(LegacyServersFile.ensureExists(at: url, beforeCreating: { calls += 1 }))
+        #expect(calls == 1)
+    }
+
     @Test("where the file cannot be made it reports false instead of claiming it exists")
     func reportsFailure() throws {
         let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
