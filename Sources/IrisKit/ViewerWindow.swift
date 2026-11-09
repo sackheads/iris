@@ -95,13 +95,18 @@ final class ViewerWindowController: NSObject, NSWindowDelegate {
         return controller.window!
     }
 
+    static func windowTitle(for conversationTitle: String) -> String {
+        let shown = WindowTitle.safe(conversationTitle)
+        return shown.isEmpty ? "Viewer" : "\(shown) — Viewer"
+    }
+
     private func show(document: ViewerDocument, conversationTitle: String, isTainted: Bool, proxyConfigurations: [ProxyConfiguration]? = nil) {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 760, height: 560),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
         // Carries the conversation's title (spec section 2), not a bare constant.
-        window.title = conversationTitle.isEmpty ? "Viewer" : "\(conversationTitle) — Viewer"
+        window.title = Self.windowTitle(for: conversationTitle)
         // Released on close (spec section 4): nothing else should reach for it afterward.
         window.isReleasedWhenClosed = false
         window.delegate = self
