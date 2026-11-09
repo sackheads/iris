@@ -317,6 +317,40 @@ struct SessionTrackingTests {
         #expect(swept.isEmpty)
     }
 
+    /// #997 review (dev-2's question 3): a nested `invoke_subagent` passes its own conversation id
+    /// as the parent — `SubagentManager`/`GoalEvaluator` resolve `owner` through the existing
+    /// `delegationRoot(of:)` (already covered elsewhere) rather than using the immediate parent
+    /// directly, so a grandchild still lands in the one strip that can ever be focused: main's.
+    @Test("a grandchild subagent's owner resolves to the top-level conversation, not its immediate parent")
+    func nestedSubagentOwnerResolvesToRoot() {
+        let app = isolatedApp()
+        let main = UUID(), subagent = UUID(), grandchild = UUID()
+        app.createNewConversation(id: main)
+        app.linkDelegate(subagent, of: main)
+        // Mirrors SubagentManager.runSubagent: linkDelegate before registerSubagent, owner
+        // resolved through the chain's root rather than the immediate parent (`subagent`).
+        app.linkDelegate(grandchild, of: subagent)
+        app.registerSubagent(id: grandchild, role: "nested", owner: app.delegationRoot(of: subagent))
+
+        app.selectedConversationId = main
+        #expect(app.visibleRuns.dropFirst().map(\.id) == [grandchild])
+    }
+
+    /// #997 review: the collapsed summary line must be scoped exactly like the expanded rows —
+    /// `SessionActivity.collapsedSummary` itself takes a plain array, so this guards the call site
+    /// (`CollapsedSummaryRow` in `ActivityStripView`) rather than the pure function.
+    @Test("collapsedSummary over the scoped visibleRuns excludes a foreign owner's run")
+    func collapsedSummaryExcludesForeignOwner() {
+        let app = isolatedApp()
+        let a = UUID(), b = UUID()
+        app.createNewConversation(id: a)
+        app.createNewConversation(id: b)
+        app.registerSubagent(id: UUID(), role: "engineer", owner: a)
+        app.selectedConversationId = b
+        let scoped = app.visibleRuns.filter { $0.kind != .main }
+        #expect(SessionActivity.collapsedSummary(for: scoped) == "")
+    }
+
     /// Fix round 1 (#217/#19), items 1 + 4: the main row's elapsed time rendered as a
     /// multi-million-hour countdown, in part because timing was recorded on `beginThinking` — a
     /// single global counter shared by every engine (main, subagent, evaluator) — rather than

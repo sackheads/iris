@@ -101,7 +101,10 @@ final class GoalEvaluator: Sendable {
             app.linkDelegate(evalId, of: originId, kind: .evaluator)   // #418: its asks are the graded session's
             app.updateConversationTitle(id: evalId, title: "Evaluator")
             if workspace != nil { app.setWorkspace(for: evalId, path: workspaceDir) }   // its run_command runs here
-            app.registerSubagent(id: evalId, role: "evaluator", kind: .evaluator, owner: originId)
+            // #986 review (#997): grading a nested subagent's work means originId is that
+            // subagent's own id, never the one conversation that can be selected — resolve to the
+            // chain's root so the evaluator still shows up in the strip it belongs to.
+            app.registerSubagent(id: evalId, role: "evaluator", kind: .evaluator, owner: app.delegationRoot(of: originId))
             // Stoppable like any delegate (#464): the run drain, a walk of the delegation tree on
             // a run's close or a parent's delete, and — grading a background subagent, which no
             // cancellation of the parent's tasks reaches — the parent's Stop. In the same job as

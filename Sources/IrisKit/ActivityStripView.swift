@@ -174,7 +174,10 @@ private struct CollapsedSummaryRow: View {
 
     var body: some View {
         if let main = state.visibleRuns.first(where: { $0.id == mainId }) {
-            let summary = SessionActivity.collapsedSummary(for: state.stripRuns)
+            // #997 review: this used to read the raw, process-wide `state.stripRuns` — the one
+            // leak #986 missed, and in the collapsed state, the one most often shown. Scope it
+            // the same way the expanded rows already are.
+            let summary = SessionActivity.collapsedSummary(for: state.visibleRuns.filter { $0.kind != .main })
             HStack(spacing: 8) {
                 statusGlyph(main.phase)
                     .frame(width: 10, alignment: .center)
