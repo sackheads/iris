@@ -133,7 +133,10 @@ final class SubagentManager: @unchecked Sendable {
             if parentIsBackground { appState.linkBackgroundDescendant(subagentId, of: parentConversationId) }
             appState.linkDelegate(subagentId, of: parentConversationId)   // #418: its asks are the parent's
             appState.updateConversationTitle(id: subagentId, title: "Subagent: \(role)")
-            appState.registerSubagent(id: subagentId, role: role, owner: parentConversationId)
+            // #986 review (#997): a nested invoke_subagent's parentConversationId is the calling
+            // subagent's own id, never the one conversation that can be selected — resolve to the
+            // chain's root so a grandchild still shows up in the strip it belongs to.
+            appState.registerSubagent(id: subagentId, role: role, owner: appState.delegationRoot(of: parentConversationId))
             // #239 3b: on another family, what it spends in a job run is priced at its own rate.
             if let route, route.providerId != ProviderSlug.id(of: LLMProvider(rawValue: config.primaryProvider) ?? .gemini) {
                 appState.setDelegatedPricing(DelegatedPricing(route: route, endpoints: config.subagentEndpoints), for: subagentId)

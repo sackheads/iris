@@ -549,7 +549,11 @@ struct ChatView: View {
             ToolbarItem(placement: .primaryAction) {
                 Button(action: {
                     Motion.withAnimation {
-                        switch ActivityStripView.toggleTarget(state.stripRuns) {
+                        // #997 review: state.stripRuns is process-wide; a foreign-owner run (or a
+                        // job) made this resolve to .collapse while the scoped strip had nothing
+                        // to collapse, so the click did nothing visible and #982's idle note
+                        // became unreachable. visibleRuns is what the strip itself renders from.
+                        switch ActivityStripView.toggleTarget(state.visibleRuns) {
                         case .collapse: activityStripExpanded.toggle()
                         case .idleNote: activityStripIdleNote.toggle()
                         }
