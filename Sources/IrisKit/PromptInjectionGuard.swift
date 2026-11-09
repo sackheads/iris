@@ -111,24 +111,41 @@ struct PromptInjectionGuard {
     /// no `model:` on the `model:` step, then the `---` step joins the fragments into a live
     /// `model:` — which nothing in that same pass checks again. The same happens across any two
     /// patterns where an earlier-order pattern's removal exposes a later/already-passed one
-    /// (`<|im_<|im_end|>start|>` → removing `<|im_end|>` exposes `<|im_start|>`). Bounded: each
-    /// changing pass only ever removes characters (`remove` deletes matches, never inserts), so
-    /// the line strictly shrinks every time it changes — termination is guaranteed, this cap is
-    /// pure defense against a pathological input forcing needless extra passes, not a
-    /// correctness requirement. In practice reassembly across this fixed 10-pattern list bottoms
-    /// out in at most a couple of passes; this is a generous multiple of that.
+    /// (`<|im_<|im_end|>start|>` → removing `<|im_end|>` exposes `<|im_start|>`). Fixing it with
+    /// a fixed-point loop (repeat until a pass changes nothing) is not itself enough: a
+    /// chat-template token's asymmetric prefix/suffix (`<|im_` / `end|>`) lets an attacker nest
+    /// the token inside itself to an arbitrary, attacker-chosen depth (each layer costs exactly
+    /// one more pass to unwind), so a cap on pass count alone would hit the cap mid-unwind and
+    /// return a partial strip that can still carry a live marker (#972 review) — the cap would
+    /// bound CPU but reopen #970 for anyone willing to nest past it. So hitting the cap without
+    /// a pass that changes nothing is treated as `noTermination` and fails closed to a fixed
+    /// placeholder (`nestedDelimiterPlaceholder`), never the partial text: no legitimate input
+    /// nests this deep, so the placeholder costs nothing, and the cap now only bounds CPU, which
+    /// is what a cap is for. Flat patterns with no internal prefix/suffix structure (`---`,
+    /// `###`, a bare role word) cannot self-nest this way — concatenating two fragments of the
+    /// *same* character just produces a longer homogeneous run, which a single
+    /// `replacingOccurrences` call resolves in one shot — so unbounded depth is specifically a
+    /// chat-template-token risk, not a general one; the fail-closed branch below still covers
+    /// every pattern uniformly, since the cap is pattern-agnostic.
     private static let maxStripPasses = 20
+    /// Replaces a line whose strip never reached a fixed point within `maxStripPasses` (#972
+    /// review) — an attacker-chosen nesting depth beyond anything a legitimate input needs.
+    static let nestedDelimiterPlaceholder = "[line withheld: nested delimiters]"
 
     /// Strips `patterns` line by line, in order, repeating the full pattern-list pass until a
-    /// whole pass makes no further change (fixed point, #970) or `maxStripPasses` is hit,
-    /// exactly as a whole-text replace would (none spans a newline), and records each line a
-    /// delimiter was stripped from — including one revealed only by a later pass's reassembly.
+    /// whole pass makes no further change (fixed point, #970) or `maxStripPasses` is hit — in
+    /// which case the line fails closed to `nestedDelimiterPlaceholder` rather than return a
+    /// partial strip that could still carry a live marker (#972 review) — exactly as a
+    /// whole-text replace would (none spans a newline), and records each line a delimiter was
+    /// stripped from, including one revealed only by a later pass's reassembly, or withheld
+    /// outright for failing to converge.
     static func stripRecording(_ text: String, patterns: [String]) -> (text: String, delimiterLines: [Int: String]) {
         var recorded: [Int: String] = [:]
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false).enumerated().map { index, raw -> String in
             let original = String(raw)
             var line = original
             var counts = false
+            var reachedFixedPoint = false
             for _ in 0..<maxStripPasses {
                 var changedThisPass = false
                 for pattern in patterns {
@@ -139,7 +156,11 @@ struct PromptInjectionGuard {
                     }
                     line = stripped
                 }
-                if !changedThisPass { break }
+                if !changedThisPass { reachedFixedPoint = true; break }
+            }
+            if !reachedFixedPoint {
+                recorded[index] = original
+                return nestedDelimiterPlaceholder
             }
             if !counts, line != original,
                delimiterBeforeRole.firstMatch(in: original, range: NSRange(original.startIndex..., in: original)) != nil {
