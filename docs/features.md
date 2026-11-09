@@ -117,7 +117,7 @@ or subagent.
 
 ### Rich Native UI
 
-Beautiful macOS `NavigationSplitView` with multi-conversation support — a conversation you archive collapses into its own Archived section, out of the main list but one right-click away — `.regularMaterial` frosted glass input bars, and native markdown chat rendering powered by `swift-markdown-ui`. The sidebar's search field finds any past conversation by what was said in it, grouping ranked hits per conversation and jumping straight to the matching message when you pick one; hidden conversations (job runs, subagent logs) stay out of the results, the same as they stay out of the list.
+Beautiful macOS `NavigationSplitView` with multi-conversation support — a conversation you archive collapses into its own Archived section, out of the main list but one right-click away — `.regularMaterial` frosted glass input bars, and native markdown chat rendering powered by `swift-markdown-ui`, for your own messages as well as Iris's (neither bubble offers drag-to-select; copy a whole message from its row). The sidebar's search field finds any past conversation by what was said in it, grouping ranked hits per conversation and jumping straight to the matching message when you pick one; hidden conversations (job runs, subagent logs) stay out of the results, the same as they stay out of the list.
 
 ### Model Status LEDs
 
