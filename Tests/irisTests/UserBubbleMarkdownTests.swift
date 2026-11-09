@@ -32,4 +32,12 @@ struct UserBubbleMarkdownTests {
         #expect(src.contains("messageMarkdown(message.content)"))
         #expect(src.contains("messageMarkdown(state.liveContent(of: message))"))
     }
+
+    @Test("the user call site keeps typed newlines as line breaks")
+    func userBubbleKeepsLineBreaks() throws {
+        let src = try Self.chatViewSource()
+        let call = try #require(src.range(of: "messageMarkdown(message.content)"))
+        let next = src[call.upperBound...].prefix(80)
+        #expect(next.contains(".markdownSoftBreakMode(.lineBreak)"))
+    }
 }
