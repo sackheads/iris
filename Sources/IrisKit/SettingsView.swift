@@ -402,7 +402,18 @@ struct SettingsView: View {
 
             // MARK: - Vibecop Tab
             Form {
-                Section(header: Text("Vibecop Guardian").font(.headline)) {
+                Section(header:
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Vibecop Guardian").font(.headline)
+                        // #991: Brian's copy — Vibecop screens each command/file op with a small
+                        // model so most of them never prompt, the way macOS's auto-mode approves
+                        // known-safe actions, but the engine and threshold are configurable here
+                        // rather than fixed to one provider.
+                        Text("Like auto-mode but for any model. Tunable.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                ) {
                     Toggle("Enable Vibecop", isOn: $config.enableVibecop)
                     Text("Off means every command and file operation asks for your approval, unless you have already allowed it.")
                         .font(.caption)
