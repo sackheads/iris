@@ -372,8 +372,25 @@ actor IrisEngine {
     /// content changes (including through a symlink target), the protection setting changes, or a
     /// guard tier's provisioning state changes (5a Task 7). `nil` means no file at that path right
     /// now — a conversation with no `AGENTS.md` costs nothing beyond the one stat per turn.
-    private func guardedAgentsMdText(workspacePath: String?) async -> String? {
-        guard let wp = workspacePath else { return nil }
+    /// AGENTS.md for the primary workspace, labeled by neither (today's shape, unchanged — see
+    /// `ScenarioRunnerOptionsTests.workspaceBinding`), plus one from each of #962's
+    /// `additionalRoots`, each labeled by its own directory so the model knows which rules apply
+    /// where. Every root is read/sanitized/cached independently through `guardedAgentsMdText(forOneRoot:)`
+    /// — the existing per-path caches (`agentsStamp`, `cachedAgentsText`) are already keyed by
+    /// path string, so this is the same mechanism applied to more than one path, not a new one.
+    private func guardedAgentsMdText(workspacePath: String?, additionalRoots: [String] = []) async -> String? {
+        var sections: [String] = []
+        if let wp = workspacePath, let text = await guardedAgentsMdText(forOneRoot: wp) {
+            sections.append(text)
+        }
+        for root in additionalRoots {
+            guard let text = await guardedAgentsMdText(forOneRoot: root) else { continue }
+            sections.append("## \(root)\n" + text)
+        }
+        return sections.isEmpty ? nil : sections.joined(separator: "\n\n")
+    }
+
+    private func guardedAgentsMdText(forOneRoot wp: String) async -> String? {
         let agentsMdPath = Self.expandTilde(wp)
         let fullPath = (agentsMdPath as NSString).appendingPathComponent("AGENTS.md")
         guard let modified = Self.fileModificationDate(atPath: fullPath) else {
@@ -411,8 +428,8 @@ actor IrisEngine {
     /// `Content` value — what keeps the provider's prompt cache hitting (5a §0.2).
     /// `agentProfile` (#465) is a layer after AGENTS.md. Keyed into the cache by name, so two
     /// conversations in one workspace with different profiles keep a cache entry each.
-    private func assembledSystemPrompt(workspacePath: String?, agentProfile: AgentProfile? = nil) async -> Content {
-        var composed = await composedSystemPrompt(workspacePath: workspacePath, agentProfile: agentProfile)
+    private func assembledSystemPrompt(workspacePath: String?, additionalRoots: [String] = [], agentProfile: AgentProfile? = nil) async -> Content {
+        var composed = await composedSystemPrompt(workspacePath: workspacePath, additionalRoots: additionalRoots, agentProfile: agentProfile)
         // After the cached composition, never inside it: the date must not freeze in a cache entry.
         if let text = composed.parts.first?.text {
             composed.parts[0].text = text + "\n\n" + Self.currentDateLine(now: wallClock())
@@ -424,11 +441,11 @@ actor IrisEngine {
     private var wallClock: @Sendable () -> Date = { Date() }
     func setWallClockForTesting(_ clock: @escaping @Sendable () -> Date) { wallClock = clock }
 
-    private func composedSystemPrompt(workspacePath: String?, agentProfile: AgentProfile? = nil) async -> Content {
+    private func composedSystemPrompt(workspacePath: String?, additionalRoots: [String] = [], agentProfile: AgentProfile? = nil) async -> Content {
         let base = await ensureSystemPrompt(skills: agentProfile?.skills)
         guard let baseText = base.parts.first?.text else { return base }
         let profileText = await guardedUserProfileText()
-        let agentsText = await guardedAgentsMdText(workspacePath: workspacePath)
+        let agentsText = await guardedAgentsMdText(workspacePath: workspacePath, additionalRoots: additionalRoots)
         let agentText = agentProfile.map { "# Agent Profile: \($0.name)\n" + $0.prompt }
         let key = (workspacePath ?? Self.noWorkspaceCacheKey) + "\u{0}" + (agentProfile?.name ?? "")
 
@@ -2868,13 +2885,14 @@ actor IrisEngine {
         
         var history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
         let workspacePath = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.workspacePath }
-        
+        let additionalRoots = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.additionalRoots ?? [] }
+
         // USER.md and AGENTS.md are re-read and re-guarded only when they actually change — by
         // content (via modification date, following symlinks), by the protection setting, or by a
         // guard tier's provisioning state (5a Task 7). An unchanged turn gets back the identical
         // `Content` it got last time, keeping the system prompt byte-stable for the provider's
-        // prompt cache (5a §0.2).
-        let currentSystemPrompt = await assembledSystemPrompt(workspacePath: workspacePath, agentProfile: agentProfile)
+        // prompt cache (5a §0.2). #962's additionalRoots feed in the same way workspacePath does.
+        let currentSystemPrompt = await assembledSystemPrompt(workspacePath: workspacePath, additionalRoots: additionalRoots, agentProfile: agentProfile)
         for notice in pendingGuardNotices {
             await pushToUI(role: .system, text: notice, conversationId: conversationId)
         }
@@ -7073,6 +7091,20 @@ actor IrisEngine {
         }
     }
 
+    /// #962: this conversation's own `additionalRoots`, for the one real access extension they
+    /// feed today — the sandbox's extra mounts (`runCommand`'s no-grant branch). Read directly off
+    /// the conversation itself, not its delegation root: unlike `homeWritableOptIn` (a person's
+    /// opt-in decision that should hold for whatever runs under it), additionalRoots are each
+    /// conversation's own scope, set the same way `workspacePath` is per-conversation.
+    func additionalRoots(for conversationId: UUID?) async -> [String] {
+        guard let conversationId else { return [] }
+        let localState = state
+        return await MainActor.run { () -> [String] in
+            guard let state = localState else { return [] }
+            return state.conversations.first { $0.id == conversationId }?.additionalRoots ?? []
+        }
+    }
+
     /// `beforeToolFired`: the dispatcher already ran this call's BeforeTool hooks, before its
     /// approval (#647), so they are not run again and `args` are exactly what was approved.
     private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil, approvedWorkspaceRoot: String? = nil, decidedPath: String? = nil, decidedJobProfile: JobProfile? = nil, restrictedPath: [String]? = nil,
@@ -7132,7 +7164,8 @@ actor IrisEngine {
 
         var result = await executor.execute(name: name, args: execArgs, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox, grant: grant, grantedMount: grantedMount,
                                               approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath, restrictedPath: restrictedPath,
-                                              homeWritableOptIn: await homeWritableOptIn(for: conversationId), decidedJobProfile: decidedJobProfile)
+                                              homeWritableOptIn: await homeWritableOptIn(for: conversationId),
+                                              additionalRoots: await additionalRoots(for: conversationId), decidedJobProfile: decidedJobProfile)
 
         if name == "write_file", result.hasPrefix("Successfully wrote to "),
            let cid = conversationId, let path = execArgs["path"]?.stringValue {

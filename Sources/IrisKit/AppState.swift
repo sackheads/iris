@@ -236,6 +236,13 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// by the person in the UI, never by a tool; a workspace moved elsewhere is not covered. Nil
     /// is no opt-in.
     var homeWritableOptIn: String?
+    /// #962 — directories, beyond `workspacePath`, this conversation is scoped to: each a
+    /// canonical absolute path, set only by the person in the UI ("Add Directory..."), never by a
+    /// tool. Feeds the same consumers `workspacePath` does for scope (AGENTS.md pickup, sandbox
+    /// mounts) — it does NOT widen what auto-approves without asking; that stays Vibecop/the
+    /// dialog's call, same as any other path, until #974 turns these into part of the profile's
+    /// own FS grant. Empty is no additional roots.
+    var additionalRoots: [String] = []
     /// This conversation's `/loop`, if one is set (#190). Comes back paused after a relaunch.
     var loop: ConversationLoop?
     /// This conversation's own model tier, set by `/model` (#667). Nil: its agent profile's tier,
@@ -327,7 +334,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, hasUntrustedToolOutput, outboundAllowedTools, jobOutboundExemptions, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier, lastTouchedAt, archivedAutomaticallyAt, inSessions
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, hasUntrustedToolOutput, outboundAllowedTools, jobOutboundExemptions, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier, lastTouchedAt, archivedAutomaticallyAt, inSessions, additionalRoots
     }
 
     init(from decoder: Decoder) throws {
@@ -366,6 +373,8 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         role = try container.decodeIfPresent(String.self, forKey: .role)
         // Invariant 1: absent on every conversation persisted before #611, and absent is no opt-in.
         homeWritableOptIn = try container.decodeIfPresent(String.self, forKey: .homeWritableOptIn)
+        // Invariant 1: absent before #962, and absent is no additional roots.
+        additionalRoots = try container.decodeIfPresent([String].self, forKey: .additionalRoots) ?? []
         // Invariant 1: absent before #465, and absent is no profile. A snapshot that does not
         // decode drops only itself; the link stays and the file is read again.
         agentProfile = try container.decodeIfPresent(String.self, forKey: .agentProfile)
@@ -2409,6 +2418,31 @@ class AppState {
                 appendMessage(role: .system, content: Self.untrustedRulesNote(files), to: conversationId)
             }
         }
+    }
+
+    /// #962 — "Add Directory...": appends a directory to this conversation's `additionalRoots`,
+    /// the same kind of thing `workspacePath` already is (feeds AGENTS.md pickup and, when
+    /// sandboxed, the mount list), never a second, parallel allow-list. A no-op if the canonical
+    /// path is already the workspace or already in the list — set-like append, not a growing log.
+    /// Does NOT widen what auto-approves without asking: that stays Vibecop/the dialog's call
+    /// until #974 turns these into part of the profile's own FS grant.
+    func addAdditionalRoot(for conversationId: UUID, path: String) {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
+        let canonical = IrisPaths.canonicalPath(IrisEngine.expandTilde(path))
+        guard canonical != conversations[idx].workspacePath,
+              !conversations[idx].additionalRoots.contains(canonical) else { return }
+        writableRoots.record([canonical])   // #616: a sandbox in this conversation can write it, same as setWorkspace
+        conversations[idx].additionalRoots.append(canonical)
+        markChanged(conversationId, .metadata)
+    }
+
+    /// #962 — "Manage Directories...": drops exactly `path` (already canonical, as stored) from
+    /// this conversation's `additionalRoots`. No effect on `workspacePath`, which has no remove
+    /// today; a no-op if `path` isn't in the list.
+    func removeAdditionalRoot(for conversationId: UUID, path: String) {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
+        conversations[idx].additionalRoots.removeAll { $0 == path }
+        markChanged(conversationId, .metadata)
     }
 
     /// Who decides which workspace `.iris/` rules Iris acts on (#625). Injectable for tests.

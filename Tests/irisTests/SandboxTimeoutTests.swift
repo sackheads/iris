@@ -702,6 +702,29 @@ struct SandboxTimeoutTests {
         #expect(captured.value.workspace == "/ws" && captured.value.mounts.isEmpty && captured.value.network == .default, "no grant, no change")
     }
 
+    /// #962: without a grant, additionalRoots ride as extra read-write mounts, the same role a
+    /// grant's own extraMountEntries play — never auto-approve, which stays #974's. A grant
+    /// already fully determines a job run's mounts, so additionalRoots there is ignored.
+    @Test("without a grant, additionalRoots become extra read-write mounts (#962)")
+    func additionalRootsBecomeExtraMountsWithoutAGrant() async {
+        let (executor, captured) = capturingExecutor()
+        _ = await executor.execute(name: "run_command", args: ["command": .string("x")], cwd: "/ws",
+                                   conversationId: UUID(), useSandbox: true, additionalRoots: ["/a", "/b"])
+        #expect(captured.value.workspace == "/ws")
+        #expect(captured.value.mounts == ["/a", "/b"])
+
+        // A root that already equals the workspace is never mounted twice.
+        _ = await executor.execute(name: "run_command", args: ["command": .string("x")], cwd: "/ws",
+                                   conversationId: UUID(), useSandbox: true, additionalRoots: ["/ws", "/a"])
+        #expect(captured.value.mounts == ["/a"])
+
+        // A grant's own mounts win; additionalRoots never apply to a job run.
+        let grant = JobGrant(mounts: [ContainerMount(source: "/p"), ContainerMount(source: "/q", readOnly: true)])
+        _ = await executor.execute(name: "run_command", args: ["command": .string("x")], cwd: "/p",
+                                   conversationId: UUID(), useSandbox: true, grant: grant, additionalRoots: ["/a"])
+        #expect(captured.value.mounts == ["/q:ro"])
+    }
+
     @Test("a granted conversation whose workspacePath was moved still mounts only the grant (§0.10)")
     func movedWorkspaceDoesNotMoveTheMount() async {
         let (executor, captured) = capturingExecutor()

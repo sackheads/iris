@@ -805,6 +805,12 @@ final class ConversationStore: Sendable {
         m.registerMigration("v36_inbox_pending_targets") { db in
             try db.alter(table: "inbox_items") { t in t.add(column: "pendingTargetsJSON", .text) }
         }
+        // #962: nullable JSON text; NULL/absent is no additional roots, same as workspacePath's own default.
+        m.registerMigration("v37_additional_roots") { db in
+            try db.alter(table: "conversations") { t in
+                t.add(column: "additionalRoots", .text)
+            }
+        }
         return m
     }
 
@@ -1032,6 +1038,8 @@ final class ConversationStore: Sendable {
         let jobExemptions = c.jobOutboundExemptions.isEmpty ? nil : try json(c.jobOutboundExemptions, encoder)
         let profileSnapshot = try c.agentProfileSnapshot.map { try json($0, encoder) }
         let loop = try c.loop.map { try json($0, encoder) }
+        // NULL when absent, same as outboundAllowedTools/jobOutboundExemptions above (#962).
+        let additionalRoots = c.additionalRoots.isEmpty ? nil : try json(c.additionalRoots, encoder)
         if exists {
             try db.execute(sql: """
                 UPDATE conversations SET title = ?, updatedAt = ?, workspacePath = ?, activeGoal = ?,
@@ -1041,14 +1049,14 @@ final class ConversationStore: Sendable {
                     isBackground = ?, isPinned = ?, sessionCard = ?, jobProfile = ?, sandboxGrant = ?,
                     hasUnattendedInput = ?, hasUntrustedToolOutput = ?, outboundAllowedTools = ?, jobOutboundExemptions = ?, prefixMismatchBehavior = ?, role = ?, homeWritableOptIn = ?,
                     agentProfile = ?, agentProfileSnapshot = ?,
-                    loop = ?, modelTier = ?, lastTouchedAt = ?, archivedAutomaticallyAt = ?, inSessions = ?
+                    loop = ?, modelTier = ?, lastTouchedAt = ?, archivedAutomaticallyAt = ?, inSessions = ?, additionalRoots = ?
                 WHERE id = ?
                 """, arguments: [c.title, touched, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
                                  evaluation, report, c.isArchived, c.isBackground, c.isPinned, card,
                                  c.jobProfile?.rawValue, grant, c.hasUnattendedInput, c.hasUntrustedToolOutput, outboundAllowed, jobExemptions, c.prefixMismatchBehavior?.rawValue,
                                  c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue,
-                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, c.id.uuidString])
+                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, additionalRoots, c.id.uuidString])
         } else {
             let position = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(position), 0) FROM conversations") ?? 0) + 1
             try db.execute(sql: """
@@ -1057,14 +1065,14 @@ final class ConversationStore: Sendable {
                     subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived,
                     isBackground, isPinned, sessionCard, jobProfile, sandboxGrant, hasUnattendedInput,
                     hasUntrustedToolOutput, outboundAllowedTools, jobOutboundExemptions, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier,
-                    lastTouchedAt, archivedAutomaticallyAt, inSessions)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    lastTouchedAt, archivedAutomaticallyAt, inSessions, additionalRoots)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [c.id.uuidString, position, c.title, now, touched, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
                                  tokenUsage, contract, result, history, evaluation, report, c.isArchived,
                                  c.isBackground, c.isPinned, card, c.jobProfile?.rawValue, grant, c.hasUnattendedInput,
                                  c.hasUntrustedToolOutput, outboundAllowed, jobExemptions, c.prefixMismatchBehavior?.rawValue, c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue,
-                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions])
+                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, additionalRoots])
         }
     }
 
@@ -1248,6 +1256,7 @@ final class ConversationStore: Sendable {
                 let sandboxGrant = supplementary("sandboxGrant")
                 let outboundAllowed = supplementary("outboundAllowedTools")
                 let jobExemptions = supplementary("jobOutboundExemptions")
+                let additionalRoots = supplementary("additionalRoots")
                 let prefixMismatch = supplementary("prefixMismatchBehavior")
                 let checkpointHistory = supplementary("checkpointHistory")
                 let lastGoalEvaluation = supplementary("lastGoalEvaluation")
@@ -1395,6 +1404,11 @@ final class ConversationStore: Sendable {
                 if let s = outboundAllowed {
                     do { c.outboundAllowedTools = try decoder.decode([String].self, from: Data(s.utf8)) }
                     catch { localSoftLosses.append(("outboundAllowedTools", "\(error)")) }
+                }
+                // #962: an unreadable list is none, same fail-safe shape as outboundAllowedTools above.
+                if let s = additionalRoots {
+                    do { c.additionalRoots = try decoder.decode([String].self, from: Data(s.utf8)) }
+                    catch { localSoftLosses.append(("additionalRoots", "\(error)")) }
                 }
                 if let s = jobExemptions {
                     do { c.jobOutboundExemptions = try decoder.decode([String].self, from: Data(s.utf8)) }
