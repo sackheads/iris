@@ -260,8 +260,9 @@ records only **Iris's verifier/signer obligations** at the design level.
   registered keyset**, never a flat global key map — otherwise an enrolled peer could sign as another.
 - **Iris-side verifier MUSTs** (the ones that land on our code): recipient binding (the envelope is
   addressed to `iris`); a present replay nonce and a strict RFC 3339 UTC timestamp; **reject duplicate
-  JSON object keys** (Swift's `JSONSerialization`/`JSONDecoder` keep last-wins by default — needs an
-  explicit check); derive tier/permissions from Iris's **local** key/grant registry, never from the
+  JSON object keys** (whether Swift's `JSONSerialization`/`JSONDecoder` silently keep last-wins is
+  **unverified** — the explicit scan is required regardless, and the macOS recheck below must cover
+  duplicate-key behaviour, not just the outer frame); derive tier/permissions from Iris's **local** key/grant registry, never from the
   envelope's self-claimed authority; **fail closed** — a missing/invalid/unverifiable signature is
   hard-rejected, **never coerced to `guest`**, and relay-attested (gateway-vouched) traffic is rejected
   unless the user opted into a separate explicit "the gateway" profile. Every rejection logs a reason code.
