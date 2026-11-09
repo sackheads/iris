@@ -37,6 +37,8 @@ struct ChatView: View {
     @State private var homeOptInTarget: Conversation?
     /// #625: the conversation whose workspace rules are being reviewed.
     @State private var rulesReviewTarget: Conversation?
+    /// #962: the conversation whose additional-directories list is open for review/removal.
+    @State private var manageDirectoriesTarget: Conversation?
     /// What the sheet shows: read once when it opens, and again only when a trust is refused
     /// because a file changed, so the text never changes under the person mid-read (#625 review).
     @State private var rulesReviewFiles: [(file: String, data: Data)] = []
@@ -801,9 +803,27 @@ struct ChatView: View {
                                      dismiss: { rulesReviewTarget = nil; rulesReviewChanged = false })
             }
         }
+        .sheet(isPresented: Binding(
+            get: { manageDirectoriesTarget?.id == conv.id },
+            set: { if !$0 { manageDirectoriesTarget = nil } }
+        )) {
+            if let target = manageDirectoriesTarget {
+                ManageDirectoriesSheet(
+                    workspacePath: target.workspacePath,
+                    additionalRoots: state.conversations.first { $0.id == target.id }?.additionalRoots ?? [],
+                    remove: { state.removeAdditionalRoot(for: target.id, path: $0) },
+                    dismiss: { manageDirectoriesTarget = nil })
+            }
+        }
         .contextMenu {
             Button("Link to Workspace...") {
                 linkWorkspace(to: conv.id)
+            }
+            Button("Add Directory...") {
+                addDirectory(to: conv.id)
+            }
+            Button("Manage Directories...") {
+                manageDirectoriesTarget = conv
             }
             // #670: the only way a profile reaches a conversation after it starts. Never Iris, a
             // subagent's thread or a job run (AppState refuses them too).
@@ -904,7 +924,25 @@ struct ChatView: View {
             }
         }
     }
-    
+
+    /// #962: "Add Directory..." — appends a read-write directory to the conversation's scope,
+    /// the same kind of thing `linkWorkspace` already does for the primary workspace. Worded as
+    /// scope, not a grant: this does NOT stop Vibecop or the approval dialog from asking about a
+    /// call under it — that stays exactly as it is today until #974 turns these roots into part
+    /// of the owner profile's own FS grant.
+    private func addDirectory(to id: UUID) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Add Directory"
+
+        if panel.runModal() == .OK, let url = panel.url {
+            state.addAdditionalRoot(for: id, path: url.path)
+            state.appendMessage(role: .system, content: "Added \(url.path) to this session's scope (AGENTS.md and, when sandboxed, its mount). It still asks before a call under it, same as everywhere else.", to: id)
+        }
+    }
+
     private func groupedMessages(for conv: Conversation) -> [MessageItem] {
         MessageItem.group(conv.messages)
     }
@@ -1965,6 +2003,44 @@ struct WorkspaceRulesReview: View {
         }
         .padding(20)
         .frame(width: 560)
+    }
+}
+
+/// #962: lists the primary workspace (fixed — no remove today, same as "Link to Workspace..."
+/// itself has none) plus every additional root, each removable. Worded as scope throughout, never
+/// "access" or "allow": removing one here only narrows what AGENTS.md/the sandbox mount see next
+/// time, same as today's approval dialog either way.
+struct ManageDirectoriesSheet: View {
+    let workspacePath: String?
+    let additionalRoots: [String]
+    let remove: (String) -> Void
+    let dismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Directories").font(.headline)
+            Text("Scoped to this session: AGENTS.md from each, and the sandbox mount when it's sandboxed. This does not change whether a call under one still asks for approval.")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            List {
+                if let workspacePath {
+                    Text(workspacePath).font(.system(.body, design: .monospaced))
+                }
+                ForEach(additionalRoots, id: \.self) { root in
+                    Text(root).font(.system(.body, design: .monospaced))
+                }
+                .onDelete { offsets in
+                    for i in offsets { remove(additionalRoots[i]) }
+                }
+            }
+            .frame(minHeight: 80, maxHeight: 300)
+            HStack {
+                Spacer()
+                Button("Done", action: dismiss).keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 480)
     }
 }
 

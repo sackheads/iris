@@ -226,6 +226,7 @@ struct ToolExecutor {
                  useSandbox: Bool = false, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil,
                  approvedWorkspaceRoot: String? = nil, decidedPath: String? = nil,
                  restrictedPath: [String]? = nil, homeWritableOptIn: String? = nil,
+                 additionalRoots: [String] = [],
                  decidedJobProfile: JobProfile? = nil) async -> String {
         // A NUL ends the C string the kernel is handed, so the file opened is not the one named
         // (#256). The dispatcher refuses it before approval; this covers a hook's rewrite.
@@ -244,7 +245,7 @@ struct ToolExecutor {
             let timeoutSeconds = min(max(rawTimeout, 10), 3600)
             return await runCommand(command, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox,
                                     timeoutSeconds: timeoutSeconds, grant: grant, restrictedPath: restrictedPath,
-                                    homeWritableOptIn: homeWritableOptIn)
+                                    homeWritableOptIn: homeWritableOptIn, additionalRoots: additionalRoots)
         case "read_file":
             guard let path = args["path"]?.stringValue else { return "Error: Missing path" }
             let range: LineRange?
@@ -540,7 +541,7 @@ struct ToolExecutor {
 
     func runCommand(_ command: String, cwd: String?, conversationId: UUID? = nil, useSandbox: Bool = false,
                     timeoutSeconds: Double = 600, grant: JobGrant? = nil, restrictedPath: [String]? = nil,
-                    homeWritableOptIn: String? = nil) async -> String {
+                    homeWritableOptIn: String? = nil, additionalRoots: [String] = []) async -> String {
         // A grant is a promise about a container (#282). Off the sandboxed branch — sandboxing
         // resolved off, or no conversation to own a session — there is no container to keep it
         // in, and the host with `cwd` is not a fallback. The dispatcher refuses this upstream
@@ -568,7 +569,13 @@ struct ToolExecutor {
                !HomeMount.isCovered(source, by: homeWritableOptIn) {
                 return HomeMount.refusal(path: source, reason: reason)
             }
-            let extraMounts = grant?.extraMountEntries() ?? []
+            // #962: without a grant (an ordinary attended conversation), additionalRoots become
+            // extra read-write mounts, the same role a grant's own extraMountEntries play — scope
+            // only, never auto-approve (that's #974's). A grant already fully determines a job
+            // run's mounts, so additionalRoots don't apply there. Filtered against the workspace's
+            // own source so a stale root that now matches it is never mounted twice.
+            let extraMounts = grant?.extraMountEntries()
+                ?? additionalRoots.filter { $0 != workspace?.source }.map { ContainerMount(source: $0).entry }
             let network = NetworkMode.forGrant(grant)
             if let sandboxSession {
                 return await sandboxSession(command, conversationId, workspace, extraMounts, network, deadline)

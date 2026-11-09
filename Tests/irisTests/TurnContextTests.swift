@@ -553,6 +553,78 @@ struct GuardedFileCacheTests {
         #expect(!systemText(requests[1]).contains("agents v2"))
     }
 
+    /// #962: an additional root's own AGENTS.md is picked up alongside the primary workspace's,
+    /// labeled by its path so the model knows which rules apply where; the primary stays
+    /// unlabeled (today's shape, unchanged — `ScenarioRunnerOptionsTests.workspaceBinding`).
+    @Test("an additional root's AGENTS.md is picked up and labeled by its path, alongside the workspace's own")
+    func additionalRootAgentsMdIsPickedUp() async throws {
+        let wsDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-962-ws-\(UUID().uuidString)")
+        let rootDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-962-root-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: wsDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: rootDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: wsDir)
+            try? FileManager.default.removeItem(at: rootDir)
+        }
+        let workspaceMarker = "WORKSPACE-RULE-\(UUID().uuidString)"
+        let rootMarker = "ADDITIONAL-ROOT-RULE-\(UUID().uuidString)"
+        try workspaceMarker.write(to: wsDir.appendingPathComponent("AGENTS.md"), atomically: true, encoding: .utf8)
+        try rootMarker.write(to: rootDir.appendingPathComponent("AGENTS.md"), atomically: true, encoding: .utf8)
+
+        let app = AppState()
+        let id = newConversation(app)
+        guard let idx = app.conversations.firstIndex(where: { $0.id == id }) else {
+            Issue.record("conversation not found")
+            return
+        }
+        app.conversations[idx].workspacePath = wsDir.path
+        app.conversations[idx].additionalRoots = [rootDir.path]
+        let client = CapturingLLMClient(reply: "ok")
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
+                                retryDelays: [], streamResponses: false,
+                                protectionEnabled: false, sessionPeerCount: 0)
+        await engine.processInput("one", source: "UI", conversationId: id)
+
+        try #require(client.requests.count == 1)
+        let text = systemText(client.requests[0])
+        #expect(text.contains(workspaceMarker))
+        #expect(text.contains(rootMarker))
+        #expect(text.contains(rootDir.path), "the additional root's section is labeled by its path")
+    }
+
+    /// #962: no additional roots means no change to the existing single-workspace shape at all.
+    @Test("with no additional roots, the AGENTS.md section is exactly as it was before #962")
+    func noAdditionalRootsLeavesTheSectionUnchanged() async throws {
+        let wsDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-962-noroots-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: wsDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: wsDir) }
+        let marker = "WORKSPACE-ONLY-RULE-\(UUID().uuidString)"
+        try marker.write(to: wsDir.appendingPathComponent("AGENTS.md"), atomically: true, encoding: .utf8)
+
+        let app = AppState()
+        let id = newConversation(app)
+        guard let idx = app.conversations.firstIndex(where: { $0.id == id }) else {
+            Issue.record("conversation not found")
+            return
+        }
+        app.conversations[idx].workspacePath = wsDir.path
+        let client = CapturingLLMClient(reply: "ok")
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
+                                retryDelays: [], streamResponses: false,
+                                protectionEnabled: false, sessionPeerCount: 0)
+        await engine.processInput("one", source: "UI", conversationId: id)
+
+        try #require(client.requests.count == 1)
+        let text = systemText(client.requests[0])
+        guard let headerRange = text.range(of: "# Project Workspace Rules (AGENTS.md)\n") else {
+            Issue.record("AGENTS.md section missing entirely")
+            return
+        }
+        let after = text[headerRange.upperBound...]
+        #expect(!after.hasPrefix("## "), "no path label when there's only the primary workspace")
+        #expect(after.contains(marker))
+    }
+
     @Test("two turns with an unchanged AGENTS.md run tier 2/3 once, not twice")
     func agentsMdGuardedOnce() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-agents-once-\(UUID().uuidString)")

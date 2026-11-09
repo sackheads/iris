@@ -40,8 +40,9 @@ Proves the master switch + global default picker work.
 ## Test C — The sidebar toggle (main agent, per conversation)
 
 1. Right-click a conversation in the left sidebar.
-2. **Expect:** directly under **"Link to Workspace…"** there's a **"Sandbox main agent"** item
-   with a **checkbox**. Because the global default is Host, it should be **unchecked**.
+2. **Expect:** below **"Link to Workspace…"**, **"Add Directory…"** and **"Manage Directories…"**
+   (#962), then **"Sandbox main agent"** with a **checkbox**. Because the global default is Host,
+   it should be **unchecked**.
 3. Link that conversation to a real folder (right-click → Link to Workspace…), pick a project
    folder.
 4. Right-click again → **check** "Sandbox main agent."
