@@ -80,6 +80,9 @@ struct InboxEmitTests {
         let result = await runToolCall(emitCall(title: "Ship the thing?", situation: "Full context here.",
                                                 options: options), on: app, as: id)
         #expect(result.contains("Recorded #"), Comment(rawValue: result))
+        // #943 shipped the mailbox: the model must not be told to hide that it raised something
+        // (#920 review: the old "do not tell him" wording survived the mailbox landing).
+        #expect(!result.contains("do not tell him"), Comment(rawValue: result))
 
         let items = try app.store.inbox.openItems()
         #expect(items.count == 1)
