@@ -245,25 +245,50 @@ signature verification is the standard, generalizable answer.
 - The gateway becomes a **relay**: it can drop, delay or reorder tasks, but holds no peer private key
   and can no longer impersonate a peer. The blast-radius argument that made H4 a finding (one bearer
   token → impersonate any mapped peer → inherit the union of their grants) is closed at the root.
-- Each inbound task must carry **(1)** a key id, **(2)** an Ed25519 signature over a byte-exact
-  canonical payload, and **(3)** a nonce/timestamp (covered by the signature) for replay protection.
-  Iris selects the registered public key by key id and verifies before the route resolves to a profile.
-- **Per-profile peer public-key registry.** A peer's public key is registered **out of band** at
-  enrollment — the first-grant Inbox gate (M5) — never carried by the gateway. `(transport, issuer, id)`
-  (M4) keys the mapping.
-- CryptoKit provides Ed25519 (`Curve25519.Signing`); the crypto is cheap. The real work is the
-  key-management plumbing and reversing the A2A plan's "Iris does no cryptography" simplicity. The A2A
-  client plan (`docs/superpowers/plans/2026-11-07-a2a-client.md`, esp. Task 5 inbound auth) **must be
-  updated** to add signature verification and drop the trust-the-gateway assumption.
-- **Open item, coordinated externally:** the exact canonical-payload shape (what bytes are signed, and
-  the nonce/timestamp scheme) is being settled with the gateway/client spec owners. Until it lands, the
-  Iris-side contract here is written transport-agnostically ("verify an Ed25519 signature over the agreed
-  canonical payload against the registered key") and the payload bytes are a to-be-finalized detail, not
-  a blocker on the rest of v2. Gateway topology and wire-format specifics stay out of this repo doc by
-  design; only Iris's verification requirement lives here.
+
+**The contract is now committed — see romar#396 (`peer-signature-spec.md`, v2) for the byte-exact wire
+format.** The earlier open item (canonical-payload shape) is retired: the reviewed design signs the
+**exact transmitted bytes, verify-before-parse**, with no JSON canonicalization (stock encoders do not
+agree across Python/Go/Swift). The wire frame, domain separator and codec live in romar; this doc
+records only **Iris's verifier/signer obligations** at the design level.
+
+- **Verify before parse, parse once.** Iris verifies the Ed25519 signature over the transmitted bytes
+  **before** parsing the envelope, then parses once and acts only on that parsed object — never
+  re-serializing a parsed tree or re-parsing for dispatch. The exact signing input is romar#396's.
+- **Key bound to sender, within the principal's keyset.** The signing key id must equal the envelope's
+  declared sender profile (mismatch ⇒ reject), and a key is resolved **strictly within that principal's
+  registered keyset**, never a flat global key map — otherwise an enrolled peer could sign as another.
+- **Iris-side verifier MUSTs** (the ones that land on our code): recipient binding (the envelope is
+  addressed to `iris`); a present replay nonce and a strict RFC 3339 UTC timestamp; **reject duplicate
+  JSON object keys** (Swift's `JSONSerialization`/`JSONDecoder` keep last-wins by default — needs an
+  explicit check); derive tier/permissions from Iris's **local** key/grant registry, never from the
+  envelope's self-claimed authority; **fail closed** — a missing/invalid/unverifiable signature is
+  hard-rejected, **never coerced to `guest`**, and relay-attested (gateway-vouched) traffic is rejected
+  unless the user opted into a separate explicit "the gateway" profile. Every rejection logs a reason code.
+- **Replay: deadline-bounded, not a fixed window.** The nonce goes in a **persisted, per-peer-bounded**
+  seen-set, written **before** the task executes; the timestamp may not be in the future beyond a small
+  skew; a required per-task deadline bounds lifetime (capped at 24 h). No `abs(now − ts)` window — a
+  queued task can sit in the relay up to its deadline while the laptop sleeps, so a fixed window (correct
+  for always-on peers) would reject every queued task on wake. A full seen-set rejects rather than
+  evicts; a duplicate is rejected **and acked** (a nack makes the relay redeliver forever).
+- **Bidirectional (new scope).** This is not verify-only: Iris must **enroll its own Ed25519 keypair and
+  sign its outbound** tasks and replies (incl. disclosure answers), because the relay can forge an
+  unsigned reply just as easily. The A2A client plan
+  (`docs/superpowers/plans/2026-11-07-a2a-client.md`, Task 5) must be updated to add inbound verification
+  **and** outbound signing, dropping its "Iris does no cryptography" assumption.
+- **Enrollment.** A peer's public key is registered **out of band** in Iris's per-profile registry at the
+  human-approved first grant (M5); the gateway's key distribution is explicitly **not** Iris's trust
+  source. `(transport, issuer, id)` (M4) keys the mapping. CryptoKit provides Ed25519
+  (`Curve25519.Signing`); the crypto is cheap — the work is the key/seen-set plumbing and outbound signing.
+- **Iris-specific risks to settle in the plan:** recheck macOS `JSONSerialization` on the outer frame
+  (the audit covered Linux Swift only); **vendor romar's single conformance vector** (incl. its
+  negative-reason cases) by commit/CI fetch rather than hand-maintaining a drift-prone copy; accept
+  **only** the new signed format from day one, no downgrade path.
 - Because identity is now cryptographically verified, the earlier "Inbox-gate every credentialed action"
   sub-question becomes **optional defence-in-depth**, not a load-bearing control: forged-peer-via-gateway
-  is no longer a path.
+  is no longer a path. Signing is identity + integrity only — a verified peer can still carry injected
+  content (a PR diff), so the content/injection guards and the C2 spend-vs-possess invariant still apply
+  to verified input.
 
 ## The disclosure broker (the proxy / escalation path)
 
@@ -424,8 +449,11 @@ once; re-review confirms the changed sections close the findings, nothing more.
 ## Left to the builder / to fine-tune later
 
 - Keychain storage shape for typed accounts + owner-class, and the per-type proxy-tool op-sets (C2).
-- The exact canonical-payload shape for peer signatures (H4) — coordinated with the gateway/client spec
-  owners, out of band.
+- Peer-signature verifier + outbound signer (H4) against the **committed** contract (romar#396,
+  peer-signature-spec.md v2 "sign exact bytes"): the sign-exact-bytes codec, the verifier MUSTs, the
+  persisted per-peer seen-set, Iris's own keypair + outbound signing, romar's vendored conformance
+  vector, and the macOS `JSONSerialization` recheck on the outer frame. (The canonical-payload open item
+  is retired — the contract signs exact bytes, no canonicalization.)
 - Memory-slice mechanism (coarse tiers vs. granted namespaces); read/write axis representation (H1).
 - The exact sensitivity-dial classification (which categories auto vs. Inbox); Brian's first cut:
   deny = creds / third-party PII / secrets; fine-tune as cases arise.
