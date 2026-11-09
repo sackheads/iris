@@ -54,6 +54,10 @@ struct PluginsSettingsView: View {
             detailPane
                 .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
         }
+        // The split view and its sidebar-style list otherwise reach up into the Settings toolbar,
+        // painting a light band behind the tab labels and drawing the divider through them. Every
+        // other pane is a padded Form, so this one starts where they do (#992).
+        .padding(.top, 20)
         .task { await refresh() }
         // No explicit teardown call is needed here: FileWatcher.watch(paths:)'s AsyncStream sets
         // `continuation.onTermination = { [weak self] _ in self?.stop() }` (FileWatcher.swift:71-73),
@@ -69,6 +73,24 @@ struct PluginsSettingsView: View {
             PluginInstallWizardView(source: source) {
                 Task { await refresh() }
             }
+        }
+    }
+
+    /// What a plugin is, in the pane itself, with the doc that goes further (#992).
+    static let explanation = "A plugin bundles tools (MCP servers), skills and rules for Iris. Add one below, from a folder, an MCP snippet or another app's config."
+    static let docsURL = URL(string: "https://github.com/sackheads/iris/blob/main/docs/features.md#plugins")!
+
+    /// Opens the legacy file in the default editor, creating an empty one first when there is none:
+    /// `open` on a missing file fails without a word, which made the button look dead (#992).
+    /// Reveals it in Finder when no app takes the open.
+    private func editLegacyFile() {
+        let url = IrisPaths.default.mcpServersJSON
+        guard LegacyServersFile.ensureExists(at: url) else {
+            NSWorkspace.shared.activateFileViewerSelecting([IrisPaths.default.configDir])
+            return
+        }
+        if !NSWorkspace.shared.open(url) {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
         }
     }
 
@@ -96,6 +118,10 @@ struct PluginsSettingsView: View {
         VStack(alignment: .leading, spacing: 0) {
             List(selection: $selectedID) {
                 Section("Plugins") {
+                    Text(Self.explanation)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     ForEach(plugins, id: \.manifest.id) { plugin in
                         HStack {
                             statusLED(for: plugin)
@@ -129,11 +155,12 @@ struct PluginsSettingsView: View {
                             Button("Convert to Plugin…") { showInstallWizard = .convertLegacy(name: name) }
                         }
                     }
-                    Button("Edit mcp_servers.json") {
-                        NSWorkspace.shared.open(IrisPaths.default.mcpServersJSON)
-                    }.buttonStyle(.link)
+                    Button("Edit mcp_servers.json") { editLegacyFile() }.buttonStyle(.link)
                 }
             }
+            Link("What is a plugin?", destination: Self.docsURL)
+                .font(.caption)
+                .padding(.horizontal, 8)
             Menu("＋ Add Plugin") {
                 Button("From Folder…") { pickFolder() }
                 Button("From MCP Snippet…") { showInstallWizard = .snippet }
@@ -456,6 +483,25 @@ struct PluginDetailView: View {
             _ = await PluginAuthRunner.runSetup(auth, config: configDrafts, approve: PluginAuthRunner.userClicked)
             authStatuses[index] = await PluginAuthRunner.check(auth, config: configDrafts,
                                                                approve: PluginAuthRunner.userClicked)
+        }
+    }
+}
+
+
+/// The legacy `mcp_servers.json`, a bare `{ "name": { "command": ... } }` map (see
+/// `HarnessConfigImporter.servers(at:)`). Absent on a home that never had a hand-written server.
+enum LegacyServersFile {
+    /// Creates an empty `{}` map (and its directory) when the file is missing. Returns whether
+    /// the file exists afterwards. An existing file is never touched.
+    @discardableResult
+    static func ensureExists(at url: URL, fileManager fm: FileManager = .default) -> Bool {
+        if fm.fileExists(atPath: url.path) { return true }
+        do {
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("{}\n".utf8).write(to: url, options: .withoutOverwriting)
+            return true
+        } catch {
+            return fm.fileExists(atPath: url.path)
         }
     }
 }
