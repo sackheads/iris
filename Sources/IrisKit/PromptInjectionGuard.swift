@@ -112,21 +112,22 @@ struct PromptInjectionGuard {
     /// `model:` — which nothing in that same pass checks again. The same happens across any two
     /// patterns where an earlier-order pattern's removal exposes a later/already-passed one
     /// (`<|im_<|im_end|>start|>` → removing `<|im_end|>` exposes `<|im_start|>`). Fixing it with
-    /// a fixed-point loop (repeat until a pass changes nothing) is not itself enough: a
-    /// chat-template token's asymmetric prefix/suffix (`<|im_` / `end|>`) lets an attacker nest
-    /// the token inside itself to an arbitrary, attacker-chosen depth (each layer costs exactly
-    /// one more pass to unwind), so a cap on pass count alone would hit the cap mid-unwind and
-    /// return a partial strip that can still carry a live marker (#972 review) — the cap would
-    /// bound CPU but reopen #970 for anyone willing to nest past it. So hitting the cap without
-    /// a pass that changes nothing is treated as `noTermination` and fails closed to a fixed
-    /// placeholder (`nestedDelimiterPlaceholder`), never the partial text: no legitimate input
-    /// nests this deep, so the placeholder costs nothing, and the cap now only bounds CPU, which
-    /// is what a cap is for. Flat patterns with no internal prefix/suffix structure (`---`,
-    /// `###`, a bare role word) cannot self-nest this way — concatenating two fragments of the
-    /// *same* character just produces a longer homogeneous run, which a single
-    /// `replacingOccurrences` call resolves in one shot — so unbounded depth is specifically a
-    /// chat-template-token risk, not a general one; the fail-closed branch below still covers
-    /// every pattern uniformly, since the cap is pattern-agnostic.
+    /// a fixed-point loop (repeat until a pass changes nothing) is not itself enough: a single
+    /// pattern (or a pair of patterns) whose removal exposes another occurrence that nothing
+    /// later in the SAME pass re-checks lets an attacker nest arbitrarily deep — each layer costs
+    /// exactly one more pass to unwind — so a cap on pass count alone would hit the cap mid-unwind
+    /// and return a partial strip that can still carry a live marker (#972 review). This is not
+    /// limited to chat-template tokens: `---`/`###` alone can't self-nest (two fragments of the
+    /// *same* character just merge into one homogeneous run that a single `replacingOccurrences`
+    /// call resolves fully), but ALTERNATING `---` and `###` wrappers around each other can (dev-2
+    /// review round 2) — any pattern pair whose removals expose each other across a pass boundary
+    /// is a nesting risk, not only self-nesting ones. So hitting the cap without a pass that
+    /// changes nothing is treated as non-termination and fails closed to a fixed placeholder
+    /// (`nestedDelimiterPlaceholder`), never the partial text: no legitimate input nests this
+    /// deep, so the placeholder costs nothing, and the cap now only bounds CPU (a 1 MB line
+    /// nested 100k deep would otherwise cost passes × length), which is what it's for. The
+    /// fail-closed branch below covers every pattern and pattern-pair uniformly, since the cap
+    /// itself is pattern-agnostic.
     private static let maxStripPasses = 20
     /// Replaces a line whose strip never reached a fixed point within `maxStripPasses` (#972
     /// review) — an attacker-chosen nesting depth beyond anything a legitimate input needs.
