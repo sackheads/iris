@@ -49,7 +49,9 @@ To build a real `.app` bundle from the command line instead of Xcode, run
 `scripts/build-app.sh Debug` (needs `brew install xcodegen` and the Metal Toolchain); it builds into
 `$TMPDIR/iris-app-<config>-<hash of the checkout's path>`, one directory per worktree, because a
 derived-data directory remembers absolute paths and must not be shared between trees (pass a
-directory as the second argument to choose another). Either way,
+directory as the second argument to choose another). Each one is about 5.7 GB and nothing removes
+it with the worktree: delete the `derived data:` path the script prints when the worktree goes
+(`AGENTS.md`'s worktree steps give the command). Either way,
 building the app needs the team's Developer ID Application certificate in your keychain —
 `project.yml` signs it manually with that fixed identity, not an Xcode account. See
 `AGENTS.md`'s "Build and test" section for the `Release` config and why not to launch it before
