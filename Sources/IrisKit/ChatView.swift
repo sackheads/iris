@@ -26,6 +26,8 @@ struct ChatView: View {
     /// run exists (a manual collapse is remembered only until the strip empties out, at which
     /// point `ActivityStripView` resets this back to `true` itself).
     @State private var activityStripExpanded = true
+    /// The cpu button's other job: with no run on the strip it shows a one-line "No active runs" note (#982).
+    @State private var activityStripIdleNote = false
     /// The goal progress popover (#882), opened from the toolbar.
     @State private var showGoalProgress = false
     /// Whether the Archived disclosure group is open. The single source of truth: the group
@@ -457,7 +459,7 @@ struct ChatView: View {
 
                     messageInputBar
 
-                    ActivityStripView(state: state, isExpanded: $activityStripExpanded)
+                    ActivityStripView(state: state, isExpanded: $activityStripExpanded, idleNoteRequested: $activityStripIdleNote)
                 }
                 .onDrop(of: [.fileURL], isTargeted: $isDraggingOver) { providers in
                     handleDrop(providers: providers)
@@ -546,7 +548,12 @@ struct ChatView: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 Button(action: {
-                    Motion.withAnimation { activityStripExpanded.toggle() }
+                    Motion.withAnimation {
+                        switch ActivityStripView.toggleTarget(state.stripRuns) {
+                        case .collapse: activityStripExpanded.toggle()
+                        case .idleNote: activityStripIdleNote.toggle()
+                        }
+                    }
                 }) {
                     ZStack {
                         Image(systemName: "cpu")

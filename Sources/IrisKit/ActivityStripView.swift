@@ -15,6 +15,8 @@ import SwiftUI
 struct ActivityStripView: View {
     var state: AppState
     @Binding var isExpanded: Bool
+    /// Set by the toolbar's cpu button when no run exists; see `showsIdleNote`.
+    @Binding var idleNoteRequested: Bool
 
     /// Rough single-row height at `.caption` sizing; six of these bounds the expanded strip so it
     /// scrolls instead of growing without limit (invariant 8's spirit — nothing unbounded in the
@@ -22,6 +24,26 @@ struct ActivityStripView: View {
     private static let rowHeight: CGFloat = 22
     /// Rows shown before the list scrolls (invariant 8: nothing unbounded in the composer stack).
     private static let maxVisibleRows = 6
+
+    /// Whether the strip has a run besides the main row to expand or collapse (#982).
+    nonisolated static func hasRunsToToggle(_ sessions: [ActivitySummary]) -> Bool {
+        sessions.contains { $0.kind != .main }
+    }
+
+    /// What the toolbar's cpu button does. With runs it collapses or expands them; with none it
+    /// shows or hides the one-line idle note, so the click always has a visible effect (#982).
+    enum ToggleTarget: Equatable { case collapse, idleNote }
+    nonisolated static func toggleTarget(_ sessions: [ActivitySummary]) -> ToggleTarget {
+        hasRunsToToggle(sessions) ? .collapse : .idleNote
+    }
+
+    /// The note shows only while asked for and while there is still nothing else to show; a run
+    /// starting replaces it with the run rows.
+    nonisolated static func showsIdleNote(_ sessions: [ActivitySummary], requested: Bool) -> Bool {
+        requested && !hasRunsToToggle(sessions)
+    }
+
+    static let idleNoteText = "No active runs"
 
     private func expandedRows(_ sessions: [ActivitySummary]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -39,7 +61,7 @@ struct ActivityStripView: View {
         // evaluation rather than through several computed properties that each called it again.
         let sessions = state.visibleRuns
         let mainSession = sessions.first { $0.kind == .main }
-        let otherRuns = sessions.filter { $0.kind != .main }
+        let otherRuns = sessions.filter { $0.kind != .main }  // empty exactly when !hasRunsToToggle(sessions)
         // Hidden entirely when there is nothing to show — the common case — so the strip doesn't
         // permanently occupy space below the composer. #187 fix round 1: this deliberately does
         // NOT consider whether the transcript sheet is open. It used to, so that hiding the strip
@@ -47,7 +69,8 @@ struct ActivityStripView: View {
         // event card's "View run"), and keeping that term made opening a card's transcript pop an
         // otherwise-idle strip into view under the composer. The `else` branch below keeps the
         // sheet's host alive instead, which is what that term was really buying.
-        let isHidden = otherRuns.isEmpty && (mainSession?.phase ?? .idle) == .idle
+        let showsIdleNote = Self.showsIdleNote(sessions, requested: idleNoteRequested)
+        let isHidden = otherRuns.isEmpty && (mainSession?.phase ?? .idle) == .idle && !showsIdleNote
         // Expanded whenever there's anything besides the main row to show, unless the user has
         // manually collapsed it (and it hasn't emptied out since). With no other sessions,
         // "expanded" vs. "collapsed" is moot — there's only ever the one main line either way.
@@ -73,8 +96,13 @@ struct ActivityStripView: View {
                         // than hide (`● main · idle · 2 subagents running`), so the badge isn't
                         // the only tell.
                         CollapsedSummaryRow(state: state, mainId: main.id)
-                    } else if let main = mainSession {
+                    } else if let main = mainSession, !(showsIdleNote && (mainSession?.phase ?? .idle) == .idle) {
                         ActivityRowView(state: state, sessionId: main.id, isMain: true, onTap: {})
+                    }
+                    if showsIdleNote {
+                        Text(Self.idleNoteText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
                 .padding(.horizontal, 12)
@@ -98,7 +126,7 @@ struct ActivityStripView: View {
         .onChange(of: otherRuns.isEmpty) { _, empty in
             // The strip emptied out (nothing left but main): drop any manual collapse so the
             // NEXT subagent/evaluator run starts expanded again, per the ruling above.
-            if empty { isExpanded = true }
+            if empty { isExpanded = true } else { idleNoteRequested = false }
         }
         // The one transcript sheet in the app, with two openers: a row of this strip, and an
         // event card's "View run" (#187). Its presentation state lives on `AppState`
