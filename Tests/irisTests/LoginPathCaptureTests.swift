@@ -35,15 +35,17 @@ struct LoginPathCaptureTests {
     }
 
     @MainActor
-    @Test("waiting on the shell does not run the main queue")
-    func doesNotPumpMainQueue() throws {
+    @Test("waiting on the shell does not run the main run loop")
+    func doesNotPumpRunLoop() throws {
         let shell = try script("sleep 0.5; echo /a/bin")
-        var ran = false
-        DispatchQueue.main.async { ran = true }
+        var fired = false
+        // A timer in the default mode: `waitUntilExit()` services it while it waits, which is how a
+        // SwiftUI body re-entered mid-initialisation. A semaphore wait does not.
+        let timer = Timer(timeInterval: 0.05, repeats: false) { _ in fired = true }
+        RunLoop.main.add(timer, forMode: .default)
+        defer { timer.invalidate() }
         _ = BinaryResolver.captureLoginPath(shell: shell)
-        // A `waitUntilExit()` here would have serviced the queued block, which is how a SwiftUI
-        // body re-entered mid-initialisation.
-        #expect(!ran)
+        #expect(!fired)
     }
 
     @Test("HomeMount.reason still takes an explicit login PATH, and the home folder is refused")
