@@ -285,6 +285,16 @@ records only **Iris's verifier/signer obligations** at the design level.
   (the audit covered Linux Swift only); **vendor romar's single conformance vector** (incl. its
   negative-reason cases) by commit/CI fetch rather than hand-maintaining a drift-prone copy; accept
   **only** the new signed format from day one, no downgrade path.
+- **Build-plan requirements carried from romar#399 (the H4 implementation plan must include these):**
+  (1) **the seen-set fails closed on a bad store** — if the persisted seen-set exists but can't be read or
+  parsed, refuse inbound frames and alert; never start empty (that silently reopens replay for everything
+  still inside its deadline). Write it durably (fsync temp → rename → fsync dir). (2) **Peers pin Iris's key
+  out of band** — the mirror of Iris's own enrollment rule: a peer must obtain Iris's public key out of band,
+  never from the gateway's key bucket, or the relay can serve its own key as `iris` and forge Iris's replies.
+  Iris's enrollment flow must produce and display its public key for that step. (3) **A duplicate after a
+  crash gets a terminal status, not a re-run** — with write-before-execute, a task interrupted by a crash is
+  redelivered and rejected as a duplicate; if no terminal status was ever posted for it, post
+  `failed: interrupted` before acking so the caller isn't left waiting until the deadline.
 - Because identity is now cryptographically verified, the earlier "Inbox-gate every credentialed action"
   sub-question becomes **optional defence-in-depth**, not a load-bearing control: forged-peer-via-gateway
   is no longer a path. Signing is identity + integrity only — a verified peer can still carry injected
