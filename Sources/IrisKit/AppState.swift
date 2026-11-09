@@ -2235,9 +2235,11 @@ class AppState {
     
     /// `kind` defaults to `.subagent`; `GoalEvaluator` passes `.evaluator` and `JobRunner` passes
     /// `.job` (#187), so the strip and the toolbar badge can tell an independent grader run, a
-    /// background job run and a delegated unit of work apart.
-    func registerSubagent(id: UUID, role: String, kind: ActivitySummary.Kind = .subagent) {
-        stripRuns.append(ActivitySummary(id: id, kind: kind, role: role, startTime: Date(),
+    /// background job run and a delegated unit of work apart. `owner` (#986) is the spawning
+    /// conversation for a subagent/evaluator, `nil` for a job — it is what `visibleRuns` and
+    /// `ChatView`'s badge count scope to the focused session.
+    func registerSubagent(id: UUID, role: String, kind: ActivitySummary.Kind = .subagent, owner: UUID? = nil) {
+        stripRuns.append(ActivitySummary(id: id, kind: kind, role: role, owner: owner, startTime: Date(),
                                         phase: .thinking, lastActivity: nil))
     }
 
@@ -2275,11 +2277,14 @@ class AppState {
         }
     }
 
-    /// The strip's data source: the synthesised row for the conversation you have open first, then every subagent, evaluator
-    /// and background job-run entry. `stripRuns` only ever holds non-main kinds (`registerSubagent`
-    /// is the sole writer and takes a non-main `kind`); the filter is belt-and-braces. The
-    /// synthesised row's id can't collide with one of them either: `createNewConversation` never
-    /// selects a subagent or background conversation, so `selectedConversationId` is never one.
+    /// The strip's data source: the synthesised row for the conversation you have open first, then
+    /// every subagent/evaluator run *it* spawned (#986 — Brian's decision B: per-session scope, not
+    /// every run process-wide). A background job's `owner` is `nil`, so it never matches a real
+    /// selection and never appears here; it belongs to the global #988 view only. `stripRuns` only
+    /// ever holds non-main kinds (`registerSubagent` is the sole writer and takes a non-main
+    /// `kind`); the kind filter is belt-and-braces. The synthesised row's id can't collide with one
+    /// of them either: `createNewConversation` never selects a subagent or background conversation,
+    /// so `selectedConversationId` is never one.
     var visibleRuns: [ActivitySummary] {
         // A stable fallback id, not a fresh `UUID()`, so the synthesised row's identity doesn't
         // change on every access (breaking `ForEach` diffing) on the practically-never-hit path
@@ -2292,10 +2297,13 @@ class AppState {
         // recorded phase was never explicitly cleared.
         let isRunning = selectedConversationId.map(hasTurnInFlight(for:)) ?? false
         let phase: ActivitySummary.Phase = isRunning ? (mainPhaseByConversation[mainId] ?? .thinking) : .idle
-        let main = ActivitySummary(id: mainId, kind: .main, role: "main",
+        let main = ActivitySummary(id: mainId, kind: .main, role: "main", owner: nil,
                                    startTime: mainStartTimeByConversation[mainId] ?? Date(),
                                    phase: phase, lastActivity: nil)
-        return [main] + stripRuns.filter { $0.kind != .main }
+        // #986: scoped to the focused session's own runs — a background job (owner nil) never
+        // matches a real selection, and nothing shows when nothing is selected.
+        let focusedId = selectedConversationId
+        return [main] + stripRuns.filter { $0.kind != .main && focusedId != nil && $0.owner == focusedId }
     }
     private static let noSelectionSessionId = UUID()
 

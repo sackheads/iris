@@ -1962,8 +1962,10 @@ actor JobRunner {
                 state.conversations[idx].mainAgentSandbox = .sandboxed
             }
             // The strip is the only place a run in flight is visible at all, since the
-            // conversation itself is hidden.
-            state.registerSubagent(id: id, role: "job:\(job.name)", kind: .job)
+            // conversation itself is hidden. owner stays nil (#986): a job has no interactive
+            // parent, so it is scoped out of every focused session's strip by design — it
+            // surfaces only in the global #988 view.
+            state.registerSubagent(id: id, role: "job:\(job.name)", kind: .job, owner: nil)
             return id
         }
     }
