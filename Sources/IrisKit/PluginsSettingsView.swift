@@ -85,7 +85,9 @@ struct PluginsSettingsView: View {
     /// Reveals it in Finder when no app takes the open.
     private func editLegacyFile() {
         let url = IrisPaths.default.mcpServersJSON
-        guard LegacyServersFile.ensureExists(at: url) else {
+        // Creating the file is a write the legacy watcher would take for an edit and answer with a
+        // fleet-wide MCP restart for an empty map; flag it as self-inflicted first.
+        guard LegacyServersFile.ensureExists(at: url, beforeCreating: { LegacyFileWatchSuppressor.suppressNext() }) else {
             NSWorkspace.shared.activateFileViewerSelecting([IrisPaths.default.configDir])
             return
         }
@@ -494,8 +496,10 @@ enum LegacyServersFile {
     /// Creates an empty `{}` map (and its directory) when the file is missing. Returns whether
     /// the file exists afterwards. An existing file is never touched.
     @discardableResult
-    static func ensureExists(at url: URL, fileManager fm: FileManager = .default) -> Bool {
+    static func ensureExists(at url: URL, fileManager fm: FileManager = .default,
+                             beforeCreating: () -> Void = {}) -> Bool {
         if fm.fileExists(atPath: url.path) { return true }
+        beforeCreating()
         do {
             try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Data("{}\n".utf8).write(to: url, options: .withoutOverwriting)
