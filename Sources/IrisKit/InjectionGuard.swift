@@ -71,9 +71,11 @@ public struct InjectionGuard {
 
     /// Whether an untrusted-channel caller wants the destructive role-marker/`---`/`###` strip
     /// relaxed to a non-destructive, judged display (#952, "narrowed A"). `.off` is every
-    /// behavior the guard has today; `.preserveWhenJudged` is pure plumbing here — this task
-    /// threads the flag into `classifyDetailed`, but nothing reads it yet to change what gets
-    /// shown (that is #952 Task 2).
+    /// behavior the guard has today; `.preserveWhenJudged` judges the stripped text (detection is
+    /// unchanged) and, once a model-backed tier actually judges it, carries the per-line original
+    /// back in for display wherever its judged form matches what was scored — see
+    /// `carriedDisplay`, where a line is rejected back to its judged form instead of carried if it
+    /// could reassemble a real chat-template token or hides a non-`\n` line break.
     ///
     /// Always an explicit parameter from the one real call site that may ask for it — never
     /// inferred downstream from `contextTag` or a tool name. `contextTag` is caller-chosen free
@@ -771,10 +773,29 @@ public struct InjectionGuard {
             return escapeWrapperBreakout(stripped)
         }
         // Chat-template tokens have no fidelity case, ever (spec: "always, even in the fidelity
-        // channel") — real control tokens for local models, stripped even on a carried line.
-        func chatTokensStripped(_ line: String) -> String {
-            line.replacingOccurrences(of: "<|im_start|>", with: "", options: [.caseInsensitive])
-                .replacingOccurrences(of: "<|im_end|>", with: "", options: [.caseInsensitive])
+        // channel") — real control tokens for local models. #952 review (dev-2, round 1): the
+        // previous version SUBSTITUTED the literal `<|im_start|>`/`<|im_end|>` substrings out of
+        // the line, which can REASSEMBLE a real token a single-pass replace cannot see — removing
+        // `<|im_end|>` from `<|im_<|im_end|>start|>` leaves a genuine `<|im_start|>`, because the
+        // earlier `stripRecording` fixed-point strip (#970/#972) judges the fully-reassembled,
+        // fully-stripped text, and the equality check above only compares against THAT already-
+        // stripped judged form — it tells us this line judged safe, not that no reassembly exists
+        // in the original. So: reject the carry, never substitute. A line with any `<|im_`
+        // fragment (any case) or stray `|>` left over after removing `---`/`###` is shown as the
+        // judged line instead of the original, whatever it reassembles to.
+        func carriesRealToken(_ line: String) -> Bool {
+            var residual = line
+            residual = residual.replacingOccurrences(of: "---", with: "")
+            residual = residual.replacingOccurrences(of: "###", with: "")
+            return residual.range(of: "<|im_", options: [.caseInsensitive]) != nil || residual.contains("|>")
+        }
+        // #952 review (dev-2, round 1): `stripRecording` splits only on `\n`, so a line carrying
+        // `\r`, U+2028 (LINE SEPARATOR), U+2029 (PARAGRAPH SEPARATOR) or U+0085 (NEL) reads as one
+        // line to the guard but several to a model or renderer — a marker could sit at what shows
+        // as a fresh line. Reject the carry for these too; show the judged line instead.
+        let hiddenLineBreaks = CharacterSet(charactersIn: "\r\u{2028}\u{2029}\u{0085}")
+        func hasHiddenLineBreak(_ line: String) -> Bool {
+            line.unicodeScalars.contains { hiddenLineBreaks.contains($0) }
         }
 
         var carried: [String] = []
@@ -783,7 +804,8 @@ public struct InjectionGuard {
         while ci < cleanLines.count {
             let cleanLine = cleanLines[ci]
             if oi < originalLines.count, singleLineJudgedForm(originalLines[oi]) == cleanLine {
-                carried.append(chatTokensStripped(originalLines[oi]))
+                let original = originalLines[oi]
+                carried.append(carriesRealToken(original) || hasHiddenLineBreak(original) ? cleanLine : original)
                 ci += 1
                 oi += 1
                 continue
