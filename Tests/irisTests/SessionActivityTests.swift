@@ -421,3 +421,42 @@ struct ExecuteToolSessionActivityTests {
         #expect(session?.lastActivity == ActivitySummary.LastActivity(tool: "run_command", detail: "echo hi"))
     }
 }
+
+@Suite("Activity strip toggle (#982)")
+struct ActivityStripToggleTests {
+    private func run(_ kind: ActivitySummary.Kind, _ phase: ActivitySummary.Phase = .thinking) -> ActivitySummary {
+        ActivitySummary(id: UUID(), kind: kind, role: "r", startTime: Date(), phase: phase, lastActivity: nil)
+    }
+
+    @Test("with no runs, or only the main row, the toggle has nothing to do")
+    func nothingToToggle() {
+        #expect(!ActivityStripView.hasRunsToToggle([]))
+        #expect(!ActivityStripView.hasRunsToToggle([run(.main)]))
+        #expect(!ActivityStripView.hasRunsToToggle([run(.main, .idle)]))
+    }
+
+    @Test("a subagent, evaluator or job run, running or lingering finished, gives it something to toggle")
+    func somethingToToggle() {
+        let done = ActivitySummary.Phase.finished(status: "completed", at: Date())
+        for kind in [ActivitySummary.Kind.subagent, .evaluator, .job] {
+            #expect(ActivityStripView.hasRunsToToggle([run(.main), run(kind)]))
+            #expect(ActivityStripView.hasRunsToToggle([run(kind, done)]))
+        }
+    }
+
+    @Test("the cpu button collapses when runs exist and shows the idle note when none do")
+    func toggleTarget() {
+        #expect(ActivityStripView.toggleTarget([]) == .idleNote)
+        #expect(ActivityStripView.toggleTarget([run(.main)]) == .idleNote)
+        #expect(ActivityStripView.toggleTarget([run(.main), run(.subagent)]) == .collapse)
+    }
+
+    @Test("the idle note shows only while requested and only while nothing else is on the strip")
+    func idleNoteVisibility() {
+        #expect(ActivityStripView.showsIdleNote([run(.main, .idle)], requested: true))
+        #expect(ActivityStripView.showsIdleNote([], requested: true))
+        #expect(!ActivityStripView.showsIdleNote([run(.main, .idle)], requested: false))
+        #expect(!ActivityStripView.showsIdleNote([run(.main), run(.subagent)], requested: true))
+        #expect(ActivityStripView.idleNoteText == "No active runs")
+    }
+}
