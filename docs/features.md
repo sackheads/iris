@@ -182,7 +182,12 @@ manifest.
 *   **Settings → Plugins tab:** Lists installed plugins with a status LED
     (green = running, orange = needs configuration or sign-in, red =
     failed, gray = disabled), plus a detail pane for configuration,
-    servers/tools, and skills/rules.
+    servers/tools, and skills/rules. The list pane opens with a one-line
+    explanation of what a plugin is and a link back to this section, and
+    servers still configured by hand in `mcp_servers.json` are listed under
+    "Configured in file"; its *Edit mcp_servers.json* button creates an
+    empty file when there is none, then opens it in your default editor
+    (revealing it in Finder if nothing takes it) (#992).
 *   **Three install flows:** *From Folder* (a local or symlinked plugin
     directory, with a dev-mode Reload button), *From MCP Snippet* (paste a
     standard `mcpServers` JSON block and Iris generates the plugin), and
