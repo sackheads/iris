@@ -140,7 +140,7 @@ struct InboxReadStateTests {
         })
     }
 
-    private func split(width: CGFloat) -> NSSplitView {
+    @MainActor private func split(width: CGFloat) -> NSSplitView {
         let split = NSSplitView(frame: NSRect(x: 0, y: 0, width: width, height: 400))
         split.isVertical = true
         split.addArrangedSubview(NSView())
