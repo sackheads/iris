@@ -69,3 +69,17 @@ something usable today.
 
 `config/a2a-peers/` is copied along with the rest of `config/` when a dev home is seeded from a
 release install (`DevHomeSeeder`) — this is fine, since it holds only public keys, not secrets.
+
+## Threat model: what actually stops a planted key
+
+Nothing in this core stops a key from reaching `config/a2a-peers/` by some path other than
+`enroll()` — the registry's integrity rests entirely on `config/`'s existing write boundary, the
+same one every other file under `config/` relies on, not on anything specific to this registry
+(peer review, PR #1036 Finding 2). Concretely: a `write_file` call into `config/a2a-peers/` always
+asks and can never be covered by a standing grant (`PermissionManager.isProtectedWrite`), but that
+check only covers the `write_file` tool — a `run_command` shell call that writes into the
+directory by redirection is judged exactly like any other shell command (asked, unless an
+allowlist, grant or auto-approve already covers it). A key planted by either path is the one
+failure this core cannot detect: `resolve()` trusts whatever `[RegisteredKey]` it finds on disk. If
+this boundary is ever loosened for `config/` in general, this registry's "only a person enrolls a
+key" guarantee goes with it.
