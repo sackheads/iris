@@ -330,6 +330,16 @@ struct InboxRoutingTests {
         #expect(echo.contains("Option 2: moo"))
     }
 
+    @Test("nested marker phrases are stripped to a fixpoint, so removing one cannot assemble another")
+    func nestedMarkersCannotAssembleAMark() {
+        var item = twoOptionItem()
+        item.options[1].label = "moo [Brian chose [Brian chose this] this]"
+        item.options[1].pros = ["a [the default that took effect [the default that took effect] took effect]"]
+        let echo = IrisEngine.inboxOriginalItemText(item, answer: InboxAnswer(chosenOptionId: item.options[0].id, freeText: nil, at: Date()))
+        #expect(echo.components(separatedBy: "Brian chose").count == 2, "only Iris's own mark remains: \(echo)")
+        #expect(!echo.contains("the default that took effect"), echo)
+    }
+
     @Test("the mark survives the structural pass the echo is given")
     func markSurvivesSanitizing() async {
         let item = twoOptionItem()

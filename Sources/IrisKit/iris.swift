@@ -1311,8 +1311,16 @@ actor IrisEngine {
     /// With `answer`, the option it picked is marked (#1025). The emitter's own text has the two
     /// marker phrases removed first, so a label cannot mark itself or another option.
     nonisolated static func inboxOriginalItemText(_ item: InboxItem, answer: InboxAnswer? = nil) -> String {
+        // Repeated until nothing changes: removing one marker can join the halves of another
+        // (`[Brian chose [Brian chose this] this]`), so a single pass would leave a real one behind.
         func unmarked(_ text: String) -> String {
-            text.replacingOccurrences(of: chosenMarker, with: "").replacingOccurrences(of: defaultMarker, with: "")
+            var current = text
+            while true {
+                let next = current.replacingOccurrences(of: chosenMarker, with: "")
+                    .replacingOccurrences(of: defaultMarker, with: "")
+                if next == current { return current }
+                current = next
+            }
         }
         var lines = ["Title: \(item.title)", "Situation: \(item.situation)"]
         for (i, o) in item.options.enumerated() {
