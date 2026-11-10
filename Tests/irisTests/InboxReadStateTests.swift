@@ -97,7 +97,7 @@ struct InboxReadStateTests {
             return split
         }
 
-        let first = SplitDividerPersister(store: store, key: "w", minimum: 100)
+        let first = SplitDividerPersister(store: store, key: "w", minimum: 100, isUserDrag: { _ in true })
         #expect(first.savedWidth == nil)
         let a = makeSplit()
         first.attach(to: a)
@@ -129,6 +129,67 @@ struct InboxReadStateTests {
         let persister = SplitDividerPersister(store: store, key: "w", minimum: 100)
         persister.attach(to: split)
         #expect(persister.savedWidth == 800, "the clamp to the window is the restore's, not a drag to save")
+    }
+
+    private func suite() -> (UserDefaults, () -> Void) {
+        let name = "iris-split-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: name)!
+        return (store, {
+            store.removePersistentDomain(forName: name)
+            IrisDefaults.removeSuiteFile(named: name, in: IrisDefaults.preferencesDirectory)
+        })
+    }
+
+    private func split(width: CGFloat) -> NSSplitView {
+        let split = NSSplitView(frame: NSRect(x: 0, y: 0, width: width, height: 400))
+        split.isVertical = true
+        split.addArrangedSubview(NSView())
+        split.addArrangedSubview(NSView())
+        split.layoutSubtreeIfNeeded()
+        return split
+    }
+
+    @Test("a split view that is not laid out yet is tried again, and restored once it has a width (#1033 review)")
+    @MainActor func notReadyIsRetried() {
+        let (store, cleanup) = suite(); defer { cleanup() }
+        store.set(300.0, forKey: "w")
+        let persister = SplitDividerPersister(store: store, key: "w", minimum: 100, isUserDrag: { _ in false })
+        let view = split(width: 0)
+        persister.attach(to: view)            // no width yet: nothing to restore into
+        view.setFrameSize(NSSize(width: 900, height: 400))
+        view.layoutSubtreeIfNeeded()
+        persister.attach(to: view)            // the next layout tries again
+        #expect(abs(view.arrangedSubviews[0].frame.width - 300) < 2)
+    }
+
+    @Test("the second pane keeps its minimum when the window is narrower than when the width was saved (#1033 review)")
+    @MainActor func secondPaneKeepsItsMinimum() {
+        let (store, cleanup) = suite(); defer { cleanup() }
+        store.set(800.0, forKey: "w")
+        let persister = SplitDividerPersister(store: store, key: "w", minimum: 100, secondPaneMinimum: 320)
+        let view = split(width: 700)
+        persister.attach(to: view)
+        #expect(view.arrangedSubviews[1].frame.width >= 319, "the detail must not collapse")
+        #expect(persister.savedWidth == 800, "and the saved width is still the one that was dragged")
+    }
+
+    @Test("a resize that is not the person dragging the divider is not saved (#1033 review)")
+    @MainActor func windowResizeIsNotSaved() {
+        let (store, cleanup) = suite(); defer { cleanup() }
+        let notDragging = SplitDividerPersister(store: store, key: "w", minimum: 100, isUserDrag: { _ in false })
+        let view = split(width: 900)
+        notDragging.attach(to: view)
+        view.setPosition(444, ofDividerAt: 0)
+        view.layoutSubtreeIfNeeded()
+        NotificationCenter.default.post(name: NSSplitView.didResizeSubviewsNotification, object: view)
+        #expect(notDragging.savedWidth == nil)
+
+        let dragging = SplitDividerPersister(store: store, key: "w2", minimum: 100, isUserDrag: { _ in true })
+        let other = split(width: 900)
+        dragging.attach(to: other)
+        other.setPosition(444, ofDividerAt: 0)
+        other.layoutSubtreeIfNeeded()
+        #expect(dragging.savedWidth.map { abs($0 - 444) < 2 } == true)
     }
 
     @Test("an unusable saved width is ignored")
