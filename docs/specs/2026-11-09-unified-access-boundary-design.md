@@ -264,6 +264,8 @@ records only **Iris's verifier/signer obligations** at the design level.
   to `iris`, while a response event (`status-update`/`artifact-update`) carries no recipient and is
   instead bound to the **outstanding request it answers** (its sender, task id and, when present,
   correlation id must match a request Iris actually issued, else reject `events_request_mismatch`),
+  enforced **inside the verifier** (the outstanding-request context is a required input for `.events`
+  kinds, never an optional per-caller parameter — romar made it optional and no call site passed it);
   because a relayed response is forgeable exactly like an inbound task; **kind↔channel binding** — a
   frame's kind must be one its arrival channel permits (romar pins the table), so a signed event cannot
   be replayed as a task or vice versa (`channel_kind_mismatch`); a present replay nonce and a strict
@@ -280,7 +282,10 @@ records only **Iris's verifier/signer obligations** at the design level.
   `ts + 24 h`; the other kinds carry no deadline and are bounded by `ts + 24 h` instead. No
   `abs(now − ts)` window — a
   queued task can sit in the relay up to its deadline while the laptop sleeps, so a fixed window (correct
-  for always-on peers) would reject every queued task on wake. A full seen-set rejects rather than
+  for always-on peers) would reject every queued task on wake. Each seen-set entry is **retained until
+  that same bound** (the deadline for `message`, `ts + 24 h` otherwise) — the acceptance window and the
+  retention window must match, or a replay reopens in the gap between them (romar shipped a 60 s retention
+  against a 24 h acceptance window for a round before fixing it). A full seen-set rejects rather than
   evicts; a duplicate is rejected **and acked** (a nack makes the relay redeliver forever).
 - **Bidirectional (new scope).** This is not verify-only: Iris must **enroll its own Ed25519 keypair and
   sign its outbound** tasks and replies (incl. disclosure answers), because the relay can forge an
@@ -289,22 +294,32 @@ records only **Iris's verifier/signer obligations** at the design level.
   **and** outbound signing, dropping its "Iris does no cryptography" assumption.
 - **Enrollment.** A peer's public key is registered **out of band** in Iris's per-profile registry at the
   human-approved first grant (M5); the gateway's key distribution is explicitly **not** Iris's trust
-  source. `(transport, issuer, id)` (M4) keys the mapping. CryptoKit provides Ed25519
+  source — and Iris keeps **no gateway-key fallback**; if one is ever added it must live in a **separate
+  store that never overrides or persists into the human-pinned registry** (cf. romar#403).
+  `(transport, issuer, id)` (M4) keys the mapping. CryptoKit provides Ed25519
   (`Curve25519.Signing`); the crypto is cheap — the work is the key/seen-set plumbing and outbound signing.
 - **Iris-specific risks to settle in the plan:** recheck macOS `JSONSerialization` on the outer frame
   (the audit covered Linux Swift only); **vendor romar's single conformance vector** (incl. its
-  negative-reason cases) by commit/CI fetch rather than hand-maintaining a drift-prone copy; accept
+  negative-reason cases) by commit/CI fetch rather than hand-maintaining a drift-prone copy — romar's
+  shared fixture has **no `events_request_mismatch` vector yet**, so add that case locally until romar
+  ships it (or gate the verifier's events tests on it); accept
   **only** the new signed format from day one, no downgrade path.
 - **Build-plan requirements carried from romar#399 (the H4 implementation plan must include these):**
   (1) **the seen-set fails closed on a bad store** — if the persisted seen-set exists but can't be read or
   parsed, refuse inbound frames and alert; never start empty (that silently reopens replay for everything
-  still inside its deadline). Write it durably (fsync temp → rename → fsync dir). (2) **Peers pin Iris's key
+  still inside its deadline). Write it durably, and the refusal must **survive a restart** — a later start
+  must not quietly begin empty; clearing the store is an explicit operator action, not automatic recovery
+  (cf. romar). (2) **Peers pin Iris's key
   out of band** — the mirror of Iris's own enrollment rule: a peer must obtain Iris's public key out of band,
   never from the gateway's key bucket, or the relay can serve its own key as `iris` and forge Iris's replies.
   Iris's enrollment flow must produce and display its public key for that step. (3) **A duplicate after a
   crash gets a terminal status, not a re-run** — with write-before-execute, a task interrupted by a crash is
-  redelivered and rejected as a duplicate; if no terminal status was ever posted for it, post
-  `failed: interrupted` before acking so the caller isn't left waiting until the deadline.
+  redelivered and rejected as a duplicate; on a redelivery that never recorded a start, post
+  `failed: interrupted, resubmit` before acking so the caller isn't left waiting until the deadline
+  (match romar#409's status string so both clients agree). (4) **Outbound signing is not relied on for
+  reply integrity toward a peer until that peer actually pins Iris's key** — tracked on the romar side as
+  romar#403; until it closes (or the affected adapter is declared homelab-only and excluded from consuming
+  Iris's `.events`), Iris's signatures give that path no forgery protection.
 - Because identity is now cryptographically verified, the earlier "Inbox-gate every credentialed action"
   sub-question becomes **optional defence-in-depth**, not a load-bearing control: forged-peer-via-gateway
   is no longer a path. Signing is identity + integrity only — a verified peer can still carry injected
@@ -473,7 +488,10 @@ once; re-review confirms the changed sections close the findings, nothing more.
 - Peer-signature verifier + outbound signer (H4) against the **committed** contract (romar#396,
   peer-signature-spec.md v2 "sign exact bytes"): the sign-exact-bytes codec, the verifier MUSTs, the
   persisted per-peer seen-set, Iris's own keypair + outbound signing, romar's vendored conformance
-  vector, and the macOS `JSONSerialization` recheck on the outer frame. (The canonical-payload open item
+  vector, and the macOS `JSONSerialization` recheck on the outer frame — **plus the four build-plan
+  requirements in §Peer identity** (fail-closed seen-set surviving restart, peers pin Iris's key, interrupted
+  terminal status, outbound signing gated on romar#403), which a builder must not implement from this
+  summary line alone. (The canonical-payload open item
   is retired — the contract signs exact bytes, no canonicalization.)
 - Memory-slice mechanism (coarse tiers vs. granted namespaces); read/write axis representation (H1).
 - The exact sensitivity-dial classification (which categories auto vs. Inbox); Brian's first cut:
