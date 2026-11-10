@@ -112,6 +112,25 @@ struct InboxReadStateTests {
         #expect(abs(b.arrangedSubviews[0].frame.width - 430) < 2)
     }
 
+    @Test("restoring into a split view too narrow for the saved width does not overwrite the saved width")
+    @MainActor func narrowRestoreKeepsSavedWidth() {
+        let name = "iris-split-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: name)!
+        defer {
+            store.removePersistentDomain(forName: name)
+            IrisDefaults.removeSuiteFile(named: name, in: IrisDefaults.preferencesDirectory)
+        }
+        store.set(800.0, forKey: "w")
+        let split = NSSplitView(frame: NSRect(x: 0, y: 0, width: 500, height: 400))
+        split.isVertical = true
+        split.addArrangedSubview(NSView())
+        split.addArrangedSubview(NSView())
+        split.layoutSubtreeIfNeeded()
+        let persister = SplitDividerPersister(store: store, key: "w", minimum: 100)
+        persister.attach(to: split)
+        #expect(persister.savedWidth == 800, "the clamp to the window is the restore's, not a drag to save")
+    }
+
     @Test("an unusable saved width is ignored")
     @MainActor func junkWidthIgnored() {
         let name = "iris-split-\(UUID().uuidString)"
