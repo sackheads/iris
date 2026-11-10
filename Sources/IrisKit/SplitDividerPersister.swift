@@ -103,6 +103,22 @@ struct SplitDividerPersistence: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView { Probe(persister: context.coordinator) }
     func updateNSView(_ nsView: NSView, context: Context) {}
 
+    /// The nearest split view above `view`, only if `view` sits in its first of exactly two panes.
+    /// The inbox list is that pane; the main window's `NavigationSplitView` is also an `NSSplitView`,
+    /// and the inbox sits in its detail pane, so a walk that took any split view would resize the
+    /// conversation sidebar instead (#1033 review).
+    static func ownSplitView(of view: NSView) -> NSSplitView? {
+        var child: NSView = view
+        while let parent = child.superview {
+            if let split = parent as? NSSplitView {
+                let panes = split.arrangedSubviews
+                return panes.count == 2 && panes[0] === child ? split : nil
+            }
+            child = parent
+        }
+        return nil
+    }
+
     private final class Probe: NSView {
         let persister: SplitDividerPersister
         init(persister: SplitDividerPersister) {
@@ -125,8 +141,7 @@ struct SplitDividerPersistence: NSViewRepresentable {
         }
 
         private func attachIfReady() {
-            guard window != nil, let split = sequence(first: superview, next: { $0?.superview })
-                .compactMap({ $0 as? NSSplitView }).first else { return }
+            guard window != nil, let split = SplitDividerPersistence.ownSplitView(of: self) else { return }
             MainActor.assumeIsolated { persister.attach(to: split) }
         }
     }

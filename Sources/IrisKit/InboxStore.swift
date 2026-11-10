@@ -247,8 +247,9 @@ final class InboxStore: Sendable {
             }
             guard stateRaw != InboxItemState.closed.rawValue else { return .failure(.itemClosed) }
 
-            try db.execute(sql: "UPDATE inbox_items SET answerJSON = ?, state = ?, lastActivityAt = ? WHERE id = ?",
-                           arguments: [answerJSON, InboxItemState.answered.rawValue, answer.at, itemId])
+            // His own answer is not news to him; an automatic one is (viewedAt stays behind it).
+            try db.execute(sql: "UPDATE inbox_items SET answerJSON = ?, state = ?, lastActivityAt = ?, viewedAt = CASE WHEN ? THEN viewedAt ELSE ? END WHERE id = ?",
+                           arguments: [answerJSON, InboxItemState.answered.rawValue, answer.at, answer.automatic, answer.at, itemId])
             let body = [answer.chosenOptionId, answer.freeText].compactMap { $0 }.joined(separator: ": ")
             try Self.appendEntry(itemId: itemId, kind: "answer", author: "brian", body: body, at: answer.at, db: db)
             return .success(())
@@ -271,8 +272,8 @@ final class InboxStore: Sendable {
                 return .failure(stateRaw == InboxItemState.closed.rawValue ? .itemClosed : .notAnswerable)
             }
             let state: InboxItemState = pendingTargets.isEmpty ? .answered : .awaitingDelivery
-            try db.execute(sql: "UPDATE inbox_items SET answerJSON = ?, state = ?, lastActivityAt = ?, pendingTargetsJSON = ? WHERE id = ?",
-                           arguments: [answerJSON, state.rawValue, answer.at, pendingJSON, itemId])
+            try db.execute(sql: "UPDATE inbox_items SET answerJSON = ?, state = ?, lastActivityAt = ?, pendingTargetsJSON = ?, viewedAt = CASE WHEN ? THEN viewedAt ELSE ? END WHERE id = ?",
+                           arguments: [answerJSON, state.rawValue, answer.at, pendingJSON, answer.automatic, answer.at, itemId])
             // The thread is history Brian reads, so name the option by its label, not its id; the
             // label is looked up now because a later follow-up replaces the options (#1024).
             let optionsText = try String.fetchOne(db, sql: "SELECT optionsJSON FROM inbox_items WHERE id = ?", arguments: [itemId])
