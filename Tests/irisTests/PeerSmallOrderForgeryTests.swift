@@ -99,7 +99,7 @@ struct PeerSmallOrderForgeryTests {
             }
             if chosen != nil { forgeriesThatVerifyUnderCryptoKit += 1 }
             let envelopeBytes = try #require(chosen ?? fallback)
-            let frame = SignedFrameParts(principal: "clomp", keyId: nil, verifiedBy: "direct",
+            let frame = SignedFrameParts(principal: "clomp", keyId: nil, verifiedBy: "ed25519",
                                          signature: forgedSignature, envelopeBytes: envelopeBytes)
             let verifier = PeerSignatureVerifier(registry: registry, seenSet: PeerSignatureVerifierTests.InMemorySeenSet())
             let context = VerificationContext(selfProfile: "iris", channel: .inbox, outstanding: nil, now: now)
