@@ -302,6 +302,15 @@ struct InboxRoutingTests {
         #expect(!IrisEngine.inboxOriginalItemText(item).contains("chose this"))
     }
 
+    @Test("the notify frame carries the stable id too, not only a position")
+    func notifyCarriesTheId() {
+        let item = twoOptionItem()
+        let chosen = item.options[1].id
+        let text = IrisEngine.inboxNotifyFrame(item: item, answer: InboxAnswer(chosenOptionId: chosen, freeText: nil, at: Date()),
+                                               echoedTitle: "T")
+        #expect(text.contains("He chose option 2 (id \(chosen))."), Comment(rawValue: text))
+    }
+
     @Test("an automatic default is marked as the default, never as Brian's choice")
     func echoMarksTheDefault() {
         let item = twoOptionItem()
