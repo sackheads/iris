@@ -65,4 +65,26 @@ enum InboxUIModel {
     static func mailboxItems(open: [InboxItem], awaitingDelivery: [InboxItem]) -> [InboxItem] {
         open + awaitingDelivery
     }
+
+    /// The thread entries shown under the current ask: everything except the last `"question"` or
+    /// `"followup"`, which is the ask itself and already on screen as the item's title and
+    /// situation (a follow-up writes its own onto the item, #1024). Empty for a thread with only
+    /// its opening question.
+    static func history(of thread: [InboxThreadEntry]) -> [InboxThreadEntry] {
+        guard let currentAsk = thread.lastIndex(where: { $0.kind == "question" || $0.kind == "followup" }) else {
+            return thread
+        }
+        var entries = thread
+        entries.remove(at: currentAsk)
+        return entries
+    }
+
+    static func historyKindLabel(_ kind: String) -> String {
+        switch kind {
+        case "question": return "Asked"
+        case "followup": return "Follow-up"
+        case "answer": return "Answered"
+        default: return kind
+        }
+    }
 }

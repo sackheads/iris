@@ -143,11 +143,88 @@ struct InboxEmitTests {
         _ = try app.store.inbox.recordAnswer(itemId: item.id, answer: InboxAnswer(chosenOptionId: nil, freeText: "go ahead", at: Date()))
 
         let result = await runToolCall(emitCall(situation: "actually, hold on", threadId: item.threadId), on: app, as: id)
-        #expect(result.contains("Appended"), Comment(rawValue: result))
+        #expect(result.contains("Follow-up recorded on #\(item.id)"), Comment(rawValue: result))
         let reopened = try #require(try app.store.inbox.item(id: item.id))
         #expect(reopened.state == .open)
         let thread = try app.store.inbox.thread(itemId: item.id)
         #expect(thread.map(\.kind) == ["question", "answer", "followup"])
+    }
+
+    private func option(_ id: String, _ label: String) -> JSONValue {
+        .object(["id": .string(id), "label": .string(label)])
+    }
+
+    @Test("a followup replaces the answered item's title, situation and options and clears the old answer (#1024)")
+    func followupReplacesTheAsk() async throws {
+        let (app, id) = app()
+        _ = await runToolCall(emitCall(title: "Which animal?", situation: "pick one", options: [option("a", "honk"), option("b", "moo")]),
+                              on: app, as: id)
+        let item = try #require(try app.store.inbox.openItems().first)
+        _ = try app.store.inbox.submitAnswer(itemId: item.id, answer: InboxAnswer(chosenOptionId: "a", freeText: nil, at: Date()),
+                                              pendingTargets: [])
+
+        let result = await runToolCall(emitCall(title: "And the colour?", situation: "now pick a colour",
+                                                options: [option("c", "red"), option("d", "blue"), option("e", "green")],
+                                                threadId: item.threadId), on: app, as: id)
+        #expect(result.contains("#\(item.id)"), Comment(rawValue: result))
+
+        let read = try #require(try app.store.inbox.item(id: item.id))
+        #expect(read.state == .open)
+        #expect(read.title == "And the colour?" && read.situation == "now pick a colour")
+        #expect(read.options.map(\.label) == ["red", "blue", "green"], "the follow-up's options are stored, not dropped")
+        #expect(read.answer == nil, "the old answer is cleared so the item can be answered again")
+        #expect(try app.store.inbox.openItems().map(\.id) == [item.id], "and it is in the open list Brian sees")
+
+        let thread = try app.store.inbox.thread(itemId: item.id)
+        #expect(thread.map(\.kind) == ["question", "answer", "followup"])
+        #expect(thread[1].body == "honk", "the history names the option he chose by label")
+    }
+
+    @Test("a followup can be answered again, and a second answer is delivered like the first (#1024)")
+    func followupIsAnswerable() async throws {
+        let (app, id) = app()
+        _ = await runToolCall(emitCall(options: [option("a", "yes")]), on: app, as: id)
+        let item = try #require(try app.store.inbox.openItems().first)
+        _ = try app.store.inbox.submitAnswer(itemId: item.id, answer: InboxAnswer(chosenOptionId: "a", freeText: nil, at: Date()),
+                                              pendingTargets: [])
+        _ = await runToolCall(emitCall(options: [option("z", "again")], threadId: item.threadId), on: app, as: id)
+
+        let second = try app.store.inbox.submitAnswer(itemId: item.id, answer: InboxAnswer(chosenOptionId: "z", freeText: nil, at: Date()),
+                                                       pendingTargets: [])
+        guard case .success = second else { Issue.record("expected success, got \(second)"); return }
+        #expect(try app.store.inbox.item(id: item.id)?.answer?.chosenOptionId == "z")
+    }
+
+    @Test("a followup that turns the item into a timedVeto needs a future deadline and an option id, like a new item (#1024)")
+    func followupTimedVetoValidated() async throws {
+        let (app, id) = app()
+        _ = await runToolCall(emitCall(), on: app, as: id)
+        let item = try #require(try app.store.inbox.openItems().first)
+        let before = try app.store.inbox.thread(itemId: item.id).count
+
+        let refused = await runToolCall(emitCall(responseMode: "timedVeto", options: [option("a", "go")], threadId: item.threadId,
+                                                 deadline: "2001-01-01T00:00:00Z", vetoDefault: "a"), on: app, as: id)
+        #expect(refused.contains("needs a deadline"), Comment(rawValue: refused))
+        #expect(try app.store.inbox.thread(itemId: item.id).count == before, "a refused follow-up appends nothing")
+
+        let future = ISO8601DateFormatter().string(from: Date().addingTimeInterval(3600))
+        let ok = await runToolCall(emitCall(responseMode: "timedVeto", options: [option("a", "go")], threadId: item.threadId,
+                                            deadline: future, vetoDefault: "a"), on: app, as: id)
+        #expect(ok.contains("Follow-up recorded"), Comment(rawValue: ok))
+        let read = try #require(try app.store.inbox.item(id: item.id))
+        #expect(read.responseMode == .timedVeto && read.vetoDefaultOptionId == "a" && read.deadline != nil)
+    }
+
+    @Test("the inbox_item schema offers an option id, so timedVeto is usable by an agent that follows it (#1024)")
+    func optionIdIsInTheSchema() async {
+        let (app, id) = app()
+        let client = CapturingLLMClient(reply: "ok")
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, retryDelays: [], sessionPeerCount: 0)
+        await engine.processInput("hello", source: "UI", conversationId: id)
+        let decl = client.requests.first?.tools?.flatMap { $0.functionDeclarations }.first { $0.name == "inbox_item" }
+        let optionProps = decl?.parameters?.properties?["options"]?.items?.properties
+        #expect(optionProps?["id"] != nil, "options declare id, label, pros and cons")
+        #expect(decl?.parameters?.properties?["veto_default"]?.description?.contains("id") == true)
     }
 
     @Test("a followup to another chain's thread_id is refused, never takes it over")

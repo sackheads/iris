@@ -93,6 +93,18 @@ struct InboxItem: Equatable, Sendable {
     var pendingTargets: [String] = []
 }
 
+/// What a follow-up puts on the item in place of the question that was answered (#1024). The item
+/// is one row per thread, so the follow-up's own title, situation, options and response shape
+/// replace the row's current ask; the earlier question and answer stay in the thread entries.
+struct InboxFollowupAsk: Equatable, Sendable {
+    var title: String
+    var situation: String
+    var options: [InboxOption]
+    var responseMode: InboxResponseMode
+    var deadline: Date?
+    var vetoDefaultOptionId: String?
+}
+
 /// One entry in a thread's history: the original question, Brian's answer, or a later followup.
 struct InboxThreadEntry: Equatable, Sendable {
     let seq: Int64
@@ -101,6 +113,11 @@ struct InboxThreadEntry: Equatable, Sendable {
     let author: String
     let body: String
     let at: Date
+}
+
+/// What a successful follow-up reports back: the item it landed on, so the tool can name it.
+struct InboxFollowupResult: Equatable, Sendable {
+    let itemId: String
 }
 
 enum InboxError: Error, Equatable {
@@ -170,9 +187,15 @@ final class InboxStore: Sendable {
     /// `.open`. `tainted` ORs into the item's `emitterTainted` (dev-3's #929 review finding 2): the
     /// flag was otherwise set once, at creation, so a followup from a session that has since read
     /// untrusted content left a tainted item reading clean.
+    ///
+    /// `ask` is the follow-up's own question (#1024): it replaces the row's title, situation,
+    /// options and response shape, and the earlier answer is cleared so the item can be answered
+    /// again (it stays in the thread as its `"answer"` entry). Without it the item is only
+    /// reopened and keeps the question it had, the old behaviour, which dropped the follow-up's
+    /// options on the floor and left Brian looking at a question he had already answered.
     @discardableResult
     func appendFollowup(threadId: String, fromChain ownerChain: String, author: String, body: String,
-                        at: Date, tainted: Bool = false) throws -> Result<Void, InboxError> {
+                        at: Date, tainted: Bool = false, ask: InboxFollowupAsk? = nil) throws -> Result<InboxFollowupResult, InboxError> {
         return try writer.write { db in
             guard let row = try Row.fetchOne(db, sql: "SELECT id, ownerChain, state, emitterTainted FROM inbox_items WHERE threadId = ?",
                                              arguments: [threadId]) else {
@@ -188,7 +211,15 @@ final class InboxStore: Sendable {
             try Self.appendEntry(itemId: itemId, kind: "followup", author: author, body: body, at: at, db: db)
             try db.execute(sql: "UPDATE inbox_items SET state = ?, lastActivityAt = ?, emitterTainted = ? WHERE id = ?",
                            arguments: [InboxItemState.open.rawValue, at, wasTainted || tainted, itemId])
-            return .success(())
+            if let ask {
+                let optionsJSON = String(decoding: try JSONEncoder().encode(ask.options), as: UTF8.self)
+                try db.execute(sql: """
+                    UPDATE inbox_items SET title = ?, situation = ?, optionsJSON = ?, responseMode = ?, deadline = ?,
+                        vetoDefaultOptionId = ?, answerJSON = NULL, pendingTargetsJSON = NULL WHERE id = ?
+                    """, arguments: [ask.title, ask.situation, optionsJSON, ask.responseMode.rawValue, ask.deadline,
+                                     ask.vetoDefaultOptionId, itemId])
+            }
+            return .success(InboxFollowupResult(itemId: itemId))
         }
     }
 
@@ -231,7 +262,12 @@ final class InboxStore: Sendable {
             let state: InboxItemState = pendingTargets.isEmpty ? .answered : .awaitingDelivery
             try db.execute(sql: "UPDATE inbox_items SET answerJSON = ?, state = ?, lastActivityAt = ?, pendingTargetsJSON = ? WHERE id = ?",
                            arguments: [answerJSON, state.rawValue, answer.at, pendingJSON, itemId])
-            let body = [answer.chosenOptionId, answer.freeText].compactMap { $0 }.joined(separator: ": ")
+            // The thread is history Brian reads, so name the option by its label, not its id; the
+            // label is looked up now because a later follow-up replaces the options (#1024).
+            let optionsText = try String.fetchOne(db, sql: "SELECT optionsJSON FROM inbox_items WHERE id = ?", arguments: [itemId])
+            let options = optionsText.flatMap { try? JSONDecoder().decode([InboxOption].self, from: Data($0.utf8)) } ?? []
+            let chosen = answer.chosenOptionId.map { id in options.first { $0.id == id }?.label ?? id }
+            let body = [chosen, answer.freeText].compactMap { $0 }.joined(separator: ": ")
             try Self.appendEntry(itemId: itemId, kind: "answer", author: answer.automatic ? "veto-timer" : "brian",
                                  body: answer.automatic ? "no answer by the deadline; default \(body) took effect" : body,
                                  at: answer.at, db: db)
