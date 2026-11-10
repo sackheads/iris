@@ -113,7 +113,7 @@ struct ViewerGUINavigationTests {
         }) == 2, "ignoring `alreadyLoaded` did not let the reload through — the mutation arm itself is broken")
     }
 
-    @Test("the context menu over real link and image content is Copy-only — menu(for:) is the hook WebKit actually calls, not an untested override",
+    @Test("menu(for:) over real link and image content is Copy-only or absent (WebKit presents through willOpenMenu, covered in ClosedSurfaceWebViewMenuTests)",
           .enabled(if: isEnabled))
     func contextMenuOverRealContentIsCopyOnly() async throws {
         let html = """
@@ -132,7 +132,9 @@ struct ViewerGUINavigationTests {
         guard let webView = host.webView else { throw TestFailure.webViewNeverAppeared }
 
         // #904 review (dev-2's non-blocking nit): `allSatisfy` alone passes on a nil/empty menu,
-        // so this doesn't prove `menu(for:)` is WebKit's real hook. Investigated adding a
+        // so this proves nothing about WebKit's real hook, and it was not: the live pass showed the
+        // full default menu because WebKit presents through `willOpenMenu`, now overridden and tested
+        // in `ClosedSurfaceWebViewMenuTests`. This stays as a check on the control-click path. Investigated adding a
         // non-emptiness check: in this session, `swiftpm-testing-helper`'s windows never become
         // key (`window.isKeyWindow` stayed false even after `NSApp.activate` +
         // `makeKeyAndOrderFront`, same root cause as PR 2's window-server capture gap — these
@@ -142,8 +144,8 @@ struct ViewerGUINavigationTests {
         // A stronger assertion would just fail permanently in this environment rather than prove
         // anything about the production override, so this stays as a same-shape check: proof
         // that whatever `menu(for:)` returns here contains no non-Copy item, not proof it's
-        // non-empty. The real non-emptiness proof is the headless `ClosedSurfaceWebViewMenuTests`
-        // calling `ClosedSurfaceWebView.copyOnly` directly on a real `NSMenu`.
+        // non-empty. The non-emptiness proof is the headless `ClosedSurfaceWebViewMenuTests`
+        // calling `ClosedSurfaceWebView.restrictToCopy` directly on a real `NSMenu`.
         for point in [NSPoint(x: 30, y: window.contentView!.bounds.height - 20),   // over the link
                       NSPoint(x: 30, y: window.contentView!.bounds.height - 80)] { // over the image
             let event = NSEvent.mouseEvent(with: .rightMouseDown, location: point, modifierFlags: [],

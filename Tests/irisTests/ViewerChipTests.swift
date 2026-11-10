@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 import AppKit
+import WebKit
 @testable import IrisKit
 
 /// #896 PR 2, spec section 6: "a document over 1 MB is refused with the message and not
@@ -103,22 +104,49 @@ struct ViewerBannerViewTests {
 @MainActor
 @Suite("ClosedSurfaceWebView context menu filter (#896)")
 struct ClosedSurfaceWebViewMenuTests {
-    @Test("keeps only items titled Copy, case-insensitively")
-    func keepsOnlyCopy() {
+    /// What the live pass saw on a right-click over selected text (#904), by title.
+    private func webKitDefaultMenu() -> NSMenu {
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Open Link", action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "COPY", action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Download Image", action: nil, keyEquivalent: ""))
-
-        let filtered = ClosedSurfaceWebView.copyOnly(menu)
-        #expect(filtered?.items.map(\.title) == ["COPY"])
+        for title in ["Look Up", "Translate", "Search with Google", "Copy", "Share\u{2026}", "Speech", "Services"] {
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            if title == "Services" || title == "Speech" { item.submenu = NSMenu(title: title) }
+            menu.addItem(item)
+            if title == "Translate" { menu.addItem(.separator()) }
+        }
+        return menu
     }
 
-    @Test("no Copy item at all: no menu")
-    func noCopyMeansNoMenu() {
+    @Test("keeps only items titled Copy, case-insensitively, and drops separators and submenus")
+    func keepsOnlyCopy() {
+        let menu = webKitDefaultMenu()
+        menu.addItem(NSMenuItem(title: "COPY", action: nil, keyEquivalent: ""))
+        ClosedSurfaceWebView.restrictToCopy(menu)
+        #expect(menu.items.map(\.title) == ["Copy", "COPY"])
+    }
+
+    @Test("no Copy item at all: an empty menu")
+    func noCopyMeansEmpty() {
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Open Link", action: nil, keyEquivalent: ""))
+        ClosedSurfaceWebView.restrictToCopy(menu)
+        #expect(menu.items.isEmpty)
+    }
 
-        #expect(ClosedSurfaceWebView.copyOnly(menu) == nil)
+    @Test("the menu WebKit hands willOpenMenu is restricted to Copy before it shows (#904 live pass)")
+    func willOpenMenuRestricts() {
+        let webView = ClosedSurfaceWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let menu = webKitDefaultMenu()
+        let event = NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                        windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        webView.willOpenMenu(menu, with: event)
+        #expect(menu.items.map(\.title) == ["Copy"], "left: \(menu.items.map(\.title))")
+    }
+
+    @Test("the shipped web view class overrides willOpenMenu, the hook WebKit presents its menu through")
+    func overrideIsPresent() throws {
+        let source = try String(contentsOf: PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit/ViewerWindow.swift"), encoding: .utf8)
+        #expect(source.contains("override func willOpenMenu(_ menu: NSMenu, with event: NSEvent)"))
+        #expect(source.contains("let webView = ClosedSurfaceWebView(frame: bounds, configuration: config)"),
+                "the viewer host must build the restricting subclass, not a bare WKWebView")
     }
 }
