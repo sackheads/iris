@@ -52,6 +52,8 @@ struct ConversationLoop: Codable, Equatable, Sendable {
     /// `sleep`.
     static let alarmMinimum: Double = 15
     static let alarmMaximum: Double = 3600
+    /// The longest note kept: it is stored with the loop and resent in the tick.
+    static let alarmNoteLimit = 300
 
     /// Clamps an alarm's delay and says what was applied. A non-number is the shortest wait.
     static func clampedAlarmDelay(_ requested: Double) -> (seconds: Double, result: String) {

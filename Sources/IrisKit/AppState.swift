@@ -6107,7 +6107,7 @@ class AppState {
         }
         if let refusal = loopRefusal(conv, forAlarm: true) { return "Not set: " + refusal }
         let (seconds, result) = ConversationLoop.clampedAlarmDelay(requested)
-        let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = String(note.trimmingCharacters(in: .whitespacesAndNewlines).prefix(ConversationLoop.alarmNoteLimit))
         let alarm = ConversationLoop.alarm(note: trimmed.isEmpty ? "see what you were waiting for" : trimmed, delaySeconds: seconds)
         let replaced = conv.loop
         conversations[idx].loop = alarm
@@ -6208,13 +6208,21 @@ class AppState {
         loopNextTick[id] = nil
         cancelWaitingLoopTick(id)
         markChanged(id, .metadata)
-        appendMessage(role: .system, content: "Loop paused. `/loop resume` or the chip's Resume starts it again.", to: id)
+        let paused = conversations.first(where: { $0.id == id })?.loop
+        appendMessage(role: .system, content: paused?.isAlarm == true
+            ? "Alarm paused. Resume on the chip sets it going again, for its full delay from then."
+            : "Loop paused. `/loop resume` or the chip's Resume starts it again.", to: id)
     }
 
     func resumeLoop(for id: UUID) {
         guard let idx = conversations.firstIndex(where: { $0.id == id }), let loop = conversations[idx].loop else { return }
         conversations[idx].loop?.paused = false
         markChanged(id, .metadata)
+        if loop.isAlarm {
+            appendMessage(role: .system, content: "Alarm resumed: it rings in \(ConversationLoop.describe(seconds: loop.intervalSeconds)).", to: id)
+            armLoopIfIdle(id)
+            return
+        }
         appendMessage(role: .system, content: "Loop resumed: the next tick in \(ConversationLoop.describe(seconds: loop.selfPaced ? loopRequestedDelay[id] ?? ConversationLoop.selfPacedDefault : loop.intervalSeconds)).", to: id)
         armLoopIfIdle(id)
     }
