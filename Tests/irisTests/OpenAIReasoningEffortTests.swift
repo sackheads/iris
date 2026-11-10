@@ -64,6 +64,32 @@ struct OpenAIReasoningEffortTests {
         #expect(end.contains(.thoughtSignature("think ")), "round trip unchanged")
     }
 
+    @Test("a server that sends both reasoning_content and reasoning in one delta shows it once")
+    func bothFieldsShownOnce() throws {
+        var mapper = OpenAIStreamMapper()
+        let events = try mapper.handle(SSEEvent(event: nil, data: #"{"choices":[{"delta":{"reasoning_content":"same","reasoning":"same"}}]}"#))
+        #expect(events == [.thinkingText("same")])
+    }
+
+    @Test("a transient error before the first event (503, 429) is not a refusal: no reopen, nothing remembered")
+    func streamTransientErrorsPassThrough() async {
+        for status in [503, 429, 500] {
+            let k = key()
+            let opens = Sent()
+            let stream = OpenAIEffortFallback.stream(key: k, effort: "high") { e in
+                AsyncThrowingStream { c in
+                    Task { await opens.add(e) }
+                    c.finish(throwing: APIError(message: "busy", statusCode: status))
+                }
+            }
+            do { for try await _ in stream {}; Issue.record("should throw") }
+            catch { #expect((error as? APIError)?.statusCode == status) }
+            let seen = await opens.all
+            #expect(seen == ["high"], "status \(status) reopened without the effort")
+            #expect(!OpenAIEffortFallback.isRefused(k))
+        }
+    }
+
     @Test("a 400 for the effort alone is answered once without it, and remembered")
     func refusedOnce() async throws {
         let k = key(); let sent = Sent()
