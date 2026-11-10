@@ -198,6 +198,25 @@ struct GeminiThinkingTests {
         #expect(assembler.response().candidates?.first?.content?.parts.first?.thoughtSignature == "SIG2")
     }
 
+    @Test("a transient error before the stream's first event (503, 429, 500) reopens nothing and remembers nothing")
+    func streamTransientErrorsPassThrough() async {
+        for status in [503, 429, 500] {
+            let k = key()
+            let sent = Sent()
+            let stream = GeminiThinkingFallback.stream(key: k, level: "low", includeThoughts: true) { rung in
+                AsyncThrowingStream { c in
+                    Task { await sent.add(rung) }
+                    c.finish(throwing: APIError(message: "busy", statusCode: status))
+                }
+            }
+            do { for try await _ in stream {}; Issue.record("should throw") }
+            catch { #expect((error as? APIError)?.statusCode == status) }
+            let rungs = await sent.all
+            #expect(rungs == [.init(level: "low", includeThoughts: true)], "status \(status) walked the ladder")
+            #expect(!GeminiThinkingFallback.levelRefused(key: k, level: "low") && !GeminiThinkingFallback.thoughtsRefused(key: k))
+        }
+    }
+
     @Test("a non-400 error is not a refusal: no retry")
     func otherErrorsPassThrough() async {
         let k = key()
