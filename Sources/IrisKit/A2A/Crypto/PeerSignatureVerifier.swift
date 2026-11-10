@@ -203,11 +203,16 @@ enum StrictJSON {
 }
 
 private struct DuplicateKeyScanner {
-    /// A few hundred levels is far more than any real envelope nests, and far below what would
-    /// risk the host stack — bounds this scanner's own recursion so a deeply nested payload
-    /// throws instead of overflowing the stack (Review finding, Important: ~20,000 nested
-    /// brackets in a ~20KB payload reproduced a stack-overflow crash before this bound existed).
-    private static let maxDepth = 500
+    /// Bounds this scanner's own recursion so a deeply nested payload throws instead of
+    /// overflowing the stack (Review finding, Important: ~20,000 nested brackets in a ~20KB
+    /// payload reproduced a stack-overflow crash before this bound existed). 64 is generous
+    /// headroom under a debug (`-Onone`) build's ~512KB cooperative-pool thread stack — a
+    /// follow-up review measured a 500-deep payload using roughly 93% of that stack in a debug
+    /// build before the transport's own call frames are even counted, overflowing around depth
+    /// 540-550 with no cap at all (vs. 4,000-8,000 in a release build); the vendored fixture's own
+    /// envelope nests only 4-5 levels deep, so there is no legitimate-payload reason to need more
+    /// than a small multiple of that.
+    private static let maxDepth = 64
 
     private let bytes: [UInt8]
     private var index: Int = 0
