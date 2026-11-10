@@ -1075,8 +1075,8 @@ struct PeerSignatureVerifierRealLedgerTests {
         return formatter.string(from: date)
     }
 
-    @Test("message kind: fresh well inside the real deadline window, replay one second later rejected via the real ledger")
-    func messageKindRealLedgerReplayAfterDeadline() throws {
+    @Test("message kind: fresh well inside the real deadline window, replay one second before the deadline rejected via the real ledger")
+    func messageKindRealLedgerReplayNearDeadline() throws {
         let (store, cleanup) = try onDiskStore()
         defer { cleanup() }
         let (registry, tempDir) = freshRegistry()
@@ -1099,17 +1099,21 @@ struct PeerSignatureVerifierRealLedgerTests {
         let first = try verifier.verifyAndAdmit(frame, context: firstContext, decode: PeerSignatureVerifierTests.decodeTestEnvelope)
         #expect(first.envelopeId == "real-ledger-msg-0001")
 
-        // The exact same frame, replayed one second later: the real ledger's own
-        // prune-on-every-admit must not have evicted the row it just wrote.
+        // The exact same frame, replayed one second before the real 8h deadline: a retention
+        // mutant that extends retainUntil past the deadline by any fixed amount (e.g. +300s, as
+        // found by the final whole-branch review) would still prune this row before this replay
+        // and wrongly re-admit it as fresh — this is the actual threat (a redelivery still
+        // inside the real deadline window), not a ledger retention race at +1s, which every
+        // retention value in the plan's bound (±300s or more) would equally satisfy.
         let replayContext = VerificationContext(selfProfile: "iris", channel: .inbox, outstanding: nil,
-                                                  now: t0.addingTimeInterval(6 * 3600 + 1))
+                                                  now: t0.addingTimeInterval(8 * 3600 - 1))
         #expect(throws: PeerVerificationError(reason: .duplicateEnvelopeId, envelopeId: "real-ledger-msg-0001")) {
             _ = try verifier.verifyAndAdmit(frame, context: replayContext, decode: PeerSignatureVerifierTests.decodeTestEnvelope)
         }
     }
 
-    @Test("non-message kind (cancel): fresh well inside the implicit ts+24h window, replay one second later rejected via the real ledger")
-    func cancelKindRealLedgerReplayAfterImplicitBound() throws {
+    @Test("non-message kind (cancel): fresh well inside the implicit ts+24h window, replay one second before the bound rejected via the real ledger")
+    func cancelKindRealLedgerReplayNearImplicitBound() throws {
         let (store, cleanup) = try onDiskStore()
         defer { cleanup() }
         let (registry, tempDir) = freshRegistry()
@@ -1131,8 +1135,10 @@ struct PeerSignatureVerifierRealLedgerTests {
         let first = try verifier.verifyAndAdmit(frame, context: firstContext, decode: PeerSignatureVerifierTests.decodeTestEnvelope)
         #expect(first.envelopeId == "real-ledger-cancel-0001")
 
+        // Replayed one second before the real implicit ts+24h bound, for the same reason as the
+        // message-kind test above: this is the threat a retention-widening mutant must not survive.
         let replayContext = VerificationContext(selfProfile: "iris", channel: .inbox, outstanding: nil,
-                                                  now: t0.addingTimeInterval(23 * 3600 + 1))
+                                                  now: t0.addingTimeInterval(24 * 3600 - 1))
         #expect(throws: PeerVerificationError(reason: .duplicateEnvelopeId, envelopeId: "real-ledger-cancel-0001")) {
             _ = try verifier.verifyAndAdmit(frame, context: replayContext, decode: PeerSignatureVerifierTests.decodeTestEnvelope)
         }
