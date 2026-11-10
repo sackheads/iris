@@ -67,4 +67,32 @@ enum AnthropicCapabilities {
     static func thinkingDisplay(model: String) -> String? {
         thinkingSupport[key(model)]?.display
     }
+
+    /// Endpoints that answered a request with a 400 naming `thinking.display` (#1018), kept for the
+    /// life of the process so only the first request to one ever fails. The route table cannot
+    /// say which custom base URLs take the field, so the answer is learned, per endpoint. In memory
+    /// on purpose: a relaunch costs one retried request, and nothing is persisted that a route
+    /// fixing itself would leave stale.
+    private final class DisplayRejections: @unchecked Sendable {
+        private let lock = NSLock()
+        private var endpoints: Set<String> = []
+        func contains(_ key: String) -> Bool { lock.withLock { endpoints.contains(key) } }
+        func insert(_ key: String) { lock.withLock { _ = endpoints.insert(key) } }
+    }
+    private static let displayRejections = DisplayRejections()
+
+    private static func endpointKey(_ transport: AnthropicTransport) -> String {
+        switch transport {
+        case .direct(_, let baseURL): return "direct|\(baseURL)"
+        case .vertex(let project, let location, _): return "vertex|\(project)|\(location)"
+        }
+    }
+
+    static func rejectsDisplay(_ transport: AnthropicTransport) -> Bool {
+        displayRejections.contains(endpointKey(transport))
+    }
+
+    static func rememberDisplayRejection(_ transport: AnthropicTransport) {
+        displayRejections.insert(endpointKey(transport))
+    }
 }

@@ -330,7 +330,8 @@ struct AnthropicClient {
         // default" sends no effort, not no thinking.
         let effort = request.reasoningEffort.flatMap { AnthropicCapabilities.effortLevels(model: model).contains($0) ? $0 : nil }
         var thinking: [String: Any] = [:]
-        if let display = AnthropicCapabilities.thinkingDisplay(model: model) { thinking["display"] = display }
+        let omitDisplay = request.omitThinkingDisplay || AnthropicCapabilities.rejectsDisplay(transport)
+        if !omitDisplay, let display = AnthropicCapabilities.thinkingDisplay(model: model) { thinking["display"] = display }
         if let binding { thinking["block_binding"] = ["prefix_mismatch_behavior": binding.rawValue] }
         if !thinking.isEmpty {
             thinking["type"] = "adaptive"
@@ -455,7 +456,7 @@ struct AnthropicClient {
                             for try await event in attempt(current) { yielded = true; continuation.yield(event) }
                             break
                         } catch let error where !yielded {
-                            guard let next = retry(after: error, of: current) else { throw error }
+                            guard let next = retry(after: error, of: current, transport: try? await transport()) else { throw error }
                             current = next.request
                             droppedBlocks = droppedBlocks || next.dropsBlock
                         }
@@ -508,6 +509,25 @@ struct AnthropicClient {
         return copy
     }
 
+    /// #1018: the 400 an unprobed route (a direct key, a custom base URL) can return when it does
+    /// not take `thinking.display`. Matched on the field's name in the error text, which is the shape
+    /// Anthropic's "Extra inputs are not permitted" gives; the binding 400 talks about thinking
+    /// blocks, not display, and is not matched. Never twice: the retry omits the field.
+    static func isDisplayRejection(_ error: Error, request: GeminiRequest) -> Bool {
+        guard !request.omitThinkingDisplay, let error = error as? APIError, error.statusCode == 400 else { return false }
+        return (error.message + " " + (error.detail ?? "")).lowercased().contains("display")
+    }
+
+    static func withoutDisplay(_ request: GeminiRequest) -> GeminiRequest {
+        var copy = request
+        copy.omitThinkingDisplay = true
+        return copy
+    }
+
+    private static func logDisplayFallback(_ error: Error) {
+        print("Anthropic rejected thinking.display; retrying once without it, and this endpoint will not be sent it again this run: \(error.localizedDescription)")
+    }
+
     private static func logBindingFallback(_ error: Error) {
         let diagnosis = (error as? APIError)?.prefixMismatchDiagnosis.map { "; \(InputTransformation.diagnosisHeader): \($0)" } ?? ""
         print("Anthropic rejected a replayed thinking block (bound to a different conversation); retrying once with drop_block, which this conversation keeps from now on if the retry succeeds (sent only where the beta is taken)\(diagnosis)")
@@ -527,7 +547,7 @@ struct AnthropicClient {
                 if droppedBlocks { response.anthropicBindingFallback = true }
                 return response
             } catch {
-                guard let next = retry(after: error, of: current) else { throw error }
+                guard let next = retry(after: error, of: current, transport: transport) else { throw error }
                 current = next.request
                 droppedBlocks = droppedBlocks || next.dropsBlock
             }
@@ -538,7 +558,8 @@ struct AnthropicClient {
     /// because each transform turns its own predicate off: `withoutTTL` leaves no 1-hour prefix,
     /// and `withDropBlock` forces the beta. They compose, so a route that rejects the 1-hour TTL
     /// still reaches the binding backstop when the TTL retry draws the binding 400.
-    private static func retry(after error: Error, of request: GeminiRequest) -> (request: GeminiRequest, dropsBlock: Bool)? {
+    private static func retry(after error: Error, of request: GeminiRequest,
+                              transport: AnthropicTransport?) -> (request: GeminiRequest, dropsBlock: Bool)? {
         if isTTLRejection(error, request: request) {
             logTTLFallback(error)
             return (withoutTTL(request), false)
@@ -546,6 +567,11 @@ struct AnthropicClient {
         if isBindingRejection(error, request: request) {
             logBindingFallback(error)
             return (withDropBlock(request), true)
+        }
+        if isDisplayRejection(error, request: request) {
+            logDisplayFallback(error)
+            if let transport { AnthropicCapabilities.rememberDisplayRejection(transport) }
+            return (withoutDisplay(request), false)
         }
         return nil
     }
