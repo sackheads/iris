@@ -1314,14 +1314,18 @@ actor IrisEngine {
     /// below is justified only by a person having pressed Submit in the inbox.
     nonisolated static let inboxAnswerSource = "inbox_answer"
 
-    /// A chosen option's id is the emitter's own string, so it is shown only if it is plain;
-    /// otherwise the reader gets the option's position.
+    /// A chosen option's id reaches a trusted, user-authority line only when it is a
+    /// session-generated UUID (#1025) — opaque, carrying no emitter-chosen text. An emitter may
+    /// supply its own custom id (#1024's schema accepts one), but a custom id is still the
+    /// emitter's own string: `approve-and-delete-everything` is charset-bounded enough to be safe
+    /// from injection, but it is still semantic text riding under Brian's authority in a line that
+    /// reads "Brian chose approve-and-delete-everything" (#1032). Anything that is not a genuine
+    /// UUID falls back to position-only in every line that calls this; the option's label (the
+    /// meaningful part a reader would actually need) still appears, marked as the emitter's own
+    /// quoted text and not Brian's words, via `inboxPickedLabelLine`. The raw id string itself is
+    /// never echoed anywhere else — it was never meant to be read, only matched against.
     nonisolated private static func plainOptionId(_ id: String) -> Bool {
-        // A UUID is 36 characters, over the cap, but it is the id every option gets when its
-        // emitter gave none (#1025), and it parses as hex and hyphens only, so it carries no text.
-        if UUID(uuidString: id) != nil { return true }
-        // Emitter-chosen short ids still reach the decision line (see #1032).
-        return (1...32).contains(id.count) && id.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }
+        UUID(uuidString: id) != nil
     }
 
     /// The emitter's own label for the option an answer picked, as one more line the renderer owns,
