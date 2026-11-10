@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import os
 
 /// The transport-neutral channel a signed A2A frame arrived on (#974 H4 Task 4). Maps to whatever
 /// NATS subject or queue the transport actually uses — this type never spells one out, so the
@@ -465,6 +466,12 @@ struct PeerSignatureVerifier: Sendable {
         return formatter
     }()
 
+    /// Plan Global Constraint: "every rejection logs its reason code with envelopeId." One shared
+    /// logger for the whole crypto core, subsystem matching the bundle id convention used
+    /// elsewhere in this codebase (`BuildIdentity.releaseBundleIdentifier`) rather than inventing a
+    /// new string.
+    private static let logger = Logger(subsystem: "com.bnaylor.iris", category: "a2a-crypto")
+
     init(registry: PeerKeyRegistry, seenSet: any SeenSetStore, maxSeenPerPeer: Int = 10_000) {
         self.registry = registry
         self.seenSet = seenSet
@@ -489,10 +496,48 @@ struct PeerSignatureVerifier: Sendable {
     /// No canonicalization anywhere in this: every check up through the signature verify operates
     /// on `frame.envelopeBytes` exactly as given, and nothing before that signature check ever
     /// inspects a decoded field.
+    ///
+    /// Every rejection is logged before it is rethrown (Global Constraint, see `logRejection`
+    /// below) — this wraps `performVerifyAndAdmit`, which carries the actual romar §5 logic
+    /// unchanged, purely so every throw site funnels through one place to log.
     func verifyAndAdmit<E: VerifiableEnvelope>(
         _ frame: SignedFrameParts,
         context: VerificationContext,
         domain: String = PeerSignatureDomain.a2a,
+        decode: (Data) throws -> E
+    ) throws -> E {
+        do {
+            return try performVerifyAndAdmit(frame, context: context, domain: domain, decode: decode)
+        } catch {
+            Self.logRejection(error)
+            throw error
+        }
+    }
+
+    /// Logs whatever `verifyAndAdmit` is about to rethrow. A `PeerVerificationError` has a romar
+    /// reason code and (from step 5 onward) an `envelopeId` — both logged. Everything else
+    /// (`VerifierUsageError`, `StrictJSONError`, `RegistryError`, an unmapped
+    /// `FrameDecodeError.missingRequiredField`) has no romar code and, for most of these, no
+    /// envelope to name yet (e.g. a bad signature fails before anything decodes) — logged as the
+    /// error's own type/description, which is all there is to attach.
+    private static func logRejection(_ error: Error) {
+        if let verificationError = error as? PeerVerificationError {
+            logger.error("""
+                a2a frame rejected: reason=\(verificationError.reason.rawValue, privacy: .public) \
+                envelopeId=\(verificationError.envelopeId ?? "<none>", privacy: .public)
+                """)
+        } else {
+            logger.error("""
+                a2a frame rejected before a romar reason code applied: \
+                \(String(describing: error), privacy: .public)
+                """)
+        }
+    }
+
+    private func performVerifyAndAdmit<E: VerifiableEnvelope>(
+        _ frame: SignedFrameParts,
+        context: VerificationContext,
+        domain: String,
         decode: (Data) throws -> E
     ) throws -> E {
         // Caller contract, not a wire-triggered rejection: `.inbox` must never carry an
