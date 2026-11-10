@@ -120,6 +120,7 @@ struct CloudAuxiliaryEngine: AuxiliaryInferenceEngine {
         
         var request = GeminiRequest(contents: [requestContent], systemInstruction: nil, tools: nil)
         request.thinkingLevel = thinkingLevel()
+        request.ignoresTierThinkingLevel = true
         
         let chosen = model()?.trimmingCharacters(in: .whitespacesAndNewlines)
         let response: GeminiResponse

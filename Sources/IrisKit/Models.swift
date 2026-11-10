@@ -26,12 +26,15 @@ struct GeminiRequest: Codable {
     /// unprobed route can reject. Never encoded.
     var omitThinkingDisplay: Bool = false
     /// #800: Gemini's `generationConfig.thinkingConfig.thinkingLevel`, set by a cloud tier 3 that
-    /// has one. `LLMClient.encodeGeminiBody` adds it to the wire body; no other provider reads it.
-    /// Never encoded here.
+    /// has one, else by the tier's own setting (#1019). `LLMClient.encodeGeminiBody` adds it to the
+    /// wire body; no other provider reads it. Never encoded here.
     var thinkingLevel: String? = nil
     /// #1019: Gemini's `thinkingConfig.includeThoughts`, set on a streamed chat call so the model's
     /// thought summaries come back as `thought: true` parts for the status line. Never encoded here.
     var includeThoughts: Bool = false
+    /// #1019: a guard's cloud call (`CloudAuxiliaryEngine`) sets this so the user's per-tier thinking
+    /// level never reaches it, whatever model it falls back to. Never encoded.
+    var ignoresTierThinkingLevel: Bool = false
     /// #314 PR 7: Anthropic's `output_config.effort`, the user's reasoning-effort setting for the
     /// call's tier. Nil sends none, so the model keeps its own default. The client sends it only to
     /// a model whose `AnthropicCapabilities` row lists the level. Never encoded.

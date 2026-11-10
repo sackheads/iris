@@ -177,6 +177,14 @@ struct LLMClient {
         return try withThinkingConfig(body, level: wire.thinkingLevel, includeThoughts: wire.includeThoughts)
     }
 
+    /// The level a Gemini call sends (#1019): the request's own (tier 3's, #800) if it has one, else
+    /// the tier's setting, but never to a guard's cloud call or a call that names its own model.
+    static func resolvedThinkingLevel(request: GeminiRequest, tier: ModelTier, config: ConfigManager, modelOverride: Bool) -> String? {
+        if let own = request.thinkingLevel { return own }
+        if request.ignoresTierThinkingLevel || modelOverride { return nil }
+        return config.geminiThinkingLevel(for: tier)
+    }
+
     /// `body` with Gemini's `generationConfig.thinkingConfig.thinkingLevel` set (#800).
     static func withThinkingLevel(_ body: Data, level: String) throws -> Data {
         try withThinkingConfig(body, level: level, includeThoughts: false)
@@ -235,7 +243,7 @@ struct LLMClient {
             // metrics wrapper below and is recorded like any other failed call.
             // #1019: the tier's thinking level and thought summaries, dropped on a route that 400s them.
             var wanted = request
-            wanted.thinkingLevel = request.thinkingLevel ?? config.geminiThinkingLevel(for: tier)
+            wanted.thinkingLevel = Self.resolvedThinkingLevel(request: request, tier: tier, config: config, modelOverride: false)
             wanted.includeThoughts = true
             let key = GeminiThinkingFallback.endpointKey(authMode: config.geminiAuthMode, baseURL: config.geminiBaseURL, model: modelName)
             let asked = wanted
@@ -308,7 +316,7 @@ struct LLMClient {
                 // Fallback to Gemini. The tier's own model only, as for Anthropic's effort: a `model`
                 // override is a guard call and does not take the user's thinking level (#1019).
                 var asked = request
-                if model == nil { asked.thinkingLevel = request.thinkingLevel ?? config.geminiThinkingLevel(for: tier) }
+                asked.thinkingLevel = Self.resolvedThinkingLevel(request: request, tier: tier, config: config, modelOverride: model != nil)
                 let key = GeminiThinkingFallback.endpointKey(authMode: config.geminiAuthMode, baseURL: config.geminiBaseURL, model: modelName)
                 response = try await GeminiThinkingFallback.run(key: key, level: asked.thinkingLevel, includeThoughts: false) { rung in
                     var attempt = asked
