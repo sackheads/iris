@@ -215,6 +215,39 @@ struct InboxEmitTests {
         #expect(read.responseMode == .timedVeto && read.vetoDefaultOptionId == "a" && read.deadline != nil)
     }
 
+    @Test("a followup while Brian's answer is still awaiting delivery is refused, and the answer stays queued (#1028 review)")
+    func followupRefusedWhileAwaitingDelivery() async throws {
+        let (app, id) = app()
+        _ = await runToolCall(emitCall(options: [option("a", "go")]), on: app, as: id)
+        let item = try #require(try app.store.inbox.openItems().first)
+        _ = try app.store.inbox.submitAnswer(itemId: item.id, answer: InboxAnswer(chosenOptionId: "a", freeText: nil, at: Date()),
+                                              pendingTargets: ["role:reviewer"])
+        #expect(try app.store.inbox.awaitingDeliveryItems().count == 1)
+
+        let result = await runToolCall(emitCall(options: [option("z", "new")], threadId: item.threadId), on: app, as: id)
+        #expect(result.contains("has not reached its recipients"), Comment(rawValue: result))
+        let after = try #require(try app.store.inbox.item(id: item.id))
+        #expect(after.state == .awaitingDelivery && after.pendingTargets == ["role:reviewer"] && after.answer != nil)
+        #expect(try app.store.inbox.awaitingDeliveryItems().count == 1, "still in redeliverAwaitingInbox's queue")
+        #expect(try app.store.inbox.thread(itemId: item.id).map(\.kind) == ["question", "answer"], "nothing appended")
+    }
+
+    @Test("a followup that turns a timedVeto into a plain item clears its deadline and default (#1028 review)")
+    func followupClearsTimedVeto() async throws {
+        let (app, id) = app()
+        let future = ISO8601DateFormatter().string(from: Date().addingTimeInterval(3600))
+        _ = await runToolCall(emitCall(responseMode: "timedVeto", options: [option("a", "go")], deadline: future, vetoDefault: "a"),
+                              on: app, as: id)
+        let item = try #require(try app.store.inbox.openItems().first)
+        #expect(item.deadline != nil && item.vetoDefaultOptionId == "a")
+
+        _ = await runToolCall(emitCall(responseMode: "freeform", threadId: item.threadId), on: app, as: id)
+        let read = try #require(try app.store.inbox.item(id: item.id))
+        #expect(read.responseMode == .freeform && read.deadline == nil && read.vetoDefaultOptionId == nil)
+        #expect(try app.store.inbox.dueVetoItems(now: Date().addingTimeInterval(86_400 * 365)).isEmpty,
+                "nothing is left for the veto timer to fire")
+    }
+
     @Test("the inbox_item schema offers an option id, so timedVeto is usable by an agent that follows it (#1024)")
     func optionIdIsInTheSchema() async {
         let (app, id) = app()

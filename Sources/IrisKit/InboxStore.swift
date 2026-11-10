@@ -133,6 +133,10 @@ enum InboxError: Error, Equatable {
     case itemClosed
     /// `submitAnswer` on an item that is not waiting for one (already answered, awaiting delivery or closed).
     case notAnswerable
+    /// `appendFollowup` on an item whose answer has not reached its route-back targets yet. A
+    /// follow-up reopens the item and so takes it out of `redeliverAwaitingInbox`'s queue; the
+    /// answer Brian gave would never arrive (dev-3's #1028 review).
+    case awaitingDelivery
 }
 
 /// The `inbox_items` + `inbox_thread` tables: items and their thread entries, independent of any
@@ -181,7 +185,7 @@ final class InboxStore: Sendable {
 
     /// Refuses with `.notOwner` when `ownerChain` is not the thread's own owner (#920 spec: thread
     /// ownership) — a foreign chain cannot reopen a decision Brian already trusts. Refuses with
-    /// `.itemClosed` once the thread is closed (dev-2 finding 4: closing is final). The owner
+    /// `.itemClosed` once the thread is closed (dev-2 finding 4: closing is final), and with `.awaitingDelivery` while Brian's answer has not reached its recipients. The owner
     /// lookup is `threadId`'s UNIQUE row, not an `ORDER BY` over caller-supplied dates (dev-2
     /// finding 1's root cause). Else appends a `"followup"` entry and flips the item back to
     /// `.open`. `tainted` ORs into the item's `emitterTainted` (dev-3's #929 review finding 2): the
@@ -207,6 +211,7 @@ final class InboxStore: Sendable {
             }
             guard storedOwner == ownerChain else { return .failure(.notOwner) }
             guard stateRaw != InboxItemState.closed.rawValue else { return .failure(.itemClosed) }
+            guard stateRaw != InboxItemState.awaitingDelivery.rawValue else { return .failure(.awaitingDelivery) }
 
             try Self.appendEntry(itemId: itemId, kind: "followup", author: author, body: body, at: at, db: db)
             try db.execute(sql: "UPDATE inbox_items SET state = ?, lastActivityAt = ?, emitterTainted = ? WHERE id = ?",

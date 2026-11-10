@@ -1247,6 +1247,9 @@ actor IrisEngine {
                 case .failure(.itemClosed):
                     await MainActor.run { localState?.refundInboxEmit(from: conversationId) }
                     return "Not raised: thread \(threadId) is closed."
+                case .failure(.awaitingDelivery):
+                    await MainActor.run { localState?.refundInboxEmit(from: conversationId) }
+                    return "Not raised: Brian has answered thread \(threadId), but his answer has not reached its recipients yet. Follow up once it has."
                 case .failure(.unknownThread):
                     await MainActor.run { localState?.refundInboxEmit(from: conversationId) }
                     return "Not raised: no thread \(threadId) exists."
