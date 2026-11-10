@@ -37,6 +37,21 @@ enum IrisPalette {
     static func buttonFill(enabled: Bool, _ scheme: ColorScheme) -> Color {
         enabled ? .irisIndigo : Color.irisIndigo.opacity(scheme == .dark ? 0.4 : 0.6)
     }
+    /// A pro and a con in the inbox's option lists (#1023): blue and orange, which stay apart for
+    /// red-green colour blindness (they differ on the blue-yellow axis, which it leaves alone)
+    /// and sit with Iris's cool palette, where the old green and red read as a party. Each is dark
+    /// enough on a light window and light enough on a dark one to pass 4.5:1 against it. The "For:"
+    /// and "Against:" words carry the meaning too, so colour is never the only cue.
+    static let pro = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? proDark : proLight
+    })
+    static let con = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? conDark : conLight
+    })
+    static let proLight = NSColor(srgbRed: 0.10, green: 0.40, blue: 0.78, alpha: 1)   // ~#1A66C7
+    static let proDark = NSColor(srgbRed: 0.31, green: 0.61, blue: 0.86, alpha: 1)    // ~#4F9BDB, irisBlue
+    static let conLight = NSColor(srgbRed: 0.72, green: 0.35, blue: 0.00, alpha: 1)   // ~#B85A00
+    static let conDark = NSColor(srgbRed: 0.98, green: 0.62, blue: 0.25, alpha: 1)    // ~#FA9E40
     /// The spectrum line: pastel hues washed to 70% vanish on white, so it is full there.
     static func spectrumOpacity(_ scheme: ColorScheme) -> Double { scheme == .dark ? 0.7 : 1.0 }
 }
