@@ -264,11 +264,14 @@ struct AnthropicBindingRetryTests {
         #expect(rec.all.count == 1)
     }
 
-    @Test("without the binding field the body carries no thinking object, as on main (ruling 2)")
-    func noThinkingWithoutTheField() throws {
+    @Test("without the binding field the body carries no block_binding; only a model the table lists gets a thinking object, for its display (#1018)")
+    func noBindingWithoutTheField() throws {
+        let listed: Set<String> = ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5"]
         for model in ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5", "claude-sonnet-5", "claude-made-up-9"] {
             for t in [Self.direct, Self.vertex] {
-                #expect(!(try built(Self.request(), model, t).body.contains("\"thinking\"")), "\(model) \(t)")
+                let body = try built(Self.request(), model, t).body
+                #expect(!body.contains("block_binding"), "\(model) \(t)")
+                #expect(body.contains("\"thinking\"") == listed.contains(model), "\(model) \(t)")
             }
         }
     }
