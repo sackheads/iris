@@ -1,0 +1,169 @@
+import Foundation
+import CryptoKit
+import Testing
+@testable import IrisKit
+
+/// #974 H4 Task 2: the per-profile registry of OTHER peers' public keys, the other side of Task
+/// 1's `IrisSigningKey` (Iris's own identity). Every test uses its own temp directory via
+/// `IrisPaths(root:)` (Invariant 7) — never `IrisPaths.default`.
+@Suite("Peer key registry (#974 H4)")
+struct PeerKeyRegistryTests {
+    private func freshRegistry() -> (PeerKeyRegistry, URL) {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("peer-key-registry-\(UUID().uuidString)")
+        return (PeerKeyRegistry(paths: IrisPaths(root: tempDir)), tempDir)
+    }
+
+    /// A fresh, valid Ed25519 wire-form public key, independent of any registered identity.
+    private func freshWireKey() -> String {
+        IrisSigningKey().publicKeyWireString
+    }
+
+    @Test("enroll then resolve by exact keyId returns the enrolled key")
+    func enrollAndResolveExactKeyId() throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let wire = freshWireKey()
+        try registry.enroll(RegisteredKey(profile: "clomp", keyId: "clomp-2026-11", publicKey: wire))
+
+        let resolved = try registry.resolve(principal: "clomp", keyId: "clomp-2026-11")
+        #expect(resolved != nil)
+        #expect(resolved?.rawRepresentation.base64EncodedString() ==
+                 String(wire.dropFirst("ed25519:".count)))
+    }
+
+    @Test("resolve with nil keyId defaults to the principal name, resolving a default-named key")
+    func resolveDefaultKeyIdHit() throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let wire = freshWireKey()
+        // Enrolled under keyId == profile, the default-key convention.
+        try registry.enroll(RegisteredKey(profile: "clomp", keyId: "clomp", publicKey: wire))
+
+        let resolved = try registry.resolve(principal: "clomp", keyId: nil)
+        #expect(resolved != nil)
+    }
+
+    @Test("resolve with nil keyId is nil when only a non-default keyId is enrolled")
+    func resolveDefaultKeyIdMiss() throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        try registry.enroll(RegisteredKey(profile: "clomp", keyId: "clomp-2026-11", publicKey: freshWireKey()))
+
+        let resolved = try registry.resolve(principal: "clomp", keyId: nil)
+        #expect(resolved == nil)
+    }
+
+    // Review Focus: cross-principal key confusion. A keyId that coincidentally matches across
+    // two principals' files must never resolve under the wrong principal.
+    @Test("resolve('clomp', 'rune-key-1') is nil even after enrolling rune/rune-key-1")
+    func crossPrincipalIsolation() throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        try registry.enroll(RegisteredKey(profile: "rune", keyId: "rune-key-1", publicKey: freshWireKey()))
+
+        let resolved = try registry.resolve(principal: "clomp", keyId: "rune-key-1")
+        #expect(resolved == nil)
+        // Sanity: the key is reachable under its own principal.
+        #expect(try registry.resolve(principal: "rune", keyId: "rune-key-1") != nil)
+    }
+
+    @Test("unsafe principal names resolve to nil without touching the filesystem outside a2aPeersDir")
+    func unsafeNamesTouchNothing() throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let unsafeNames = [
+            "../conversations",
+            "",
+            "has/slash",
+            "has\0nul",
+            String(repeating: "a", count: 200),
+        ]
+        for name in unsafeNames {
+            #expect(try registry.resolve(principal: name, keyId: nil) == nil, "name: \(name.debugDescription)")
+        }
+
+        // No resolve call above wrote or created anything: the temp root (which did not exist
+        // before this test ran) must still not exist at all.
+        #expect(!FileManager.default.fileExists(atPath: tempDir.path))
+    }
+
+    @Test("a file mis-cased as Clomp.json does not answer for principal clomp (record-profile-exact)")
+    func misCasedFileDoesNotAnswer() throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let wire = freshWireKey()
+
+        // Planted directly on disk (not through `enroll`, which would reject "Clomp" as a
+        // profile name) to simulate a hand-moved or case-folded file.
+        try FileManager.default.createDirectory(at: registry.directory, withIntermediateDirectories: true)
+        let record = RegisteredKey(profile: "Clomp", keyId: "clomp", publicKey: wire)
+        let data = try JSONEncoder().encode([record])
+        try data.write(to: registry.directory.appendingPathComponent("Clomp.json"))
+
+        let resolved = try registry.resolve(principal: "clomp", keyId: "clomp")
+        #expect(resolved == nil)
+    }
+
+    @Test("enroll of an existing keyId with a different public key throws")
+    func enrollKeySubstitutionThrows() throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        try registry.enroll(RegisteredKey(profile: "clomp", keyId: "clomp-2026-11", publicKey: freshWireKey()))
+
+        let substitute = RegisteredKey(profile: "clomp", keyId: "clomp-2026-11", publicKey: freshWireKey())
+        #expect(throws: PeerKeySubstitutionError(profile: "clomp", keyId: "clomp-2026-11")) {
+            try registry.enroll(substitute)
+        }
+    }
+
+    @Test("re-enrolling the exact same keyId and public key is a no-op, not a throw")
+    func enrollIdempotentForIdenticalKey() throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let key = RegisteredKey(profile: "clomp", keyId: "clomp-2026-11", publicKey: freshWireKey())
+        try registry.enroll(key)
+        try registry.enroll(key)
+
+        #expect(try registry.list(profile: "clomp").count == 1)
+    }
+
+    @Test("a corrupt principal file throws RegistryError.unavailable while other principals stay resolvable")
+    func corruptFileFailsClosed() throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        try registry.enroll(RegisteredKey(profile: "clomp", keyId: "clomp", publicKey: freshWireKey()))
+
+        try FileManager.default.createDirectory(at: registry.directory, withIntermediateDirectories: true)
+        try Data("not json at all".utf8).write(to: registry.directory.appendingPathComponent("rune.json"))
+
+        #expect(throws: RegistryError.unavailable) {
+            _ = try registry.resolve(principal: "rune", keyId: nil)
+        }
+        // The corruption is isolated to rune's own file.
+        #expect(try registry.resolve(principal: "clomp", keyId: "clomp") != nil)
+    }
+
+    @Test("revoke then resolve returns nil")
+    func revokeThenResolve() throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        try registry.enroll(RegisteredKey(profile: "clomp", keyId: "clomp-2026-11", publicKey: freshWireKey()))
+        #expect(try registry.resolve(principal: "clomp", keyId: "clomp-2026-11") != nil)
+
+        try registry.revoke(profile: "clomp", keyId: "clomp-2026-11")
+        #expect(try registry.resolve(principal: "clomp", keyId: "clomp-2026-11") == nil)
+    }
+
+    @Test("list returns every registered key for a profile")
+    func listReturnsAll() throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        try registry.enroll(RegisteredKey(profile: "clomp", keyId: "clomp-2026-11", publicKey: freshWireKey()))
+        try registry.enroll(RegisteredKey(profile: "clomp", keyId: "clomp-2026-12", publicKey: freshWireKey()))
+
+        let keys = try registry.list(profile: "clomp")
+        #expect(Set(keys.map(\.keyId)) == ["clomp-2026-11", "clomp-2026-12"])
+    }
+}

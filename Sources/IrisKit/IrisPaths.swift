@@ -164,6 +164,11 @@ struct IrisPaths: Sendable {
     var permissionsJSON: URL { configDir.appendingPathComponent("permissions.json") }
     var mcpServersJSON: URL { configDir.appendingPathComponent("mcp_servers.json") }
 
+    /// `PeerKeyRegistry`'s one `<profile>.json` per A2A principal (#974 H4 Task 2). Under
+    /// `configDir`, so it is already covered by `protectedWriteDirs` below: no tool call or
+    /// model-driven write can plant or alter a trusted peer key here.
+    var a2aPeersDir: URL { configDir.appendingPathComponent("a2a-peers") }
+
     // metrics/: measurements kept for this Mac's own use, never sent (#238)
     var metricsDir: URL { root.appendingPathComponent("metrics") }
     var tier2ScoresJSON: URL { metricsDir.appendingPathComponent("tier2-scores.json") }
