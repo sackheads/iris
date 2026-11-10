@@ -67,6 +67,13 @@ struct InboxView: View {
             }
             .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        // A follow-up replaces the question under the same item id, so a choice or text meant for
+        // the old one must not stay armed for the new (dev-3's #1028 review).
+        .onChange(of: selected?.lastActivityAt) {
+            chosenOptionId = nil
+            freeText = ""
+            lastOutcome = nil
+        }
         .navigationTitle("Inbox")
     }
 
