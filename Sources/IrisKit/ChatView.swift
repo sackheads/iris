@@ -6,6 +6,7 @@ struct ChatView: View {
     @State var state = AppState.shared
     @State private var inputText = ""
     @State private var composerHeight: CGFloat = 24
+    @State private var showCostBreakdown = false
     @State private var emojiModel = EmojiTokenModel()
     @State private var slashModel = SlashCommandModel()
     @State private var draftAttachments: [FileAttachment] = []
@@ -517,12 +518,22 @@ struct ChatView: View {
                                 .help("Total Tokens Used")
 
                                 if let cost = state.conversationCost(for: conv.id) {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "dollarsign.circle")
-                                        Text(cost.label)
+                                    // A button, so the figure opens its breakdown by token type (#1011).
+                                    Button { showCostBreakdown.toggle() } label: {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "dollarsign.circle")
+                                            Text(cost.label)
+                                        }
                                     }
+                                    .buttonStyle(.plain)
                                     .foregroundColor(.secondary)
-                                    .help(cost.help)
+                                    .help(cost.help + " Click for the breakdown.")
+                                    .accessibilityLabel("Estimated cost \(cost.label). Show the breakdown.")
+                                    .popover(isPresented: $showCostBreakdown, arrowEdge: .bottom) {
+                                        if let breakdown = state.conversationCostBreakdown(for: conv.id) {
+                                            CostBreakdownView(breakdown: breakdown)
+                                        }
+                                    }
                                 }
                             }
                             .font(.caption)
