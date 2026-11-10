@@ -2970,7 +2970,8 @@ class AppState {
         /// `set_session_card`, whose clash check excludes archived sessions, so a roleless
         /// session's name is free for another to take once it archives. Keying ownership on it
         /// let a session that claimed a dead emitter's old name append to and reopen its threads.
-        /// `emitterLabel` is still the card name when there is one — a display label only, read
+        /// `emitterLabel` is the card name when there is one (else a role, title or short id, see
+        /// `inboxEmitterLabel`) — a display label only, read
         /// here, on this one hop, never taken from the tool's own arguments: a caller-supplied
         /// chain would let any emitter claim another's threads (dev-2's #924 review of the same
         /// hazard in `InboxStore`, carried forward to this caller).
@@ -2990,7 +2991,18 @@ class AppState {
             return .refused("Not raised: rate limit — this session has raised \(PeerRateLimiter.capacity) inbox items in quick succession. The next is allowed in about \(Int(wait.rounded(.up)))s.")
         }
         let ownerChain = c.role ?? sender.uuidString
-        return .allowed(ownerChain: ownerChain, emitterLabel: c.sessionCard?.name, tainted: c.hasUntrustedToolOutput)
+        return .allowed(ownerChain: ownerChain, emitterLabel: Self.inboxEmitterLabel(for: c), tainted: c.hasUntrustedToolOutput)
+    }
+
+    /// The name an inbox item is raised under (#1027): the session's card name, else its role, else
+    /// its conversation title once it has one, else a short id. Never the full UUID, which read as
+    /// noise in the list. Each is something the session or its user chose, so it is still only a
+    /// display label (the caller flattens and caps it), never an identity.
+    static func inboxEmitterLabel(for c: Conversation) -> String {
+        if let name = c.sessionCard?.name, !name.trimmingCharacters(in: .whitespaces).isEmpty { return name }
+        if let role = c.role, !role.isEmpty { return role }
+        if !c.hasDefaultTitle { return c.title }
+        return InboxUIModel.shortId(c.id)
     }
 
     /// Gives back the token `decideInboxEmit` took for an emit the guard then withheld, or that

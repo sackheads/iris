@@ -47,6 +47,8 @@ struct InboxView: View {
             }
             .frame(minWidth: 240, idealWidth: 280)
             .listStyle(.sidebar)
+            // The divider comes back where it was left (#1027).
+            .background(SplitDividerPersistence(key: "inboxListWidth", minimum: 240))
 
             // One stable view in this HSplitView slot, not an if/else swapping two view
             // identities in it — the latter can make the NSSplitView it bridges to re-derive
@@ -82,18 +84,42 @@ struct InboxView: View {
     private func inboxRowSummary(_ item: InboxItem) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack {
-                Text(item.title).font(.subheadline).lineLimit(1)
+                if item.isUnread {
+                    Circle().fill(Color.accentColor).frame(width: 7, height: 7)
+                        .accessibilityLabel("Unread")
+                }
+                Text(item.title).font(.subheadline.weight(item.isUnread ? .semibold : .regular)).lineLimit(1)
                 Spacer()
                 stateChip(for: item)
             }
             HStack(spacing: 6) {
-                Text(item.emitterLabel).font(.caption2).foregroundColor(.secondary)
+                Text(senderName(item)).font(.caption2).foregroundColor(.secondary)
                 Text("·").font(.caption2).foregroundColor(.secondary)
                 Text(item.createdAt, style: .relative).font(.caption2).foregroundColor(.secondary)
             }
             Text(item.situation).font(.caption).foregroundColor(.secondary).lineLimit(1)
         }
         .padding(.vertical, 2)
+    }
+
+    private func emitterConversation(_ item: InboxItem) -> Conversation? {
+        state.conversations.first { $0.id == item.emitter }
+    }
+
+    private func senderName(_ item: InboxItem) -> String {
+        InboxUIModel.senderName(of: item, conversationTitle: emitterConversation(item)?.title)
+    }
+
+    /// "from <name>", which opens the session that raised the item while it still exists.
+    @ViewBuilder
+    private func fromLabel(_ item: InboxItem) -> some View {
+        if let conv = emitterConversation(item), !conv.isArchived {
+            Button("from \(senderName(item))") { state.selectConversation(conv.id) }
+                .buttonStyle(.link).font(.caption)
+                .help("Open the session that raised this")
+        } else {
+            Text("from \(senderName(item)) (session closed)").font(.caption).foregroundColor(.secondary)
+        }
     }
 
     private func stateChip(for item: InboxItem) -> some View {
@@ -124,7 +150,7 @@ struct InboxView: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text(item.title).font(.title3.bold())
                 HStack(spacing: 6) {
-                    Text("from \(item.emitterLabel)").font(.caption).foregroundColor(.secondary)
+                    fromLabel(item)
                     if item.emitterTainted {
                         Label("read outside content", systemImage: "exclamationmark.shield")
                             .font(.caption2).foregroundColor(.orange)
@@ -166,6 +192,15 @@ struct InboxView: View {
             .padding()
         }
         .id(item.id)
+        // Looking at it is what reads it; a follow-up that lands while it is open changes
+        // `lastActivityAt`, which runs this again.
+        .task(id: item.lastActivityAt) { markViewed(item) }
+    }
+
+    private func markViewed(_ item: InboxItem) {
+        guard item.isUnread else { return }
+        try? state.store.inbox.markViewed(itemId: item.id, at: Date())
+        state.bumpInboxRevision()
     }
 
     /// The thread before the current ask: the original question, answers and follow-ups, oldest

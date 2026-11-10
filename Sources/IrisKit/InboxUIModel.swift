@@ -87,4 +87,20 @@ enum InboxUIModel {
         default: return kind
         }
     }
+
+    /// The first eight characters of a session's id, for when nothing better names it.
+    static func shortId(_ id: UUID) -> String { String(id.uuidString.lowercased().prefix(8)) }
+
+    /// What the list and detail show as "from". Items raised before #1027 stored the full UUID when
+    /// the session had no card, so a stored label that is just the emitter's id is replaced by the
+    /// conversation's title now (or a short id); anything else is the label as stored. Display
+    /// only: it is never read back into a frame or a route.
+    static func senderName(of item: InboxItem, conversationTitle: String?) -> String {
+        let stored = item.emitterLabel.trimmingCharacters(in: .whitespaces)
+        guard UUID(uuidString: stored) != nil else { return item.emitterLabel }
+        if let title = conversationTitle, !title.isEmpty,
+           title != Conversation.defaultTitle, title != Conversation.untitledTitle { return title }
+        return shortId(item.emitter)
+    }
 }
+
