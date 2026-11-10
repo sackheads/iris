@@ -321,6 +321,11 @@ struct PeerSignatureVerifier: Sendable {
     /// kind) may never reach further than this past `ts`.
     private static let deadlineCap: TimeInterval = 24 * 60 * 60
 
+    /// romar §5.1: `envelopeId` shorter than this (in Unicode scalars, matching romar's own
+    /// Python `len()`) is treated the same as absent — too short to carry any real replay-defence
+    /// value.
+    private static let minimumEnvelopeIdLength = 16
+
     /// romar §5.1's exact RFC-3339 grammar — anchored to the full string, ASCII-digit-only (never
     /// substitute `\d`, which some regex engines also match against Unicode decimal digits).
     private static let rfc3339Regex = try! NSRegularExpression(
@@ -448,9 +453,12 @@ struct PeerSignatureVerifier: Sendable {
             }
         }
 
-        // 9. envelopeId must be usable. `decode` already proved it's present (step 5); this
-        // catches a present-but-empty value, which carries no replay-defence value either.
-        guard !envelopeId.isEmpty else {
+        // 9. envelopeId must be usable: present (decode already proved that in step 5), and at
+        // least romar §5.1's 16-(unicode-scalar) floor — too short to be any real replay-defence
+        // id, so it's treated the same as absent. Counted in Unicode scalars, not grapheme
+        // clusters (`.count` would undercount a composed character) — matches romar's own
+        // Python `len()`, which counts code points.
+        guard envelopeId.unicodeScalars.count >= Self.minimumEnvelopeIdLength else {
             throw PeerVerificationError(reason: .envelopeIdMissing, envelopeId: nil)
         }
 

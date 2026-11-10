@@ -196,7 +196,7 @@ struct PeerSignatureVerifierTests {
         let ts = Self.iso(now)
         let deadline = Self.iso(now.addingTimeInterval(3600))
         let envelope = Data("""
-        {"from":{"profile":"clomp"},"to":{"profile":"iris"},"kind":"message","envelopeId":"happy-path-1","ts":"\(ts)","payload":{"metadata":{"deadline":"\(deadline)"}},"taskId":"task-1","correlationId":"corr-1"}
+        {"from":{"profile":"clomp"},"to":{"profile":"iris"},"kind":"message","envelopeId":"happy-path-id-0001","ts":"\(ts)","payload":{"metadata":{"deadline":"\(deadline)"}},"taskId":"task-1","correlationId":"corr-1"}
         """.utf8)
         let frame = PeerSigner(key: key).sign(envelopeBytes: envelope, principal: "clomp", keyId: nil)
 
@@ -204,7 +204,7 @@ struct PeerSignatureVerifierTests {
         let context = VerificationContext(selfProfile: "iris", channel: .inbox, outstanding: nil, now: now)
         let result = try verifier.verifyAndAdmit(frame, context: context, decode: Self.decodeTestEnvelope)
 
-        #expect(result.envelopeId == "happy-path-1")
+        #expect(result.envelopeId == "happy-path-id-0001")
         #expect(result.fromProfile == "clomp")
     }
 
@@ -345,17 +345,14 @@ struct PeerSignatureVerifierTests {
         }
     }
 
-    // MARK: - envelope_id_missing (NOT the vendored vector — see report)
+    // MARK: - envelope_id_missing
     //
-    // The vendored `envelope_id_missing` vector's only change from the baseline frame is
-    // `envelopeId: "short"` (5 ASCII characters) in place of `"conformance-vector-0001"` (24).
-    // "short" is present, non-null and non-empty, so it decodes successfully as a `String` and
-    // carries no structural signal this task's authoritative value-dump defines a check for —
-    // romar evidently enforces some further format or length rule on `envelopeId` that wasn't
-    // included in that dump. Rather than invent a threshold, this test exercises the one
-    // non-arbitrary "missing" semantics available from the given interfaces: `decode` throwing
-    // `FrameDecodeError.missingRequiredField("envelopeId")` for a genuinely absent/empty id. See
-    // the task report for this gap.
+    // Resolved via iris-planner, sourced from romar §5.1: `envelopeId` MUST be present, non-empty,
+    // AND at least 16 characters, counted in Unicode scalars (matching romar's own Python `len()`,
+    // which counts code points, not Swift grapheme clusters) — no charset or UUID requirement,
+    // just a length floor. That's why the vendored vector's `"short"` (5 scalars) is rejected while
+    // the baseline `"conformance-vector-0001"` (23 scalars) clears this check.
+
     @Test("envelope_id_missing: decode throws missingRequiredField(\"envelopeId\") for an absent id")
     func envelopeIdMissingViaDecodeFailure() throws {
         let (registry, tempDir) = freshRegistry()
@@ -372,6 +369,51 @@ struct PeerSignatureVerifierTests {
         let context = VerificationContext(selfProfile: "iris", channel: .inbox, outstanding: nil, now: now)
         #expect(throws: PeerVerificationError(reason: .envelopeIdMissing, envelopeId: nil)) {
             _ = try verifier.verifyAndAdmit(frame, context: context, decode: Self.decodeTestEnvelope)
+        }
+    }
+
+    // Now driven by the vendored fixture's real signed frame, rather than a hand-built one: its
+    // `envelopeId: "short"` (5 scalars) is rejected by the 16-scalar floor.
+    @Test("envelope_id_missing: the vendored fixture's own 5-scalar envelopeId (\"short\") is rejected")
+    func envelopeIdMissingVendoredVector() throws {
+        let (frame, registry, tempDir, context) = try setup(for: try fixtureVector(named: "envelope_id_missing"))
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let verifier = PeerSignatureVerifier(registry: registry, seenSet: InMemorySeenSet())
+        #expect(throws: PeerVerificationError(reason: .envelopeIdMissing, envelopeId: nil)) {
+            _ = try verifier.verifyAndAdmit(frame, context: context, decode: Self.decodeTestEnvelope)
+        }
+    }
+
+    // Pins the boundary itself (not just "the fixture's 23-scalar baseline happens to pass"): 16
+    // scalars exactly clears the floor and the frame is admitted end-to-end; 15 scalars rejects.
+    @Test("envelopeId at exactly the 16-scalar floor is admitted; 15 scalars rejects with envelope_id_missing")
+    func envelopeIdLengthBoundary() throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let key = try enrolledKey(profile: "clomp", in: registry)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let ts = Self.iso(now)
+        let deadline = Self.iso(now.addingTimeInterval(3600))
+
+        func envelope(envelopeId: String) -> Data {
+            Data("""
+            {"from":{"profile":"clomp"},"to":{"profile":"iris"},"kind":"message","envelopeId":"\(envelopeId)","ts":"\(ts)","payload":{"metadata":{"deadline":"\(deadline)"}}}
+            """.utf8)
+        }
+        let verifier = PeerSignatureVerifier(registry: registry, seenSet: InMemorySeenSet())
+        let context = VerificationContext(selfProfile: "iris", channel: .inbox, outstanding: nil, now: now)
+
+        let sixteenScalars = "sixteen-chars-ok"
+        #expect(sixteenScalars.unicodeScalars.count == 16)
+        let passFrame = PeerSigner(key: key).sign(envelopeBytes: envelope(envelopeId: sixteenScalars), principal: "clomp", keyId: nil)
+        let passed = try verifier.verifyAndAdmit(passFrame, context: context, decode: Self.decodeTestEnvelope)
+        #expect(passed.envelopeId == sixteenScalars)
+
+        let fifteenScalars = "fifteen-chars-x"
+        #expect(fifteenScalars.unicodeScalars.count == 15)
+        let failFrame = PeerSigner(key: key).sign(envelopeBytes: envelope(envelopeId: fifteenScalars), principal: "clomp", keyId: nil)
+        #expect(throws: PeerVerificationError(reason: .envelopeIdMissing, envelopeId: nil)) {
+            _ = try verifier.verifyAndAdmit(failFrame, context: context, decode: Self.decodeTestEnvelope)
         }
     }
 
@@ -422,14 +464,14 @@ struct PeerSignatureVerifierTests {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let ts = Self.iso(now)
         let envelope = Data("""
-        {"from":{"profile":"clomp"},"kind":"status-update","envelopeId":"ev-3","ts":"\(ts)","taskId":"task-1","correlationId":"corr-1"}
+        {"from":{"profile":"clomp"},"kind":"status-update","envelopeId":"events-binding-id-3","ts":"\(ts)","taskId":"task-1","correlationId":"corr-1"}
         """.utf8)
         let frame = PeerSigner(key: key).sign(envelopeBytes: envelope, principal: "clomp", keyId: nil)
         let verifier = PeerSignatureVerifier(registry: registry, seenSet: InMemorySeenSet())
         let outstanding = OutstandingRequest(addressee: "clomp", taskId: "task-1", correlationId: "corr-1")
         let context = VerificationContext(selfProfile: "iris", channel: .events, outstanding: outstanding, now: now)
         let result = try verifier.verifyAndAdmit(frame, context: context, decode: Self.decodeTestEnvelope)
-        #expect(result.envelopeId == "ev-3")
+        #expect(result.envelopeId == "events-binding-id-3")
     }
 
     @Test("duplicate_envelope_id: the same id admitted twice rejects the second call")
@@ -441,16 +483,16 @@ struct PeerSignatureVerifierTests {
         let ts = Self.iso(now)
         let deadline = Self.iso(now.addingTimeInterval(3600))
         let envelope = Data("""
-        {"from":{"profile":"clomp"},"to":{"profile":"iris"},"kind":"message","envelopeId":"dup-replay-1","ts":"\(ts)","payload":{"metadata":{"deadline":"\(deadline)"}}}
+        {"from":{"profile":"clomp"},"to":{"profile":"iris"},"kind":"message","envelopeId":"dup-replay-id-0001","ts":"\(ts)","payload":{"metadata":{"deadline":"\(deadline)"}}}
         """.utf8)
         let frame = PeerSigner(key: key).sign(envelopeBytes: envelope, principal: "clomp", keyId: nil)
         let verifier = PeerSignatureVerifier(registry: registry, seenSet: InMemorySeenSet())
         let context = VerificationContext(selfProfile: "iris", channel: .inbox, outstanding: nil, now: now)
 
         let first = try verifier.verifyAndAdmit(frame, context: context, decode: Self.decodeTestEnvelope)
-        #expect(first.envelopeId == "dup-replay-1")
+        #expect(first.envelopeId == "dup-replay-id-0001")
 
-        #expect(throws: PeerVerificationError(reason: .duplicateEnvelopeId, envelopeId: "dup-replay-1")) {
+        #expect(throws: PeerVerificationError(reason: .duplicateEnvelopeId, envelopeId: "dup-replay-id-0001")) {
             _ = try verifier.verifyAndAdmit(frame, context: context, decode: Self.decodeTestEnvelope)
         }
     }
@@ -464,12 +506,12 @@ struct PeerSignatureVerifierTests {
         let ts = Self.iso(now)
         let deadline = Self.iso(now.addingTimeInterval(3600))
         let envelope = Data("""
-        {"from":{"profile":"clomp"},"to":{"profile":"iris"},"kind":"message","envelopeId":"full-1","ts":"\(ts)","payload":{"metadata":{"deadline":"\(deadline)"}}}
+        {"from":{"profile":"clomp"},"to":{"profile":"iris"},"kind":"message","envelopeId":"seen-set-full-id-1","ts":"\(ts)","payload":{"metadata":{"deadline":"\(deadline)"}}}
         """.utf8)
         let frame = PeerSigner(key: key).sign(envelopeBytes: envelope, principal: "clomp", keyId: nil)
         let verifier = PeerSignatureVerifier(registry: registry, seenSet: InMemorySeenSet(forcedError: .full))
         let context = VerificationContext(selfProfile: "iris", channel: .inbox, outstanding: nil, now: now)
-        #expect(throws: PeerVerificationError(reason: .seenSetFull, envelopeId: "full-1")) {
+        #expect(throws: PeerVerificationError(reason: .seenSetFull, envelopeId: "seen-set-full-id-1")) {
             _ = try verifier.verifyAndAdmit(frame, context: context, decode: Self.decodeTestEnvelope)
         }
     }
@@ -483,12 +525,12 @@ struct PeerSignatureVerifierTests {
         let ts = Self.iso(now)
         let deadline = Self.iso(now.addingTimeInterval(3600))
         let envelope = Data("""
-        {"from":{"profile":"clomp"},"to":{"profile":"iris"},"kind":"message","envelopeId":"unavail-1","ts":"\(ts)","payload":{"metadata":{"deadline":"\(deadline)"}}}
+        {"from":{"profile":"clomp"},"to":{"profile":"iris"},"kind":"message","envelopeId":"seen-set-unavail-id-1","ts":"\(ts)","payload":{"metadata":{"deadline":"\(deadline)"}}}
         """.utf8)
         let frame = PeerSigner(key: key).sign(envelopeBytes: envelope, principal: "clomp", keyId: nil)
         let verifier = PeerSignatureVerifier(registry: registry, seenSet: InMemorySeenSet(forcedError: .unavailable))
         let context = VerificationContext(selfProfile: "iris", channel: .inbox, outstanding: nil, now: now)
-        #expect(throws: PeerVerificationError(reason: .seenSetUnavailable, envelopeId: "unavail-1")) {
+        #expect(throws: PeerVerificationError(reason: .seenSetUnavailable, envelopeId: "seen-set-unavail-id-1")) {
             _ = try verifier.verifyAndAdmit(frame, context: context, decode: Self.decodeTestEnvelope)
         }
     }
@@ -503,7 +545,7 @@ struct PeerSignatureVerifierTests {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let ts = Self.iso(now)
         let envelope = Data("""
-        {"from":{"profile":"clomp"},"to":{"profile":"iris"},"kind":"cancel","envelopeId":"cancel-1","ts":"\(ts)"}
+        {"from":{"profile":"clomp"},"to":{"profile":"iris"},"kind":"cancel","envelopeId":"cancel-fresh-id-1","ts":"\(ts)"}
         """.utf8)
         let frame = PeerSigner(key: key).sign(envelopeBytes: envelope, principal: "clomp", keyId: nil)
         let verifier = PeerSignatureVerifier(registry: registry, seenSet: InMemorySeenSet())
@@ -522,12 +564,12 @@ struct PeerSignatureVerifierTests {
         let tsString = Self.iso(ts)
         let now = ts.addingTimeInterval(24 * 60 * 60 + 1) // one second past the implicit bound
         let envelope = Data("""
-        {"from":{"profile":"clomp"},"to":{"profile":"iris"},"kind":"cancel","envelopeId":"cancel-2","ts":"\(tsString)"}
+        {"from":{"profile":"clomp"},"to":{"profile":"iris"},"kind":"cancel","envelopeId":"cancel-expired-id-2","ts":"\(tsString)"}
         """.utf8)
         let frame = PeerSigner(key: key).sign(envelopeBytes: envelope, principal: "clomp", keyId: nil)
         let verifier = PeerSignatureVerifier(registry: registry, seenSet: InMemorySeenSet())
         let context = VerificationContext(selfProfile: "iris", channel: .inbox, outstanding: nil, now: now)
-        #expect(throws: PeerVerificationError(reason: .deadlineExpired, envelopeId: "cancel-2")) {
+        #expect(throws: PeerVerificationError(reason: .deadlineExpired, envelopeId: "cancel-expired-id-2")) {
             _ = try verifier.verifyAndAdmit(frame, context: context, decode: Self.decodeTestEnvelope)
         }
     }
@@ -555,12 +597,12 @@ struct PeerSignatureVerifierTests {
 
         let verifier = PeerSignatureVerifier(registry: registry, seenSet: InMemorySeenSet())
 
-        let (passFrame, passContext) = frame(secondsAhead: 60, envelopeId: "skew-pass")
+        let (passFrame, passContext) = frame(secondsAhead: 60, envelopeId: "skew-pass-id-0001")
         let passed = try verifier.verifyAndAdmit(passFrame, context: passContext, decode: Self.decodeTestEnvelope)
-        #expect(passed.envelopeId == "skew-pass")
+        #expect(passed.envelopeId == "skew-pass-id-0001")
 
-        let (failFrame, failContext) = frame(secondsAhead: 61, envelopeId: "skew-fail")
-        #expect(throws: PeerVerificationError(reason: .tsInFuture, envelopeId: "skew-fail")) {
+        let (failFrame, failContext) = frame(secondsAhead: 61, envelopeId: "skew-fail-id-0002")
+        #expect(throws: PeerVerificationError(reason: .tsInFuture, envelopeId: "skew-fail-id-0002")) {
             _ = try verifier.verifyAndAdmit(failFrame, context: failContext, decode: Self.decodeTestEnvelope)
         }
     }
