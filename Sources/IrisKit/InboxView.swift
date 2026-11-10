@@ -48,7 +48,7 @@ struct InboxView: View {
             .frame(minWidth: 240, idealWidth: 280)
             .listStyle(.sidebar)
             // The divider comes back where it was left (#1027).
-            .background(SplitDividerPersistence(key: "inboxListWidth", minimum: 240))
+            .background(SplitDividerPersistence(key: "inboxListWidth", minimum: 240, secondPaneMinimum: 320))
 
             // One stable view in this HSplitView slot, not an if/else swapping two view
             // identities in it — the latter can make the NSSplitView it bridges to re-derive
