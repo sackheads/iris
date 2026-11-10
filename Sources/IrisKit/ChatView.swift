@@ -2079,14 +2079,15 @@ struct LoopChip: View {
         .background(Color.accentColor.opacity(0.06))
         .cornerRadius(8)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Loop, \(loop.cadence), \(loop.ticksLeft) ticks left\(loop.paused ? ", paused" : "")")
+        .accessibilityLabel(loop.isAlarm ? "Alarm, \(loop.cadence)\(loop.paused ? ", paused" : "")"
+                            : "Loop, \(loop.cadence), \(loop.ticksLeft) ticks left\(loop.paused ? ", paused" : "")")
     }
 
     private var content: some View {
             HStack(spacing: 8) {
                 Image(systemName: "arrow.triangle.2.circlepath").foregroundColor(.accentColor)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(verbatim: "Looping \(loop.cadence) · \(loop.ticksLeft) of \(loop.cap) ticks left")
+                    Text(verbatim: loop.isAlarm ? "Alarm set: \(loop.cadence)" : "Looping \(loop.cadence) · \(loop.ticksLeft) of \(loop.cap) ticks left")
                         .font(.caption.bold())
                     Text(verbatim: loop.prompt)
                         .font(.caption2).foregroundColor(.secondary).lineLimit(2)
@@ -2097,14 +2098,14 @@ struct LoopChip: View {
                         // past while the tick is still to come.
                         TimelineView(.periodic(from: .now, by: 30)) { context in
                             if next > context.date {
-                                Text("Next tick \(next, style: .relative)")
+                                Text("\(loop.isAlarm ? "Rings" : "Next tick") \(next, style: .relative)")
                             } else {
-                                Text("Next tick due shortly")
+                                Text(loop.isAlarm ? "Due shortly" : "Next tick due shortly")
                             }
                         }
                         .font(.caption2).foregroundColor(.secondary)
                     } else if thinking {
-                        Text("Next tick after this turn").font(.caption2).foregroundColor(.secondary)
+                        Text(loop.isAlarm ? "Starts counting when this turn ends" : "Next tick after this turn").font(.caption2).foregroundColor(.secondary)
                     } else {
                         Text("Stopped: Resume, or send a message, to start it again").font(.caption2).foregroundColor(.orange)
                     }
@@ -2116,9 +2117,9 @@ struct LoopChip: View {
                     Button("Pause") { state.pauseLoop(for: conversationId) }
                 }
                 // "End loop", not "Stop": the composer's Stop keeps the loop.
-                Button("End loop") {
+                Button(loop.isAlarm ? "Cancel alarm" : "End loop") {
                     if state.clearLoop(for: conversationId) {
-                        state.appendMessage(role: .system, content: "Loop stopped.", to: conversationId)
+                        state.appendMessage(role: .system, content: loop.isAlarm ? "Alarm cancelled." : "Loop stopped.", to: conversationId)
                     }
                 }
             }

@@ -6293,6 +6293,7 @@ class AppState {
 
     private func loopStatus(_ loop: ConversationLoop?) -> String {
         guard let loop else { return "No loop is running here. " + ConversationLoop.usage }
+        if loop.isAlarm { return "⏰ \(loop.cadence.prefix(1).uppercased() + loop.cadence.dropFirst())\(loop.paused ? " (paused)" : ""): \(loop.prompt)" }
         return "↻ \(loop.cadence.prefix(1).uppercased() + loop.cadence.dropFirst()), \(loop.ticksLeft) of \(loop.cap) ticks left\(loop.paused ? ", paused" : ""): \(loop.prompt)"
     }
 

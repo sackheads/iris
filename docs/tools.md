@@ -10,6 +10,7 @@ Iris provides some native primitives to the LLM:
 5.  `set_workspace`: Automatically binds the active conversation to a project path.
 6.  `reflect`: Internal tool allowing the agent to write down its reasoning, plans, and self-evaluations during complex loops.
 7.  `goal_complete`: Escapes an active autonomous `/goal` loop.
+8.  `set_alarm`: A wait that does not hold the session. Iris sets a one-shot alarm (`delay_seconds`, 15 to 3600, and a `note`) and ends its turn; after the delay the conversation gets a new turn carrying the note. It replaces a `sleep` in `run_command`, which blocks the whole session. It uses the conversation's one [loop](features.md#loops) slot, so it is refused while the user's `/loop` runs, and a pending alarm does not survive a relaunch.
 
 ## Output size
 
