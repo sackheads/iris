@@ -340,6 +340,20 @@ struct InboxRoutingTests {
         #expect(!echo.contains("the default that took effect"), echo)
     }
 
+    @Test("a mark spelled with no leading space, other case or extra spaces is stripped too (#1030 review)")
+    func variantSpellingsAreStripped() {
+        var item = twoOptionItem()
+        for spelling in ["moo[Brian chose this]", "moo [brian chose this]", "moo [BRIAN  CHOSE   THIS]", "moo [ Brian chose this ]",
+                         "moo [The default\tthat took effect]", "moo[the default that took effect]"] {
+            item.options[1].label = spelling
+            let echo = IrisEngine.inboxOriginalItemText(item, answer: InboxAnswer(chosenOptionId: item.options[0].id, freeText: nil, at: Date()))
+            #expect(echo.components(separatedBy: "[Brian chose this]").count == 2 && !echo.lowercased().contains("took effect"),
+                    "\(spelling) must not survive: \(echo)")
+            let lines = echo.split(separator: "\n").map(String.init)
+            #expect(lines.first { $0.hasPrefix("Option 2") }?.hasPrefix("Option 2: moo") == true)
+        }
+    }
+
     @Test("the mark survives the structural pass the echo is given")
     func markSurvivesSanitizing() async {
         let item = twoOptionItem()
