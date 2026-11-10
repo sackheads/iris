@@ -232,6 +232,31 @@ struct PeerSignatureVerifierTests {
         }
     }
 
+    // Review Focus (the brief's own named case, distinct from the vendored vector above): the
+    // `unknown_key` vendored vector has NO key enrolled anywhere, which doesn't actually exercise
+    // cross-principal isolation. This test enrolls a REAL key under `rune`, then signs a frame
+    // that CLAIMS principal `clomp` with that rune-registered key. `resolve(principal: "clomp",
+    // keyId: nil)` must look strictly within clomp's own (empty) keyset and never find rune's key
+    // just because a valid Ed25519 signature happens to exist for it — a signature that would
+    // genuinely verify is not itself proof of the claimed identity.
+    @Test("unknown_key: a frame claiming clomp but signed with a key registered only under rune")
+    func unknownKeyCrossPrincipalIsolation() throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let runeKey = try enrolledKey(profile: "rune", in: registry) // clomp.json never gets a key
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let ts = Self.iso(now)
+        let envelope = Data("""
+        {"from":{"profile":"clomp"},"to":{"profile":"iris"},"kind":"cancel","envelopeId":"cross-principal-id-1","ts":"\(ts)"}
+        """.utf8)
+        let frame = PeerSigner(key: runeKey).sign(envelopeBytes: envelope, principal: "clomp", keyId: nil)
+        let verifier = PeerSignatureVerifier(registry: registry, seenSet: InMemorySeenSet())
+        let context = VerificationContext(selfProfile: "iris", channel: .inbox, outstanding: nil, now: now)
+        #expect(throws: PeerVerificationError(reason: .unknownKey, envelopeId: nil)) {
+            _ = try verifier.verifyAndAdmit(frame, context: context, decode: Self.decodeTestEnvelope)
+        }
+    }
+
     @Test("recipient_mismatch: envelope addressed to iris, context self-profile is rune")
     func recipientMismatch() throws {
         let (frame, registry, tempDir, context) = try setup(for: try fixtureVector(named: "recipient_mismatch"))
@@ -741,6 +766,138 @@ struct PeerSignatureVerifierTests {
 
         #expect(throws: VerifierUsageError.self) {
             _ = try verifier.verifyAndAdmit(frame, context: context, decode: Self.decodeTestEnvelope)
+        }
+    }
+}
+
+/// Direct tests against `StrictJSON.rejectDuplicateKeys` itself, below the `verifyAndAdmit`
+/// level (review follow-up, #974 H4 Task 4). An independent review harness built standalone
+/// against the scanner (never touching `PeerSignatureVerifier`) found that earlier versions
+/// silently returned — i.e. reported "no duplicate found," which `verifyAndAdmit` reads as
+/// "proceed" — on bytes that were not valid, strict, bare-UTF-8 JSON at all: a UTF-8 BOM, UTF-16
+/// or UTF-32-encoded payloads, and JSON5-style unquoted keys all decode cleanly under
+/// `JSONSerialization`/`JSONDecoder`, so a scanner that stayed quiet on "not quite JSON" bytes let
+/// exactly those bypass the duplicate-key guarantee this type exists to give. The same harness
+/// found a crash (an unvalidated surrogate-pair low-half underflowing a `UInt32` subtraction,
+/// reachable from any string value in a legitimately signed envelope) and a stack overflow from
+/// unbounded recursion on deeply nested input. These tests exercise `StrictJSON` directly so each
+/// of those three bug classes has a test that would have caught it without going through a full
+/// signed frame.
+@Suite("StrictJSON duplicate-key scanner (#974 H4 Task 4 — review follow-up)")
+struct StrictJSONTests {
+    private static let validJSON = #"{"from":{"profile":"clomp"},"kind":"message"}"#
+
+    // MARK: - Encoding/grammar bypasses (Critical)
+
+    @Test("a UTF-8 BOM-prefixed payload is rejected, not silently accepted")
+    func utf8BOMRejected() throws {
+        var bytes = Data([0xEF, 0xBB, 0xBF])
+        bytes.append(Data(Self.validJSON.utf8))
+        #expect(throws: StrictJSONError.invalidEncoding) {
+            try StrictJSON.rejectDuplicateKeys(bytes)
+        }
+    }
+
+    @Test("UTF-16LE-encoded JSON is rejected, not silently accepted")
+    func utf16LERejected() throws {
+        let data = try #require(Self.validJSON.data(using: .utf16LittleEndian))
+        #expect(throws: StrictJSONError.self) {
+            try StrictJSON.rejectDuplicateKeys(data)
+        }
+    }
+
+    @Test("UTF-16BE-encoded JSON is rejected, not silently accepted")
+    func utf16BERejected() throws {
+        let data = try #require(Self.validJSON.data(using: .utf16BigEndian))
+        #expect(throws: StrictJSONError.self) {
+            try StrictJSON.rejectDuplicateKeys(data)
+        }
+    }
+
+    @Test("UTF-32LE-encoded JSON is rejected, not silently accepted")
+    func utf32LERejected() throws {
+        let data = try #require(Self.validJSON.data(using: .utf32LittleEndian))
+        #expect(throws: StrictJSONError.self) {
+            try StrictJSON.rejectDuplicateKeys(data)
+        }
+    }
+
+    @Test("JSON5-style unquoted keys are rejected, not silently accepted")
+    func json5UnquotedKeysRejected() throws {
+        let data = Data(#"{from:"clomp",kind:"message"}"#.utf8)
+        #expect(throws: StrictJSONError.self) {
+            try StrictJSON.rejectDuplicateKeys(data)
+        }
+    }
+
+    @Test("trailing garbage after the top-level value is rejected")
+    func trailingGarbageRejected() throws {
+        let data = Data(#"{"a":1} garbage"#.utf8)
+        #expect(throws: StrictJSONError.malformed) {
+            try StrictJSON.rejectDuplicateKeys(data)
+        }
+    }
+
+    @Test("well-formed, strict UTF-8 JSON with no duplicate keys is accepted")
+    func wellFormedJSONAccepted() throws {
+        try StrictJSON.rejectDuplicateKeys(Data(Self.validJSON.utf8))
+    }
+
+    // MARK: - Surrogate-pair crash (Important)
+
+    @Test("a malformed surrogate-pair escape throws instead of crashing")
+    func malformedSurrogatePairThrowsNotCrashes() throws {
+        // \uD800 is a lone high surrogate immediately followed by an escape that is NOT a valid
+        // low surrogate (A = 'A') — this is the exact shape that used to underflow
+        // `UInt32(low) - 0xDC00` with `low = 0x0041` and trap the process (SIGTRAP).
+        let data = Data(#"{"k":"\uD800A"}"#.utf8)
+        #expect(throws: StrictJSONError.malformed) {
+            try StrictJSON.rejectDuplicateKeys(data)
+        }
+    }
+
+    @Test("an unpaired high surrogate with no following \\u escape at all throws")
+    func unpairedHighSurrogateThrows() throws {
+        let data = Data(#"{"k":"\uD800"}"#.utf8)
+        #expect(throws: StrictJSONError.malformed) {
+            try StrictJSON.rejectDuplicateKeys(data)
+        }
+    }
+
+    @Test("a lone low surrogate with no preceding high surrogate throws")
+    func unpairedLowSurrogateThrows() throws {
+        let data = Data(#"{"k":"\uDC00"}"#.utf8)
+        #expect(throws: StrictJSONError.malformed) {
+            try StrictJSON.rejectDuplicateKeys(data)
+        }
+    }
+
+    @Test("a correctly paired high/low surrogate (an astral character) is accepted")
+    func validSurrogatePairAccepted() throws {
+        // U+1F600 (the signer-key fixture's own emoji conformance value) as a UTF-16 surrogate
+        // pair: 😀.
+        let data = Data(#"{"k":"😀"}"#.utf8)
+        try StrictJSON.rejectDuplicateKeys(data)
+    }
+
+    // MARK: - Unbounded recursion / stack overflow (Important)
+
+    @Test("nesting past the depth limit throws tooDeep; comfortably under it is accepted")
+    func depthLimitEnforced() throws {
+        func nested(depth: Int) -> Data {
+            var s = String(repeating: "[", count: depth)
+            s += "1"
+            s += String(repeating: "]", count: depth)
+            return Data(s.utf8)
+        }
+
+        // Comfortably under the implementation's 500-level limit.
+        try StrictJSON.rejectDuplicateKeys(nested(depth: 100))
+
+        // Far past it — this depth (and payload size) is what reproduced a stack-overflow crash
+        // before the depth limit existed.
+        #expect(throws: StrictJSONError.tooDeep) {
+            try StrictJSON.rejectDuplicateKeys(nested(depth: 20_000))
         }
     }
 }

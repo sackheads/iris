@@ -104,11 +104,28 @@ struct VerifierUsageError: Error, Sendable, Equatable {
     let message: String
 }
 
-/// Thrown by `StrictJSON.rejectDuplicateKeys` when any single JSON object in the scanned bytes
-/// repeats a key. Distinct from `PeerRejectReason.duplicateKey`, which is what `verifyAndAdmit`
-/// maps this to — this is the raw-bytes-scanner's own error, usable standalone.
+/// Thrown by `StrictJSON.rejectDuplicateKeys`. `.duplicateKey` — any single JSON object in the
+/// scanned bytes repeats a key — is the one `verifyAndAdmit` maps to `PeerRejectReason.duplicateKey`;
+/// the rest are this scanner's own fail-closed signals for bytes that are not the strict UTF-8
+/// JSON romar's wire format requires, and `verifyAndAdmit` propagates them unmodified (romar names
+/// no code for "malformed/wrong-encoding envelope" — same precedent as `RegistryError.unavailable`
+/// above: an undefined-by-romar failure fails closed via its own error type rather than being
+/// mapped to a `PeerRejectReason` that would misrepresent what went wrong).
+///
+/// - `.invalidEncoding`: the bytes carry a UTF-8 BOM, or are not valid UTF-8 at all.
+/// - `.malformed`: the bytes don't parse as strict JSON — an unrecognized token, an unterminated
+///   string, an invalid `\u` escape or surrogate pair, trailing garbage after the top-level value,
+///   etc. (Review finding, Critical: earlier versions of this scanner silently returned instead of
+///   throwing here, which let a BOM-prefixed, UTF-16/UTF-32-encoded, or JSON5-unquoted-key payload
+///   — all of which `JSONSerialization` decodes without complaint — sail past the duplicate-key
+///   scan the core is supposed to own.)
+/// - `.tooDeep`: nesting exceeded `DuplicateKeyScanner.maxDepth` — bounds the scanner's own
+///   recursion so a deeply nested payload can't overflow the stack (Review finding, Important).
 enum StrictJSONError: Error, Equatable {
     case duplicateKey
+    case invalidEncoding
+    case malformed
+    case tooDeep
 }
 
 /// Thrown by a transport's `decode` closure when a required wire field is absent (or, as this
@@ -149,28 +166,55 @@ protocol SeenSetStore: Sendable {
     func admit(peer: String, envelopeId: String, retainUntil: Date, maxPerPeer: Int, now: Date) throws -> AdmitResult
 }
 
-/// A small raw-bytes JSON scanner whose only job is finding a repeated key within one object, at
-/// any nesting depth (#974 H4 Task 4). Exists because `JSONDecoder`/`JSONSerialization` resolve a
-/// duplicate key by silently keeping the last value — exactly the fail-open a transport's naive
-/// decode closure could reproduce without ever being told. The core owns this scan over the raw
-/// bytes `B` itself, before any decode runs, so no transport implementation can skip it.
+/// A small raw-bytes JSON validator and duplicate-key scanner over one JSON document (#974 H4
+/// Task 4). Exists because `JSONDecoder`/`JSONSerialization` resolve a duplicate key by silently
+/// keeping the last value — exactly the fail-open a transport's naive decode closure could
+/// reproduce without ever being told. The core owns this scan over the raw bytes `B` itself,
+/// before any decode runs, so no transport implementation can skip it.
 ///
-/// This is a scanner, not a validator: malformed JSON that is not a duplicate key (a missing
-/// colon, an unterminated string past end-of-input) is left for `decode` to reject on its own
-/// terms — this type only ever throws for the one condition it exists to catch.
+/// Fails closed on anything that isn't strict, bare-UTF-8 JSON (Review finding, Critical): a
+/// BOM-prefixed, UTF-16/UTF-32-encoded, or JSON5-style-unquoted-key payload all decode cleanly
+/// under `JSONSerialization`, so a scanner that stayed silent on "not quite JSON" bytes it didn't
+/// recognize would let exactly those bypass the duplicate-key guarantee this type exists to give.
+/// Every unrecognized byte, state or trailing garbage after the top-level value throws rather than
+/// returning — this is now a validating scan, not a best-effort one.
 enum StrictJSON {
     static func rejectDuplicateKeys(_ bytes: Data) throws {
-        var scanner = DuplicateKeyScanner(bytes)
+        let array = Array(bytes)
+        // A UTF-8 BOM is itself valid UTF-8 (it decodes as U+FEFF), so the UTF-8-validity check
+        // below would not catch it on its own — romar's wire format is bare UTF-8, never
+        // BOM-prefixed, so reject it outright before any structural scan.
+        if array.count >= 3, array[0] == 0xEF, array[1] == 0xBB, array[2] == 0xBF {
+            throw StrictJSONError.invalidEncoding
+        }
+        // Rejects UTF-16/UTF-32-encoded bytes that contain any invalid UTF-8 continuation
+        // sequence. Does NOT by itself reject an all-ASCII UTF-16 payload (its interleaved NUL
+        // bytes are themselves valid lone UTF-8 code points) — the strict structural scan below,
+        // which now throws on any unrecognized byte instead of silently returning, is what catches
+        // that case (a NUL byte where a key's opening quote or a value's leading token is
+        // expected is simply not valid JSON).
+        guard String(bytes: array, encoding: .utf8) != nil else {
+            throw StrictJSONError.invalidEncoding
+        }
+        var scanner = DuplicateKeyScanner(array)
         try scanner.scanValue()
+        try scanner.expectEndOfInput()
     }
 }
 
 private struct DuplicateKeyScanner {
+    /// A few hundred levels is far more than any real envelope nests, and far below what would
+    /// risk the host stack — bounds this scanner's own recursion so a deeply nested payload
+    /// throws instead of overflowing the stack (Review finding, Important: ~20,000 nested
+    /// brackets in a ~20KB payload reproduced a stack-overflow crash before this bound existed).
+    private static let maxDepth = 500
+
     private let bytes: [UInt8]
     private var index: Int = 0
+    private var depth = 0
 
-    init(_ data: Data) {
-        self.bytes = Array(data)
+    init(_ bytes: [UInt8]) {
+        self.bytes = bytes
     }
 
     private func peek() -> UInt8? {
@@ -183,30 +227,53 @@ private struct DuplicateKeyScanner {
         }
     }
 
+    /// Nothing may follow the top-level value but whitespace — trailing garbage is itself a
+    /// fail-closed signal (Review finding, Critical).
+    mutating func expectEndOfInput() throws {
+        skipWhitespace()
+        guard peek() == nil else { throw StrictJSONError.malformed }
+    }
+
     mutating func scanValue() throws {
         skipWhitespace()
-        switch peek() {
-        case 0x7B: try scanObject() // {
-        case 0x5B: try scanArray()  // [
-        case 0x22: _ = try scanString() // "
-        default: skipScalar()      // number, true, false, null, or end/malformed
+        guard let b = peek() else { throw StrictJSONError.malformed } // a value was expected
+        switch b {
+        case 0x7B: try scanObject()           // {
+        case 0x5B: try scanArray()            // [
+        case 0x22: _ = try scanString()       // "
+        case 0x74: try expectLiteral("true")
+        case 0x66: try expectLiteral("false")
+        case 0x6E: try expectLiteral("null")
+        case 0x2D, 0x30...0x39: try scanNumber() // - or a digit
+        default: throw StrictJSONError.malformed // not a recognized JSON token
         }
     }
 
+    private mutating func enterNesting() throws {
+        depth += 1
+        guard depth <= Self.maxDepth else { throw StrictJSONError.tooDeep }
+    }
+
+    private mutating func exitNesting() {
+        depth -= 1
+    }
+
     private mutating func scanObject() throws {
+        try enterNesting()
+        defer { exitNesting() }
         index += 1 // consume {
         var keys = Set<String>()
         skipWhitespace()
         if peek() == 0x7D { index += 1; return } // empty object
         while true {
             skipWhitespace()
-            guard peek() == 0x22 else { return } // malformed — not this scanner's concern
+            guard peek() == 0x22 else { throw StrictJSONError.malformed } // a quoted key was expected
             let key = try scanString()
             if !keys.insert(key).inserted {
                 throw StrictJSONError.duplicateKey
             }
             skipWhitespace()
-            guard peek() == 0x3A else { return } // :
+            guard peek() == 0x3A else { throw StrictJSONError.malformed } // :
             index += 1
             try scanValue()
             skipWhitespace()
@@ -214,10 +281,13 @@ private struct DuplicateKeyScanner {
             break
         }
         skipWhitespace()
-        if peek() == 0x7D { index += 1 }
+        guard peek() == 0x7D else { throw StrictJSONError.malformed }
+        index += 1
     }
 
     private mutating func scanArray() throws {
+        try enterNesting()
+        defer { exitNesting() }
         index += 1 // consume [
         skipWhitespace()
         if peek() == 0x5D { index += 1; return } // empty array
@@ -228,7 +298,40 @@ private struct DuplicateKeyScanner {
             break
         }
         skipWhitespace()
-        if peek() == 0x5D { index += 1 }
+        guard peek() == 0x5D else { throw StrictJSONError.malformed }
+        index += 1
+    }
+
+    private mutating func expectLiteral(_ literal: String) throws {
+        for expected in literal.utf8 {
+            guard peek() == expected else { throw StrictJSONError.malformed }
+            index += 1
+        }
+    }
+
+    /// A JSON number: `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`. Grammar-checked, not
+    /// value-parsed — this scanner only needs to consume exactly the bytes a number occupies, not
+    /// the numeric value itself (romar's bignum/scientific-notation conformance values are handled
+    /// the same way a decoder would).
+    private mutating func scanNumber() throws {
+        if peek() == 0x2D { index += 1 } // -
+        guard let first = peek(), (0x30...0x39).contains(first) else { throw StrictJSONError.malformed }
+        if first == 0x30 {
+            index += 1 // a leading zero stands alone in the integer part
+        } else {
+            while let d = peek(), (0x30...0x39).contains(d) { index += 1 }
+        }
+        if peek() == 0x2E { // .
+            index += 1
+            guard let d = peek(), (0x30...0x39).contains(d) else { throw StrictJSONError.malformed }
+            while let d2 = peek(), (0x30...0x39).contains(d2) { index += 1 }
+        }
+        if let e = peek(), e == 0x65 || e == 0x45 { // e / E
+            index += 1
+            if let sign = peek(), sign == 0x2B || sign == 0x2D { index += 1 }
+            guard let d = peek(), (0x30...0x39).contains(d) else { throw StrictJSONError.malformed }
+            while let d2 = peek(), (0x30...0x39).contains(d2) { index += 1 }
+        }
     }
 
     /// Returns the string's *decoded* content (escapes resolved), so two keys that are the same
@@ -241,7 +344,7 @@ private struct DuplicateKeyScanner {
             index += 1
             if b == 0x22 { return String(decoding: decoded, as: UTF8.self) }
             if b == 0x5C {
-                guard let esc = peek() else { break }
+                guard let esc = peek() else { throw StrictJSONError.malformed } // backslash at EOF
                 index += 1
                 switch esc {
                 case 0x22: decoded.append(0x22) // \"
@@ -253,46 +356,54 @@ private struct DuplicateKeyScanner {
                 case 0x72: decoded.append(0x0D) // \r
                 case 0x74: decoded.append(0x09) // \t
                 case 0x75: // \uXXXX, with surrogate-pair support
-                    let unit = readUnicodeEscape()
-                    if (0xD800...0xDBFF).contains(unit),
-                       peek() == 0x5C, index + 1 < bytes.count, bytes[index + 1] == 0x75 {
-                        index += 2
-                        let low = readUnicodeEscape()
-                        let value = 0x10000 + (UInt32(unit) - 0xD800) * 0x400 + (UInt32(low) - 0xDC00)
-                        if let scalar = Unicode.Scalar(value) {
-                            decoded.append(contentsOf: String(scalar).utf8)
-                        }
-                    } else if let scalar = Unicode.Scalar(unit) {
-                        decoded.append(contentsOf: String(scalar).utf8)
-                    }
+                    try appendUnicodeEscape(to: &decoded)
                 default:
-                    decoded.append(esc)
+                    throw StrictJSONError.malformed // not a recognized escape
                 }
                 continue
             }
             decoded.append(b)
         }
-        return String(decoding: decoded, as: UTF8.self)
+        throw StrictJSONError.malformed // unterminated string
     }
 
-    private mutating func readUnicodeEscape() -> UInt16 {
-        guard index + 4 <= bytes.count else { return 0 }
-        let hex = String(decoding: bytes[index..<index + 4], as: UTF8.self)
+    /// Review finding, Important: the previous version computed
+    /// `(UInt32(low) - 0xDC00)` unconditionally once a `\uD800`-range escape was followed by any
+    /// second `\u` escape, with no check that `low` actually fell in the `0xDC00...0xDFFF` low-
+    /// surrogate range first — an unpaired or malformed high surrogate underflowed that `UInt32`
+    /// subtraction and trapped the whole process (SIGTRAP), from any string value in a
+    /// legitimately *signed* envelope, not just a key. Every surrogate case below either combines
+    /// a validated high/low pair or throws — it never traps and never silently drops a code unit.
+    private mutating func appendUnicodeEscape(to decoded: inout [UInt8]) throws {
+        let unit = try readUnicodeEscape()
+        if (0xD800...0xDBFF).contains(unit) {
+            // High surrogate: must be immediately followed by a low-surrogate \u escape.
+            guard peek() == 0x5C, index + 1 < bytes.count, bytes[index + 1] == 0x75 else {
+                throw StrictJSONError.malformed
+            }
+            index += 2
+            let low = try readUnicodeEscape()
+            guard (0xDC00...0xDFFF).contains(low) else { throw StrictJSONError.malformed }
+            let value = 0x10000 + (UInt32(unit) - 0xD800) * 0x400 + (UInt32(low) - 0xDC00)
+            guard let scalar = Unicode.Scalar(value) else { throw StrictJSONError.malformed }
+            decoded.append(contentsOf: String(scalar).utf8)
+        } else if (0xDC00...0xDFFF).contains(unit) {
+            throw StrictJSONError.malformed // a lone low surrogate with no preceding high one
+        } else {
+            guard let scalar = Unicode.Scalar(unit) else { throw StrictJSONError.malformed }
+            decoded.append(contentsOf: String(scalar).utf8)
+        }
+    }
+
+    private mutating func readUnicodeEscape() throws -> UInt16 {
+        guard index + 4 <= bytes.count else { throw StrictJSONError.malformed }
+        guard let hex = String(bytes: bytes[index..<index + 4], encoding: .utf8),
+              let value = UInt16(hex, radix: 16)
+        else {
+            throw StrictJSONError.malformed
+        }
         index += 4
-        return UInt16(hex, radix: 16) ?? 0
-    }
-
-    private mutating func skipScalar() {
-        while let b = peek(), !isStructural(b) {
-            index += 1
-        }
-    }
-
-    private func isStructural(_ b: UInt8) -> Bool {
-        switch b {
-        case 0x2C, 0x7D, 0x5D, 0x20, 0x09, 0x0A, 0x0D: return true
-        default: return false
-        }
+        return value
     }
 }
 
@@ -403,10 +514,14 @@ struct PeerSignatureVerifier: Sendable {
         }
 
         // 4. The core's own duplicate-key scan over the raw bytes — runs regardless of what the
-        // injected `decode` closure does, so a naive transport decoder cannot fail open.
+        // injected `decode` closure does, so a naive transport decoder cannot fail open. Only
+        // `.duplicateKey` is a romar-named code; `.invalidEncoding`/`.malformed`/`.tooDeep`
+        // propagate unmodified, same precedent as `RegistryError.unavailable` above — romar names
+        // no code for "malformed/wrong-encoding envelope", so this fails closed via its own error
+        // type rather than being mapped to a `PeerRejectReason` that would misrepresent it.
         do {
             try StrictJSON.rejectDuplicateKeys(frame.envelopeBytes)
-        } catch is StrictJSONError {
+        } catch StrictJSONError.duplicateKey {
             throw PeerVerificationError(reason: .duplicateKey, envelopeId: nil)
         }
 
