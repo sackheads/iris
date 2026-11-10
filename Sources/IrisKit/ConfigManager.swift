@@ -209,8 +209,8 @@ class ConfigManager: @unchecked Sendable {
     }
 
     /// #314 PR 7: the reasoning effort each Anthropic tier asks for (`output_config.effort`). Empty,
-    /// the default, sends none, so the model keeps its own default and nothing changes until the
-    /// user picks. A stored word the tier's model does not list reads as none (`reasoningEffort`),
+    /// the default, sends none, so the model keeps its own effort (the thinking summary is asked
+    /// for either way, #1018). A stored word the tier's model does not list reads as none (`reasoningEffort`),
     /// so a hand-edited value or a changed model can never send a level the model rejects.
     var anthropicEffortEasy: String {
         didSet { store.set(anthropicEffortEasy, forKey: "ANTHROPIC_EFFORT_EASY") }
