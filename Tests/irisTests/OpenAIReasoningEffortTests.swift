@@ -84,8 +84,11 @@ struct OpenAIReasoningEffortTests {
             let opens = Sent()
             let stream = OpenAIEffortFallback.stream(key: k, effort: "high") { e in
                 AsyncThrowingStream { c in
-                    Task { await opens.add(e) }
-                    c.finish(throwing: APIError(message: "busy", statusCode: status))
+                    // Record, then finish: an unordered Task let the assertion read first on a slow runner.
+                    Task {
+                        await opens.add(e)
+                        c.finish(throwing: APIError(message: "busy", statusCode: status))
+                    }
                 }
             }
             do { for try await _ in stream {}; Issue.record("should throw") }
