@@ -80,6 +80,60 @@ struct InboxReadStateTests {
         #expect(AppState.inboxEmitterLabel(for: c) == "inbox tester")
     }
 
+    @Test("his own answer does not unread the item; an automatic answer does (#1033 review)")
+    func ownAnswerIsRead() throws {
+        let s = try ConversationStore.inMemory()
+        let hand = item(), auto = item(), viaRecord = item()
+        for it in [hand, auto, viaRecord] { try s.inbox.createItem(it, question: "S") }
+        let at = Date(timeIntervalSince1970: 5_000)
+        try s.inbox.submitAnswer(itemId: hand.id, answer: InboxAnswer(chosenOptionId: nil, freeText: "ok", at: at),
+                                 pendingTargets: ["dev-1"])
+        try s.inbox.submitAnswer(itemId: auto.id, answer: InboxAnswer(chosenOptionId: nil, freeText: "d", at: at, automatic: true),
+                                 pendingTargets: [])
+        try s.inbox.recordAnswer(itemId: viaRecord.id, answer: InboxAnswer(chosenOptionId: nil, freeText: "ok", at: at))
+        #expect(!(try #require(try s.inbox.item(id: hand.id))).isUnread)
+        #expect(!(try #require(try s.inbox.item(id: viaRecord.id))).isUnread)
+        #expect((try #require(try s.inbox.item(id: auto.id))).isUnread)
+    }
+
+    @Test("an item already read, then answered by hand, stays read")
+    func readThenAnswered() throws {
+        let s = try ConversationStore.inMemory()
+        let it = item()
+        try s.inbox.createItem(it, question: "S")
+        try s.inbox.markViewed(itemId: it.id, at: Date(timeIntervalSince1970: 2_000))
+        try s.inbox.submitAnswer(itemId: it.id, answer: InboxAnswer(chosenOptionId: nil, freeText: "ok", at: Date(timeIntervalSince1970: 3_000)),
+                                 pendingTargets: [])
+        #expect(!(try #require(try s.inbox.item(id: it.id))).isUnread)
+    }
+
+    @Test("the divider probe takes only a two-pane split view it is the first pane of, never an outer one (#1033 review)")
+    @MainActor func probeIgnoresTheOuterSplit() {
+        func pair() -> NSSplitView {
+            let v = NSSplitView(frame: NSRect(x: 0, y: 0, width: 900, height: 400))
+            v.isVertical = true
+            v.addArrangedSubview(NSView()); v.addArrangedSubview(NSView())
+            return v
+        }
+        let outer = pair()
+        let inner = pair()
+        // The inbox sits in the outer split's detail pane, with its own split inside.
+        outer.arrangedSubviews[1].addSubview(inner)
+        let probe = NSView()
+        inner.arrangedSubviews[0].addSubview(probe)
+        #expect(SplitDividerPersistence.ownSplitView(of: probe) === inner)
+
+        // No inner split of its own: the walk reaches the outer one, where the probe is the detail pane.
+        let bare = NSView()
+        outer.arrangedSubviews[1].addSubview(bare)
+        #expect(SplitDividerPersistence.ownSplitView(of: bare) == nil, "the main window's split view must not be taken")
+
+        // First pane of a split with a third pane is not the inbox's two-pane split either.
+        let three = pair(); three.addArrangedSubview(NSView())
+        let p3 = NSView(); three.arrangedSubviews[0].addSubview(p3)
+        #expect(SplitDividerPersistence.ownSplitView(of: p3) == nil)
+    }
+
     @Test("the saved first-pane width is restored onto a new split view and re-saved when dragged")
     @MainActor func dividerRoundTrips() throws {
         let name = "iris-split-\(UUID().uuidString)"

@@ -199,7 +199,10 @@ struct InboxView: View {
 
     private func markViewed(_ item: InboxItem) {
         guard item.isUnread else { return }
-        try? state.store.inbox.markViewed(itemId: item.id, at: Date())
+        do { try state.store.inbox.markViewed(itemId: item.id, at: Date()) } catch {
+            print("[inbox] markViewed failed for \(item.id): \(error)")
+            return
+        }
         state.bumpInboxRevision()
     }
 
