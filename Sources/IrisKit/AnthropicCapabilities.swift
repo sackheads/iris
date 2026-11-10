@@ -68,8 +68,10 @@ enum AnthropicCapabilities {
         thinkingSupport[key(model)]?.display
     }
 
-    /// Endpoints that answered a request with a 400 naming `thinking.display` (#1018), kept for the
-    /// life of the process so only the first request to one ever fails. The route table cannot
+    /// Endpoints that rejected `thinking.display` (#1018): the 400 named it, and the retry without it
+    /// then succeeded. Kept for the life of the process so only the first request to one ever fails.
+    /// Per endpoint, not per model: a gateway that rejects it for one model drops it for the others
+    /// there too, which fails soft. The route table cannot
     /// say which custom base URLs take the field, so the answer is learned, per endpoint. In memory
     /// on purpose: a relaunch costs one retried request, and nothing is persisted that a route
     /// fixing itself would leave stale.

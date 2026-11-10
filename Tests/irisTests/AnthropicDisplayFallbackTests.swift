@@ -49,6 +49,8 @@ struct AnthropicDisplayFallbackTests {
         omitted.omitThinkingDisplay = true
         #expect(AnthropicClient.isDisplayRejection(error(400, Self.displayRejection), request: plain))
         #expect(!AnthropicClient.isDisplayRejection(error(400, Self.otherRejection), request: plain))
+        #expect(!AnthropicClient.isDisplayRejection(error(400, #"{"error":{"message":"tools.4.custom.name: got display_image"}}"#), request: plain))
+        #expect(!AnthropicClient.isDisplayRejection(error(400, #"{"error":{"message":"messages.2.content.0.text: contains the display name Jo"}}"#), request: plain))
         #expect(!AnthropicClient.isDisplayRejection(error(500, Self.displayRejection), request: plain))
         #expect(!AnthropicClient.isDisplayRejection(error(400, AnthropicBindingRetryTests.bindingRejection), request: plain),
                 "the binding 400 mentions thinking blocks, not display")
@@ -121,6 +123,38 @@ struct AnthropicDisplayFallbackTests {
             _ = try await AnthropicClient.generateContent(request: Self.request(), model: "claude-opus-5-5", transport: Self.endpoint(), session: session2)
         }
         #expect(twice.all.count == 2)
+    }
+
+    @Test("a retry that fails again does not teach the endpoint anything: display is still sent there next time")
+    func failedRetryIsNotRemembered() async throws {
+        let transport = Self.endpoint()
+        let rec = Recorder()
+        let (session, remove) = Self.session(rejections: [Self.displayRejection, Self.displayRejection], stream: false, recorder: rec)
+        defer { remove() }
+        await #expect(throws: APIError.self) {
+            _ = try await AnthropicClient.generateContent(request: Self.request(), model: "claude-opus-5-5", transport: transport, session: session)
+        }
+        #expect(!AnthropicCapabilities.rejectsDisplay(transport))
+
+        let streamed = Recorder()
+        let (session2, remove2) = Self.session(rejections: [Self.displayRejection, Self.displayRejection], stream: true, recorder: streamed)
+        defer { remove2() }
+        await #expect(throws: APIError.self) {
+            for try await _ in AnthropicClient.streamContent(request: Self.request(), model: "claude-opus-5-5", session: session2,
+                                                             transport: { transport }) {}
+        }
+        #expect(!AnthropicCapabilities.rejectsDisplay(transport))
+    }
+
+    @Test("a successful retry teaches the endpoint, streamed or not")
+    func successfulRetryIsRemembered() async throws {
+        let transport = Self.endpoint()
+        let rec = Recorder()
+        let (session, remove) = Self.session(rejections: [Self.displayRejection], stream: true, recorder: rec)
+        defer { remove() }
+        for try await _ in AnthropicClient.streamContent(request: Self.request(), model: "claude-opus-5-5", session: session,
+                                                         transport: { transport }) {}
+        #expect(AnthropicCapabilities.rejectsDisplay(transport))
     }
 
     @Test("a non-streamed reply that now carries a thinking block parses to its text, and the block is stored for replay (#1018)")
