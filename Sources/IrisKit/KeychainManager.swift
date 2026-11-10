@@ -9,6 +9,10 @@ public final class KeychainManager: @unchecked Sendable {
     private var account: String { Self.account }
 
     public static let mcpFileService = "iris.mcp"
+    /// Iris's own Ed25519 signing identity (#974 H4). Deliberately not copied by `DevHomeSeeder`
+    /// (its services list is `[legacyService, mcpFileService] + iris.plugin.*`, `DevHomeSeeder.swift`
+    /// around line 85), so a dev build never shares the release build's signing key.
+    public static let a2aSigningKeyService = "iris.a2a.signing"
     public static func pluginService(_ id: String) -> String { "iris.plugin.\(id)" }
 
     /// Under `swift test` the manager uses an in-memory store instead of the real login
