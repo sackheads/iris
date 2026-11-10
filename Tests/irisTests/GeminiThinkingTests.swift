@@ -166,6 +166,38 @@ struct GeminiThinkingTests {
         #expect(!GeminiThinkingFallback.levelRefused(key: k, level: "low") && !GeminiThinkingFallback.thoughtsRefused(key: k))
     }
 
+    @Test("an unladdered call (the guard's) sends once and lets its 400 through to sendAsking")
+    func guardOwnsItsFourHundred() async {
+        let k = key()
+        let sent = Sent()
+        let outcome: Result<String, Error> = await Result {
+            try await GeminiThinkingFallback.run(key: k, level: "low", includeThoughts: false, laddered: false) { rung in
+                await sent.add(rung)
+                throw APIError(message: "no level", statusCode: 400)
+            }
+        }
+        #expect(outcome.isFailure)
+        #expect(await sent.all == [.init(level: "low", includeThoughts: false)])
+        #expect(!GeminiThinkingFallback.levelRefused(key: k, level: "low"))
+    }
+
+    @Test("the client ladders every call but the guard's")
+    func clientPassesLaddered() throws {
+        let source = try String(contentsOf: PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit/LLMClient.swift"), encoding: .utf8)
+        #expect(source.contains("laddered: !asked.ignoresTierThinkingLevel"))
+    }
+
+    @Test("a signature on a thought part is forwarded, not dropped, and the answer's own replaces it")
+    func thoughtPartSignature() throws {
+        var mapper = GeminiStreamMapper()
+        let chunk = #"{"candidates":[{"content":{"parts":[{"text":"hm","thought":true,"thoughtSignature":"SIG1"},{"text":"Answer","thoughtSignature":"SIG2"}]}}]}"#
+        let events = try mapper.handle(SSEEvent(event: nil, data: chunk))
+        #expect(events == [.thinkingText("hm"), .thoughtSignature("SIG1"), .textDelta("Answer"), .thoughtSignature("SIG2")])
+        var assembler = StreamAssembler()
+        for e in events { assembler.apply(e, now: 0) }
+        #expect(assembler.response().candidates?.first?.content?.parts.first?.thoughtSignature == "SIG2")
+    }
+
     @Test("a non-400 error is not a refusal: no retry")
     func otherErrorsPassThrough() async {
         let k = key()
