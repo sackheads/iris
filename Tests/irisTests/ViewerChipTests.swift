@@ -10,18 +10,23 @@ import AppKit
 struct ViewerChipPolicyTests {
     /// #896 PR 2: `ViewerChipPolicy.shouldOffer` is deliberately gate-free (it's a pure per-block
     /// check, tested on its own below); the one place that decides whether the chip is reachable
-    /// at all is `ViewerFeatureGate`, wired at the `ChatView` call site. #904's SOCKS5 proxy
-    /// instrument confirmed zero lookups for `rel=preconnect` and ordinary network loads, but
-    /// could not observe `rel=dns-prefetch`/`rel=prefetch` at all (dev-2's #904 review finding 1).
-    /// #912 closes that gap by construction instead of by observation (`RawHTMLSanitizer`), but
-    /// dev-3's #915 review round 1 found two live-confirmed holes in the stripper itself (`rel`
-    /// split on space only; a combining mark after a quote desyncing the tokenizer from WebKit's
-    /// own parser) — both fixed, with live mutation-checked tests, but the planner's call is this
-    /// stays off until dev-3's round-2 re-review confirms it. This test is the tripwire: flipping
-    /// the gate on is that re-review's decision, never a side effect of refactoring this file.
-    @Test("the viewer is not reachable until #912's sanitizer passes dev-3's re-review")
-    func gateIsOffUntilTheSanitizerPassesReReview() {
-        #expect(ViewerFeatureGate.isEnabled == false)
+    /// at all is `ViewerFeatureGate`, wired at the `ChatView` call site. #904 flipped it on after
+    /// #912's allow-list sanitizer closed dns-prefetch by construction (#915, three review rounds).
+    /// This is the tripwire in the other direction: the gate is on, and the chip's one production
+    /// path sanitizes, so turning either off or adding a second, unsanitized path fails here.
+    @Test("the viewer is reachable, through exactly one call site that sanitizes first")
+    func gateIsOnAndTheOnlyPathSanitizes() throws {
+        #expect(ViewerFeatureGate.isEnabled == true)
+        let root = PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit")
+        let chat = try String(contentsOf: root.appendingPathComponent("ChatView.swift"), encoding: .utf8)
+        #expect(chat.contains("onOpenViewer: ViewerFeatureGate.isEnabled ? {"), "the chip must stay behind the gate")
+        #expect(chat.contains("content: RawHTMLSanitizer.sanitize(configuration.content)"), "the document is built from sanitized HTML")
+        var sites: [String] = []
+        for file in try FileManager.default.contentsOfDirectory(atPath: root.path) where file.hasSuffix(".swift") {
+            let text = try String(contentsOf: root.appendingPathComponent(file), encoding: .utf8)
+            if text.contains("ViewerDocument(") { sites.append(file) }
+        }
+        #expect(sites == ["ChatView.swift"], "a second ViewerDocument construction site would bypass the sanitizer: \(sites)")
     }
 
     @Test("html, not streaming: offered")

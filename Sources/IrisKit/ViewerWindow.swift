@@ -38,24 +38,19 @@ enum ViewerChipPolicy {
 
 /// Gates whether the viewer is reachable at all, independent of language/streaming. A code
 /// constant, not a `Settings` toggle: the spec's DNS zero-lookup result is a ship blocker ("the
-/// window does not ship unless that shows zero lookups") — PR 2 landed the window, chip and
-/// banner with the chip off; #904 then measured with a SOCKS5h "resolver we control"
-/// (`SOCKS5ProxyTestHelper`) and found the proxy reliable for `rel=preconnect` and ordinary
-/// subresource loads but NOT for `rel=dns-prefetch`/`rel=prefetch` — the same unmitigated control
-/// that catches preconnect records nothing for either, so a zero result there cannot distinguish
-/// "WebKit never resolves them" from "WebKit resolves them through the system resolver, bypassing
-/// `proxyConfigurations` entirely" (dev-2's #904 review finding 1). Brian's resolution
-/// (2026-11-07) was to close dns-prefetch by construction rather than by observation: #912's
-/// `RawHTMLSanitizer` strips every speculative-load hint (`dns-prefetch`/`preconnect`/
-/// `prerender`/`prefetch`/`preload`/`modulepreload`, plus `<base>`/`<a ping>`/`<meta
-/// http-equiv>`) from the raw HTML before `ChatView` ever builds a `ViewerDocument` from it — a
-/// defense alongside the viewer's existing CSP/content rule list, not a replacement for either.
-/// Stays `false` through #915 review round 1 (two live-confirmed holes: `rel` split on space only,
-/// and a combining mark after a quote desyncing the tokenizer from WebKit's own parser) — both
-/// fixed, with live mutation-checked tests, but the planner's call is this stays off until dev-3's
-/// round-2 re-review confirms it. Flip only once that lands.
+/// window does not ship unless that shows zero lookups"). #904 measured it with a SOCKS5h
+/// "resolver we control" (`SOCKS5ProxyTestHelper`): zero lookups for `rel=preconnect` and ordinary
+/// subresource loads, but the proxy cannot see `rel=dns-prefetch`/`rel=prefetch` at all (it
+/// resolves outside a proxy), so a zero there proves nothing. Brian's resolution (2026-11-07) was
+/// to close dns-prefetch by construction rather than by observation: #912's `RawHTMLSanitizer`
+/// strips every speculative-load hint (`dns-prefetch`/`preconnect`/`prerender`/`prefetch`/
+/// `preload`/`modulepreload`, plus `<base>`/`<a ping>`/`<meta http-equiv>`) from the raw HTML
+/// before `ChatView` builds a `ViewerDocument` from it, a defense alongside the viewer's CSP and
+/// content rule list, not a replacement for either. #915 passed three review rounds and merged;
+/// this is the flip (#904). The one production call site (`ChatView`) sanitizes, and
+/// `ViewerChipTests` pins that it stays the only one and stays sanitized.
 enum ViewerFeatureGate {
-    static let isEnabled = false
+    static let isEnabled = true
 }
 
 /// Opens one window per document, AppKit-managed rather than a SwiftUI `Scene`: a `WindowGroup`

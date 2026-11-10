@@ -11,7 +11,7 @@ import WebKit
 /// network stack would otherwise go via `WKWebsiteDataStore.proxyConfigurations`. It proved
 /// reliable for `rel=preconnect` and ordinary network loads — see `hintChannelsControl` below —
 /// but NOT for `rel=dns-prefetch`/`rel=prefetch`, which never show up here whether or not WebKit
-/// actually resolves them, so `ViewerFeatureGate` stays off (dev-2's #904 review finding 1).
+/// actually resolves them, which is why dns-prefetch is closed by construction (`RawHTMLSanitizer`, #912) and not by this instrument (dev-2's #904 review finding 1); `ViewerFeatureGate` is on as of #904's flip.
 @MainActor
 @Suite("Viewer: zero DNS lookups (#904)", .timeLimit(.minutes(1)))
 struct ViewerZeroLookupTests {
@@ -58,10 +58,10 @@ struct ViewerZeroLookupTests {
     /// `rel=prefetch`'s, even given a real window and a real wait. That means WebKit either never
     /// resolves those two in this setup, or resolves them through the system resolver, bypassing
     /// `WKWebsiteDataStore.proxyConfigurations` entirely — this instrument cannot tell those
-    /// apart. `ViewerFeatureGate` stays off until dns-prefetch/prefetch are observed another way
-    /// (a real resolver, or `tcpdump`, per the planner's escalation ruling): see
-    /// `productionConfigMakesZeroLookups` below, whose zero for dns-prefetch/prefetch is therefore
-    /// not proof of anything, only its zero for preconnect and ordinary loads is.
+    /// apart. dns-prefetch/prefetch are therefore closed by construction (`RawHTMLSanitizer`, #912)
+    /// rather than observed: see `productionConfigMakesZeroLookups` below, whose zero for them is
+    /// not proof of anything, only its zero for preconnect and ordinary loads is, and
+    /// `shippedPathMakesZeroLookups`, which runs the sanitized page through the same config.
     @Test("hint channels, unmitigated: preconnect is observable through the proxy, dns-prefetch and prefetch are not")
     func hintChannelsControl() async throws {
         let proxy = try SOCKS5ProxyTestHelper(holdOpen: false)
@@ -140,6 +140,53 @@ struct ViewerZeroLookupTests {
             proxy.recordedTargets.isEmpty,
             "the production viewer config let a hostname reach the proxy: \(proxy.recordedTargets.map(\.description))"
         )
+    }
+
+    /// #904's flip: the page the user's click really loads is `RawHTMLSanitizer.sanitize(model HTML)`
+    /// in the production config, not the raw page. This runs that composition against the proxy
+    /// with every hint #912 strips, so the evidence is for the shipped path and not for the two
+    /// halves measured apart (the sanitizer changed after #911 measured).
+    @Test("the shipped path (sanitized page, production config) makes zero lookups")
+    func shippedPathMakesZeroLookups() async throws {
+        let proxy = try SOCKS5ProxyTestHelper()
+        defer { proxy.close() }
+
+        let hostile = """
+        <html><head>
+        <link rel="dns-prefetch" href="//iris-s-dnsprefetch.invalid.example">
+        <link rel="stylesheet dns-prefetch" href="//iris-s-multirel.invalid.example/a.css">
+        <link rel="PRECONNECT" href="//iris-s-preconnect.invalid.example">
+        <link rel="prefetch" href="//iris-s-prefetch.invalid.example/x">
+        <link rel="preload" as="image" href="http://iris-s-preload.invalid.example/p.png">
+        <base href="http://iris-s-base.invalid.example/">
+        <meta http-equiv="refresh" content="0;url=http://iris-s-refresh.invalid.example/r">
+        </head><body>
+        <a href="http://iris-s-a.invalid.example/" ping="http://iris-s-ping.invalid.example/p">x</a>
+        <img src="http://iris-s-img.invalid.example/i.png">
+        </body></html>
+        """
+        let shipped = RawHTMLSanitizer.sanitize(hostile)
+        for needle in ["dns-prefetch", "preconnect", "prefetch", "preload", "<base", "ping=", "http-equiv"] {
+            #expect(!shipped.lowercased().contains(needle), "the sanitizer let \(needle) through: \(shipped)")
+        }
+
+        let id = "iris-view-test-shipped-\(UUID().uuidString)"
+        let list = try await ViewerContentRules.compile(identifier: id)
+        defer { WKContentRuleListStore.default()!.removeContentRuleList(forIdentifier: id) { _ in } }
+
+        let handler = ViewerSchemeHandler(document: Data(shipped.utf8))
+        let config = ViewerConfiguration.build(schemeHandler: handler, proxyConfigurations: [socksProxyConfiguration(port: proxy.port)])
+        config.userContentController.add(list)
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        let waiter = TrustedOnlyNavigationWaiterForZeroLookup()
+        webView.navigationDelegate = waiter
+        webView.load(URLRequest(url: ViewerConfiguration.documentURL))
+        await waiter.waitForFinish()
+        try? await Task.sleep(for: .seconds(1))
+
+        #expect(proxy.recordedTargets.isEmpty,
+                "the shipped path let a hostname reach the proxy: \(proxy.recordedTargets.map(\.description))")
     }
 }
 
