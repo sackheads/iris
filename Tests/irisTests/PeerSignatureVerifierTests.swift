@@ -26,9 +26,12 @@ struct PeerSignatureVerifierTests {
 
     /// A deliberately naive mapping from raw JSON bytes to `TestEnvelope`, via
     /// `JSONSerialization` — which, like any ordinary `JSONDecoder`-based transport, silently
-    /// keeps the *last* value for a repeated object key. Standing in for "what a transport that
-    /// never heard of `StrictJSON` would write." Used directly by the "last-wins decode still
-    /// yields duplicate-key" test below: the core's own scan must catch what this decoder cannot.
+    /// keeps the *first* value for a repeated object key (pinned independently by this task's own
+    /// round-1 security review and by Task 6's `PeerSignatureConformanceTests`) rather than
+    /// noticing the repeat at all. Standing in for "what a transport that never heard of
+    /// `StrictJSON` would write." Used directly by the
+    /// `firstWinsDecodeStillYieldsDuplicateKey` test below: the core's own scan must catch what
+    /// this decoder cannot, regardless of which value it would have silently picked.
     static func decodeTestEnvelope(_ data: Data) throws -> TestEnvelope {
         guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw FrameDecodeError.missingRequiredField("root")
@@ -634,15 +637,15 @@ struct PeerSignatureVerifierTests {
 
     // MARK: - Verify-before-parse ordering
 
-    @Test("a deliberately last-wins decode closure still yields duplicate_key: the core scans B itself")
-    func lastWinsDecodeStillYieldsDuplicateKey() throws {
+    @Test("a naive first-wins decode closure still yields duplicate_key: the core scans B itself")
+    func firstWinsDecodeStillYieldsDuplicateKey() throws {
         let (registry, tempDir) = freshRegistry()
         defer { try? FileManager.default.removeItem(at: tempDir) }
         let key = try enrolledKey(profile: "clomp", in: registry)
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let ts = Self.iso(now)
         // Top-level "protocol" key repeated — a naive JSONSerialization-backed decode silently
-        // keeps the last value and would never notice.
+        // keeps the first value and would never notice the repeat at all.
         let envelope = Data("""
         {"from":{"profile":"clomp"},"to":{"profile":"iris"},"kind":"message","envelopeId":"dup-1","ts":"\(ts)","protocol":"a2a-jetstream/0.4","protocol":"a2a-jetstream/0.4"}
         """.utf8)

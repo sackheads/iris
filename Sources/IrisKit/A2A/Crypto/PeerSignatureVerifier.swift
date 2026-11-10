@@ -168,9 +168,11 @@ protocol SeenSetStore: Sendable {
 
 /// A small raw-bytes JSON validator and duplicate-key scanner over one JSON document (#974 H4
 /// Task 4). Exists because `JSONDecoder`/`JSONSerialization` resolve a duplicate key by silently
-/// keeping the last value — exactly the fail-open a transport's naive decode closure could
-/// reproduce without ever being told. The core owns this scan over the raw bytes `B` itself,
-/// before any decode runs, so no transport implementation can skip it.
+/// keeping the first value (pinned independently by this task's own round-1 security review and
+/// by Task 6's `PeerSignatureConformanceTests`) rather than noticing the repeat at all — exactly
+/// the fail-open a transport's naive decode closure could reproduce without ever being told. The
+/// core owns this scan over the raw bytes `B` itself, before any decode runs, so no transport
+/// implementation can skip it.
 ///
 /// Fails closed on anything that isn't strict, bare-UTF-8 JSON (Review finding, Critical): a
 /// BOM-prefixed, UTF-16/UTF-32-encoded, or JSON5-style-unquoted-key payload all decode cleanly
