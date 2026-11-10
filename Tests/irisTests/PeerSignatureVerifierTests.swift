@@ -899,7 +899,7 @@ struct StrictJSONTests {
 
     @Test("a correctly paired high/low surrogate escape (an astral character) is accepted")
     func validSurrogatePairAccepted() throws {
-        // The ACTUAL \u-escaped surrogate pair for U+1F600 (😀): 😀, built the same
+        // The ACTUAL \u-escaped surrogate pair for U+1F600 (😀): \uD83D\uDE00, built the same
         // literal-text way as the other tests in this group — not a raw UTF-8 emoji character
         // embedded directly, which would bypass the \u-escape-combining code (`appendUnicodeEscape`)
         // entirely via `scanString`'s plain non-backslash byte-passthrough path, and so would never
@@ -907,6 +907,39 @@ struct StrictJSONTests {
         let escapes = Self.literalUnicodeEscape("D83D") + Self.literalUnicodeEscape("DE00")
         let data = Data("{\"k\":\"\(escapes)\"}".utf8)
         try StrictJSON.rejectDuplicateKeys(data)
+    }
+
+    // MARK: - Escaped/raw key collision for duplicate detection (review follow-up)
+    //
+    // `scanString` decodes escapes (rather than comparing raw bytes between the quotes)
+    // specifically so two keys that are the *same character* written two different ways still
+    // collide as one key for duplicate detection — e.g. `{"a":1,"a":2}` where the second "a" is
+    // written as `a`. Nothing exercised that property directly: a mutant that combines a
+    // surrogate pair with a different, still-valid-but-wrong formula would pass every other test
+    // in this file, because none of them actually relies on two differently-written keys landing
+    // on the same decoded string.
+
+    @Test("an escaped key collides with its raw equivalent for duplicate detection")
+    func escapedKeyCollidesWithRawEquivalent() throws {
+        // One raw "a", one "a" written as a (built via literalUnicodeEscape, never typed
+        // directly as a \uXXXX span in source — see that helper's own doc comment for why).
+        let escapedA = Self.literalUnicodeEscape("0061")
+        let data = Data("{\"a\":1,\"\(escapedA)\":2}".utf8)
+        #expect(throws: StrictJSONError.duplicateKey) {
+            try StrictJSON.rejectDuplicateKeys(data)
+        }
+    }
+
+    @Test("an escaped astral key collides with its raw UTF-8 equivalent for duplicate detection")
+    func escapedAstralKeyCollidesWithRawEquivalent() throws {
+        // One key is the raw UTF-8 emoji character directly (safe to type literally — it is not
+        // a \uXXXX-shaped escape span); the other is the same character built as an escaped
+        // surrogate pair via `literalUnicodeEscape`. Both must decode to the identical key.
+        let escapedEmoji = Self.literalUnicodeEscape("D83D") + Self.literalUnicodeEscape("DE00")
+        let data = Data("{\"😀\":1,\"\(escapedEmoji)\":2}".utf8)
+        #expect(throws: StrictJSONError.duplicateKey) {
+            try StrictJSON.rejectDuplicateKeys(data)
+        }
     }
 
     // MARK: - Unbounded recursion / stack overflow (Important)
