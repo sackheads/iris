@@ -1,5 +1,20 @@
 import Foundation
 
+/// `exit`'s C++ static-destructor chain trips llama.cpp's Metal `GGML_ASSERT` once this process has
+/// loaded ggml (#1007: `GGML_ASSERT([rsets->data count] == 0)` in `ggml-metal-device.m`, firing from
+/// the global `std::vector<unique_ptr<ggml_metal_device>>`'s destructor during `__cxa_finalize_ranges`)
+/// — the same hazard `--run-job`'s `CLIStop` already works around below, the way `AppDelegate` leaves
+/// at terminate (`_exit(0)`, `IrisApp.swift`). Any headless mode that can load a `llama_cpp` guard-tier
+/// engine (`--guard-probe`, `--eval`) exits through here instead of a plain `exit`: flush what `exit`'s
+/// own atexit handler would have flushed, then `_exit`, skipping the C++ static destructors that
+/// assert. Nothing else in this process registers an atexit handler (checked), so nothing but stdio
+/// buffering is lost — the same reasoning `CLIStop.exit`'s doc comment gives for its own `_exit`.
+private func exitAfterPossibleGGMLLoad(_ code: Int32) -> Never {
+    fflush(stdout)
+    fflush(stderr)
+    _exit(code)
+}
+
 /// The process entry point, shared by the SwiftPM `iris` binary and the Xcode `Iris.app`.
 /// Headless modes (--perf, --bench, --run-job, --eval, --context-holds-report, --guard-probe, --seed-dev-home) run before any
 /// SwiftUI window is created and exit.
@@ -58,7 +73,7 @@ public enum IrisMain {
             ProcessRole.set(.eval)
             switch eval {
             case .success(let command):
-                exit(await EvalCLI.execute(command))
+                exitAfterPossibleGGMLLoad(await EvalCLI.execute(command))
             case .failure(let err):
                 FileHandle.standardError.write(Data("iris --eval: \(err.localizedDescription)\n\(EvalCLI.usage)\n".utf8))
                 exit(64)
@@ -78,7 +93,7 @@ public enum IrisMain {
             ProcessRole.set(.probe)
             switch probe {
             case .success(let options):
-                exit(await GuardProbeCLI.run(options))
+                exitAfterPossibleGGMLLoad(await GuardProbeCLI.run(options))
             case .failure(let err):
                 FileHandle.standardError.write(Data("iris --guard-probe: \(err.localizedDescription)\n\(GuardProbeCLI.usage)\n".utf8))
                 exit(64)
