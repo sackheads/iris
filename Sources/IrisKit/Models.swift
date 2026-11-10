@@ -32,8 +32,9 @@ struct GeminiRequest: Codable {
     /// #1019: Gemini's `thinkingConfig.includeThoughts`, set on a streamed chat call so the model's
     /// thought summaries come back as `thought: true` parts for the status line. Never encoded here.
     var includeThoughts: Bool = false
-    /// #1019: a guard's cloud call (`CloudAuxiliaryEngine`) sets this so the user's per-tier thinking
-    /// level never reaches it, whatever model it falls back to. Never encoded.
+    /// #1019, #1020: a guard's cloud call (`CloudAuxiliaryEngine`) sets this so the user's per-tier
+    /// thinking level (Gemini) or reasoning effort (OpenAI) never reaches it, whatever model it falls
+    /// back to. Never encoded.
     var ignoresTierThinkingLevel: Bool = false
     /// #314 PR 7: Anthropic's `output_config.effort` (and, #1020, OpenAI's `reasoning_effort`), the user's reasoning-effort setting for the
     /// call's tier. Nil sends none, so the model keeps its own default. The client sends it only to
