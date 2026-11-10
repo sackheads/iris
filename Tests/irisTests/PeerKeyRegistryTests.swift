@@ -172,6 +172,61 @@ struct PeerKeyRegistryTests {
         }
     }
 
+    // Peer review (PR #1036 Finding 3): a key equal to one of Ed25519's 8 known small-order
+    // point encodings makes `isValidSignature` return true independent of what was actually
+    // signed — "the trust root" of this whole core. Each wire string below is the base64 wire
+    // form of one of the 8 small-order compressed points (identity, the order-2 point, the two
+    // order-4 points, and the four order-8 points), derived and checked independently (see the
+    // implementation comment on `PeerKeyRegistry.smallOrderEncodings`) rather than taken from
+    // memory.
+    private static let smallOrderWireKeys: [String] = [
+        "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIA=",
+        "ed25519:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "ed25519:JuiVj8KyJ7BFw/SJ8u+Y8NXfrAXTxjM5sTgCiG1T/AU=",
+        "ed25519:JuiVj8KyJ7BFw/SJ8u+Y8NXfrAXTxjM5sTgCiG1T/IU=",
+        "ed25519:xxdqcD1N2E+6PAt2DRBnDyogU/osOczGTsf9d5KsA3o=",
+        "ed25519:xxdqcD1N2E+6PAt2DRBnDyogU/osOczGTsf9d5KsA/o=",
+        "ed25519:7P///////////////////////////////////////38=",
+    ]
+
+    @Test("enroll of a small-order Ed25519 point fails closed, the same as unparseable key material")
+    func enrollRejectsSmallOrderKey() throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        for (index, wire) in Self.smallOrderWireKeys.enumerated() {
+            #expect(throws: RegistryError.unavailable) {
+                try registry.enroll(RegisteredKey(profile: "clomp", keyId: "small-order-\(index)", publicKey: wire))
+            }
+        }
+        // None of the rejected attempts persisted anything.
+        #expect(try registry.list(profile: "clomp").isEmpty)
+    }
+
+    // The registry file is hand-writable, so a small-order key can reach disk by a path other
+    // than `enroll` (a stale file from before this check existed, or one hand-edited) — `resolve`
+    // must refuse it too, the same way `badKeyMaterialFailsClosed` covers other unusable key
+    // material planted directly into the file.
+    @Test("a stale file with a small-order key fails closed at resolve, not as a clean miss")
+    func resolveRejectsStaleSmallOrderKey() throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let staleRecords = Self.smallOrderWireKeys.enumerated().map { index, wire in
+            RegisteredKey(profile: "clomp", keyId: "small-order-\(index)", publicKey: wire)
+        }
+        try FileManager.default.createDirectory(at: registry.directory, withIntermediateDirectories: true)
+        let data = try JSONEncoder().encode(staleRecords)
+        try data.write(to: registry.directory.appendingPathComponent("clomp.json"))
+
+        for record in staleRecords {
+            #expect(throws: RegistryError.unavailable) {
+                _ = try registry.resolve(principal: "clomp", keyId: record.keyId)
+            }
+        }
+    }
+
     // Review finding: AGENTS.md Invariant 3 documents that tool calls run concurrently via
     // `withTaskGroup` — this is a real, recurring race class here, not a generic worry. The
     // `withLock` serialization around `enroll`'s read-check-write must hold under real
