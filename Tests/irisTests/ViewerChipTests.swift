@@ -22,12 +22,21 @@ struct ViewerChipPolicyTests {
         let chat = try String(contentsOf: root.appendingPathComponent("ChatView.swift"), encoding: .utf8)
         #expect(chat.contains("onOpenViewer: ViewerFeatureGate.isEnabled ? {"), "the chip must stay behind the gate")
         #expect(chat.contains("content: RawHTMLSanitizer.sanitize(configuration.content)"), "the document is built from sanitized HTML")
+        // Every Swift file under Sources/ and App/, subdirectories included (#1049): a flat listing of
+        // `Sources/IrisKit` missed anything in `A2A/` or `Eval/`, so a site planted there passed.
+        let repo = PerfPaths.repoRoot()
         var sites: [String] = []
-        for file in try FileManager.default.contentsOfDirectory(atPath: root.path) where file.hasSuffix(".swift") {
-            let text = try String(contentsOf: root.appendingPathComponent(file), encoding: .utf8)
-            if text.contains("ViewerDocument(") { sites.append(file) }
+        for top in ["Sources", "App"] {
+            let base = repo.appendingPathComponent(top)
+            guard let walker = FileManager.default.enumerator(atPath: base.path) else {
+                Issue.record("cannot walk \(base.path)"); continue
+            }
+            for case let relative as String in walker where relative.hasSuffix(".swift") {
+                let text = try String(contentsOf: base.appendingPathComponent(relative), encoding: .utf8)
+                if text.contains("ViewerDocument(") { sites.append("\(top)/\(relative)") }
+            }
         }
-        #expect(sites == ["ChatView.swift"], "a second ViewerDocument construction site would bypass the sanitizer: \(sites)")
+        #expect(sites == ["Sources/IrisKit/ChatView.swift"], "a second ViewerDocument construction site would bypass the sanitizer: \(sites)")
     }
 
     @Test("html, not streaming: offered")
