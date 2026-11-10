@@ -17,6 +17,11 @@ struct GeminiStreamMapper: StreamMapper {
         var out: [LLMStreamEvent] = []
         if let candidate = chunk.candidates?.first {
             for part in candidate.content?.parts ?? [] {
+                // #1019: a thought summary is for the status line; it is not the reply.
+                if part.thought == true {
+                    if let text = part.text, !text.isEmpty { out.append(.thinkingText(text)) }
+                    continue
+                }
                 if let text = part.text {
                     out.append(.textDelta(text))
                     if let signature = part.thoughtSignature ?? part.thought_signature { out.append(.thoughtSignature(signature)) }

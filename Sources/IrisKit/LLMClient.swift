@@ -173,15 +173,25 @@ struct LLMClient {
         encoder.keyEncodingStrategy = .useDefaultKeys
         encoder.outputFormatting = [.sortedKeys]
         let body = try encoder.encode(wire)
-        guard let level = wire.thinkingLevel else { return body }
-        return try withThinkingLevel(body, level: level)
+        guard wire.thinkingLevel != nil || wire.includeThoughts else { return body }
+        return try withThinkingConfig(body, level: wire.thinkingLevel, includeThoughts: wire.includeThoughts)
     }
 
     /// `body` with Gemini's `generationConfig.thinkingConfig.thinkingLevel` set (#800).
     static func withThinkingLevel(_ body: Data, level: String) throws -> Data {
-        guard var json = try JSONSerialization.jsonObject(with: body) as? [String: Any] else { return body }
+        try withThinkingConfig(body, level: level, includeThoughts: false)
+    }
+
+    /// `body` with `generationConfig.thinkingConfig` carrying the level (#800) and, for a streamed
+    /// chat call, `includeThoughts` (#1019). Neither given leaves the body as it was.
+    static func withThinkingConfig(_ body: Data, level: String?, includeThoughts: Bool) throws -> Data {
+        guard level != nil || includeThoughts,
+              var json = try JSONSerialization.jsonObject(with: body) as? [String: Any] else { return body }
         var generation = json["generationConfig"] as? [String: Any] ?? [:]
-        generation["thinkingConfig"] = ["thinkingLevel": level]
+        var config: [String: Any] = [:]
+        if let level { config["thinkingLevel"] = level }
+        if includeThoughts { config["includeThoughts"] = true }
+        generation["thinkingConfig"] = config
         json["generationConfig"] = generation
         return try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])
     }
@@ -223,8 +233,20 @@ struct LLMClient {
         } else {
             // The missing-key check lives in `makeGeminiURLRequest`, so it throws inside the
             // metrics wrapper below and is recorded like any other failed call.
-            inner = LLMStreaming.stream(provider: "Gemini", mapper: GeminiStreamMapper()) {
-                try await self.makeGeminiURLRequest(request: request, modelName: modelName, streaming: true)
+            // #1019: the tier's thinking level and thought summaries, dropped on a route that 400s them.
+            var wanted = request
+            wanted.thinkingLevel = request.thinkingLevel ?? config.geminiThinkingLevel(for: tier)
+            wanted.includeThoughts = true
+            let key = GeminiThinkingFallback.endpointKey(authMode: config.geminiAuthMode, baseURL: config.geminiBaseURL, model: modelName)
+            let asked = wanted
+            inner = GeminiThinkingFallback.stream(key: key, level: asked.thinkingLevel, includeThoughts: true) { rung in
+                var attempt = asked
+                attempt.thinkingLevel = rung.level
+                attempt.includeThoughts = rung.includeThoughts
+                let sent = attempt
+                return LLMStreaming.stream(provider: "Gemini", mapper: GeminiStreamMapper()) {
+                    try await self.makeGeminiURLRequest(request: sent, modelName: modelName, streaming: true)
+                }
             }
         }
         // Provider latency metrics, as the plain call records them.
@@ -283,24 +305,32 @@ struct LLMClient {
                 response = try await OpenAIClient.generateContent(request: request, model: modelName, apiKey: config.openAIAPIKey, baseURL: config.openAIBaseURL,
                                                                   session: providerSession)
             } else {
-                // Fallback to Gemini
-                let urlRequest = try await makeGeminiURLRequest(request: request, modelName: modelName, streaming: false)
-                let (data, urlResponse) = try await providerSession.data(for: urlRequest)
-                
-                guard let httpResponse = urlResponse as? HTTPURLResponse else {
-                    throw URLError(.badServerResponse)
+                // Fallback to Gemini. The tier's own model only, as for Anthropic's effort: a `model`
+                // override is a guard call and does not take the user's thinking level (#1019).
+                var asked = request
+                if model == nil { asked.thinkingLevel = request.thinkingLevel ?? config.geminiThinkingLevel(for: tier) }
+                let key = GeminiThinkingFallback.endpointKey(authMode: config.geminiAuthMode, baseURL: config.geminiBaseURL, model: modelName)
+                response = try await GeminiThinkingFallback.run(key: key, level: asked.thinkingLevel, includeThoughts: false) { rung in
+                    var attempt = asked
+                    attempt.thinkingLevel = rung.level
+                    let urlRequest = try await makeGeminiURLRequest(request: attempt, modelName: modelName, streaming: false)
+                    let (data, urlResponse) = try await providerSession.data(for: urlRequest)
+
+                    guard let httpResponse = urlResponse as? HTTPURLResponse else {
+                        throw URLError(.badServerResponse)
+                    }
+
+                    if httpResponse.statusCode != 200 {
+                        // Full body goes to the console; the chat only ever sees the capped form.
+                        print("API Error (\(httpResponse.statusCode)): \(String(data: data, encoding: .utf8) ?? "<non-utf8 body>")")
+                        throw APIError.http(provider: "Gemini", statusCode: httpResponse.statusCode, body: data,
+                                            headers: httpResponse.allHeaderFields)
+                    }
+
+                    let decoder = JSONDecoder()
+                    decoder.keyDecodingStrategy = .useDefaultKeys
+                    return try decoder.decode(GeminiResponse.self, from: data)
                 }
-                
-                if httpResponse.statusCode != 200 {
-                    // Full body goes to the console; the chat only ever sees the capped form.
-                    print("API Error (\(httpResponse.statusCode)): \(String(data: data, encoding: .utf8) ?? "<non-utf8 body>")")
-                    throw APIError.http(provider: "Gemini", statusCode: httpResponse.statusCode, body: data,
-                                headers: httpResponse.allHeaderFields)
-                }
-                
-                let decoder = JSONDecoder()
-                decoder.keyDecodingStrategy = .useDefaultKeys
-                response = try decoder.decode(GeminiResponse.self, from: data)
             }
             
             let durationMs = UptimeClock.live.seconds(since: startTime) * 1000.0
