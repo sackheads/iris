@@ -4650,11 +4650,20 @@ actor IrisEngine {
     /// taints until someone decides it shouldn't. Kept short on purpose (#818 review): a tool that
     /// can return anything it didn't compose itself (an evaluator's evidence, Google's response
     /// or error body, another session's card, a restored fact's text) stays off it.
+    ///
+    /// `inbox_item` (#1026): every return in `emitToInbox` is a fixed sentence plus an id/thread id
+    /// this call itself generated (`store.inbox.newItemId()`/`newThreadId()`) — never another
+    /// session's situation, options or history. The place another session's card-like text DOES
+    /// reach a conversation — the original item's title/situation echoed to a route-back or notify
+    /// target — is a different turn entirely, the inbox-answer delivery path, by
+    /// `deliverInboxAnswerFrame`, which taints there directly from `item.emitterTainted`
+    /// (:1386-1388). That path never runs through `resultIsIrisOwnWords`, so adding `inbox_item`
+    /// here does not touch it.
     nonisolated static let resultIsIrisOwnWords: Set<String> = [
         "write_file", "create_skill", "update_skill", "delete_skill",
         "set_workspace", "register_directory_watcher",
         "update_user_profile", "update_soul", "update_memory", "save_fact", "reflect",
-        "rename_conversation", scheduleNextTickTool, setAlarmTool,
+        "rename_conversation", "inbox_item", scheduleNextTickTool, setAlarmTool,
     ]
 
     /// #813: a read under ~/.iris that is Iris's own standing context: SOUL, USER, memory.md,
