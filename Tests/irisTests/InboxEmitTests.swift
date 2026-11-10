@@ -241,7 +241,7 @@ struct InboxEmitTests {
         let item = try #require(try app.store.inbox.openItems().first)
         #expect(item.deadline != nil && item.vetoDefaultOptionId == "a")
 
-        _ = await runToolCall(emitCall(responseMode: "freeform", threadId: item.threadId), on: app, as: id)
+        _ = await runToolCall(emitCall(responseMode: "freeform", threadId: item.threadId, deadline: future, vetoDefault: "a"), on: app, as: id)
         let read = try #require(try app.store.inbox.item(id: item.id))
         #expect(read.responseMode == .freeform && read.deadline == nil && read.vetoDefaultOptionId == nil)
         #expect(try app.store.inbox.dueVetoItems(now: Date().addingTimeInterval(86_400 * 365)).isEmpty,
