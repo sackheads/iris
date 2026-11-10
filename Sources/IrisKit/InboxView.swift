@@ -261,10 +261,10 @@ struct InboxView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(option.label).font(.body)
                             if !option.pros.isEmpty {
-                                Text("For: " + option.pros.joined(separator: ", ")).font(.caption).foregroundColor(.green)
+                                Text("For: " + option.pros.joined(separator: ", ")).font(.caption).foregroundColor(IrisPalette.pro)
                             }
                             if !option.cons.isEmpty {
-                                Text("Against: " + option.cons.joined(separator: ", ")).font(.caption).foregroundColor(.red)
+                                Text("Against: " + option.cons.joined(separator: ", ")).font(.caption).foregroundColor(IrisPalette.con)
                             }
                         }
                     }
