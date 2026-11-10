@@ -314,21 +314,21 @@ struct AnthropicClient {
         // #314 decisions 4 and 6: the binding field travels only with its header (alone it is a
         // 400, "Extra inputs are not permitted"), and only to a model and route the table says
         // take the beta, unless this is the retry after a binding 400, which proved the model checks.
-        // Without the field no `thinking` object is sent at all, as before #314: each model keeps
-        // its own default. `block_binding` works only inside adaptive thinking, so the object is
-        // adaptive. Opus 5.5 and Fable 5.1 accept nothing but adaptive anyway, so for them it adds
-        // only the binding. Sonnet 5.5 is the one whose thinking this changes: Iris otherwise sends
-        // it no thinking object, and its `between_tools` mode rejects `block_binding`, so the retry
-        // (and every later request of that conversation, while the table says it takes the beta)
-        // runs it on adaptive thinking.
+        // `block_binding` works only inside adaptive thinking, so the object is adaptive. A model
+        // the table lists also gets `display` (below), so for those the object is always sent and
+        // the binding only adds a field; a model it does not list keeps no `thinking` object at all
+        // unless the binding needs one. Sonnet 5.5's `between_tools` mode rejects `block_binding`,
+        // so the retry (and every later request of that conversation, while the table says it takes
+        // the beta) runs it on adaptive thinking, which its requests now are from the first (#1018).
         let takesBeta = AnthropicCapabilities.takesBindingBeta(model: model, transport: transport)
         let binding = (takesBeta || request.forceBindingBeta) ? request.prefixMismatchBehavior : nil
         // #314 PR 7: `display` rides the same adaptive object, and only to a model the table says
         // takes it (thinking is always on for those, so adaptive changes nothing else); it is why
-        // the stream carries thinking text at all, since the default is "omitted".
+        // the stream carries thinking text at all, since the default is "omitted". Sent whether or
+        // not an effort was picked (#1018): "Model default" sends no effort, not no thinking.
         let effort = request.reasoningEffort.flatMap { AnthropicCapabilities.effortLevels(model: model).contains($0) ? $0 : nil }
         var thinking: [String: Any] = [:]
-        if let display = AnthropicCapabilities.thinkingDisplay(model: model, effortChosen: effort != nil) { thinking["display"] = display }
+        if let display = AnthropicCapabilities.thinkingDisplay(model: model) { thinking["display"] = display }
         if let binding { thinking["block_binding"] = ["prefix_mismatch_behavior": binding.rawValue] }
         if !thinking.isEmpty {
             thinking["type"] = "adaptive"

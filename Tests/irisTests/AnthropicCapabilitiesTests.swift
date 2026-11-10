@@ -64,13 +64,13 @@ struct AnthropicCapabilitiesTests {
         #expect(try header("claude-opus-5-5", Self.vertex) == AnthropicCapabilities.bindingBeta)
     }
 
-    @Test("the header adds nothing to the body: no thinking object, no block_binding")
+    @Test("the header adds no block_binding to the body: the thinking object is the display's alone (#1018)")
     func bodyUnchanged() throws {
         let r = GeminiRequest(contents: [Content(role: "user", parts: [Part(text: "hi")])], systemInstruction: nil, tools: nil)
         let body = String(decoding: try AnthropicClient.makeURLRequest(request: r, model: "claude-opus-5-5",
                                                                        transport: Self.direct, stream: true).httpBody ?? Data(),
                           as: UTF8.self)
-        #expect(!body.contains("thinking"))
+        #expect(body.contains("\"display\":\"summarized\""), "the default request asks for the thinking summary")
         #expect(!body.contains("block_binding"))
     }
 
