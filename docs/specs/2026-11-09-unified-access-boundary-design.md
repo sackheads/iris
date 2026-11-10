@@ -246,8 +246,9 @@ signature verification is the standard, generalizable answer.
   and can no longer impersonate a peer. The blast-radius argument that made H4 a finding (one bearer
   token → impersonate any mapped peer → inherit the union of their grants) is closed at the root.
 
-**The contract is now committed — see romar#396 (`peer-signature-spec.md`, v2) for the byte-exact wire
-format.** The earlier open item (canonical-payload shape) is retired: the reviewed design signs the
+**The contract is committed and shipping — see romar#396 (`peer-signature-spec.md`, v2) for the
+byte-exact wire format; it is implemented in the gateway/client (romar#399) with refinements through
+romar#407.** The earlier open item (canonical-payload shape) is retired: the reviewed design signs the
 **exact transmitted bytes, verify-before-parse**, with no JSON canonicalization (stock encoders do not
 agree across Python/Go/Swift). The wire frame, domain separator and codec live in romar; this doc
 records only **Iris's verifier/signer obligations** at the design level.
@@ -258,8 +259,15 @@ records only **Iris's verifier/signer obligations** at the design level.
 - **Key bound to sender, within the principal's keyset.** The signing key id must equal the envelope's
   declared sender profile (mismatch ⇒ reject), and a key is resolved **strictly within that principal's
   registered keyset**, never a flat global key map — otherwise an enrolled peer could sign as another.
-- **Iris-side verifier MUSTs** (the ones that land on our code): recipient binding (the envelope is
-  addressed to `iris`); a present replay nonce and a strict RFC 3339 UTC timestamp; **reject duplicate
+- **Iris-side verifier MUSTs** (the ones that land on our code): recipient binding, which splits by
+  direction (romar §5.1) — a delivered task or cancel (an inbound `message`/`cancel`) must be addressed
+  to `iris`, while a response event (`status-update`/`artifact-update`) carries no recipient and is
+  instead bound to the **outstanding request it answers** (its sender, task id and, when present,
+  correlation id must match a request Iris actually issued, else reject `events_request_mismatch`),
+  because a relayed response is forgeable exactly like an inbound task; **kind↔channel binding** — a
+  frame's kind must be one its arrival channel permits (romar pins the table), so a signed event cannot
+  be replayed as a task or vice versa (`channel_kind_mismatch`); a present replay nonce and a strict
+  RFC 3339 UTC timestamp; **reject duplicate
   JSON object keys** (whether Swift's `JSONSerialization`/`JSONDecoder` silently keep last-wins is
   **unverified** — the explicit scan is required regardless, and the macOS recheck below must cover
   duplicate-key behaviour, not just the outer frame); derive tier/permissions from Iris's **local** key/grant registry, never from the
@@ -268,7 +276,9 @@ records only **Iris's verifier/signer obligations** at the design level.
   unless the user opted into a separate explicit "the gateway" profile. Every rejection logs a reason code.
 - **Replay: deadline-bounded, not a fixed window.** The nonce goes in a **persisted, per-peer-bounded**
   seen-set, written **before** the task executes; the timestamp may not be in the future beyond a small
-  skew; a required per-task deadline bounds lifetime (capped at 24 h). No `abs(now − ts)` window — a
+  skew; a deadline is **required on delivered tasks** (`message` kind) and bounds lifetime, capped at
+  `ts + 24 h`; the other kinds carry no deadline and are bounded by `ts + 24 h` instead. No
+  `abs(now − ts)` window — a
   queued task can sit in the relay up to its deadline while the laptop sleeps, so a fixed window (correct
   for always-on peers) would reject every queued task on wake. A full seen-set rejects rather than
   evicts; a duplicate is rejected **and acked** (a nack makes the relay redeliver forever).
