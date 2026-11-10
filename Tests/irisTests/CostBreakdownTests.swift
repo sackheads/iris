@@ -81,7 +81,7 @@ struct CostBreakdownTests {
         #expect(!CostBreakdown.make(usage: usage, cost: cost(rates)).caveats.contains { $0.contains("1-hour") || $0.contains("No exact rate") })
         var u = usage; u.cacheWrite1hTokenCount = 40_000
         let b = CostBreakdown.make(usage: u, cost: cost(rates, source: .fallback, estimated: true, note: "set a rate in Settings"))
-        #expect(b.caveats.contains { $0.contains("40000") && $0.contains("1-hour") && $0.contains("bill above the rate") })
+        #expect(b.caveats.contains { $0.contains("40,000") && $0.contains("1-hour") && $0.contains("bill above the rate") })
         #expect(b.caveats.contains { $0.contains("No exact rate is known") && $0.contains("set a rate in Settings") })
         #expect(b.rateSourceNote == "fallback")
     }
