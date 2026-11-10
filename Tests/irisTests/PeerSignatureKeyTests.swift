@@ -60,6 +60,51 @@ struct PeerSignatureKeyTests {
         #expect(raw.count == 32)
     }
 
+    /// Minimal shape of `Fixtures/peer-signature-conformance.json` — only the two fields this
+    /// test needs, so a change elsewhere in the fixture can't break decoding here.
+    private struct ConformanceKeyPair: Decodable {
+        let public_hex: String
+        let private_hex: String
+    }
+
+    private static func dataFromHex(_ hex: String) -> Data {
+        var bytes = [UInt8]()
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            bytes.append(UInt8(hex[index..<next], radix: 16)!)
+            index = next
+        }
+        return Data(bytes)
+    }
+
+    // Review finding: the format was previously checked only by an uncommitted, one-off script
+    // during development, so a regression (dropped padding, unpadded base64, hex instead of
+    // base64) would have passed every committed test while silently breaking interop with
+    // romar's peers. This pins `publicKeyWireString` against the vendored conformance fixture's
+    // own known bytes — not a round-trip of a freshly minted key — by constructing the key from
+    // the fixture's `private_hex` seed (independently confirmed via `openssl pkey -text_pub` to
+    // derive exactly `public_hex`, so this isn't circular) and checking the wire string against
+    // a literal built straight from `public_hex`.
+    @Test("publicKeyWireString matches the vendored conformance fixture's own known key bytes")
+    func wireStringMatchesVendoredFixture() throws {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/peer-signature-conformance.json")
+        let data = try Data(contentsOf: fixtureURL)
+        let fixture = try JSONDecoder().decode(ConformanceKeyPair.self, from: data)
+
+        let seed = Self.dataFromHex(fixture.private_hex)
+        #expect(seed.count == 32)
+        let key = try #require(IrisSigningKey(base64Seed: seed.base64EncodedString()))
+
+        let expectedPublicKey = Self.dataFromHex(fixture.public_hex)
+        #expect(expectedPublicKey.count == 32)
+        let expectedWireString = "ed25519:" + expectedPublicKey.base64EncodedString()
+
+        #expect(key.publicKeyWireString == expectedWireString)
+    }
+
     @Test("a signature verifies for the signed message and fails for a one-byte-flipped message")
     func signatureVerifies() throws {
         let store = freshStore()
