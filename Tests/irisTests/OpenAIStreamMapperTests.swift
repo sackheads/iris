@@ -67,7 +67,10 @@ struct OpenAIStreamMapperTests {
             #"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"t","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
             "[DONE]"
         ])
+        // #1020: each fragment is also shown in the status line as it arrives.
         #expect(events == [
+            .thinkingText("think "),
+            .thinkingText("more"),
             .textDelta("answer"),
             .functionCall(FunctionCall(name: "t", args: [:], id: "c", thought_signature: "think more", thoughtSignature: "think more")),
             .thoughtSignature("think more"),
