@@ -20,6 +20,8 @@ struct GeminiStreamMapper: StreamMapper {
                 // #1019: a thought summary is for the status line; it is not the reply.
                 if part.thought == true {
                     if let text = part.text, !text.isEmpty { out.append(.thinkingText(text)) }
+                    // A signature is never dropped: a later part's own replaces it (#1019 review).
+                    if let signature = part.thoughtSignature ?? part.thought_signature { out.append(.thoughtSignature(signature)) }
                     continue
                 }
                 if let text = part.text {

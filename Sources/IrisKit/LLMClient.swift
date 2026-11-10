@@ -318,7 +318,10 @@ struct LLMClient {
                 var asked = request
                 asked.thinkingLevel = Self.resolvedThinkingLevel(request: request, tier: tier, config: config, modelOverride: model != nil)
                 let key = GeminiThinkingFallback.endpointKey(authMode: config.geminiAuthMode, baseURL: config.geminiBaseURL, model: modelName)
-                response = try await GeminiThinkingFallback.run(key: key, level: asked.thinkingLevel, includeThoughts: false) { rung in
+                // A guard's cloud call owns its level: `CloudAuxiliaryEngine.sendAsking` (#800) catches the
+                // 400, remembers it and tells the person, so no ladder here may answer it first.
+                response = try await GeminiThinkingFallback.run(key: key, level: asked.thinkingLevel, includeThoughts: false,
+                                                                laddered: !asked.ignoresTierThinkingLevel) { rung in
                     var attempt = asked
                     attempt.thinkingLevel = rung.level
                     let urlRequest = try await makeGeminiURLRequest(request: attempt, modelName: modelName, streaming: false)

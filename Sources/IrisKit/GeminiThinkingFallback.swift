@@ -65,8 +65,11 @@ enum GeminiThinkingFallback {
 
     /// Runs `send` down the ladder until a rung is accepted. A non-400 error, or a 400 on the last
     /// rung, throws the first rung's error: that is the request the person asked for.
-    static func run<T>(key: String, level: String?, includeThoughts: Bool,
+    /// `laddered: false` sends the one request as asked and lets a 400 through: a caller that
+    /// answers the 400 itself (the guard's `sendAsking`, #800) must see it.
+    static func run<T>(key: String, level: String?, includeThoughts: Bool, laddered: Bool = true,
                        send: (Attempt) async throws -> T) async throws -> T {
+        guard laddered else { return try await send(Attempt(level: level, includeThoughts: includeThoughts)) }
         let rungs = ladder(key: key, level: level, includeThoughts: includeThoughts)
         var firstError: Error?
         for (index, rung) in rungs.enumerated() {
