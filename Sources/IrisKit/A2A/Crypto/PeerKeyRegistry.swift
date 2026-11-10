@@ -110,6 +110,12 @@ struct PeerKeyRegistry: Sendable {
     /// under that profile with a different `publicKey`. Re-enrolling the exact same (keyId,
     /// publicKey) pair is a no-op, not an error, so re-running an enrollment step is safe.
     func enroll(_ key: RegisteredKey) throws {
+        // Unlike `resolve` (nil for an unsafe name — attacker-controlled wire data), this throws:
+        // `key.profile` here is always a caller-supplied value, never wire data pre-signature, and
+        // no legitimate caller can produce an invalid one (profiles are created and validated
+        // through `AgentProfileStore.isValidName` elsewhere). Reusing `.unavailable` for "can't
+        // locate the file safely" is a slight overload of its documented "damaged file" meaning,
+        // accepted because this path is unreachable for any real caller.
         guard Self.isSafeName(key.profile) else { throw RegistryError.unavailable }
         try withLock(for: key.profile) {
             var records = try load(key.profile)
@@ -128,6 +134,9 @@ struct PeerKeyRegistry: Sendable {
     /// that profile's keyset. Takes effect for the very next `resolve` call. A no-op if no such
     /// key was registered.
     func revoke(profile: String, keyId: String?) throws {
+        // See the comment on the same guard in `enroll`: this is caller input, not wire data, so
+        // throwing (rather than `resolve`'s nil-for-unsafe-name) is fine — no real caller path
+        // reaches an invalid name here.
         guard Self.isSafeName(profile) else { throw RegistryError.unavailable }
         try withLock(for: profile) {
             var records = try load(profile)
@@ -139,6 +148,7 @@ struct PeerKeyRegistry: Sendable {
 
     /// Every key registered for `profile`, or `[]` if none have been enrolled yet.
     func list(profile: String) throws -> [RegisteredKey] {
+        // See the comment on the same guard in `enroll`: caller input, not wire data.
         guard Self.isSafeName(profile) else { throw RegistryError.unavailable }
         return try load(profile)
     }
