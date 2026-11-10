@@ -212,6 +212,9 @@ final class ConversationStore: Sendable {
     /// Pending human-decision items and their threads (#920): independent of any conversation, so
     /// a reply outlives a dead emitter.
     let inbox: InboxStore
+    /// The replay seen-set `PeerSignatureVerifier` checks every inbound A2A frame against (#974
+    /// H4 Task 5). `isOnDisk` matters here: see `A2ASeenLedger`'s own doc comment.
+    let a2aSeen: A2ASeenLedger
 
     private init(writer: any DatabaseWriter, path: URL?, alreadyMigrated: Bool = false,
                  openFailure: String? = nil) throws {
@@ -223,6 +226,7 @@ final class ConversationStore: Sendable {
         self.peers = PeerLedger(writer: writer)
         self.artifacts = ArtifactLedger(writer: writer)
         self.inbox = InboxStore(writer: writer)
+        self.a2aSeen = A2ASeenLedger(writer: writer, isOnDisk: path != nil)
     }
 
     static func inMemory() throws -> ConversationStore {
@@ -815,6 +819,22 @@ final class ConversationStore: Sendable {
         // as never viewed, so every existing item starts out unread once.
         m.registerMigration("v38_inbox_viewed") { db in
             try db.alter(table: "inbox_items") { t in t.add(column: "viewedAt", .datetime) }
+        }
+        // #974 H4 Task 5: the persisted replay seen-set `PeerSignatureVerifier` (Task 4) checks
+        // every inbound A2A frame against. `retain_until` is stored and compared as a
+        // `timeIntervalSince1970` double (`A2ASeenLedger`), not through GRDB's default
+        // Date-as-text encoding, so the boundary comparisons there are exact rather than rounded
+        // to that format's millisecond granularity.
+        m.registerMigration("v39_a2a_seen") { db in
+            try db.create(table: "seen_nonces") { t in
+                t.autoIncrementedPrimaryKey("seq")
+                t.column("peer", .text).notNull()
+                t.column("envelope_id", .text).notNull()
+                t.column("retain_until", .double).notNull()
+            }
+            try db.create(index: "seen_nonces_peer_envelope", on: "seen_nonces",
+                          columns: ["peer", "envelope_id"], unique: true)
+            try db.create(index: "seen_nonces_retain_until", on: "seen_nonces", columns: ["retain_until"])
         }
         return m
     }
