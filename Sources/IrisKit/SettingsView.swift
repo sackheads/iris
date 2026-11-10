@@ -336,10 +336,13 @@ struct SettingsView: View {
                             .help("Overrides the default openai endpoint. Useful for deepseek or local compatible servers.")
                         TextField("Easy Subagent Model", text: $config.openaiModelEasy)
                             .help("Used for simple and repetitive tasks.")
+                        OpenAIReasoningEffortPicker(title: "Easy reasoning effort", selection: $config.openaiEffortEasy)
                         TextField("Primary / Medium Model", text: $config.openaiModelMedium)
                             .help("Used for standard generation and reasoning.")
+                        OpenAIReasoningEffortPicker(title: "Medium reasoning effort", selection: $config.openaiEffortMedium)
                         TextField("Hard Subagent Model", text: $config.openaiModelHard)
                             .help("Used for complex reasoning and evaluation.")
+                        OpenAIReasoningEffortPicker(title: "Hard reasoning effort", selection: $config.openaiEffortHard)
                     }
 
                     modelToolsView()
@@ -1691,6 +1694,23 @@ private struct GeminiThinkingLevelPicker: View {
             ForEach(ConfigManager.geminiThinkingLevels, id: \.self) { Text($0.capitalized).tag($0) }
         }
         .help("How hard the model thinks before it answers (Gemini 3 and later). Model default sends nothing. Not every model takes every level (Gemini 3 Pro takes low and high, for one): a model that answers 400 is asked again without the level, and the level is dropped for it until Iris restarts.")
+    }
+}
+
+/// One OpenAI tier's reasoning effort (#1020). It lists every word the API has used, since no model
+/// list is published: a model that takes no effort, or not this word, answers 400 and is asked again
+/// without it. "Model default" sends nothing.
+private struct OpenAIReasoningEffortPicker: View {
+    let title: String
+    @Binding var selection: String
+
+    var body: some View {
+        Picker(title, selection: Binding(get: { ConfigManager.openaiReasoningEfforts.contains(selection) ? selection : "" },
+                                          set: { selection = $0 })) {
+            Text("Model default").tag("")
+            ForEach(ConfigManager.openaiReasoningEfforts, id: \.self) { Text($0.capitalized).tag($0) }
+        }
+        .help("How hard a reasoning model thinks before it answers (sent as reasoning_effort). Model default sends nothing. Not every model takes every word (minimal is gpt-5's, none and xhigh are newer, o-series stops at high, and a non-reasoning model or a local server takes none): a model that answers 400 is asked again without it, and the effort is dropped for that model until Iris restarts. Unattended jobs, goal loops and subagents use the same setting.")
     }
 }
 

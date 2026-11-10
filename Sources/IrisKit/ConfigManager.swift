@@ -284,6 +284,34 @@ class ConfigManager: @unchecked Sendable {
         didSet { store.set(openaiModelHard, forKey: "OPENAI_MODEL_HARD") }
     }
     
+    /// #1020: the reasoning effort each OpenAI tier asks for (Chat Completions `reasoning_effort`).
+    /// Empty, the default, sends none, so the model keeps its own. The word is checked against
+    /// `openaiReasoningEfforts` only; which model takes which is the API's answer (`minimal` is
+    /// gpt-5's, `none` and `xhigh` are newer, the o-series stops at high), and a 400 drops the
+    /// effort for that model (`OpenAIEffortFallback`).
+    static let openaiReasoningEfforts = ["none", "minimal", "low", "medium", "high", "xhigh"]
+    var openaiEffortEasy: String {
+        didSet { store.set(openaiEffortEasy, forKey: "OPENAI_EFFORT_EASY") }
+    }
+    var openaiEffortMedium: String {
+        didSet { store.set(openaiEffortMedium, forKey: "OPENAI_EFFORT_MEDIUM") }
+    }
+    var openaiEffortHard: String {
+        didSet { store.set(openaiEffortHard, forKey: "OPENAI_EFFORT_HARD") }
+    }
+
+    /// The effort to send for an OpenAI call on `tier`, or nil: a word outside `openaiReasoningEfforts`
+    /// (hand-edited, or empty) reads as none.
+    func openaiReasoningEffort(for tier: ModelTier) -> String? {
+        let effort: String
+        switch tier {
+        case .easy: effort = openaiEffortEasy
+        case .medium: effort = openaiEffortMedium
+        case .hard: effort = openaiEffortHard
+        }
+        return Self.openaiReasoningEfforts.contains(effort) ? effort : nil
+    }
+
     func getModel(for tier: ModelTier) -> String {
         switch primaryProvider {
         case LLMProvider.anthropic.rawValue:
@@ -704,6 +732,9 @@ class ConfigManager: @unchecked Sendable {
         self.openaiModelEasy = resolveModel(key: "OPENAI_MODEL_EASY", provider: "OpenAI", migrated: oldEasy, fallback: "gpt-5.6-luna")
         self.openaiModelMedium = resolveModel(key: "OPENAI_MODEL_MEDIUM", provider: "OpenAI", migrated: oldMedium, fallback: "gpt-5.6-terra")
         self.openaiModelHard = resolveModel(key: "OPENAI_MODEL_HARD", provider: "OpenAI", migrated: oldHard, fallback: "gpt-5.6-sol")
+        self.openaiEffortEasy = saved.string(forKey: "OPENAI_EFFORT_EASY") ?? ""
+        self.openaiEffortMedium = saved.string(forKey: "OPENAI_EFFORT_MEDIUM") ?? ""
+        self.openaiEffortHard = saved.string(forKey: "OPENAI_EFFORT_HARD") ?? ""
         
         var gClientId = ""
         migrate(key: "GOOGLE_CLIENT_ID", dest: &gClientId)

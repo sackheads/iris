@@ -26,7 +26,13 @@ struct OpenAIStreamMapper: StreamMapper {
         if let choice = (json["choices"] as? [[String: Any]])?.first {
             if let delta = choice["delta"] as? [String: Any] {
                 if let text = delta["content"] as? String, !text.isEmpty { out.append(.textDelta(text)) }
-                if let r = delta["reasoning_content"] as? String { reasoning += r }
+                if let r = delta["reasoning_content"] as? String {
+                    reasoning += r
+                    if !r.isEmpty { out.append(.thinkingText(r)) }
+                }
+                // #1020: Ollama and OpenRouter name the same stream `reasoning`. It is shown, not
+                // kept: only `reasoning_content` round-trips as the thought signature.
+                if let r = delta["reasoning"] as? String, !r.isEmpty { out.append(.thinkingText(r)) }
                 for fragment in delta["tool_calls"] as? [[String: Any]] ?? [] {
                     let index = fragment["index"] as? Int ?? 0
                     var call = calls[index] ?? Call()

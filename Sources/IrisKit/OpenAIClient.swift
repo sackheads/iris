@@ -125,6 +125,9 @@ struct OpenAIClient {
             body["prompt_cache_key"] = ConversationReader.utf8Prefix(key, maxBytes: 64)
         }
         
+        // #1020: the tier's reasoning effort; `LLMClient` sets it for the direct OpenAI route only.
+        if let effort = request.reasoningEffort, !effort.isEmpty { body["reasoning_effort"] = effort }
+
         if let tools = request.tools, let fds = tools.first?.functionDeclarations {
             var openAITools = [[String: Any]]()
             for fd in fds {
