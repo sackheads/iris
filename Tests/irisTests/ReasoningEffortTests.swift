@@ -59,10 +59,27 @@ struct ReasoningEffortTests {
         #expect(u.value(forHTTPHeaderField: "anthropic-beta") == AnthropicCapabilities.bindingBeta)   // the binding beta only
     }
 
-    @Test("with no effort picked the request has no thinking object, as before", arguments: ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5"])
-    func unchangedUntilPicked(model: String) throws {
+    @Test("with no effort picked the request still asks for summarized adaptive thinking, and sends no effort (#1018)", arguments: ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5"])
+    func displayAtDefaultEffort(model: String) throws {
         let b = try body(model, effort: nil)
-        #expect(b["thinking"] == nil && b["output_config"] == nil)
+        let thinking = try #require(b["thinking"] as? [String: Any], "a default-effort user sees live thinking too")
+        #expect(thinking["type"] as? String == "adaptive")
+        #expect(thinking["display"] as? String == "summarized")
+        #expect(thinking["block_binding"] == nil, "the binding is its own beta and is not implied")
+        #expect(b["output_config"] == nil, "Model default still sends no effort")
+    }
+
+    @Test("a model the table does not list gets no thinking object at default effort either", arguments: ["claude-made-up-9", "claude-haiku-4-5-20251001", "claude-sonnet-5"])
+    func noDisplayForUnknownAtDefault(model: String) throws {
+        #expect(try body(model, effort: nil)["thinking"] == nil)
+    }
+
+    @Test("thinkingDisplay is the table's for a listed model and nil for any other (#1018)")
+    func displayFollowsTheTable() {
+        for model in ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5"] {
+            #expect(AnthropicCapabilities.thinkingDisplay(model: model) == "summarized")
+        }
+        #expect(AnthropicCapabilities.thinkingDisplay(model: "claude-haiku-4-5-20251001") == nil)
     }
 
     @Test("display and the binding share one thinking object")

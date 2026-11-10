@@ -58,11 +58,13 @@ enum AnthropicCapabilities {
         thinkingSupport[key(model)]?.effortLevels ?? []
     }
 
-    /// The `thinking.display` mode to request, or nil to send none. It goes out only with a
-    /// user-picked effort (`effortChosen`): a user who picks nothing sees the request they always
-    /// had, which carries no `thinking` object unless the binding needs one (ruling 2). Whether
-    /// the default should also ask for a summary is Brian's call, raised in the PR.
-    static func thinkingDisplay(model: String, effortChosen: Bool) -> String? {
-        effortChosen ? thinkingSupport[key(model)]?.display : nil
+    /// The `thinking.display` mode to request, or nil to send none: the table's, for a model it
+    /// lists, whether or not an effort was picked (#1018). The stream carries thinking text only
+    /// when the request asks for a display, because the API's default is "omitted"; gating it on
+    /// a picked effort left every user at "Model default" with no live thinking. It rides an
+    /// adaptive `thinking` object, which is what those models run anyway. A model the table does
+    /// not list gets nil, so nothing new goes to it.
+    static func thinkingDisplay(model: String) -> String? {
+        thinkingSupport[key(model)]?.display
     }
 }
