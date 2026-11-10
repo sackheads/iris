@@ -59,8 +59,14 @@ struct PeerKeyRegistry: Sendable {
         self.paths = paths
     }
 
-    /// `config/a2a-peers/`. Already inside `IrisPaths.protectedWriteDirs` (via `configDir`), so
-    /// no tool call or model-driven write can plant or alter a trusted peer key here.
+    /// `config/a2a-peers/`. Already inside `IrisPaths.protectedWriteDirs` (via `configDir`), the
+    /// same boundary as the rest of `config/` — no stronger a guarantee for this registry
+    /// specifically (peer review, PR #1036 Finding 2). That boundary: a `write_file` call into
+    /// this directory always asks and can never be covered by a standing grant; a shell command
+    /// writing here (e.g. `echo '[...]' > ~/.iris/config/a2a-peers/x.json`) is judged exactly like
+    /// any other shell command — asked unless an allowlist, grant or auto-approve covers it. A
+    /// planted key here would be the one thing that breaks this whole core's trust model, so this
+    /// boundary matters even though it is not specific to this file.
     var directory: URL { paths.a2aPeersDir }
 
     private static let wirePrefix = "ed25519:"
@@ -80,9 +86,38 @@ struct PeerKeyRegistry: Sendable {
         directory.appendingPathComponent(name + ".json")
     }
 
+    /// The 8 known small-order Ed25519 point encodings (the torsion subgroup of order dividing 8
+    /// under the curve's cofactor) — order-1 (identity), the one order-2 point, the two order-4
+    /// points, and the four order-8 points, each as its canonical 32-byte compressed encoding.
+    /// `Curve25519.Signing.PublicKey(rawRepresentation:)` only checks the byte count, not whether
+    /// the point has full order, so a key equal to one of these can make `isValidSignature`
+    /// return true independent of what was actually signed (peer review, PR #1036 Finding 3 — "I
+    /// would not defer this one; it is the trust root"). Derived and verified independently here
+    /// rather than trusted from memory: generated via the curve's own group law (a random curve
+    /// point scaled by the prime-subgroup order ℓ lands in the 8-torsion subgroup; its 8 multiples
+    /// are exactly these 8 points), with the decompression/arithmetic used to derive them checked
+    /// against the published Ed25519 base point's x-coordinate before trusting the result.
+    private static let smallOrderEncodings: Set<Data> = [
+        Data([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+        Data([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80]),
+        Data([0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+        Data([0x26, 0xe8, 0x95, 0x8f, 0xc2, 0xb2, 0x27, 0xb0, 0x45, 0xc3, 0xf4, 0x89, 0xf2, 0xef, 0x98, 0xf0, 0xd5, 0xdf, 0xac, 0x05, 0xd3, 0xc6, 0x33, 0x39, 0xb1, 0x38, 0x02, 0x88, 0x6d, 0x53, 0xfc, 0x05]),
+        Data([0x26, 0xe8, 0x95, 0x8f, 0xc2, 0xb2, 0x27, 0xb0, 0x45, 0xc3, 0xf4, 0x89, 0xf2, 0xef, 0x98, 0xf0, 0xd5, 0xdf, 0xac, 0x05, 0xd3, 0xc6, 0x33, 0x39, 0xb1, 0x38, 0x02, 0x88, 0x6d, 0x53, 0xfc, 0x85]),
+        Data([0xc7, 0x17, 0x6a, 0x70, 0x3d, 0x4d, 0xd8, 0x4f, 0xba, 0x3c, 0x0b, 0x76, 0x0d, 0x10, 0x67, 0x0f, 0x2a, 0x20, 0x53, 0xfa, 0x2c, 0x39, 0xcc, 0xc6, 0x4e, 0xc7, 0xfd, 0x77, 0x92, 0xac, 0x03, 0x7a]),
+        Data([0xc7, 0x17, 0x6a, 0x70, 0x3d, 0x4d, 0xd8, 0x4f, 0xba, 0x3c, 0x0b, 0x76, 0x0d, 0x10, 0x67, 0x0f, 0x2a, 0x20, 0x53, 0xfa, 0x2c, 0x39, 0xcc, 0xc6, 0x4e, 0xc7, 0xfd, 0x77, 0x92, 0xac, 0x03, 0xfa]),
+        Data([0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f]),
+    ]
+
+    /// `nil` for anything that isn't valid Ed25519 key material in romar's wire form, AND for a
+    /// small-order point (above) even though that *is* 32 bytes of validly-shaped key material —
+    /// a small-order public key breaks `isValidSignature`'s soundness, so this registry must never
+    /// hand one to a verifier. Checked at both `enroll` (refuse to persist one) and `resolve`
+    /// (refuse to resolve one, catching a stale or hand-edited file that already has one), since
+    /// both call through here.
     private static func parsePublicKey(_ wire: String) -> Curve25519.Signing.PublicKey? {
         guard wire.hasPrefix(wirePrefix) else { return nil }
         guard let data = Data(base64Encoded: String(wire.dropFirst(wirePrefix.count))) else { return nil }
+        guard !smallOrderEncodings.contains(data) else { return nil }
         return try? Curve25519.Signing.PublicKey(rawRepresentation: data)
     }
 
@@ -117,6 +152,11 @@ struct PeerKeyRegistry: Sendable {
         // locate the file safely" is a slight overload of its documented "damaged file" meaning,
         // accepted because this path is unreachable for any real caller.
         guard Self.isSafeName(key.profile) else { throw RegistryError.unavailable }
+        // Refuse to persist key material `parsePublicKey` would refuse to resolve — in
+        // particular a small-order point (peer review, PR #1036 Finding 3): persisting one and
+        // only discovering it at the next `resolve` would leave a trusted-looking record on disk
+        // that can never actually verify anything.
+        guard Self.parsePublicKey(key.publicKey) != nil else { throw RegistryError.unavailable }
         try withLock(for: key.profile) {
             var records = try load(key.profile)
             if let existing = records.first(where: { $0.keyId == key.keyId }) {
