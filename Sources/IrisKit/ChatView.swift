@@ -331,6 +331,7 @@ struct ChatView: View {
                             return [NSItemProvider(object: text as NSString)]
                         })
                         .background(Color(NSColor.textBackgroundColor))
+                        .hardTopScrollEdge()
                         // #703: a click in the transcript takes focus from the composer, so Cmd-C
                         // reaches the copy handler above instead of beeping in an empty composer.
                         .background(TranscriptFocusAnchor(enabled: !conv.messages.isEmpty))
@@ -490,6 +491,7 @@ struct ChatView: View {
                 }
                 .background(Color(NSColor.textBackgroundColor))
                 .navigationTitle(WindowTitle.safe(conv.title))
+                .solidTitlebarBacking()
                 .toolbar {
                     if conv.tokenUsage.totalTokenCount > 0 {
                         ToolbarItem(placement: .automatic) {
