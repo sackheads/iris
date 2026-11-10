@@ -83,7 +83,7 @@ struct CostBreakdown: Equatable {
         var caveats = ["An estimate, not a bill. The whole conversation is priced at \(cost.model)'s rates, its current model: a tier switched mid-conversation reprices all of it.",
                        "Subagents' tokens sit in their own conversations and are not included."]
         if (usage.cacheWrite1hTokenCount ?? 0) > 0 {
-            caveats.append("\(usage.cacheWrite1hTokenCount ?? 0) of the cache-write tokens were 1-hour writes, which bill above the rate used here.")
+            caveats.append("\(tokens(usage.cacheWrite1hTokenCount)) of the cache-write tokens were 1-hour writes, which bill above the rate used here.")
         }
         if cost.rate.estimated {
             caveats.append("No exact rate is known for this model: \(cost.rate.note ?? "a fallback rate stands in").")
