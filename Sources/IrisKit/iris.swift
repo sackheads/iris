@@ -1385,7 +1385,9 @@ actor IrisEngine {
             """
         }
         var how: [String] = []
-        if let id = answer.chosenOptionId, let n = item.options.firstIndex(where: { $0.id == id }) { how.append("He chose option \(n + 1).") }
+        if let id = answer.chosenOptionId, let n = item.options.firstIndex(where: { $0.id == id }) {
+            how.append("He chose option \(n + 1)" + (plainOptionId(id) ? " (id \(id))." : "."))
+        }
         if let text = answer.freeText, !text.isEmpty { how.append("He wrote: \(text)") }
         return """
         Inbox notice: Brian answered item \(item.id). \(how.joined(separator: " "))
