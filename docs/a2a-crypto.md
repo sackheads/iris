@@ -26,9 +26,13 @@ of its own.
   registry that only a person enrolls by hand — never from anything a wire frame claims about
   itself, and never from a gateway's own say-so. Key resolution is scoped to the principal a frame
   claims: a key registered under one principal can never authenticate a different one.
-- **Bidirectional.** Iris generates and keeps its own Ed25519 signing key (one per build identity —
-  a dev build and the release build sign as different keys, so a peer enrolls the right one) and
-  signs its own outbound frames the same way it verifies inbound ones.
+- **Bidirectional, with outbound reliance still gated.** Iris generates and keeps its own Ed25519
+  signing key (one per build identity — a dev build and the release build sign as different keys,
+  so a peer enrolls the right one) and signs its own outbound frames the same way it verifies
+  inbound ones. The signer exists and works today, but Iris does not yet *rely* on it for reply
+  integrity toward a peer — that reliance is gated pending romar#403, per this core's own plan.
+  Until that gate lifts, treat only the inbound direction (what the rest of this page describes) as
+  end-to-end trustworthy; outbound signing is not yet the other half of a closed loop.
 
 ## Where the pieces live
 
@@ -55,9 +59,13 @@ checking, read romar's `peer-signature-spec.md`, not this page.
 
 ## Enrollment
 
-A person enrolls a peer's public key by hand, per profile — there is no automatic discovery and no
-path from a wire frame to a newly-trusted key. Iris's own public key, for a peer to enroll on their
-end, is shown via `IrisSigningKeyStore.publicKeyWireString()`.
+`PeerKeyRegistry.enroll()` is API-only today — there is no UI for it yet, and no automatic
+discovery or path from a wire frame to a newly-trusted key; a future enrollment surface is what
+would call it to add a peer's public key by hand, per profile. Likewise,
+`IrisSigningKeyStore.publicKeyWireString()` is the capability this core exposes for a future
+enrollment surface to display or otherwise hand to a peer — it is not wired into any UI yet, so
+"a person enrolls a key" and "a key is shown" both describe what this core makes possible, not
+something usable today.
 
 `config/a2a-peers/` is copied along with the rest of `config/` when a dev home is seeded from a
 release install (`DevHomeSeeder`) — this is fine, since it holds only public keys, not secrets.
