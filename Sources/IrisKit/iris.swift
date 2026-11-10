@@ -1197,7 +1197,7 @@ actor IrisEngine {
                 return "response_mode timedVeto needs a deadline: an ISO 8601 timestamp in the future."
             }
             guard let vetoDefault, optionIds.contains(vetoDefault) else {
-                return "response_mode timedVeto needs veto_default naming one of the options' ids."
+                return "response_mode timedVeto needs veto_default naming one of the options' ids; give each option an `id` and pass one of them."
             }
         }
 
@@ -1228,11 +1228,19 @@ actor IrisEngine {
         let now = Date()
         do {
             if let threadId {
-                let result = try store.inbox.appendFollowup(threadId: threadId, fromChain: ownerChain, author: label, body: situation, at: now, tainted: tainted)
+                // The follow-up's own question replaces the item's current ask (#1024); route_back
+                // and notify stay as they were raised, since where Brian's answers go is fixed
+                // when the item is created.
+                let ask = InboxFollowupAsk(title: title, situation: situation, options: options, responseMode: responseMode,
+                                           deadline: responseMode == .timedVeto ? deadline : nil,
+                                           vetoDefaultOptionId: responseMode == .timedVeto ? vetoDefault : nil)
+                let result = try store.inbox.appendFollowup(threadId: threadId, fromChain: ownerChain, author: label, body: situation,
+                                                            at: now, tainted: tainted, ask: ask)
                 switch result {
-                case .success:
+                case .success(let landed):
                     await MainActor.run { localState?.bumpInboxRevision() }
-                    return "Appended to thread \(threadId) and reopened it."
+                    let routing = (routeBack.isEmpty && notify.isEmpty) ? "" : " route_back and notify were left as first raised."
+                    return "Follow-up recorded on #\(landed.itemId) (thread \(threadId)). It is open in Brian's inbox again with your new title, situation and options in place of the ones he answered.\(routing)"
                 case .failure(.notOwner):
                     await MainActor.run { localState?.refundInboxEmit(from: conversationId) }
                     return "Not raised: thread \(threadId) belongs to a different chain; you may not append to it."
@@ -3336,11 +3344,12 @@ actor IrisEngine {
         if !isUnattended && principal == .main {
             toolsList.append(FunctionDeclaration(
                 name: "inbox_item",
-                description: "Record a decision for Brian to answer: a durable, human-facing question that outlives this conversation. Omit thread_id for a new item; give the thread_id of an item you raised before to append a followup and reopen it (only the chain that raised it may do this — a foreign followup is refused). It appears in Brian's inbox (sidebar row, open-items count) — you may tell him you raised it.",
+                description: "Record a decision for Brian to answer: a durable, human-facing question that outlives this conversation. Omit thread_id for a new item; give the thread_id of an item you raised before to append a followup: it reopens the item with your new title, situation and options in place of the ones he answered (only the chain that raised it may do this — a foreign followup is refused; route_back and notify stay as first raised). It appears in Brian's inbox (sidebar row, open-items count) — you may tell him you raised it.",
                 parameters: Schema(type: "OBJECT", properties: [
                     "title": Schema(type: "STRING", description: "A short label for the item."),
                     "situation": Schema(type: "STRING", description: "The full context: what's going on and why this needs a decision."),
                     "options": Schema(type: "ARRAY", description: "The choices on the table, if any.", items: Schema(type: "OBJECT", properties: [
+                        "id": Schema(type: "STRING", description: "A short id you choose for this option. Required for every option when response_mode is timedVeto, because veto_default names one of them; otherwise optional."),
                         "label": Schema(type: "STRING", description: "The choice, in a few words."),
                         "pros": Schema(type: "ARRAY", description: "Reasons for it.", items: Schema(type: "STRING")),
                         "cons": Schema(type: "ARRAY", description: "Reasons against it.", items: Schema(type: "STRING")),
@@ -3348,9 +3357,9 @@ actor IrisEngine {
                     "response_mode": Schema(type: "STRING", description: "optionsAndFreeform | freeform | timedVeto | notification."),
                     "route_back": Schema(type: "ARRAY", description: "Who gets Brian's answer: role:<name> entries (whoever holds the role when he answers). Omit to get it yourself. Another session by id or name is refused.", items: Schema(type: "STRING")),
                     "notify": Schema(type: "ARRAY", description: "role:<name> entries told, once, when Brian has answered. Another session by id or name is refused.", items: Schema(type: "STRING")),
-                    "thread_id": Schema(type: "STRING", description: "Omit for a new item; give an existing one to append a followup and reopen it."),
+                    "thread_id": Schema(type: "STRING", description: "Omit for a new item; give an existing one to append a followup and reopen it with the title, situation, options and response_mode you pass now."),
                     "deadline": Schema(type: "STRING", description: "ISO 8601. For response_mode timedVeto: when the default takes effect with no answer."),
-                    "veto_default": Schema(type: "STRING", description: "For response_mode timedVeto: the option id that takes effect at the deadline."),
+                    "veto_default": Schema(type: "STRING", description: "For response_mode timedVeto: the id of the option that takes effect at the deadline if Brian has not answered. It must match an option's id. The default is not guaranteed to apply: an item may be held open for Brian to decide instead (for example after you read outside content)."),
                 ], required: ["title", "situation", "response_mode"])
             ))
         }

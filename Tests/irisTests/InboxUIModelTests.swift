@@ -151,3 +151,27 @@ struct InboxUIModelTests {
         #expect(app.inboxRevision > before)
     }
 }
+
+@Suite("Inbox thread history (#1024)")
+struct InboxHistoryTests {
+    private func entry(_ seq: Int64, _ kind: String) -> InboxThreadEntry {
+        InboxThreadEntry(seq: seq, itemId: "i", kind: kind, author: "a", body: "b\(seq)", at: Date())
+    }
+
+    @Test("a thread with only its opening question has no history: the ask is already on screen")
+    func openingQuestionOnly() {
+        #expect(InboxUIModel.history(of: [entry(1, "question")]).isEmpty)
+    }
+
+    @Test("the current ask is the last question or follow-up; everything earlier is history, in order")
+    func currentAskIsLeftOut() {
+        let thread = [entry(1, "question"), entry(2, "answer"), entry(3, "followup")]
+        #expect(InboxUIModel.history(of: thread).map(\.seq) == [1, 2])
+    }
+
+    @Test("an answered item keeps its answer in the history")
+    func answeredItem() {
+        #expect(InboxUIModel.history(of: [entry(1, "question"), entry(2, "answer")]).map(\.seq) == [2])
+    }
+}
+

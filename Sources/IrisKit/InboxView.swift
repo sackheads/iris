@@ -148,6 +148,8 @@ struct InboxView: View {
                     answeredSummary(answer, item: item)
                 }
 
+                historySection(item)
+
                 if let lastOutcome {
                     Text(lastOutcome).font(.caption).foregroundColor(.secondary)
                 }
@@ -157,6 +159,38 @@ struct InboxView: View {
             .padding()
         }
         .id(item.id)
+    }
+
+    /// The thread before the current ask: the original question, answers and follow-ups, oldest
+    /// first (#1024). Only drawn once there is something earlier than what is already on screen:
+    /// a follow-up replaces the item's title, situation and options with its own, so without this
+    /// Brian would never see what was asked or answered before.
+    @ViewBuilder
+    private func historySection(_ item: InboxItem) -> some View {
+        let entries = historyEntries(item)
+        if !entries.isEmpty {
+            DisclosureGroup("History (\(entries.count))") {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(entries, id: \.seq) { entry in
+                        VStack(alignment: .leading, spacing: 1) {
+                            HStack(spacing: 6) {
+                                Text(InboxUIModel.historyKindLabel(entry.kind)).font(.caption.weight(.semibold))
+                                Text(entry.at, style: .relative).font(.caption2).foregroundColor(.secondary)
+                            }
+                            Text(entry.body).font(.caption).foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .padding(.top, 4)
+            }
+            .font(.caption)
+        }
+    }
+
+    /// `inboxRevision` is read so a follow-up or an answer written elsewhere redraws the history.
+    private func historyEntries(_ item: InboxItem) -> [InboxThreadEntry] {
+        _ = state.inboxRevision
+        return InboxUIModel.history(of: (try? state.store.inbox.thread(itemId: item.id)) ?? [])
     }
 
     /// A read-only summary of Brian's own answer, for an item no longer `.open` (finding 3).
