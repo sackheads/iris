@@ -17,10 +17,14 @@ struct ConversationLoop: Codable, Equatable, Sendable {
     /// Self-paced (#190 PR 2): the model sets each next delay with `schedule_next_tick`;
     /// `intervalSeconds` is then the first tick's delay only.
     var selfPaced: Bool
+    /// A one-shot wait the model set with `set_alarm` (#1022): one tick, `prompt` is its note,
+    /// `intervalSeconds` its delay. Not a loop the person started.
+    var isAlarm: Bool
 
-    init(prompt: String, intervalSeconds: Double, cap: Int, paused: Bool = false, selfPaced: Bool = false) {
+    init(prompt: String, intervalSeconds: Double, cap: Int, paused: Bool = false, selfPaced: Bool = false, isAlarm: Bool = false) {
         self.id = UUID()
         self.selfPaced = selfPaced
+        self.isAlarm = isAlarm
         self.prompt = prompt
         self.intervalSeconds = intervalSeconds
         self.ticksLeft = cap
@@ -37,6 +41,27 @@ struct ConversationLoop: Codable, Equatable, Sendable {
         ticksLeft = try c.decodeIfPresent(Int.self, forKey: .ticksLeft) ?? cap
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? true
         selfPaced = try c.decodeIfPresent(Bool.self, forKey: .selfPaced) ?? false
+        isAlarm = try c.decodeIfPresent(Bool.self, forKey: .isAlarm) ?? false
+    }
+
+    static func alarm(note: String, delaySeconds: Double) -> ConversationLoop {
+        ConversationLoop(prompt: note, intervalSeconds: delaySeconds, cap: 1, isAlarm: true)
+    }
+
+    /// `set_alarm`'s bounds. The floor is under a loop's minute: an alarm stands in for a short
+    /// `sleep`.
+    static let alarmMinimum: Double = 15
+    static let alarmMaximum: Double = 3600
+
+    /// Clamps an alarm's delay and says what was applied. A non-number is the shortest wait.
+    static func clampedAlarmDelay(_ requested: Double) -> (seconds: Double, result: String) {
+        let value = requested.isFinite ? requested.rounded() : alarmMinimum
+        let applied = min(max(value, alarmMinimum), alarmMaximum)
+        let set = "Alarm set for \(describe(seconds: applied))."
+        guard requested.isFinite else { return (applied, "\(set) No usable delay was given, so the shortest was used.") }
+        guard applied != value else { return (applied, set) }
+        let asked = value < alarmMinimum ? "less than \(Int(alarmMinimum)) s" : "more than \(Int(alarmMaximum)) s"
+        return (applied, "\(set) You asked for \(asked); the delay is \(Int(alarmMinimum)) to \(Int(alarmMaximum)) s, so it was clamped.")
     }
 
     /// The shortest and longest interval `/loop` accepts.
@@ -119,11 +144,14 @@ struct ConversationLoop: Codable, Equatable, Sendable {
 
     var every: String { selfPaced ? "self-paced" : Self.describe(seconds: intervalSeconds) }
     /// "every 10m", or "self-paced": for the chip, the sidebar and the replies.
-    var cadence: String { selfPaced ? "self-paced" : "every \(every)" }
+    var cadence: String { isAlarm ? "alarm in \(every)" : selfPaced ? "self-paced" : "every \(every)" }
 
     /// What a tick sends the model, as source `IrisEngine.loopSource`: its own frame, without the
     /// system-event "briefly acknowledge it" suffix, and never starting with a trigger prefix.
     func tickText(number: Int) -> String {
+        if isAlarm {
+            return "Alarm: the wait you set has ended. Carry on from here: \(prompt)"
+        }
         let pacing = selfPaced
             ? "\n\nThis loop is self-paced: call `schedule_next_tick` with how long to wait before the next tick (\(Self.describe(seconds: Self.selfPacedMinimum)) to \(Self.describe(seconds: Self.selfPacedMaximum))). Without a call, the next tick runs in \(Self.describe(seconds: Self.selfPacedDefault))."
             : ""

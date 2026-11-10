@@ -6096,6 +6096,29 @@ class AppState {
         return result
     }
 
+    /// `set_alarm` (#1022): a one-tick alarm in `id`, replacing an earlier alarm. The answer is the
+    /// tool's result: what was set, or why not. The slot is the conversation's one loop, so a
+    /// person's `/loop` is never replaced from here.
+    func setAlarm(for id: UUID, requested: Double, note: String) -> String {
+        guard let idx = conversations.firstIndex(where: { $0.id == id }) else { return "Not set: no such conversation." }
+        let conv = conversations[idx]
+        if let running = conv.loop, !running.isAlarm {
+            return "Not set: a /loop is running in this conversation (\(running.cadence): \(running.prompt)). Its ticks already do the waiting; `/loop stop` ends it."
+        }
+        if let refusal = loopRefusal(conv, forAlarm: true) { return "Not set: " + refusal }
+        let (seconds, result) = ConversationLoop.clampedAlarmDelay(requested)
+        let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        let alarm = ConversationLoop.alarm(note: trimmed.isEmpty ? "see what you were waiting for" : trimmed, delaySeconds: seconds)
+        let replaced = conv.loop
+        conversations[idx].loop = alarm
+        loopRequestedDelay[id] = nil
+        markChanged(id, .metadata)
+        appendMessage(role: .system, content: "⏰ \(alarm.cadence): \(alarm.prompt)", to: id)
+        armLoopIfIdle(id)
+        return result + (replaced != nil ? " This replaces the alarm that was set." : "")
+            + " It wakes this conversation with a new turn, so end this turn rather than waiting. It does not survive quitting Iris: after a relaunch it comes back paused."
+    }
+
     /// The delay before `loop`'s next tick: its interval, or for a self-paced loop the delay asked
     /// for since the last tick started, else the default. Read, not taken: a chat turn between
     /// ticks re-arms at the same pace; the request is cleared as the next tick starts (#684 review).
@@ -6141,9 +6164,10 @@ class AppState {
         }
     }
 
-    /// Why `/loop` cannot start in `conv`, or nil.
-    func loopRefusal(_ conv: Conversation) -> String? {
-        if conv.isPinned {
+    /// Why `/loop` cannot start in `conv`, or nil. An alarm (#1022) is one tick, so the pinned
+    /// conversation may hold one: the fill-up this guards against is a loop's many ticks.
+    func loopRefusal(_ conv: Conversation, forAlarm: Bool = false) -> String? {
+        if conv.isPinned && !forAlarm {
             return "Iris can't run a loop: it's the conversation your memory and `/new` work from, and a loop would fill it with ticks. Start one in another conversation."
         }
         if conv.isBackground || conv.isSubagent {
@@ -6223,7 +6247,7 @@ class AppState {
     /// The loop the engine may schedule a tick for, or nil.
     func armableLoop(for id: UUID) -> ConversationLoop? {
         guard let conv = conversations.first(where: { $0.id == id }), let loop = conv.loop,
-              !loop.paused, loopRefusal(conv) == nil else {
+              !loop.paused, loopRefusal(conv, forAlarm: loop.isAlarm) == nil else {
             loopNextTick[id] = nil
             return nil
         }
@@ -6238,14 +6262,20 @@ class AppState {
     func takeLoopTick(for id: UUID, loopId: UUID) -> LoopTake {
         loopNextTick[id] = nil
         guard let idx = conversations.firstIndex(where: { $0.id == id }), let loop = conversations[idx].loop,
-              loop.id == loopId, !loop.paused, loop.ticksLeft > 0, loopRefusal(conversations[idx]) == nil else { return .none }
-        if isThinking(in: id) { return .busy }
+              loop.id == loopId, !loop.paused, loop.ticksLeft > 0,
+              loopRefusal(conversations[idx], forAlarm: loop.isAlarm) == nil else { return .none }
+        if isThinking(in: id) {
+            // A skipped loop tick is an interval away; a skipped alarm is not spent, and comes
+            // back soon rather than a whole delay later.
+            if loop.isAlarm { conversations[idx].loop?.intervalSeconds = ConversationLoop.alarmMinimum }
+            return .busy
+        }
         conversations[idx].loop?.ticksLeft -= 1
         // Each tick asks for its own next delay; without a call it falls back to the default.
         loopRequestedDelay[id] = nil
         markChanged(id, .metadata)
         let number = loop.cap - loop.ticksLeft + 1
-        appendMessage(role: .system, content: "↻ Loop tick \(number) of \(loop.cap)", to: id)
+        appendMessage(role: .system, content: loop.isAlarm ? "⏰ Alarm: \(loop.prompt)" : "↻ Loop tick \(number) of \(loop.cap)", to: id)
         // Reserved in the same main-actor step that took the tick, so an arrival before the tick's
         // own turn begins queues behind it instead of running beside it (#676 review). The engine
         // releases it once the tick's turn has run.
@@ -6256,6 +6286,8 @@ class AppState {
     /// The loop spent its ticks: it ends, said once.
     func endLoopAtCap(for id: UUID) {
         guard let loop = conversations.first(where: { $0.id == id })?.loop, clearLoop(for: id) else { return }
+        // A fired alarm is spent by design; it has no limit to report.
+        if loop.isAlarm { return }
         appendMessage(role: .system, content: "The loop reached its \(loop.cap)-tick limit and stopped. Run `/loop` again to start it anew.", to: id)
     }
 

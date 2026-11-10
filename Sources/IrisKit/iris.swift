@@ -684,6 +684,19 @@ actor IrisEngine {
             "delay_seconds": Schema(type: "INTEGER", description: "Seconds until the next tick, \(Int(ConversationLoop.selfPacedMinimum))-\(Int(ConversationLoop.selfPacedMaximum))."),
             "reason": Schema(type: "STRING", description: "Optional: one line on why this delay."),
         ], required: ["delay_seconds"]))
+    /// A one-shot wait that does not hold the turn (#1022). Declared like `schedule_job`: on attended
+    /// main turns, since nothing in a plain turn says the model is about to wait.
+    nonisolated static let setAlarmTool = "set_alarm"
+    nonisolated static let setAlarmDeclaration = FunctionDeclaration(
+        name: setAlarmTool,
+        description: "Wait without blocking: set an alarm and end your turn. After the delay this conversation gets a new turn carrying your note, so you can carry on (check a build, a CI run, a download). Use it instead of `sleep` in run_command, which holds the whole session. \(Int(ConversationLoop.alarmMinimum))-\(Int(ConversationLoop.alarmMaximum)) seconds; for longer or recurring waits use schedule_job. One alarm per conversation, and not while the user's /loop is running.",
+        parameters: Schema(type: "OBJECT", properties: [
+            "delay_seconds": Schema(type: "INTEGER", description: "Seconds until the alarm, \(Int(ConversationLoop.alarmMinimum))-\(Int(ConversationLoop.alarmMaximum)); outside that is clamped."),
+            "note": Schema(type: "STRING", description: "What to do or check when it fires; it is all you will have then."),
+        ], required: ["delay_seconds", "note"]))
+    /// What a `set_alarm` call is told when it is not an attended main turn.
+    nonisolated static let alarmUnavailableRefusal = "Not available: an alarm wakes a conversation someone is in, so only the main agent's attended turns can set one."
+
     /// What a `schedule_next_tick` call is told without a self-paced loop in its conversation.
     nonisolated static let noSelfPacedLoopRefusal = "Not available: this conversation has no self-paced /loop, so there is no next tick to schedule. Only `/loop <prompt>` with no interval is paced this way."
 
@@ -3101,6 +3114,8 @@ actor IrisEngine {
                 required: []
             )
         ))
+        // #1022: a wait that does not hold the turn. Attended main turns only, like schedule_job.
+        toolsList.append(Self.setAlarmDeclaration)
         }
         
         toolsList.append(FunctionDeclaration(
@@ -4605,7 +4620,7 @@ actor IrisEngine {
         "write_file", "create_skill", "update_skill", "delete_skill",
         "set_workspace", "register_directory_watcher",
         "update_user_profile", "update_soul", "update_memory", "save_fact", "reflect",
-        "rename_conversation", scheduleNextTickTool,
+        "rename_conversation", scheduleNextTickTool, setAlarmTool,
     ]
 
     /// #813: a read under ~/.iris that is Iris's own standing context: SOUL, USER, memory.md,
@@ -4781,7 +4796,7 @@ actor IrisEngine {
     /// 5c §1: never declared to an unattended turn, whatever a sticky set says.
     nonisolated static let unattendedNeverDeclared: Set<String> =
         jobCreationTools.union(["set_workspace", "list_sessions", "describe_session", "send_to_session",
-                                "set_session_card", "close_request", "inbox_item"])
+                                "set_session_card", "close_request", "inbox_item", setAlarmTool])
     /// OpenAI's `prompt_cache_key` (5c §0.9). It is a routing hint, so it names the prefix a
     /// request shares with others, not the conversation. An attended chat (Iris included) keeps
     /// its own history warm, so it uses its id. A job run, a subagent or an evaluator starts a
@@ -4811,7 +4826,7 @@ actor IrisEngine {
     nonisolated static let mainOnlyDeclared: Set<String> =
         // The /rename and /goal trigger tools too (#581): neither flow runs in a subagent, and
         // `isTrigger` already requires the main agent; this is the backstop for a sticky set.
-        jobCreationTools.union([scheduleNextTickTool, "rename_conversation", "propose_goal_contract",
+        jobCreationTools.union([scheduleNextTickTool, setAlarmTool, "rename_conversation", "propose_goal_contract",
                                 "amend_goal_contract", "reach_checkpoint", "delegate_milestone",
                                 "waive_criterion", "list_sessions", "describe_session", "send_to_session",
                                 "set_session_card", "close_request", "inbox_item"])
@@ -6165,6 +6180,15 @@ actor IrisEngine {
             let readBlocked: Bool
             if case .blocked = readOutcome { readBlocked = true } else { readBlocked = false }
             result = noteBlockedResult(guardedRead, name: functionCall.name, conversationId: conversationId, blocked: readBlocked)
+        } else if functionCall.name == Self.setAlarmTool {
+            let requested = functionCall.args["delay_seconds"].flatMap { Double($0.stringValue) } ?? .nan
+            let note = functionCall.args["note"]?.stringValue ?? ""
+            let attended = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.isBackground == false }
+            if principal == .main, attended {
+                result = await MainActor.run { localState?.setAlarm(for: conversationId, requested: requested, note: note) } ?? "Not set: no such conversation."
+            } else {
+                result = Self.alarmUnavailableRefusal
+            }
         } else if functionCall.name == Self.scheduleNextTickTool {
             let requested = functionCall.args["delay_seconds"].flatMap { Double($0.stringValue) } ?? .nan
             let scheduled = principal == .main
@@ -6906,7 +6930,7 @@ actor IrisEngine {
         "reflect", "goal_complete", "search_memory", "update_user_profile", "update_soul",
         "update_memory", "propose_goal_contract", "list_sessions", "describe_session", "send_to_session",
         "set_session_card", "close_request", "amend_goal_contract", "reach_checkpoint", "waive_criterion",
-        "invoke_subagent", "delegate_milestone", "inbox_item", scheduleNextTickTool,
+        "invoke_subagent", "delegate_milestone", "inbox_item", scheduleNextTickTool, setAlarmTool,
     ]
 
     /// Every tool name the app can ever declare to any conversation (main agent, subagent or
