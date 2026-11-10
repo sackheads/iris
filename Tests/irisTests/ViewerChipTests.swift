@@ -151,6 +151,25 @@ struct ClosedSurfaceWebViewMenuTests {
         #expect(menu.items.map(\.title) == ["Copy"], "left: \(menu.items.map(\.title))")
     }
 
+    @Test("willOpenMenu switches the context-menu plug-ins off, which is what keeps Services and Share out (#904 live pass)")
+    func willOpenMenuSwitchesPlugInsOff() {
+        let webView = ClosedSurfaceWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let menu = NSMenu()
+        menu.allowsContextMenuPlugIns = true
+        let event = NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                        windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        webView.willOpenMenu(menu, with: event)
+        #expect(menu.allowsContextMenuPlugIns == false)
+    }
+
+    @Test("the viewer's web view is a requestor for no service, for any pasteboard type")
+    func noServiceRequestor() {
+        let webView = ClosedSurfaceWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        #expect(webView.validRequestor(forSendType: .string, returnType: nil) == nil)
+        #expect(webView.validRequestor(forSendType: .string, returnType: .string) == nil)
+        #expect(webView.validRequestor(forSendType: nil, returnType: nil) == nil)
+    }
+
     @Test("the shipped web view class overrides willOpenMenu, the hook WebKit presents its menu through")
     func overrideIsPresent() throws {
         let source = try String(contentsOf: PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit/ViewerWindow.swift"), encoding: .utf8)
