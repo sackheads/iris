@@ -4,12 +4,26 @@ import Foundation
 /// loaded ggml (#1007: `GGML_ASSERT([rsets->data count] == 0)` in `ggml-metal-device.m`, firing from
 /// the global `std::vector<unique_ptr<ggml_metal_device>>`'s destructor during `__cxa_finalize_ranges`)
 /// — the same hazard `--run-job`'s `CLIStop` already works around below, the way `AppDelegate` leaves
-/// at terminate (`_exit(0)`, `IrisApp.swift`). Any headless mode that can load a `llama_cpp` guard-tier
-/// engine (`--guard-probe`, `--eval`) exits through here instead of a plain `exit`: flush what `exit`'s
-/// own atexit handler would have flushed, then `_exit`, skipping the C++ static destructors that
-/// assert. Nothing else in this process registers an atexit handler (checked), so nothing but stdio
-/// buffering is lost — the same reasoning `CLIStop.exit`'s doc comment gives for its own `_exit`.
+/// at terminate (`_exit(0)`, `IrisApp.swift`). Every headless mode that can reach a `llama_cpp`
+/// guard-tier engine exits through here instead of a plain `exit`: `--guard-probe` and `--eval`
+/// directly (both can load one on purpose); `--perf` and `--bench` defensively — `--perf`'s real-lane
+/// rung 5 runs guards `.asConfigured` (`PerfRunner.swift`), so a machine whose own prompt-guard
+/// engine is `llama_cpp` loads it there too, not just at `--guard-probe`'s command line; `--bench`
+/// forces `ollama` today (`BenchCLI.swift:92`) and so cannot reach this hazard, but a future change
+/// to that default silently would, and the cost of guarding it now is one line. Neither `--perf`'s
+/// nor `--bench`'s crash is independently reproduced (unlike `--guard-probe`'s, confirmed 3/3) — this
+/// is a code-path argument, stated here rather than left undocumented, per dev-2's #1044 review.
+///
+/// Runs what `exit`'s atexit chain would have run — `IrisDefaults.removeVolatileCopy()` (idempotent;
+/// `--guard-probe` with `--engine`/`--model`/`--tier2`, and `--perf`/`--bench` always, seed a volatile
+/// `iris-bench-<pid>` suite via `useVolatileCopyOfStandard()` before touching `ConfigManager.shared`,
+/// whose own `atexit` cleanup never fires once `_exit` skips the chain) and flushing stdio — then `_exit`,
+/// skipping the C++ static destructors that assert — including `removeVolatileCopy`'s own `atexit`
+/// registration, which is why this path calls it explicitly first instead of relying on that. Nothing
+/// else in this process registers an atexit handler (checked), so nothing but that plist and stdio
+/// buffering would otherwise be lost.
 private func exitAfterPossibleGGMLLoad(_ code: Int32) -> Never {
+    IrisDefaults.removeVolatileCopy()
     fflush(stdout)
     fflush(stderr)
     _exit(code)
@@ -30,7 +44,7 @@ public enum IrisMain {
             ProcessRole.set(.perf)
             switch perf {
             case .success(let cmd):
-                exit(await PerfCLI.execute(cmd, environment: .process))
+                exitAfterPossibleGGMLLoad(await PerfCLI.execute(cmd, environment: .process))
             case .failure(let err):
                 FileHandle.standardError.write(Data("iris --perf: \(err.localizedDescription)\n\(PerfCLI.usage)\n".utf8))
                 exit(64)
@@ -38,7 +52,7 @@ public enum IrisMain {
         } else if let benchOptions = BenchCLI.parse(CommandLine.arguments) {
             ProcessRole.set(.bench)
             await BenchCLI.run(benchOptions)
-            exit(0)
+            exitAfterPossibleGGMLLoad(0)
         } else if let invocation = RunJobCLI.parse(arguments: CommandLine.arguments) {
             ProcessRole.set(.runJob)
             // The real store and the real model client (#187 §8): a `--run-job` measurement is only

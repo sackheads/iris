@@ -86,11 +86,22 @@ enum IrisDefaults {
         atexit {
             // Read under the same lock useVolatileCopyOfStandard() writes with — atexit runs on
             // whatever thread calls exit(), so this is a genuine cross-thread read.
-            if let n = IrisDefaults.lock.withLock({ IrisDefaults.volatileSuiteName }) {
-                UserDefaults(suiteName: n)?.removePersistentDomain(forName: n)
-                // removePersistentDomain does not delete the backing plist on current macOS.
-                IrisDefaults.removeSuiteFile(named: n, in: IrisDefaults.preferencesDirectory)
-            }
+            IrisDefaults.removeVolatileCopy()
+        }
+    }
+
+    /// `useVolatileCopyOfStandard`'s cleanup, factored out so an exit path that skips `atexit`
+    /// entirely (`_exit`, #1007/#1044: once this process has loaded ggml, `exit`'s own atexit chain
+    /// runs the C++ static destructors that assert) can run it explicitly first. Idempotent —
+    /// `removePersistentDomain`/`removeSuiteFile` on an already-removed domain is a no-op — so it is
+    /// safe to call once before `_exit` and have `atexit` (for every ordinary `exit`) call it again.
+    /// `named` defaults to whatever `useVolatileCopyOfStandard` recorded; a test passes its own name
+    /// instead of setting the process-global `override` (invariant 7) just to exercise the deletion.
+    static func removeVolatileCopy(named: String? = nil) {
+        if let n = named ?? lock.withLock({ volatileSuiteName }) {
+            UserDefaults(suiteName: n)?.removePersistentDomain(forName: n)
+            // removePersistentDomain does not delete the backing plist on current macOS.
+            IrisDefaults.removeSuiteFile(named: n, in: IrisDefaults.preferencesDirectory)
         }
     }
 
