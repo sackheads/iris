@@ -503,11 +503,10 @@ struct PeerSignatureVerifier: Sendable {
     func verifyAndAdmit<E: VerifiableEnvelope>(
         _ frame: SignedFrameParts,
         context: VerificationContext,
-        domain: String = PeerSignatureDomain.a2a,
         decode: (Data) throws -> E
     ) throws -> E {
         do {
-            return try performVerifyAndAdmit(frame, context: context, domain: domain, decode: decode)
+            return try performVerifyAndAdmit(frame, context: context, decode: decode)
         } catch {
             Self.logRejection(error)
             throw error
@@ -537,7 +536,6 @@ struct PeerSignatureVerifier: Sendable {
     private func performVerifyAndAdmit<E: VerifiableEnvelope>(
         _ frame: SignedFrameParts,
         context: VerificationContext,
-        domain: String,
         decode: (Data) throws -> E
     ) throws -> E {
         // Caller contract, not a wire-triggered rejection: `.inbox` must never carry an
@@ -559,8 +557,11 @@ struct PeerSignatureVerifier: Sendable {
             throw PeerVerificationError(reason: .unknownKey, envelopeId: nil)
         }
 
-        // 3. Verify before any decode — the core security property of this type.
-        let input = signingInput(domain: domain, envelopeBytes: frame.envelopeBytes)
+        // 3. Verify before any decode — the core security property of this type. `domain` is
+        // always `PeerSignatureDomain.a2a`, never a parameter a caller can pick (peer review, PR
+        // #1036 Finding 1): accepting a non-default domain here would accept a signature meant
+        // for a different protocol, which is exactly what domain separation exists to prevent.
+        let input = signingInput(domain: PeerSignatureDomain.a2a, envelopeBytes: frame.envelopeBytes)
         guard publicKey.isValidSignature(frame.signature, for: input) else {
             throw PeerVerificationError(reason: .invalidSignature, envelopeId: nil)
         }

@@ -62,9 +62,12 @@ public struct PeerSigner: Sendable {
 
     /// Signs `B` over the domain-separated `signingInput(domain, B)`, never over `B` directly —
     /// so a signature produced here only verifies against the same domain-separated construction
-    /// a verifier must also use.
-    public func sign(envelopeBytes B: Data, principal: String, keyId: String?, domain: String = PeerSignatureDomain.a2a) -> SignedFrameParts {
-        let input = signingInput(domain: domain, envelopeBytes: B)
+    /// a verifier must also use. `domain` is always `PeerSignatureDomain.a2a` — not a per-call
+    /// parameter (peer review, PR #1036 Finding 1): a transport that could pass a non-default
+    /// domain would defeat the whole point of domain separation, so nothing above this signer can
+    /// choose it.
+    public func sign(envelopeBytes B: Data, principal: String, keyId: String?) -> SignedFrameParts {
+        let input = signingInput(domain: PeerSignatureDomain.a2a, envelopeBytes: B)
         let signature = key.sign(input)
         return SignedFrameParts(
             principal: principal,
