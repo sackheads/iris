@@ -1320,12 +1320,16 @@ actor IrisEngine {
         // A UUID is 36 characters, over the cap, but it is the id every option gets when its
         // emitter gave none (#1025), and it parses as hex and hyphens only, so it carries no text.
         if UUID(uuidString: id) != nil { return true }
+        // Emitter-chosen short ids are the one place emitter text still reaches the decision line;
+        // the character set keeps it to a word, not a sentence (follow-up filed to settle it).
         return (1...32).contains(id.count) && id.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }
     }
 
     /// Marks, in the echoed option list, which option the answer picked. Added by Iris, not the
     /// emitter: the decision itself is still stated in the first part of the frame by position and
     /// id, so this only lets a recipient read the emitter's own label beside the choice (#1025).
+    nonisolated private static let markerPattern = try! NSRegularExpression(
+        pattern: #"\[\s*(?:brian\s+chose\s+this|the\s+default\s+that\s+took\s+effect)\s*\]"#, options: [.caseInsensitive])
     nonisolated private static let chosenMarker = " [Brian chose this]"
     nonisolated private static let defaultMarker = " [the default that took effect]"
 
@@ -1335,13 +1339,14 @@ actor IrisEngine {
     /// With `answer`, the option it picked is marked (#1025). The emitter's own text has the two
     /// marker phrases removed first, so a label cannot mark itself or another option.
     nonisolated static func inboxOriginalItemText(_ item: InboxItem, answer: InboxAnswer? = nil) -> String {
-        // Repeated until nothing changes: removing one marker can join the halves of another
-        // (`[Brian chose [Brian chose this] this]`), so a single pass would leave a real one behind.
+        // The phrases are matched leniently (case, runs of whitespace) and repeated until nothing
+        // changes: removing one can join the halves of another (`[Brian chose [Brian chose this]
+        // this]`), and a label may spell the phrase a little differently and still read as the mark.
         func unmarked(_ text: String) -> String {
             var current = text
             while true {
-                let next = current.replacingOccurrences(of: chosenMarker, with: "")
-                    .replacingOccurrences(of: defaultMarker, with: "")
+                let range = NSRange(current.startIndex..., in: current)
+                let next = markerPattern.stringByReplacingMatches(in: current, options: [], range: range, withTemplate: "")
                 if next == current { return current }
                 current = next
             }
