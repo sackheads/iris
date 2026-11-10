@@ -811,6 +811,11 @@ final class ConversationStore: Sendable {
                 t.add(column: "additionalRoots", .text)
             }
         }
+        // #1027: when Brian last looked at an inbox item. Nullable: a row from before this reads
+        // as never viewed, so every existing item starts out unread once.
+        m.registerMigration("v38_inbox_viewed") { db in
+            try db.alter(table: "inbox_items") { t in t.add(column: "viewedAt", .datetime) }
+        }
         return m
     }
 

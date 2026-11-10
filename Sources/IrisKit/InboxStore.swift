@@ -91,6 +91,12 @@ struct InboxItem: Equatable, Sendable {
     /// Route-back targets (as the emitter wrote them) the answer has not reached yet. Non-empty
     /// exactly while `state == .awaitingDelivery`.
     var pendingTargets: [String] = []
+    /// When Brian last opened the item (#1027); nil until he does. Unread is "changed since then".
+    var viewedAt: Date?
+
+    /// Not yet seen, or changed (a follow-up, an answer) since it was last seen. Separate from
+    /// `state`: an answered item can be unread (an automatic answer) and an open one read.
+    var isUnread: Bool { viewedAt.map { $0 < lastActivityAt } ?? true }
 }
 
 /// What a follow-up puts on the item in place of the question that was answered (#1024). The item
@@ -316,6 +322,17 @@ final class InboxStore: Sendable {
         }
     }
 
+    /// Notes that Brian has looked at the item, as of `at`. Touches only `viewedAt`, never
+    /// `lastActivityAt`, so reading changes neither the order of the list nor what counts as new.
+    /// Writes only when the item is unread, so reopening a read item costs nothing.
+    func markViewed(itemId: String, at: Date) throws {
+        try writer.write { db in
+            try db.execute(sql: """
+                UPDATE inbox_items SET viewedAt = ? WHERE id = ? AND (viewedAt IS NULL OR viewedAt < lastActivityAt)
+                """, arguments: [at, itemId])
+        }
+    }
+
     /// Refuses `.unknownItem` when nothing was updated (dev-2 finding 4).
     @discardableResult
     func setState(itemId: String, _ state: InboxItemState) throws -> Result<Void, InboxError> {
@@ -454,7 +471,8 @@ final class InboxStore: Sendable {
                          responseMode: responseMode, routeBack: routeBack, notify: notify,
                          deadline: row["deadline"], vetoDefaultOptionId: row["vetoDefaultOptionId"],
                          emitterTainted: emitterTainted, state: state, createdAt: createdAt,
-                         lastActivityAt: lastActivityAt, answer: answer, pendingTargets: pendingTargets)
+                         lastActivityAt: lastActivityAt, answer: answer, pendingTargets: pendingTargets,
+                         viewedAt: row["viewedAt"])
     }
 
     private static func decodeEntry(_ row: Row) -> InboxThreadEntry? {
