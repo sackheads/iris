@@ -73,11 +73,6 @@ struct PeerSignerTests {
         let signer = PeerSigner(key: key)
         let parts = signer.sign(envelopeBytes: B, principal: "clomp", keyId: "key-1")
 
-        // The fixture's top-level `sig_b64` is deliberately NOT this signature — it's the
-        // fixed invalid signature reused by the fixture's own `invalid_signature` negative
-        // vector, over a different envelope entirely. The known-answer check here is that
-        // signing `B` with the fixture's known private key produces a signature that verifies
-        // against its known public key, over the exact domain-separated signingInput.
         let expectedPublicKey = Self.dataFromHex(fixture.public_hex)
         let publicKey = try Curve25519.Signing.PublicKey(rawRepresentation: expectedPublicKey)
         let expectedInput = signingInput(domain: PeerSignatureDomain.a2a, envelopeBytes: B)
@@ -87,6 +82,25 @@ struct PeerSignerTests {
 
         // And confirm it is domain-separated: the raw envelope bytes alone must NOT verify.
         #expect(!publicKey.isValidSignature(parts.signature, for: B))
+
+        // KAT, without asserting byte-equality against a freshly produced signature: the
+        // fixture's own `sig_b64` IS the canonical Ed25519 signature over `signing_input_hex`
+        // for this same key pair (independently reproduced with `openssl pkeyutl -sign` over a
+        // DER-wrapped `private_hex`, byte-for-byte identical to `sig_b64`). It is not asserted
+        // as `parts.signature`'s expected value, because `Curve25519.Signing.PrivateKey
+        // .signature(for:)` is empirically NOT deterministic across calls for an identical key
+        // and message on this toolchain — signing the fixture's own `signing_input_hex` with
+        // its `private_hex` five times in one process produced five distinct, independently
+        // valid, signatures, none equal to each other or to `sig_b64` (CryptoKit's Ed25519
+        // hedges/randomizes the nonce; its *verification* path remains standards-compliant).
+        // A byte-equality assertion against a live `parts.signature` would therefore never
+        // pass here, not from a bug in this signer, but from that property of the underlying
+        // primitive `IrisSigningKey.sign` calls. What this checks instead, and is a genuine
+        // KAT: `sig_b64` itself verifies against the fixture's public key over the same
+        // domain-separated `signingInput`, confirming the construction interoperates with an
+        // externally (non-CryptoKit) produced canonical signature, not just a CryptoKit round trip.
+        let fixtureSignature = try #require(Data(base64Encoded: fixture.sig_b64))
+        #expect(publicKey.isValidSignature(fixtureSignature, for: expectedInput))
     }
 
     @Test("PeerSigner.sign fills principal, keyId, verifiedBy and envelopeBytes correctly")
