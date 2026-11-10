@@ -323,9 +323,11 @@ struct AnthropicClient {
         let takesBeta = AnthropicCapabilities.takesBindingBeta(model: model, transport: transport)
         let binding = (takesBeta || request.forceBindingBeta) ? request.prefixMismatchBehavior : nil
         // #314 PR 7: `display` rides the same adaptive object, and only to a model the table says
-        // takes it (thinking is always on for those, so adaptive changes nothing else); it is why
-        // the stream carries thinking text at all, since the default is "omitted". Sent whether or
-        // not an effort was picked (#1018): "Model default" sends no effort, not no thinking.
+        // takes it; it is why the stream carries thinking text at all, since the default is
+        // "omitted". Thinking is always on for Opus 5.5 and Fable 5.1, so adaptive adds nothing
+        // there; Sonnet 5.5 otherwise runs its own `between_tools` mode, so for it this moves the
+        // conversation to adaptive. Sent whether or not an effort was picked (#1018): "Model
+        // default" sends no effort, not no thinking.
         let effort = request.reasoningEffort.flatMap { AnthropicCapabilities.effortLevels(model: model).contains($0) ? $0 : nil }
         var thinking: [String: Any] = [:]
         if let display = AnthropicCapabilities.thinkingDisplay(model: model) { thinking["display"] = display }
