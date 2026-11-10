@@ -108,6 +108,34 @@ struct PeerKeyRegistry: Sendable {
         Data([0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f]),
     ]
 
+    /// The small-order points' y-coordinates with the sign bit cleared: a point is small-order
+    /// whichever sign bit its encoding carries, so `01 00..80` (x = 0 "negative") and
+    /// `ec ff..ff` are the same points as entries above, spelled the way a canonical-only
+    /// byte match misses.
+    private static let smallOrderYs: Set<Data> = Set(smallOrderEncodings.map(clearingSignBit))
+
+    private static func clearingSignBit(_ encoding: Data) -> Data {
+        var bytes = Array(encoding)
+        bytes[31] &= 0x7f
+        return Data(bytes)
+    }
+
+    /// True for a small-order point under any spelling: a canonical encoding, the same y with the
+    /// other sign bit, or a non-canonical y >= p = 2^255 - 19 (only y < 19 has such a spelling,
+    /// `ed ff..7f` for y = 0 and `ee ff..7f` for y = 1, each with either sign bit) that reduces
+    /// to one. Libraries disagree on whether to decode a non-canonical y; CryptoKit accepts it as
+    /// key material, so whether such a key can forge depends on its verifier, which is not a
+    /// property to trust here (#1038). Any y >= p is refused, small-order or not: no honest
+    /// signer produces one.
+    private static func isSmallOrderOrAlias(_ encoding: Data) -> Bool {
+        guard encoding.count == 32 else { return false }
+        let y = clearingSignBit(encoding)
+        if smallOrderYs.contains(y) { return true }
+        let bytes = Array(y)
+        let highBytesAllOnes = bytes[1..<31].allSatisfy { $0 == 0xff } && bytes[31] == 0x7f
+        return highBytesAllOnes && bytes[0] >= 0xed
+    }
+
     /// `nil` for anything that isn't valid Ed25519 key material in romar's wire form, AND for a
     /// small-order point (above) even though that *is* 32 bytes of validly-shaped key material —
     /// a small-order public key breaks `isValidSignature`'s soundness, so this registry must never
@@ -117,7 +145,7 @@ struct PeerKeyRegistry: Sendable {
     private static func parsePublicKey(_ wire: String) -> Curve25519.Signing.PublicKey? {
         guard wire.hasPrefix(wirePrefix) else { return nil }
         guard let data = Data(base64Encoded: String(wire.dropFirst(wirePrefix.count))) else { return nil }
-        guard !smallOrderEncodings.contains(data) else { return nil }
+        guard !isSmallOrderOrAlias(data) else { return nil }
         return try? Curve25519.Signing.PublicKey(rawRepresentation: data)
     }
 
