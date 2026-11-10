@@ -658,9 +658,16 @@ struct PeerSignatureVerifier: Sendable {
             retainUntil = deadlineDate
         } else {
             // Non-message kinds carry no deadline field at all — never required, never rejected
-            // for lacking one. Their freshness bound is implicit: `ts + 24h`. romar names no
-            // separate code for this case; `deadlineExpired` is the existing code whose meaning —
-            // "this envelope's admission window has closed" — already covers it.
+            // for lacking one. Their freshness bound is implicit: `ts + 24h`. romar's reason-code
+            // list is closed at 18 and names no separate code for this case; its own conformance
+            // fixture and reference-verifier suite (checked at romar commit 98dc4e14) exercise the
+            // stale path only for `message` and only test a non-message kind as a positive (fresh)
+            // case — so folding this into `deadlineExpired` is conformance-SAFE (nothing in romar's
+            // own suite distinguishes it from a true deadline rejection) but is NOT a confirmed
+            // match to any observed romar behavior: this predicate is genuinely underspecified
+            // upstream. The actual check below is `now > ts + 24h`, with no `deadline` field
+            // involved at all — the reused code's literal name is the closest existing fit, not a
+            // claim that this envelope actually had a deadline that expired.
             let bound = tsDate.addingTimeInterval(Self.deadlineCap)
             guard context.now <= bound else {
                 throw PeerVerificationError(reason: .deadlineExpired, envelopeId: envelopeId)
