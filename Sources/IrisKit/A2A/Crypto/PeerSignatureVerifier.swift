@@ -340,7 +340,7 @@ private struct DuplicateKeyScanner {
     }
 
     /// Returns the string's *decoded* content (escapes resolved), so two keys that are the same
-    /// character sequence written with different escaping (`"a"` vs `"a"`) are still caught
+    /// character sequence written with different escaping (`"a"` vs `"\u0061"`) are still caught
     /// as the same key — comparing raw bytes between the quotes would miss that.
     private mutating func scanString() throws -> String {
         index += 1 // consume opening quote
