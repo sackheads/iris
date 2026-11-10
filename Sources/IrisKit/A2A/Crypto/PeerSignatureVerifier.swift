@@ -736,7 +736,11 @@ struct PeerSignatureVerifier: Sendable {
               let hour = field(11..<13), let minute = field(14..<16), let second = field(17..<19) else {
             return false
         }
-        guard (1...12).contains(month), (0...23).contains(hour), (0...59).contains(minute), (0...59).contains(second) else {
+        // Python's `datetime` (romar's `fromisoformat`) has no year 0 (`MINYEAR == 1`);
+        // `ISO8601DateFormatter` parses "0000-01-01T00:00:00Z" without complaint (dev-2's #1036
+        // re-review note). The regex's 4-digit year is already bounded above at 9999, matching
+        // Python's own `MAXYEAR`, so only the floor needs checking here.
+        guard year >= 1, (1...12).contains(month), (0...23).contains(hour), (0...59).contains(minute), (0...59).contains(second) else {
             return false
         }
         let isLeapYear = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
