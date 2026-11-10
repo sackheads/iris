@@ -1346,13 +1346,11 @@ struct MessageView: View {
                     // `state.streaming.boxes` is what the agent call site's `liveContent(of:)`
                     // reads, so this is the live answer there; always nil for a user message.
                     isStreaming: state.streaming.boxes[message.id] != nil,
-                    // Not reachable on merge (#896 PR 2): `ViewerFeatureGate` is off
-                    // pending Brian's resolution of the dns-prefetch gap (#904). `nil`
-                    // here, not a disabled button, so there is no chip to notice at
-                    // all. `RawHTMLSanitizer.sanitize` (#912) runs on the raw-HTML
-                    // render path before any document is ever shown — this is the
-                    // only production call site that turns chat content into a
-                    // `ViewerDocument`.
+                    // `ViewerFeatureGate` (#904) decides whether there is a chip at all: `nil`
+                    // here, not a disabled button, so a gated-off viewer shows nothing to
+                    // notice. `RawHTMLSanitizer.sanitize` (#912) runs on the raw-HTML render
+                    // path before any document is ever shown — this is the only production
+                    // call site that turns chat content into a `ViewerDocument`.
                     onOpenViewer: ViewerFeatureGate.isEnabled ? {
                         ViewerWindowController.open(
                             document: ViewerDocument(
