@@ -845,12 +845,35 @@ struct StrictJSONTests {
 
     // MARK: - Surrogate-pair crash (Important)
 
+    /// Builds the *literal source text* `\` + `u` + `hex` — e.g. `literalUnicodeEscape("D800")`
+    /// returns the 6-character string `\uD800`, never the single (invalid, since D800 is a lone
+    /// surrogate) Unicode scalar that text would decode to if it appeared as a real escape.
+    ///
+    /// Review finding: a Swift string literal containing `\uD800` would not even compile (D800 is
+    /// not a valid standalone Unicode scalar), and this project's earlier version of these tests
+    /// used `\uD800A` — a *literal* `A` character right after the one escape, not a second `\u`
+    /// escape — which exercises a different guard (`appendUnicodeEscape`'s "no `\u` at all follows
+    /// the high surrogate" branch) than the one the underflow bug actually lived in (the "low
+    /// surrogate's *value* is out of `0xDC00...0xDFFF` range" branch, which needs a second,
+    /// separate `\u` escape to reach). A mutation check (temporarily deleting that range guard)
+    /// proved the old tests kept passing even with the guard gone — i.e. they gave zero coverage
+    /// of the actual fix. Building the escape as plain-ASCII text concatenation — `"\u{5C}"` is
+    /// itself a safe, unambiguous, non-surrogate scalar escape for the backslash character alone,
+    /// resolved at compile time — removes any dependence on how a `\uXXXX`-shaped substring inside
+    /// a string literal might otherwise be written or transformed, and makes the intended two
+    /// separate escapes unambiguous in the resulting bytes.
+    private static func literalUnicodeEscape(_ hex: String) -> String {
+        "\u{5C}u" + hex
+    }
+
     @Test("a malformed surrogate-pair escape throws instead of crashing")
     func malformedSurrogatePairThrowsNotCrashes() throws {
-        // \uD800 is a lone high surrogate immediately followed by an escape that is NOT a valid
-        // low surrogate (A = 'A') — this is the exact shape that used to underflow
-        // `UInt32(low) - 0xDC00` with `low = 0x0041` and trap the process (SIGTRAP).
-        let data = Data(#"{"k":"\uD800A"}"#.utf8)
+        // The exact original underflow shape: a high surrogate (\uD800) immediately followed by a
+        // SECOND, separate \u escape whose value (A = 'A') is not in the low-surrogate range
+        // 0xDC00...0xDFFF — this is what used to compute `UInt32(0x0041) - 0xDC00`, an unsigned
+        // underflow, and trap the process (SIGTRAP).
+        let escapes = Self.literalUnicodeEscape("D800") + Self.literalUnicodeEscape("0041")
+        let data = Data("{\"k\":\"\(escapes)\"}".utf8)
         #expect(throws: StrictJSONError.malformed) {
             try StrictJSON.rejectDuplicateKeys(data)
         }
@@ -858,7 +881,8 @@ struct StrictJSONTests {
 
     @Test("an unpaired high surrogate with no following \\u escape at all throws")
     func unpairedHighSurrogateThrows() throws {
-        let data = Data(#"{"k":"\uD800"}"#.utf8)
+        let escape = Self.literalUnicodeEscape("D800")
+        let data = Data("{\"k\":\"\(escape)\"}".utf8)
         #expect(throws: StrictJSONError.malformed) {
             try StrictJSON.rejectDuplicateKeys(data)
         }
@@ -866,24 +890,29 @@ struct StrictJSONTests {
 
     @Test("a lone low surrogate with no preceding high surrogate throws")
     func unpairedLowSurrogateThrows() throws {
-        let data = Data(#"{"k":"\uDC00"}"#.utf8)
+        let escape = Self.literalUnicodeEscape("DC00")
+        let data = Data("{\"k\":\"\(escape)\"}".utf8)
         #expect(throws: StrictJSONError.malformed) {
             try StrictJSON.rejectDuplicateKeys(data)
         }
     }
 
-    @Test("a correctly paired high/low surrogate (an astral character) is accepted")
+    @Test("a correctly paired high/low surrogate escape (an astral character) is accepted")
     func validSurrogatePairAccepted() throws {
-        // U+1F600 (the signer-key fixture's own emoji conformance value) as a UTF-16 surrogate
-        // pair: 😀.
-        let data = Data(#"{"k":"😀"}"#.utf8)
+        // The ACTUAL \u-escaped surrogate pair for U+1F600 (😀): 😀, built the same
+        // literal-text way as the other tests in this group — not a raw UTF-8 emoji character
+        // embedded directly, which would bypass the \u-escape-combining code (`appendUnicodeEscape`)
+        // entirely via `scanString`'s plain non-backslash byte-passthrough path, and so would never
+        // actually exercise the pair-combining logic this test means to cover.
+        let escapes = Self.literalUnicodeEscape("D83D") + Self.literalUnicodeEscape("DE00")
+        let data = Data("{\"k\":\"\(escapes)\"}".utf8)
         try StrictJSON.rejectDuplicateKeys(data)
     }
 
     // MARK: - Unbounded recursion / stack overflow (Important)
 
-    @Test("nesting past the depth limit throws tooDeep; comfortably under it is accepted")
-    func depthLimitEnforced() throws {
+    @Test("nesting exactly at DuplicateKeyScanner.maxDepth (64) is accepted; one level past it throws tooDeep")
+    func depthLimitBoundary() throws {
         func nested(depth: Int) -> Data {
             var s = String(repeating: "[", count: depth)
             s += "1"
@@ -891,11 +920,28 @@ struct StrictJSONTests {
             return Data(s.utf8)
         }
 
-        // Comfortably under the implementation's 500-level limit.
-        try StrictJSON.rejectDuplicateKeys(nested(depth: 100))
+        // Mirrors `DuplicateKeyScanner.maxDepth` (not importable — it's `private`), the same way
+        // the clock-skew test hardcodes romar's 60s tolerance rather than reaching into the
+        // implementation. Exactly at the cap: each `[` increments the scanner's depth counter by
+        // one on entry, so 64 nested arrays peaks the counter at exactly 64, which the guard
+        // `depth <= maxDepth` still admits.
+        try StrictJSON.rejectDuplicateKeys(nested(depth: 64))
 
-        // Far past it — this depth (and payload size) is what reproduced a stack-overflow crash
-        // before the depth limit existed.
+        // One level past it: the 65th `[` increments the counter to 65, which the same guard now
+        // rejects.
+        #expect(throws: StrictJSONError.tooDeep) {
+            try StrictJSON.rejectDuplicateKeys(nested(depth: 65))
+        }
+    }
+
+    @Test("~20,000 nested brackets (the depth that reproduced the original stack-overflow crash) still just throws tooDeep")
+    func depthLimitStopsTheOriginalCrashShape() throws {
+        func nested(depth: Int) -> Data {
+            var s = String(repeating: "[", count: depth)
+            s += "1"
+            s += String(repeating: "]", count: depth)
+            return Data(s.utf8)
+        }
         #expect(throws: StrictJSONError.tooDeep) {
             try StrictJSON.rejectDuplicateKeys(nested(depth: 20_000))
         }
