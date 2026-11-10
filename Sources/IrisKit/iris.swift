@@ -692,7 +692,7 @@ actor IrisEngine {
         description: "Wait without blocking: set an alarm and end your turn. After the delay this conversation gets a new turn carrying your note, so you can carry on (check a build, a CI run, a download). Use it instead of `sleep` in run_command, which holds the whole session. \(Int(ConversationLoop.alarmMinimum))-\(Int(ConversationLoop.alarmMaximum)) seconds; for longer or recurring waits use schedule_job. One alarm per conversation, and not while the user's /loop is running.",
         parameters: Schema(type: "OBJECT", properties: [
             "delay_seconds": Schema(type: "INTEGER", description: "Seconds until the alarm, \(Int(ConversationLoop.alarmMinimum))-\(Int(ConversationLoop.alarmMaximum)); outside that is clamped."),
-            "note": Schema(type: "STRING", description: "What to do or check when it fires; it is all you will have then."),
+            "note": Schema(type: "STRING", description: "What to do or check when it fires, up to \(ConversationLoop.alarmNoteLimit) characters; it is all you will have then."),
         ], required: ["delay_seconds", "note"]))
     /// What a `set_alarm` call is told when it is not an attended main turn.
     nonisolated static let alarmUnavailableRefusal = "Not available: an alarm wakes a conversation someone is in, so only the main agent's attended turns can set one."
@@ -4181,7 +4181,7 @@ actor IrisEngine {
     /// loop's: a goal follow-up holds arrivals (`goalFollowUpPending`, `isLive`) until it runs,
     /// and a tick waits up to a day, so a peer's message or a subagent's post-back would have
     /// waited with it. `running` once the tick has started its turn.
-    private var loopTicks: [UUID: (token: UUID, task: Task<Void, Never>, running: Bool)] = [:]
+    private var loopTicks: [UUID: (token: UUID, task: Task<Void, Never>, running: Bool, loopId: UUID)] = [:]
 
     /// Cancels the conversation's loop tick: a waiting one always, a running one only when
     /// `includingRunning` (Stop). Pause and `/loop stop` let a running tick finish.
@@ -4213,6 +4213,10 @@ actor IrisEngine {
             await MainActor.run { localState?.endLoopAtCap(for: conversationId) }
             return
         }
+        // An alarm counts down from when it was set: another turn ending in the conversation
+        // re-arms here, and restarting the delay would push a pending alarm back every time the
+        // user wrote (#1029 review). A replaced alarm has a new id and arms afresh.
+        if loop.isAlarm, let waiting = loopTicks[conversationId], !waiting.running, waiting.loopId == loop.id { return }
         let token = UUID()
         let task = Task { [weak self] in
             await UptimeWait.seconds(delay)
@@ -4222,7 +4226,7 @@ actor IrisEngine {
         }
         // A running tick is the turn arming this one, finishing: replaced, not cancelled.
         if let old = loopTicks[conversationId], !old.running { old.task.cancel() }
-        loopTicks[conversationId] = (token, task, false)
+        loopTicks[conversationId] = (token, task, false, loop.id)
         await MainActor.run { localState?.loopNextTick[conversationId] = Date().addingTimeInterval(delay) }
     }
 

@@ -205,4 +205,42 @@ struct SetAlarmTests {
         let back = try JSONDecoder().decode(ConversationLoop.self, from: JSONEncoder().encode(alarm))
         #expect(back == alarm && back.isAlarm)
     }
+
+    @Test("another turn ending does not restart a waiting alarm; a replaced alarm arms afresh")
+    func reArmKeepsTheCountdown() async throws {
+        let (state, id) = try app()
+        // The state's own engine: `setAlarm` arms through it, and a second engine would keep a
+        // second tick of its own.
+        let engine = try #require(state.engine)
+        _ = state.setAlarm(for: id, requested: 600, note: "first")
+        await engine.armLoopTick(for: id)
+        let due = try #require(state.loopNextTick[id])
+        // What any other turn's end does.
+        await engine.armLoopTick(for: id)
+        #expect(state.loopNextTick[id] == due, "the alarm still rings when it first said")
+        _ = state.setAlarm(for: id, requested: 900, note: "second")
+        await engine.armLoopTick(for: id)
+        let replaced = try #require(state.loopNextTick[id])
+        #expect(replaced > due, "a replaced alarm counts its own delay")
+        await engine.cancelLoopTick(for: id, includingRunning: true)
+    }
+
+    @Test("a long note is cut to the limit")
+    func noteCapped() throws {
+        let (state, id) = try app()
+        _ = state.setAlarm(for: id, requested: 60, note: String(repeating: "n", count: 5000))
+        #expect(loop(state, id)?.prompt.count == ConversationLoop.alarmNoteLimit)
+    }
+
+    @Test("pausing and resuming an alarm say alarm, not loop")
+    func pauseResumeWording() throws {
+        let (state, id) = try app()
+        _ = state.setAlarm(for: id, requested: 60, note: "x")
+        state.pauseLoop(for: id)
+        var said = state.conversations.first { $0.id == id }?.messages.last?.content ?? ""
+        #expect(said.contains("Alarm paused") && !said.contains("Loop paused"), Comment(rawValue: said))
+        state.resumeLoop(for: id)
+        said = state.conversations.first { $0.id == id }?.messages.last?.content ?? ""
+        #expect(said.contains("Alarm resumed") && !said.contains("Loop resumed"), Comment(rawValue: said))
+    }
 }
