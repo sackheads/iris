@@ -353,6 +353,54 @@ struct PeerSignatureVerifierTests {
         }
     }
 
+    // Review Focus (#1036 Iris boundary-audit, item 1): `ISO8601DateFormatter` NORMALIZES an
+    // out-of-range field instead of rejecting it (Feb 30 -> Mar 2, Feb 29 on a non-leap year ->
+    // Mar 1, Nov 31 -> Dec 1, T24:00:00 -> next midnight), while romar's Python
+    // `datetime.fromisoformat` raises on every one of these — so the identical signed frame used
+    // to verify as `ts_invalid` on a romar peer and as a different, normalized instant on Iris.
+    // One test per impossible value, each shape-valid for `matchesRFC3339`'s regex so only the
+    // calendar check can be catching it.
+    @Test("ts_invalid: a calendar-impossible ts (Feb 30, Feb 29 non-leap, Nov 31, T24:00:00) is rejected, not normalized",
+          arguments: ["2026-02-30T12:00:00Z", "2026-02-29T12:00:00Z", "2026-11-31T12:00:00Z", "2026-01-01T24:00:00Z"])
+    func tsInvalidCalendarImpossibleDate(_ badTs: String) throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let key = try enrolledKey(profile: "clomp", in: registry)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let envelope = Data("""
+        {"from":{"profile":"clomp"},"to":{"profile":"iris"},"kind":"cancel","envelopeId":"ts-invalid-calendar-id-1","ts":"\(badTs)"}
+        """.utf8)
+        let frame = PeerSigner(key: key).sign(envelopeBytes: envelope, principal: "clomp", keyId: nil)
+        let verifier = PeerSignatureVerifier(registry: registry, seenSet: InMemorySeenSet())
+        let context = VerificationContext(selfProfile: "iris", channel: .inbox, outstanding: nil, now: now)
+        #expect(throws: PeerVerificationError(reason: .tsInvalid, envelopeId: "ts-invalid-calendar-id-1")) {
+            _ = try verifier.verifyAndAdmit(frame, context: context, decode: Self.decodeTestEnvelope)
+        }
+    }
+
+    // Same four impossible values, now in `deadline` with a valid `ts`: the parse failure falls
+    // into the existing `deadlineMissing` guard (`parseRFC3339` returning nil reads the same as
+    // the field being absent) — romar has no separate `deadline_invalid` code, so this is the
+    // correct bucket, not a gap.
+    @Test("deadline_missing: a calendar-impossible deadline (Feb 30, Feb 29 non-leap, Nov 31, T24:00:00) is rejected, not normalized",
+          arguments: ["2026-02-30T12:00:00Z", "2026-02-29T12:00:00Z", "2026-11-31T12:00:00Z", "2026-01-01T24:00:00Z"])
+    func deadlineInvalidCalendarImpossibleDate(_ badDeadline: String) throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let key = try enrolledKey(profile: "clomp", in: registry)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let ts = Self.iso(now)
+        let envelope = Data("""
+        {"from":{"profile":"clomp"},"to":{"profile":"iris"},"kind":"message","envelopeId":"deadline-invalid-calendar-id-1","ts":"\(ts)","payload":{"metadata":{"deadline":"\(badDeadline)"}},"taskId":"task-1","correlationId":"corr-1"}
+        """.utf8)
+        let frame = PeerSigner(key: key).sign(envelopeBytes: envelope, principal: "clomp", keyId: nil)
+        let verifier = PeerSignatureVerifier(registry: registry, seenSet: InMemorySeenSet())
+        let context = VerificationContext(selfProfile: "iris", channel: .inbox, outstanding: nil, now: now)
+        #expect(throws: PeerVerificationError(reason: .deadlineMissing, envelopeId: "deadline-invalid-calendar-id-1")) {
+            _ = try verifier.verifyAndAdmit(frame, context: context, decode: Self.decodeTestEnvelope)
+        }
+    }
+
     @Test("channel_kind_mismatch: a message-kind frame delivered on the events channel")
     func channelKindMismatch() throws {
         let (frame, registry, tempDir, context) = try setup(for: try fixtureVector(named: "channel_kind_mismatch"), channel: .events)
