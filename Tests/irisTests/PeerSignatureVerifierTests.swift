@@ -360,8 +360,8 @@ struct PeerSignatureVerifierTests {
     // to verify as `ts_invalid` on a romar peer and as a different, normalized instant on Iris.
     // One test per impossible value, each shape-valid for `matchesRFC3339`'s regex so only the
     // calendar check can be catching it.
-    @Test("ts_invalid: a calendar-impossible ts (Feb 30, Feb 29 non-leap, Nov 31, T24:00:00) is rejected, not normalized",
-          arguments: ["2026-02-30T12:00:00Z", "2026-02-29T12:00:00Z", "2026-11-31T12:00:00Z", "2026-01-01T24:00:00Z"])
+    @Test("ts_invalid: a calendar-impossible ts (Feb 30, Feb 29 non-leap, Nov 31, T24:00:00, year 0000) is rejected, not normalized",
+          arguments: ["2026-02-30T12:00:00Z", "2026-02-29T12:00:00Z", "2026-11-31T12:00:00Z", "2026-01-01T24:00:00Z", "0000-01-01T00:00:00Z"])
     func tsInvalidCalendarImpossibleDate(_ badTs: String) throws {
         let (registry, tempDir) = freshRegistry()
         defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -382,8 +382,8 @@ struct PeerSignatureVerifierTests {
     // into the existing `deadlineMissing` guard (`parseRFC3339` returning nil reads the same as
     // the field being absent) — romar has no separate `deadline_invalid` code, so this is the
     // correct bucket, not a gap.
-    @Test("deadline_missing: a calendar-impossible deadline (Feb 30, Feb 29 non-leap, Nov 31, T24:00:00) is rejected, not normalized",
-          arguments: ["2026-02-30T12:00:00Z", "2026-02-29T12:00:00Z", "2026-11-31T12:00:00Z", "2026-01-01T24:00:00Z"])
+    @Test("deadline_missing: a calendar-impossible deadline (Feb 30, Feb 29 non-leap, Nov 31, T24:00:00, year 0000) is rejected, not normalized",
+          arguments: ["2026-02-30T12:00:00Z", "2026-02-29T12:00:00Z", "2026-11-31T12:00:00Z", "2026-01-01T24:00:00Z", "0000-01-01T00:00:00Z"])
     func deadlineInvalidCalendarImpossibleDate(_ badDeadline: String) throws {
         let (registry, tempDir) = freshRegistry()
         defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -397,6 +397,44 @@ struct PeerSignatureVerifierTests {
         let verifier = PeerSignatureVerifier(registry: registry, seenSet: InMemorySeenSet())
         let context = VerificationContext(selfProfile: "iris", channel: .inbox, outstanding: nil, now: now)
         #expect(throws: PeerVerificationError(reason: .deadlineMissing, envelopeId: "deadline-invalid-calendar-id-1")) {
+            _ = try verifier.verifyAndAdmit(frame, context: context, decode: Self.decodeTestEnvelope)
+        }
+    }
+
+    // dev-2's #1036 re-review: nothing above pins that a REAL leap day is still accepted — a
+    // mutant that hardcodes `isLeapYear = false` passes all four impossible-ts/deadline tests
+    // unnoticed, since none of them is a Feb 29. 2028 is a real leap year (divisible by 4, not
+    // by 100); 2100 looks like one by the "divisible by 4" rule alone but isn't (divisible by
+    // 100, not by 400) — the exact case the full Gregorian rule exists to catch.
+    @Test("ts_invalid does NOT fire for a real leap day (2028-02-29); a well-formed cancel is admitted")
+    func realLeapDayIsAdmitted() throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let key = try enrolledKey(profile: "clomp", in: registry)
+        let now = try #require(ISO8601DateFormatter().date(from: "2028-02-29T12:00:00Z"))
+        let envelope = Data("""
+        {"from":{"profile":"clomp"},"to":{"profile":"iris"},"kind":"cancel","envelopeId":"leap-day-real-id-1","ts":"2028-02-29T12:00:00Z"}
+        """.utf8)
+        let frame = PeerSigner(key: key).sign(envelopeBytes: envelope, principal: "clomp", keyId: nil)
+        let verifier = PeerSignatureVerifier(registry: registry, seenSet: InMemorySeenSet())
+        let context = VerificationContext(selfProfile: "iris", channel: .inbox, outstanding: nil, now: now)
+        let result = try verifier.verifyAndAdmit(frame, context: context, decode: Self.decodeTestEnvelope)
+        #expect(result.envelopeId == "leap-day-real-id-1")
+    }
+
+    @Test("ts_invalid: 2100-02-29 is rejected — divisible by 100 but not by 400, so not a leap year despite being divisible by 4")
+    func centuryNonLeapYearRejected() throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let key = try enrolledKey(profile: "clomp", in: registry)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let envelope = Data("""
+        {"from":{"profile":"clomp"},"to":{"profile":"iris"},"kind":"cancel","envelopeId":"century-non-leap-id-1","ts":"2100-02-29T12:00:00Z"}
+        """.utf8)
+        let frame = PeerSigner(key: key).sign(envelopeBytes: envelope, principal: "clomp", keyId: nil)
+        let verifier = PeerSignatureVerifier(registry: registry, seenSet: InMemorySeenSet())
+        let context = VerificationContext(selfProfile: "iris", channel: .inbox, outstanding: nil, now: now)
+        #expect(throws: PeerVerificationError(reason: .tsInvalid, envelopeId: "century-non-leap-id-1")) {
             _ = try verifier.verifyAndAdmit(frame, context: context, decode: Self.decodeTestEnvelope)
         }
     }
