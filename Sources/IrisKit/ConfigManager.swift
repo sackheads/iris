@@ -222,6 +222,33 @@ class ConfigManager: @unchecked Sendable {
         didSet { store.set(anthropicEffortHard, forKey: "ANTHROPIC_EFFORT_HARD") }
     }
 
+    /// #1019: the thinking level each Gemini tier asks for (`thinkingConfig.thinkingLevel`). Empty,
+    /// the default, sends none, so the model keeps its own default. The word is checked against
+    /// `geminiThinkingLevels` only; whether the tier's model takes it is the API's answer, and a 400
+    /// drops the level for that model (`GeminiThinkingFallback`).
+    static let geminiThinkingLevels = ["minimal", "low", "medium", "high"]
+    var geminiThinkingLevelEasy: String {
+        didSet { store.set(geminiThinkingLevelEasy, forKey: "GEMINI_THINKING_LEVEL_EASY") }
+    }
+    var geminiThinkingLevelMedium: String {
+        didSet { store.set(geminiThinkingLevelMedium, forKey: "GEMINI_THINKING_LEVEL_MEDIUM") }
+    }
+    var geminiThinkingLevelHard: String {
+        didSet { store.set(geminiThinkingLevelHard, forKey: "GEMINI_THINKING_LEVEL_HARD") }
+    }
+
+    /// The level to send for a Gemini call on `tier`, or nil: a word outside `geminiThinkingLevels`
+    /// (hand-edited, or empty) reads as none.
+    func geminiThinkingLevel(for tier: ModelTier) -> String? {
+        let level: String
+        switch tier {
+        case .easy: level = geminiThinkingLevelEasy
+        case .medium: level = geminiThinkingLevelMedium
+        case .hard: level = geminiThinkingLevelHard
+        }
+        return Self.geminiThinkingLevels.contains(level) ? level : nil
+    }
+
     func anthropicEffort(for tier: ModelTier) -> String {
         switch tier {
         case .easy: return anthropicEffortEasy
@@ -670,6 +697,9 @@ class ConfigManager: @unchecked Sendable {
         self.anthropicEffortEasy = saved.string(forKey: "ANTHROPIC_EFFORT_EASY") ?? ""
         self.anthropicEffortMedium = saved.string(forKey: "ANTHROPIC_EFFORT_MEDIUM") ?? ""
         self.anthropicEffortHard = saved.string(forKey: "ANTHROPIC_EFFORT_HARD") ?? ""
+        self.geminiThinkingLevelEasy = saved.string(forKey: "GEMINI_THINKING_LEVEL_EASY") ?? ""
+        self.geminiThinkingLevelMedium = saved.string(forKey: "GEMINI_THINKING_LEVEL_MEDIUM") ?? ""
+        self.geminiThinkingLevelHard = saved.string(forKey: "GEMINI_THINKING_LEVEL_HARD") ?? ""
 
         self.openaiModelEasy = resolveModel(key: "OPENAI_MODEL_EASY", provider: "OpenAI", migrated: oldEasy, fallback: "gpt-5.6-luna")
         self.openaiModelMedium = resolveModel(key: "OPENAI_MODEL_MEDIUM", provider: "OpenAI", migrated: oldMedium, fallback: "gpt-5.6-terra")

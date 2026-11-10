@@ -279,10 +279,13 @@ struct SettingsView: View {
                             .help("Leave blank for default endpoint")
                         TextField("Easy Subagent Model", text: $config.geminiModelEasy)
                             .help("Used for simple and repetitive tasks.")
+                        GeminiThinkingLevelPicker(title: "Easy thinking level", selection: $config.geminiThinkingLevelEasy)
                         TextField("Primary / Medium Model", text: $config.geminiModelMedium)
                             .help("Used for standard generation and reasoning.")
+                        GeminiThinkingLevelPicker(title: "Medium thinking level", selection: $config.geminiThinkingLevelMedium)
                         TextField("Hard Subagent Model", text: $config.geminiModelHard)
                             .help("Used for complex reasoning and evaluation.")
+                        GeminiThinkingLevelPicker(title: "Hard thinking level", selection: $config.geminiThinkingLevelHard)
                     } else if config.primaryProvider == LLMProvider.anthropic.rawValue {
                         Picker("Authentication Method", selection: $config.anthropicAuthMode) {
                             ForEach(AnthropicAuthMode.allCases) { mode in
@@ -1672,6 +1675,24 @@ private struct ModelListSheet: View {
     }
 }
 
+
+/// One Gemini tier's thinking level (#1019). Unlike the Anthropic picker it cannot list only what
+/// the model takes, since Google publishes no per-model query: a level the tier's model refuses is
+/// a 400 that the client answers by asking again without it, once, and remembers. "Model default"
+/// sends nothing.
+private struct GeminiThinkingLevelPicker: View {
+    let title: String
+    @Binding var selection: String
+
+    var body: some View {
+        Picker(title, selection: Binding(get: { ConfigManager.geminiThinkingLevels.contains(selection) ? selection : "" },
+                                          set: { selection = $0 })) {
+            Text("Model default").tag("")
+            ForEach(ConfigManager.geminiThinkingLevels, id: \.self) { Text($0.capitalized).tag($0) }
+        }
+        .help("How hard the model thinks before it answers (Gemini 3 and later). Model default sends nothing. Not every model takes every level (Gemini 3 Pro takes low and high, for one): a model that answers 400 is asked again without the level, and the level is dropped for it until Iris restarts.")
+    }
+}
 
 /// One tier's reasoning effort (#314 PR 7). It lists only the levels the tier's model accepts
 /// (`AnthropicCapabilities`); a model with none, or one the table does not know, gets a disabled

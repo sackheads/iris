@@ -29,6 +29,9 @@ struct GeminiRequest: Codable {
     /// has one. `LLMClient.encodeGeminiBody` adds it to the wire body; no other provider reads it.
     /// Never encoded here.
     var thinkingLevel: String? = nil
+    /// #1019: Gemini's `thinkingConfig.includeThoughts`, set on a streamed chat call so the model's
+    /// thought summaries come back as `thought: true` parts for the status line. Never encoded here.
+    var includeThoughts: Bool = false
     /// #314 PR 7: Anthropic's `output_config.effort`, the user's reasoning-effort setting for the
     /// call's tier. Nil sends none, so the model keeps its own default. The client sends it only to
     /// a model whose `AnthropicCapabilities` row lists the level. Never encoded.
@@ -58,6 +61,9 @@ public struct Part: Codable, Sendable {
     public var inlineData: InlineData? = nil
     public var thought_signature: String?
     public var thoughtSignature: String?
+    /// #1019: Gemini marks a thought-summary part `thought: true`. Such a part is shown live and
+    /// never joins the reply; a request never carries one (nil is not encoded).
+    public var thought: Bool?
 
     public init(
         text: String? = nil,
@@ -65,7 +71,8 @@ public struct Part: Codable, Sendable {
         functionResponse: FunctionResponse? = nil,
         inlineData: InlineData? = nil,
         thought_signature: String? = nil,
-        thoughtSignature: String? = nil
+        thoughtSignature: String? = nil,
+        thought: Bool? = nil
     ) {
         self.text = text
         self.functionCall = functionCall
@@ -73,6 +80,7 @@ public struct Part: Codable, Sendable {
         self.inlineData = inlineData
         self.thought_signature = thought_signature
         self.thoughtSignature = thoughtSignature
+        self.thought = thought
     }
 
     /// Lenient decoder (invariant 1, #204 round 2): every field here was already `Optional`, so the
@@ -90,6 +98,7 @@ public struct Part: Codable, Sendable {
         inlineData = try c.decodeIfPresent(InlineData.self, forKey: .inlineData)
         thought_signature = try c.decodeIfPresent(String.self, forKey: .thought_signature)
         thoughtSignature = try c.decodeIfPresent(String.self, forKey: .thoughtSignature)
+        thought = try c.decodeIfPresent(Bool.self, forKey: .thought)
     }
 }
 
