@@ -129,6 +129,19 @@ struct SetAlarmTests {
         #expect(state.loopRefusal(state.conversations[i], forAlarm: true) == nil)
         #expect(state.setAlarm(for: id, requested: 60, note: "x").contains("Alarm set"))
         #expect(loop(state, id)?.isAlarm == true)
+        // And the engine may arm and fire it there: the same refusal gates both.
+        let set = try #require(loop(state, id))
+        #expect(state.armableLoop(for: id)?.id == set.id)
+        guard case .run = state.takeLoopTick(for: id, loopId: set.id) else { Issue.record("the pinned alarm did not fire"); return }
+        state.endEngineTurn(for: id)
+    }
+
+    @Test("an alarm waits its own delay, not a loop default")
+    func armedDelay() throws {
+        let (state, id) = try app()
+        _ = state.setAlarm(for: id, requested: 120, note: "x")
+        let set = try #require(loop(state, id))
+        #expect(state.nextLoopDelay(for: id, loop: set) == 120)
     }
 
     @Test("the tick that fires an alarm says it is an alarm, carries the note and asks for no pacing")
