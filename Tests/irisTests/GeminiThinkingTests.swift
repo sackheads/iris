@@ -44,6 +44,28 @@ struct GeminiThinkingTests {
         #expect(again.geminiThinkingLevel(for: .hard) == nil, "a stored unknown word still reads as none")
     }
 
+    @Test("the tier's level goes to a chat call, never to a guard call or a named model, and the request's own wins")
+    func resolution() {
+        let (config, _, cleanup) = isolated(); defer { cleanup() }
+        config.geminiThinkingLevelEasy = "minimal"
+        var chat = empty
+        #expect(LLMClient.resolvedThinkingLevel(request: chat, tier: .easy, config: config, modelOverride: false) == "minimal")
+        #expect(LLMClient.resolvedThinkingLevel(request: chat, tier: .medium, config: config, modelOverride: false) == nil)
+        #expect(LLMClient.resolvedThinkingLevel(request: chat, tier: .easy, config: config, modelOverride: true) == nil)
+        var guardCall = empty
+        guardCall.ignoresTierThinkingLevel = true
+        #expect(LLMClient.resolvedThinkingLevel(request: guardCall, tier: .easy, config: config, modelOverride: false) == nil,
+                "a guard that fell back to the easy tier's model must not take the user's easy level")
+        chat.thinkingLevel = "low"
+        #expect(LLMClient.resolvedThinkingLevel(request: chat, tier: .easy, config: config, modelOverride: false) == "low")
+    }
+
+    @Test("the guard's cloud engine marks its requests")
+    func guardMarks() throws {
+        let source = try String(contentsOf: PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit/CloudAuxiliaryEngine.swift"), encoding: .utf8)
+        #expect(source.contains("request.ignoresTierThinkingLevel = true"))
+    }
+
     // MARK: wire
 
     @Test("a request with neither field is byte-identical to before")
