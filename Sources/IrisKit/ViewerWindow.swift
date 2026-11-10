@@ -279,25 +279,32 @@ final class ViewerWebViewHost: NSView {
 /// #904's DNS verification. The banner is worded to match: it never claims Iris prevents drag-out.
 /// The GUI pass records whether a drag attempt actually leaves the window, as evidence either way.
 final class ClosedSurfaceWebView: WKWebView {
-    override func menu(for event: NSEvent) -> NSMenu? {
-        super.menu(for: event).flatMap(Self.copyOnly)
+    /// The hook WebKit actually presents its context menu through on macOS: `willOpenMenu` runs on
+    /// the menu it built, just before it shows. #904's live pass showed the full default menu
+    /// (Look Up, Translate, Search with Google, Share, Services), "Search with Google" being a
+    /// one-click egress of the selected text from a window that says it makes no network
+    /// connections, because the filter then sat only on `menu(for:)`, which WebKit does not route
+    /// its menu through. Filtered after `super`, so nothing it adds survives either.
+    override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
+        super.willOpenMenu(menu, with: event)
+        Self.restrictToCopy(menu)
     }
 
-    /// Pure, so a test can assert the filter itself without a live `NSMenu` from a real context
-    /// menu event (which needs a window): keeps only items titled "Copy" (WebKit's own, not
-    /// guessed), and returns nil — no menu at all — when the default menu had none.
-    static func copyOnly(_ defaultMenu: NSMenu) -> NSMenu? {
-        let copyItems = defaultMenu.items.filter { $0.title.caseInsensitiveCompare("Copy") == .orderedSame }
-        guard !copyItems.isEmpty else { return nil }
-        let menu = NSMenu()
-        // An `NSMenuItem` can only ever belong to one menu at a time (AppKit throws if it's
-        // still in `defaultMenu` when added here) — remove it from the default menu first, which
-        // is about to be discarded anyway.
-        for item in copyItems {
-            defaultMenu.removeItem(item)
-            menu.addItem(item)
+    /// Kept for the paths AppKit does route through it (a control-click), on the same filter.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard let menu = super.menu(for: event) else { return nil }
+        Self.restrictToCopy(menu)
+        return menu.items.isEmpty ? nil : menu
+    }
+
+    /// Pure and in place, so a test can drive the filter itself on a real `NSMenu`: removes every
+    /// item not titled "Copy" (WebKit's own title, not guessed), separators and submenus (Share,
+    /// Services, Speech) included. A localized title that is not "Copy" leaves no menu: it fails
+    /// closed.
+    static func restrictToCopy(_ menu: NSMenu) {
+        for item in menu.items.reversed() where item.title.caseInsensitiveCompare("Copy") != .orderedSame {
+            menu.removeItem(item)
         }
-        return menu
     }
 }
 
