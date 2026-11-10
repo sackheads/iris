@@ -68,6 +68,37 @@ struct VolatileDefaultsTests {
         IrisDefaults.removeSuiteFile(named: "iris-bench-not-there", in: dir)
     }
 
+    /// #1007/#1044 (dev-2 review): `removeVolatileCopy` is `useVolatileCopyOfStandard`'s atexit
+    /// cleanup, factored out so `exitAfterPossibleGGMLLoad`'s `_exit` (which skips atexit entirely)
+    /// can run it explicitly. Exercised with an explicit `named:` rather than through
+    /// `useVolatileCopyOfStandard` itself, which would set the process-global `override` and
+    /// pollute every other test in this process (invariant 7).
+    @Test("removeVolatileCopy deletes the named suite's plist from the real preferences directory")
+    func removeVolatileCopyDeletesTheNamedPlist() throws {
+        let name = "iris-volatile-removetest-\(UUID().uuidString)"
+        let copy = try #require(UserDefaults(suiteName: name))
+        copy.set(true, forKey: "X")
+        copy.synchronize()
+        let path = IrisDefaults.preferencesDirectory.appendingPathComponent("\(name).plist").path
+        defer {
+            copy.removePersistentDomain(forName: name)
+            IrisDefaults.removeSuiteFile(named: name, in: IrisDefaults.preferencesDirectory)
+        }
+        guard FileManager.default.fileExists(atPath: path) else {
+            Issue.record("synchronize did not write \(path) in time — an environment issue, not the code under test")
+            return
+        }
+
+        IrisDefaults.removeVolatileCopy(named: name)
+
+        #expect(!FileManager.default.fileExists(atPath: path))
+    }
+
+    @Test("removeVolatileCopy with no explicit name and nothing recorded is a harmless no-op")
+    func removeVolatileCopyNoOpWhenNothingRecorded() {
+        IrisDefaults.removeVolatileCopy()
+    }
+
     @Test("the preferences directory is the user's Library/Preferences")
     func preferencesDirectoryIsLibraryPreferences() {
         #expect(IrisDefaults.preferencesDirectory.path.hasSuffix("/Library/Preferences"))
