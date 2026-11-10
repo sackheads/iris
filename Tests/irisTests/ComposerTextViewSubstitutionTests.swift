@@ -59,4 +59,17 @@ struct ComposerTextViewSubstitutionTests {
         #expect(tv.isAutomaticTextReplacementEnabled == false)
         #expect(tv.isAutomaticSpellingCorrectionEnabled == false)
     }
+
+    /// #1050: pins the fix, not just that some color got set. `.labelColor` is the adaptive
+    /// color the composer is supposed to already be resolving to by default — asserting the
+    /// exact color (not merely "not nil", which a wrong fixed color like `.black` would also
+    /// satisfy) is what a mutant swapping in a non-adaptive color should fail.
+    @Test("sets textColor and insertionPointColor to the adaptive label color")
+    func textColorPolicySetsAdaptiveLabelColor() {
+        let tv = NSTextView()
+        tv.textColor = .black // mutation check: start from the regressed value, then apply
+        tv.applyComposerTextColorPolicy()
+        #expect(tv.textColor == .labelColor)
+        #expect(tv.insertionPointColor == .labelColor)
+    }
 }

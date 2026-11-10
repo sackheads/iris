@@ -27,6 +27,7 @@ struct ComposerTextView: NSViewRepresentable {
         tv.isSelectable = true
         tv.allowsUndo = true
         tv.drawsBackground = false
+        tv.applyComposerTextColorPolicy()
         tv.textContainerInset = NSSize(width: 4, height: 8)
         tv.isVerticallyResizable = true
         tv.isHorizontallyResizable = false
@@ -175,6 +176,16 @@ extension NSTextView {
         isAutomaticQuoteSubstitutionEnabled = false
         isAutomaticTextReplacementEnabled = false
         isAutomaticSpellingCorrectionEnabled = false
+    }
+
+    /// #1050: a change elsewhere on current main regressed how the composer's NSTextView
+    /// resolves `effectiveAppearance`, so its default-adaptive `textColor` came out black on a
+    /// dark window. Set explicitly rather than left to rely on that resolution surviving every
+    /// future ancestor change. Extracted (same reasoning as `applyComposerSubstitutionPolicy`
+    /// above) so a test can assert it without standing up the composer's full NSViewRepresentable.
+    func applyComposerTextColorPolicy() {
+        textColor = .labelColor
+        insertionPointColor = .labelColor
     }
 }
 
