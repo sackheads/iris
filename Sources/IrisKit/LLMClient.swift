@@ -204,6 +204,13 @@ struct LLMClient {
         return try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])
     }
 
+    /// The effort an OpenAI call sends (#1020): the tier's setting, but never to a guard's cloud call
+    /// or a call that names its own model, as for Anthropic (#620).
+    static func resolvedReasoningEffort(request: GeminiRequest, tier: ModelTier, config: ConfigManager, modelOverride: Bool) -> String? {
+        if request.ignoresTierThinkingLevel || modelOverride { return nil }
+        return config.openaiReasoningEffort(for: tier)
+    }
+
     var supportsStreaming: Bool { true }
 
     /// The Anthropic provider's transport for this call (#181): the API key, or Vertex AI with an
@@ -237,7 +244,17 @@ struct LLMClient {
                 try await Self.anthropicTransport(config: config)
             }
         } else if provider == LLMProvider.openai.rawValue {
-            inner = OpenAIClient.streamContent(request: request, model: modelName, apiKey: config.openAIAPIKey, baseURL: config.openAIBaseURL)
+            // #1020: the tier's reasoning effort, dropped on a model or route that 400s it.
+            var asked = request
+            asked.reasoningEffort = Self.resolvedReasoningEffort(request: request, tier: tier, config: config, modelOverride: false)
+            let sent = asked
+            let baseURL = config.openAIBaseURL, apiKey = config.openAIAPIKey
+            let key = sent.reasoningEffort.map { OpenAIEffortFallback.key(baseURL: baseURL, model: modelName, effort: $0) } ?? ""
+            inner = OpenAIEffortFallback.stream(key: key, effort: sent.reasoningEffort) { effort in
+                var attempt = sent
+                attempt.reasoningEffort = effort
+                return OpenAIClient.streamContent(request: attempt, model: modelName, apiKey: apiKey, baseURL: baseURL)
+            }
         } else {
             // The missing-key check lives in `makeGeminiURLRequest`, so it throws inside the
             // metrics wrapper below and is recorded like any other failed call.
@@ -310,8 +327,16 @@ struct LLMClient {
                                                                      transport: try await Self.anthropicTransport(config: config),
                                                                      session: providerSession)
             } else if provider == LLMProvider.openai.rawValue {
-                response = try await OpenAIClient.generateContent(request: request, model: modelName, apiKey: config.openAIAPIKey, baseURL: config.openAIBaseURL,
+                var asked = request
+                asked.reasoningEffort = Self.resolvedReasoningEffort(request: request, tier: tier, config: config, modelOverride: model != nil)
+                let baseURL = config.openAIBaseURL, apiKey = config.openAIAPIKey
+                let key = asked.reasoningEffort.map { OpenAIEffortFallback.key(baseURL: baseURL, model: modelName, effort: $0) } ?? ""
+                response = try await OpenAIEffortFallback.run(key: key, effort: asked.reasoningEffort) { effort in
+                    var attempt = asked
+                    attempt.reasoningEffort = effort
+                    return try await OpenAIClient.generateContent(request: attempt, model: modelName, apiKey: apiKey, baseURL: baseURL,
                                                                   session: providerSession)
+                }
             } else {
                 // Fallback to Gemini. The tier's own model only, as for Anthropic's effort: a `model`
                 // override is a guard call and does not take the user's thinking level (#1019).
