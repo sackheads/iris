@@ -17,7 +17,7 @@ private func eventually(_ timeoutMs: Int = 5000, _ condition: @MainActor @Sendab
 struct UntrustedOutputClassifierTests {
     @Test func ownWordsDoNotTaint() {
         for name in ["write_file", "create_skill", "update_soul", "save_fact", "reflect", "set_workspace",
-                     "rename_conversation"] {
+                     "rename_conversation", "inbox_item"] {
             #expect(!IrisEngine.resultCarriesOutsideContent(name, args: [:]), "\(name)")
         }
     }
