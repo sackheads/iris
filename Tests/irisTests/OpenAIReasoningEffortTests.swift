@@ -20,7 +20,8 @@ struct OpenAIReasoningEffortTests {
 
     private func wire(_ request: GeminiRequest) throws -> [String: Any] {
         let url = try OpenAIClient.makeURLRequest(request: request, model: "m", apiKey: "k", stream: false)
-        return try #require(try JSONSerialization.jsonObject(with: #require(url.httpBody)) as? [String: Any])
+        let data = try #require(url.httpBody)
+        return try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 
     @Test("each tier reads its own effort; empty and unknown words read as none; it persists")
@@ -74,7 +75,8 @@ struct OpenAIReasoningEffortTests {
         #expect(r == "ok" && OpenAIEffortFallback.isRefused(k))
         let again = Sent()
         _ = try await OpenAIEffortFallback.run(key: k, effort: "high") { e in await again.add(e); return "ok" }
-        #expect(await sent.all == ["high", nil] && await again.all == [nil], "one failed round trip per process")
+        let first = await sent.all, second = await again.all
+        #expect(first == ["high", nil] && second == [nil], "one failed round trip per process")
     }
 
     @Test("a 400 the prompt causes fails both and remembers nothing; a non-400 does not retry")
@@ -87,7 +89,8 @@ struct OpenAIReasoningEffortTests {
         #expect(!OpenAIEffortFallback.isRefused(k))
         let sent = Sent()
         _ = try? await OpenAIEffortFallback.run(key: k, effort: "high") { e in await sent.add(e); throw APIError(message: "busy", statusCode: 503) } as String
-        #expect(await sent.all == ["high"])
+        let calls = await sent.all
+        #expect(calls == ["high"])
     }
 
     @Test("a stream rejected before its first event is reopened without the effort; later errors pass through")
