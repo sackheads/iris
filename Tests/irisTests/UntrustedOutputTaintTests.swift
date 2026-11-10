@@ -106,6 +106,16 @@ struct ApprovedCallTaintClassifierTests {
     @Test func readFileWithNoDecidedPathStaysAmbiguousAndTaints() {
         #expect(IrisEngine.approvedCallResultCarriesOutsideContent("read_file", args: [:], decidedPath: nil))
     }
+
+    /// dev-2 review (#1041): `args["path"]` must never stand in for `decidedPath`. An attacker can
+    /// spell `args["path"]` as anything, including a real first-party path, while a sandbox grant
+    /// resolves the actual read somewhere else entirely — so a nil `decidedPath` taints regardless
+    /// of what `args` claims. This pins the function against a plausible-looking "simplification"
+    /// that derives a path from `args` instead of taking the caller's own resolution.
+    @Test func readFileWithNoDecidedPathTaintsEvenWithAFirstPartyLookingArgsPath() {
+        #expect(IrisEngine.approvedCallResultCarriesOutsideContent(
+            "read_file", args: ["path": .string(IrisPaths.default.soulMd.path)], decidedPath: nil))
+    }
 }
 
 /// #813: the flag persists, and whatever predates it or can't be read counts as tainted, the
@@ -334,11 +344,15 @@ struct ApprovedCallTaintEngineTests {
     }
 
     /// Under a sandbox grant, `executeApprovedCall` never computes a plain `decidedPath` (it hands
-    /// the executor the grant instead) — even a first-party-looking path stays ambiguous, so this
-    /// taints, the fail-safe side, rather than guessing. The read itself may fail (nothing granted
-    /// this mount in the real sandbox), which is fine: taint is decided independently of whether
-    /// the call actually succeeded.
-    @Test("an approved read under a sandbox grant taints, even naming a first-party-looking path")
+    /// the executor the grant instead) — so this taints, the fail-safe side, rather than guessing.
+    /// `args["path"]` is deliberately spelled as a genuine first-party path
+    /// (`IrisPaths.default.soulMd.path`) while the grant mounts an unrelated directory: a correct
+    /// implementation never looks at `args` for `read_file` (only `decidedPath`, which is nil here),
+    /// so it must still taint. A version that "simplified" by deriving a path from `args["path"]`
+    /// instead of the caller's `decidedPath` would wrongly clear this — the gap dev-2's review of
+    /// #1041 found. The read itself may fail (nothing granted this mount in the real sandbox), which
+    /// is fine: taint is decided independently of whether the call actually succeeded.
+    @Test("an approved read under a sandbox grant taints, even when args names a real first-party path")
     func approvedReadUnderAGrantStaysAmbiguousAndTaints() async throws {
         let (state, engine) = try harness()
         let dir = try tempDirectory()
@@ -350,7 +364,7 @@ struct ApprovedCallTaintEngineTests {
             return
         }
         state.conversations[idx].sandboxGrant = grant
-        let call = BlockedCall(toolName: "read_file", args: ["path": .string(dir.appendingPathComponent("x.txt").path)])
+        let call = BlockedCall(toolName: "read_file", args: ["path": .string(IrisPaths.default.soulMd.path)])
 
         _ = await engine.executeApprovedCall(call, conversationId: conversationId)
 

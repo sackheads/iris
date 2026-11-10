@@ -4652,15 +4652,25 @@ actor IrisEngine {
     }
 
     /// #813, approved-call path (#1026): whether an approved call's result provably cannot carry
-    /// outside content, by the same bar `resultCarriesOutsideContent` enforces for the main-turn
-    /// dispatch — extended to the first-party `read_file` carve-out, which that path applies
-    /// separately inside `executeToolWithHooks` (`isFirstPartyRead`, :7217-7225) on a resolved
-    /// filesystem path. `executeApprovedCall` never reaches that check: `executeToolWithHooks`
-    /// returns at `origin == .approvedCall` before it runs (:7201), which is why it used to taint
-    /// unconditionally. `decidedPath` is the same resolved path `executeApprovedCall` already
-    /// computes and hands to the executor when there is no sandbox grant; when there is one (or the
-    /// call isn't `read_file`/`write_file`), no plain filesystem path was decided here, so the read
-    /// stays ambiguous and this taints — the fail-safe direction (#813's hard constraint).
+    /// outside content. For every tool but `read_file` this is exactly `resultCarriesOutsideContent`'s
+    /// bar. For `read_file` it is NOT that function's bar (which only discriminates the artifact-scheme
+    /// case) — it reproduces the outcome of the main-turn path's own separate first-party carve-out,
+    /// applied inside `executeToolWithHooks` (`isFirstPartyRead` after an `isUnderIrisDir` gate,
+    /// currently around :7239-7243) on a resolved filesystem path. `executeApprovedCall` never reaches
+    /// that check: `executeToolWithHooks` returns early at `origin == .approvedCall` (currently around
+    /// :7223), before it runs — which is why it used to taint unconditionally. `isFirstPartyRead`'s own
+    /// definition already implies "under ~/.iris", so calling it directly (no separate
+    /// `isUnderIrisDir` gate here) is equivalent, not a shortcut.
+    ///
+    /// `decidedPath` — never `args["path"]` — is the only path this function will look at for
+    /// `read_file`, and it must come from the caller's own resolution (`executeApprovedCall`'s
+    /// already-computed `decidedPath`, nil whenever there is a sandbox grant or any tool but
+    /// `read_file`/`write_file`). `args` exists only to match `resultCarriesOutsideContent`'s shape; it
+    /// is never read in the `read_file` branch — resolving a path from `args["path"]` here instead of
+    /// taking the caller's `decidedPath` would let an attacker-spelled first-party-looking path (e.g.
+    /// `~/.iris/rules/x.md`) clear the hold on a grant that actually resolves it somewhere else
+    /// entirely. No decided path means the read is ambiguous, so this taints regardless of what `args`
+    /// says — the fail-safe direction (#813's hard constraint).
     nonisolated static func approvedCallResultCarriesOutsideContent(_ name: String, args: [String: JSONValue], decidedPath: String?) -> Bool {
         if resultIsIrisOwnWords.contains(name) { return false }
         if name == "read_file" {
