@@ -145,6 +145,78 @@ struct PeerKeyRegistryTests {
         #expect(try registry.resolve(principal: "clomp", keyId: "clomp") != nil)
     }
 
+    // Review finding: `corruptFileFailsClosed` only covered file-level corruption (not valid
+    // JSON). This covers the other half of the fail-closed design: a syntactically valid
+    // `[RegisteredKey]` array whose matched record's `publicKey` string is unusable key
+    // material — a bad prefix, non-base64 content, or the right base64 shape but the wrong
+    // decoded byte count for Curve25519. Each must also throw `.unavailable`, never read as a
+    // clean "no such key".
+    @Test("a record with unparseable key material throws RegistryError.unavailable, not nil")
+    func badKeyMaterialFailsClosed() throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let badRecords = [
+            RegisteredKey(profile: "clomp", keyId: "bad-prefix", publicKey: "not-ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
+            RegisteredKey(profile: "clomp", keyId: "bad-base64", publicKey: "ed25519:not-valid-base64!!"),
+            RegisteredKey(profile: "clomp", keyId: "wrong-length", publicKey: "ed25519:" + Data([1, 2, 3]).base64EncodedString()),
+        ]
+        try FileManager.default.createDirectory(at: registry.directory, withIntermediateDirectories: true)
+        let data = try JSONEncoder().encode(badRecords)
+        try data.write(to: registry.directory.appendingPathComponent("clomp.json"))
+
+        for record in badRecords {
+            #expect(throws: RegistryError.unavailable) {
+                _ = try registry.resolve(principal: "clomp", keyId: record.keyId)
+            }
+        }
+    }
+
+    // Review finding: AGENTS.md Invariant 3 documents that tool calls run concurrently via
+    // `withTaskGroup` — this is a real, recurring race class here, not a generic worry. The
+    // `withLock` serialization around `enroll`'s read-check-write must hold under real
+    // contention: with several callers racing to enroll the same (profile, keyId) under
+    // different public keys, exactly one must win (and persist), every other must see
+    // `PeerKeySubstitutionError`, and the file on disk afterward must hold exactly one
+    // uncorrupted record — never a torn or merged write from two writers racing `save`.
+    @Test("concurrent enroll calls for the same (profile, keyId) with differing public keys: exactly one wins, the rest see substitution, the file is never torn")
+    func concurrentEnrollSubstitutionIsSerialized() async throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let attempts = (0..<8).map { _ in freshWireKey() }
+
+        let outcomes = await withTaskGroup(of: Result<Void, Error>.self) { group in
+            for wire in attempts {
+                group.addTask {
+                    do {
+                        try registry.enroll(RegisteredKey(profile: "clomp", keyId: "clomp-2026-11", publicKey: wire))
+                        return .success(())
+                    } catch {
+                        return .failure(error)
+                    }
+                }
+            }
+            var results: [Result<Void, Error>] = []
+            for await result in group { results.append(result) }
+            return results
+        }
+
+        let successes = outcomes.filter { if case .success = $0 { return true }; return false }
+        let substitutionFailures = outcomes.compactMap { outcome -> PeerKeySubstitutionError? in
+            if case .failure(let error) = outcome { return error as? PeerKeySubstitutionError }
+            return nil
+        }
+        #expect(successes.count == 1)
+        #expect(substitutionFailures.count == attempts.count - 1)
+        #expect(substitutionFailures.allSatisfy { $0 == PeerKeySubstitutionError(profile: "clomp", keyId: "clomp-2026-11") })
+
+        // The file holds exactly one record, and it's one of the attempted values — not a torn
+        // or merged write from two writers racing `save` under the lock.
+        let stored = try registry.list(profile: "clomp")
+        #expect(stored.count == 1)
+        #expect(attempts.contains(stored[0].publicKey))
+    }
+
     @Test("revoke then resolve returns nil")
     func revokeThenResolve() throws {
         let (registry, tempDir) = freshRegistry()
