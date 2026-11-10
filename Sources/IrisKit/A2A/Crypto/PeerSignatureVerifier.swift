@@ -711,9 +711,36 @@ struct PeerSignatureVerifier: Sendable {
     }
 
     private static func parseRFC3339(_ value: String) -> Date? {
+        guard Self.hasValidCalendarFields(value) else { return nil }
         if value.contains(".") {
             return isoFormatterFractional.date(from: value)
         }
         return isoFormatterPlain.date(from: value)
+    }
+
+    /// `ISO8601DateFormatter` normalizes an out-of-range field instead of rejecting it — Feb 30
+    /// becomes Mar 2, Feb 29 on a non-leap year becomes Mar 1, Nov 31 becomes Dec 1, `T24:00:00`
+    /// becomes the next midnight — so the same signed frame that romar's Python
+    /// `datetime.fromisoformat` rejects outright would verify on Iris as a different, normalized
+    /// instant (#1036 Iris boundary-audit review, item 1: not a replay hole, since the normalized
+    /// instant is used consistently from there on, but a cross-implementation disagreement on a
+    /// field romar's spec calls strict). Checked directly against the calendar, on the exact
+    /// character positions `matchesRFC3339`'s regex already pins (`YYYY-MM-DDTHH:MM:SS`), rather
+    /// than round-tripping the formatter's own output back through itself — a round-trip would
+    /// just re-run the same normalization this is meant to catch.
+    private static func hasValidCalendarFields(_ value: String) -> Bool {
+        let chars = Array(value)
+        guard chars.count >= 19 else { return false }
+        func field(_ range: Range<Int>) -> Int? { Int(String(chars[range])) }
+        guard let year = field(0..<4), let month = field(5..<7), let day = field(8..<10),
+              let hour = field(11..<13), let minute = field(14..<16), let second = field(17..<19) else {
+            return false
+        }
+        guard (1...12).contains(month), (0...23).contains(hour), (0...59).contains(minute), (0...59).contains(second) else {
+            return false
+        }
+        let isLeapYear = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+        let daysInMonth = [31, isLeapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        return (1...daysInMonth[month - 1]).contains(day)
     }
 }
