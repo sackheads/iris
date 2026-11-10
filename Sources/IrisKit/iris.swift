@@ -1325,7 +1325,13 @@ actor IrisEngine {
     /// quoted text and not Brian's words, via `inboxPickedLabelLine`. The raw id string itself is
     /// never echoed anywhere else — it was never meant to be read, only matched against.
     nonisolated private static func plainOptionId(_ id: String) -> Bool {
-        UUID(uuidString: id) != nil
+        // `UUID(uuidString:)` accepts a NUL-terminated tail (dev-3's #1054 review): a valid UUID
+        // followed by "\0" and arbitrary text still parses as that UUID, underlying C-string
+        // interop stopping at the NUL. A bare non-nil check let the whole string, tail included,
+        // through as "plain". Round-tripping closes it: the id counts as a genuine UUID only if
+        // re-formatting the parsed value reproduces the exact same string.
+        guard let parsed = UUID(uuidString: id) else { return false }
+        return parsed.uuidString.caseInsensitiveCompare(id) == .orderedSame
     }
 
     /// The emitter's own label for the option an answer picked, as one more line the renderer owns,
