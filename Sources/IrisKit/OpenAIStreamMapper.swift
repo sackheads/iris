@@ -33,7 +33,7 @@ struct OpenAIStreamMapper: StreamMapper {
                 // #1020: Ollama and OpenRouter name the same stream `reasoning`. It is shown, not
                 // kept: only `reasoning_content` round-trips as the thought signature. A server
                 // that sends both in one delta says the same thing twice; show it once.
-                if delta["reasoning_content"] == nil, let r = delta["reasoning"] as? String, !r.isEmpty {
+                if (delta["reasoning_content"] as? String ?? "").isEmpty, let r = delta["reasoning"] as? String, !r.isEmpty {
                     out.append(.thinkingText(r))
                 }
                 for fragment in delta["tool_calls"] as? [[String: Any]] ?? [] {

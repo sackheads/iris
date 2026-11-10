@@ -69,6 +69,12 @@ struct OpenAIReasoningEffortTests {
         var mapper = OpenAIStreamMapper()
         let events = try mapper.handle(SSEEvent(event: nil, data: #"{"choices":[{"delta":{"reasoning_content":"same","reasoning":"same"}}]}"#))
         #expect(events == [.thinkingText("same")])
+        // An absent, null or empty reasoning_content does not hide `reasoning` (#1042 review).
+        for lead in ["", #""reasoning_content":null,"#, #""reasoning_content":"","#] {
+            var m = OpenAIStreamMapper()
+            let e = try m.handle(SSEEvent(event: nil, data: "{\"choices\":[{\"delta\":{\(lead)\"reasoning\":\"x\"}}]}"))
+            #expect(e == [.thinkingText("x")], "lead: \(lead)")
+        }
     }
 
     @Test("a transient error before the first event (503, 429) is not a refusal: no reopen, nothing remembered")
