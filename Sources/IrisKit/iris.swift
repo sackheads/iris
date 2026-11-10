@@ -4639,6 +4639,25 @@ actor IrisEngine {
         return true
     }
 
+    /// #813, approved-call path (#1026): whether an approved call's result provably cannot carry
+    /// outside content, by the same bar `resultCarriesOutsideContent` enforces for the main-turn
+    /// dispatch — extended to the first-party `read_file` carve-out, which that path applies
+    /// separately inside `executeToolWithHooks` (`isFirstPartyRead`, :7217-7225) on a resolved
+    /// filesystem path. `executeApprovedCall` never reaches that check: `executeToolWithHooks`
+    /// returns at `origin == .approvedCall` before it runs (:7201), which is why it used to taint
+    /// unconditionally. `decidedPath` is the same resolved path `executeApprovedCall` already
+    /// computes and hands to the executor when there is no sandbox grant; when there is one (or the
+    /// call isn't `read_file`/`write_file`), no plain filesystem path was decided here, so the read
+    /// stays ambiguous and this taints — the fail-safe direction (#813's hard constraint).
+    nonisolated static func approvedCallResultCarriesOutsideContent(_ name: String, args: [String: JSONValue], decidedPath: String?) -> Bool {
+        if resultIsIrisOwnWords.contains(name) { return false }
+        if name == "read_file" {
+            guard let decidedPath else { return true }
+            return !isFirstPartyRead(decidedPath)
+        }
+        return true
+    }
+
     /// #813: holds `call` when its conversation has read untrusted output, and says so to the
     /// model; nil means run it as usual. A conversation the app doesn't know (none should reach
     /// here) is held too: unknown is not clean.
@@ -6827,8 +6846,11 @@ actor IrisEngine {
                                                 conversationId: conversationId, useSandbox: useSandbox,
                                                 origin: .approvedCall, grant: grant, grantedMount: grantedMount,
                                                 decidedPath: decidedPath, beforeToolFired: call.hooksFired)
-        // #813: the person approved running the call, not what came back.
-        await markReadUntrusted(conversationId)
+        // #813: the person approved running the call, not necessarily what came back — but a
+        // result that provably cannot carry outside content (#1026) does not need the hold either.
+        if Self.approvedCallResultCarriesOutsideContent(call.toolName, args: call.args, decidedPath: decidedPath) {
+            await markReadUntrusted(conversationId)
+        }
         return result
     }
 

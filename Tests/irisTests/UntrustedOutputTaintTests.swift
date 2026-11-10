@@ -61,6 +61,53 @@ struct UntrustedOutputClassifierTests {
     }
 }
 
+/// #1026: the approved-call path (`executeApprovedCall`) used to taint unconditionally — "the
+/// person approved running the call, not what came back" — which over-triggers on nearly every
+/// session, since an approved call happens far more often than real untrusted ingestion. The fix
+/// only removes taint where the result provably cannot carry outside content, the same bar
+/// `resultCarriesOutsideContent` enforces for the main-turn path; `read_file`'s first-party
+/// carve-out (`isFirstPartyRead`, applied inside `executeToolWithHooks` for a model-turn read, a
+/// path `executeApprovedCall` never reaches) is reproduced here against `decidedPath`, the already-
+/// resolved path `executeApprovedCall` computes when there is no sandbox grant. Ambiguous cases
+/// (no plain filesystem path decided, i.e. a sandbox grant) keep tainting.
+@Suite("Untrusted-output taint: approved-call classifier (#1026)")
+struct ApprovedCallTaintClassifierTests {
+    @Test func ownWordsDoNotTaintRegardlessOfPath() {
+        #expect(!IrisEngine.approvedCallResultCarriesOutsideContent("write_file", args: [:], decidedPath: "/tmp/anything"))
+        #expect(!IrisEngine.approvedCallResultCarriesOutsideContent("write_file", args: [:], decidedPath: nil))
+    }
+
+    @Test func outsideContentStillTaints() {
+        for name in ["run_command", "search_web", "gmail_send_email"] {
+            #expect(IrisEngine.approvedCallResultCarriesOutsideContent(name, args: [:], decidedPath: nil), "\(name)")
+        }
+    }
+
+    /// `decidedPath` is checked against `IrisPaths.default` (the predicate takes no `paths:`
+    /// parameter — it reproduces the main-turn path's own default), so this uses the real
+    /// standing-context paths rather than a fixture root.
+    @Test func readFileOfAFirstPartyPathDoesNotTaint() {
+        #expect(!IrisEngine.approvedCallResultCarriesOutsideContent(
+            "read_file", args: [:], decidedPath: IrisPaths.default.soulMd.path))
+        #expect(!IrisEngine.approvedCallResultCarriesOutsideContent(
+            "read_file", args: [:], decidedPath: IrisPaths.default.rulesDir.appendingPathComponent("a.md").path))
+    }
+
+    @Test func readFileOfANonFirstPartyPathStillTaints() {
+        #expect(IrisEngine.approvedCallResultCarriesOutsideContent(
+            "read_file", args: [:], decidedPath: "/tmp/iris-1026-\(UUID().uuidString)/outside.txt"))
+        #expect(IrisEngine.approvedCallResultCarriesOutsideContent(
+            "read_file", args: [:], decidedPath: IrisPaths.default.workspacesDir.appendingPathComponent("repo/README.md").path),
+            "a cloned workspace under ~/.iris is someone else's text, same as the main-turn path")
+    }
+
+    /// No plain filesystem path was decided (a sandbox grant resolves the path a different way) —
+    /// ambiguous, so this stays on the fail-safe side rather than guessing it is first-party.
+    @Test func readFileWithNoDecidedPathStaysAmbiguousAndTaints() {
+        #expect(IrisEngine.approvedCallResultCarriesOutsideContent("read_file", args: [:], decidedPath: nil))
+    }
+}
+
 /// #813: the flag persists, and whatever predates it or can't be read counts as tainted, the
 /// opposite of `hasUnattendedInput`'s default, because set is this flag's cautious side.
 @MainActor
@@ -217,6 +264,97 @@ struct UntrustedOutputEngineTests {
         let dirty = app.createNewConversation(select: false)
         app.markConversationReadUntrusted(dirty)
         #expect(await startedTainted(parent: dirty) == true)
+    }
+}
+
+/// #1026: `executeApprovedCall` end-to-end, through the real dispatcher — not just the classifier
+/// function above — pinning both directions so a future change can't silently under-taint.
+@MainActor
+@Suite("Untrusted-output taint: approved-call path end-to-end (#1026)", .timeLimit(.minutes(1)))
+struct ApprovedCallTaintEngineTests {
+    private func harness() throws -> (AppState, IrisEngine) {
+        let store = try ConversationStore.inMemory()
+        let state = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        state.conversations.removeAll()
+        let engine = IrisEngine(state: state, tier: .medium, client: FakeLLMClient(responses: []),
+                                protectionEnabled: false, sessionPeerCount: 0)
+        return (state, engine)
+    }
+
+    private func tempDirectory() throws -> URL {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("iris-1026-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    @Test("an approved call with a non-outside-content result does not taint")
+    func approvedWriteFileDoesNotTaint() async throws {
+        let (state, engine) = try harness()
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let conversationId = state.createNewConversation(isBackground: true, title: "approved")
+        let call = BlockedCall(toolName: "write_file",
+                               args: ["path": .string(dir.appendingPathComponent("a.txt").path),
+                                      "content": .string("hi")], cwd: dir.path)
+
+        _ = await engine.executeApprovedCall(call, conversationId: conversationId)
+
+        #expect(state.conversations.first { $0.id == conversationId }?.hasUntrustedToolOutput == false)
+    }
+
+    @Test("an approved read of Iris's own standing context does not taint")
+    func approvedReadOfAFirstPartyPathDoesNotTaint() async throws {
+        let (state, engine) = try harness()
+        let rule = IrisPaths.default.rulesDir.appendingPathComponent("taint-1026-\(UUID().uuidString).md")
+        try FileManager.default.createDirectory(at: IrisPaths.default.rulesDir, withIntermediateDirectories: true)
+        try "mine".write(to: rule, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: rule) }
+        let conversationId = state.createNewConversation(isBackground: true, title: "approved")
+        let call = BlockedCall(toolName: "read_file", args: ["path": .string(rule.path)])
+
+        _ = await engine.executeApprovedCall(call, conversationId: conversationId)
+
+        #expect(state.conversations.first { $0.id == conversationId }?.hasUntrustedToolOutput == false)
+    }
+
+    @Test("an approved call whose result carries outside content still taints")
+    func approvedReadOfAnOutsidePathStillTaints() async throws {
+        let (state, engine) = try harness()
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let outside = dir.appendingPathComponent("theirs.txt")
+        try "theirs".write(to: outside, atomically: true, encoding: .utf8)
+        let conversationId = state.createNewConversation(isBackground: true, title: "approved")
+        let call = BlockedCall(toolName: "read_file", args: ["path": .string(outside.path)])
+
+        _ = await engine.executeApprovedCall(call, conversationId: conversationId)
+
+        #expect(state.conversations.first { $0.id == conversationId }?.hasUntrustedToolOutput == true)
+    }
+
+    /// Under a sandbox grant, `executeApprovedCall` never computes a plain `decidedPath` (it hands
+    /// the executor the grant instead) — even a first-party-looking path stays ambiguous, so this
+    /// taints, the fail-safe side, rather than guessing. The read itself may fail (nothing granted
+    /// this mount in the real sandbox), which is fine: taint is decided independently of whether
+    /// the call actually succeeded.
+    @Test("an approved read under a sandbox grant taints, even naming a first-party-looking path")
+    func approvedReadUnderAGrantStaysAmbiguousAndTaints() async throws {
+        let (state, engine) = try harness()
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let conversationId = state.createNewConversation(isBackground: true, title: "approved")
+        let grant = JobGrant(mounts: [ContainerMount(source: dir.path)])
+        guard let idx = state.conversations.firstIndex(where: { $0.id == conversationId }) else {
+            Issue.record("conversation not found")
+            return
+        }
+        state.conversations[idx].sandboxGrant = grant
+        let call = BlockedCall(toolName: "read_file", args: ["path": .string(dir.appendingPathComponent("x.txt").path)])
+
+        _ = await engine.executeApprovedCall(call, conversationId: conversationId)
+
+        #expect(state.conversations.first { $0.id == conversationId }?.hasUntrustedToolOutput == true)
     }
 }
 
