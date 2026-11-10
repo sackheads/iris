@@ -98,6 +98,19 @@ struct InboxEmitTests {
         #expect(app.inboxRevision > before)
     }
 
+    /// #1026: pins the bug itself, not just the classifier. Before this fix, `inbox_item` was
+    /// missing from `resultIsIrisOwnWords`, so the main-turn dispatch (`iris.swift:3890`) tainted
+    /// the conversation on its first ever tool call — before any outside content existed to taint
+    /// it with. Driven through the real dispatch (`runToolCall`/`processInput`), not the classifier
+    /// directly, so a regression in how the dispatcher calls the predicate would also be caught.
+    @Test("a successful emit, as the session's first tool call, does not set hasUntrustedToolOutput (dev-3's #1047 review finding 2)")
+    func emitDoesNotTaintTheConversation() async {
+        let (app, id) = app()
+        let result = await runToolCall(emitCall(), on: app, as: id)
+        #expect(result.contains("Recorded #"), Comment(rawValue: result))
+        #expect(app.conversations.first { $0.id == id }?.hasUntrustedToolOutput == false)
+    }
+
     @Test("a guard-blocked emit fails closed: nothing stored, and the rate token is refunded")
     func guardBlockedEmitFailsClosed() async throws {
         let (app, id) = app()
