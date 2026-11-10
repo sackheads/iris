@@ -205,8 +205,11 @@ struct GeminiThinkingTests {
             let sent = Sent()
             let stream = GeminiThinkingFallback.stream(key: k, level: "low", includeThoughts: true) { rung in
                 AsyncThrowingStream { c in
-                    Task { await sent.add(rung) }
-                    c.finish(throwing: APIError(message: "busy", statusCode: status))
+                    // Record, then finish: an unordered Task let the assertion read before the record on a slow runner.
+                    Task {
+                        await sent.add(rung)
+                        c.finish(throwing: APIError(message: "busy", statusCode: status))
+                    }
                 }
             }
             do { for try await _ in stream {}; Issue.record("should throw") }
