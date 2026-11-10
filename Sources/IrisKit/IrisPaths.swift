@@ -165,8 +165,13 @@ struct IrisPaths: Sendable {
     var mcpServersJSON: URL { configDir.appendingPathComponent("mcp_servers.json") }
 
     /// `PeerKeyRegistry`'s one `<profile>.json` per A2A principal (#974 H4 Task 2). Under
-    /// `configDir`, so it is already covered by `protectedWriteDirs` below: no tool call or
-    /// model-driven write can plant or alter a trusted peer key here.
+    /// `configDir`, so it is covered by `protectedWriteDirs` below the same as the rest of
+    /// `config/` — no stronger a guarantee than that (peer review, PR #1036 Finding 2): a
+    /// `write_file` call into this directory always asks and can never be covered by a standing
+    /// grant, but a shell command writing here (e.g. `run_command` redirecting output into a
+    /// file under this directory) is judged like any other shell command — asked unless an
+    /// allowlist, grant or auto-approve covers it. See `PermissionManager.isProtectedWrite`,
+    /// which only gates the `write_file` tool.
     var a2aPeersDir: URL { configDir.appendingPathComponent("a2a-peers") }
 
     // metrics/: measurements kept for this Mac's own use, never sent (#238)
