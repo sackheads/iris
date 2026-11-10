@@ -484,6 +484,57 @@ struct PeerSignatureVerifierTests {
         }
     }
 
+    // Final whole-branch review, Important 2: the addressee leg of the 3-way .events binding
+    // (taskId, addressee, correlationId — spec line 265) was never exercised on its own. A frame
+    // whose taskId matches is still signed by a DIFFERENT, legitimately enrolled principal than
+    // the one Iris is actually waiting on a reply from — a mutant deleting just the addressee
+    // check left every prior .events test green, because none of them used two distinct real
+    // principals.
+    @Test("events_request_mismatch: taskId matches but the frame is legitimately signed by a different principal than OutstandingRequest.addressee")
+    func eventsMismatchWrongAddressee() throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        _ = try enrolledKey(profile: "clomp", in: registry) // the addressee Iris is actually waiting on
+        let runeKey = try enrolledKey(profile: "rune", in: registry) // a different, real, enrolled peer
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let ts = Self.iso(now)
+        // Signed by rune, claiming to be rune — a wholly legitimate frame from rune's own
+        // perspective, just not the peer the OutstandingRequest names.
+        let envelope = Data("""
+        {"from":{"profile":"rune"},"kind":"status-update","envelopeId":"ev-wrong-addressee-1","ts":"\(ts)","taskId":"task-1","correlationId":"corr-1"}
+        """.utf8)
+        let frame = PeerSigner(key: runeKey).sign(envelopeBytes: envelope, principal: "rune", keyId: nil)
+        let verifier = PeerSignatureVerifier(registry: registry, seenSet: InMemorySeenSet())
+        let outstanding = OutstandingRequest(addressee: "clomp", taskId: "task-1", correlationId: "corr-1")
+        let context = VerificationContext(selfProfile: "iris", channel: .events, outstanding: outstanding, now: now)
+        #expect(throws: PeerVerificationError(reason: .eventsRequestMismatch, envelopeId: "ev-wrong-addressee-1")) {
+            _ = try verifier.verifyAndAdmit(frame, context: context, decode: Self.decodeTestEnvelope)
+        }
+    }
+
+    // Final whole-branch review, Important 2: the correlationId leg of the same 3-way binding. A
+    // mutant stubbing the correlationId check to always-true left every prior .events test green,
+    // because none of them set a correlationId on the OutstandingRequest that then disagreed with
+    // the frame's own.
+    @Test("events_request_mismatch: taskId and addressee match but correlationId disagrees with OutstandingRequest")
+    func eventsMismatchWrongCorrelationId() throws {
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let key = try enrolledKey(profile: "clomp", in: registry)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let ts = Self.iso(now)
+        let envelope = Data("""
+        {"from":{"profile":"clomp"},"kind":"status-update","envelopeId":"ev-wrong-corr-1","ts":"\(ts)","taskId":"task-1","correlationId":"corr-wrong"}
+        """.utf8)
+        let frame = PeerSigner(key: key).sign(envelopeBytes: envelope, principal: "clomp", keyId: nil)
+        let verifier = PeerSignatureVerifier(registry: registry, seenSet: InMemorySeenSet())
+        let outstanding = OutstandingRequest(addressee: "clomp", taskId: "task-1", correlationId: "corr-expected")
+        let context = VerificationContext(selfProfile: "iris", channel: .events, outstanding: outstanding, now: now)
+        #expect(throws: PeerVerificationError(reason: .eventsRequestMismatch, envelopeId: "ev-wrong-corr-1")) {
+            _ = try verifier.verifyAndAdmit(frame, context: context, decode: Self.decodeTestEnvelope)
+        }
+    }
+
     @Test(".events frame whose taskId and addressee match the OutstandingRequest is admitted")
     func eventsBindingMatches() throws {
         let (registry, tempDir) = freshRegistry()
@@ -917,14 +968,14 @@ struct StrictJSONTests {
     // `scanString` decodes escapes (rather than comparing raw bytes between the quotes)
     // specifically so two keys that are the *same character* written two different ways still
     // collide as one key for duplicate detection — e.g. `{"a":1,"a":2}` where the second "a" is
-    // written as `a`. Nothing exercised that property directly: a mutant that combines a
+    // written as `\u0061`. Nothing exercised that property directly: a mutant that combines a
     // surrogate pair with a different, still-valid-but-wrong formula would pass every other test
     // in this file, because none of them actually relies on two differently-written keys landing
     // on the same decoded string.
 
     @Test("an escaped key collides with its raw equivalent for duplicate detection")
     func escapedKeyCollidesWithRawEquivalent() throws {
-        // One raw "a", one "a" written as a (built via literalUnicodeEscape, never typed
+        // One raw "a", one "a" written as \u0061 (built via literalUnicodeEscape, never typed
         // directly as a \uXXXX span in source — see that helper's own doc comment for why).
         let escapedA = Self.literalUnicodeEscape("0061")
         let data = Data("{\"a\":1,\"\(escapedA)\":2}".utf8)
@@ -980,6 +1031,110 @@ struct StrictJSONTests {
         }
         #expect(throws: StrictJSONError.tooDeep) {
             try StrictJSON.rejectDuplicateKeys(nested(depth: 20_000))
+        }
+    }
+}
+
+/// Final whole-branch review, Important 1: every test above uses `InMemorySeenSet`, which ignores
+/// `retainUntil` entirely, and every `ts` sits at or near `now` — neither exercises the real
+/// retention arithmetic (`deadlineDate`/`ts + 24h`) that the production `A2ASeenLedger` (#974 H4
+/// Task 5) actually persists and opportunistically prunes against on every `admit`. That gap is
+/// LIVE: a mutant that passed `context.now` as `retainUntil` instead of the real computed value
+/// left every verifier/ledger test green, and is a genuine replay hole against the real ledger —
+/// its own prune-on-every-admit deletes the "replay" row and silently re-admits it as fresh on the
+/// next delivery. This suite drives `verifyAndAdmit` against the real, on-disk `A2ASeenLedger`
+/// (via `ConversationStore.onDisk`, not a stub), with `ts` and `now` meaningfully separated, so the
+/// real retention window — not a fixed, hardcoded staleness window, and not `context.now`
+/// substituted for it — is what is actually pinned.
+@Suite("Peer signature verifier x real A2ASeenLedger (final whole-branch review, Important 1)")
+struct PeerSignatureVerifierRealLedgerTests {
+    private func onDiskStore() throws -> (store: ConversationStore, cleanup: () -> Void) {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iris-a2a-verifier-ledger-\(UUID().uuidString)")
+        let paths = IrisPaths(root: root)
+        try paths.ensureDirectories()
+        let store = try ConversationStore.onDisk(at: paths.conversationsDB)
+        return (store, { try? FileManager.default.removeItem(at: root) })
+    }
+
+    private func freshRegistry() -> (PeerKeyRegistry, URL) {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("peer-sig-verifier-ledger-\(UUID().uuidString)")
+        return (PeerKeyRegistry(paths: IrisPaths(root: tempDir)), tempDir)
+    }
+
+    private func enrolledKey(profile: String, in registry: PeerKeyRegistry) throws -> IrisSigningKey {
+        let key = IrisSigningKey()
+        try registry.enroll(RegisteredKey(profile: profile, keyId: profile, publicKey: key.publicKeyWireString))
+        return key
+    }
+
+    private static func iso(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: date)
+    }
+
+    @Test("message kind: fresh well inside the real deadline window, replay one second later rejected via the real ledger")
+    func messageKindRealLedgerReplayAfterDeadline() throws {
+        let (store, cleanup) = try onDiskStore()
+        defer { cleanup() }
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let key = try enrolledKey(profile: "clomp", in: registry)
+
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        let ts = Self.iso(t0)
+        let deadline = Self.iso(t0.addingTimeInterval(8 * 3600)) // well past any fixed short window
+        let envelope = Data("""
+        {"from":{"profile":"clomp"},"to":{"profile":"iris"},"kind":"message","envelopeId":"real-ledger-msg-0001","ts":"\(ts)","payload":{"metadata":{"deadline":"\(deadline)"}}}
+        """.utf8)
+        let frame = PeerSigner(key: key).sign(envelopeBytes: envelope, principal: "clomp", keyId: nil)
+        let verifier = PeerSignatureVerifier(registry: registry, seenSet: store.a2aSeen)
+
+        // 6h after ts: inside the real 8h deadline, but far outside any hardcoded short window
+        // (e.g. 300s) a mutant might substitute for it.
+        let firstContext = VerificationContext(selfProfile: "iris", channel: .inbox, outstanding: nil,
+                                                 now: t0.addingTimeInterval(6 * 3600))
+        let first = try verifier.verifyAndAdmit(frame, context: firstContext, decode: PeerSignatureVerifierTests.decodeTestEnvelope)
+        #expect(first.envelopeId == "real-ledger-msg-0001")
+
+        // The exact same frame, replayed one second later: the real ledger's own
+        // prune-on-every-admit must not have evicted the row it just wrote.
+        let replayContext = VerificationContext(selfProfile: "iris", channel: .inbox, outstanding: nil,
+                                                  now: t0.addingTimeInterval(6 * 3600 + 1))
+        #expect(throws: PeerVerificationError(reason: .duplicateEnvelopeId, envelopeId: "real-ledger-msg-0001")) {
+            _ = try verifier.verifyAndAdmit(frame, context: replayContext, decode: PeerSignatureVerifierTests.decodeTestEnvelope)
+        }
+    }
+
+    @Test("non-message kind (cancel): fresh well inside the implicit ts+24h window, replay one second later rejected via the real ledger")
+    func cancelKindRealLedgerReplayAfterImplicitBound() throws {
+        let (store, cleanup) = try onDiskStore()
+        defer { cleanup() }
+        let (registry, tempDir) = freshRegistry()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let key = try enrolledKey(profile: "clomp", in: registry)
+
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        let ts = Self.iso(t0)
+        let envelope = Data("""
+        {"from":{"profile":"clomp"},"to":{"profile":"iris"},"kind":"cancel","envelopeId":"real-ledger-cancel-0001","ts":"\(ts)"}
+        """.utf8)
+        let frame = PeerSigner(key: key).sign(envelopeBytes: envelope, principal: "clomp", keyId: nil)
+        let verifier = PeerSignatureVerifier(registry: registry, seenSet: store.a2aSeen)
+
+        // 23h after ts: inside the real implicit ts+24h bound, far outside any hardcoded short
+        // window a mutant might substitute for it.
+        let firstContext = VerificationContext(selfProfile: "iris", channel: .inbox, outstanding: nil,
+                                                 now: t0.addingTimeInterval(23 * 3600))
+        let first = try verifier.verifyAndAdmit(frame, context: firstContext, decode: PeerSignatureVerifierTests.decodeTestEnvelope)
+        #expect(first.envelopeId == "real-ledger-cancel-0001")
+
+        let replayContext = VerificationContext(selfProfile: "iris", channel: .inbox, outstanding: nil,
+                                                  now: t0.addingTimeInterval(23 * 3600 + 1))
+        #expect(throws: PeerVerificationError(reason: .duplicateEnvelopeId, envelopeId: "real-ledger-cancel-0001")) {
+            _ = try verifier.verifyAndAdmit(frame, context: replayContext, decode: PeerSignatureVerifierTests.decodeTestEnvelope)
         }
     }
 }
