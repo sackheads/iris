@@ -288,6 +288,19 @@ final class ClosedSurfaceWebView: WKWebView {
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
         super.willOpenMenu(menu, with: event)
         Self.restrictToCopy(menu)
+        // The "Services" submenu is not an item WebKit lists: AppKit adds it, and the context-menu
+        // plug-ins (Share and the like), when the menu opens, so the title filter above never sees
+        // it. Switching plug-ins off is what keeps them out (#904 live pass: "Copy" and "Services").
+        menu.allowsContextMenuPlugIns = false
+    }
+
+    /// Offers no Services at all for this view: AppKit asks the responder chain for a requestor
+    /// per pasteboard type before it lists a service, and none here answers. A second guard beside
+    /// `allowsContextMenuPlugIns`, since a service run on the selection hands model-written text
+    /// to another program.
+    override func validRequestor(forSendType sendType: NSPasteboard.PasteboardType?,
+                                 returnType: NSPasteboard.PasteboardType?) -> Any? {
+        nil
     }
 
     /// Kept for the paths AppKit does route through it (a control-click), on the same filter.
