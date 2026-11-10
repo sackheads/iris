@@ -120,6 +120,17 @@ struct SetAlarmTests {
         #expect(loop(state, id) == nil)
     }
 
+    @Test("a call from a background (unattended) conversation sets nothing")
+    func unattendedRefused() async throws {
+        let (state, id) = try app()
+        let i = try #require(state.conversations.firstIndex { $0.id == id })
+        state.conversations[i].isBackground = true
+        state.stickyTools.record([IrisEngine.setAlarmTool], for: id)
+        let answer = await alarmTurn(state, id, args: ["delay_seconds": .int(60), "note": .string("x")])
+        #expect(loop(state, id) == nil)
+        #expect(answer?.contains("Alarm set") != true, Comment(rawValue: answer ?? "nil"))
+    }
+
     @Test("the pinned Iris conversation may hold an alarm: one tick does not fill it the way a loop would")
     func pinnedAllowed() throws {
         let (state, id) = try app()
