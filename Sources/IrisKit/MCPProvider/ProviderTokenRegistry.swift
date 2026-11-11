@@ -16,25 +16,49 @@ final class ProviderTokenRegistry: @unchecked Sendable {
 
     enum RegistryError: Error, Equatable {
         case reservedClientId
+        case invalidClientId
     }
 
     private let keychain: KeychainManager
+    /// Guards the dictionaries only — a reader (`clientId(forToken:)`, `isRegistered`,
+    /// `allClientIds`) takes this and nothing else, so it is never blocked behind a slow or
+    /// prompting Keychain call.
     private let lock = NSLock()
+    /// Serializes `issueToken`/`revokeToken` across their Keychain I/O: without this, two
+    /// concurrent calls for the same client id could leave Keychain and the dictionaries
+    /// disagreeing about which token is current (dev-2/dev-3 review). Held for the whole write,
+    /// `lock` only for the brief dictionary update inside it — never the other way around, so a
+    /// reader can never be stuck behind a Keychain prompt in `issueToken`/`revokeToken`.
+    private let writeLock = NSLock()
     private var cache: [String: String] = [:]          // clientId -> token
     private var reverseCache: [String: String] = [:]   // token -> clientId
 
     /// Set when the Keychain load in `init` failed (locked item, a Deny, a damaged item). The
-    /// cache then starts empty — fail-closed: nothing resolves until the next successful
-    /// `issueToken`/Keychain read — rather than silently pretending the store is simply new.
+    /// cache then starts empty — fail-closed: nothing resolves until a client re-registers via
+    /// `issueToken`. There is no automatic reload of a failed load; this property only lets a
+    /// caller notice the failure happened, it does not retry it.
     private(set) var keychainLoadError: Error?
 
-    /// Rejects every spelling of `reservedClientId` a UI would still render as "iris" — not just
-    /// the exact string. `issueToken`'s own check used only `==`, so "Iris", " iris " or "IRIS"
-    /// registered successfully and would be indistinguishable from Iris itself wherever a client
-    /// id reaches a UI.
-    private static func isReservedSpelling(_ clientId: String) -> Bool {
-        clientId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == reservedClientId
+    /// A conservative allowlist, not a denylist of specific look-alikes: lowercase ASCII
+    /// alphanumerics plus `.`, `_`, `-`, starting with an alphanumeric, 1-64 characters. This is
+    /// what actually closes the spoofing class dev-2/dev-3 found — fullwidth "ｉｒｉｓ", Cyrillic
+    /// "іris", a zero-width-joined "ir\u{200B}is", and Turkish "İris" all fail this character
+    /// class, where a normalize-then-compare-to-"iris" check (this file's earlier fix) let every
+    /// one of them through. The exact lowercase spelling "iris" still passes this allowlist on
+    /// its own, since it is itself a valid identifier shape — `isReservedSpelling` below is the
+    /// second, explicit guard that rejects that one specific case.
+    private static func isValidClientIdShape(_ clientId: String) -> Bool {
+        guard clientId.count <= 64, let first = clientId.unicodeScalars.first else { return false }
+        guard first.isASCII, CharacterSet.lowercaseASCIILetters.contains(first) || CharacterSet.asciiDigits.contains(first) else {
+            return false
+        }
+        return clientId.unicodeScalars.allSatisfy { scalar in
+            scalar.isASCII && (CharacterSet.lowercaseASCIILetters.contains(scalar) || CharacterSet.asciiDigits.contains(scalar)
+                || scalar == "." || scalar == "_" || scalar == "-")
+        }
     }
+
+    private static func isReservedSpelling(_ clientId: String) -> Bool { clientId == reservedClientId }
 
     init(keychain: KeychainManager = .shared) {
         self.keychain = keychain
@@ -42,7 +66,8 @@ final class ProviderTokenRegistry: @unchecked Sendable {
         var reverseCache: [String: String] = [:]
         do {
             let loaded = try keychain.secretsOrThrow(service: KeychainManager.mcpProviderService)
-            for (clientId, token) in loaded where !Self.isReservedSpelling(clientId) {
+            for (clientId, token) in loaded
+            where Self.isValidClientIdShape(clientId) && !Self.isReservedSpelling(clientId) {
                 // Two client ids sharing one stored token (only reachable through a write outside
                 // issueToken) would otherwise make reverseCache resolve to whichever wins the
                 // loop; skip every duplicate so a token resolves to at most one client id.
@@ -58,41 +83,42 @@ final class ProviderTokenRegistry: @unchecked Sendable {
     }
 
     func issueToken(forClientId clientId: String) throws -> String {
+        guard Self.isValidClientIdShape(clientId) else { throw RegistryError.invalidClientId }
         guard !Self.isReservedSpelling(clientId) else { throw RegistryError.reservedClientId }
         var bytes = [UInt8](repeating: 0, count: 32)
         let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
         precondition(status == errSecSuccess, "SecRandomCopyBytes failed with status \(status)")
         let token = Data(bytes).base64EncodedString()
-        // The Keychain write and the cache update happen under the same lock as one unit: two
-        // concurrent issueToken calls for the same clientId, each writing Keychain outside any
-        // lock and updating the cache separately, could leave Keychain holding one call's token
-        // while the cache holds the other's — a real race, not a hypothetical one, since
-        // KeychainManager's own write lock only serializes the Keychain write itself, not this
-        // class's cache mutation relative to it.
-        return try lock.withLock {
+        return try writeLock.withLock {
             try keychain.updateSecretsOrThrow(service: KeychainManager.mcpProviderService) { dict in
                 dict[clientId] = token
             }
-            // Re-issuing for an already-registered client id must invalidate its old token, or
-            // the old one keeps resolving through clientId(forToken:) after Keychain no longer
-            // holds it.
-            if let oldToken = cache[clientId] { reverseCache[oldToken] = nil }
-            cache[clientId] = token
-            reverseCache[token] = clientId
+            lock.withLock {
+                // Re-issuing for an already-registered client id must invalidate its old token,
+                // or the old one keeps resolving through clientId(forToken:) after Keychain no
+                // longer holds it.
+                if let oldToken = cache[clientId] { reverseCache[oldToken] = nil }
+                cache[clientId] = token
+                reverseCache[token] = clientId
+            }
             return token
         }
     }
 
     func revokeToken(forClientId clientId: String) throws {
-        try lock.withLock {
+        try writeLock.withLock {
             // The in-memory cache — the hot path every admission decision actually reads — is
             // cleared FIRST, before the Keychain write is even attempted. A revoke that fails to
-            // persist is a recoverable problem the caller can retry; a revoke that still resolves
-            // through clientId(forToken:) because the cache kept the old token is the actual
-            // security bug this fixes (dev-2 review on #1069): it fails open exactly when it
-            // matters least to.
-            if let token = cache.removeValue(forKey: clientId) {
-                reverseCache[token] = nil
+            // persist is a recoverable problem the caller can retry (and, until it does, the
+            // revoked token would resurrect on the next process launch that reloads from
+            // Keychain — Task 8's revoke path must surface this throw, not swallow it); a revoke
+            // that still resolves through clientId(forToken:) because the cache kept the old
+            // token in THIS process is the actual security bug this fixes (dev-2 review on
+            // #1069): it fails open exactly when it matters least to.
+            lock.withLock {
+                if let token = cache.removeValue(forKey: clientId) {
+                    reverseCache[token] = nil
+                }
             }
             try keychain.updateSecretsOrThrow(service: KeychainManager.mcpProviderService) { dict in
                 dict[clientId] = nil
@@ -111,4 +137,9 @@ final class ProviderTokenRegistry: @unchecked Sendable {
     func isRegistered(clientId: String) -> Bool {
         lock.withLock { cache[clientId] != nil }
     }
+}
+
+private extension CharacterSet {
+    static let lowercaseASCIILetters = CharacterSet(charactersIn: "a"..."z")
+    static let asciiDigits = CharacterSet(charactersIn: "0"..."9")
 }

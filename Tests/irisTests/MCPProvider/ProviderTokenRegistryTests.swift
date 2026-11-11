@@ -51,16 +51,53 @@ struct ProviderTokenRegistryTests {
         #expect(registry.clientId(forToken: second) == nil)
     }
 
-    @Test("issueToken refuses case/whitespace variants of \"iris\", not just the exact spelling")
+    @Test("issueToken refuses case/whitespace variants of \"iris\" too, via the shape check, not just the exact spelling")
     func reservedSpellingVariantsRejected() throws {
         let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
         let registry = ProviderTokenRegistry(keychain: keychain)
         for variant in ["Iris", "IRIS", " iris", "iris ", " Iris "] {
-            #expect(throws: ProviderTokenRegistry.RegistryError.reservedClientId) {
+            #expect(throws: ProviderTokenRegistry.RegistryError.invalidClientId) {
                 try registry.issueToken(forClientId: variant)
             }
         }
         #expect(registry.allClientIds().isEmpty)
+    }
+
+    @Test("look-alike spellings of \"iris\" that bypass a normalize-then-compare check are refused by the character-class allowlist")
+    func unicodeLookAlikesRejected() throws {
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
+        let registry = ProviderTokenRegistry(keychain: keychain)
+        // Fullwidth, Cyrillic look-alike, zero-width-joined, and Turkish dotted capital — none of
+        // these are ASCII, so none can pass the lowercase-ASCII-only allowlist, regardless of
+        // what a `.lowercased()` + `==` comparison does with them.
+        for lookAlike in ["\u{FF49}\u{FF52}\u{FF49}\u{FF53}", "\u{0456}ris", "ir\u{200B}is", "\u{0130}ris", ""] {
+            #expect(throws: ProviderTokenRegistry.RegistryError.invalidClientId) {
+                try registry.issueToken(forClientId: lookAlike)
+            }
+        }
+        #expect(registry.allClientIds().isEmpty)
+    }
+
+    @Test("many concurrent issueToken calls for the same client id leave Keychain and the cache agreeing on one token")
+    func concurrentIssueForSameClientStaysConsistent() async throws {
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
+        let registry = ProviderTokenRegistry(keychain: keychain)
+        let tokens = try await withThrowingTaskGroup(of: String.self) { group in
+            for _ in 0..<20 {
+                group.addTask { try registry.issueToken(forClientId: "c") }
+            }
+            var results: [String] = []
+            for try await token in group { results.append(token) }
+            return results
+        }
+        #expect(tokens.count == 20)
+        // Whichever call ran last, exactly one token must be live: Keychain and the cache agree,
+        // and every earlier call's token was invalidated.
+        let liveTokens = tokens.filter { registry.clientId(forToken: $0) == "c" }
+        #expect(liveTokens.count == 1)
+        let stored = try keychain.secretsOrThrow(service: KeychainManager.mcpProviderService)
+        #expect(stored["c"] == liveTokens.first)
+        #expect(registry.allClientIds() == ["c"])
     }
 
     @Test("revokeToken clears the in-memory cache even when persisting the revoke fails (fail-safe, not fail-open)")
