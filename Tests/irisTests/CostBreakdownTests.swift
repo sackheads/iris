@@ -130,6 +130,13 @@ struct CostBreakdownTests {
         #expect(CostBreakdown.cost(of: b.lines[0]) != "\u{2014}")
     }
 
+    @Test("the popover draws each line's cost through cost(of:), so the dash reaches the screen")
+    func viewUsesTheDash() throws {
+        let view = try String(contentsOf: PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit/CostBreakdownView.swift"), encoding: .utf8)
+        #expect(view.contains("CostBreakdown.cost(of: line)"))
+        #expect(!view.contains("CostBreakdown.money(line.dollars)"), "a per-line money() would show $0.00 for a line nobody reported")
+    }
+
     @Test("the toolbar figure is a button that opens the breakdown popover")
     func toolbarOpensThePopover() throws {
         let chat = try String(contentsOf: PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit/ChatView.swift"), encoding: .utf8)
