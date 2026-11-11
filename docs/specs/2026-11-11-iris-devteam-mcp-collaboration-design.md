@@ -1,13 +1,25 @@
 # Iris as an MCP Provider: Dev-Team Collaboration on the Agent Mesh — Design
 
-**Status:** DRAFT for team review. This document decides nothing. It frames what we are building
-— Iris as a *provider* on the agent mesh, with the dev team as the first concrete peer — how the
-provider direction differs from the consumer direction we already have on the board (the homelab
-A2A client), and the design points where the existing machinery does not fit the new shape
-cleanly. The decisions belong to the people named under each point.
+**Status:** DRAFT — **design of record for the Iris MCP provider work**, consolidating `#964`
+(folded in as §6, 2026-11-11, Brian's call). It frames what we are building — Iris as a *provider*
+on the agent mesh, with the dev team as the first concrete peer — how the provider direction
+differs from the consumer direction we already have on the board (the homelab A2A client), the
+design points where the existing machinery does not fit the new shape cleanly, and (§6) the
+confinement model and build arc carried over from #964. The central §3.2 shape fork and §3.7 scope
+are decided (§5); the remaining §3.x points are Phase-appropriate build details whose decisions
+belong to the people named under each. **#964's PR is closed in favour of this doc; its issue stays
+open as the service's tracking issue.**
+
+**Scope note on `send` (Brian, 2026-11-11):** direct **client-to-client** messaging — one MCP
+client messaging another *through* Iris — is **out of bounds**. The provider's `send`/`poll` is
+**client↔Iris only**: a guest addresses Iris (the app's self-report door, §3.7) or a role session
+(§3.2) and polls for *that* reply. This reinforces #964's existing guest→guest ban (§3.4): Iris is
+never a relay between two guests. Guest↔role-session messaging (Phase 2, Shape 5) and dev↔Iris-app
+diagnostics (Phase 1, Shape 4) are both client↔Iris; neither is a client-to-client relay.
 
 **Neighbours (normative — this doc references, it does not re-specify them):**
-- `#964` — Iris MCP service + agent confinement (the service this rides on).
+- `#964` — Iris MCP service + agent confinement: **folded into this doc (§6)**; in-text "#964"
+  references below denote that now-folded service/confinement design, not a separate live doc.
 - `docs/specs/2026-10-10-sessions-a2a-messaging.md` — session↔session A2A: `Message`/`Part`,
   `attachments`, `iris-artifact://`, `artifact_refs`, retention, the §6 rate limit and #185
   cascade budget.
@@ -174,8 +186,8 @@ can't carry.
 
 *The other direction — guest → Iris ingest (Clomp/dev-2).* Option (b)'s `resources/read` is
 server→client (Iris → guest) only; it does **not** cover a guest *handing Iris a file* (§1, "hand it
-a file, and get one back"). That ingest path must be specified separately when this folds into #964
-— inline `DataPart`/`FilePart` bytes on `send`, or an `artifact_put` MCP tool — and explicitly
+a file, and get one back"). That ingest path must be specified separately in the plan (§6's build
+arc) — inline `DataPart`/`FilePart` bytes on `send`, or an `artifact_put` MCP tool — and explicitly
 **not** a host `{path}` read via `IrisEngine.attachFile`, which authorizes the read against a sending
 `Conversation`'s `read_file` scope a guest does not have.
 
@@ -522,10 +534,11 @@ mechanism; per-target egress confinement on it.
   prevent a leak. Guest / standing-role artifacts need a TTL/expiry prune of their own — now an open
   item under §3.1/§3.6, not a solved one.)
 
-## 5. What this doc is not, and the next step
+## 5. Status, the decided fork, and the next step
 
-This is not a plan and not a design of record. It is the framing for a design conversation that
-pulls in the dev team, the Iris reviewers, and the overseer. Its eight points were hardened before
+This is the **design of record** for the MCP provider work (it began as framing for a design
+conversation with the dev team, the Iris reviewers, and the overseer, and now consolidates #964 —
+§6). Its eight points were hardened before
 wider review by three pre-circulation passes (2026-11-11): dev-2's fact-check against the specs,
 Iris's code-grounded review (which added the app-vs-session split, the app-level self-report tool,
 turn-scoped authority, and the steer-path and reply-direction seams), dev-1's independent re-review
@@ -533,10 +546,11 @@ turn-scoped authority, and the steer-path and reply-direction seams), dev-1's in
 review verified by dev-2 (which surfaced the §3.2 fork and the shared-history, principal-gating, and
 cascade constraints), and Rune's review (deepseek, re-verified here against `6d957a74`), which showed
 the prior passes had verified omissions not mechanisms — correcting §3.3 and §3.1 and establishing
-that only a context-partitioned shape meets the confidentiality bar. The intended path:
-circulate → reconcile the points → fold the decisions into #964 as the "generalizing the A2A
-file/delivery path to `mcpGuest`" section, and raise plan work only after #964 absorbs them. No new
-build begins before that.
+that only a context-partitioned shape meets the confidentiality bar. The points have now been
+circulated and reconciled, #964 is folded in (§6), and the central fork is decided (below). Plan
+work is the Phase-1 implementation plan (#1067/#1068); **no build begins until Brian gives the
+go-ahead, and not before this doc is wrapped** (Rune's re-review at the final head, #964 fold,
+send-scope strike — all landed here).
 
 **The §3.2 shape is decided (Brian, 2026-11-11): Shape 4 → 5, phased.** Phase 1 is Shape 4 — the
 app-level self-report door (§3.7) plus the plain messaging/file-exchange surface — which serves the
@@ -545,7 +559,159 @@ confined `mcpGuest` lane with a bounded read of the role session), gated on #106
 partitioning. Shapes 1–2 are rejected (confidentiality); 3 is a subset of 5, 6 is heavier. This
 resolves the doc's central fork; the remaining §3.x items are Phase-appropriate build details.
 
-Two further points are settled, not open. **§3.7's scope** (Brian): a narrow, read-only, app-level
+Three further points are settled, not open. **§3.7's scope** (Brian): a narrow, read-only, app-level
 self-report door is accommodated — it *is* Phase 1's door. **The never-steer rule in §3.2** is a hard
 security line: guest arrivals must never be consumed as a steer into a turn running under the user's
 permissions. (No guest path exists today — a requirement for the designed path, not a live hole.)
+**The `send` scope** (Brian, 2026-11-11): direct client-to-client messaging through Iris is out of
+bounds; the provider is client↔Iris only (see the scope note under the header and §3.4's guest→guest
+ban). The Phase-1 `send`/`poll` surface is a guest addressing Iris (Shape 4 door) or a role session
+(Phase 2, Shape 5) and polling for that reply — never a relay between two guests.
+
+## 6. The confinement model and build arc (folded from #964, 2026-11-11)
+
+#964 designed the MCP *service* and — because the first real consumers are *untrusted,
+credentialed, public-posting* agents — the **confinement model** that makes exposing Iris safe. The
+provider surface in §§1–4 rides on that model; this section carries it in as the design of record.
+`#964` references above denote this now-folded design. Where §3.2's Shape 4 → 5 decision (§5) and the
+client↔Iris-only `send` scope narrow what #964 assumed, this section is reconciled to them; nothing
+here reopens the decided fork.
+
+**Iris is a product that exposes services to other agents** (the Safari/Chrome-MCP, kube-agents
+category). The through-line for the confined, credentialed case (Phase 2 and beyond): **a guest
+connects (per-token) → routes to an owner-created, role-holding, profiled session → whose
+credentials pin it to the sandbox and whose memory is scoped → and whose consequential actions are
+taint-gated and reach the owner for approval.** Phase 1 (Shape 4) needs none of the credential/
+memory machinery — it is the app-level self-report door (§3.7) plus plain client↔Iris messaging/
+file-exchange; the model below is what Phase 2 (Shape 5, the confined `mcpGuest` lane, gated on
+#1066) is built against.
+
+### 6.1 The arc across component issues
+
+One coupled design across the component issues:
+
+- **#964 — the MCP service** (this doc's spine): a loopback Streamable-HTTP MCP server, off by
+  default, that external agents connect to. The transport/entry.
+- **#961 — profile editor**: the UI for agent profiles, which become the confinement unit.
+- **#966 — credential registry + per-profile access**: typed credentials bound to profiles,
+  *enforced*.
+- **#967 — per-profile memory scoping**: the confidentiality half of profile confinement.
+- **#965 — Iris reviews as herself**: the first credentialed use case, which needs all of the above.
+
+### 6.2 The confinement model (#961/#966/#967)
+
+**Corrected reuse reality (the #966/#961 reviews caught the original error):** there is **no**
+KeychainManager access-list and **no** `Principal` grant/deny model to reuse — KeychainManager
+scopes by service name only; `Principal` is `{main, subagent, evaluator}`. Enforcement is **new**
+dispatcher-side code. Do not size this as "reuse existing."
+
+- **Credentials (#966).** A typed credential registry (GitHub today, extensible — `type + id`),
+  N accounts, each `{identity metadata + creds}`; for GitHub `{username, API token, git author
+  name/email}` (both the API actor and the git author switch). A **dispatcher-side credential
+  broker** checks the conversation's profile allowlist before handing out a credential.
+  - **BLOCKER — sandbox pin:** the broker only gates what Iris *hands out*; a host `run_command`
+    already has the owner's `gh auth token`, git credential helper, and ssh-agent. So **assigning
+    any credential to a profile pins its `run_command` to the sandbox VM** (no home mount, no
+    ssh-agent, HTTPS remotes) and **fails closed** if no runtime. Without this, confinement is
+    theater. (This is the same sandbox-pin finding §3.2 leans on: with the master switch off,
+    `SandboxPolicy.resolve` returns `.host` for every principal, so a credentialed profile must
+    force the pin, not merely prefer it.)
+  - **BLOCKER — fail-closed grants:** a credential allowlist *is* a grant, which breaks #465's
+    "a profile grants nothing." Credential grants must come only from a live, cleanly-parsed
+    profile file — **no snapshot-fallback** (which fails *open*: breaking the file to revoke
+    leaves the grant live). Keep the allowlist in the protected `config/agent-profiles/` dir.
+  - **Taint-gates use, not just access:** credentialed actions are outbound+consequential (class
+    of `gmail_send_email`). After #818 taint they need approval unless an explicit exemption
+    covers them — else #965 becomes "any guest posts as Iris."
+  - **GitHub-side scoping (second layer):** the `iris` account gets a fine-grained PAT, triage/
+    write without bypass, branch protection, minimum repos/scopes. Treat the token as one that
+    will eventually leak.
+  - **Token exposure / git identity:** redact registry secrets from tool output (reuse Iris's
+    output filter) and/or a per-call credential helper in the VM; set `GIT_AUTHOR_*`/
+    `GIT_COMMITTER_*` via per-command env, never `git config` writes (no #832 collision).
+- **Profiles & the editor (#961).** The editor is independently landable. For credentials:
+  validate with `AgentProfileStore.parse()` before save (refuse broken writes); field-level
+  rewrite preserving unknown keys + body; `contentHash` concurrent-edit check; atomic write. UI:
+  a **Tools/skills** section labelled *focus/narrowing* (AgentProfile.swift: "not security")
+  kept distinct from a **Credentials** section labelled an *enforced boundary*, shown only once
+  the broker ships. Before saving a credential grant, show its blast radius ("N open
+  conversations use this profile, M tainted"). The #965 reviewer profile ships with a **narrow
+  `tools:` list as defence-in-depth** (no `gmail_send_email`, calendar/tasks, `schedule_job`,
+  `update_soul`/`update_user_profile`/`update_memory`, `invoke_subagent`, …) — narrowing is
+  focus, not a boundary, but it's near-free; enforcement stays broker + sandbox-pin + taint.
+- **Memory (#967).** Profiles confine tools and (soon) credentials but **not memory** — a
+  confined credentialed reviewer reads the owner's full fact store/USER.md and could be asked to
+  post it publicly. #813 holds *writes* from tainted conversations (integrity) but nothing
+  protects *reads* (confidentiality). This is the same confidentiality axis §3.2 found at the
+  history layer (#1066): per-profile memory scoping (namespace, or a
+  `memory: none|shared-readonly|shared` frontmatter key with a fact-store scope filter) is the
+  memory half of the same partition. Also a likely **current** gap, separable from profiles:
+  `ContextHolds` gates `write_file` by path but not `run_command`'s shell, so a tainted host
+  `echo >> ~/.iris/memory/...` may be unheld — verify and, if so, harden #813 independently.
+- **The #965 reviewer is a standing session, not a job.** Profiles never apply to the pinned
+  Iris, a subagent, or a job run (#611) — so "Iris reviews PRs" is a long-lived, owner-created
+  session holding `role:reviewer` with the `iris`-account profile; #964 guests route there.
+
+### 6.3 Reuse vs net-new (corrected)
+
+- **Genuine reuse:** the MCP SDK server side (zero protocol code); the `decidePeerSend` upstream
+  divert for the outbound mailbox leg (leaves `deliverPeerMessage` untouched); the #818 taint
+  model; `sweepIdleSessions`' role-holder protection; the protected profile dir.
+- **Net-new (do not undersize):** the library-backed loopback HTTP server; the `MCP.Server` +
+  tools; the per-token guest mailbox; the **dispatcher-side credential broker**; **sandbox-pin
+  enforcement** for credentialed profiles; per-profile memory scoping; guest TTL + rate limits.
+
+### 6.4 Sequencing & dependency graph
+
+**Phase 1 (Shape 4, buildable now — #1067/#1068)** needs none of the credential machinery: the
+app-level self-report door (§3.7, bounded fields + own rate budget + non-`@MainActor` entry) and
+the plain client↔Iris messaging/file-exchange surface. Even this plain increment carries guest
+obligations that are not credential-specific and must gate it: **per-guest rate/turn budget + stop
+condition** (an uncredentialed guest can still loop a role session's tokens — but note that under
+Shape 4 there is no role-session turn, so this binds the moment Phase 2's lane exists), **guest TTL
+/ last-poll expiry** (else a departed guest's `expects_reply` stays open forever), and
+**provenance stamping** (needed the moment there are two guests).
+
+**Phase 2 (Shape 5) and the credentialed increment** additionally require, as hard prerequisites:
+1. **Inbox approval *delivery*** (not just recording — the inbox is currently write-only).
+2. **Role-addressable sessions** + #955 F4 (unheld-role signal).
+3. The **credential broker + sandbox-pin** enforcement.
+4. **#1066 context partitioning** (the history-layer confidentiality bar §3.2 established).
+
+Build order: profile-editor base (#961, independent) can land any time. Phase 1 ships first.
+Phase 2's confined `mcpGuest` lane waits on #1066 + the budgets/TTL/provenance above; the
+**credentialed** reviewer (#965) additionally waits on the broker + sandbox-pin + role-addressable
+sessions (prereqs 1–3). Memory scoping (#967) and the standalone #813 `run_command` hardening
+proceed in parallel as investigation/fix.
+
+### 6.5 Goals / non-goals / anti-goals
+
+**Goals:** Iris as an opt-in MCP service; **client↔Iris** multi-client messaging (each client's
+context stays clean — no hub session, and **no client-to-client relay**, Brian 2026-11-11);
+confined, credentialed, memory-scoped guest-facing sessions; owner informed/approving via Overseer
++ *delivered* gates; default surface unchanged.
+**Non-goals:** remote/cross-machine (#931); a general debugging/introspection port (§1); direct
+client-to-client messaging through Iris; replacing the human inbox or owner approval; running by
+default; full A2A compliance.
+**Anti-goals:** a guest that self-asserts authority, spawns a credentialed session, launders an
+escalation, or reaches the owner's creds/memory/token; a guest reply that paraphrases the owner's
+context out of shared history (§3.2/§3.8 — closed by #1066 partition, not by egress scrubbing); an
+always-on port; credential confinement that is UI-only (unenforced); a credentialed job or
+pinned-Iris reviewer.
+
+### 6.6 Owner decisions carried forward (2026-11-08 and 2026-11-11)
+
+From #964 (2026-11-08): co-design with #931; sequence the credentialed increment after
+inbox/guard; multi-client agnostic (client↔Iris, no hub); HTTP-server library (not hand-rolled);
+feature-not-debug (the toggle binds the port, nothing else); a dedicated reviewer profile holding
+the `iris` GitHub creds (not the owner's), as a standing owner-created `role:reviewer` session.
+From this doc (2026-11-11, Brian): §3.2 Shape 4 → 5 phased; §3.7 self-report door accommodated;
+the never-steer rule; `send` is client↔Iris only; #964 folded here; wrap the design before any
+build, which stays Brian-gated.
+
+### 6.7 Left to the builder
+
+Exact tool/mailbox schemas; the credential-broker interface (`type + id`); the sandbox-pin
+mechanism in `resolve()`; the memory-scoping mechanism (namespace vs read-filter — #967
+investigates); the shared A2A envelope with #931; the guest file-ingest path (§3.1). The Phase-1
+build details are the open §3.x items at Phase-1 scope, carried into the #1068 plan.
