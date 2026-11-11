@@ -77,7 +77,11 @@ holds its shape.
 The dev team is the first peer because it is trusted and in-house, but nothing in the surface is
 dev-team-specific. Any agent that speaks MCP/A2A could, with the right grant, be a peer; the
 confinement and access-boundary design is precisely what makes that safe to open past the dev team
-later. In the unified access boundary's terms, such a peer is an **`mcpGuest`**: the intent is
+later. One scope caveat (Rune): the provider has **two auth legs** — a *local bearer/loopback* leg
+(route 3 → `mcpGuest`, which §3.3 analyzes) and a *remote ed25519* leg (route 4 → `a2aRemote`, with
+no loopback channel or local config file). This document specifies only the local leg; v1 is
+loopback-only, and "any agent could be a peer" should read "any *local process*" until the remote
+ed25519 provider leg is designed. In the unified access boundary's terms, such a peer is an **`mcpGuest`**: the intent is
 that it reaches the inter-agent *bus*, not the underlying access. How that confinement actually
 binds once a role session processes the guest's text under its own authority is itself an open
 question — see design point 3.2.
@@ -99,7 +103,7 @@ case in the other; most rows generalize beyond those two specific peers.
 | **Peer in the first instance** | External homelab agents (Clomp et al.) | Internal Iris dev sessions (generalizes to any granted agent) |
 | **Trust basis** | Per-frame ed25519 signature (romar#396, #974 H4); relay is not an identity authority | Static Bearer token (Claude Code's MCP client; no OAuth) |
 | **Interaction shape** | Task delegation — a peer delivers a `task`, gets `status-update`/`artifact-update` back | Conversational messaging — `send`/`poll` to a live session, threaded by `contextId` |
-| **Delivery target** | A fresh, isolated, off-foreground `a2a-remote` session (`Principal.a2aRemote`), confined and approval-capable, without the role session's conversational context | A role-holding session's inbox *or* `#974`'s isolated lane *or* a read-only app snapshot query — an **open four-shape fork (§3.2)**, since inbox delivery would run under the session's own binding, not a guest floor |
+| **Delivery target** | A fresh, isolated, off-foreground `a2a-remote` session (`Principal.a2aRemote`), confined and approval-capable, without the role session's conversational context | A role-holding session's inbox *or* `#974`'s isolated lane *or* a read-only app snapshot query, or an isolated lane with a scoped role read — an **open six-shape fork (§3.2)**, since inbox delivery would run under the session's own binding, not a guest floor |
 | **Object store** | Peer-hosted, `PUT`/`GET /v1/objects/{taskId}/{sha256}` | Iris-hosted — Iris serves the SHA-addressed object endpoint for the first time |
 | **Principal** | `a2aRemote` | `mcpGuest` |
 
@@ -125,16 +129,30 @@ four: the app-vs-session split (§1), the app-level self-report tool (§3.7), tu
 (§3.2), and two seams nobody else caught — the steer path (§3.2) and the reply direction (§3.8).
 dev-1 then corrected a taint claim folded from Iris (§3.2) and raised the key-window gap (§3.7).
 Then **Clomp's external review** (`clomp42`, `CHANGES_REQUESTED`) traced the open points to code and
-surfaced the central §3.2 four-shape fork plus the shared-history, principal-gating, and cascade
+surfaced the central §3.2 fork plus the shared-history, principal-gating, and cascade
 constraints; **dev-2 verified** each against `6d957a74` (confirming the mechanics, correcting two
-overstatements in §3.8 and §2) before they were folded here.
+overstatements in §3.8 and §2) before they were folded here. Finally **Rune's review** (`rune42808`,
+deepseek) made the sharpest point of the chain — the prior passes verified *omissions, not
+mechanisms* — and three corrections followed, each re-verified here against `6d957a74`: §3.3 (the
+deny-list "control" is inert against `read_file`, and its credential-store enumeration was a dev-2
+error this doc had folded); §3.1 (the homelab GET ACL is specified on the romar side as
+principal-owned `{taskId}`, not "silent"); and §3.2×§3.8 (shapes 1–2 fail the confidentiality bar
+because `mcpGuest` strips *tools* but does not partition *history* — the model is the exfil channel).
+Rune also added shapes 5–6 and the honest admission that no shape yet both confines a guest and
+delivers §1's role-session value.
 
 ### 3.1 How a guest addresses and reads an artifact
 
-*Scope segment.* The homelab object path is `PUT /v1/objects/{taskId}/{sha256}`. The plan gives
-only the PUT path and is silent on the GET-side ACL, so "the `{taskId}` segment is what scopes
-access" is this doc's inference, not the plan's text. The messaging lane has no `taskId` — it
-threads by `contextId`, artifacts keyed `(sha256, conversationId, msgId)` in `artifact_refs`.
+*Scope segment and the homelab GET ACL (corrected, Rune).* The a2a-client plan Task 3 produces both
+`uploadObject` (PUT) and `downloadObject` (GET, SHA-verified) — the GET path is not missing, only its
+ACL *prose* is. And that ACL **is** specified on the romar side: `design-spec.md` §4.4/§5.2 require
+the caller's `{taskId}` to be **principal-owned** (`taskId` begins with `{caller.principal}--`, else
+`403` / `-32003 TaskNotOwned`). So the homelab object ACL is **bearer + principal-owned `{taskId}`**,
+*not* a conversation row — an earlier draft's "the plan is silent, so `{taskId}` scoping is our
+inference" was wrong. The messaging lane is the *different* model: no `taskId`, threaded by
+`contextId`, artifacts keyed `(sha256, conversationId, msgId)` in `artifact_refs` under the §7.6 B
+conversation-row ACL. These are **two ACL models**, and the options below must pick one for Iris's
+provider endpoint rather than present option (b)'s "same row-based ACL" as if it matched homelab.
 
 *The read ACL is a conversation row, and a guest is not a conversation.* Messaging §7.6 B: only a
 conversation holding an `artifact_refs` row may read an artifact, and "a forwarded message that
@@ -207,8 +225,9 @@ Two verified problems:
   dispatch guards, no carve-out, verified). A guest-principal turn can neither originate a message
   nor raise an inbox item.
 
-So "authority belongs to the turn" and "run it as `mcpGuest`" cannot both hold. **The fork (dev-2),
-four shapes, none chosen:**
+So "authority belongs to the turn" and "run it as `mcpGuest`" cannot both hold. **The fork — six
+shapes, none chosen** (dev-2's four, plus two Rune added by separating *authority*-isolation from
+*context*-isolation):
 1. **Guest turn keeps `Principal.main` with a narrowed binding.** Tool guards pass, but the floor now
    depends on a binding check that does not exist yet, and `history` is still shared and
    unpartitioned.
@@ -217,15 +236,36 @@ four shapes, none chosen:**
 3. **`#974`'s isolated lane.** Avoids the shared-history problem entirely — but loses the "ask a real
    role session about *itself*" value that §1 is for.
 4. **The guest message becomes a read-only query the app answers from a card or snapshot — no turn in
-   the role session at all.** This is §3.7's app-level shape generalized past diagnostics; it
-   sidesteps every problem above but only serves what a snapshot can answer, not a conversation.
+   the role session at all.** This is §3.7's app-level shape; it sidesteps every problem above but
+   only serves what a snapshot can answer, not a conversation.
+5. **An isolated `mcpGuest` lane *with* a scoped read of the role session** via a bounded read tool —
+   the primitives already exist (`read_conversation`, `describe_session`/`list_sessions` for
+   deterministic cards) and the doc had ignored them (Rune). Gets the floor *and* a window into the
+   role session, read-only.
+6. **A guest-owned fork/copy of the role session's history, run under `mcpGuest`.** The guest reasons
+   over a snapshot of the session without mutating it or inheriting its authority.
 
-Two must-nots bind whichever shape wins (verified): a guest `Origin` must be a distinct case that
+**The confidentiality bar rules out shapes 1 and 2 (Rune).** Running as `mcpGuest` strips *tools*; it
+does **not** partition `Conversation.history`. So the guest turn's *model* still receives the full
+shared history — prior non-guest turns' tool output, file reads, `read_conversation` output, secrets
+— and emits what it saw into the reply. §3.8's "exact-secret scrubbing" catches literal token values
+only; a model that paraphrases or summarizes a prior secret is caught by nothing (the boundary spec
+itself concedes semantic classes are best-effort). No tool floor, no principal, and no scrubbing
+closes that axis: **the model is a covert channel from shared history to the guest's mailbox.** So
+shapes 1–2 do not meet the confidentiality bar at all; only a *context-partitioned* shape (3, 4, 5,
+or 6) can. Said plainly, and the doc should say it: **as scoped, no shape both confines the guest and
+delivers §1's "ask a real role session about itself" — shapes 1–3 each fail for a different reason,
+shape 4 can't answer a qualitative question, and shapes 5/6 (partition + a bounded role read) are the
+only candidates that might.**
+
+Three must-nots bind whichever shape wins (verified): a guest `Origin` must be a distinct case that
 **never coalesces** with `.user`/`.peer` in `drainPendingUserMessages` (which joins same-`Origin`
-entries with `\n\n`), and a guest-drained turn must **not** run `runReflection` — `startTurn(isPeer:)`
+entries with `\n\n`); a guest-drained turn must **not** run `runReflection` — `startTurn(isPeer:)`
 still increments `messageCountSinceReflection` and fires reflection at ≥ 30, which `#974` C7 forbids
-for a guest binding. (`.systemEvent` drains bypass `startTurn`, so a guest origin could take that
-shape.)
+for a guest binding (`.systemEvent` drains bypass `startTurn`, so a guest origin could take that
+shape); and because **no shape tags history entries with origin/authority** today, a guest's persisted
+text is read back by the next full-authority turn *indistinguishable from the user's own words* — a
+standing prompt-injection channel the winning shape must close with per-entry origin tagging.
 
 **The steer path — a hard requirement for the designed path (Iris; verified).** When the target is
 mid-turn, a peer arrival is queued (`queuePeerArrival`) and can be drained into the *running* turn
@@ -239,19 +279,23 @@ exists today, so this is a requirement for the path being designed, not a live h
 arrivals must never steer:** they wait for the current turn to end and start their own
 guest-principal turn. Not a trade-off — a line the build must hold.
 
-*To settle:* choose among the four shapes above — this is the crux of the whole design — plus the
-never-steer rule and the two drain must-nots. The earlier "pin `mcpGuest` → inbox delivery" framing
-assumed inbox-into-role-session survives contact with shared history and principal gating; Clomp and
-dev-2 show it may not, so shapes 3 (isolated lane) and 4 (read-only snapshot query) are live
-contenders, not fallbacks.
+*To settle:* choose among the six shapes above — this is the crux of the whole design — plus the
+never-steer rule and the three drain must-nots. The earlier "pin `mcpGuest` → inbox delivery" framing
+assumed inbox-into-role-session survives contact with shared history and principal gating; it does
+not. Rune's confidentiality argument rules out shapes 1–2, shape 4 can't answer a qualitative
+question, so the live contenders for §1's role-session value are **shapes 5–6** (context partition +
+a bounded role read) and, for pure diagnostics, shape 4.
 
 *Weigh in:* #964 owner, the unified-boundary author, security review.
 
 ### 3.3 Auth strength, token lifetime, and the first grant
 
 `a2aRemote` is per-frame ed25519-signed; compromise the setup and you still need the key to forge
-each frame. `mcpGuest` is a static Bearer token — leak it once and you are that guest until the
-token dies. The floor must encode the weaker identity. Two distinct lifetimes are in play and the
+each frame. (Caveat, Rune: "the relay is not an identity authority" is the committed H4 contract, but
+romar still ships legacy attestation paths — `door.go`/`iris_relay.go` stamp `verifiedBy:
+"a2a-gateway"`, `sig: nil` — so until those are retired, a relayed frame's provenance isn't fully
+trustworthy on the wire.) `mcpGuest` is a static Bearer token — leak it once and you are that guest
+until the token dies. The floor must encode the weaker identity. Two distinct lifetimes are in play and the
 doc must not conflate them: the **token lifetime** (how long a bearer credential is valid — new
 here) and #964's **request TTL / last-poll expiry** (which closes outstanding `expects_reply`
 requests — not a token lifetime). Per the unified boundary R5, guest-auth itself is #965's design,
@@ -265,18 +309,31 @@ ban does not catch Iris→loopback→Iris. Either bind the token to something a 
 read, or state explicitly that this identity means "any local process" and set the `mcpGuest` floor
 to match.
 
-**A concrete control (Clomp #5, verified by dev-2).** The credential-store deny list that would keep
-`read_file` and sandbox mounts away from that plaintext token omits exactly the paths that hold it.
-`#974` C5's denied set — enforced on main as `JobGrant.credentialStores` — lists `~/.iris[-dev]`,
-`~/.config`, `~/.config/gh`, `~/.netrc`, `~/.git-credentials`, `~/.ssh`, but **not** `~/.claude`,
-`~/.claude.json`, or `**/.mcp.json`. Adding those three (and refusing to register Iris's own loopback
-port in `MCPManager`, plus blocking container→host-loopback traffic to the MCP port) closes most of
-the `Iris→loopback→Iris` exposure. The omission is in both the spec and the enforced code.
+**The deny-list "control" is inert against the read path (Rune, verified — this corrects an earlier
+fold).** A prior pass proposed adding `~/.claude`, `~/.claude.json`, `**/.mcp.json` to a credential
+deny list to close the `Iris→loopback→Iris` exposure. Verified against `6d957a74`, it closes nothing
+on the read path: `JobGrant.credentialStores` is consulted **only** by sandbox *mount* creation
+(`isCredentialStore`, called from `HomeMount`), and `read_file` is gated by `ReadOnlyCommand`, which
+returns `.run` for `read_file` on **any** path — it never consults `credentialStores`. So in §3.2's
+own scenario (guest-triggered `main`-session turn, master switch off → `.host`), `read_file` of
+`~/.claude.json` is auto-approved and the token stays readable. Two more corrections: the actual
+`credentialStores` list (`~/.ssh, ~/.aws, ~/.gnupg, ~/.config/gh, ~/.docker, ~/.kube, …, ~/Library/
+Keychains, …`) does **not** contain `~/.netrc` or `~/.git-credentials` (a stale earlier claim here),
+and `**/.mcp.json` is a glob the canonical-prefix matcher can't express and a file the mount list
+can't admit.
 
-*To settle:* the token lifetime and revoke/rotate path (per-token vs per-session); what the bearer
-identity actually denotes (and the floor that follows); the deny-list additions above; confirmation
-that nothing a guest profile reaches leans on signed-frame provenance. Defer the guest-auth mechanism
-to #965.
+**The real fix (Rune).** Stop leaning on the mount deny list. Either **bind the token** to something a
+process can't just read (a Keychain item with a per-item ACL, or an ephemeral token handed to the MCP
+server over stdin and never written under `~`), or **declare the identity "any local process"** and
+set the `mcpGuest` floor to match (the doc's own alternative). If a deny list is kept at all, it must
+be enforced at the `read_file`/`run_command` **data layer**, with a glob-capable, file-aware matcher,
+and acknowledged as doing nothing to host `run_command`. (Token lifetime is not novel either: romar's
+gateway bearer already models `expiresAt`/`notBefore`/`revoked` + fsnotify reload, romar
+`design-spec.md` §6.1 — mirror it.)
+
+*To settle:* bind-the-token vs declare-any-local-process (and the floor that follows); the token
+lifetime/revoke path (mirroring romar §6.1); confirmation that nothing a guest profile reaches leans
+on signed-frame provenance. Defer the guest-auth mechanism to #965.
 
 *Weigh in:* #965/#964 owners, the unified-boundary author, security review.
 
@@ -316,7 +373,9 @@ resets — wedging the standing role session. Worse, `peerDepths` is keyed by th
 UUID, so a guest-driven wedge on `role:reviewer` also blocks the local planner→reviewer chain. Not
 forced, though: once the budget is keyed per guest token (which the doc already calls for), the rate
 bucket (cap 20, one per 15 s) is the real bound; what stays open is the **depth key and reset rule**
-for an external guest whose typing `Iris.app` can't observe.
+for an external guest whose typing `Iris.app` can't observe. (This wedge is a shapes-1/2 concern — it
+needs a turn in the role session sharing `peerDepths[roleId]`; shapes 3–6 that isolate or snapshot
+don't inherit it.)
 
 **And the attention budget (Iris, from §1).** The richest thing a guest turn can do is not compute
 — it is reach the user: a guest-triggered turn can call `inbox_item` and queue questions for the
@@ -332,9 +391,11 @@ flag), so a tighter per-guest cap has a seam to live on.
 ### 3.6 Which lane's caps a guest inherits
 
 The lanes cap files differently (dev-2's M5): the task lane is 128 KiB inline, else upload; the
-messaging lane never inlines and caps at 50 MB/file, 200 MB/session/day, 2 GB total. A guest over
-MCP is neither lane by default. Say which caps apply — and, since the guest token is the unit,
-whether the per-session/day budgets re-key per token.
+messaging lane never inlines and caps at 50 MB/file, 200 MB/session/day, 2 GB total. And romar's
+object store adds a *third* regime (Rune): 64 MiB/object, 512 MiB/bucket, 7-day TTL — the conformance
+baseline for Iris's provider endpoint. A guest over MCP is none of the three by default. Reconcile
+them, say which applies to a guest, and — since the guest token is the unit — whether the
+per-session/day budgets re-key per token.
 
 *Weigh in:* whoever owns `ArtifactLimits`, #964.
 
@@ -397,6 +458,20 @@ snapshot/ring-buffer fields should capture `TranscriptFocusAnchor`'s async hop �
 first responder changes *after* `sendEvent`; record it both synchronously and post-hop — and
 `effectiveAppearance` on the window and the composer's `NSTextView` (the #1052 dark-text axis).
 
+*Three ways the door as drawn breaks its own promises (Rune, verified).* (1) The "key/main window"
+query emits the **window title**, and the title is derived from unvetted content — `ChatView` sets
+`.navigationTitle(WindowTitle.safe(conv.title))`, and `WindowTitle.safe` is documented as *display
+hygiene, not a guard* (strips control chars, caps at 80, **no redaction**). Emitting it falsifies the
+door's own "no transcript text." (2) The key-window query is **system-wide** (macOS has one), so it
+reads whatever is frontmost — often another app (Terminal, a browser, 1Password) — with no bound on
+emitting that app's title. (3) The door is deliberately session-less, so neither `PeerRateLimiter`
+nor §3.5's budget applies: a guest can flood the MainActor with snapshot/ring reads, and the
+main-actor timeout *diagnoses* the wedge rather than *preventing* it. **Fix:** enumerate the exact
+emitted fields and bound each (window owner = app bundle-id only, never the title string; responder =
+class only, never `stringValue`); give the door its own per-token rate/concurrency budget enforced at
+the MCP entry point *before* the MainActor hop; and name the ring buffer's bounds (size, per-entry
+cap, retention), which are asserted but unspecified.
+
 *Weigh in:* #964 + security review for the tool's surface and bound; main-actor review for the read.
 
 ### 3.8 The reply direction (Iris — a whole axis the other points miss)
@@ -415,13 +490,19 @@ guest replies" worry does not hold today: `send_to_session` is not in `OutboundT
 replies to that gated set. Second, and the real gap: `#964`'s `poll` is a **pull** mailbox, so a
 reply need not use `send_to_session` at all — yet the doc never states *how* a reply reaches the
 mailbox. That path must be specified, and it should be neither `send_to_session` (stripped under
-shape 2, §3.2) nor the tool-name-keyed `outboundGate` (whose `outboundAllowedTools` is a
-`Set<String>`, so one exemption would cover every target). The likely answer is `#974`'s
-`AccessProfile` transport/peer allowlist + data-layer memory scoping + exact-secret output
-scrubbing, not the `#812` tool-name gate.
+shape 2, §3.2) nor the tool-name-keyed `outboundGate` (whose `outboundAllowedTools` is a `[String]`,
+so one exemption would cover every target).
 
-*To settle:* the mechanism by which a reply reaches the guest's pull mailbox, and the egress
-confinement on it (per-target, not per-tool-name).
+**But egress gating on the reply is not where the confidentiality bar is won (Rune).** The exfil
+channel is the *model*, not the tool: a guest turn over unpartitioned shared history can paraphrase a
+prior secret into its reply, and output scrubbing catches only literal values. So the real bound is
+§3.2's context partitioning (shapes 3–6), not a §3.8 egress gate — the reply-egress decision belongs
+*inside* the §3.2 shape choice, not deferred here. What §3.8 still owns once context is partitioned:
+per-target (not per-tool-name) egress confinement via `#974`'s `AccessProfile` transport/peer
+allowlist, for the "any granted agent" generalization.
+
+*To settle:* fold the reply-egress decision into §3.2's shape choice; specify the pull-mailbox reply
+mechanism; per-target egress confinement on it.
 
 *Weigh in:* whoever owns egress/taint gating and the `#964` mailbox, security review.
 
@@ -444,13 +525,15 @@ confinement on it (per-target, not per-tool-name).
 ## 5. What this doc is not, and the next step
 
 This is not a plan and not a design of record. It is the framing for a design conversation that
-pulls in the dev team, the Iris reviewers, and the overseer. Its nine points were hardened before
+pulls in the dev team, the Iris reviewers, and the overseer. Its eight points were hardened before
 wider review by three pre-circulation passes (2026-11-11): dev-2's fact-check against the specs,
 Iris's code-grounded review (which added the app-vs-session split, the app-level self-report tool,
 turn-scoped authority, and the steer-path and reply-direction seams), dev-1's independent re-review
-(which corrected the taint claim in §3.2 and raised the key-window gap in §3.7), and Clomp's external
-review verified by dev-2 (which surfaced the §3.2 four-shape fork and the shared-history,
-principal-gating, and cascade constraints). The intended path:
+(which corrected the taint claim in §3.2 and raised the key-window gap in §3.7), Clomp's external
+review verified by dev-2 (which surfaced the §3.2 fork and the shared-history, principal-gating, and
+cascade constraints), and Rune's review (deepseek, re-verified here against `6d957a74`), which showed
+the prior passes had verified omissions not mechanisms — correcting §3.3 and §3.1 and establishing
+that only a context-partitioned shape meets the confidentiality bar. The intended path:
 circulate → reconcile the points → fold the decisions into #964 as the "generalizing the A2A
 file/delivery path to `mcpGuest`" section, and raise plan work only after #964 absorbs them. No new
 build begins before that.
