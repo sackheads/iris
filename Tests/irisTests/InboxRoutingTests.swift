@@ -324,6 +324,26 @@ struct InboxRoutingTests {
         let notifyFrame = IrisEngine.inboxNotifyFrame(item: item, answer: answer, echoedTitle: "t")
         #expect(notifyFrame.contains("He chose option 1.") && !notifyFrame.contains("deleting the repo"),
                 Comment(rawValue: notifyFrame))
+
+        let autoAnswer = InboxAnswer(chosenOptionId: evilId, freeText: nil, at: Date(), automatic: true)
+        let autoFrame = IrisEngine.inboxAutomaticFrame(item: item, answer: autoAnswer, echoed: "echo")
+        #expect(autoFrame.contains("option 1") && !autoFrame.contains("deleting the repo"), Comment(rawValue: autoFrame))
+    }
+
+    /// dev-3's #1054 review (non-blocking note): `Foundation.UUID().uuidString` only ever produces
+    /// uppercase hex, so no test above actually exercises the round-trip's `caseInsensitiveCompare`
+    /// — a mutant comparing with plain `==` (case-sensitive) would pass every existing test despite
+    /// rejecting every lowercase UUID. A lowercase-spelled id must still count as genuine.
+    @Test("a lowercase-spelled UUID option id still reaches the trusted decision line")
+    func lowercaseUUIDStillCounts() {
+        let lowercased = UUID().uuidString.lowercased()
+        let item = InboxItem(id: "i4", threadId: "t4", ownerChain: "x", emitter: UUID(), emitterLabel: "e", title: "t", situation: "s",
+                             options: [InboxOption(id: lowercased, label: "Go", pros: [], cons: [])],
+                             responseMode: .optionsAndFreeform, routeBack: [], notify: [], deadline: nil, vetoDefaultOptionId: nil,
+                             emitterTainted: false, state: .open, createdAt: Date(), lastActivityAt: Date(), answer: nil)
+        let answer = InboxAnswer(chosenOptionId: lowercased, freeText: nil, at: Date())
+        let text = IrisEngine.inboxAnswerFrame(item: item, answer: answer, echoed: "echo")
+        #expect(text.contains("He chose option 1 (id \(lowercased))."), Comment(rawValue: text))
     }
 
     // MARK: Which option was chosen (#1025)
