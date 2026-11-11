@@ -338,9 +338,14 @@ reply may carry.
 - The §6 token bucket (capacity 20, one send / 15 s) and the hop-depth limit (`maxSessionCascade`)
   as the *starting* budget — §3.5 re-keys them per guest token, it does not replace them.
 - SHA-verify-on-read for objects.
-- The launch + daily retention sweep — it already gives Iris-as-server most of its GC. **One
-  gap (confirmed by dev-2):** guest-ingested objects must write `artifact_refs` rows, or the sweep
-  (which is driven by that table) never sees them and they leak.
+- The launch + daily retention sweep is solid for **conversation-scoped** artifacts. (An earlier
+  draft claimed guest objects must write `artifact_refs` rows "or they leak" — that is **backwards**,
+  Clomp's trace, verified: `ArtifactStore.sweep` walks every file on disk and *orphan-deletes* the
+  ones **without** a row after a 7-day grace, while a row **keeps** the blob, and the only row-delete
+  path is `deleteConversation` — keyed by a `Conversation` UUID a guest never has. So writing rows
+  for guest transfers would *pin* those blobs until the 2 GB exchange cap fails new attachments, not
+  prevent a leak. Guest / standing-role artifacts need a TTL/expiry prune of their own — now an open
+  item under §3.1/§3.6, not a solved one.)
 
 ## 5. What this doc is not, and the next step
 
