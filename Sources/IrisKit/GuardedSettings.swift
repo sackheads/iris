@@ -35,8 +35,12 @@ enum GuardedKey: String, CaseIterable, Sendable {
     /// #239 3c: rates typed in Settings, JSON keyed `providerId|model` (a subagent's) or
     /// `primary|model`. Guarded because a lower rate loosens a job's budget.
     case subagentRates = "SUBAGENT_RATES"
+    /// #1067: opens the loopback MCP provider's socket when on. Unlike every other `.flag` here,
+    /// off is the protective value — an unreadable or missing item must not silently start
+    /// listening.
+    case mcpProviderEnabled = "MCP_PROVIDER_ENABLED"
 
-    enum Kind { case url, cap(Int), flag, sandboxPref, blob }
+    enum Kind { case url, cap(Int), flag(protectiveOn: Bool), sandboxPref, blob }
 
     var kind: Kind {
         switch self {
@@ -54,7 +58,8 @@ enum GuardedKey: String, CaseIterable, Sendable {
         case .maxSessionCascade: .cap(8)
         case .loopTickCap: .cap(ConfigManager.defaultLoopTickCap)
         case .vibecopTimeoutSeconds: .cap(5)
-        case .enableSandboxing, .enableVibecop, .enablePromptInjectionProtection: .flag
+        case .enableSandboxing, .enableVibecop, .enablePromptInjectionProtection: .flag(protectiveOn: true)
+        case .mcpProviderEnabled: .flag(protectiveOn: false)
         case .mainAgentSandboxDefault: .sandboxPref
         case .subagentProviders, .subagentBuiltIns, .subagentRates: .blob
         }
@@ -71,11 +76,12 @@ enum GuardedKey: String, CaseIterable, Sendable {
     }
 
     /// What applies when the item is missing after the upgrade, or can't be read: official
-    /// endpoints, built-in caps, every guard on.
+    /// endpoints, built-in caps, every guard on — except a guard whose own protective value is
+    /// off, because its "guard" is never starting rather than always restricting.
     var protective: String {
         switch kind {
         case .url, .cap, .blob: builtIn
-        case .flag: "true"
+        case .flag(let protectiveOn): protectiveOn ? "true" : "false"
         case .sandboxPref: SandboxPref.sandboxed.rawValue
         }
     }
@@ -315,6 +321,7 @@ extension ConfigManager {
         case .mainAgentSandboxDefault: mainAgentSandboxDefault.rawValue
         case .enableVibecop: enableVibecop ? "true" : "false"
         case .enablePromptInjectionProtection: enableAdvancedPromptInjectionProtection ? "true" : "false"
+        case .mcpProviderEnabled: mcpProviderEnabled ? "true" : "false"
         case .subagentProviders, .subagentBuiltIns, .subagentRates: guardedBlob(key)
         }
     }

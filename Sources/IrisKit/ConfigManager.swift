@@ -358,7 +358,23 @@ class ConfigManager: @unchecked Sendable {
     var enableSandboxing: Bool {
         didSet { persistGuarded(.enableSandboxing) { $0.set(enableSandboxing, forKey: "ENABLE_SANDBOXING") } }
     }
-    
+
+    /// Opens the loopback MCP provider's socket when on (#1067). Off is the protective default —
+    /// see `GuardedKey.mcpProviderEnabled`'s `.flag(protectiveOn: false)`.
+    var mcpProviderEnabled: Bool {
+        didSet { persistGuarded(.mcpProviderEnabled) { $0.set(mcpProviderEnabled, forKey: "MCP_PROVIDER_ENABLED") } }
+    }
+
+    /// The MCP provider's loopback bind port (#1067). A bind port, not a spend or safety
+    /// control, so it is plain `ConfigManager` state, not a `GuardedKey`. Dev and release builds
+    /// can both have the provider enabled on the same machine at once, so they default to
+    /// different ports rather than colliding on one shared literal.
+    static func defaultMCPProviderPort(for identity: BuildIdentity) -> Int { identity == .dev ? 8788 : 8787 }
+    static let defaultMCPProviderPort: Int = defaultMCPProviderPort(for: BuildIdentity.current)
+    var mcpProviderPort: Int {
+        didSet { store.set(mcpProviderPort, forKey: "MCP_PROVIDER_PORT") }
+    }
+
     var sandboxImage: String {
         didSet { store.set(sandboxImage, forKey: "SANDBOX_IMAGE") }
     }
@@ -761,6 +777,9 @@ class ConfigManager: @unchecked Sendable {
         }
         self.googleTokenExpiry = saved.double(forKey: "GOOGLE_TOKEN_EXPIRY")
         self.enableSandboxing = guardedBool(.enableSandboxing, "ENABLE_SANDBOXING")
+        self.mcpProviderEnabled = guardedBool(.mcpProviderEnabled, "MCP_PROVIDER_ENABLED")
+        let savedMCPProviderPort = saved.integer(forKey: "MCP_PROVIDER_PORT")
+        self.mcpProviderPort = savedMCPProviderPort <= 0 ? Self.defaultMCPProviderPort : savedMCPProviderPort
         self.sandboxImage = saved.string(forKey: "SANDBOX_IMAGE") ?? "ubuntu:latest"
         let savedExchangeCap = saved.integer(forKey: "ARTIFACT_EXCHANGE_CAP_MB")
         self.artifactExchangeCapMB = savedExchangeCap <= 0 ? ArtifactLimits.defaultExchangeCapMB : savedExchangeCap
