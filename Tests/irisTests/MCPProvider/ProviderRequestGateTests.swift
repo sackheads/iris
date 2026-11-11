@@ -4,9 +4,9 @@ import Foundation
 
 private final class InstantBox: @unchecked Sendable {
     private let lock = NSLock()
-    private var instant: ContinuousClock.Instant
-    init(_ instant: ContinuousClock.Instant) { self.instant = instant }
-    var value: ContinuousClock.Instant {
+    private var instant: SuspendingClock.Instant
+    init(_ instant: SuspendingClock.Instant) { self.instant = instant }
+    var value: SuspendingClock.Instant {
         get { lock.withLock { instant } }
         set { lock.withLock { instant = newValue } }
     }
@@ -58,13 +58,49 @@ struct ProviderRequestGateTests {
     func refillsOverTime() async throws {
         let registry = registry()
         let token = try registry.issueToken(forClientId: "c")
-        let clockBox = InstantBox(ContinuousClock().now)
+        let clockBox = InstantBox(SuspendingClock().now)
         let gate = ProviderRequestGate(registry: registry, capacity: 1, refillInterval: .milliseconds(50),
                                        now: { clockBox.value })
 
         #expect(await gate.admit(bearerToken: token) == .admitted(clientId: "c"))
         #expect(await gate.admit(bearerToken: token) == .budgetExceeded)
         clockBox.value = clockBox.value.advanced(by: .milliseconds(60))
+        #expect(await gate.admit(bearerToken: token) == .admitted(clientId: "c"))
+    }
+
+    @Test("the bucket is clamped at capacity: idling for far longer than needed never admits more than capacity at once")
+    func refillIsClampedAtCapacity() async throws {
+        let registry = registry()
+        let token = try registry.issueToken(forClientId: "c")
+        let clockBox = InstantBox(SuspendingClock().now)
+        let gate = ProviderRequestGate(registry: registry, capacity: 2, refillInterval: .milliseconds(50),
+                                       now: { clockBox.value })
+
+        // Drain the bucket, then idle for 10 refill intervals — far more than enough to refill
+        // past capacity if the clamp were missing.
+        #expect(await gate.admit(bearerToken: token) == .admitted(clientId: "c"))
+        #expect(await gate.admit(bearerToken: token) == .admitted(clientId: "c"))
+        clockBox.value = clockBox.value.advanced(by: .milliseconds(500))
+
+        #expect(await gate.admit(bearerToken: token) == .admitted(clientId: "c"))
+        #expect(await gate.admit(bearerToken: token) == .admitted(clientId: "c"))
+        #expect(await gate.admit(bearerToken: token) == .budgetExceeded)
+    }
+
+    @Test("a partial refill grants less than a full token: two half-intervals together equal one, not two")
+    func partialRefillAccumulates() async throws {
+        let registry = registry()
+        let token = try registry.issueToken(forClientId: "c")
+        let clockBox = InstantBox(SuspendingClock().now)
+        let gate = ProviderRequestGate(registry: registry, capacity: 1, refillInterval: .milliseconds(50),
+                                       now: { clockBox.value })
+
+        #expect(await gate.admit(bearerToken: token) == .admitted(clientId: "c"))
+        clockBox.value = clockBox.value.advanced(by: .milliseconds(30))
+        // 30 of 50 ms: not yet a full token.
+        #expect(await gate.admit(bearerToken: token) == .budgetExceeded)
+        clockBox.value = clockBox.value.advanced(by: .milliseconds(30))
+        // 60 ms total elapsed since the drain: now past one full interval.
         #expect(await gate.admit(bearerToken: token) == .admitted(clientId: "c"))
     }
 }
