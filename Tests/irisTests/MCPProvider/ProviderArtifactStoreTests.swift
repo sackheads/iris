@@ -77,14 +77,16 @@ struct ProviderArtifactStoreTests {
     @Test("a second client uploading the same bytes a first client already stored doesn't double-charge totalBytes, and does grant the second client a read")
     func reuploadBySecondClientGrantsReadWithoutDoubleCharging() async throws {
         var quotas = ProviderArtifactStore.Quotas()
-        quotas.totalStoreCapBytes = 20  // "hello" (5 bytes) fits once; a double-charge would not
+        // "hello" (5) + "world" (5) = 10 fits exactly once "hello" is charged once; charged twice
+        // (5+5+5=15) it would not.
+        quotas.totalStoreCapBytes = 10
         let store = ProviderArtifactStore(root: temporaryTestDirectory(), quotas: quotas)
         let shaFromA = try await store.put(bytes: Data("hello".utf8), from: "a")
         let shaFromB = try await store.put(bytes: Data("hello".utf8), from: "b")
         #expect(shaFromA == shaFromB)
         // "b" gets a read on its own re-upload, without needing "a" to authorize it.
         #expect(try await store.get(sha256: shaFromB, requestingClientId: "b") == Data("hello".utf8))
-        // A third 5-byte object still fits under the 20-byte cap only if "hello" was charged once.
+        // A third 5-byte object still fits under the 10-byte cap only if "hello" was charged once.
         _ = try await store.put(bytes: Data("world".utf8), from: "c")
     }
 
@@ -100,6 +102,24 @@ struct ProviderArtifactStoreTests {
         }
         let contents = try FileManager.default.contentsOfDirectory(atPath: root.path)
         #expect(contents.isEmpty)
+    }
+
+    @Test("init removes only hash-named entries from root, never the directory itself or a foreign file")
+    func initNeverDeletesAForeignFile() async throws {
+        let root = temporaryTestDirectory()
+        let foreign = root.appendingPathComponent("not-a-hash.txt")
+        try Data("unrelated".utf8).write(to: foreign)
+
+        let first = ProviderArtifactStore(root: root)
+        let sha = try await first.put(bytes: Data("hello".utf8), from: "a")
+
+        // A second construction over the same root (simulating a relaunch) must still leave the
+        // foreign file alone, even though it clears this store's own orphaned object.
+        _ = ProviderArtifactStore(root: root)
+        let contents = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        #expect(contents == ["not-a-hash.txt"])
+        #expect(FileManager.default.fileExists(atPath: foreign.path))
+        _ = sha  // silence unused-variable warning; the object's removal is covered by the sibling test
     }
 
     @Test("sweepExpired frees totalBytes, letting a put that would otherwise exceed the total cap succeed")
