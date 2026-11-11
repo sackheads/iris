@@ -20,8 +20,24 @@ final class LoopbackHTTPListener: @unchecked Sendable {
     static let headerCompletionDeadline: Duration = .seconds(5)
     static let maxConcurrentConnections = 16
 
+    /// Every tunable, instance-level so tests can shrink a real-time bound (`readTimeout`,
+    /// `headerCompletionDeadline`) or a byte cap without waiting out the production value.
+    /// Defaults to this type's own named constants — production code never passes this.
+    struct Limits: Sendable {
+        var maxRequestLineBytes = LoopbackHTTPListener.maxRequestLineBytes
+        var maxHeaderBytes = LoopbackHTTPListener.maxHeaderBytes
+        var maxHeaderCount = LoopbackHTTPListener.maxHeaderCount
+        var maxContentLength = LoopbackHTTPListener.maxContentLength
+        var readTimeout = LoopbackHTTPListener.readTimeout
+        var headerCompletionDeadline = LoopbackHTTPListener.headerCompletionDeadline
+        var maxConcurrentConnections = LoopbackHTTPListener.maxConcurrentConnections
+    }
+
     private let requestedPort: UInt16
     private let handle: @Sendable (HTTPRequest) async -> HTTPResponse
+    private let preBodyCheck: (@Sendable (HTTPRequest) -> HTTPResponse?)?
+    private let limits: Limits
+    private let isLoopbackCheck: @Sendable (NWEndpoint) -> Bool
 
     private let lock = NSLock()
     private var listener: NWListener?
@@ -32,8 +48,19 @@ final class LoopbackHTTPListener: @unchecked Sendable {
     /// the real assigned port.
     private(set) var boundPort: UInt16?
 
-    init(port: UInt16, handle: @escaping @Sendable (HTTPRequest) async -> HTTPResponse) {
+    /// - preBodyCheck: called once headers are parsed, with a headers-only `HTTPRequest` (`body:
+    ///   nil`) — before this connection ever reads a byte of its body. A non-nil return is sent
+    ///   as the response immediately, with the body never read. This is Task 8's seam for
+    ///   auth: the token resolves off `Authorization`, which is a header, so an unauthorized
+    ///   request's body (up to `maxContentLength`) is never buffered at all.
+    init(port: UInt16, limits: Limits = Limits(),
+         isLoopbackCheck: @escaping @Sendable (NWEndpoint) -> Bool = LoopbackHTTPListener.isLoopback,
+         preBodyCheck: (@Sendable (HTTPRequest) -> HTTPResponse?)? = nil,
+         handle: @escaping @Sendable (HTTPRequest) async -> HTTPResponse) {
         self.requestedPort = port
+        self.limits = limits
+        self.isLoopbackCheck = isLoopbackCheck
+        self.preBodyCheck = preBodyCheck
         self.handle = handle
     }
 
@@ -70,13 +97,18 @@ final class LoopbackHTTPListener: @unchecked Sendable {
             self?.accept(connection)
         }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let resumer = StartResumer(continuation)
             listener.stateUpdateHandler = { [weak self] state in
                 switch state {
                 case .ready:
                     self?.boundPort = listener.port?.rawValue
-                    continuation.resume()
+                    resumer.resume()
                 case .failed(let error):
-                    continuation.resume(throwing: error)
+                    resumer.resume(throwing: error)
+                case .cancelled:
+                    // stop() raced start(): resume rather than hang forever on a continuation
+                    // nothing will ever fulfill.
+                    resumer.resume(throwing: CancellationError())
                 default:
                     break
                 }
@@ -102,19 +134,20 @@ final class LoopbackHTTPListener: @unchecked Sendable {
     }
 
     private func accept(_ nwConnection: NWConnection) {
-        guard Self.isLoopback(nwConnection.endpoint) else {
+        guard isLoopbackCheck(nwConnection.endpoint) else {
             refuse(nwConnection)
             return
         }
         let shouldAccept: Bool = lock.withLock {
-            guard connections.count < Self.maxConcurrentConnections else { return false }
+            guard connections.count < limits.maxConcurrentConnections else { return false }
             return true
         }
         guard shouldAccept else {
             refuse(nwConnection)
             return
         }
-        let connection = Connection(nwConnection: nwConnection, queue: queue, handle: handle) { [weak self] finished in
+        let connection = Connection(nwConnection: nwConnection, queue: queue, limits: limits,
+                                    preBodyCheck: preBodyCheck, handle: handle) { [weak self] finished in
             self?.remove(finished)
         }
         lock.withLock { connections[ObjectIdentifier(connection)] = connection }
@@ -131,6 +164,8 @@ final class LoopbackHTTPListener: @unchecked Sendable {
 private final class Connection: @unchecked Sendable {
     private let nwConnection: NWConnection
     private let queue: DispatchQueue
+    private let limits: LoopbackHTTPListener.Limits
+    private let preBodyCheck: (@Sendable (HTTPRequest) -> HTTPResponse?)?
     private let handle: @Sendable (HTTPRequest) async -> HTTPResponse
     private let onFinished: (Connection) -> Void
 
@@ -144,11 +179,14 @@ private final class Connection: @unchecked Sendable {
     private var bodyStart = 0
     private var expectedBodyLength: Int?
 
-    init(nwConnection: NWConnection, queue: DispatchQueue,
+    init(nwConnection: NWConnection, queue: DispatchQueue, limits: LoopbackHTTPListener.Limits,
+         preBodyCheck: (@Sendable (HTTPRequest) -> HTTPResponse?)?,
          handle: @escaping @Sendable (HTTPRequest) async -> HTTPResponse,
          onFinished: @escaping (Connection) -> Void) {
         self.nwConnection = nwConnection
         self.queue = queue
+        self.limits = limits
+        self.preBodyCheck = preBodyCheck
         self.handle = handle
         self.onFinished = onFinished
     }
@@ -165,7 +203,7 @@ private final class Connection: @unchecked Sendable {
     }
 
     private func scheduleHeaderDeadline() {
-        queue.asyncAfter(deadline: .now() + LoopbackHTTPListener.headerCompletionDeadline.timeInterval) { [weak self] in
+        queue.asyncAfter(deadline: .now() + limits.headerCompletionDeadline.timeInterval) { [weak self] in
             guard let self else { return }
             let stillWaiting = self.lock.withLock { !self.headersComplete && !self.finished }
             if stillWaiting { self.finish() }
@@ -173,7 +211,7 @@ private final class Connection: @unchecked Sendable {
     }
 
     private func scheduleReadTimeout() {
-        queue.asyncAfter(deadline: .now() + LoopbackHTTPListener.readTimeout.timeInterval) { [weak self] in
+        queue.asyncAfter(deadline: .now() + limits.readTimeout.timeInterval) { [weak self] in
             guard let self else { return }
             let stillOpen = self.lock.withLock { !self.finished }
             if stillOpen { self.finish() }
@@ -208,7 +246,7 @@ private final class Connection: @unchecked Sendable {
             buffer.append(data)
             if !headersComplete {
                 guard let result = tryParseHeaders() else {
-                    if buffer.count > LoopbackHTTPListener.maxRequestLineBytes + LoopbackHTTPListener.maxHeaderBytes {
+                    if buffer.count > limits.maxRequestLineBytes + limits.maxHeaderBytes {
                         finished = true
                         return .fail
                     }
@@ -217,6 +255,13 @@ private final class Connection: @unchecked Sendable {
                 switch result {
                 case .ok:
                     headersComplete = true
+                    // Before this connection ever reads a byte of its body: a headers-only
+                    // request, so an unauthorized sender's body is never buffered at all.
+                    let headersOnlyRequest = HTTPRequest(method: method, headers: headers, body: nil, path: path)
+                    if let preBodyCheck, let response = preBodyCheck(headersOnlyRequest) {
+                        finished = true
+                        return .respondWithoutBody(response)
+                    }
                 case .tooLarge, .malformed:
                     finished = true
                     return .fail
@@ -233,6 +278,9 @@ private final class Connection: @unchecked Sendable {
             nwConnection.cancel()
             onFinished(self)
             return false
+        case .respondWithoutBody(let response):
+            send(response)
+            return false
         case .deliver:
             deliver()
             return false
@@ -241,7 +289,7 @@ private final class Connection: @unchecked Sendable {
         }
     }
 
-    private enum ParseOutcome { case continueReceiving, fail, deliver, stop }
+    private enum ParseOutcome { case continueReceiving, fail, deliver, stop, respondWithoutBody(HTTPResponse) }
     private enum HeaderParseResult { case ok, tooLarge, malformed }
 
     /// Called with `lock` held. Looks for the blank-line terminator; if found, parses the request
@@ -251,36 +299,45 @@ private final class Connection: @unchecked Sendable {
         let terminator = Data("\r\n\r\n".utf8)
         guard let range = buffer.range(of: terminator) else { return nil }
         let headerBlock = buffer.subdata(in: 0..<range.lowerBound)
-        guard headerBlock.count <= LoopbackHTTPListener.maxRequestLineBytes + LoopbackHTTPListener.maxHeaderBytes else {
+        guard headerBlock.count <= limits.maxRequestLineBytes + limits.maxHeaderBytes else {
             return .tooLarge
         }
         guard let text = String(data: headerBlock, encoding: .utf8) else { return .malformed }
         var lines = text.split(separator: "\r\n", omittingEmptySubsequences: false).map(String.init)
         guard !lines.isEmpty else { return .malformed }
         let requestLine = lines.removeFirst()
-        guard requestLine.utf8.count <= LoopbackHTTPListener.maxRequestLineBytes else { return .tooLarge }
+        guard requestLine.utf8.count <= limits.maxRequestLineBytes else { return .tooLarge }
         let parts = requestLine.split(separator: " ")
         guard parts.count >= 2 else { return .malformed }
         method = String(parts[0])
         path = String(parts[1])
 
-        guard lines.count <= LoopbackHTTPListener.maxHeaderCount else { return .tooLarge }
+        guard lines.count <= limits.maxHeaderCount else { return .tooLarge }
         var headerBytes = 0
-        var parsedHeaders: [String: String] = [:]
+        var parsedHeaders: [String: (name: String, value: String)] = [:]
         for line in lines where !line.isEmpty {
             headerBytes += line.utf8.count
-            guard headerBytes <= LoopbackHTTPListener.maxHeaderBytes else { return .tooLarge }
+            guard headerBytes <= limits.maxHeaderBytes else { return .tooLarge }
             guard let colon = line.firstIndex(of: ":") else { return .malformed }
             let name = String(line[line.startIndex..<colon]).trimmingCharacters(in: .whitespaces)
             let value = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
-            parsedHeaders[name] = value
+            let key = name.lowercased()
+            // A duplicate header resolving order-dependently (whichever line wins the dictionary
+            // write) is exactly the ambiguity request smuggling exploits; refuse outright rather
+            // than pick a winner, except when every occurrence agrees.
+            if let existing = parsedHeaders[key], existing.value != value { return .malformed }
+            parsedHeaders[key] = (name: name, value: value)
         }
-        headers = parsedHeaders
+        // No chunked transfer-encoding (this parser's own stated scope) — refusing the header
+        // entirely closes the Transfer-Encoding/Content-Length smuggling pair, since a request
+        // naming it can never reach the Content-Length branch below believing it will be chunked.
+        guard parsedHeaders["transfer-encoding"] == nil else { return .malformed }
+        headers = Dictionary(uniqueKeysWithValues: parsedHeaders.values.map { ($0.name, $0.value) })
         bodyStart = range.upperBound
 
-        if let contentLengthHeader = parsedHeaders.first(where: { $0.key.lowercased() == "content-length" })?.value {
+        if let contentLengthHeader = parsedHeaders["content-length"]?.value {
             guard let length = Int(contentLengthHeader), length >= 0 else { return .malformed }
-            guard length <= LoopbackHTTPListener.maxContentLength else { return .tooLarge }
+            guard length <= limits.maxContentLength else { return .tooLarge }
             expectedBodyLength = length
         } else if method.uppercased() == "POST" {
             // A POST with no Content-Length is refused rather than read unbounded (dev-2 Gap 7).
@@ -350,5 +407,27 @@ extension Duration {
     var timeInterval: TimeInterval {
         let (seconds, attoseconds) = components
         return Double(seconds) + Double(attoseconds) / 1e18
+    }
+}
+
+/// `NWListener.stateUpdateHandler` can fire `.ready` and then later `.failed`/`.cancelled` on the
+/// very same continuation (a listener cancelled right after becoming ready, or `stop()` racing
+/// `start()`); resuming a `CheckedContinuation` twice is a fatal error, and never resuming it at
+/// all (no case for `.cancelled`) hangs `start()` forever. This fires at most once, whichever
+/// state wins the race.
+private final class StartResumer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+
+    init(_ continuation: CheckedContinuation<Void, Error>) { self.continuation = continuation }
+
+    func resume() {
+        lock.lock(); let c = continuation; continuation = nil; lock.unlock()
+        c?.resume()
+    }
+
+    func resume(throwing error: Error) {
+        lock.lock(); let c = continuation; continuation = nil; lock.unlock()
+        c?.resume(throwing: error)
     }
 }

@@ -10,6 +10,7 @@ struct LoopbackHTTPListenerTests {
     func postRoundTrips() async throws {
         let listener = LoopbackHTTPListener(port: 0) { request in
             #expect(request.method == "POST")
+            #expect(request.body == Data("{}".utf8))
             return .data(Data("{\"ok\":true}".utf8), headers: ["Content-Type": "application/json"])
         }
         try await listener.start()
@@ -26,6 +27,51 @@ struct LoopbackHTTPListenerTests {
         let http = response as? HTTPURLResponse
         #expect(http?.statusCode == 200)
         #expect(String(data: data, encoding: .utf8) == "{\"ok\":true}")
+    }
+
+    @Test("preBodyCheck answers from headers alone, never reading the body, and the main handler never runs")
+    func preBodyCheckShortCircuitsBeforeTheBodyIsRead() async throws {
+        let mainHandlerCalled = CallFlag()
+        let listener = LoopbackHTTPListener(
+            port: 0,
+            preBodyCheck: { request in
+                #expect(request.body == nil, "preBodyCheck must see a headers-only request")
+                #expect(request.header("Authorization") == "Bearer nope")
+                return .error(statusCode: 401, .invalidRequest("unauthorized"))
+            },
+            handle: { _ in
+                mainHandlerCalled.set()
+                return .ok()
+            }
+        )
+        try await listener.start()
+        defer { listener.stop() }
+        guard let port = listener.boundPort else { Issue.record("no bound port"); return }
+
+        var urlRequest = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/")!)
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("Bearer nope", forHTTPHeaderField: "Authorization")
+        // A body that would hang if the connection ever tried to read more than Content-Length
+        // says — preBodyCheck must answer before any of it is requested.
+        urlRequest.httpBody = Data("{}".utf8)
+        let (_, response) = try await URLSession.shared.data(for: urlRequest)
+        #expect((response as? HTTPURLResponse)?.statusCode == 401)
+        #expect(!mainHandlerCalled.value)
+    }
+
+    @Test("with no preBodyCheck, every request reaches the main handler as before")
+    func noPreBodyCheckMeansHandlerAlwaysRuns() async throws {
+        let listener = LoopbackHTTPListener(port: 0) { _ in .ok() }
+        try await listener.start()
+        defer { listener.stop() }
+        guard let port = listener.boundPort else { Issue.record("no bound port"); return }
+
+        var urlRequest = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/")!)
+        urlRequest.httpMethod = "POST"
+        urlRequest.httpBody = Data()
+        urlRequest.setValue("0", forHTTPHeaderField: "Content-Length")
+        let (_, response) = try await URLSession.shared.data(for: urlRequest)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
     }
 
     @Test("start() binds via NWParameters.requiredLocalEndpoint to 127.0.0.1, not just any interface on the port")
@@ -74,19 +120,113 @@ struct LoopbackHTTPListenerTests {
         defer { listener.stop() }
         guard let port = listener.boundPort else { Issue.record("no bound port"); return }
 
-        // Oversize Content-Length: the connection must close before (or without) a 200.
+        // Oversize Content-Length: the connection must actually close, not merely withhold a
+        // 200 — "no response within N seconds" alone can't tell a refusal from a slow handler.
         let over = try await rawConnect(port: port)
         try await over.send("POST / HTTP/1.1\r\nContent-Length: \(LoopbackHTTPListener.maxContentLength + 1)\r\n\r\n")
-        let overResponse = await over.readSome(timeout: 2)
-        #expect(overResponse == nil || !overResponse!.contains("200"))
+        #expect(await over.isClosedByRemote(timeout: 2))
         over.cancel()
 
         // Missing Content-Length on a POST.
         let missing = try await rawConnect(port: port)
         try await missing.send("POST / HTTP/1.1\r\n\r\n")
-        let missingResponse = await missing.readSome(timeout: 2)
-        #expect(missingResponse == nil || !missingResponse!.contains("200"))
+        #expect(await missing.isClosedByRemote(timeout: 2))
         missing.cancel()
+    }
+
+    @Test("two Content-Length headers with conflicting values are refused; agreeing duplicates are not")
+    func duplicateHeadersRejectedWhenConflicting() async throws {
+        let listener = LoopbackHTTPListener(port: 0) { _ in .ok() }
+        try await listener.start()
+        defer { listener.stop() }
+        guard let port = listener.boundPort else { Issue.record("no bound port"); return }
+
+        let conflicting = try await rawConnect(port: port)
+        try await conflicting.send("POST / HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 5\r\n\r\n")
+        #expect(await conflicting.isClosedByRemote(timeout: 2), "conflicting duplicate headers must be refused, never resolved order-dependently")
+        conflicting.cancel()
+
+        let agreeing = try await rawConnect(port: port)
+        try await agreeing.send("POST / HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n")
+        let response = await agreeing.readSome(timeout: 2)
+        #expect(response?.contains("200") == true)
+        agreeing.cancel()
+    }
+
+    @Test("a Transfer-Encoding header is refused outright: no chunked support, and it can't pair with Content-Length to smuggle a request")
+    func transferEncodingRejected() async throws {
+        let listener = LoopbackHTTPListener(port: 0) { _ in .ok() }
+        try await listener.start()
+        defer { listener.stop() }
+        guard let port = listener.boundPort else { Issue.record("no bound port"); return }
+
+        let connection = try await rawConnect(port: port)
+        try await connection.send("POST / HTTP/1.1\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n")
+        #expect(await connection.isClosedByRemote(timeout: 2))
+        connection.cancel()
+    }
+
+    @Test("a request line over maxRequestLineBytes is refused")
+    func requestLineCapEnforced() async throws {
+        var limits = LoopbackHTTPListener.Limits()
+        limits.maxRequestLineBytes = 32
+        let listener = LoopbackHTTPListener(port: 0, limits: limits) { _ in .ok() }
+        try await listener.start()
+        defer { listener.stop() }
+        guard let port = listener.boundPort else { Issue.record("no bound port"); return }
+
+        let connection = try await rawConnect(port: port)
+        let oversizePath = String(repeating: "a", count: 200)
+        try await connection.send("GET /\(oversizePath) HTTP/1.1\r\n\r\n")
+        #expect(await connection.isClosedByRemote(timeout: 2))
+        connection.cancel()
+    }
+
+    @Test("more headers than maxHeaderCount is refused")
+    func headerCountCapEnforced() async throws {
+        var limits = LoopbackHTTPListener.Limits()
+        limits.maxHeaderCount = 3
+        let listener = LoopbackHTTPListener(port: 0, limits: limits) { _ in .ok() }
+        try await listener.start()
+        defer { listener.stop() }
+        guard let port = listener.boundPort else { Issue.record("no bound port"); return }
+
+        let connection = try await rawConnect(port: port)
+        let extraHeaders = (0..<10).map { "X-Pad-\($0): v\r\n" }.joined()
+        try await connection.send("POST / HTTP/1.1\r\nContent-Length: 0\r\n\(extraHeaders)\r\n")
+        #expect(await connection.isClosedByRemote(timeout: 2))
+        connection.cancel()
+    }
+
+    @Test("a connection idle past readTimeout, with headers complete but the body never arriving, is closed")
+    func readTimeoutEnforced() async throws {
+        var limits = LoopbackHTTPListener.Limits()
+        limits.readTimeout = .milliseconds(200)
+        let listener = LoopbackHTTPListener(port: 0, limits: limits) { _ in .ok() }
+        try await listener.start()
+        defer { listener.stop() }
+        guard let port = listener.boundPort else { Issue.record("no bound port"); return }
+
+        let connection = try await rawConnect(port: port)
+        // Headers complete (Content-Length: 5) but the 5 body bytes never arrive.
+        try await connection.send("POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\n")
+        #expect(await connection.isClosedByRemote(timeout: 2))
+        connection.cancel()
+    }
+
+    @Test("a non-loopback remote is refused via the injected predicate, independent of the real bind")
+    func injectedIsLoopbackCheckRefuses() async throws {
+        let listener = LoopbackHTTPListener(port: 0, isLoopbackCheck: { _ in false }) { _ in .ok() }
+        try await listener.start()
+        defer { listener.stop() }
+        guard let port = listener.boundPort else { Issue.record("no bound port"); return }
+
+        // The real connection IS loopback; only the injected predicate says otherwise, isolating
+        // accept()'s own refusal path from whatever the real bind restricts.
+        let connection = try await rawConnect(port: port)
+        try await connection.send("POST / HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
+        #expect(await connection.isClosedByRemote(timeout: 2))
+        connection.cancel()
     }
 
     @Test("a connection that never finishes sending headers is closed after headerCompletionDeadline, freeing its slot",
@@ -150,6 +290,13 @@ struct LoopbackHTTPListenerTests {
     }
 }
 
+private final class CallFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var wasCalled = false
+    func set() { lock.withLock { wasCalled = true } }
+    var value: Bool { lock.withLock { wasCalled } }
+}
+
 // MARK: - Raw TCP test helper
 
 /// A continuation that resumes at most once, safe to call from any thread/closure — avoids
@@ -191,13 +338,18 @@ private final class RawConnection: @unchecked Sendable {
         }
     }
 
-    func waitUntilCancelled(timeout: TimeInterval) async -> Bool {
+    /// `stateUpdateHandler` tracks this connection's own lifecycle, not the remote's: a graceful
+    /// remote close surfaces as EOF on `receive`, not a `.cancelled`/`.failed` state transition.
+    /// So "was this refused" has to be answered by actually trying to read: EOF or an error means
+    /// the remote closed without serving anything; real data means it wasn't refused.
+    func isClosedByRemote(timeout: TimeInterval) async -> Bool {
         await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             let resumer = OneShotResumer(continuation)
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .cancelled, .failed: resumer.resume(true)
-                default: break
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { data, _, isComplete, error in
+                if isComplete || error != nil {
+                    resumer.resume(true)
+                } else if data != nil {
+                    resumer.resume(false)
                 }
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { resumer.resume(false) }
