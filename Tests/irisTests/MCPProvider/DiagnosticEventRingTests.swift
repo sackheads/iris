@@ -50,4 +50,26 @@ struct DiagnosticEventRingTests {
         #expect(names.first == "5")
         #expect(names.last == "\(DiagnosticEventRing.capacity + 4)")
     }
+
+    @Test("every DiagnosticEventRing.Event case has at least one production record( call site")
+    func everyEventCaseHasAProductionCallSite() throws {
+        let cases = [
+            "transcriptMouseDown", "transcriptFocusHop", "composerAcceptsFirstMouse",
+            "windowAppearanceChanged", "composerAppearanceChanged",
+        ]
+        let sourcesRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources")
+        var foundCases: Set<String> = []
+        let enumerator = FileManager.default.enumerator(at: sourcesRoot, includingPropertiesForKeys: nil)
+        while let url = enumerator?.nextObject() as? URL {
+            guard url.pathExtension == "swift" else { continue }
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            for caseName in cases where text.contains("record(.\(caseName)") {
+                foundCases.insert(caseName)
+            }
+        }
+        let missing = Set(cases).subtracting(foundCases)
+        #expect(missing.isEmpty, "no production record( call site found for: \(missing.sorted())")
+    }
 }

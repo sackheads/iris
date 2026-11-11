@@ -43,6 +43,11 @@ struct TranscriptFocusAnchor: NSViewRepresentable {
                 if let self, event.window === self.window {
                     let point = event.locationInWindow
                     let isDown = event.type == .leftMouseDown
+                    // Recorded here, synchronously, at the physical event: the plan's own point
+                    // (§3.7 Clomp note) is that the pre-hop and post-hop ring entries land in the
+                    // order the event and the hop actually occurred in, which a record made only
+                    // after the DispatchQueue.main.async hop below cannot pin.
+                    if isDown { DiagnosticEventRing.shared.record(.transcriptMouseDown(atWindowPoint: point)) }
                     DispatchQueue.main.async { isDown ? self.mouseWentDown(at: point) : self.focusTable(clickedAt: point) }
                 }
                 return event
@@ -51,16 +56,18 @@ struct TranscriptFocusAnchor: NSViewRepresentable {
 
         func mouseWentDown(at point: NSPoint) {
             downInside = convert(bounds, to: nil).contains(point)
-            DiagnosticEventRing.shared.record(.transcriptMouseDown(atWindowPoint: point))
         }
 
-        /// A mouse-up at `point`: focuses the table only when the mouse-down was inside too.
+        /// A mouse-up at `point`: focuses the table only when the mouse-down was inside too. Only
+        /// a mouse-up that actually landed on a transcript table is diagnostically interesting;
+        /// every other mouse-up in the window (the composer, the sidebar, a title bar click)
+        /// would otherwise log a `tookFocus: false` that has nothing to do with the transcript.
         func focusTable(clickedAt point: NSPoint) {
             defer { downInside = false }
             guard enabled, downInside, let window, let root = window.contentView,
                   convert(bounds, to: nil).contains(point),
-                  let table = Self.table(containing: point, in: root),
-                  window.firstResponder !== table else {
+                  let table = Self.table(containing: point, in: root) else { return }
+            guard window.firstResponder !== table else {
                 DiagnosticEventRing.shared.record(.transcriptFocusHop(tookFocus: false))
                 return
             }
@@ -71,8 +78,11 @@ struct TranscriptFocusAnchor: NSViewRepresentable {
                 DiagnosticEventRing.shared.record(.transcriptFocusHop(tookFocus: false))
                 return
             }
-            window.makeFirstResponder(table)
-            DiagnosticEventRing.shared.record(.transcriptFocusHop(tookFocus: true))
+            // makeFirstResponder's own Bool return, not an assumed success: it is false when the
+            // current responder refuses to resign — #1055's exact symptom — and recording `true`
+            // regardless would log a refused hop as though it had succeeded.
+            let tookFocus = window.makeFirstResponder(table)
+            DiagnosticEventRing.shared.record(.transcriptFocusHop(tookFocus: tookFocus))
         }
 
         /// The table whose scroll view's frame, in window coordinates, contains `point`.
