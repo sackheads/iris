@@ -64,6 +64,91 @@ struct ProviderArtifactStoreTests {
         }
     }
 
+    @Test("a fullwidth-digit hash is rejected: isValidHash is ASCII-only, not Unicode-hex-digit-aware")
+    func fullwidthHashRejected() async throws {
+        let store = ProviderArtifactStore(root: temporaryTestDirectory())
+        // U+FF41 ("ａ") satisfies Character.isHexDigit despite not being ASCII.
+        let fullwidth = String(repeating: "\u{FF41}", count: 64)
+        await #expect(throws: ProviderArtifactStore.ArtifactError.invalidHash) {
+            try await store.get(sha256: fullwidth, requestingClientId: "a")
+        }
+    }
+
+    @Test("a second client uploading the same bytes a first client already stored doesn't double-charge totalBytes, and does grant the second client a read")
+    func reuploadBySecondClientGrantsReadWithoutDoubleCharging() async throws {
+        var quotas = ProviderArtifactStore.Quotas()
+        quotas.totalStoreCapBytes = 20  // "hello" (5 bytes) fits once; a double-charge would not
+        let store = ProviderArtifactStore(root: temporaryTestDirectory(), quotas: quotas)
+        let shaFromA = try await store.put(bytes: Data("hello".utf8), from: "a")
+        let shaFromB = try await store.put(bytes: Data("hello".utf8), from: "b")
+        #expect(shaFromA == shaFromB)
+        // "b" gets a read on its own re-upload, without needing "a" to authorize it.
+        #expect(try await store.get(sha256: shaFromB, requestingClientId: "b") == Data("hello".utf8))
+        // A third 5-byte object still fits under the 20-byte cap only if "hello" was charged once.
+        _ = try await store.put(bytes: Data("world".utf8), from: "c")
+    }
+
+    @Test("a fresh store over a root a prior store already wrote to starts empty, not with orphaned files")
+    func secondStoreOverSameRootStartsEmpty() async throws {
+        let root = temporaryTestDirectory()
+        let first = ProviderArtifactStore(root: root)
+        let sha = try await first.put(bytes: Data("hello".utf8), from: "a")
+
+        let second = ProviderArtifactStore(root: root)
+        await #expect(throws: ProviderArtifactStore.ArtifactError.notFound) {
+            try await second.get(sha256: sha, requestingClientId: "a")
+        }
+        let contents = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        #expect(contents.isEmpty)
+    }
+
+    @Test("sweepExpired frees totalBytes, letting a put that would otherwise exceed the total cap succeed")
+    func sweepFreesTotalCapacity() async throws {
+        var quotas = ProviderArtifactStore.Quotas()
+        quotas.totalStoreCapBytes = 10
+        let base = Date()
+        let clockBox = DateBox(base)
+        let store = ProviderArtifactStore(root: temporaryTestDirectory(), now: { clockBox.value }, quotas: quotas)
+        _ = try await store.put(bytes: Data(repeating: 0, count: 10), from: "a")  // fills the 10-byte cap
+
+        await #expect(throws: ProviderArtifactStore.ArtifactError.quotaExceeded) {
+            _ = try await store.put(bytes: Data(repeating: 1, count: 10), from: "b")
+        }
+
+        clockBox.value = base.addingTimeInterval(ProviderArtifactStore.ttl + 1)
+        await store.sweepExpired(now: clockBox.value)
+
+        // The cap is free again now that the expired object's bytes were released.
+        _ = try await store.put(bytes: Data(repeating: 1, count: 10), from: "b")
+    }
+
+    @Test("get treats a past-TTL object as absent even before sweepExpired has run")
+    func getTreatsExpiredAsAbsent() async throws {
+        let base = Date()
+        let clockBox = DateBox(base)
+        let store = ProviderArtifactStore(root: temporaryTestDirectory(), now: { clockBox.value })
+        let sha = try await store.put(bytes: Data("hello".utf8), from: "a")
+        clockBox.value = base.addingTimeInterval(ProviderArtifactStore.ttl + 1)
+        // No sweepExpired call here — the record is still physically present, but stale.
+        await #expect(throws: ProviderArtifactStore.ArtifactError.notFound) {
+            try await store.get(sha256: sha, requestingClientId: "a")
+        }
+    }
+
+    @Test("a re-upload refreshes storedAt, so sweepExpired does not delete what was just re-stored")
+    func reuploadRefreshesStoredAt() async throws {
+        let base = Date()
+        let clockBox = DateBox(base)
+        let store = ProviderArtifactStore(root: temporaryTestDirectory(), now: { clockBox.value })
+        let sha = try await store.put(bytes: Data("hello".utf8), from: "a")
+        clockBox.value = base.addingTimeInterval(ProviderArtifactStore.ttl - 1)
+        // Re-upload just before the original TTL would expire, resetting the clock.
+        _ = try await store.put(bytes: Data("hello".utf8), from: "a")
+        clockBox.value = base.addingTimeInterval(ProviderArtifactStore.ttl + 2)
+        // Still within ttl of the re-upload, even though it's past the original upload's ttl.
+        #expect(try await store.get(sha256: sha, requestingClientId: "a") == Data("hello".utf8))
+    }
+
     @Test("an object over the size cap is rejected before any write")
     func oversizeRejected() async throws {
         let root = temporaryTestDirectory()
