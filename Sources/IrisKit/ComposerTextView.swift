@@ -193,6 +193,13 @@ extension NSEvent {
 final class KeyCatchingTextView: NSTextView {
     weak var coordinator: ComposerTextView.Coordinator?
 
+    /// #1055: a click that also reactivates the window (e.g. click away from Iris, then click
+    /// back) is AppKit's default "activating click" — consumed to bring the window forward and
+    /// never delivered as a real `mouseDown`, so it can't take first responder either. The
+    /// composer is the thing a person reaches for first after switching back to Iris; it should
+    /// win that click rather than need a second one.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func keyDown(with event: NSEvent) {
         guard let coordinator else { super.keyDown(with: event); return }
         if event.isStashShortcut { coordinator.parent.onStash(); return }

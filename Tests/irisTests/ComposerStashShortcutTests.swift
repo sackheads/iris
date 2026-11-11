@@ -56,4 +56,14 @@ struct ComposerStashShortcutTests {
         tv.keyDown(with: keyEvent(characters: "s", flags: []))
         #expect(stashCount == 1, "a bare S must not stash")
     }
+
+    /// #1055: a click that also reactivates the window is AppKit's "activating click" — consumed
+    /// for activation only and never delivered as a real `mouseDown` unless the view opts in via
+    /// `acceptsFirstMouse`. Default is `false` on a bare `NSTextView`; the composer must opt in so
+    /// clicking back into Iris after switching away hands it the keystroke, not a beep.
+    @Test("the composer's text view accepts the first click after reactivation")
+    func acceptsFirstMouseAfterReactivation() {
+        let tv = KeyCatchingTextView()
+        #expect(tv.acceptsFirstMouse(for: nil))
+    }
 }
