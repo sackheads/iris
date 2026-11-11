@@ -723,12 +723,14 @@ git commit -m "feat: #1067 provider-scoped content-addressed artifact store, dir
   - `func start() async throws` — builds a `LoopbackHTTPListener(port: port, handle: handleAuthenticated)` where `handleAuthenticated` is this class's own method, **not** a bare `transport.handleRequest` reference (that was the pre-spike shape; it no longer applies):
     1. **Resolve, don't admit, first.** Read the `Authorization` header off the raw `HTTPRequest` directly (`request.header("Authorization")`); strip a `Bearer ` prefix if present. Call `tokenRegistry.clientId(forToken:)` (Task 1's existing, **non-consuming** lookup — no budget is spent here) to get a 401 decision for free: a missing header or an unknown token rejects outright, with **no JSON-RPC body parsed at all yet** (dev-2 round 2, item 2: parsing an untrusted body of up to `LoopbackHTTPListener.maxContentLength` — 16 MiB — before the token check would let an unauthenticated connection spend CPU on a big body for free). This step produces a resolved `clientId: String` or an immediate 401; it never touches either `ProviderRequestGate`.
     2. **Reject a batch body outright.** If the parsed JSON-RPC body is a top-level array (a JSON-RPC batch), return 400 and go no further (dev-2 round 2, item 2: this listener's minimal parser has no batch support, and "peek the body for one method name" silently breaks — or silently admits N calls for the price of one — against a batch; make the restriction explicit rather than accidental).
+    **Parse the body exactly once, with the same parser the SDK's own transport uses for its own classification** (dev-3 round 4, finding 2 — `MCP`'s `JSONRPCMessageKind(data:)`, the SDK's own request/notification/response classifier, uses `JSONSerialization.jsonObject(with:)`, not `JSONDecoder` — confirmed by reading `HTTPServerTypes.swift`). This step's `method`/tool-name peek must decode the body with `JSONSerialization` too, not a second, independently-written parser, and the `LoopbackHTTPListener` parser from Task 2 is HTTP-only — it never parses JSON-RPC content, only the request line/headers/body-length framing around it (state this explicitly; it is easy to misread Task 2's "parser" as covering this too). **Reject a body whose top-level JSON object contains a duplicate key** (e.g. two `"method"` entries) rather than relying on whichever of `JSONSerialization`/`JSONDecoder` happens to pick the same one first — dev-3 round 4 tested the two against each other on a duplicate-key body and found they agree today (both first-wins), but that agreement is an implementation detail of two libraries this plan does not control, not a guarantee, and the point of rejecting outright is that the method/tool name *this gate* charges against a budget can never differ from what the SDK's `Server` later actually dispatches. Fail closed on this the same way `StrictJSON.rejectDuplicateKeys(_:)` does elsewhere in this codebase (`Sources/IrisKit/A2A/Crypto/PeerSignatureVerifier.swift`, #974 H4 — a raw-bytes scan over the JSON text, since `JSONSerialization` has already silently collapsed the duplicate by the time a decoded dictionary exists to inspect): if that type has landed on `main` by the time this task is built, call it directly; if not yet merged, vendor a small duplicate-top-level-key scanner scoped to this task with the same fail-closed posture, rather than block Phase 1 on unrelated unmerged work or skip the check.
     3. **Dispatch by method against an explicit, default-deny allowlist — not an open-ended "`tools/call` is charged, everything else just proceeds" rule** (dev-2 round 3, item B: the round-2 text only named `initialize`/`tools/list`/`ping` as free and `tools/call` as charged, which left `resources/read` — a distinct JSON-RPC method, not a `tools/call` — uncharged and undefined, along with `notifications/initialized`, `resources/list`, `prompts/*`, `logging/setLevel`, `completion/complete`, and anything else the SDK or a client might send). The allowlist, exhaustively:
-       - **Free (resolved `clientId` required, no gate charge):** `initialize`, `notifications/initialized`, `tools/list`, `ping`.
+       - **Free (resolved `clientId` required, no gate charge):** `initialize`, `notifications/initialized`, `tools/list`, `ping`, **`resources/list`, `resources/templates/list`** (dev-3 round 4, finding 1: this plan's `serverCapabilities` advertises a `resources` capability, and a spec-following client may call these on connect; artifacts are reached only by URI, never enumerated — §3.6/§7.6 — so these two return an empty list rather than refusing a call the server's own advertised capability invited).
        - **Charged to `doorGate`, one `admit(bearerToken:)` call:** a `tools/call` naming one of the 6 door tools.
        - **Charged to `mailboxGate`, one `admit(bearerToken:)` call:** a `tools/call` naming one of the 4 mailbox tools or `artifact_put`, **and `resources/read`** (not a `tools/call` at all, but still a chargeable read against this surface — charged the same as the mailbox/file tools since it reads from the same `ProviderArtifactStore`).
-       - **Everything else — any other method name, including `resources/list`, `prompts/*`, `logging/setLevel`, `completion/complete`, and a `tools/call` naming an unknown tool — is refused with a 400/method-not-found, with no gate call at all.** This is a default-deny allowlist: a method this plan did not name is refused, not silently passed through.
-       Exactly one `admit(bearerToken:)` call happens for a chargeable request, from whichever one of the two branches above applies — never from inside `SelfReportDoor` or `ProviderMailbox` themselves (dev-2 round 2, item 2 — see Task 5's architecture note), and never for a free method. On `.unauthorized`/`.budgetExceeded`, return the appropriate HTTP error response immediately, having constructed no `MCP.Server` and made no MainActor hop.
+       - **Any other `notifications/*` method** (e.g. `notifications/cancelled`, `notifications/roots/list_changed`) **is accepted with 202 and dropped — not refused** (dev-3 round 4, finding 3: a notification carries no id, so nothing is waiting on a response, but a 400 may still surface as a transport-level error to a well-behaved client sending a standard notification this surface has no use for; accepting and discarding it costs nothing and avoids that). No gate call for any notification, free or otherwise.
+       - **Everything else — any other request method name, including `prompts/*`, `logging/setLevel`, `completion/complete`, and a `tools/call` naming an unknown tool — is refused with a 400/method-not-found, with no gate call at all.** This is a default-deny allowlist: a method this plan did not name is refused, not silently passed through.
+       Exactly one `admit(bearerToken:)` call happens for a chargeable request, from whichever one of the two charged branches above applies — never from inside `SelfReportDoor` or `ProviderMailbox` themselves (dev-2 round 2, item 2 — see Task 5's architecture note), and never for a free method or a dropped notification. On `.unauthorized`/`.budgetExceeded`, return the appropriate HTTP error response immediately, having constructed no `MCP.Server` and made no MainActor hop.
     4. On success, construct a fresh `MCP.Server(name: "iris", version: ..., capabilities: Self.serverCapabilities, configuration: .default)` — **`capabilities:` must be passed explicitly, never left at its `.init()` default** (dev-2/planner round 3, item A — confirmed independently by the planner against `Server.swift`: `Server.init`'s `capabilities` parameter defaults to `Server.Capabilities()`, whose `tools`/`resources` fields default to `nil`, and the `initialize` response literally returns `self.capabilities` — so a default-capabilities Server advertises no tools or resources at all, and a spec-following client like Claude Code never calls `tools/list` or `tools/call` against it. This plan's own tests post a bare `tools/call` directly and would pass against a broken server anyway, which is exactly how this escaped three review rounds until a real-client read caught it.) Define `static let serverCapabilities = Server.Capabilities(resources: .init(subscribe: false, listChanged: false), tools: .init(listChanged: false))` and register a `ListTools` handler (the Consumes line already named `withMethodHandler(ListTools.self)`; this step is where it actually gets registered — list the 10 tools: the 6 door tools, `iris_send`/`iris_poll`/`iris_discover`/`iris_status`, and `artifact_put`) alongside the other handlers below. Those handlers: the 6 door tools (`iris_window_owner`, `iris_responder_class`, `iris_composer_state`, `iris_turn_state`, `iris_activation_state`, `iris_event_ring` — one per `SelfReportDoor.Query` case) each calling `door.handle(query:clientId:)` with the **resolved `clientId`** (Task 5's door takes a plain `clientId`, not a bearer token — there is nothing left for it to re-authenticate); 4 mailbox tools (`iris_send`, `iris_poll`, `iris_discover`, `iris_status`) each closed over the same resolved `clientId`, never reading a `from`/`clientId` argument out of the tool call's own arguments (dev-2 Gap 5/provenance); a `resources/read` handler resolving `iris-artifact://<sha256>` URIs to `artifactStore.get(sha256:requestingClientId: clientId)`; an `artifact_put` tool calling `artifactStore.put(bytes:from: clientId)` (inline base64 bytes in the tool call arguments, capped by `LoopbackHTTPListener.maxContentLength` upstream and `ProviderArtifactStore.maxBytesPerObject` here, never a host path — Global Constraints).
        **`iris_send`'s handler is not a bare `mailbox.send` + a loop of `authorize` calls** (dev-2 round 2, item 3 — atomicity): it first **preflights every entry in `fileRefs`** — each is 64-lowercase-hex (cheap, no I/O) and `artifactStore.authorize(sha256: ref, by: clientId, adding: [])` would not throw for it (calling `authorize` with an empty `adding:` set is a pure permission check with no side effect other than the union-with-empty-set no-op; if the SDK or store implementation makes that awkward, add a dedicated non-mutating `func canAuthorize(sha256:by:) -> Bool` to `ProviderArtifactStore` instead — Task 7's choice to make, this task only needs *a* non-mutating check). **If any ref fails preflight, the whole send is refused before `mailbox.send` is ever called** — no partial message, no partial grant. Only once every ref preflights clean does the handler call `mailbox.send(from: clientId, to: <argument>, text: <argument>, fileRefs: <argument>)` and then, in **one** call, `artifactStore.authorizeAll(sha256s: <the message's fileRefs>, by: clientId, adding: to)` — the atomic, all-or-nothing form (Task 7), not a loop of individual `authorize` calls. **If `authorizeAll` throws anyway** — the preflight and the grant are two separate actor hops with an `await` between them, during which `sweepExpired`/`purge(clientId:)` could in principle run and invalidate a ref that preflighted clean moments earlier (dev-2 round 3 smaller item 1: this is the residual race the preflight alone does not close) — the handler calls `mailbox.retract(id: message.id)` to undo the just-stored message before returning the error, so a grant failure never leaves a half-delivered message behind. This ordering means a message with any invalid or since-invalidated file reference never ends up durably in the recipient's mailbox, rather than arriving with some refs readable and others not.
     5. Wrap the whole of steps 3-4 (from the moment a gate `admit`s a request through the final response) in a `requestDeadline` bound (dev-2 round 2 smaller item: Task 2's listener only bounds the *read*, not the time a handler takes to produce a response — a handler that never returns leaves the HTTP connection, and the transport's `responseWaiters` continuation for it, waiting forever). On expiry, return a 504-equivalent `HTTPResponse` and still run step 6's teardown.
@@ -775,12 +777,15 @@ func doorBudgetExceededNeverConstructsDoor() async throws {
     // door.handle, never touched the MainActor probe again.
 }
 
-@Test("a method not on the allowlist is refused with no gate call at all")
+@Test("a method not on the allowlist is refused, spending neither gate's budget")
 func disallowedMethodRefused() async throws {
-    // A well-formed valid token; drive each of resources/list, prompts/list, logging/setLevel,
-    // and a tools/call naming an unknown tool, through handleAuthenticated; assert each is a
-    // 400/method-not-found and that neither gate's admit() was called (dev-2 round 3, item B —
-    // default-deny: a method this plan did not name is refused, not passed through uncharged).
+    // Build doorGate and mailboxGate with capacity: 1 each (dev-3 round 4, finding 4: the
+    // observable for "no gate call was made" is that a legitimate call still admits afterward,
+    // not an internal call-count assertion). Drive each of prompts/list, logging/setLevel, and a
+    // tools/call naming an unknown tool, through handleAuthenticated as the same client; assert
+    // each is a 400/method-not-found. Then drive one real door tool call and one real mailbox
+    // tool call for that same client; assert both still admit — if the refused calls had spent
+    // either gate's single unit of budget, one of these would now be rejected instead.
 }
 
 @Test("resources/read is charged to mailboxGate, not left free or uncharged")
@@ -790,6 +795,48 @@ func resourcesReadChargedToMailboxGate() async throws {
     // then again (budget exhausted -> rejected). Confirm doorGate's budget is untouched by either
     // call (dev-2 round 3, item B: resources/read is a distinct JSON-RPC method, not a tools/call,
     // and must still cost a unit of the mailbox/file surface's budget).
+}
+
+@Test("resources/list and resources/templates/list are free and return an empty list") // dev-3 round 4, finding 1
+func resourcesListReturnsEmpty() async throws {
+    // A well-formed valid token; drive resources/list, then resources/templates/list, through
+    // handleAuthenticated with no prior artifact_put/authorize. Assert both succeed (not a 400 —
+    // this surface advertises the `resources` capability via Self.serverCapabilities, so a
+    // spec-following client may call these on connect) and each returns an empty resources/
+    // resourceTemplates array, never erroring just because nothing has been shared yet. Assert
+    // neither gate's admit() was called (these are free, like initialize/tools-list/ping).
+}
+
+@Test("a body with a duplicate top-level JSON key is rejected at the gate, never reaches dispatch") // dev-3 round 4, finding 2
+func duplicateTopLevelKeyRejected() async throws {
+    // A well-formed valid token; construct a raw body with two "method" keys (one "tools/call",
+    // one naming a door tool directly as a top-level "method" too, or any two differing values —
+    // the point is the key repeats, not which value a lenient parser would pick) by hand, since
+    // JSONSerialization/JSONEncoder would collapse it before this test could observe the
+    // ambiguity. Drive it through handleAuthenticated; assert it is rejected before any gate call
+    // and before any Server is constructed — the gate's own duplicate-key scan over the raw bytes
+    // must catch this, not a decode that already silently picked one value.
+}
+
+@Test("an unlisted notification is accepted and dropped, not refused") // dev-3 round 4, finding 3
+func unlistedNotificationAcceptedAndDropped() async throws {
+    // A well-formed valid token; drive notifications/cancelled (a method with no id — a JSON-RPC
+    // notification, not a request) through handleAuthenticated. Assert a 202-equivalent response
+    // (or whatever this transport's notification-accepted shape is), not a 400, and that neither
+    // gate's admit() was called. notifications/initialized (already free per the allowlist) is a
+    // different case from this one; this test is specifically the "no entry names this
+    // notification, but it's still a notification" path.
+}
+
+@Test("the tools/list response names exactly the tool names the dispatch allowlist accepts") // dev-3 round 4, finding 5
+func listToolsMatchesDispatchAllowlist() async throws {
+    // Drive a tools/list request through handleAuthenticated; decode the response's tool names
+    // into a Set<String>. Compare it against a Set<String> built from the same source the
+    // dispatch allowlist's tool-name checks read from (not a second, separately maintained
+    // literal list in the test — if the implementation hard-codes the allowlist as a separate
+    // array from ListTools's registration, this test's own list must be built from whichever one
+    // is NOT what's under test, so a future tool added to one and not the other actually fails
+    // this test rather than both lists silently matching each other).
 }
 ```
 
