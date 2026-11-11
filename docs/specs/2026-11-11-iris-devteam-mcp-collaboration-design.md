@@ -49,12 +49,18 @@ That is the shape of the value, and it sets the scope:
 > address space. It asks Iris, and Iris — which already holds its own `AppState` — answers, or
 > runs a diagnostic and hands back the result.
 
-**Explicit non-goal: a debugging/introspection port.** We are not adding a wire protocol that
-exposes internal state, drives UI events, or lets a peer step the app. A real debug port is a
-different-order project — a protocol, state serialization, safe event injection, keeping it
-coherent while the target mutates under you — and the intelligence we need already lives in the
+**Non-goal: a general-purpose debugging/introspection port.** We are not adding a wire protocol
+that lets a peer drive UI events, step the app, or inspect arbitrary internal state. A real debug
+port is a different-order project — a protocol, state serialization, safe event injection, keeping
+it coherent while the target mutates under you — and the intelligence we need already lives in the
 agent. Asking Iris to report on itself recovers most of the debugging value at a fraction of the
 cost. This is a deliberate scoping decision, not a deferral.
+
+**One accommodated exception (Brian, §3.7).** A *narrow, read-only self-report door* — the app
+answering specific questions about its own state through a bounded diagnostic tool — is a special
+case this environment accommodates. It is not the general port the non-goal rules out: it drives
+nothing and exposes a defined surface, not arbitrary state. §3.7 holds the open sub-questions
+about its exact shape.
 
 The dev team is the first peer because it is trusted and in-house, but nothing in the surface is
 dev-team-specific. Any agent that speaks MCP/A2A could, with the right grant, be a peer; the
@@ -198,21 +204,23 @@ whether the per-session/day budgets re-key per token.
 
 *Weigh in:* whoever owns `ArtifactLimits`, #964.
 
-### 3.7 The motivating case needs a self-report tool — a small introspection surface (Brian's call)
+### 3.7 The self-report door — scope settled, shape open
 
-dev-2's M2, and the one point that touches the stated non-goal directly. "What is your composer's
-first responder right now?" has **no tool behind it today**: nothing in the surface reads AppKit/UI
-or live `AppState`, and `describe_session` returns session-card data, not that. Answering it needs
-a new, narrow, main-actor diagnostic tool, gated per Invariant 6 and guest-reachable. That is a
-*small introspection surface* — in tension with this doc's own "no debugging/introspection port"
-non-goal. The tension is real and it is a scoping decision, not an implementation detail: the line
-between "the agent reports on itself" and "a narrow introspection port" sits exactly here. The
-natural target is also not the `reviewer` profile, whose tool list #964 deliberately narrows.
+dev-2's M2. "What is your composer's first responder right now?" has **no tool behind it today**:
+nothing in the surface reads AppKit/UI or live `AppState`, and `describe_session` returns
+session-card data, not that. Answering it needs a new, narrow, main-actor diagnostic tool, gated
+per Invariant 6 and guest-reachable.
 
-*To settle (Brian):* whether the self-report value justifies a narrow, read-only, explicitly
-bounded diagnostic tool, and if so where its line sits relative to the non-goal.
+**Brian's call (settled, 2026-11-11):** a literal self-report / debug door is a special case this
+environment accommodates — "unique to this environment." It is not the general debug port the §1
+non-goal rules out (which drives events and inspects arbitrary state); this door is read-only and
+bounded. So the *scope question is closed yes*; what remains open is the tool's shape.
 
-*Weigh in:* Brian (scope), then #964 + security review for the tool's shape.
+*Open (team):* the exact surface the tool exposes (what it may read, and the bound), which profile
+carries it — not `reviewer`, whose tool list #964 narrows — main-actor safety, and the Invariant-6
+gating.
+
+*Weigh in:* #964 + security review for the tool's shape; main-actor review for the read.
 
 ## 4. What is already solid (leave alone unless a point above forces it)
 
@@ -234,6 +242,6 @@ review. The intended path: circulate → reconcile the points → fold the decis
 "generalizing the A2A file/delivery path to `mcpGuest`" section, and raise plan work only after
 #964 absorbs them. No new build begins before that.
 
-One point is Brian's before the rest can proceed: §3.7 (does the motivating self-report case
-justify a narrow introspection tool, given the stated non-goal). It sits on the scope line he
-drew, so it is surfaced to him directly rather than left to the group.
+§3.7's scope question — the one that sat on Brian's non-goal line — is settled: a narrow,
+read-only self-report door is accommodated as a special case unique to this environment. Its
+*shape* stays open for the team. Every other point is the group's to reconcile.
