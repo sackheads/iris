@@ -51,6 +51,44 @@ struct ProviderTokenRegistryTests {
         #expect(registry.clientId(forToken: second) == nil)
     }
 
+    @Test("issueToken refuses case/whitespace variants of \"iris\", not just the exact spelling")
+    func reservedSpellingVariantsRejected() throws {
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
+        let registry = ProviderTokenRegistry(keychain: keychain)
+        for variant in ["Iris", "IRIS", " iris", "iris ", " Iris "] {
+            #expect(throws: ProviderTokenRegistry.RegistryError.reservedClientId) {
+                try registry.issueToken(forClientId: variant)
+            }
+        }
+        #expect(registry.allClientIds().isEmpty)
+    }
+
+    @Test("revokeToken clears the in-memory cache even when persisting the revoke fails (fail-safe, not fail-open)")
+    func revokeFailsSafeOnKeychainWriteFailure() throws {
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
+        let registry = ProviderTokenRegistry(keychain: keychain)
+        let token = try registry.issueToken(forClientId: "a")
+        #expect(registry.clientId(forToken: token) == "a")
+
+        // updateSecretsOrThrow reads before it writes; failing the read makes the whole revoke
+        // call throw before anything is persisted — but the cache must already be clear.
+        keychain.simulateReadFailure(errSecIO)
+        #expect(throws: (any Error).self) {
+            try registry.revokeToken(forClientId: "a")
+        }
+        #expect(registry.clientId(forToken: token) == nil, "a revoke that fails to persist must still block the token immediately")
+        #expect(!registry.isRegistered(clientId: "a"))
+    }
+
+    @Test("a Keychain read failure at init is recorded, not silently swallowed, and the registry starts empty (fail-closed)")
+    func keychainLoadErrorIsRecorded() throws {
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
+        keychain.simulateReadFailure(errSecIO)
+        let registry = ProviderTokenRegistry(keychain: keychain)
+        #expect(registry.keychainLoadError != nil)
+        #expect(registry.allClientIds().isEmpty)
+    }
+
     @Test("allClientIds and isRegistered reflect multiple registered clients")
     func multipleClients() throws {
         let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
