@@ -38,6 +38,21 @@ struct ConfigManagerIsolationTests {
         #expect(ConfigManager(store: storeB).defaultEmojiSkinTone == SkinTone.light.rawValue)
     }
 
+    /// #1067: dev and release can both have the provider enabled on one machine at once, so they
+    /// must not default to the same bind port.
+    @Test("mcpProviderPort defaults differently for dev and release, and persists an explicit value")
+    func mcpProviderPortDefaultsDifferByBuildIdentity() {
+        #expect(ConfigManager.defaultMCPProviderPort(for: .dev) != ConfigManager.defaultMCPProviderPort(for: .release))
+
+        let (store, name) = suite("mcp-port")
+        defer { cleanup(store, name) }
+        let config = ConfigManager(store: store)
+        #expect(config.mcpProviderPort == ConfigManager.defaultMCPProviderPort)
+
+        config.mcpProviderPort = 9999
+        #expect(ConfigManager(store: store).mcpProviderPort == 9999)
+    }
+
     /// The default-true-when-unset branch lost its coverage when the racy settings suite was
     /// deleted; #199's `ConfigManager(store:)` seam lets it be asserted against a store nobody
     /// else touches, so the test can never race `IrisDefaults.store` or `ConfigManager.shared`.

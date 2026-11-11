@@ -13,6 +13,11 @@ public final class KeychainManager: @unchecked Sendable {
     /// (its services list is `[legacyService, mcpFileService] + iris.plugin.*`, `DevHomeSeeder.swift`
     /// around line 85), so a dev build never shares the release build's signing key.
     public static let a2aSigningKeyService = "iris.a2a.signing"
+    /// Per-client bearer tokens for the loopback MCP provider (#1067). One entry per registered
+    /// client id, keyed `[clientId: token]`; `ProviderTokenRegistry.reservedClientId` is never
+    /// written here by `issueToken`, but a pre-existing entry under that key is still skipped on
+    /// load rather than trusted.
+    public static let mcpProviderService = "iris.mcp.provider"
     public static func pluginService(_ id: String) -> String { "iris.plugin.\(id)" }
 
     /// Under `swift test` the manager uses an in-memory store instead of the real login
