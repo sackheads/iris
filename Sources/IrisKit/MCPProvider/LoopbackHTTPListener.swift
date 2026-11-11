@@ -1,0 +1,354 @@
+import Foundation
+import Network
+import MCP
+
+/// A minimal, hand-rolled HTTP/1.1 listener bound to loopback only, bridging raw socket bytes to
+/// an injected handler (the MCP SDK's `StatelessHTTPServerTransport.handleRequest`, in production
+/// — never referenced directly here so this type's own tests never need a real `MCP.Server`).
+/// POST only, no chunked transfer-encoding, no keep-alive: a single local client's request/response
+/// round trip, nothing more (#1067).
+final class LoopbackHTTPListener: @unchecked Sendable {
+    static let maxRequestLineBytes = 8 * 1024
+    static let maxHeaderBytes = 32 * 1024
+    static let maxHeaderCount = 64
+    /// A ceiling above Task 7's own 8 MiB object cap, since this listener also carries JSON-RPC
+    /// envelope overhead.
+    static let maxContentLength = 16 * 1024 * 1024
+    /// Bounds the body read once headers are complete.
+    static let readTimeout: Duration = .seconds(30)
+    /// A separate, shorter bound on how long a connection may sit before its headers finish.
+    static let headerCompletionDeadline: Duration = .seconds(5)
+    static let maxConcurrentConnections = 16
+
+    private let requestedPort: UInt16
+    private let handle: @Sendable (HTTPRequest) async -> HTTPResponse
+
+    private let lock = NSLock()
+    private var listener: NWListener?
+    private var connections: [ObjectIdentifier: Connection] = [:]
+    private let queue = DispatchQueue(label: "iris.mcpprovider.loopback-listener")
+
+    /// The port actually bound, once `start()` returns — resolves a `0` (ephemeral) request to
+    /// the real assigned port.
+    private(set) var boundPort: UInt16?
+
+    init(port: UInt16, handle: @escaping @Sendable (HTTPRequest) async -> HTTPResponse) {
+        self.requestedPort = port
+        self.handle = handle
+    }
+
+    /// Binds loopback at construction time via `NWParameters.requiredLocalEndpoint`, not just by
+    /// filtering connections after the fact — layer 1 of two independent layers of defence.
+    static func loopbackParameters(port: UInt16) -> NWParameters {
+        let params = NWParameters.tcp
+        let nwPort = port == 0 ? NWEndpoint.Port.any : (NWEndpoint.Port(rawValue: port) ?? .any)
+        params.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: nwPort)
+        return params
+    }
+
+    /// Layer 2, defence in depth on top of the bind-time restriction: a connection whose remote
+    /// endpoint is not loopback is refused even if the bind is ever misconfigured or bypassed.
+    static func isLoopback(_ endpoint: NWEndpoint) -> Bool {
+        switch endpoint {
+        case .hostPort(let host, _):
+            switch host {
+            case .ipv4(let address): return address.isLoopback
+            case .ipv6(let address): return address.isLoopback
+            case .name(let name, _): return name == "localhost"
+            @unknown default: return false
+            }
+        default: return false
+        }
+    }
+
+    func start() async throws {
+        let params = Self.loopbackParameters(port: requestedPort)
+        let nwPort = requestedPort == 0 ? NWEndpoint.Port.any : (NWEndpoint.Port(rawValue: requestedPort) ?? .any)
+        let listener = try NWListener(using: params, on: nwPort)
+        self.listener = listener
+        listener.newConnectionHandler = { [weak self] connection in
+            self?.accept(connection)
+        }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            listener.stateUpdateHandler = { [weak self] state in
+                switch state {
+                case .ready:
+                    self?.boundPort = listener.port?.rawValue
+                    continuation.resume()
+                case .failed(let error):
+                    continuation.resume(throwing: error)
+                default:
+                    break
+                }
+            }
+            listener.start(queue: queue)
+        }
+    }
+
+    func stop() {
+        listener?.cancel()
+        listener = nil
+        let active = lock.withLock { let c = connections.values; connections.removeAll(); return c }
+        for connection in active { connection.cancel() }
+    }
+
+    /// A refused connection is started and immediately cancelled, not just cancelled outright:
+    /// an `NWConnection` handed to `newConnectionHandler` already has a kernel socket from the
+    /// accept, but `cancel()` on one that was never `start()`ed leaves that socket sitting open
+    /// instead of tearing it down — the remote end would see "connected" forever.
+    private func refuse(_ nwConnection: NWConnection) {
+        nwConnection.start(queue: queue)
+        nwConnection.cancel()
+    }
+
+    private func accept(_ nwConnection: NWConnection) {
+        guard Self.isLoopback(nwConnection.endpoint) else {
+            refuse(nwConnection)
+            return
+        }
+        let shouldAccept: Bool = lock.withLock {
+            guard connections.count < Self.maxConcurrentConnections else { return false }
+            return true
+        }
+        guard shouldAccept else {
+            refuse(nwConnection)
+            return
+        }
+        let connection = Connection(nwConnection: nwConnection, queue: queue, handle: handle) { [weak self] finished in
+            self?.remove(finished)
+        }
+        lock.withLock { connections[ObjectIdentifier(connection)] = connection }
+        connection.start()
+    }
+
+    private func remove(_ connection: Connection) {
+        lock.withLock { _ = connections.removeValue(forKey: ObjectIdentifier(connection)) }
+    }
+}
+
+/// One accepted connection's parse-and-respond state machine. A class (not a struct) so the
+/// listener can hold and cancel it by identity.
+private final class Connection: @unchecked Sendable {
+    private let nwConnection: NWConnection
+    private let queue: DispatchQueue
+    private let handle: @Sendable (HTTPRequest) async -> HTTPResponse
+    private let onFinished: (Connection) -> Void
+
+    private let lock = NSLock()
+    private var buffer = Data()
+    private var headersComplete = false
+    private var finished = false
+    private var method = ""
+    private var path: String?
+    private var headers: [String: String] = [:]
+    private var bodyStart = 0
+    private var expectedBodyLength: Int?
+
+    init(nwConnection: NWConnection, queue: DispatchQueue,
+         handle: @escaping @Sendable (HTTPRequest) async -> HTTPResponse,
+         onFinished: @escaping (Connection) -> Void) {
+        self.nwConnection = nwConnection
+        self.queue = queue
+        self.handle = handle
+        self.onFinished = onFinished
+    }
+
+    func start() {
+        nwConnection.start(queue: queue)
+        scheduleHeaderDeadline()
+        scheduleReadTimeout()
+        receiveMore()
+    }
+
+    func cancel() {
+        finish()
+    }
+
+    private func scheduleHeaderDeadline() {
+        queue.asyncAfter(deadline: .now() + LoopbackHTTPListener.headerCompletionDeadline.timeInterval) { [weak self] in
+            guard let self else { return }
+            let stillWaiting = self.lock.withLock { !self.headersComplete && !self.finished }
+            if stillWaiting { self.finish() }
+        }
+    }
+
+    private func scheduleReadTimeout() {
+        queue.asyncAfter(deadline: .now() + LoopbackHTTPListener.readTimeout.timeInterval) { [weak self] in
+            guard let self else { return }
+            let stillOpen = self.lock.withLock { !self.finished }
+            if stillOpen { self.finish() }
+        }
+    }
+
+    private func receiveMore() {
+        nwConnection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
+            guard let self else { return }
+            if let data, !data.isEmpty {
+                let shouldContinue = self.append(data)
+                if !shouldContinue { return }
+            }
+            if error != nil {
+                self.finish()
+                return
+            }
+            if isComplete {
+                self.finish()
+                return
+            }
+            let alreadyFinished = self.lock.withLock { self.finished }
+            if !alreadyFinished { self.receiveMore() }
+        }
+    }
+
+    /// Appends newly-received bytes and advances the parse. Returns `false` once the request has
+    /// been delivered (or the connection failed), so the receive loop stops early.
+    private func append(_ data: Data) -> Bool {
+        let outcome: ParseOutcome = lock.withLock {
+            guard !finished else { return .stop }
+            buffer.append(data)
+            if !headersComplete {
+                guard let result = tryParseHeaders() else {
+                    if buffer.count > LoopbackHTTPListener.maxRequestLineBytes + LoopbackHTTPListener.maxHeaderBytes {
+                        finished = true
+                        return .fail
+                    }
+                    return .continueReceiving
+                }
+                switch result {
+                case .ok:
+                    headersComplete = true
+                case .tooLarge, .malformed:
+                    finished = true
+                    return .fail
+                }
+            }
+            guard headersComplete else { return .continueReceiving }
+            guard let expected = expectedBodyLength else { return .deliver }
+            return (buffer.count - bodyStart) >= expected ? .deliver : .continueReceiving
+        }
+        switch outcome {
+        case .continueReceiving:
+            return true
+        case .fail:
+            nwConnection.cancel()
+            onFinished(self)
+            return false
+        case .deliver:
+            deliver()
+            return false
+        case .stop:
+            return false
+        }
+    }
+
+    private enum ParseOutcome { case continueReceiving, fail, deliver, stop }
+    private enum HeaderParseResult { case ok, tooLarge, malformed }
+
+    /// Called with `lock` held. Looks for the blank-line terminator; if found, parses the request
+    /// line and headers, enforcing every cap (dev-2 Gap 7). Returns `nil` if the terminator hasn't
+    /// arrived yet.
+    private func tryParseHeaders() -> HeaderParseResult? {
+        let terminator = Data("\r\n\r\n".utf8)
+        guard let range = buffer.range(of: terminator) else { return nil }
+        let headerBlock = buffer.subdata(in: 0..<range.lowerBound)
+        guard headerBlock.count <= LoopbackHTTPListener.maxRequestLineBytes + LoopbackHTTPListener.maxHeaderBytes else {
+            return .tooLarge
+        }
+        guard let text = String(data: headerBlock, encoding: .utf8) else { return .malformed }
+        var lines = text.split(separator: "\r\n", omittingEmptySubsequences: false).map(String.init)
+        guard !lines.isEmpty else { return .malformed }
+        let requestLine = lines.removeFirst()
+        guard requestLine.utf8.count <= LoopbackHTTPListener.maxRequestLineBytes else { return .tooLarge }
+        let parts = requestLine.split(separator: " ")
+        guard parts.count >= 2 else { return .malformed }
+        method = String(parts[0])
+        path = String(parts[1])
+
+        guard lines.count <= LoopbackHTTPListener.maxHeaderCount else { return .tooLarge }
+        var headerBytes = 0
+        var parsedHeaders: [String: String] = [:]
+        for line in lines where !line.isEmpty {
+            headerBytes += line.utf8.count
+            guard headerBytes <= LoopbackHTTPListener.maxHeaderBytes else { return .tooLarge }
+            guard let colon = line.firstIndex(of: ":") else { return .malformed }
+            let name = String(line[line.startIndex..<colon]).trimmingCharacters(in: .whitespaces)
+            let value = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+            parsedHeaders[name] = value
+        }
+        headers = parsedHeaders
+        bodyStart = range.upperBound
+
+        if let contentLengthHeader = parsedHeaders.first(where: { $0.key.lowercased() == "content-length" })?.value {
+            guard let length = Int(contentLengthHeader), length >= 0 else { return .malformed }
+            guard length <= LoopbackHTTPListener.maxContentLength else { return .tooLarge }
+            expectedBodyLength = length
+        } else if method.uppercased() == "POST" {
+            // A POST with no Content-Length is refused rather than read unbounded (dev-2 Gap 7).
+            return .malformed
+        } else {
+            expectedBodyLength = nil
+        }
+        return .ok
+    }
+
+    private func deliver() {
+        let (request, snapshotFinished): (HTTPRequest, Bool) = lock.withLock {
+            let bodyLength = expectedBodyLength ?? 0
+            let body = bodyLength > 0 ? buffer.subdata(in: bodyStart..<(bodyStart + bodyLength)) : nil
+            let request = HTTPRequest(method: method, headers: headers, body: body, path: path)
+            let wasFinished = finished
+            finished = true
+            return (request, wasFinished)
+        }
+        guard !snapshotFinished else { return }
+        Task {
+            let response = await self.handle(request)
+            self.send(response)
+        }
+    }
+
+    private func send(_ response: HTTPResponse) {
+        var text = "HTTP/1.1 \(response.statusCode) \(Self.reasonPhrase(for: response.statusCode))\r\n"
+        let body = response.bodyData ?? Data()
+        var headers = response.headers
+        headers["Content-Length"] = String(body.count)
+        for (name, value) in headers {
+            text += "\(name): \(value)\r\n"
+        }
+        text += "\r\n"
+        var payload = Data(text.utf8)
+        payload.append(body)
+        nwConnection.send(content: payload, completion: .contentProcessed { [weak self] _ in
+            self?.nwConnection.cancel()
+            if let self { self.onFinished(self) }
+        })
+    }
+
+    private static func reasonPhrase(for statusCode: Int) -> String {
+        switch statusCode {
+        case 200: return "OK"
+        case 202: return "Accepted"
+        case 400: return "Bad Request"
+        case 401: return "Unauthorized"
+        default: return "Error"
+        }
+    }
+
+    private func finish() {
+        let wasFinished = lock.withLock {
+            let already = finished
+            finished = true
+            return already
+        }
+        guard !wasFinished else { return }
+        nwConnection.cancel()
+        onFinished(self)
+    }
+}
+
+extension Duration {
+    var timeInterval: TimeInterval {
+        let (seconds, attoseconds) = components
+        return Double(seconds) + Double(attoseconds) / 1e18
+    }
+}
