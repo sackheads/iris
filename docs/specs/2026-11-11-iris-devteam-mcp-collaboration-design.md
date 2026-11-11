@@ -116,12 +116,13 @@ trap is assuming that because the *boundary* is shared in the spec, the *deliver
 ## 3. Design points (open — this is the part to rope the players in on)
 
 Each point names the seam, the options, and who should weigh in. None is decided here. Several
-points were corrected and reshaped by two pre-circulation reviews (2026-11-11): dev-2's fact-check
-and Iris's own code-grounded review (checked against `origin/main` 6d957a74). The first draft got
-a number of claims about the existing machinery wrong from partial reads; those corrections — with
-code/spec citations — are folded in. Iris reshaped four of these: the app-vs-session split (§1),
-the app-level self-report tool (§3.7), turn-scoped authority (§3.2), and two seams nobody else
-caught — the steer path (§3.2) and the reply direction (§3.8).
+points were corrected and reshaped by three pre-circulation reviews (2026-11-11): dev-2's
+fact-check, Iris's own code-grounded review (against `origin/main` 6d957a74), and dev-1's
+independent re-review. The first draft got a number of claims about the existing machinery wrong
+from partial reads; those corrections — with code/spec citations — are folded in. Iris reshaped
+four: the app-vs-session split (§1), the app-level self-report tool (§3.7), turn-scoped authority
+(§3.2), and two seams nobody else caught — the steer path (§3.2) and the reply direction (§3.8).
+dev-1 then corrected a taint claim folded from Iris (§3.2) and raised the key-window gap (§3.7).
 
 ### 3.1 How a guest addresses and reads an artifact
 
@@ -160,14 +161,17 @@ isolated lane does not carry. #964 routes guests to an existing role session's i
 `a2a-remote` task runner.
 
 But inbox delivery opens a deeper seam (dev-2's M1, sharpened by Iris): **the guest's text is then
-processed by the role session, under *that session's* binding — not an `mcpGuest` floor.** That is
-a plain confused deputy, and the "confinement comes from the receiving profile, #818 taint, and the
-sandbox pin" story does not hold up in the code (Iris's check):
-- **Taint is noise right now.** #1026 sets it on nearly every session before any untrusted input
-  arrives, so it cannot distinguish a guest-tainted turn.
-- **The sandbox pin is not a floor.** `SandboxPolicy.resolve` returns `.host` for every principal
-  the moment the master switch is off (`SandboxPolicy.swift:50`), verified. A guest-triggered turn
-  in a `main` session with sandboxing off runs host commands that inherit the process env.
+processed by the role session, under *that session's* binding — not an `mcpGuest` floor.** That is a
+plain confused deputy, and one of the layers #964 would lean on to contain it is not actually a
+floor: `SandboxPolicy.resolve` returns `.host` for every principal the moment the master switch is
+off (`SandboxPolicy.swift:50`, verified), so a guest-triggered turn in a `main` session with
+sandboxing off runs host commands that inherit the process env.
+
+*(An earlier draft also claimed the #818 taint layer was "noise" because #1026 taints every session.
+dev-1's re-review corrected that: #1026 is two **fixes** for over-tainting — `05303324`, `c7d923d0`
+— both already in the `6d957a74` baseline. Taint is therefore not a demonstrated gap; the
+confused-deputy concern rests on the sandbox-pin finding and the structural inversion below, not on
+taint.)*
 
 *Position to weigh (Iris):* **authority belongs to the turn, not the session.** A turn started by a
 guest message runs under (receiving profile ∩ `mcpGuest` floor), with the sandbox **enforced**, not
@@ -296,6 +300,15 @@ So the door is called directly behind the same bearer token — **no session, no
 "Ask a role session about itself" still exists for *qualitative* questions; it just is not the
 debugging path.
 
+*One shape gap to resolve (dev-1).* `isKeyWindow` and first-responder are only meaningful while the
+queried app is frontmost — macOS has one key window system-wide. If the door is polled while Iris is
+backgrounded (which the "no need to bring it forward" framing implies), the key-window query reports
+"not key" regardless of the real bug. Clarify whether the door assumes Iris stays frontmost for the
+session (likely true for the #1055 scenario — the human clicks in the live Iris window and relays via
+another app) or must report differently for a backgrounded target. dev-1 also confirmed the tool's
+premise in code: `describe_session` (`iris.swift:3269`) returns session-card data only, no AppKit or
+`AppState` read exists in the surface today.
+
 *Weigh in:* #964 + security review for the tool's surface and bound; main-actor review for the read.
 
 ### 3.8 The reply direction (Iris — a whole axis the other points miss)
@@ -327,9 +340,11 @@ reply may carry.
 
 This is not a plan and not a design of record. It is the framing for a design conversation that
 pulls in the dev team, the Iris reviewers, and the overseer. Its nine points were hardened before
-wider review by two pre-circulation passes (2026-11-11): dev-2's fact-check against the specs, and
-Iris's own code-grounded review (which added the app-vs-session split, the app-level self-report
-tool, turn-scoped authority, and the steer-path and reply-direction seams). The intended path:
+wider review by three pre-circulation passes (2026-11-11): dev-2's fact-check against the specs,
+Iris's code-grounded review (which added the app-vs-session split, the app-level self-report tool,
+turn-scoped authority, and the steer-path and reply-direction seams), and dev-1's independent
+re-review (which corrected the taint claim in §3.2 and raised the key-window gap in §3.7). The
+intended path:
 circulate → reconcile the points → fold the decisions into #964 as the "generalizing the A2A
 file/delivery path to `mcpGuest`" section, and raise plan work only after #964 absorbs them. No new
 build begins before that.
