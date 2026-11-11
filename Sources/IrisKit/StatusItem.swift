@@ -205,6 +205,11 @@ struct MainWindowTracker: NSViewRepresentable {
             super.viewDidMoveToWindow()
             MainWindow.track(window)
         }
+
+        override func viewDidChangeEffectiveAppearance() {
+            super.viewDidChangeEffectiveAppearance()
+            DiagnosticEventRing.shared.record(.windowAppearanceChanged(name: effectiveAppearance.name.rawValue))
+        }
     }
 }
 
