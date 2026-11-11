@@ -74,6 +74,26 @@ struct LoopbackHTTPListenerTests {
         #expect((response as? HTTPURLResponse)?.statusCode == 200)
     }
 
+    @Test("a handler that never returns is bounded by handleTimeout, and the response frees the slot", .timeLimit(.minutes(1)))
+    func handleTimeoutBoundsAHungHandler() async throws {
+        var limits = LoopbackHTTPListener.Limits()
+        limits.handleTimeout = .milliseconds(300)
+        let listener = LoopbackHTTPListener(port: 0, limits: limits) { _ in
+            try? await Task.sleep(for: .seconds(3600))  // never returns within the test's lifetime
+            return .ok()
+        }
+        try await listener.start()
+        defer { listener.stop() }
+        guard let port = listener.boundPort else { Issue.record("no bound port"); return }
+
+        var urlRequest = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/")!)
+        urlRequest.httpMethod = "POST"
+        urlRequest.httpBody = Data()
+        urlRequest.setValue("0", forHTTPHeaderField: "Content-Length")
+        let (_, response) = try await URLSession.shared.data(for: urlRequest)
+        #expect((response as? HTTPURLResponse)?.statusCode == 504)
+    }
+
     @Test("start() binds via NWParameters.requiredLocalEndpoint to 127.0.0.1, not just any interface on the port")
     func bindsToLoopbackAtConstructionTime() throws {
         let params = LoopbackHTTPListener.loopbackParameters(port: 12345)
@@ -91,6 +111,38 @@ struct LoopbackHTTPListenerTests {
         #expect(!LoopbackHTTPListener.isLoopback(remote))
         let loopback = NWEndpoint.hostPort(host: "127.0.0.1", port: 80)
         #expect(LoopbackHTTPListener.isLoopback(loopback))
+    }
+
+    @Test("start()'s real bind refuses a connection to the machine's own LAN address at the same port")
+    func realBindRefusesNonLoopbackAddress() async throws {
+        guard let lanAddress = firstNonLoopbackIPv4Address() else {
+            // No non-loopback interface is up (a sandboxed/offline CI runner) — the injected-
+            // predicate test above still covers layer 2's behavior; nothing to assert here.
+            return
+        }
+        let listener = LoopbackHTTPListener(port: 0) { _ in .ok() }
+        try await listener.start()
+        defer { listener.stop() }
+        guard let port = listener.boundPort else { Issue.record("no bound port"); return }
+
+        // The listener bound only 127.0.0.1:port — nothing is listening on the LAN address at
+        // this same port, so a real TCP connect there must fail outright, proving the bind
+        // itself (not just the per-connection check) restricts to loopback.
+        let connection = NWConnection(host: NWEndpoint.Host(lanAddress), port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
+        let outcome = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let resumer = OneShotResumer(continuation)
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready: resumer.resume(true)      // connected: the bind did NOT restrict — a failure
+                case .failed, .cancelled: resumer.resume(false)
+                default: break
+                }
+            }
+            connection.start(queue: .global())
+            DispatchQueue.global().asyncAfter(deadline: .now() + 3) { resumer.resume(false) }
+        }
+        connection.cancel()
+        #expect(!outcome, "a connection to the LAN address must never succeed; the listener only bound 127.0.0.1")
     }
 
     @Test("a truncated request closes its connection without affecting a later well-formed one")
@@ -376,6 +428,29 @@ private final class OneShotThrowingResumer: @unchecked Sendable {
         lock.lock(); let c = continuation; continuation = nil; lock.unlock()
         c?.resume(throwing: error)
     }
+}
+
+/// The machine's own first up, non-loopback IPv4 address (e.g. the Wi-Fi/Ethernet interface's
+/// LAN address), or `nil` if none is up — a sandboxed or offline runner may have none.
+private func firstNonLoopbackIPv4Address() -> String? {
+    var addrList: UnsafeMutablePointer<ifaddrs>?
+    guard getifaddrs(&addrList) == 0, let first = addrList else { return nil }
+    defer { freeifaddrs(first) }
+
+    var cursor: UnsafeMutablePointer<ifaddrs>? = first
+    while let interface = cursor {
+        defer { cursor = interface.pointee.ifa_next }
+        let flags = Int32(interface.pointee.ifa_flags)
+        guard (flags & IFF_UP) != 0, (flags & IFF_LOOPBACK) == 0,
+              let addr = interface.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) else { continue }
+        var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        let result = addr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+            getnameinfo(sockaddrPtr, socklen_t(sockaddrPtr.pointee.sa_len), &buffer, socklen_t(buffer.count), nil, 0, NI_NUMERICHOST)
+        }
+        guard result == 0 else { continue }
+        return buffer.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+    }
+    return nil
 }
 
 private func rawConnect(port: UInt16) async throws -> RawConnection {
