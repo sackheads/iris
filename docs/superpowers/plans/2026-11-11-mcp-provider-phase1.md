@@ -77,7 +77,7 @@ Read directly, not run (no harness exists yet to run it against):
   - `func clientId(forToken token: String) -> String?` — reverse lookup against the **in-memory cache**, not a fresh Keychain read. Dev-2 smaller item: a Keychain lookup on every HTTP request (and a locked or denied Keychain item can raise a user-facing prompt) is unacceptable on a hot path; load the registry's whole map into memory once (on init, and again on every `issueToken`/`revokeToken`), and resolve tokens against that cache. The cache is guarded by the same internal lock as the rest of this class's mutable state.
   - `func allClientIds() -> [String]` — every registered client id (backs `discover` in Task 6), from the in-memory cache.
   - `func isRegistered(clientId: String) -> Bool` — `allClientIds().contains(clientId)` against the in-memory cache, no Keychain read (dev-2 round 3 smaller item 2: `ProviderMailbox.send` and `ProviderArtifactStore.put` re-check this at mutation time, below, so a request admitted before a concurrent `revoke(clientId:)` cannot create new state under the just-revoked id — this is the cheap lookup that check needs; consumed by Tasks 6 and 7).
-  - `init(keychain: KeychainManager = .shared)` — injectable for tests, per `AGENTS.md` Invariant 7 (never touch `KeychainManager.shared` from a test); loads the initial cache from the Keychain in `init`.
+  - `init(keychain: KeychainManager = .shared)` — injectable for tests, per `AGENTS.md` Invariant 7 (never touch `KeychainManager.shared` from a test); loads the initial cache from the Keychain in `init`, **skipping any entry keyed `Self.reservedClientId`** (dev-3's rule-26 re-read: `issueToken`'s guard only stops a *new* registration — an item already sitting in the Keychain service under that key from before this guard existed, or written by any path other than `issueToken`, would otherwise load straight into the cache and `isRegistered`/`allClientIds` would treat it as a normal, usable client id). A skipped entry is not deleted or repaired, just never surfaced through this cache.
 - Consumes: `KeychainManager.updateSecretsOrThrow(service:_:)`, `.secretsOrThrow(service:)`, `.deleteSecrets(service:)` (existing, `Sources/IrisKit/KeychainManager.swift`).
 
 **Out of scope for this task, flagged minor from PR #1068's review:** this plan builds `issueToken`/`revokeToken` as a programmatic API only — no UI, menu command, or CLI flag calls them yet. Getting a token into a dev-team session's `.mcp.json` (or wherever Claude Code's MCP client config lives) is a manual step for whoever builds this, done once per client by calling `issueToken` from a debug/REPL path (e.g. a temporary `--mcp-provider-issue-token <clientId>` headless CLI flag, if one is added — not specified by this plan, since #1067's scope is the provider surface, not its own onboarding UI). Note this gap explicitly in the task's self-review rather than silently shipping a registry nothing can populate outside tests. **Also flag as a follow-up, not something this plan closes (dev-2 smaller item):** the Keychain binding protects only the *server's* copy of the token — the client's copy sits in plaintext in Claude Code's own config file once issued (Clomp's #5 on #1063). Add `~/.claude`, `~/.claude.json`, and `**/.mcp.json` to whatever deny-list governs `read_file`'s reach, as a tracked follow-up issue; do not claim in this plan or its docs that a plain file read cannot lift the token — it can, from the client's side.
@@ -109,6 +109,15 @@ func reservedClientIdRejected() throws {
     }
     #expect(registry.allClientIds().isEmpty)  // the rejected call left no trace
 }
+
+@Test("a pre-existing Keychain entry keyed \"iris\", written by any path other than issueToken, is skipped on load")
+func reservedClientIdSkippedOnLoad() throws {
+    // Write a raw [ "iris": "some-token" ] entry directly via KeychainManager.updateSecretsOrThrow,
+    // bypassing ProviderTokenRegistry.issueToken entirely (simulating an item that predates this
+    // guard, or was written by some other path) — then construct a *new* ProviderTokenRegistry
+    // over that same keychain and assert allClientIds() does not contain "iris" and
+    // isRegistered(clientId: "iris") is false, even though the raw entry is sitting there.
+}
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -121,7 +130,7 @@ Expected: fails to compile (`ProviderTokenRegistry` undefined) or runs 0 tests �
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `scripts/test-filter.sh ProviderTokenRegistryTests`
-Expected: PASS, test count ≥ 2
+Expected: PASS, test count ≥ 3
 
 - [ ] **Step 5: Add `mcpProviderEnabled` to `GuardedSettings.swift`'s `GuardedKey`, and `mcpProviderPort` to `ConfigManager`**
 
@@ -1034,13 +1043,14 @@ func toolArgumentsCannotOverrideResolvedIdentity() async throws {
 ```swift
 @Test("ProviderMailbox.deliverReply is never called from production code outside ProviderMailbox.swift itself")
 func deliverReplyHasNoProductionCallSite() throws {
-    // Grep Sources/IrisKit (not Tests/) for "deliverReply(" and assert every match's file is
+    // Recursively walk Sources/ and App/ (dev-3's rule-26 re-read: a single top-level
+    // Sources/IrisKit listing missed a subdirectory in #1046's own scan, so walk the full tree
+    // the same way #1046's fix does) for "deliverReply(" and assert every match's file is
     // Sources/IrisKit/MCPProvider/ProviderMailbox.swift (its own definition/any internal use) —
     // zero matches anywhere else, in particular IrisMCPProviderServer.swift. This is the
-    // enforced version of item 25's grep in the final whole-branch reviewer note: a future PR
-    // that wires deliverReply to an MCP tool without touching this test would still pass it
-    // (the grep only proves today's absence), but it does pin the fact this task's own
-    // commit leaves true, and a reviewer re-running it against a later head re-proves it then.
+    // enforced version of item 25's grep in the final whole-branch reviewer note: it pins today's
+    // absence as a fact this task's own commit leaves true, and a future PR that wires
+    // deliverReply to an MCP tool without updating this test fails it, which is the point.
 }
 ```
 
