@@ -28,6 +28,9 @@ This is infra investment, not throwaway: Task 1's per-token registry, Task 3's a
 - Guest/client file exchange gets its **own** TTL sweep, independent of `ArtifactStore.sweep`'s conversation-row model — a client here has no `Conversation` and so no row-delete path (§4).
 - Guest→Iris file ingest is inline bytes or an `artifact_put`-style tool call only, **never** a host `{path}` read (§3.1 — `IrisEngine.attachFile` authorizes against a `Conversation`'s scope a client here does not have).
 - Off by default: the provider only binds its socket when the feature toggle (new `ConfigManager.mcpProviderEnabled`) is on, following the existing `enableSandboxing` toggle pattern (`ConfigManager.swift:303-305`).
+- `ProviderArtifactStore.get` is **not** a bare-hash-grants-a-read surface (§7.6 B's rule: a hash alone grants nothing) — a read succeeds only for a client in that object's own authorized set, populated at `put`/`send` time (Task 7/6, planner review on PR #1068).
+- The loopback listener binds its socket to `127.0.0.1` via `NWParameters.requiredLocalEndpoint` (construction-time, not just a runtime connection filter) — the per-connection endpoint check (Task 2) is defence in depth on top of that bind, not a substitute for it (planner review on PR #1068).
+- `DiagnosticEventRing` preserves the physical order events occurred in; a diagnostic ring that can reorder the very sequence it exists to capture (#1055's point) is worse than no ring. Use a synchronous, lock-based recorder, not `Task { await actor.record(...) }` from a sync callback (planner review on PR #1068).
 
 ## Review Focus
 
@@ -54,6 +57,8 @@ This is infra investment, not throwaway: Task 1's per-token registry, Task 3's a
   - `func allClientIds() -> [String]` — every registered client id (backs `discover` in Task 5).
   - `init(keychain: KeychainManager = .shared)` — injectable for tests, per `AGENTS.md` Invariant 7 (never touch `KeychainManager.shared` from a test).
 - Consumes: `KeychainManager.updateSecretsOrThrow(service:_:)`, `.secretsOrThrow(service:)`, `.deleteSecrets(service:)` (existing, `Sources/IrisKit/KeychainManager.swift`).
+
+**Out of scope for this task, flagged minor from PR #1068's review:** this plan builds `issueToken`/`revokeToken` as a programmatic API only — no UI, menu command, or CLI flag calls them yet. Getting a token into a dev-team session's `.mcp.json` (or wherever Claude Code's MCP client config lives) is a manual step for whoever builds this, done once per client by calling `issueToken` from a debug/REPL path (e.g. a temporary `--mcp-provider-issue-token <clientId>` headless CLI flag, if one is added — not specified by this plan, since #1067's scope is the provider surface, not its own onboarding UI). Note this gap explicitly in the task's self-review rather than silently shipping a registry nothing can populate outside tests.
 
 - [ ] **Step 1: Write the failing test for issue/lookup/revoke round-trip**
 
@@ -107,10 +112,10 @@ git commit -m "feat: #1067 provider token registry + feature toggle"
 - Create: `Tests/irisTests/MCPProvider/LoopbackHTTPListenerTests.swift`
 
 **Interfaces:**
-- Consumes: `MCP.StatelessHTTPServerTransport` (`.build/checkouts/swift-sdk/Sources/MCP/Base/Transports/HTTPServer/StatelessHTTPServerTransport.swift`) — specifically its `handleRequest(_ request: HTTPRequest) async -> HTTPResponse` entry point (confirm the exact method name and signature by reading that file; the SDK's doc comment in the same file shows the intended call shape) and the `HTTPRequest`/`HTTPResponse` types from `HTTPServerTypes.swift`.
+- Consumes: `MCP.StatelessHTTPServerTransport` — **confirmed against the pinned SDK revision** (`Package.resolved`, `swift-sdk` @ `a0ae212ebf6eab5f754c3129608bc5557637e605`, branch `main`): `public func handleRequest(_ request: HTTPRequest) async -> HTTPResponse` at `.build/checkouts/swift-sdk/Sources/MCP/Base/Transports/HTTPServer/StatelessHTTPServerTransport.swift:156` (and the stateful variant at the equivalent line in `StatefulHTTPServerTransport.swift:170`, not used here), plus the `HTTPRequest`/`HTTPResponse` types from `HTTPServerTypes.swift` (`HTTPRequest.init(method:headers:body:path:)`, `HTTPRequest.header(_:)` case-insensitive lookup, `HTTPResponse.statusCode`/`.headers`/`.bodyData`). If `Package.resolved`'s pinned revision has moved by the time this task starts, re-grep for `handleRequest` at that revision before trusting this citation — the plan review (PR #1068) flagged this exact drift risk.
 - Produces: `final class LoopbackHTTPListener: Sendable` with:
   - `init(port: UInt16, handle: @escaping @Sendable (HTTPRequest) async -> HTTPResponse)` — `handle` is the transport's `handleRequest`, injected so this task's tests never need a real `MCP.Server`.
-  - `func start() throws` — opens an `NWListener` on `NWEndpoint.Port(rawValue: port)` with `NWParameters.tcp`, and **asserts/guards the listener's parameters restrict to loopback** (`NWParameters` has no "interface allow-list" for TCP by default on macOS — bind explicitly to the loopback `NWEndpoint.Host("127.0.0.1")` by using `NWListener(using:on:)` is port-only; loopback-only must instead be enforced by accepting a connection and checking `connection.endpoint`'s remote host is `127.0.0.1`/`::1`, rejecting (canceling) any other — write this check explicitly and test it).
+  - `func start() throws` — binds the socket to loopback at **construction time**, not just by filtering connections after the fact (planner review on PR #1068 — defence in depth has two independent layers here): build `var params = NWParameters.tcp` and set `params.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!)` before constructing `NWListener(using: params)` — confirm `NWParameters.requiredLocalEndpoint` exists on the deployment target (Network.framework, available since macOS 10.15) before writing code that assumes it; if it is unavailable for any reason, that is a plan-breaking finding to report back, not something to silently work around. **On top of** that bind, still check each accepted connection's remote endpoint and refuse (cancel) anything not `127.0.0.1`/`::1` — the second, independent layer, in case the bind-time restriction is ever misconfigured or bypassed by a future refactor.
   - `func stop()`.
   - A minimal HTTP/1.1 request-line + header + `Content-Length`-bounded body parser, reading from an `NWConnection`'s receive loop into an `HTTPRequest`, and a response writer serializing `HTTPResponse.statusCode`/`.headers`/`.bodyData` back as raw bytes. (This parser is net-new, hand-rolled, and intentionally minimal: POST only, no chunked transfer-encoding, no keep-alive required for a single local client.)
 
@@ -140,22 +145,31 @@ Expected: fails to compile (`LoopbackHTTPListener` undefined)
 Run: `scripts/test-filter.sh LoopbackHTTPListenerTests`
 Expected: PASS
 
-- [ ] **Step 5: Write the failing test for a connection from a non-loopback remote address being refused**
+- [ ] **Step 5: Write the failing test that `start()` configures a loopback-bound `NWParameters` (layer 1), and the failing test that a connection from a non-loopback remote address is refused (layer 2)**
 
 ```swift
+@Test("start() binds via NWParameters.requiredLocalEndpoint to 127.0.0.1, not just any interface on the port")
+func bindsToLoopbackAtConstructionTime() throws {
+    // Extract the parameter-building step into a static/testable function, e.g.
+    // `static func loopbackParameters(port: UInt16) -> NWParameters`, and assert its
+    // `.requiredLocalEndpoint` equals `.hostPort(host: "127.0.0.1", port: ...)`. Unit-testable
+    // without opening a real socket.
+}
+
 @Test("a connection whose remote endpoint is not loopback is refused, not served")
 func nonLoopbackRefused() async throws {
     // Exercise the endpoint-check path directly (unit-test the predicate function extracted
     // from start()'s connection handler) rather than trying to fake a non-loopback NWConnection,
     // which the test process cannot originate. Name the predicate so it's testable in isolation,
-    // e.g. `static func isLoopback(_ endpoint: NWEndpoint) -> Bool`.
+    // e.g. `static func isLoopback(_ endpoint: NWEndpoint) -> Bool`. This is layer 2, defence in
+    // depth on top of Step 5's bind-time restriction — it must stay even once the bind exists.
 }
 ```
 
-- [ ] **Step 6: Run it, verify it fails, implement `LoopbackHTTPListener.isLoopback(_:)`, run again, verify it passes**
+- [ ] **Step 6: Run both, verify they fail, implement `LoopbackHTTPListener.loopbackParameters(port:)` and `.isLoopback(_:)`, run again, verify they pass**
 
 Run: `scripts/test-filter.sh LoopbackHTTPListenerTests`
-Expected: PASS, test count ≥ 2
+Expected: PASS, test count ≥ 3
 
 - [ ] **Step 7: Write the failing test for a malformed/truncated request not hanging or crashing the listener**
 
@@ -170,7 +184,7 @@ func truncatedRequestDoesNotWedgeListener() async throws {
 - [ ] **Step 8: Run it, verify it fails if the parser currently hangs or the listener dies; fix; verify it passes**
 
 Run: `scripts/test-filter.sh LoopbackHTTPListenerTests`
-Expected: PASS, test count ≥ 3
+Expected: PASS, test count ≥ 4
 
 - [ ] **Step 9: Commit**
 
@@ -238,26 +252,37 @@ git commit -m "feat: #1067 per-token admission gate (auth + rate/concurrency bud
 - Modify: `Sources/IrisKit/ComposerTextView.swift` (the `acceptsFirstMouse` override added for #1055, and wherever `effectiveAppearance` is observable on the composer's `NSTextView`)
 
 **Interfaces:**
-- Produces: `actor DiagnosticEventRing` with:
+- Produces: `final class DiagnosticEventRing: @unchecked Sendable` — **not an actor** (planner review on PR #1068: a ring that exists to pin the #1055 event *sequence* must not let its own recording mechanism reorder entries, and `Task { await actor.record(...) }` fired from synchronous AppKit callbacks gives no ordering guarantee between the two `Task`s it creates). Use a single `NSLock` guarding an in-memory array, the same shape `KeychainManager`'s own lock-guarded mutable state uses:
   - `static let capacity = 200` (named constant — Global Constraints; pick this value or another explicit one, but it must be named, not implicit).
   - `enum Event: Sendable { case transcriptMouseDown(atWindowPoint: CGPoint); case transcriptFocusHop(tookFocus: Bool); case composerAcceptsFirstMouse(Bool); case windowAppearanceChanged(name: String); case composerAppearanceChanged(name: String) }` — no free-text, no titles, no `stringValue` (Global Constraints).
   - `struct Entry: Sendable { let timestamp: Date; let event: Event }`
-  - `func record(_ event: Event)` — appends, dropping the oldest entry once `capacity` is exceeded.
-  - `func snapshot() -> [Entry]` — returns entries oldest-first, read by Task 6's `iris_event_ring` tool.
+  - `func record(_ event: Event)` — **synchronous**, lock-guarded; appends, dropping the oldest entry once `capacity` is exceeded. Callable directly from a synchronous AppKit callback with no `Task {}` wrapper, so two calls made in physical event order are recorded in that same order.
+  - `func snapshot() -> [Entry]` — synchronous, lock-guarded; returns entries oldest-first, read by Task 5's `.eventRing` query and registered as the `iris_event_ring` MCP tool in Task 8.
   - `static let shared = DiagnosticEventRing()` — one process-wide ring, written from multiple AppKit callbacks; injected nowhere else, so Task 4's own tests construct their own instance (`DiagnosticEventRing()`), never `.shared`.
-- Consumes: nothing new; `TranscriptFocusAnchor.AnchorView.mouseWentDown(at:)`/`.focusTable(clickedAt:)` and `ComposerTextView`'s `acceptsFirstMouse` call `DiagnosticEventRing.shared.record(...)` as a side effect, synchronously before and after the existing `DispatchQueue.main.async` hop in `AnchorView.viewDidMoveToWindow`'s monitor closure (§3.7 Clomp note: record both pre- and post-hop, since first responder changes only after the hop).
+- Consumes: nothing new; `TranscriptFocusAnchor.AnchorView.mouseWentDown(at:)`/`.focusTable(clickedAt:)` and `ComposerTextView`'s `acceptsFirstMouse` call `DiagnosticEventRing.shared.record(...)` directly and synchronously, before and after the existing `DispatchQueue.main.async` hop in `AnchorView.viewDidMoveToWindow`'s monitor closure (§3.7 Clomp note: record both pre- and post-hop, since first responder changes only after the hop) — the whole point of making this synchronous is that the pre-hop and post-hop calls land in the ring in the same relative order the physical events and the hop actually occurred in.
 
-- [ ] **Step 1: Write the failing test for bounded capacity**
+- [ ] **Step 1: Write the failing tests for bounded capacity and in-order recording**
 
 ```swift
 @Test("the ring drops the oldest entry once it exceeds capacity")
-func dropsOldestPastCapacity() async {
+func dropsOldestPastCapacity() {
     let ring = DiagnosticEventRing()
     for i in 0..<(DiagnosticEventRing.capacity + 10) {
-        await ring.record(.composerAcceptsFirstMouse(i.isMultiple(of: 2)))
+        ring.record(.composerAcceptsFirstMouse(i.isMultiple(of: 2)))
     }
-    let entries = await ring.snapshot()
+    let entries = ring.snapshot()
     #expect(entries.count == DiagnosticEventRing.capacity)
+}
+
+@Test("entries come back in the exact order they were recorded, synchronously")
+func preservesRecordingOrder() {
+    let ring = DiagnosticEventRing()
+    ring.record(.transcriptMouseDown(atWindowPoint: .zero))
+    ring.record(.transcriptFocusHop(tookFocus: true))
+    ring.record(.composerAcceptsFirstMouse(true))
+    let events = ring.snapshot().map(\.event)
+    // assert the three cases appear in exactly this sequence — the property a Task-based
+    // actor recorder cannot guarantee under concurrent AppKit callbacks.
 }
 ```
 
@@ -275,7 +300,7 @@ Expected: PASS
 
 - [ ] **Step 5: Instrument `TranscriptFocusAnchor.AnchorView`**
 
-In `mouseWentDown(at:)`, after setting `downInside`, call `DiagnosticEventRing.shared.record(.transcriptMouseDown(atWindowPoint: point))` (window-local point, not screen — no title, no content). In `focusTable(clickedAt:)`, after the existing `window.makeFirstResponder(table)` call (and also on each early `return` path where focus was *not* taken), record `.transcriptFocusHop(tookFocus:)` with the correct bool for that path. This runs on the main thread already (it's inside the `DispatchQueue.main.async` closure); `DiagnosticEventRing.record` is `async` on an actor, so wrap each call in `Task { await DiagnosticEventRing.shared.record(...) }` from the synchronous AppKit callback.
+In `mouseWentDown(at:)`, after setting `downInside`, call `DiagnosticEventRing.shared.record(.transcriptMouseDown(atWindowPoint: point))` directly (window-local point, not screen — no title, no content). In `focusTable(clickedAt:)`, after the existing `window.makeFirstResponder(table)` call (and also on each early `return` path where focus was *not* taken), record `.transcriptFocusHop(tookFocus:)` with the correct bool for that path. `DiagnosticEventRing.record` is synchronous and lock-guarded (Task 4's interface), so call it directly from these synchronous AppKit callbacks — no `Task {}` wrapper, no `await`. That is the whole fix for the ordering problem the planner flagged: a `Task` would race two unordered hops; a direct synchronous call records in exactly the order the callbacks fire.
 
 - [ ] **Step 6: Instrument `ComposerTextView`'s `acceptsFirstMouse` override to record `.composerAcceptsFirstMouse(true)` on every call (it always returns `true` since #1055's fix; recording it anyway gives the ring a timestamped signal that a reactivating click reached the composer)**
 
@@ -304,7 +329,7 @@ git commit -m "feat: #1067 bounded diagnostic event ring + #1055/#1052 instrumen
 - Create: `Tests/irisTests/MCPProvider/SelfReportDoorTests.swift`
 
 **Interfaces:**
-- Consumes: `ProviderRequestGate.admit(bearerToken:)` (Task 3), `DiagnosticEventRing.shared.snapshot()` (Task 4), `withTimeout(seconds:_:)` (`Sources/IrisKit/Timeout.swift`), `MainWindow.current`/`MainWindow.isFrontmost` (`Sources/IrisKit/StatusItem.swift`), `AppState.hasTurnInFlight(for:)` (`Sources/IrisKit/AppState.swift`), `NSApp.isActive`.
+- Consumes: `ProviderRequestGate.admit(bearerToken:)` (Task 3), `DiagnosticEventRing.shared.snapshot()` (Task 4), `withTimeout(seconds:_:)` (`Sources/IrisKit/Timeout.swift`), `MainWindow.current`/`MainWindow.isFrontmost` (`Sources/IrisKit/StatusItem.swift:175-205` — confirmed present, `enum MainWindow` with `static let tracking`), `AppState.hasTurnInFlight(for:)` (`Sources/IrisKit/AppState.swift:1198`, confirmed present), `NSApp.isActive`.
 - Produces: `struct SelfReportDoor: Sendable` (a plain `nonisolated` struct — never `@MainActor` itself, per Global Constraints) with:
   - `static let mainActorTimeout: Duration = .milliseconds(500)` (named constant).
   - `enum Query: String, Sendable, CaseIterable { case windowOwner, responderClass, composerState, turnState, activationState, eventRing }`
@@ -452,20 +477,26 @@ git commit -m "feat: #1067 provider mailbox — send/poll/discover/status, token
 - Produces: `actor ProviderArtifactStore` with:
   - `static let maxBytesPerObject = 64 * 1024 * 1024` (64 MiB — romar's conformance baseline, §3.6) as a named constant.
   - `static let ttl: TimeInterval = 7 * 24 * 60 * 60` (7 days, matching romar's object TTL, §3.6) as a named constant.
-  - `func put(bytes: Data, from clientId: String) throws -> String` — rejects (`ArtifactError.tooLarge`) over `maxBytesPerObject`; computes `SHA256.hash(data:)` (CryptoKit) hex string as the key, writes `bytes` under a directory scoped to this store (not the conversation `ArtifactStore`'s directory — Global Constraints), records `(sha256, clientId, storedAt)`, returns the hex sha256.
-  - `func get(sha256: String, requestingClientId: String) throws -> Data` — throws `.notFound` if absent; **no ACL beyond existence** in Phase 1 (any registered client can read any sha256 it already knows — it must already have the hash, which is unguessable, and Phase 1 has no `Conversation` row to scope reads to; document this as the deliberate Phase 1 bound, inherited from option (b)'s "same channel, no second surface" but without a conversation-row ACL since none exists here).
-  - `func sweepExpired(now: Date = Date())` — deletes every stored object whose `storedAt` is older than `ttl`, and removes its bookkeeping record. Called on a timer from Task 8's lifecycle wiring, not from `ArtifactStore.sweep` (Global Constraints — this store's sweep is independent).
+  - `func put(bytes: Data, from clientId: String) throws -> String` — rejects (`ArtifactError.tooLarge`) over `maxBytesPerObject`; computes `SHA256.hash(data:)` (CryptoKit) hex string as the key, writes `bytes` under a directory scoped to this store (not the conversation `ArtifactStore`'s directory — Global Constraints), records `(sha256, storedAt)`, **and initializes that object's authorized-reader set to `{clientId}`** — the uploader can always read back what it uploaded — returns the hex sha256.
+  - `func authorize(sha256: String, adding clientIds: Set<String>) throws` — throws `.notFound` if the object doesn't exist; unions `clientIds` into that object's authorized-reader set. Planner review on PR #1068: **a bare hash must not grant a read** (§7.6 B) — this is the ACL that closes that gap, populated by Task 8's `iris_send` wiring (not by this task) at the point a message carrying `fileRefs` is actually sent, adding the message's recipient.
+  - `func get(sha256: String, requestingClientId: String) throws -> Data` — throws `.notFound` if the object doesn't exist, **`.unauthorized` if `requestingClientId` is not in that object's authorized-reader set** — knowing the hash is no longer sufficient on its own.
+  - `func sweepExpired(now: Date = Date())` — deletes every stored object whose `storedAt` is older than `ttl`, and removes its bookkeeping record (including its authorized-reader set). Called on a timer from Task 8's lifecycle wiring, not from `ArtifactStore.sweep` (Global Constraints — this store's sweep is independent).
 
-- [ ] **Step 1: Write the failing test for put/get round-trip and SHA verification**
+- [ ] **Step 1: Write the failing tests for put/get round-trip, SHA verification, and the authorized-reader ACL**
 
 ```swift
-@Test("a stored object round-trips by its own sha256, and a tampered read is caught")
-func putGetRoundTrips() throws {
+@Test("the uploader can always read its own object; an unauthorized client cannot, even knowing the hash")
+func putGetACLEnforced() throws {
     let store = ProviderArtifactStore(root: temporaryTestDirectory())
     let sha = try store.put(bytes: Data("hello".utf8), from: "a")
-    #expect(try store.get(sha256: sha, requestingClientId: "b") == Data("hello".utf8))
+    #expect(try store.get(sha256: sha, requestingClientId: "a") == Data("hello".utf8))
+    #expect(throws: ProviderArtifactStore.ArtifactError.unauthorized) {
+        try store.get(sha256: sha, requestingClientId: "b")  // knows the hash, was never authorized
+    }
+    try store.authorize(sha256: sha, adding: ["b"])
+    #expect(try store.get(sha256: sha, requestingClientId: "b") == Data("hello".utf8))  // now readable
     #expect(throws: ProviderArtifactStore.ArtifactError.notFound) {
-        try store.get(sha256: "0000...", requestingClientId: "b")
+        try store.get(sha256: "0000...", requestingClientId: "a")
     }
 }
 ```
@@ -522,7 +553,7 @@ git commit -m "feat: #1067 provider-scoped content-addressed artifact store with
 - Consumes: Tasks 1–7 in full: `ProviderTokenRegistry`, `LoopbackHTTPListener`, `ProviderRequestGate` (two instances — door and mailbox), `SelfReportDoor`, `DiagnosticEventRing.shared`, `ProviderMailbox`, `ProviderArtifactStore`. Also `MCP.Server` (`init(name:version:...)`, `withMethodHandler(ListTools.self) { ... }`, `withMethodHandler(CallTool.self) { ... }`, `withMethodHandler(ListResources.self) { ... }`, `withMethodHandler(ReadResource.self) { ... }`, `start(transport:)`) and `MCP.StatelessHTTPServerTransport` (confirm its exact `handleRequest` method name/signature in `.build/checkouts/swift-sdk/Sources/MCP/Base/Transports/HTTPServer/StatelessHTTPServerTransport.swift` before wiring — Task 2 already did this lookup once; reuse that finding rather than re-deriving it).
 - Produces: `final class IrisMCPProviderServer: Sendable` with:
   - `init(tokenRegistry: ProviderTokenRegistry, mailbox: ProviderMailbox, artifactStore: ProviderArtifactStore, door: SelfReportDoor, doorGate: ProviderRequestGate, mailboxGate: ProviderRequestGate, port: UInt16)`
-  - `func start() async throws` — builds the `MCP.Server`, registers the 6 door tools (`iris_window_owner`, `iris_responder_class`, `iris_composer_state`, `iris_turn_state`, `iris_activation_state`, `iris_event_ring` — one per `SelfReportDoor.Query` case) each extracting the `Authorization` header's bearer token from `Server.currentHandlerContext?.httpContext` (confirmed available per the SDK's `HandlerContext.httpContext`, `Server.swift:300-320`) before calling `door.handle(query:bearerToken:)`; registers 4 mailbox tools (`iris_send`, `iris_poll`, `iris_discover`, `iris_status`), each reading the same header and calling `mailboxGate.admit(bearerToken:)` before touching `mailbox`; registers a `resources/read` handler resolving `iris-artifact://<sha256>` URIs to `artifactStore.get(sha256:requestingClientId:)`, and an `artifact_put` tool for guest→Iris ingest (inline base64 bytes in the tool call arguments, never a host path — Global Constraints); starts `LoopbackHTTPListener(port: port, handle: transport.handleRequest)`; schedules `artifactStore.sweepExpired()` on a repeating timer (e.g. daily, matching `ArtifactStore`'s own sweep cadence — grep it for the exact interval and mirror it).
+  - `func start() async throws` — builds the `MCP.Server`, registers the 6 door tools (`iris_window_owner`, `iris_responder_class`, `iris_composer_state`, `iris_turn_state`, `iris_activation_state`, `iris_event_ring` — one per `SelfReportDoor.Query` case) each extracting the `Authorization` header's bearer token from `Server.currentHandlerContext?.httpContext` (confirmed available per the SDK's `HandlerContext.httpContext`, `Server.swift:300-320`) before calling `door.handle(query:bearerToken:)`; registers 4 mailbox tools (`iris_send`, `iris_poll`, `iris_discover`, `iris_status`), each reading the same header and calling `mailboxGate.admit(bearerToken:)` before touching `mailbox`; the `iris_send` handler specifically — after a successful `mailbox.send(from:to:text:fileRefs:)` — calls `artifactStore.authorize(sha256: ref, adding: [to])` for every `ref` in that message's `fileRefs`, which is **the only place a file's authorized-reader set grows past its uploader** (planner review on PR #1068 — this is where Task 6's mailbox and Task 7's store compose; neither task touches the other directly, so this wiring is where the ACL actually gets populated); registers a `resources/read` handler resolving `iris-artifact://<sha256>` URIs to `artifactStore.get(sha256:requestingClientId:)` (propagating `.unauthorized`/`.notFound` as the appropriate MCP error, never silently substituting one for the other), and an `artifact_put` tool for guest→Iris ingest calling `artifactStore.put(bytes:from:)` (inline base64 bytes in the tool call arguments, never a host path — Global Constraints); starts `LoopbackHTTPListener(port: port, handle: transport.handleRequest)`; schedules `artifactStore.sweepExpired()` on a repeating timer (e.g. daily, matching `ArtifactStore`'s own sweep cadence — grep it for the exact interval and mirror it).
   - `func stop() async`.
 - The app-lifecycle modification instantiates one `IrisMCPProviderServer` and calls `start()`/`stop()` as `ConfigManager.shared.mcpProviderEnabled` flips, mirroring however the existing sandboxing toggle's `didSet` already drives a side effect (if it drives one directly; if `enableSandboxing` is read lazily instead, follow whatever wiring pattern an adjacent toggle-that-does-start-something uses instead — identify one by grep before copying).
 
@@ -553,24 +584,36 @@ Expected: PASS
 
 - [ ] **Step 5: Write the failing end-to-end test: start the server on a real (test) port, issue a token, POST a `tools/call` for `iris_discover` over real HTTP, assert the registered client list comes back**
 
-- [ ] **Step 6: Run it, verify it fails, wire the remaining pieces until it passes**
+- [ ] **Step 6: Write the failing test that `iris_send` with a `fileRefs` entry authorizes the recipient, and that an uninvolved third client is still refused**
+
+```swift
+@Test("sending a file reference authorizes its recipient, but nobody else")
+func sendAuthorizesRecipientOnly() async throws {
+    // registry has clients "a", "b", "c"; "a" calls artifact_put (gets sha), then iris_send to
+    // "b" with fileRefs: [sha]; assert artifactStore.get(sha256: sha, requestingClientId: "b")
+    // now succeeds, and artifactStore.get(sha256: sha, requestingClientId: "c") still throws
+    // .unauthorized.
+}
+```
+
+- [ ] **Step 7: Run both, verify they fail, wire the remaining pieces until they pass**
 
 Run: `scripts/test-filter.sh IrisMCPProviderServerTests`
-Expected: PASS, test count ≥ 3
+Expected: PASS, test count ≥ 4
 
-- [ ] **Step 7: Wire the app-lifecycle start/stop; add a test (or, if the app-lifecycle file has no existing test harness for this kind of toggle, note in the ledger that this one piece is verified by manual GUI check only, flagged for the task reviewer)**
+- [ ] **Step 8: Wire the app-lifecycle start/stop; add a test (or, if the app-lifecycle file has no existing test harness for this kind of toggle, note in the ledger that this one piece is verified by manual GUI check only, flagged for the task reviewer)**
 
-- [ ] **Step 8: Run the full warnings-clean build**
+- [ ] **Step 9: Run the full warnings-clean build**
 
 Run: `scripts/check-warnings.sh`
 Expected: exit 0
 
-- [ ] **Step 9: Run the full suite**
+- [ ] **Step 10: Run the full suite**
 
 Run: `swift test --no-parallel`
 Expected: all green, note the total test count
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
 git add Sources/IrisKit/MCPProvider/IrisMCPProviderServer.swift Sources/IrisKit/IrisApp.swift Tests/irisTests/MCPProvider/IrisMCPProviderServerTests.swift
@@ -606,4 +649,4 @@ This surface adds no new *agent-facing* tool (the self-report door and mailbox a
 
 ## Note for the final whole-branch reviewer
 
-Confirm explicitly: (1) no task's code path reads `Conversation.history`, `AppState.peerDepths`, `AppState.peerRateLimiter`, `AppState.inboxEmitRateLimiter`, or calls `queuePeerArrival`/`startTurn`/`send_to_session`/`inbox_item` — Phase 1 must not touch any of the §3.2/§3.5 machinery, by design; (2) the self-report door's MainActor hop is always raced via `withTimeout`, never a bare `MainActor.run` with no deadline; (3) the loopback listener genuinely refuses non-loopback connections (Task 2, Step 6) and the test proves it via the refusal predicate, not by assuming `NWListener`'s defaults; (4) no window title, `stringValue`, transcript text, memory, or file content appears in any self-report door response (grep every `Snapshot`/`Value` construction site); (5) `ProviderArtifactStore` and `ProviderMailbox` are entirely separate storage from the conversation-scoped `ArtifactStore`/`artifact_refs` — no accidental reuse of either.
+Confirm explicitly: (1) no task's code path reads `Conversation.history`, `AppState.peerDepths`, `AppState.peerRateLimiter`, `AppState.inboxEmitRateLimiter`, or calls `queuePeerArrival`/`startTurn`/`send_to_session`/`inbox_item` — Phase 1 must not touch any of the §3.2/§3.5 machinery, by design; (2) the self-report door's MainActor hop is always raced via `withTimeout`, never a bare `MainActor.run` with no deadline; (3) the loopback listener binds via `NWParameters.requiredLocalEndpoint` at construction time AND refuses non-loopback connections as a second layer (Task 2, Steps 5-6) — both, not either; (4) no window title, `stringValue`, transcript text, memory, or file content appears in any self-report door response (grep every `Snapshot`/`Value` construction site); (5) `ProviderArtifactStore` and `ProviderMailbox` are entirely separate storage from the conversation-scoped `ArtifactStore`/`artifact_refs` — no accidental reuse of either; (6) `ProviderArtifactStore.get` never succeeds for a client absent from the object's authorized-reader set, even with the correct hash — a bare hash must not grant a read; (7) `DiagnosticEventRing.record`/`.snapshot` are synchronous and lock-guarded, never routed through `Task { await ... }` from a sync AppKit callback — the ring's whole purpose is preserving event order.
