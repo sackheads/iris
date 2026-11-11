@@ -55,21 +55,36 @@ actor ProviderArtifactStore {
         self.isRegistered = isRegistered
         self.now = now
         self.quotas = quotas
+        // records/totalBytes/dailyBytes are memory-only and start empty every launch — with no
+        // persistent manifest, leaving a prior run's files in place would make them orphaned
+        // (unreadable: no record exists; never swept: sweepExpired only ever walks records) and
+        // uncounted (totalBytes starts at 0, so the 2 GiB cap no longer reflects what's on disk).
+        // Wiping root keeps the in-memory bookkeeping and the filesystem in the same state this
+        // store actually believes it's in. Phase 1 accepts losing provider-exchanged files across
+        // a restart (bounded, at most 7 days of exchange data, and this is a messaging
+        // convenience cache, not durable storage).
+        try? FileManager.default.removeItem(at: root)
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
     private static func isValidHash(_ sha256: String) -> Bool {
-        sha256.count == 64 && sha256.allSatisfy { $0.isHexDigit && !$0.isUppercase }
+        // ASCII only: `Character.isHexDigit` is Unicode-aware and accepts fullwidth digits like
+        // U+FF41 ("ａ"), which would otherwise pass this check while being a different sequence
+        // of bytes than the ASCII hex this type's paths are built from.
+        sha256.utf8.count == 64 && sha256.count == 64
+            && sha256.allSatisfy { $0.isASCII && $0.isHexDigit && !$0.isUppercase }
     }
 
     private func path(for sha256: String) -> URL { root.appendingPathComponent(sha256) }
 
-    private static func dayString(_ date: Date) -> String {
+    private static let dayFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
         formatter.timeZone = TimeZone(identifier: "UTC")
-        return formatter.string(from: date)
-    }
+        return formatter
+    }()
+
+    private static func dayString(_ date: Date) -> String { dayFormatter.string(from: date) }
 
     func put(bytes: Data, from clientId: String) throws -> String {
         guard isRegistered(clientId) else { throw ArtifactError.uploaderNoLongerRegistered }
@@ -81,14 +96,20 @@ actor ProviderArtifactStore {
         guard totalBytes + bytes.count <= quotas.totalStoreCapBytes else { throw ArtifactError.quotaExceeded }
 
         let sha256 = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
-        if records[sha256] == nil {
-            try bytes.write(to: path(for: sha256))
+        var record: Record
+        if let existing = records[sha256] {
+            // Re-uploading identical bytes doesn't double-charge storage or quota — the bytes are
+            // already on disk — but storedAt still refreshes: the client was just told it stored
+            // this, so the next sweep must not delete it on the strength of a stale timestamp
+            // from before this call (dev-2/dev-3 review on #1075).
+            record = existing
+            record.storedAt = now()
+        } else {
+            try bytes.write(to: path(for: sha256), options: .atomic)
             totalBytes += bytes.count
             dailyBytes[clientId] = (today, clientBytesToday + bytes.count)
+            record = Record(storedAt: now(), sizeBytes: bytes.count, authorizedReaders: [])
         }
-        // Re-uploading identical bytes (same hash) doesn't double-charge storage or quota, but
-        // still grants the uploader a read, same as a fresh object would.
-        var record = records[sha256] ?? Record(storedAt: now(), sizeBytes: bytes.count, authorizedReaders: [])
         record.authorizedReaders.insert(clientId)
         records[sha256] = record
         return sha256
@@ -121,10 +142,16 @@ actor ProviderArtifactStore {
     func get(sha256: String, requestingClientId: String) throws -> Data {
         guard Self.isValidHash(sha256) else { throw ArtifactError.invalidHash }
         guard let record = records[sha256] else { throw ArtifactError.notFound }
+        // An object past its TTL but not yet reclaimed (sweepExpired runs on whatever schedule
+        // Task 8's lifecycle wiring gives it, not on every get) must not be served as though it
+        // were still live — treat it as absent, the same as if it had already been swept.
+        guard now().timeIntervalSince(record.storedAt) <= Self.ttl else { throw ArtifactError.notFound }
         guard record.authorizedReaders.contains(requestingClientId) else { throw ArtifactError.unauthorized }
         return try Data(contentsOf: path(for: sha256))
     }
 
+    /// Reclaims every object past `ttl`. Runs on whatever schedule Task 8's app-lifecycle wiring
+    /// gives it (a periodic timer) — nothing in this actor schedules it itself.
     func sweepExpired(now: Date = Date()) {
         for (sha256, record) in records where now.timeIntervalSince(record.storedAt) > Self.ttl {
             try? FileManager.default.removeItem(at: path(for: sha256))
