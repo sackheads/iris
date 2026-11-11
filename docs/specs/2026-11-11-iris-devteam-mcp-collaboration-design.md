@@ -29,10 +29,14 @@ traffic on one bus, not two architectures.
 This is already the dominant shape elsewhere. `kube-agents` both calls MCP services from other
 agents *and* exposes its own; a Claude Code, Antigravity, Gemini Enterprise, or a bespoke agent
 (Spotify's `honk`/`zero`, say) can farm GKE work out to `kube-agents` and never touch cluster
-management. Iris's specialty in that division of labour is the user's machine: a caller gets
-Iris's local-first, native-macOS surface without having to be a Mac app. The homelab A2A client
-already on the board is Iris as *consumer*. **This document is Iris as *provider*** — same bus,
-same peer model, the other direction of the same relationship.
+management. Iris's specialty in that division of labour is not just the user's machine but the
+*human attached to it*: a caller reaches her local-first, native-macOS surface — and, through her,
+approvals, the Inbox, and attended GUI — without being a Mac app or having that human (Iris's
+framing). That reach is also the main risk: a guest-triggered turn can queue questions for the
+user (`inbox_item`), so guest turns need their own attention budget or the dev team can exhaust
+the user's attention by accident (§3.5). The homelab A2A client already on the board is Iris as
+*consumer*. **This document is Iris as *provider*** — same bus, same peer model, the other
+direction of the same relationship.
 
 The first concrete instance, and the one that proves the surface in-house, is **the Iris dev
 team**: the Claude Code sessions that build and review Iris, able to message the running app, hand
@@ -43,11 +47,19 @@ report a click deactivated the target window, so the next click never reached `m
 agent on the other side of that relay could have answered directly: "what is your composer's first
 responder right now?" is a question the running Iris can answer about itself.
 
-That is the shape of the value, and it sets the scope:
+That is the shape of the value, but it splits across **two levels this doc keeps apart** (Iris's
+framing — conflating them is what hid half the open questions):
 
-> **The target agent introspects *itself* and reports.** The caller does not reach into Iris's
-> address space. It asks Iris, and Iris — which already holds its own `AppState` — answers, or
-> runs a diagnostic and hands back the result.
+> **The app** — its `AppState`, composer, first responder, windows — is what a *deterministic
+> self-report* reads (§3.7). **A role session** — its conversational context and profile — is what
+> a *conversation* reaches (messaging, files, qualitative questions; §3.2). Different providers,
+> different trust stories.
+
+The caller does not reach into Iris's address space either way. For a qualitative question it asks
+a session and the session answers. For a *measurement* — "what is the composer's first responder,
+and why is it disabled?" — it reads the app directly, **without starting a turn**, because starting
+one changes the very state being measured (the #1055 confound again) and puts a model that can
+misreport between the caller and the value (§3.7).
 
 **Non-goal: a general-purpose debugging/introspection port.** We are not adding a wire protocol
 that lets a peer drive UI events, step the app, or inspect arbitrary internal state. A real debug
@@ -56,11 +68,11 @@ it coherent while the target mutates under you — and the intelligence we need 
 agent. Asking Iris to report on itself recovers most of the debugging value at a fraction of the
 cost. This is a deliberate scoping decision, not a deferral.
 
-**One accommodated exception (Brian, §3.7).** A *narrow, read-only self-report door* — the app
-answering specific questions about its own state through a bounded diagnostic tool — is a special
-case this environment accommodates. It is not the general port the non-goal rules out: it drives
-nothing and exposes a defined surface, not arbitrary state. §3.7 holds the open sub-questions
-about its exact shape.
+**One accommodated exception (Brian, §3.7).** A *narrow, read-only self-report door* — a bounded,
+**app-level** diagnostic read answering specific enumerated questions about the app's own state —
+is a special case this environment accommodates. It is not the general port the non-goal rules
+out: it drives nothing, runs no model, and exposes a defined surface, not arbitrary state. §3.7
+holds its shape.
 
 The dev team is the first peer because it is trusted and in-house, but nothing in the surface is
 dev-team-specific. Any agent that speaks MCP/A2A could, with the right grant, be a peer; the
@@ -91,18 +103,25 @@ case in the other; most rows generalize beyond those two specific peers.
 | **Object store** | Peer-hosted, `PUT`/`GET /v1/objects/{taskId}/{sha256}` | Iris-hosted — Iris serves the SHA-addressed object endpoint for the first time |
 | **Principal** | `a2aRemote` | `mcpGuest` |
 
-What is genuinely shared — and should stay shared — is the access boundary and the content
-model: one `(transport, issuer, id)` → profile resolution, A2A `Message`/`Part` (`text`/`data`/
-`file`), the `iris-artifact://<sha256>` content-addressed store, the SHA-verify-on-read, and the
-caps. The sibling framing in the unified boundary is correct. The trap is assuming that because
-the *boundary* is shared, the *delivery path* is too — see design point 3.2.
+What *should* be shared — as design intent, not as existing code — is the access boundary and the
+content model: one `(transport, issuer, id)` → profile resolution, A2A `Message`/`Part`
+(`text`/`data`/`file`), the `iris-artifact://<sha256>` content-addressed store, the
+SHA-verify-on-read, and the caps. Say "intent" literally: **none of the boundary is built yet.**
+`Principal` on main is `main | subagent | evaluator` (`SandboxPolicy.swift:10`); `mcpGuest` and
+`a2aRemote` live only in the boundary spec, and every guest floor this doc leans on is unbuilt
+(Iris's check). The sibling framing is the right target; it is not a thing to reuse today. The
+trap is assuming that because the *boundary* is shared in the spec, the *delivery path* is settled
+— see design point 3.2.
 
 ## 3. Design points (open — this is the part to rope the players in on)
 
 Each point names the seam, the options, and who should weigh in. None is decided here. Several
-points below were corrected against the specs by dev-2's pre-circulation fact-check
-(2026-11-11): this doc's first draft got a number of claims about the existing machinery wrong
-from partial reads, and those corrections — with spec citations — are folded in.
+points were corrected and reshaped by two pre-circulation reviews (2026-11-11): dev-2's fact-check
+and Iris's own code-grounded review (checked against `origin/main` 6d957a74). The first draft got
+a number of claims about the existing machinery wrong from partial reads; those corrections — with
+code/spec citations — are folded in. Iris reshaped four of these: the app-vs-session split (§1),
+the app-level self-report tool (§3.7), turn-scoped authority (§3.2), and two seams nobody else
+caught — the steer path (§3.2) and the reply direction (§3.8).
 
 ### 3.1 How a guest addresses and reads an artifact
 
@@ -125,6 +144,10 @@ as an MCP `resources/read` over the already-authenticated loopback channel, same
 never cross the network in v1, so any object surface is net-new regardless; (c) messaging
 artifacts stay in-store only — guests get data parts and small inline files, not large blobs.
 
+*Front-runner (Iris):* option (b). `resources/read` over the already-authenticated channel is the
+only option that adds no second network surface; pick it unless someone shows a blob size MCP
+can't carry.
+
 *Weigh in:* whoever owns the a2a-client object store and `artifact_refs`, plus #964.
 
 ### 3.2 The delivery path — and which authority the receiving turn runs under
@@ -136,19 +159,32 @@ kind: ask a *real* role-holding session about *itself* — the live conversation
 isolated lane does not carry. #964 routes guests to an existing role session's inbox, not the
 `a2a-remote` task runner.
 
-But inbox delivery opens a deeper seam (dev-2's M1): **the guest's text is then processed by the
-role session, under *that session's* binding — not an `mcpGuest` floor.** So §1's phrasing "what a
-guest can do is a profile ∩ the `mcpGuest` floor" is not true for the delivery path #964 wants;
-confinement there comes from the receiving profile, #818 taint, and the sandbox pin (#964's
-layers), not a floor on the guest. The unified boundary's own confused-deputy rule is that a
-profile is a property of the *initiating* authority — which the inbox path inverts. And the
-boundary §1 says `a2aRemote`/`mcpGuest` "never run in the foreground, always hard-strip, run in an
-isolated lane, execute only in the sandbox," which a standing role session does not satisfy. These
-must be reconciled before 3.2 is settled.
+But inbox delivery opens a deeper seam (dev-2's M1, sharpened by Iris): **the guest's text is then
+processed by the role session, under *that session's* binding — not an `mcpGuest` floor.** That is
+a plain confused deputy, and the "confinement comes from the receiving profile, #818 taint, and the
+sandbox pin" story does not hold up in the code (Iris's check):
+- **Taint is noise right now.** #1026 sets it on nearly every session before any untrusted input
+  arrives, so it cannot distinguish a guest-tainted turn.
+- **The sandbox pin is not a floor.** `SandboxPolicy.resolve` returns `.host` for every principal
+  the moment the master switch is off (`SandboxPolicy.swift:50`), verified. A guest-triggered turn
+  in a `main` session with sandboxing off runs host commands that inherit the process env.
 
-*To settle:* name the Principal and binding the receiving turn runs under when a guest message
-lands in a role session's inbox, and reconcile it with the boundary's foreground/isolation floor.
-Pin `mcpGuest` → inbox delivery vs `a2aRemote` → isolated runner as distinct paths.
+*Position to weigh (Iris):* **authority belongs to the turn, not the session.** A turn started by a
+guest message runs under (receiving profile ∩ `mcpGuest` floor), with the sandbox **enforced**, not
+merely preferred; the session keeps its conversational context but does not lend its full
+authority.
+
+**The steer path — a hard requirement, not an option (Iris; verified).** When the target is
+mid-turn, a peer arrival is queued (`queuePeerArrival`, `iris.swift:1000`) and can be drained into
+the *running* turn as a steer (see the comments at `iris.swift:798/891/1006`). That turn was started
+by the user under `main`, and a turn-scoped principal cannot apply to text injected mid-turn — so
+guest text consumed as a steer runs at the **user's** authority. That is a privilege escalation.
+**Guest arrivals must never steer:** they wait for the current turn to end and start their own
+guest-principal turn. This one is not a trade-off to debate; it is a line the build must hold.
+
+*To settle:* confirm turn-scoped authority with an enforced sandbox for guest-started turns, and the
+never-steer rule, and reconcile both with the boundary's foreground/isolation floor. Pin `mcpGuest`
+→ inbox delivery vs `a2aRemote` → isolated runner as distinct paths.
 
 *Weigh in:* #964 owner, the unified-boundary author, security review.
 
@@ -162,9 +198,17 @@ here) and #964's **request TTL / last-poll expiry** (which closes outstanding `e
 requests — not a token lifetime). Per the unified boundary R5, guest-auth itself is #965's design,
 and the first grant of a new peer's profile and key is Inbox-gated.
 
-*To settle:* the token lifetime and revoke/rotate path (per-token vs per-session); confirmation
-that nothing a guest profile reaches leans on signed-frame provenance. Defer the guest-auth
-mechanism to #965.
+**The bearer token is really a local-process identity (Iris).** A static token for a loopback
+endpoint lives in plaintext in Claude Code's config, so the identity it proves is not "the dev
+team" — it is "any process running as the user that can read that file," which includes Iris's own
+host `run_command`. Iris could connect to her own MCP endpoint as a guest, and #964's guest→guest
+ban does not catch Iris→loopback→Iris. Either bind the token to something a process can't simply
+read, or state explicitly that this identity means "any local process" and set the `mcpGuest` floor
+to match.
+
+*To settle:* the token lifetime and revoke/rotate path (per-token vs per-session); what the bearer
+identity actually denotes (and the floor that follows); confirmation that nothing a guest profile
+reaches leans on signed-frame provenance. Defer the guest-auth mechanism to #965.
 
 *Weigh in:* #965/#964 owners, the unified-boundary author, security review.
 
@@ -189,11 +233,19 @@ UUID** (`peerDepth(for: sender)`, `peerRateLimiter.take(for: sender)`, capacity 
 15 s). A guest has no conversation, so a guest send bypasses both unless a per-guest budget is
 built. #964 already lists "a per-guest rate/turn budget + a harness stop condition" as required
 even for the plain increment, so the principle is settled; what is open is the **values** and the
-**key** (per token, not per session UUID). *Also (dev-2's M6):* the depth counter is in-memory and
-cleared on restart, so a guest that can restart the app resets it; and `notePeerArrival` needs a
-defined depth value for a guest-origin message, which the spec does not give.
+**key** (per token, not per session UUID). Refinements (Iris): a guest-origin message should start
+at **depth ≥ 1**, not 0 — otherwise a guest gets a full cascade budget it never paid for; and
+`notePeerArrival` needs a defined depth value for a guest-origin message, which the spec does not
+give. The "a guest restarts the app and resets the in-memory depth counter" concern only bites if a
+guest *has* a restart path — so call that out as a thing to deny, rather than designing the budget
+around it.
 
-*Weigh in:* whoever owns the §6 limiter and `maxSessionCascade`.
+**And the attention budget (Iris, from §1).** The richest thing a guest turn can do is not compute
+— it is reach the user: a guest-triggered turn can call `inbox_item` and queue questions for the
+person. Guest turns need an attention budget distinct from the compute budget, or the dev team can
+exhaust the user's attention by accident.
+
+*Weigh in:* whoever owns the §6 limiter, `maxSessionCascade`, and the Inbox.
 
 ### 3.6 Which lane's caps a guest inherits
 
@@ -216,11 +268,45 @@ environment accommodates — "unique to this environment." It is not the general
 non-goal rules out (which drives events and inspects arbitrary state); this door is read-only and
 bounded. So the *scope question is closed yes*; what remains open is the tool's shape.
 
-*Open (team):* the exact surface the tool exposes (what it may read, and the bound), which profile
-carries it — not `reviewer`, whose tool list #964 narrows — main-actor safety, and the Invariant-6
-gating.
+**Iris's shape proposal — the door is an app-level MCP tool, not an agent tool.** Routing the read
+through "ask Iris, Iris answers" puts an LLM turn between the caller and the measurement, which is
+wrong twice over:
+1. *It reintroduces the #1055 confound.* Starting a turn changes the state being measured —
+   turn-in-flight, composer gating, possibly focus and the spinner. The input-refusal bug is
+   exactly the class where "a turn is running" changes the answer.
+2. *It inserts a model where you want a deterministic reading.* An LLM can misreport a value; a tool
+   returning raw values cannot.
 
-*Weigh in:* #964 + security review for the tool's shape; main-actor review for the read.
+So the door is called directly behind the same bearer token — **no session, no turn, no profile**
+(which also answers "which profile carries it": none). Shape:
+- **Fixed, enumerated queries.** Key/main window; first responder class and identity; composer
+  enabled state and *why*; turn-in-flight per session; app activation state. No transcript text, no
+  memory, no file contents.
+- **A passive event ring buffer.** The #1055 relay problem was about *events* (did `mouseDown`
+  arrive, and on what), not a snapshot — a point-in-time read can't say why a click didn't land. A
+  bounded ring of recent window/focus/event-routing transitions can.
+- **A main-actor timeout.** The read hops to the MainActor; if the main thread is wedged — a bug
+  class you'd use this for — the tool must time out and return "main actor unresponsive for N ms,"
+  which is itself the diagnosis.
+
+"Ask a role session about itself" still exists for *qualitative* questions; it just is not the
+debugging path.
+
+*Weigh in:* #964 + security review for the tool's surface and bound; main-actor review for the read.
+
+### 3.8 The reply direction (Iris — a whole axis the other points miss)
+
+Every point above is about what a guest can make Iris *do*. None covers what Iris *sends back*. A
+role session holds memory, facts, and user context, and its reply to a guest is **outbound data** —
+the same category as `gmail_send_email`. With the trusted in-house dev team that is harmless. But
+this doc's own claim is that "nothing in the surface is dev-team-specific" and the floor must hold
+for any granted peer — so a reply to a guest needs the same taint / outbound-egress gating as other
+egress, or the "any granted agent" generalization leaks the user's context outward.
+
+*To settle:* whether guest replies route through the egress/taint gate, and what a guest-reachable
+reply may carry.
+
+*Weigh in:* whoever owns egress/taint gating, security review.
 
 ## 4. What is already solid (leave alone unless a point above forces it)
 
@@ -236,12 +322,15 @@ gating.
 ## 5. What this doc is not, and the next step
 
 This is not a plan and not a design of record. It is the framing for a design conversation that
-pulls in the dev team, the Iris reviewers, and the overseer. The seven points were hardened by a
-pre-circulation fact-check (dev-2, 2026-11-11) against the actual specs before this reached wider
-review. The intended path: circulate → reconcile the points → fold the decisions into #964 as the
-"generalizing the A2A file/delivery path to `mcpGuest`" section, and raise plan work only after
-#964 absorbs them. No new build begins before that.
+pulls in the dev team, the Iris reviewers, and the overseer. Its nine points were hardened before
+wider review by two pre-circulation passes (2026-11-11): dev-2's fact-check against the specs, and
+Iris's own code-grounded review (which added the app-vs-session split, the app-level self-report
+tool, turn-scoped authority, and the steer-path and reply-direction seams). The intended path:
+circulate → reconcile the points → fold the decisions into #964 as the "generalizing the A2A
+file/delivery path to `mcpGuest`" section, and raise plan work only after #964 absorbs them. No new
+build begins before that.
 
-§3.7's scope question — the one that sat on Brian's non-goal line — is settled: a narrow,
-read-only self-report door is accommodated as a special case unique to this environment. Its
-*shape* stays open for the team. Every other point is the group's to reconcile.
+Two things are not "open" in the same way as the rest. **§3.7's scope** is settled (Brian): a
+narrow, read-only, app-level self-report door is accommodated; only its shape stays open. **The
+never-steer rule in §3.2** is a hard security line, not a trade-off: guest arrivals must never be
+consumed as a steer into a user-authority turn. Everything else is the group's to reconcile.
