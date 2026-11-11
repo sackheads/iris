@@ -36,6 +36,21 @@ struct ProviderTokenRegistryTests {
         #expect(!registry.isRegistered(clientId: ProviderTokenRegistry.reservedClientId))
     }
 
+    @Test("re-issuing a token for an already-registered client invalidates its old token, and revoke after re-issue leaves nothing resolving")
+    func reissueInvalidatesOldToken() throws {
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
+        let registry = ProviderTokenRegistry(keychain: keychain)
+        let first = try registry.issueToken(forClientId: "a")
+        let second = try registry.issueToken(forClientId: "a")
+        #expect(first != second)
+        #expect(registry.clientId(forToken: first) == nil)
+        #expect(registry.clientId(forToken: second) == "a")
+
+        try registry.revokeToken(forClientId: "a")
+        #expect(registry.clientId(forToken: first) == nil)
+        #expect(registry.clientId(forToken: second) == nil)
+    }
+
     @Test("allClientIds and isRegistered reflect multiple registered clients")
     func multipleClients() throws {
         let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)

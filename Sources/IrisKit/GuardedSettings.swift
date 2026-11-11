@@ -98,16 +98,22 @@ enum GuardedKey: String, CaseIterable, Sendable {
     }
 
     /// Whether an old defaults value may come across at the upgrade: never looser than built-in.
-    /// Lower is stricter for every cap (0 is "the default"), on is stricter for every switch, a
-    /// custom base URL is looser than the official one. The sandbox and Vibecop carry either way:
-    /// their built-in is off, so off isn't looser than built-in.
+    /// Lower is stricter for every cap (0 is "the default"), on is stricter for every switch
+    /// whose protective value is on, a custom base URL is looser than the official one. The
+    /// sandbox and Vibecop carry either way: their built-in is off, so off isn't looser than
+    /// built-in. A switch whose protective value is off (`mcpProviderEnabled`) is the mirror
+    /// image: its built-in is already at the strict (off) value, so only a matching "false"
+    /// carries — "true" is the looser value and must reset, the same shape
+    /// `enablePromptInjectionProtection` uses for its own already-strict built-in.
     func carriesOver(_ value: String) -> Bool {
         guard isValid(value) else { return false }
         switch kind {
         case .url, .blob: return value.isEmpty
         case .cap(let builtIn): return (Int(value) ?? 0) <= builtIn
         case .sandboxPref: return true
-        case .flag: return self == .enablePromptInjectionProtection ? value == "true" : true
+        case .flag(let protectiveOn):
+            guard protectiveOn else { return value == "false" }
+            return self == .enablePromptInjectionProtection ? value == "true" : true
         }
     }
 }

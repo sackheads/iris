@@ -29,6 +29,10 @@ final class ProviderTokenRegistry: @unchecked Sendable {
         var cache: [String: String] = [:]
         var reverseCache: [String: String] = [:]
         for (clientId, token) in loaded where clientId != Self.reservedClientId {
+            // Two client ids sharing one stored token (only reachable through a write outside
+            // issueToken) would otherwise make reverseCache resolve to whichever wins the loop;
+            // skip every duplicate so a token resolves to at most one client id.
+            guard reverseCache[token] == nil else { continue }
             cache[clientId] = token
             reverseCache[token] = clientId
         }
@@ -46,6 +50,10 @@ final class ProviderTokenRegistry: @unchecked Sendable {
             dict[clientId] = token
         }
         lock.withLock {
+            // Re-issuing for an already-registered client id must invalidate its old token, or
+            // the old one keeps resolving through clientId(forToken:) after Keychain no longer
+            // holds it.
+            if let oldToken = cache[clientId] { reverseCache[oldToken] = nil }
             cache[clientId] = token
             reverseCache[token] = clientId
         }

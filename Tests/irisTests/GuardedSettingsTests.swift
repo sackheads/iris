@@ -37,6 +37,13 @@ struct GuardedSettingsTests {
         }
     }
 
+    @Test("an outside defaults write of \"true\" for mcpProviderEnabled does not carry across the upgrade")
+    func mcpProviderEnabledDoesNotCarryOverFromDefaults() {
+        let load = GuardedSettings.load(item: .read([:]), defaults: ["MCP_PROVIDER_ENABLED": "true"], defaultsMarker: false)
+        #expect(load.values[.mcpProviderEnabled] == "false")
+        #expect(load.notices.first?.contains("MCP_PROVIDER_ENABLED") == true)
+    }
+
     // MARK: the decision, pure
 
     @Test("the upgrade carries a value only if it's no looser than built-in, and says which it reset")
