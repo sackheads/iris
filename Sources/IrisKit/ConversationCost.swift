@@ -78,7 +78,9 @@ struct CostBreakdown: Equatable {
                  dollars: Double(u.cacheWrite) * writeRate,
                  note: r.cacheWrite == nil ? "No cache-write rate is known, so these are priced as input." : nil),
             Line(kind: .output, label: "Output", tokens: u.output, ratePerMTok: r.output * 1e6,
-                 dollars: Double(u.output) * r.output),
+                 dollars: Double(u.output) * r.output,
+                 note: u.output > usage.candidatesTokenCount
+                     ? "Includes \(tokens(u.output - usage.candidatesTokenCount)) thinking tokens (the provider's total minus the prompt), billed as output." : nil),
         ]
         var caveats = ["An estimate, not a bill. The whole conversation is priced at \(cost.model)'s rates, its current model: a tier switched mid-conversation reprices all of it.",
                        "Subagents' tokens sit in their own conversations and are not included."]
@@ -104,6 +106,10 @@ struct CostBreakdown: Equatable {
         return f.string(from: NSNumber(value: value)) ?? "\(value)"
     }
 
+    /// A line's cost as shown: a dash where the provider reported no tokens for it (not the same
+    /// as a reported zero), so "not reported" never sits beside a "$0.00" that reads as a measurement.
+    static func cost(of line: Line) -> String { line.tokens == nil ? "\u{2014}" : money(line.dollars) }
+
     static func tokens(_ n: Int?) -> String { n.map { number(Double($0), minFraction: 0, maxFraction: 0) } ?? "not reported" }
 
     static func rate(_ perMTok: Double) -> String { "$" + number(perMTok, minFraction: 2, maxFraction: 4) + "/MTok" }
@@ -118,14 +124,6 @@ struct CostBreakdown: Equatable {
 }
 
 extension AppState {
-    /// The cost popover's content for `conversationId`: the toolbar figure by token type, or nil
-    /// where there is no figure (no tokens yet).
-    func conversationCostBreakdown(for conversationId: UUID, config: ConfigManager = .shared) -> CostBreakdown? {
-        guard let cost = conversationCost(for: conversationId, config: config),
-              let conv = conversations.first(where: { $0.id == conversationId }) else { return nil }
-        return CostBreakdown.make(usage: conv.tokenUsage, cost: cost)
-    }
-
     /// The toolbar's cost for `conversationId`, at the model its tier runs on now.
     func conversationCost(for conversationId: UUID, config: ConfigManager = .shared) -> ConversationCost? {
         guard let conv = conversations.first(where: { $0.id == conversationId }), conv.tokenUsage.totalTokenCount > 0 else { return nil }

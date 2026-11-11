@@ -20,7 +20,7 @@ struct CostBreakdownView: View {
                         Text(line.label).gridColumnAlignment(.leading)
                         Text(CostBreakdown.tokens(line.tokens)).monospacedDigit()
                         Text(CostBreakdown.rate(line.ratePerMTok)).monospacedDigit()
-                        Text(CostBreakdown.money(line.dollars)).monospacedDigit()
+                        Text(CostBreakdown.cost(of: line)).monospacedDigit()
                     }
                     if let note = line.note {
                         GridRow { Text(note).font(.caption).foregroundStyle(.secondary).gridCellColumns(4).gridColumnAlignment(.leading) }

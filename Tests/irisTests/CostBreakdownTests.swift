@@ -108,30 +108,34 @@ struct CostBreakdownTests {
         #expect(CostBreakdown.money(1234.5) == "$1,234.50")
     }
 
-    @Test("AppState builds the breakdown for a conversation with usage, and none without")
-    func appStateWiring() throws {
-        let app = AppState(); app.conversations.removeAll()
-        let id = app.createNewConversation(select: false)
-        let name = "iris-costbreakdown-\(UUID().uuidString)"
-        let store = UserDefaults(suiteName: name)!
-        defer {
-            store.removePersistentDomain(forName: name)
-            IrisDefaults.removeSuiteFile(named: name, in: IrisDefaults.preferencesDirectory)
-        }
-        let config = ConfigManager(store: store)
-        #expect(app.conversationCostBreakdown(for: id, config: config) == nil)
-        let i = try #require(app.conversations.firstIndex { $0.id == id })
-        app.conversations[i].tokenUsage = usage
-        let b = try #require(app.conversationCostBreakdown(for: id, config: config))
-        let toolbar = try #require(app.conversationCost(for: id, config: config))
-        #expect(abs(b.total - toolbar.dollars) < 1e-12)
+    @Test("thinking tokens folded into Output are labelled, and only when there are any")
+    func thinkingTokensLabelled() {
+        // Gemini: the total (5,900) minus the prompt (5,000) is 900, the candidates 100: 800 are thinking.
+        var g = TokenUsage(promptTokenCount: 5_000, candidatesTokenCount: 100, totalTokenCount: 5_900)
+        g.cacheReadTokenCount = 2_000
+        let out = CostBreakdown.make(usage: g, cost: cost(rates)).lines[3]
+        #expect(out.tokens == 900)
+        #expect(out.note == "Includes 800 thinking tokens (the provider's total minus the prompt), billed as output.")
+        #expect(CostBreakdown.make(usage: usage, cost: cost(rates)).lines[3].note == nil)
+    }
+
+    @Test("a line the provider never reported shows a dash, a reported zero shows $0.00")
+    func dashForUnreported() {
+        let none = TokenUsage(promptTokenCount: 1_000, candidatesTokenCount: 10, totalTokenCount: 1_010)
+        let a = CostBreakdown.make(usage: none, cost: cost(rates))
+        #expect(CostBreakdown.cost(of: a.lines[1]) == "\u{2014}" && CostBreakdown.cost(of: a.lines[2]) == "\u{2014}")
+        var zero = none; zero.cacheReadTokenCount = 0
+        let b = CostBreakdown.make(usage: zero, cost: cost(rates))
+        #expect(CostBreakdown.cost(of: b.lines[1]) == "$0.00")
+        #expect(CostBreakdown.cost(of: b.lines[0]) != "\u{2014}")
     }
 
     @Test("the toolbar figure is a button that opens the breakdown popover")
     func toolbarOpensThePopover() throws {
         let chat = try String(contentsOf: PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit/ChatView.swift"), encoding: .utf8)
         #expect(chat.contains("Button { showCostBreakdown.toggle() }"), "the cost figure must be a click target")
-        #expect(chat.contains("CostBreakdownView(breakdown: breakdown)"), "the popover must show the breakdown")
+        #expect(chat.contains("CostBreakdownView(breakdown: CostBreakdown.make(usage: conv.tokenUsage, cost: cost))"),
+                "the popover is built from the figure it opened from, with no optional that can render it empty")
         #expect(chat.contains(".popover(isPresented: $showCostBreakdown"))
     }
 }
