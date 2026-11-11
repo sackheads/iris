@@ -174,13 +174,17 @@ guest message runs under (receiving profile ∩ `mcpGuest` floor), with the sand
 merely preferred; the session keeps its conversational context but does not lend its full
 authority.
 
-**The steer path — a hard requirement, not an option (Iris; verified).** When the target is
+**The steer path — a hard requirement for the designed path (Iris; verified).** When the target is
 mid-turn, a peer arrival is queued (`queuePeerArrival`, `iris.swift:1000`) and can be drained into
-the *running* turn as a steer (see the comments at `iris.swift:798/891/1006`). That turn was started
-by the user under `main`, and a turn-scoped principal cannot apply to text injected mid-turn — so
-guest text consumed as a steer runs at the **user's** authority. That is a privilege escalation.
-**Guest arrivals must never steer:** they wait for the current turn to end and start their own
-guest-principal turn. This one is not a trade-off to debate; it is a line the build must hold.
+the *running* turn as a steer (`iris.swift:798/891/1006`). The queued text keeps its own peer label
+(`peerMidTaskLabel` = "Peer message (mid-task)", `iris.swift:2431`), **not** the user's
+`User (mid-task):` trust label — so it does not impersonate the user. The hazard is narrower and
+real: a turn-scoped principal cannot apply to text injected into a turn already running, so the
+steer executes inside a turn the user started under `main` and runs under the **user's
+permissions** — which for a guest-origin message would be a privilege escalation. No guest path
+exists today, so this is a requirement for the path being designed, not a live hole. **Guest
+arrivals must never steer:** they wait for the current turn to end and start their own
+guest-principal turn. Not a trade-off — a line the build must hold.
 
 *To settle:* confirm turn-scoped authority with an enforced sandbox for guest-started turns, and the
 never-steer rule, and reconcile both with the boundary's foreground/isolation floor. Pin `mcpGuest`
@@ -333,4 +337,6 @@ build begins before that.
 Two things are not "open" in the same way as the rest. **§3.7's scope** is settled (Brian): a
 narrow, read-only, app-level self-report door is accommodated; only its shape stays open. **The
 never-steer rule in §3.2** is a hard security line, not a trade-off: guest arrivals must never be
-consumed as a steer into a user-authority turn. Everything else is the group's to reconcile.
+consumed as a steer into a turn running under the user's permissions. (No guest path exists today —
+it is a requirement for the path being designed, not a live hole.) Everything else is the group's
+to reconcile.
