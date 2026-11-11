@@ -371,8 +371,18 @@ class ConfigManager: @unchecked Sendable {
     /// different ports rather than colliding on one shared literal.
     static func defaultMCPProviderPort(for identity: BuildIdentity) -> Int { identity == .dev ? 8788 : 8787 }
     static let defaultMCPProviderPort: Int = defaultMCPProviderPort(for: BuildIdentity.current)
+    /// A `UInt16` port's valid range; outside it a stored or typed value falls back to the
+    /// build's default rather than reaching `LoopbackHTTPListener(port:)` as something that
+    /// can't construct a `UInt16`, or binds an unintended port.
+    static let validMCPProviderPortRange: ClosedRange<Int> = 1...65535
     var mcpProviderPort: Int {
-        didSet { store.set(mcpProviderPort, forKey: "MCP_PROVIDER_PORT") }
+        didSet {
+            guard Self.validMCPProviderPortRange.contains(mcpProviderPort) else {
+                mcpProviderPort = Self.defaultMCPProviderPort
+                return
+            }
+            store.set(mcpProviderPort, forKey: "MCP_PROVIDER_PORT")
+        }
     }
 
     var sandboxImage: String {
@@ -779,7 +789,8 @@ class ConfigManager: @unchecked Sendable {
         self.enableSandboxing = guardedBool(.enableSandboxing, "ENABLE_SANDBOXING")
         self.mcpProviderEnabled = guardedBool(.mcpProviderEnabled, "MCP_PROVIDER_ENABLED")
         let savedMCPProviderPort = saved.integer(forKey: "MCP_PROVIDER_PORT")
-        self.mcpProviderPort = savedMCPProviderPort <= 0 ? Self.defaultMCPProviderPort : savedMCPProviderPort
+        self.mcpProviderPort = Self.validMCPProviderPortRange.contains(savedMCPProviderPort)
+            ? savedMCPProviderPort : Self.defaultMCPProviderPort
         self.sandboxImage = saved.string(forKey: "SANDBOX_IMAGE") ?? "ubuntu:latest"
         let savedExchangeCap = saved.integer(forKey: "ARTIFACT_EXCHANGE_CAP_MB")
         self.artifactExchangeCapMB = savedExchangeCap <= 0 ? ArtifactLimits.defaultExchangeCapMB : savedExchangeCap
