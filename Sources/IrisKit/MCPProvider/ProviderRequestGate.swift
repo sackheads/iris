@@ -2,9 +2,11 @@ import Foundation
 
 /// Per-token admission gate for the MCP provider (#1067): resolves a bearer token to a client id
 /// and takes one unit from that client's token bucket, same refill algorithm as
-/// `PeerRateLimiter`, but on `ContinuousClock` rather than `Date`/`TimeInterval` — AGENTS.md
-/// #605: a `Date()`-timed bucket counts a Mac sleep as elapsed budget. This is a new, separate
-/// limiter; it never reads or writes `AppState.peerRateLimiter` or `AppState.inboxEmitRateLimiter`.
+/// `PeerRateLimiter`, but on `SuspendingClock` rather than `Date`/`TimeInterval` — AGENTS.md #605:
+/// a `Date()`-timed bucket counts a Mac sleep as elapsed budget. `ContinuousClock` does too
+/// (`Tests/irisTests/TestClock.swift` notes this explicitly); `SuspendingClock` is the one that
+/// actually pauses while the system sleeps. This is a new, separate limiter; it never reads or
+/// writes `AppState.peerRateLimiter` or `AppState.inboxEmitRateLimiter`.
 ///
 /// Rate-only, not a concurrency cap: `admit` has no matching release, so there is no in-flight-
 /// request ceiling here, only a refilling-bucket limit on requests per interval. A true
@@ -19,13 +21,15 @@ actor ProviderRequestGate {
 
     private let registry: ProviderTokenRegistry
     private let capacity: Int
+    /// The time it takes to refill one token.
     private let refillInterval: Duration
-    private let now: @Sendable () -> ContinuousClock.Instant
+    private let now: @Sendable () -> SuspendingClock.Instant
 
-    private var buckets: [String: (tokens: Double, at: ContinuousClock.Instant)] = [:]
+    private var buckets: [String: (tokens: Double, at: SuspendingClock.Instant)] = [:]
 
     init(registry: ProviderTokenRegistry, capacity: Int, refillInterval: Duration,
-         now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
+         now: @escaping @Sendable () -> SuspendingClock.Instant = { SuspendingClock().now }) {
+        precondition(refillInterval > .zero, "refillInterval must be positive — zero would divide by zero in the refill math")
         self.registry = registry
         self.capacity = capacity
         self.refillInterval = refillInterval
