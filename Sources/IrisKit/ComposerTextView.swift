@@ -198,7 +198,15 @@ final class KeyCatchingTextView: NSTextView {
     /// never delivered as a real `mouseDown`, so it can't take first responder either. The
     /// composer is the thing a person reaches for first after switching back to Iris; it should
     /// win that click rather than need a second one.
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        DiagnosticEventRing.shared.record(.composerAcceptsFirstMouse(true))
+        return true
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        DiagnosticEventRing.shared.record(.composerAppearanceChanged(name: effectiveAppearance.name.rawValue))
+    }
 
     override func keyDown(with event: NSEvent) {
         guard let coordinator else { super.keyDown(with: event); return }

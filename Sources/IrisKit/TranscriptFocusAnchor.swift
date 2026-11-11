@@ -51,6 +51,7 @@ struct TranscriptFocusAnchor: NSViewRepresentable {
 
         func mouseWentDown(at point: NSPoint) {
             downInside = convert(bounds, to: nil).contains(point)
+            DiagnosticEventRing.shared.record(.transcriptMouseDown(atWindowPoint: point))
         }
 
         /// A mouse-up at `point`: focuses the table only when the mouse-down was inside too.
@@ -59,12 +60,19 @@ struct TranscriptFocusAnchor: NSViewRepresentable {
             guard enabled, downInside, let window, let root = window.contentView,
                   convert(bounds, to: nil).contains(point),
                   let table = Self.table(containing: point, in: root),
-                  window.firstResponder !== table else { return }
+                  window.firstResponder !== table else {
+                DiagnosticEventRing.shared.record(.transcriptFocusHop(tookFocus: false))
+                return
+            }
             // A control inside the transcript that took focus for itself (a text field in a row)
             // keeps it; only focus held outside it, the composer's, moves.
             if let current = window.firstResponder as? NSView, let scroll = table.enclosingScrollView,
-               current.isDescendant(of: scroll) { return }
+               current.isDescendant(of: scroll) {
+                DiagnosticEventRing.shared.record(.transcriptFocusHop(tookFocus: false))
+                return
+            }
             window.makeFirstResponder(table)
+            DiagnosticEventRing.shared.record(.transcriptFocusHop(tookFocus: true))
         }
 
         /// The table whose scroll view's frame, in window coordinates, contains `point`.
