@@ -538,9 +538,14 @@ circulate → reconcile the points → fold the decisions into #964 as the "gene
 file/delivery path to `mcpGuest`" section, and raise plan work only after #964 absorbs them. No new
 build begins before that.
 
-Two things are not "open" in the same way as the rest. **§3.7's scope** is settled (Brian): a
-narrow, read-only, app-level self-report door is accommodated; only its shape stays open. **The
-never-steer rule in §3.2** is a hard security line, not a trade-off: guest arrivals must never be
-consumed as a steer into a turn running under the user's permissions. (No guest path exists today —
-it is a requirement for the path being designed, not a live hole.) Everything else is the group's
-to reconcile.
+**The §3.2 shape is decided (Brian, 2026-11-11): Shape 4 → 5, phased.** Phase 1 is Shape 4 — the
+app-level self-report door (§3.7) plus the plain messaging/file-exchange surface — which serves the
+debugging motivator with no confidentiality exposure and is buildable now. Phase 2 is Shape 5 (a
+confined `mcpGuest` lane with a bounded read of the role session), gated on #1066's context
+partitioning. Shapes 1–2 are rejected (confidentiality); 3 is a subset of 5, 6 is heavier. This
+resolves the doc's central fork; the remaining §3.x items are Phase-appropriate build details.
+
+Two further points are settled, not open. **§3.7's scope** (Brian): a narrow, read-only, app-level
+self-report door is accommodated — it *is* Phase 1's door. **The never-steer rule in §3.2** is a hard
+security line: guest arrivals must never be consumed as a steer into a turn running under the user's
+permissions. (No guest path exists today — a requirement for the designed path, not a live hole.)
