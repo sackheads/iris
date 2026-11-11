@@ -5,8 +5,11 @@ import MCP
 /// A minimal, hand-rolled HTTP/1.1 listener bound to loopback only, bridging raw socket bytes to
 /// an injected handler (the MCP SDK's `StatelessHTTPServerTransport.handleRequest`, in production
 /// — never referenced directly here so this type's own tests never need a real `MCP.Server`).
-/// POST only, no chunked transfer-encoding, no keep-alive: a single local client's request/response
-/// round trip, nothing more (#1067).
+/// No chunked transfer-encoding, no keep-alive: a single local client's request/response round
+/// trip, nothing more (#1067). This parser itself is method-agnostic — it does not reject GET or
+/// any other verb — because the MCP Streamable HTTP transport's own 405 (a non-POST reaching
+/// `StatelessHTTPServerTransport.handleRequest`) is what actually enforces "POST only" in
+/// production; that rejection belongs to the SDK, not to this listener's framing layer.
 final class LoopbackHTTPListener: @unchecked Sendable {
     static let maxRequestLineBytes = 8 * 1024
     static let maxHeaderBytes = 32 * 1024
@@ -19,6 +22,12 @@ final class LoopbackHTTPListener: @unchecked Sendable {
     /// A separate, shorter bound on how long a connection may sit before its headers finish.
     static let headerCompletionDeadline: Duration = .seconds(5)
     static let maxConcurrentConnections = 16
+    /// Bounds the injected `handle` closure itself. Without this, a handler that never returns
+    /// (a hung downstream call, a deadlock) holds its connection's slot forever: neither
+    /// `headerCompletionDeadline` nor `readTimeout` apply once the request has already been
+    /// delivered to `handle`, so `maxConcurrentConnections` hung handlers would wedge the whole
+    /// listener shut with no later connection ever able to free one.
+    static let handleTimeout: Duration = .seconds(10)
 
     /// Every tunable, instance-level so tests can shrink a real-time bound (`readTimeout`,
     /// `headerCompletionDeadline`) or a byte cap without waiting out the production value.
@@ -31,6 +40,7 @@ final class LoopbackHTTPListener: @unchecked Sendable {
         var readTimeout = LoopbackHTTPListener.readTimeout
         var headerCompletionDeadline = LoopbackHTTPListener.headerCompletionDeadline
         var maxConcurrentConnections = LoopbackHTTPListener.maxConcurrentConnections
+        var handleTimeout = LoopbackHTTPListener.handleTimeout
     }
 
     private let requestedPort: UInt16
@@ -52,7 +62,12 @@ final class LoopbackHTTPListener: @unchecked Sendable {
     ///   nil`) — before this connection ever reads a byte of its body. A non-nil return is sent
     ///   as the response immediately, with the body never read. This is Task 8's seam for
     ///   auth: the token resolves off `Authorization`, which is a header, so an unauthorized
-    ///   request's body (up to `maxContentLength`) is never buffered at all.
+    ///   request's body (up to `maxContentLength`) is never buffered at all. **Defaults to `nil`
+    ///   only so this type's own tests (and any caller with nothing to check pre-body) don't have
+    ///   to supply one — Task 8's production wiring must always pass a real check.** It runs
+    ///   synchronously while this connection's own lock is held (it is called from inside
+    ///   `tryParseHeaders`'s caller), so it must stay a cheap, synchronous lookup (a dictionary
+    ///   read, not network or disk I/O) — never an `async` call.
     init(port: UInt16, limits: Limits = Limits(),
          isLoopbackCheck: @escaping @Sendable (NWEndpoint) -> Bool = LoopbackHTTPListener.isLoopback,
          preBodyCheck: (@Sendable (HTTPRequest) -> HTTPResponse?)? = nil,
@@ -367,7 +382,16 @@ private final class Connection: @unchecked Sendable {
         }
         guard !snapshotFinished else { return }
         Task {
-            let response = await self.handle(request)
+            let response: HTTPResponse
+            do {
+                response = try await withTimeout(seconds: self.limits.handleTimeout.timeInterval) {
+                    await self.handle(request)
+                }
+            } catch {
+                // The handler never returned within handleTimeout: answer with an error and free
+                // this connection's slot rather than holding it open forever.
+                response = .error(statusCode: 504, .internalError("handler timed out"))
+            }
             self.send(response)
         }
     }
@@ -377,6 +401,10 @@ private final class Connection: @unchecked Sendable {
         let body = response.bodyData ?? Data()
         var headers = response.headers
         headers["Content-Length"] = String(body.count)
+        // This listener never keeps a connection open past one response (Global Constraint: no
+        // keep-alive) — say so, rather than let a keep-alive-capable client assume it can reuse
+        // this connection for a second request that will never be answered.
+        headers["Connection"] = "close"
         for (name, value) in headers {
             text += "\(name): \(value)\r\n"
         }
