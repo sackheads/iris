@@ -36,6 +36,24 @@ struct ProviderTokenRegistryTests {
         #expect(!registry.isRegistered(clientId: ProviderTokenRegistry.reservedClientId))
     }
 
+    @Test("the load path applies the same allowlist as issueToken: only a shape-valid, non-reserved id survives a fresh load")
+    func loadPathAppliesTheSameAllowlist() throws {
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
+        try keychain.updateSecretsOrThrow(service: KeychainManager.mcpProviderService) { dict in
+            dict["Iris"] = "token-1"
+            dict["\u{FF49}\u{FF52}\u{FF49}\u{FF53}"] = "token-2"
+            dict["ir\u{200B}is"] = "token-3"
+            dict["has/slash"] = "token-4"
+            dict["valid-client"] = "token-5"
+        }
+        let registry = ProviderTokenRegistry(keychain: keychain)
+        #expect(registry.allClientIds() == ["valid-client"])
+        #expect(registry.clientId(forToken: "token-5") == "valid-client")
+        for badToken in ["token-1", "token-2", "token-3", "token-4"] {
+            #expect(registry.clientId(forToken: badToken) == nil)
+        }
+    }
+
     @Test("re-issuing a token for an already-registered client invalidates its old token, and revoke after re-issue leaves nothing resolving")
     func reissueInvalidatesOldToken() throws {
         let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
@@ -78,6 +96,17 @@ struct ProviderTokenRegistryTests {
         #expect(registry.allClientIds().isEmpty)
     }
 
+    /// Asserts the outcome (Keychain and the cache agree), not the mechanism: this run alone does
+    /// not distinguish `writeLock` actually serializing the Keychain write and the cache update
+    /// from the window between them simply being too small to lose on this machine (swapping
+    /// `writeLock` for a fresh, unrelated `NSLock()` still passed here). A deterministic,
+    /// semaphore-gated variant (pause the first call inside the gap via a test-only hook, then
+    /// assert a second blocks) was tried and discarded: under heavy host load it produced a
+    /// false failure unrelated to `writeLock` — GCD's global queue did not provision a worker
+    /// thread for the second call within the bound the test needed. The serialization itself is
+    /// verified by reading `issueToken`'s body instead: the Keychain write and the cache update
+    /// are both inside the same `writeLock.withLock` call, so no interleaving between two
+    /// concurrent calls' two phases is possible, regardless of timing.
     @Test("many concurrent issueToken calls for the same client id leave Keychain and the cache agreeing on one token")
     func concurrentIssueForSameClientStaysConsistent() async throws {
         let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
