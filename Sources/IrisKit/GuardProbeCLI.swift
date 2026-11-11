@@ -27,6 +27,26 @@ enum GuardProbeCLI {
         var overridesConfig: Bool { engine != nil || model != nil || tier2 != nil }
     }
 
+    /// Whether this run reads the home's secrets. A probe given an engine, a model and a tier-2 model
+    /// on its command line, with a local engine, judges on those alone and needs no key. Anything
+    /// less (a partial override reads the rest of the home's config, `--engine cloud` needs the
+    /// home's key, no override at all is the home's settings) keeps the real Keychain (#1006).
+    static func needsHomeSecrets(_ options: Options) -> Bool {
+        guard let engine = options.engine, options.model != nil, options.tier2 != nil else { return true }
+        return engine == "cloud"
+    }
+
+    /// The settings steps of a probe, in the order that matters, as closures so a test can read the
+    /// order (as `BenchCLI.prepareSettings` does): the in-memory Keychain is asked for first, before
+    /// `ConfigManager.shared` loads its secrets, then the volatile copy of the defaults is made. An
+    /// ad-hoc-signed rebuild re-prompts on every launch, since "Always Allow" never sticks to its
+    /// signature, so a probe with no use for the item must not read it.
+    static func prepareSettings(_ options: Options, requestBypass: () -> Void, useVolatile: () -> Void) {
+        guard options.overridesConfig else { return }
+        if !needsHomeSecrets(options) { requestBypass() }
+        useVolatile()
+    }
+
     static let defaultText = "The build finished in 42 seconds and all tests passed."
 
     static let usage = """
@@ -140,8 +160,9 @@ enum GuardProbeCLI {
         if let dir = options.compare { return GuardProbeFixtures.compare(dir, baselineArm: options.baselineArm) }
         if let fixtures = options.fixtures { return await GuardProbeFixtures.run(fixtures) }
         // Before the first touch of `ConfigManager.shared`, as `--perf` does: the overrides land in
-        // a copy that goes with the process.
-        if options.overridesConfig { IrisDefaults.useVolatileCopyOfStandard() }
+        // a copy that goes with the process, and a fully local run keeps off the Keychain (#1006).
+        prepareSettings(options, requestBypass: { KeychainManager.requestHeadlessBypass() },
+                        useVolatile: { IrisDefaults.useVolatileCopyOfStandard() })
         let config = ConfigManager.shared
         if let engine = options.engine { config.promptGuardEngine = engine }
         if let model = options.model { config.promptGuardModel = model }
