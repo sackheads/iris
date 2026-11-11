@@ -99,7 +99,7 @@ case in the other; most rows generalize beyond those two specific peers.
 | **Peer in the first instance** | External homelab agents (Clomp et al.) | Internal Iris dev sessions (generalizes to any granted agent) |
 | **Trust basis** | Per-frame ed25519 signature (romar#396, #974 H4); relay is not an identity authority | Static Bearer token (Claude Code's MCP client; no OAuth) |
 | **Interaction shape** | Task delegation — a peer delivers a `task`, gets `status-update`/`artifact-update` back | Conversational messaging — `send`/`poll` to a live session, threaded by `contextId` |
-| **Delivery target** | A fresh, isolated, off-foreground `a2a-remote` session (`Principal.a2aRemote`), confined and approval-capable, without the role session's conversational context | An **existing role-holding session's inbox** (`role:reviewer`, `role:feedback`) — the live agent with its own ongoing context, but it runs under *its* binding, not a guest floor (§3.2) |
+| **Delivery target** | A fresh, isolated, off-foreground `a2a-remote` session (`Principal.a2aRemote`), confined and approval-capable, without the role session's conversational context | A role-holding session's inbox *or* `#974`'s isolated lane *or* a read-only app snapshot query — an **open four-shape fork (§3.2)**, since inbox delivery would run under the session's own binding, not a guest floor |
 | **Object store** | Peer-hosted, `PUT`/`GET /v1/objects/{taskId}/{sha256}` | Iris-hosted — Iris serves the SHA-addressed object endpoint for the first time |
 | **Principal** | `a2aRemote` | `mcpGuest` |
 
@@ -153,6 +153,13 @@ artifacts stay in-store only — guests get data parts and small inline files, n
 *Front-runner (Iris):* option (b). `resources/read` over the already-authenticated channel is the
 only option that adds no second network surface; pick it unless someone shows a blob size MCP
 can't carry.
+
+*The other direction — guest → Iris ingest (Clomp/dev-2).* Option (b)'s `resources/read` is
+server→client (Iris → guest) only; it does **not** cover a guest *handing Iris a file* (§1, "hand it
+a file, and get one back"). That ingest path must be specified separately when this folds into #964
+— inline `DataPart`/`FilePart` bytes on `send`, or an `artifact_put` MCP tool — and explicitly
+**not** a host `{path}` read via `IrisEngine.attachFile`, which authorizes the read against a sending
+`Conversation`'s `read_file` scope a guest does not have.
 
 *Weigh in:* whoever owns the a2a-client object store and `artifact_refs`, plus #964.
 
