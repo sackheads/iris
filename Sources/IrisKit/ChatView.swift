@@ -530,9 +530,7 @@ struct ChatView: View {
                                     .help(cost.help + " Click for the breakdown.")
                                     .accessibilityLabel("Estimated cost \(cost.label). Show the breakdown.")
                                     .popover(isPresented: $showCostBreakdown, arrowEdge: .bottom) {
-                                        if let breakdown = state.conversationCostBreakdown(for: conv.id) {
-                                            CostBreakdownView(breakdown: breakdown)
-                                        }
+                                        CostBreakdownView(breakdown: CostBreakdown.make(usage: conv.tokenUsage, cost: cost))
                                     }
                                 }
                             }
