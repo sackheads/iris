@@ -107,7 +107,8 @@ What *should* be shared — as design intent, not as existing code — is the ac
 content model: one `(transport, issuer, id)` → profile resolution, A2A `Message`/`Part`
 (`text`/`data`/`file`), the `iris-artifact://<sha256>` content-addressed store, the
 SHA-verify-on-read, and the caps. Say "intent" literally: **none of the boundary is built yet.**
-`Principal` on main is `main | subagent | evaluator` (`SandboxPolicy.swift:10`); `mcpGuest` and
+`Principal` on main is `main | subagent | evaluator` (the `Principal` enum in `SandboxPolicy`);
+`mcpGuest` and
 `a2aRemote` live only in the boundary spec, and every guest floor this doc leans on is unbuilt
 (Iris's check). The sibling framing is the right target; it is not a thing to reuse today. The
 trap is assuming that because the *boundary* is shared in the spec, the *delivery path* is settled
@@ -164,14 +165,15 @@ But inbox delivery opens a deeper seam (dev-2's M1, sharpened by Iris): **the gu
 processed by the role session, under *that session's* binding — not an `mcpGuest` floor.** That is a
 plain confused deputy, and one of the layers #964 would lean on to contain it is not actually a
 floor: `SandboxPolicy.resolve` returns `.host` for every principal the moment the master switch is
-off (`SandboxPolicy.swift:50`, verified), so a guest-triggered turn in a `main` session with
+off (`SandboxPolicy.resolve`, verified), so a guest-triggered turn in a `main` session with
 sandboxing off runs host commands that inherit the process env.
 
 *(An earlier draft also claimed the #818 taint layer was "noise" because #1026 taints every session.
-dev-1's re-review corrected that: #1026 is two **fixes** for over-tainting — `05303324`, `c7d923d0`
-— both already in the `6d957a74` baseline. Taint is therefore not a demonstrated gap; the
-confused-deputy concern rests on the sandbox-pin finding and the structural inversion below, not on
-taint.)*
+dev-1's re-review corrected that, and Iris confirmed the error was hers: #1026 is two **fixes** for
+over-tainting — `05303324`, `c7d923d0` — both already in the `6d957a74` baseline. Taint is therefore
+not a demonstrated gap — but nor has the day-old fix been shown to work *as a guest-turn layer*, so
+§3.2 leaves taint unrelied-on in either direction; the confused-deputy concern rests on the
+sandbox-pin finding and the structural inversion below.)*
 
 *Position to weigh (Iris):* **authority belongs to the turn, not the session.** A turn started by a
 guest message runs under (receiving profile ∩ `mcpGuest` floor), with the sandbox **enforced**, not
@@ -179,9 +181,9 @@ merely preferred; the session keeps its conversational context but does not lend
 authority.
 
 **The steer path — a hard requirement for the designed path (Iris; verified).** When the target is
-mid-turn, a peer arrival is queued (`queuePeerArrival`, `iris.swift:1000`) and can be drained into
-the *running* turn as a steer (`iris.swift:798/891/1006`). The queued text keeps its own peer label
-(`peerMidTaskLabel` = "Peer message (mid-task)", `iris.swift:2431`), **not** the user's
+mid-turn, a peer arrival is queued (`queuePeerArrival`) and can be drained into the *running* turn
+as a steer (the `drainPendingInput` → `takePendingSteers` path). The queued text keeps its own peer
+label (`peerMidTaskLabel` = "Peer message (mid-task)"), **not** the user's
 `User (mid-task):` trust label — so it does not impersonate the user. The hazard is narrower and
 real: a turn-scoped principal cannot apply to text injected into a turn already running, so the
 steer executes inside a turn the user started under `main` and runs under the **user's
@@ -300,14 +302,18 @@ So the door is called directly behind the same bearer token — **no session, no
 "Ask a role session about itself" still exists for *qualitative* questions; it just is not the
 debugging path.
 
-*One shape gap to resolve (dev-1).* `isKeyWindow` and first-responder are only meaningful while the
-queried app is frontmost — macOS has one key window system-wide. If the door is polled while Iris is
-backgrounded (which the "no need to bring it forward" framing implies), the key-window query reports
-"not key" regardless of the real bug. Clarify whether the door assumes Iris stays frontmost for the
-session (likely true for the #1055 scenario — the human clicks in the live Iris window and relays via
-another app) or must report differently for a backgrounded target. dev-1 also confirmed the tool's
-premise in code: `describe_session` (`iris.swift:3269`) returns session-card data only, no AppKit or
-`AppState` read exists in the surface today.
+*A key-window subtlety dev-1 raised, and how the shape answers it (Iris).* `isKeyWindow` and
+first-responder are only meaningful while the queried app is frontmost — macOS has one key window
+system-wide — so a snapshot taken while Iris is backgrounded would report "not key" regardless of
+the real bug. The proposed shape handles this *without* assuming Iris stays frontmost: (1) every
+snapshot carries the **activation state** (`isActive` / key-window owner), so a backgrounded answer
+identifies itself as backgrounded rather than misleading; and (2) the **event ring buffer** records
+focus/key transitions as they happen, so reading it after Iris was backgrounded still shows what
+occurred while it was frontmost — which is exactly the #1055 case (the click lands while Iris is in
+front; the relay comes later). The rule to state: a snapshot is valid only together with the
+activation state it reports, and diagnosing what happened while frontmost is the ring buffer's job.
+dev-1 also confirmed the tool's premise in code: `describe_session` returns session-card data only —
+no AppKit or `AppState` read exists in the surface today.
 
 *Weigh in:* #964 + security review for the tool's surface and bound; main-actor review for the read.
 
