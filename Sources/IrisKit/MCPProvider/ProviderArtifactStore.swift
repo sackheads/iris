@@ -59,12 +59,19 @@ actor ProviderArtifactStore {
         // persistent manifest, leaving a prior run's files in place would make them orphaned
         // (unreadable: no record exists; never swept: sweepExpired only ever walks records) and
         // uncounted (totalBytes starts at 0, so the 2 GiB cap no longer reflects what's on disk).
-        // Wiping root keeps the in-memory bookkeeping and the filesystem in the same state this
-        // store actually believes it's in. Phase 1 accepts losing provider-exchanged files across
-        // a restart (bounded, at most 7 days of exchange data, and this is a messaging
-        // convenience cache, not durable storage).
-        try? FileManager.default.removeItem(at: root)
+        // Phase 1 accepts losing provider-exchanged files across a restart (bounded, at most 7
+        // days of exchange data, and this is a messaging convenience cache, not durable storage).
+        //
+        // Only entries whose name is this store's own hash-named shape are removed, never the
+        // whole directory: `removeItem(at: root)` would delete everything under whatever path
+        // Task 8 passes as `root`, recursively and silently (`try?`), if that path were ever
+        // wrong — this store has no business touching a file it didn't itself name.
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        if let entries = try? FileManager.default.contentsOfDirectory(atPath: root.path) {
+            for name in entries where Self.isValidHash(name) {
+                try? FileManager.default.removeItem(at: root.appendingPathComponent(name))
+            }
+        }
     }
 
     private static func isValidHash(_ sha256: String) -> Bool {
@@ -101,7 +108,11 @@ actor ProviderArtifactStore {
             // Re-uploading identical bytes doesn't double-charge storage or quota — the bytes are
             // already on disk — but storedAt still refreshes: the client was just told it stored
             // this, so the next sweep must not delete it on the strength of a stale timestamp
-            // from before this call (dev-2/dev-3 review on #1075).
+            // from before this call (dev-2/dev-3 review on #1075). This also means re-uploading an
+            // expired-but-unswept object revives it, with its *existing* authorized-reader set
+            // intact — every client previously granted a read keeps it, not just this uploader.
+            // That is accepted as correct, not a bug: the bytes those readers were granted access
+            // to are the exact bytes still on disk.
             record = existing
             record.storedAt = now()
         } else {
