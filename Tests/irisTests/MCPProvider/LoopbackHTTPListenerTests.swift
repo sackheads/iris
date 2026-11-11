@@ -48,15 +48,15 @@ struct LoopbackHTTPListenerTests {
         defer { listener.stop() }
         guard let port = listener.boundPort else { Issue.record("no bound port"); return }
 
-        var urlRequest = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/")!)
-        urlRequest.httpMethod = "POST"
-        urlRequest.setValue("Bearer nope", forHTTPHeaderField: "Authorization")
-        // A body that would hang if the connection ever tried to read more than Content-Length
-        // says — preBodyCheck must answer before any of it is requested.
-        urlRequest.httpBody = Data("{}".utf8)
-        let (_, response) = try await URLSession.shared.data(for: urlRequest)
-        #expect((response as? HTTPURLResponse)?.statusCode == 401)
+        // A huge Content-Length with NO body ever sent: if preBodyCheck ran only after the body
+        // was buffered (dev-3's mutation), this would hang waiting for bytes that never arrive.
+        // Answering within 2s proves it ran before any body read was even attempted.
+        let connection = try await rawConnect(port: port)
+        try await connection.send("POST / HTTP/1.1\r\nAuthorization: Bearer nope\r\nContent-Length: 1000000\r\n\r\n")
+        let response = await connection.readSome(timeout: 2)
+        #expect(response?.contains("401") == true)
         #expect(!mainHandlerCalled.value)
+        connection.cancel()
     }
 
     @Test("with no preBodyCheck, every request reaches the main handler as before")
@@ -85,8 +85,8 @@ struct LoopbackHTTPListenerTests {
         #expect(port.rawValue == 12345)
     }
 
-    @Test("a connection whose remote endpoint is not loopback is refused, not served")
-    func nonLoopbackRefused() throws {
+    @Test("the isLoopback predicate distinguishes a loopback endpoint from a remote one")
+    func isLoopbackPredicateDistinguishesLoopbackFromRemote() throws {
         let remote = NWEndpoint.hostPort(host: "93.184.216.34", port: 80)
         #expect(!LoopbackHTTPListener.isLoopback(remote))
         let loopback = NWEndpoint.hostPort(host: "127.0.0.1", port: 80)
@@ -346,10 +346,12 @@ private final class RawConnection: @unchecked Sendable {
         await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             let resumer = OneShotResumer(continuation)
             connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { data, _, isComplete, error in
-                if isComplete || error != nil {
-                    resumer.resume(true)
-                } else if data != nil {
+                // A final read can carry both real data and isComplete at once (the last bytes,
+                // then EOF); that is "served", not "closed without serving" — check data first.
+                if let data, !data.isEmpty {
                     resumer.resume(false)
+                } else if isComplete || error != nil {
+                    resumer.resume(true)
                 }
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { resumer.resume(false) }

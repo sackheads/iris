@@ -319,7 +319,12 @@ private final class Connection: @unchecked Sendable {
             headerBytes += line.utf8.count
             guard headerBytes <= limits.maxHeaderBytes else { return .tooLarge }
             guard let colon = line.firstIndex(of: ":") else { return .malformed }
-            let name = String(line[line.startIndex..<colon]).trimmingCharacters(in: .whitespaces)
+            let rawName = String(line[line.startIndex..<colon])
+            // RFC 7230 §3.2.4: no whitespace is allowed between the field name and the colon.
+            // Two parsers disagreeing on whether "Name : value" names "Name" or "Name " is
+            // exactly the ambiguity request smuggling needs; reject rather than tolerate it.
+            guard rawName == rawName.trimmingCharacters(in: .whitespaces) else { return .malformed }
+            let name = rawName
             let value = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
             let key = name.lowercased()
             // A duplicate header resolving order-dependently (whichever line wins the dictionary
@@ -336,7 +341,10 @@ private final class Connection: @unchecked Sendable {
         bodyStart = range.upperBound
 
         if let contentLengthHeader = parsedHeaders["content-length"]?.value {
-            guard let length = Int(contentLengthHeader), length >= 0 else { return .malformed }
+            // RFC 7230 §3.3.2: the field value is 1*DIGIT — no sign, no leading/trailing noise.
+            // Int("+5") parses to 5 in Swift, which would silently accept what the spec forbids.
+            guard !contentLengthHeader.isEmpty, contentLengthHeader.allSatisfy({ $0.isASCII && $0.isNumber }),
+                  let length = Int(contentLengthHeader) else { return .malformed }
             guard length <= limits.maxContentLength else { return .tooLarge }
             expectedBodyLength = length
         } else if method.uppercased() == "POST" {
