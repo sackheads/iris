@@ -1,9 +1,10 @@
-# Exposing Iris to the Iris Dev Team over MCP — Collaboration Design
+# Iris as an MCP Provider: Dev-Team Collaboration on the Agent Mesh — Design
 
-**Status:** DRAFT for team review. This document decides nothing. It frames what we are
-building, how it differs from the homelab A2A client we already have on the board, and the
-design points where the existing machinery does not fit the new shape cleanly. The decisions
-belong to the people named under each point.
+**Status:** DRAFT for team review. This document decides nothing. It frames what we are building
+— Iris as a *provider* on the agent mesh, with the dev team as the first concrete peer — how the
+provider direction differs from the consumer direction we already have on the board (the homelab
+A2A client), and the design points where the existing machinery does not fit the new shape
+cleanly. The decisions belong to the people named under each point.
 
 **Neighbours (normative — this doc references, it does not re-specify them):**
 - `#964` — Iris MCP service + agent confinement (the service this rides on).
@@ -19,21 +20,32 @@ belong to the people named under each point.
 
 ## 1. What we are trying to accomplish
 
-Expose a running Iris to the Iris dev team (the Claude Code sessions that build and review
-Iris) as a first-class collaborator: **messaging, file exchange, and collaboration as agents.**
-A dev session should be able to ask the running app a question and get an answer, hand it a
-file, and receive one back — over the same inter-agent bus Iris already speaks.
+In agentic development, work increasingly flows **agent to agent**: a session delegates to a
+specialist agent rather than absorbing that specialist's complexity itself. Iris is just another
+agent on that mesh. She both **provides** services — the thing that lives on the user's Mac, with
+their context, memory, local models, and GUI — and **consumes** them. Those are two directions of
+traffic on one bus, not two architectures.
 
-The motivating case is debugging. The attended-GUI debugging sessions (the composer
-input-refusal and dark-text nights, #1055/#1052) burned hours because a human had to relay every
-observation by hand, and the relay itself confounded the measurement (switching apps to report a
-click deactivated the target window, so the next click never reached `mouseDown`). The agent on
-the other side of that relay could have answered directly: "what is your composer's first
+This is already the dominant shape elsewhere. `kube-agents` both calls MCP services from other
+agents *and* exposes its own; a Claude Code, Antigravity, Gemini Enterprise, or a bespoke agent
+(Spotify's `honk`/`zero`, say) can farm GKE work out to `kube-agents` and never touch cluster
+management. Iris's specialty in that division of labour is the user's machine: a caller gets
+Iris's local-first, native-macOS surface without having to be a Mac app. The homelab A2A client
+already on the board is Iris as *consumer*. **This document is Iris as *provider*** — same bus,
+same peer model, the other direction of the same relationship.
+
+The first concrete instance, and the one that proves the surface in-house, is **the Iris dev
+team**: the Claude Code sessions that build and review Iris, able to message the running app, hand
+it a file, and get one back. The motivating case is debugging. The attended-GUI nights (the
+composer input-refusal and dark-text bugs, #1055/#1052) burned hours because a human had to relay
+every observation by hand, and the relay itself confounded the measurement (switching apps to
+report a click deactivated the target window, so the next click never reached `mouseDown`). The
+agent on the other side of that relay could have answered directly: "what is your composer's first
 responder right now?" is a question the running Iris can answer about itself.
 
-That is the shape of the value, and it is worth stating precisely because it sets the scope:
+That is the shape of the value, and it sets the scope:
 
-> **The target agent introspects *itself* and reports.** The dev does not reach into Iris's
+> **The target agent introspects *itself* and reports.** The caller does not reach into Iris's
 > address space. It asks Iris, and Iris — which already holds its own `AppState` — answers, or
 > runs a diagnostic and hands back the result.
 
@@ -44,32 +56,39 @@ coherent while the target mutates under you — and the intelligence we need alr
 agent. Asking Iris to report on itself recovers most of the debugging value at a fraction of the
 cost. This is a deliberate scoping decision, not a deferral.
 
-In the unified access boundary's terms, a dev session is an **`mcpGuest`**: it reaches the
-inter-agent *bus*, not the underlying access. What it can see and do is a profile intersected
-with the `mcpGuest` floor, exactly as any guest.
+The dev team is the first peer because it is trusted and in-house, but nothing in the surface is
+dev-team-specific. Any agent that speaks MCP/A2A could, with the right grant, be a peer; the
+confinement and access-boundary design is precisely what makes that safe to open past the dev team
+later. In the unified access boundary's terms, such a peer is an **`mcpGuest`**: it reaches the
+inter-agent *bus*, not the underlying access — what it can see and do is a profile intersected
+with the `mcpGuest` floor.
 
-## 2. How this differs from "Iris as homelab guest client"
+## 2. Iris as a symmetric mesh peer (what carries over, what must generalize)
 
-We already have a design on the board for Iris talking to the homelab mesh (the A2A client
-plan). It is tempting to read this work as "the same thing again," and the message/part model
-and the object store genuinely are reusable. But the two deployments are mirror images along
-almost every axis, and the differences are exactly where reuse needs generalizing.
+We already have a design on the board for Iris *consuming* mesh services (the homelab A2A client
+plan). It is tempting to read the provider direction as "the same thing again," and the
+message/part model and the object store genuinely are reusable. But a peer that *provides* differs
+from one that *consumes* along axes that drive the design — not because provider and consumer are
+separate systems (they are the same peer, and a real deployment is usually both at once), but
+because traffic direction and trust context change what the machinery has to do. The table below
+is those axes, with the existing homelab-consumer design in one column and the dev-team-provider
+case in the other; most rows generalize beyond those two specific peers.
 
-| Axis | Homelab A2A client (existing) | Dev-team MCP (this doc) |
+| Axis | Iris consuming (homelab A2A, existing) | Iris providing (dev team, this doc) |
 |---|---|---|
-| **Iris's role** | **Client** — calls the homelab gateway, uploads/downloads against *its* object store | **Server** — hosts the loopback MCP endpoint; guests connect to *it* |
-| **Who is exposed** | External homelab peers (Clomp et al.) | Internal Iris dev sessions |
+| **Traffic direction** | Iris calls out — uploads/downloads against the peer's object store | Iris is called — it hosts the loopback MCP endpoint peers connect to |
+| **Peer in the first instance** | External homelab agents (Clomp et al.) | Internal Iris dev sessions (generalizes to any granted agent) |
 | **Trust basis** | Per-frame ed25519 signature (romar#396, #974 H4); relay is not an identity authority | Static Bearer token (Claude Code's MCP client; no OAuth) |
 | **Interaction shape** | Task delegation — a peer delivers a `task`, gets `status-update`/`artifact-update` back | Conversational messaging — `send`/`poll` to a live session, threaded by `contextId` |
-| **Delivery target** | A fresh **isolated, confined** `a2a-remote` session (`Principal.a2aRemote`), off the foreground, that sees no live state | An **existing role-holding session's inbox** (`role:reviewer`, `role:feedback`) — the live agent, which *can* see its own state |
-| **Object store** | Gateway-hosted, `PUT`/`GET /v1/objects/{taskId}/{sha256}` | Iris-hosted — Iris serves the SHA-addressed object endpoint for the first time |
+| **Delivery target** | A fresh **isolated, confined** `a2a-remote` session (`Principal.a2aRemote`) that sees no live state | An **existing role-holding session's inbox** (`role:reviewer`, `role:feedback`) — the live agent, which *can* see its own state |
+| **Object store** | Peer-hosted, `PUT`/`GET /v1/objects/{taskId}/{sha256}` | Iris-hosted — Iris serves the SHA-addressed object endpoint for the first time |
 | **Principal** | `a2aRemote` | `mcpGuest` |
 
 What is genuinely shared — and should stay shared — is the access boundary and the content
 model: one `(transport, issuer, id)` → profile resolution, A2A `Message`/`Part` (`text`/`data`/
 `file`), the `iris-artifact://<sha256>` content-addressed store, the SHA-verify-on-read, and the
 caps. The sibling framing in the unified boundary is correct. The trap is assuming that because
-the *boundary* is shared, the *delivery path* is too — see design point 2.
+the *boundary* is shared, the *delivery path* is too — see design point 3.2.
 
 ## 3. Design points (open — this is the part to rope the players in on)
 
