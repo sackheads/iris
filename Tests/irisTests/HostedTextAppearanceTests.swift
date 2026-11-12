@@ -34,6 +34,8 @@ struct HostedTextAppearanceTests {
     /// Mean brightness of the glyph pixels of a bitmap render. The composer draws no background, so
     /// its glyphs are the fairly opaque pixels; the literal editor draws one, so there the glyphs
     /// are the pixels far from the background's brightness (read at a corner, which holds no text).
+    /// Thresholds below are a midpoint, not a tight bound: a CI runner's glyph anti-aliasing is
+    /// greyer than a desktop Mac's (a light-scheme render read 0.33 there against under 0.2 here).
     private static func glyphBrightness(of tv: NSTextView) throws -> Double {
         tv.layoutSubtreeIfNeeded()
         let rep = try #require(tv.bitmapImageRepForCachingDisplay(in: tv.bounds))
@@ -99,8 +101,8 @@ struct HostedTextAppearanceTests {
         #expect(tv.effectiveAppearance.name == expectedName(combo),
                 "got \(tv.effectiveAppearance.name.rawValue), wanted \(expectedName(combo).rawValue)")
         let brightness = try Self.glyphBrightness(of: tv)
-        if scheme == .dark { #expect(brightness > 0.8, "dark scheme must paint light glyphs, got \(brightness)") }
-        else { #expect(brightness < 0.2, "light scheme must paint dark glyphs, got \(brightness)") }
+        if scheme == .dark { #expect(brightness > 0.5, "dark scheme must paint light glyphs, got \(brightness)") }
+        else { #expect(brightness < 0.5, "light scheme must paint dark glyphs, got \(brightness)") }
     }
 
     @Test("the literal editor on a material resolves plain Aqua/DarkAqua matching the color scheme too",
@@ -114,8 +116,8 @@ struct HostedTextAppearanceTests {
         #expect(tv.effectiveAppearance.name == expectedName(combo),
                 "got \(tv.effectiveAppearance.name.rawValue), wanted \(expectedName(combo).rawValue)")
         let brightness = try Self.glyphBrightness(of: tv)
-        if scheme == .dark { #expect(brightness > 0.8, "dark scheme must paint light glyphs, got \(brightness)") }
-        else { #expect(brightness < 0.2, "light scheme must paint dark glyphs, got \(brightness)") }
+        if scheme == .dark { #expect(brightness > 0.5, "dark scheme must paint light glyphs, got \(brightness)") }
+        else { #expect(brightness < 0.5, "light scheme must paint dark glyphs, got \(brightness)") }
     }
 
     @Test("the material treatment stays: the views above the pinned scroll view still resolve the vibrant variant",
