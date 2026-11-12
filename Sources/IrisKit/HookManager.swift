@@ -39,6 +39,17 @@ struct HookManager {
     ]
 
     var configPathOverride: String?
+
+    /// #1066: a manager that runs nothing, whatever the owner's settings say. An MCP guest's engine
+    /// holds this one, so a guest turn can fire none of the owner's commands and guest-influenced
+    /// text never reaches a hook's stdin.
+    var runsNothing = false
+
+    static var inert: HookManager {
+        var manager = HookManager()
+        manager.runsNothing = true
+        return manager
+    }
     
     private var configPath: String {
         configPathOverride ?? IrisPaths.default.settingsJSON.path
@@ -109,6 +120,7 @@ struct HookManager {
     }
 
     private func fireEvent(eventName: String, targetMatcher: String, payload: Data?, useSandbox: Bool = false) async -> HookDecision {
+        guard !runsNothing else { return .proceed(modifiedData: nil) }
         guard let config = config, let eventHooks = config.hooks[eventName] else {
             return .proceed(modifiedData: nil) // No hooks registered — not counted
         }
