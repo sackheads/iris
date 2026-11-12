@@ -189,7 +189,7 @@ enum MainWindow {
     static func track(_ window: NSWindow?) {
         tracking.track(window)
         // #1055: the composer is where typing lands; this keeps it there for the chat window.
-        ComposerFocusKeeper.shared.attach(window)
+        ComposerFocusKeepers.shared.attach(window)
     }
     static var isVisible: Bool { tracking.isVisible }
     static var isFrontmost: Bool { tracking.isFrontmost }

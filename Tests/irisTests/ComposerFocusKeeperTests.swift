@@ -29,7 +29,7 @@ private final class Rig {
         keeper = ComposerFocusKeeper(center: center,
                                      isWindowKey: { _ in flags.windowKey },
                                      isAppActive: { flags.appActive },
-                                     composer: { composer },
+                                     composer: { _ in composer },
                                      monitorsEvents: false)
         let content = NSView(frame: window.contentRect(forFrameRect: window.frame))
         window.contentView = content
@@ -45,6 +45,14 @@ private final class Rig {
         composerScroll.documentView = composer
         content.addSubview(composerScroll)
     }
+
+    /// The middle of a view, in window coordinates, where a click would land.
+    func point(in view: NSView) -> NSPoint {
+        let frame = view.convert(view.bounds, to: nil)
+        return NSPoint(x: frame.midX, y: frame.midY)
+    }
+    var onComposer: NSPoint { point(in: composerScroll) }
+    var onSidebar: NSPoint { point(in: sidebar.enclosingScrollView!) }
 
     func hold(_ responder: NSResponder) { _ = window.makeFirstResponder(responder) }
     var holdsComposer: Bool { window.firstResponder === composer }
@@ -69,7 +77,7 @@ private func settle() async { try? await Task.sleep(for: .milliseconds(100)) }
 struct ComposerFocusPolicyTests {
     private func reclaim(_ holder: FocusHolder, clicked: Bool = false, key: Bool = true, active: Bool = true,
                          sheet: Bool = false, usable: Bool = true) -> Bool {
-        ComposerFocusPolicy.shouldReclaim(holder: holder, userHasClickedSinceKey: clicked, windowIsKey: key,
+        ComposerFocusPolicy.shouldReclaim(holder: holder, userHasChosenSinceKey: clicked, windowIsKey: key,
                                           appIsActive: active, hasSheetOrModal: sheet, composerUsable: usable)
     }
 
@@ -149,6 +157,41 @@ struct ComposerFocusKeeperTests {
         #expect(rig.window.firstResponder === rig.sidebar)
     }
 
+    @Test("a click ON the composer never switches reclaiming off: a steal-back after it is undone")
+    func composerClickKeepsReclaimingOn() async {
+        let rig = Rig()
+        rig.keeper.attach(rig.window)
+        defer { rig.keeper.detach() }
+        #expect(await eventually { rig.holdsComposer })
+
+        rig.keeper.noteUserClick(in: rig.window, at: rig.onComposer)
+        #expect(!rig.keeper.userHasChosenSinceKey)
+        rig.hold(rig.sidebar)   // the list taking focus back a moment after the click, say
+        #expect(await eventually { rig.holdsComposer })
+    }
+
+    @Test("a click OUTSIDE the composer switches reclaiming off, and a later composer click switches it back on")
+    func outsideClickDisarmsComposerClickRearms() async {
+        let rig = Rig()
+        rig.keeper.attach(rig.window)
+        defer { rig.keeper.detach() }
+        #expect(await eventually { rig.holdsComposer })
+
+        rig.keeper.noteUserClick(in: rig.window, at: rig.onSidebar)
+        #expect(rig.keeper.userHasChosenSinceKey)
+        rig.hold(rig.sidebar)
+        await settle()
+        #expect(rig.window.firstResponder === rig.sidebar, "the person chose the sidebar; it is not fought")
+
+        rig.keeper.noteUserClick(in: rig.window, at: rig.onComposer)
+        #expect(!rig.keeper.userHasChosenSinceKey)
+        // The click chose the composer: it takes focus even though the sidebar held it, with no
+        // other trigger, and a steal-back afterwards is undone too.
+        #expect(await eventually { rig.holdsComposer })
+        rig.hold(rig.sidebar)
+        #expect(await eventually { rig.holdsComposer })
+    }
+
     @Test("a click in some other window does not count as a choice here")
     func otherWindowClickIgnored() async {
         let rig = Rig()
@@ -159,7 +202,7 @@ struct ComposerFocusKeeperTests {
                              styleMask: [.titled], backing: .buffered, defer: true)
         rig.keeper.noteUserClick(in: other)
         rig.keeper.noteUserClick(in: nil)
-        #expect(!rig.keeper.userHasClickedSinceKey)
+        #expect(!rig.keeper.userHasChosenSinceKey)
         #expect(await eventually { rig.holdsComposer })
     }
 
@@ -216,6 +259,49 @@ struct ComposerFocusKeeperTests {
         // A fresh key-window cycle starts over.
         rig.center.post(name: NSWindow.didBecomeKeyNotification, object: rig.window)
         #expect(await eventually { rig.holdsComposer })
+    }
+
+    @Test("Tab away from a non-composer holder is a choice the keeper does not undo; Tab inside the composer is not")
+    func tabAwayIsAChoice() async {
+        let rig = Rig()
+        rig.keeper.attach(rig.window)
+        defer { rig.keeper.detach() }
+        #expect(await eventually { rig.holdsComposer })
+
+        rig.keeper.noteKeyboardNavigation(keyCode: 48, in: rig.window)   // Tab in the composer
+        #expect(!rig.keeper.userHasChosenSinceKey)
+        rig.keeper.noteKeyboardNavigation(keyCode: 36, in: rig.window)   // Return is no navigation
+        #expect(!rig.keeper.userHasChosenSinceKey)
+
+        rig.hold(rig.sidebar)   // full keyboard access moved focus here
+        rig.keeper.noteKeyboardNavigation(keyCode: 48, in: nil)           // some other window's key
+        #expect(!rig.keeper.userHasChosenSinceKey)
+        rig.keeper.noteKeyboardNavigation(keyCode: 48, in: rig.window)
+        #expect(rig.keeper.userHasChosenSinceKey)
+        await settle()
+        #expect(rig.window.firstResponder === rig.sidebar, "a keyboard choice is not undone")
+    }
+
+    @Test("exactly maxReclaimsPerCycle reclaims happen, the next one gives up, and it gives up only once")
+    func boundIsExact() {
+        let rig = Rig()
+        rig.flags.windowKey = false   // nothing reacts while the rig is set up
+        rig.keeper.attach(rig.window)
+        defer { rig.keeper.detach() }
+        rig.flags.windowKey = true
+        // No awaits below: the KVO-deferred reclaims queue up and run after the assertions.
+        for taken in 1...ComposerFocusKeeper.maxReclaimsPerCycle {
+            rig.hold(rig.sidebar)
+            rig.keeper.reclaimIfNeeded(.responderChanged)
+            #expect(rig.holdsComposer, "reclaim \(taken) of \(ComposerFocusKeeper.maxReclaimsPerCycle) happens")
+        }
+        #expect(rig.keeper.reclaimsThisCycle == ComposerFocusKeeper.maxReclaimsPerCycle)
+        rig.hold(rig.sidebar)
+        rig.keeper.reclaimIfNeeded(.responderChanged)
+        #expect(rig.window.firstResponder === rig.sidebar, "the next one gives up")
+        #expect(rig.keeper.reclaimsThisCycle == ComposerFocusKeeper.maxReclaimsPerCycle + 1)
+        rig.keeper.reclaimIfNeeded(.responderChanged)
+        #expect(rig.keeper.reclaimsThisCycle == ComposerFocusKeeper.maxReclaimsPerCycle + 1, "gave up once, not again")
     }
 
     @Test("a field someone is typing in, and a transcript they clicked, are left alone")
@@ -294,6 +380,63 @@ struct ComposerFocusKeeperTests {
     }
 }
 
+@MainActor
+@Suite("ComposerFocusKeepers", .timeLimit(.minutes(1)))
+struct ComposerFocusKeepersTests {
+    private func windowWithComposer() -> (NSWindow, NSTextView) {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: true)
+        let composer = NSTextView(frame: NSRect(x: 0, y: 0, width: 200, height: 40))
+        window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+        window.contentView?.addSubview(composer)
+        return (window, composer)
+    }
+
+    private func registry() -> ComposerFocusKeepers {
+        ComposerFocusKeepers(makeKeeper: {
+            ComposerFocusKeeper(center: NotificationCenter(), isWindowKey: { _ in false }, isAppActive: { false },
+                                monitorsEvents: false)
+        })
+    }
+
+    @Test("each chat window gets its own keeper, once, and a second attach changes nothing")
+    func oneKeeperPerWindow() {
+        let reg = registry()
+        let (a, _) = windowWithComposer()
+        let (b, _) = windowWithComposer()
+        reg.attach(a)
+        let first = reg.keeper(for: a)
+        reg.attach(a)
+        #expect(reg.count == 1)
+        #expect(reg.keeper(for: a) === first, "a second attach keeps the keeper it already made")
+        reg.attach(b)
+        #expect(reg.count == 2)
+        #expect(reg.keeper(for: a) !== reg.keeper(for: b))
+        reg.attach(nil)
+        #expect(reg.count == 2)
+        reg.keeper(for: a)?.detach()
+        reg.keeper(for: b)?.detach()
+    }
+
+    @Test("a window's close drops its keeper and leaves the other window's alone")
+    func closeDropsOnlyThatKeeper() {
+        let center = NotificationCenter()
+        let reg = ComposerFocusKeepers(makeKeeper: {
+            ComposerFocusKeeper(center: center, isWindowKey: { _ in false }, isAppActive: { false }, monitorsEvents: false)
+        })
+        let (a, _) = windowWithComposer()
+        let (b, _) = windowWithComposer()
+        reg.attach(a)
+        reg.attach(b)
+        center.post(name: NSWindow.willCloseNotification, object: a)
+        // The observer runs on the main queue.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        #expect(reg.keeper(for: a) == nil)
+        #expect(reg.keeper(for: b) != nil)
+        reg.keeper(for: b)?.detach()
+    }
+}
+
 /// Call-site wiring, in the repo's source-scan style: nothing else would notice one of these
 /// lines being deleted, and the keeper does nothing until they run.
 @Suite("ComposerFocusKeeper wiring")
@@ -306,8 +449,8 @@ struct ComposerFocusKeeperWiringTests {
 
     @Test("MainWindow.track attaches the keeper, the composer reports joining a window, the transcript reports its focus")
     func callSitesExist() throws {
-        #expect(try source("StatusItem.swift").contains("ComposerFocusKeeper.shared.attach(window)"))
-        #expect(try source("ComposerTextView.swift").contains("ComposerFocusKeeper.shared.composerDidAttach()"))
-        #expect(try source("TranscriptFocusAnchor.swift").contains("ComposerFocusKeeper.shared.transcriptTookFocus(table)"))
+        #expect(try source("StatusItem.swift").contains("ComposerFocusKeepers.shared.attach(window)"))
+        #expect(try source("ComposerTextView.swift").contains("ComposerFocusKeepers.shared.composerDidAttach(self)"))
+        #expect(try source("TranscriptFocusAnchor.swift").contains("ComposerFocusKeepers.shared.transcriptTookFocus(table)"))
     }
 }

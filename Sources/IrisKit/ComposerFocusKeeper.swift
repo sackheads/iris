@@ -30,9 +30,9 @@ enum ComposerFocusPolicy {
         case windowBecameKey, appBecameActive, composerAttached, responderChanged, typedKey, clickedComposer, gaveUp
     }
 
-    static func shouldReclaim(holder: FocusHolder, userHasClickedSinceKey: Bool, windowIsKey: Bool,
+    static func shouldReclaim(holder: FocusHolder, userHasChosenSinceKey: Bool, windowIsKey: Bool,
                               appIsActive: Bool, hasSheetOrModal: Bool, composerUsable: Bool) -> Bool {
-        guard windowIsKey, appIsActive, !hasSheetOrModal, composerUsable, !userHasClickedSinceKey else { return false }
+        guard windowIsKey, appIsActive, !hasSheetOrModal, composerUsable, !userHasChosenSinceKey else { return false }
         return holder == .other
     }
 
@@ -55,20 +55,19 @@ enum ComposerFocusPolicy {
     }
 }
 
-/// Watches the main chat window and keeps the composer where typing lands (#1055). One per app;
-/// `MainWindow.track` attaches it, and the composer tells it when it joins the window.
+/// Watches one chat window and keeps its composer where typing lands (#1055). One per chat
+/// window, held by `ComposerFocusKeepers`; `MainWindow.track` attaches it, and the composer tells
+/// it when it joins the window.
 ///
 /// It reclaims on the window becoming key, the app becoming active, the composer joining the
-/// window, and any later change of first responder, all until the person's first click in the
-/// window. It also redirects a typed key from a holder nobody chose (see `ComposerFocusPolicy`).
+/// window, and any later change of first responder, all until the person makes a choice in the
+/// window: a click outside the composer, or a Tab away from it. It also redirects a typed key from a holder nobody chose (see `ComposerFocusPolicy`).
 /// Both are recorded in `DiagnosticEventRing` so a morning's attended pass can read what it did.
 @MainActor
 final class ComposerFocusKeeper {
-    static let shared = ComposerFocusKeeper()
-
     private weak var window: NSWindow?
     private weak var deliberateTranscriptTable: NSView?
-    private(set) var userHasClickedSinceKey = false
+    private(set) var userHasChosenSinceKey = false
     /// How many times the composer has been put back since the window last became key or the app
     /// last became active. Bounded: if something keeps taking focus away again (SwiftUI restoring
     /// its own choice, say), reclaiming forever would be a fight with no end, so it stops and says so.
@@ -78,7 +77,10 @@ final class ComposerFocusKeeper {
     private let center: NotificationCenter
     private let isWindowKey: @MainActor (NSWindow) -> Bool
     private let isAppActive: @MainActor () -> Bool
-    private let composerProvider: @MainActor () -> NSTextView?
+    private let composerOverride: (@MainActor (NSWindow) -> NSTextView?)?
+    private weak var cachedComposer: NSTextView?
+    /// Called once when the window closes, so the registry can drop this keeper.
+    var onWindowClose: (@MainActor () -> Void)?
     private let monitorsEvents: Bool
 
     private var observers: [NSObjectProtocol] = []
@@ -88,12 +90,12 @@ final class ComposerFocusKeeper {
     init(center: NotificationCenter = .default,
          isWindowKey: @escaping @MainActor (NSWindow) -> Bool = { $0.isKeyWindow },
          isAppActive: @escaping @MainActor () -> Bool = { NSApp.isActive },
-         composer: @escaping @MainActor () -> NSTextView? = { ComposerFocus.current },
+         composer: (@MainActor (NSWindow) -> NSTextView?)? = nil,
          monitorsEvents: Bool = true) {
         self.center = center
         self.isWindowKey = isWindowKey
         self.isAppActive = isAppActive
-        self.composerProvider = composer
+        self.composerOverride = composer
         self.monitorsEvents = monitorsEvents
     }
 
@@ -101,7 +103,7 @@ final class ComposerFocusKeeper {
         guard let window, window !== self.window else { return }
         detach()
         self.window = window
-        userHasClickedSinceKey = false
+        userHasChosenSinceKey = false
         reclaimsThisCycle = 0
         observers = [
             center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) { [weak self] _ in
@@ -109,6 +111,12 @@ final class ComposerFocusKeeper {
             },
             center.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.appBecameActive() }
+            },
+            center.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.detach()
+                    self?.onWindowClose?()
+                }
             },
         ]
         responderObservation = window.observe(\.firstResponder, options: [.new]) { [weak self] _, _ in
@@ -121,8 +129,10 @@ final class ComposerFocusKeeper {
                 matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown, .keyDown]) { [weak self] event in
                 MainActor.assumeIsolated {
                     switch event.type {
-                    case .keyDown: self?.handleKeyDown(event)
-                    default: self?.noteUserClick(in: event.window)
+                    case .keyDown:
+                        self?.noteKeyboardNavigation(keyCode: event.keyCode, in: event.window)
+                        self?.handleKeyDown(event)
+                    default: self?.noteUserClick(in: event.window, at: event.locationInWindow)
                     }
                 }
                 return event
@@ -141,26 +151,58 @@ final class ComposerFocusKeeper {
         window = nil
     }
 
-    /// The composer joined a window: if it is ours, and nobody has chosen a focus yet, take it.
-    func composerDidAttach() {
+    /// The composer joined this keeper's window: remember it, and if nobody has chosen a focus
+    /// yet, take it.
+    func composerDidAttach(_ composer: NSTextView) {
+        cachedComposer = composer
         DispatchQueue.main.async { MainActor.assumeIsolated { self.reclaimIfNeeded(.composerAttached) } }
     }
 
     /// A click in the transcript took the table's focus on purpose (`TranscriptFocusAnchor`).
     func transcriptTookFocus(_ table: NSView) { deliberateTranscriptTable = table }
 
-    func noteUserClick(in clickedWindow: NSWindow?) {
-        if clickedWindow != nil, clickedWindow === window { userHasClickedSinceKey = true }
+    /// A mouse-down in the chat window. A click **outside** the composer is the person choosing
+    /// somewhere else, so the keeper stops reclaiming. A click **on** the composer is the person
+    /// choosing the composer: it must never switch reclaiming off (and clears an earlier outside
+    /// click), because if something takes focus back a moment after that click, putting it back is
+    /// exactly what they want. `point` is in window coordinates; nil counts as outside.
+    func noteUserClick(in clickedWindow: NSWindow?, at point: NSPoint? = nil) {
+        guard let window, clickedWindow === window else { return }
+        let onComposer = point.map { clickLandsOnComposer($0) } ?? false
+        userHasChosenSinceKey = !onComposer
+        guard let composer = currentComposer(in: window) else { return }
+        trace("click(onComposer=\(onComposer))", window: window, composer: composer,
+              holder: classify(window.firstResponder, composer: composer, in: window))
+        // The click chose the composer: if it did not end up first responder (the click's own
+        // focus change lost to something else), put it there once the click has been handled.
+        if onComposer {
+            DispatchQueue.main.async { MainActor.assumeIsolated { self.reclaimIfNeeded(.clickedComposer) } }
+        }
+    }
+
+    /// Tab, Shift-Tab and Ctrl-Tab pressed while something other than the composer has focus move
+    /// focus on purpose (full keyboard access, the key-view loop), which is a choice like a click:
+    /// the keeper must not undo it. Pressed in the composer, Tab does not leave it.
+    func noteKeyboardNavigation(keyCode: UInt16, in eventWindow: NSWindow?) {
+        guard keyCode == 48, let window, eventWindow === window, let composer = currentComposer(in: window),
+              classify(window.firstResponder, composer: composer, in: window) != .composer else { return }
+        userHasChosenSinceKey = true
+    }
+
+    private func clickLandsOnComposer(_ point: NSPoint) -> Bool {
+        guard let window, let composer = currentComposer(in: window) else { return false }
+        let view: NSView = composer.enclosingScrollView ?? composer
+        return view.convert(view.bounds, to: nil).contains(point)
     }
 
     private func windowBecameKey() {
-        userHasClickedSinceKey = false
+        userHasChosenSinceKey = false
         reclaimsThisCycle = 0
         DispatchQueue.main.async { MainActor.assumeIsolated { self.reclaimIfNeeded(.windowBecameKey) } }
     }
 
     private func appBecameActive() {
-        userHasClickedSinceKey = false
+        userHasChosenSinceKey = false
         reclaimsThisCycle = 0
         DispatchQueue.main.async { MainActor.assumeIsolated { self.reclaimIfNeeded(.appBecameActive) } }
     }
@@ -172,7 +214,7 @@ final class ComposerFocusKeeper {
         let holder = classify(window.firstResponder, composer: composer, in: window)
         defer { if holder != .composer { trace("reclaim(\(reason.rawValue))", window: window, composer: composer, holder: holder) } }
         guard ComposerFocusPolicy.shouldReclaim(
-            holder: holder, userHasClickedSinceKey: userHasClickedSinceKey, windowIsKey: isWindowKey(window),
+            holder: holder, userHasChosenSinceKey: userHasChosenSinceKey, windowIsKey: isWindowKey(window),
             appIsActive: isAppActive(), hasSheetOrModal: hasSheetOrModal(window), composerUsable: true) else { return }
         guard reclaimsThisCycle < Self.maxReclaimsPerCycle else {
             if reclaimsThisCycle == Self.maxReclaimsPerCycle {
@@ -221,7 +263,7 @@ final class ComposerFocusKeeper {
         let responder = window.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
         let outcome = took.map { $0 ? " took=yes" : " took=no" } ?? ""
         FileHandle.standardError.write(Data(
-            "[FOCUS] \(what) holder=\(holder) responder=\(responder) key=\(isWindowKey(window)) active=\(isAppActive()) clicked=\(userHasClickedSinceKey) cycle=\(reclaimsThisCycle) \(Self.paint(of: composer))\(outcome)\n".utf8))
+            "[FOCUS] \(what) holder=\(holder) responder=\(responder) key=\(isWindowKey(window)) active=\(isAppActive()) clicked=\(userHasChosenSinceKey) cycle=\(reclaimsThisCycle) \(Self.paint(of: composer))\(outcome)\n".utf8))
     }
 
     /// What the composer's glyphs would be drawn with: its resolved appearance name and the
@@ -240,8 +282,23 @@ final class ComposerFocusKeeper {
 
     // MARK: - Reading the window
 
+    /// This window's composer: the injected one in a test, else the one it reported on joining,
+    /// else the first `KeyCatchingTextView` in the window's view tree.
+    private func currentComposer(in window: NSWindow) -> NSTextView? {
+        if let composerOverride { return composerOverride(window) }
+        if let cached = cachedComposer, cached.window === window { return cached }
+        cachedComposer = window.contentView.flatMap(Self.findComposer)
+        return cachedComposer
+    }
+
+    private static func findComposer(in view: NSView) -> NSTextView? {
+        if let composer = view as? KeyCatchingTextView { return composer }
+        for sub in view.subviews { if let found = findComposer(in: sub) { return found } }
+        return nil
+    }
+
     private func usableComposer(in window: NSWindow) -> NSTextView? {
-        guard let composer = composerProvider(), composer.window === window,
+        guard let composer = currentComposer(in: window), composer.window === window,
               composer.isEditable, !composer.isHiddenOrHasHiddenAncestor else { return nil }
         return composer
     }
@@ -260,4 +317,43 @@ final class ComposerFocusKeeper {
         if responder is NSText { return .otherTextInput }
         return .other
     }
+}
+
+/// One `ComposerFocusKeeper` per chat window (`MainWindow` tracks several), created when the window
+/// is first tracked and dropped when it closes. An instance so a test builds its own; the app has
+/// one, `shared`.
+@MainActor
+final class ComposerFocusKeepers {
+    static let shared = ComposerFocusKeepers()
+
+    private let makeKeeper: @MainActor () -> ComposerFocusKeeper
+    private var keepers: [ObjectIdentifier: ComposerFocusKeeper] = [:]
+
+    init(makeKeeper: @escaping @MainActor () -> ComposerFocusKeeper = { ComposerFocusKeeper() }) {
+        self.makeKeeper = makeKeeper
+    }
+
+    var count: Int { keepers.count }
+
+    func attach(_ window: NSWindow?) {
+        guard let window else { return }
+        let id = ObjectIdentifier(window)
+        guard keepers[id] == nil else { return }
+        let keeper = makeKeeper()
+        keeper.onWindowClose = { [weak self] in self?.keepers[id] = nil }
+        keepers[id] = keeper
+        keeper.attach(window)
+    }
+
+    func composerDidAttach(_ composer: NSTextView) {
+        guard let window = composer.window else { return }
+        keepers[ObjectIdentifier(window)]?.composerDidAttach(composer)
+    }
+
+    func transcriptTookFocus(_ table: NSView) {
+        guard let window = table.window else { return }
+        keepers[ObjectIdentifier(window)]?.transcriptTookFocus(table)
+    }
+
+    func keeper(for window: NSWindow) -> ComposerFocusKeeper? { keepers[ObjectIdentifier(window)] }
 }

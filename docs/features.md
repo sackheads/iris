@@ -241,7 +241,7 @@ Iris runs in the background and can be summoned instantly over any other app by 
 
 ## Where typing lands
 
-The message composer is the default place to type. Until you click somewhere in the chat window, Iris puts keyboard focus in the composer when the window opens, comes back to the front, or has focus taken by the sidebar (#1055). Once you click, focus stays where you put it, except that a printable key typed while the sidebar list (or nothing in particular) has focus moves to the composer and types there. A text field you are typing in, and a transcript you clicked to select or copy from, are left alone. A dev build writes `[FOCUS]` lines about this to stderr.
+The message composer is the default place to type. Until you make a choice in a chat window, Iris puts keyboard focus in the composer when the window opens, comes back to the front, or has focus taken by the sidebar (#1055). A choice is a click outside the composer, or Tab away from it with something else focused; a click on the composer itself never counts, and the composer wins focus back if something takes it right after. Once you have chosen, focus stays where you put it, except that a printable key typed while the sidebar list (or nothing in particular) has focus moves to the composer and types there, so the sidebar's type-to-select does not work. A text field you are typing in, a transcript you clicked to select or copy from, and any other control you moved focus to are left alone. Each chat window is handled on its own. A dev build writes `[FOCUS]` lines about this to stderr.
 
 ## Slash commands
 
