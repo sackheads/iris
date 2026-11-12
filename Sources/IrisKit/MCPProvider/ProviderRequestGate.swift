@@ -57,6 +57,14 @@ actor ProviderRequestGate {
         return .admitted(clientId: clientId)
     }
 
+    /// Drops `clientId`'s bucket, so a revoked id does not hold rate-limit state across a later
+    /// re-issue of the same string, and so `buckets` does not grow for every client that ever
+    /// existed. Not itself a budget decision — `revoke` calls it alongside the mailbox/store
+    /// purges, never in place of `registry.revokeToken`.
+    func purge(clientId: String) {
+        buckets.removeValue(forKey: clientId)
+    }
+
     private static func seconds(_ duration: Duration) -> Double {
         let (seconds, attoseconds) = duration.components
         return Double(seconds) + Double(attoseconds) / 1e18

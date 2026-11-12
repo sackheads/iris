@@ -26,7 +26,8 @@ private struct Fixture {
     let server: IrisMCPProviderServer
     let doorCallCounter: CallCounter
 
-    static func build(doorGateCapacity: Int = 1000, mailboxGateCapacity: Int = 1000) -> Fixture {
+    static func build(doorGateCapacity: Int = 1000, mailboxGateCapacity: Int = 1000,
+                      serverConstructedHook: (@Sendable (Server, StatelessHTTPServerTransport) -> Void)? = nil) -> Fixture {
         let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
         let registry = ProviderTokenRegistry(keychain: keychain)
         let mailbox = ProviderMailbox(registry: registry)
@@ -47,7 +48,8 @@ private struct Fixture {
         let doorGate = ProviderRequestGate(registry: registry, capacity: doorGateCapacity, refillInterval: .seconds(60))
         let mailboxGate = ProviderRequestGate(registry: registry, capacity: mailboxGateCapacity, refillInterval: .seconds(60))
         let server = IrisMCPProviderServer(tokenRegistry: registry, mailbox: mailbox, artifactStore: artifactStore,
-                                           door: door, doorGate: doorGate, mailboxGate: mailboxGate, port: 0)
+                                           door: door, doorGate: doorGate, mailboxGate: mailboxGate, port: 0,
+                                           serverConstructedHook: serverConstructedHook)
         return Fixture(registry: registry, mailbox: mailbox, artifactStore: artifactStore,
                        doorGate: doorGate, mailboxGate: mailboxGate, server: server, doorCallCounter: counter)
     }
@@ -69,10 +71,12 @@ private func rpcBody(method: String, id: Int? = 1, params: [String: Any]? = nil)
     return try! JSONSerialization.data(withJSONObject: obj)
 }
 
-private func httpRequest(body: Data, token: String?) -> HTTPRequest {
+private func httpRequest(body: Data, token: String?, method: String = "POST", extraHeaders: [String: String] = [:], omitHeaders: Set<String> = []) -> HTTPRequest {
     var headers = ["Content-Type": "application/json", "Accept": "application/json"]
+    for name in omitHeaders { headers.removeValue(forKey: name) }
+    for (name, value) in extraHeaders { headers[name] = value }
     if let token { headers["Authorization"] = "Bearer \(token)" }
-    return HTTPRequest(method: "POST", headers: headers, body: body, path: "/")
+    return HTTPRequest(method: method, headers: headers, body: body, path: "/")
 }
 
 private func isErrorResponse(_ response: HTTPResponse) -> Bool {
@@ -292,12 +296,11 @@ struct IrisMCPProviderServerTests {
 
     @Test("the per-request Server and transport are stopped after handleRequest returns, on every request")
     func perRequestServerIsTornDown() async throws {
-        let fixture = Fixture.build()
+        let box = TransportBox()
+        let fixture = Fixture.build(serverConstructedHook: { _, transport in box.transport = transport })
         let token = try fixture.registry.issueToken(forClientId: "a")
-        defer { IrisMCPProviderServer.testOnlyServerConstructedHook = nil }
         for _ in 0..<5 {
-            let box = TransportBox()
-            IrisMCPProviderServer.testOnlyServerConstructedHook = { _, transport in box.transport = transport }
+            box.transport = nil
             let response = await fixture.server.handleAuthenticated(httpRequest(body: rpcBody(method: "ping"), token: token))
             #expect(!isErrorResponse(response))
             let transport = try #require(box.transport)
@@ -307,6 +310,42 @@ struct IrisMCPProviderServerTests {
             let postTeardown = await transport.handleRequest(httpRequest(body: rpcBody(method: "ping"), token: token))
             #expect(postTeardown.statusCode == 404)
         }
+    }
+
+    @Test("a request that exceeds requestDeadline is torn down at once by the cancellation handler, not whenever the abandoned operation gets around to it")
+    func timedOutRequestTornDownPromptly() async throws {
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
+        let registry = ProviderTokenRegistry(keychain: keychain)
+        let mailbox = ProviderMailbox(registry: registry)
+        let artifactStore = ProviderArtifactStore(root: temporaryTestDirectory(), isRegistered: { registry.isRegistered(clientId: $0) })
+        // A door whose MainActor read blocks far longer than requestDeadline, so
+        // handleAuthenticated's own timeout fires first; the door's own internal race (5s here,
+        // well above requestDeadline) is what eventually lets the blocked reader return, in the
+        // background, long after the 504 was already sent.
+        let door = SelfReportDoor(
+            windowOwnerReader: { Thread.sleep(forTimeInterval: 0.3); return "slow" },
+            responderClassReader: { "NSView" },
+            composerStateReader: { .init(isPresent: false, isFirstResponder: false, isEmpty: true) },
+            turnStateReader: { .init(any: false, count: 0) },
+            activationReader: { (true, true) },
+            eventRingReader: { [] },
+            mainActorTimeout: .seconds(5))
+        let doorGate = ProviderRequestGate(registry: registry, capacity: 1000, refillInterval: .seconds(60))
+        let mailboxGate = ProviderRequestGate(registry: registry, capacity: 1000, refillInterval: .seconds(60))
+        let box = TransportBox()
+        let server = IrisMCPProviderServer(tokenRegistry: registry, mailbox: mailbox, artifactStore: artifactStore,
+                                           door: door, doorGate: doorGate, mailboxGate: mailboxGate, port: 0,
+                                           requestDeadline: .milliseconds(20),
+                                           serverConstructedHook: { _, transport in box.transport = transport })
+        let token = try registry.issueToken(forClientId: "a")
+
+        let response = await server.handleAuthenticated(
+            httpRequest(body: rpcBody(method: "tools/call", params: ["name": "iris_window_owner"]), token: token))
+        #expect(response.statusCode == 504)
+
+        let transport = try #require(box.transport)
+        let postTeardown = await transport.handleRequest(httpRequest(body: rpcBody(method: "ping"), token: token))
+        #expect(postTeardown.statusCode == 404, "the transport must already be torn down, not merely eventually torn down once the abandoned operation finishes")
     }
 
     @Test("iris_discover over a real loopback socket returns Iris's own identity, never a client roster")
@@ -338,6 +377,26 @@ struct IrisMCPProviderServerTests {
         let bodyString = String(data: data, encoding: .utf8) ?? ""
         #expect(!bodyString.contains("\"a\""))
         #expect(!bodyString.contains("\"b\""))
+    }
+
+    @Test("over a real loopback socket, a bad token gets 401 from preBodyCheck and never reaches the door")
+    func realSocketBadTokenNeverReachesHandler() async throws {
+        let fixture = Fixture.build()
+        try await fixture.server.start()
+        defer { Task { await fixture.server.stop() } }
+        let port = try #require(fixture.server.boundPort)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer not-a-real-token", forHTTPHeaderField: "Authorization")
+        request.httpBody = rpcBody(method: "tools/call", params: ["name": "iris_window_owner"])
+
+        let (_, urlResponse) = try await URLSession.shared.data(for: request)
+        let httpURLResponse = try #require(urlResponse as? HTTPURLResponse)
+        #expect(httpURLResponse.statusCode == 401)
+        #expect(fixture.doorCallCounter.value == 0)
     }
 
     @Test("sending a file reference authorizes Iris, but nobody else")
@@ -380,6 +439,89 @@ struct IrisMCPProviderServerTests {
         _ = tokenA
     }
 
+    @Test("the caller's real method and headers reach the SDK's own validation pipeline, not a fixed stand-in")
+    func realRequestReachesSDKValidation() async throws {
+        let fixture = Fixture.build()
+        let token = try fixture.registry.issueToken(forClientId: "a")
+
+        let wrongMethod = await fixture.server.handleAuthenticated(
+            httpRequest(body: rpcBody(method: "ping"), token: token, method: "PUT"))
+        #expect(wrongMethod.statusCode == 405)
+
+        let noAccept = await fixture.server.handleAuthenticated(
+            httpRequest(body: rpcBody(method: "ping"), token: token, omitHeaders: ["Accept"]))
+        #expect(isErrorResponse(noAccept))
+
+        let noContentType = await fixture.server.handleAuthenticated(
+            httpRequest(body: rpcBody(method: "ping"), token: token, omitHeaders: ["Content-Type"]))
+        #expect(isErrorResponse(noContentType))
+    }
+
+    @Test("iris_send refuses a malformed shape outright rather than silently defaulting it")
+    func sendRejectsMalformedShape() async throws {
+        let fixture = Fixture.build()
+        let token = try fixture.registry.issueToken(forClientId: "a")
+
+        let nonStringText = await fixture.server.handleAuthenticated(
+            httpRequest(body: rpcBody(method: "tools/call", params: ["name": "iris_send", "arguments": ["text": 5]]), token: token))
+        var body = try #require(decodedBody(nonStringText))
+        var result = try #require(body["result"] as? [String: Any])
+        #expect(result["isError"] as? Bool == true)
+
+        let nonArrayFileRefs = await fixture.server.handleAuthenticated(
+            httpRequest(body: rpcBody(method: "tools/call", params: ["name": "iris_send", "arguments": ["text": "x", "fileRefs": "not-an-array"]]), token: token))
+        body = try #require(decodedBody(nonArrayFileRefs))
+        result = try #require(body["result"] as? [String: Any])
+        #expect(result["isError"] as? Bool == true)
+
+        let mixedFileRefs = await fixture.server.handleAuthenticated(
+            httpRequest(body: rpcBody(method: "tools/call", params: ["name": "iris_send", "arguments": ["text": "x", "fileRefs": [String(repeating: "a", count: 64), 5]]]), token: token))
+        body = try #require(decodedBody(mixedFileRefs))
+        result = try #require(body["result"] as? [String: Any])
+        #expect(result["isError"] as? Bool == true)
+
+        // Nothing above should have reached mailbox.send: a real send still gets sequence 1.
+        let realSend = try await fixture.mailbox.send(from: "a", text: "first real one", fileRefs: [])
+        #expect(realSend.sequence == 1)
+    }
+
+    @Test("iris_send rejects an oversized fileRefs list, never delivering the message")
+    func sendRejectsTooManyFileRefs() async throws {
+        let fixture = Fixture.build()
+        let token = try fixture.registry.issueToken(forClientId: "a")
+        let tooMany = Array(repeating: String(repeating: "a", count: 64), count: ProviderMailbox.maxFileRefsPerMessage + 1)
+
+        let response = await fixture.server.handleAuthenticated(
+            httpRequest(body: rpcBody(method: "tools/call", params: ["name": "iris_send", "arguments": ["text": "x", "fileRefs": tooMany]]), token: token))
+        let body = try #require(decodedBody(response))
+        let result = try #require(body["result"] as? [String: Any])
+        #expect(result["isError"] as? Bool == true)
+
+        // This proves the end state (refused, nothing sent), not that the count check runs
+        // before the per-ref preflight — that ordering (cheap count check before N actor hops)
+        // is verified by reading the code, not by this black-box test: a held hash repeated here
+        // would preflight clean regardless of which check runs first, and `mailbox.send`'s own
+        // count guard would still catch it afterward either way.
+        let realSend = try await fixture.mailbox.send(from: "a", text: "first real one", fileRefs: [])
+        #expect(realSend.sequence == 1)
+    }
+
+    @Test("a send refused at preflight never reaches mailbox.send at all, not send-then-retract")
+    func sendPreflightNeverCallsMailboxSend() async throws {
+        let fixture = Fixture.build()
+        let tokenC = try fixture.registry.issueToken(forClientId: "c")
+        let unheldHash = String(repeating: "a", count: 64)
+
+        _ = await fixture.server.handleAuthenticated(
+            httpRequest(body: rpcBody(method: "tools/call", params: ["name": "iris_send", "arguments": ["text": "x", "fileRefs": [unheldHash]]]), token: tokenC))
+
+        // ProviderMailbox.send's sequence counter is monotonic and never rewound by retract — if
+        // the bad-ref attempt above had reached mailbox.send at all (then been retracted), this
+        // next, valid send would get sequence 2, not 1.
+        let validMessage = try await fixture.mailbox.send(from: "c", text: "first real message", fileRefs: [])
+        #expect(validMessage.sequence == 1)
+    }
+
     @Test("a send with one valid and one invalid fileRef delivers nothing, not a partially-authorized message")
     func sendWithOneBadRefDeliversNoMessage() async throws {
         let fixture = Fixture.build()
@@ -413,6 +555,27 @@ struct IrisMCPProviderServerTests {
         #expect(bStatus.pendingCount == 0)
         let cStatus = await fixture.mailbox.status(for: "c")
         #expect(cStatus.pendingCount == 0)
+    }
+
+    @Test("iris_poll ignores a clientId tool argument; it always polls the resolved token's own identity")
+    func pollArgumentCannotOverrideResolvedIdentity() async throws {
+        let fixture = Fixture.build()
+        let tokenA = try fixture.registry.issueToken(forClientId: "a")
+        _ = try fixture.registry.issueToken(forClientId: "b")
+        _ = try await fixture.mailbox.deliverReply(to: "b", text: "for b only", fileRefs: [])
+
+        let response = await fixture.server.handleAuthenticated(
+            httpRequest(body: rpcBody(method: "tools/call", params: ["name": "iris_poll", "arguments": ["clientId": "b"]]), token: tokenA))
+        #expect(!isErrorResponse(response))
+        let result = (decodedBody(response)?["result"] as? [String: Any])
+        let structured = result?["structuredContent"]
+        // "a" has nothing pending; a poll that honored the "clientId": "b" argument would return
+        // b's message instead of an empty list.
+        if let array = structured as? [[String: Any]] {
+            #expect(array.isEmpty)
+        } else {
+            Issue.record("expected structuredContent to be an array, got \(String(describing: structured))")
+        }
     }
 
     @Test("ProviderMailbox.deliverReply is never called from production code outside ProviderMailbox.swift itself")
