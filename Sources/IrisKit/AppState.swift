@@ -625,6 +625,8 @@ class AppState {
     var permissions: PermissionManager = .shared
     /// Where agent profiles are read from (#465). Injected so a test reads only its own.
     @ObservationIgnored var agentProfiles = AgentProfileStore()
+    /// The manager `createNewConversation` fires SessionStart through; a test injects its own.
+    @ObservationIgnored var sessionStartHooks = HookManager.shared
     /// What each profiled conversation's file read last time, so a change of state is said once,
     /// not on every turn. Transient: a launch says it again.
     @ObservationIgnored private var agentProfileState: [UUID: String] = [:]
@@ -1941,8 +1943,12 @@ class AppState {
         // of their own: never a subagent's thread or a job run.
         if let agentProfile, !isSubagent, !isBackground, !isGuest { applyAgentProfile(agentProfile, to: newConv.id) }
 
-        Task {
-            _ = await HookManager.shared.fireSessionStart(conversationId: newConv.id)
+        // #1066: not for a guest, whose session is not the owner's to hook.
+        if !isGuest {
+            let hooks = sessionStartHooks
+            Task {
+                _ = await hooks.fireSessionStart(conversationId: newConv.id)
+            }
         }
         return newConv.id
     }
@@ -4490,6 +4496,12 @@ class AppState {
                          graderReadWalked: Bool = false, offersAlwaysAllow: Bool = true,
                          offersConversationAllow: Bool = false,
                          beforeToolFired: Bool = false) async -> ApprovalSource? {
+        // #1066: a guest's session is invisible to the person, so a dialog for it would be
+        // unattributable. Nothing in its two-tool floor needs an approval; if the floor ever grows,
+        // this keeps the answer no, with no UI and no recorded blocked call.
+        if let id = conversationId, conversations.first(where: { $0.id == id })?.isGuest == true {
+            return nil
+        }
         // No pre-granted-approval branch here, deliberately (#187 R21, 2026-09-21): a call a
         // person clicked "Approve and run" on is dispatched by `IrisEngine.executeApprovedCall`,
         // which runs the tool through the hook layer directly and never enters this function. The

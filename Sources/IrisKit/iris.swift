@@ -621,7 +621,9 @@ actor IrisEngine {
         self.declareStateGatedTools = declareStateGatedTools
         self.stickyToolsEnabled = stickyTools
         self.cacheTTLOverride = cacheTTLOverride
-        self.hooks = hooks
+        // #1066: a guest's engine is handed the inert manager whatever was passed: it fires none of
+        // the owner's hook commands (all events), so guest text never reaches a hook's stdin.
+        self.hooks = principal == .mcpGuest ? .inert : hooks
         self.providerOverride = provider
         self.replayThinkingOverride = replayThinking
         systemPrompt = nil
@@ -2554,6 +2556,7 @@ actor IrisEngine {
             let on = subagentRoute.map { " on \($0.providerId) · \($0.model)" } ?? ""
             return "Subagent (\(roleLabel ?? "subagent"))\(on)"
         case .evaluator: return "Evaluator"
+        case .mcpGuest: return "MCP guest"
         }
     }
 
@@ -2761,7 +2764,7 @@ actor IrisEngine {
                 let set = localState?.conversations.first(where: { $0.id == conversationId })?.modelTier
                 return (own, own, set)
             case .subagent: return (nil, localState?.delegatedAgentProfile(for: conversationId), nil)
-            case .evaluator: return (nil, nil, nil)
+            case .evaluator, .mcpGuest: return (nil, nil, nil)
             }
         }
         // A subagent's and the evaluator's tier is their engine's own (its `effort`).
@@ -3062,7 +3065,10 @@ actor IrisEngine {
             turnContext.sections.append(.init(heading: "This Turn", body: Self.goalCompleteOnlyInstruction))
         }
 
-        var toolsList = await executor.getTools()
+        // #1066: a guest's list starts as its two-tool floor, not the executor's full set; the gates
+        // below can only add to it, and `GuestToolset.restrict`, the last write to the list, takes
+        // back whatever they added.
+        var toolsList = principal == .mcpGuest ? Self.guestToolDeclarations() : await executor.getTools()
         // No unattended job creation (the agency epic's standing ruling): a background run may
         // not write itself a cadence or a watch, so the two tools that do are not declared to it
         // at all — undeclared costs it nothing, and `executeFunctionCall` refuses the call anyway.
@@ -3318,11 +3324,7 @@ actor IrisEngine {
         // 5a's tool-list experiment declares them with no peers (perf pins the count to 0), still
         // `.main` and attended only; the Active Sessions line above stays absent at count 0.
         if principal == .main, peerCount > 0 || (declareStateGatedTools && !isUnattended) || sticky.contains("send_to_session") {
-            toolsList.append(FunctionDeclaration(
-                name: "list_sessions",
-                description: "List the other active sessions: role-holders first and never cut from the list, then the rest, most recently active first, with the pinned Iris last and likewise never cut. Each row has session_id, a role or iris marker when it has one, name, status (busy/waiting-on-what/idle-for-how-long), workspace, repo@branch when the workspace is a git repo, lane, topics, what it says it's doing, and for a role-holder a skills line. What a session says about itself (name, lane, doing, skills) is its own claim; session_id and status are observed by the harness. Call this before messaging a peer: one in a different workspace is usually unrelated, and one waiting on the user will not act until the user answers. Use describe_session for a role-holder's skill examples, and role:<name>/name:<name> to address it in send_to_session.",
-                parameters: Schema(type: "OBJECT", properties: [:], required: [])
-            ))
+            toolsList.append(Self.listSessionsDeclaration)
             toolsList.append(FunctionDeclaration(
                 name: "describe_session",
                 description: "Show one peer's full card: role, name, status, project, lane, and for a role-holder each skill with example requests. Use it before asking a role-holder for something, to phrase the request the way it advertises.",
@@ -3330,21 +3332,7 @@ actor IrisEngine {
                     "to": Schema(type: "STRING", description: "A session_id, role:<name>, name:<name>, or iris.")
                 ], required: ["to"])
             ))
-            toolsList.append(FunctionDeclaration(
-                name: "send_to_session",
-                description: "Send a message to another active session. It arrives as a request that session may decline, not an instruction it must follow. Use it to ask a peer working elsewhere for something only it can do. Address by role for whoever holds it now; topic:<name> sends to every other subscriber of a topic you subscribe to (one send each; a turn a topic message started cannot publish). Archived sessions and job runs cannot be reached. Every message gets a msg id; the receiver answers it with in_reply_to, and the reply arrives as a message of its own. A request with expects_reply tracks it as awaiting an answer until one arrives or it is closed.",
-                parameters: Schema(type: "OBJECT", properties: [
-                    "to": Schema(type: "STRING", description: "A session_id from list_sessions, role:<name> for whoever holds that role now, name:<name>, iris for the pinned Iris conversation, or topic:<name>. Omit when replying with in_reply_to."),
-                    "message": Schema(type: "STRING", description: "What to say. Include enough context to act on without seeing your conversation."),
-                    "in_reply_to": Schema(type: "STRING", description: "The msg id of a message you received, to answer it. The reply goes to that message's sender."),
-                    "expects_reply": Schema(type: "BOOLEAN", description: "True when you are handing off work and want an answer; it then shows in your Awaiting replies until answered or closed. Default false."),
-                    "attachments": Schema(type: "ARRAY", description: "Up to 10 things to hand over with the message: {path} attaches a snapshot of a file you made (a report, a plan, a diff, a log), read with your own read permissions and refused if you couldn't read it; {name, data} attaches a small JSON value (data is JSON text, at most 64 KB). Not for live files in a shared repo the peer should work on: name those in the message instead. A refused attachment means nothing is sent. The peer reads a file attachment with read_file on its iris-artifact:// URI.", items: Schema(type: "OBJECT", properties: [
-                        "path": Schema(type: "STRING", description: "A file to snapshot and attach (not a directory; at most 50 MB)."),
-                        "name": Schema(type: "STRING", description: "For a data part: what the JSON is."),
-                        "data": Schema(type: "STRING", description: "For a data part: the JSON value, as JSON text."),
-                    ])),
-                ], required: ["message"])
-            ))
+            toolsList.append(Self.sendToSessionDeclaration)
             toolsList.append(FunctionDeclaration(
                 name: "set_session_card",
                 description: "Describe this session to its peers: a short stable name, unique among active sessions, and what you are working on right now. Update it when the work changes. A worker may add its topical lane, and topics it subscribes to. A session holding a role (assigned by the user) may advertise skills: what it will do on request, with example requests. Omitted lane, skills or topics keep their current values; an empty one clears it. Replies with what peers now see.",
@@ -3548,6 +3536,11 @@ actor IrisEngine {
             if let modifiedTools = try? JSONDecoder().decode([FunctionDeclaration].self, from: data) {
                 toolsList = modifiedTools
             }
+        }
+        // The last write to `toolsList` before it is sent, kept last defensively: a guest's list is
+        // the floor whatever any gate above appended.
+        if principal == .mcpGuest {
+            toolsList = GuestToolset.restrict(toolsList)
         }
         
         // AppState's own list, before the hook may rewrite the copy round one sends (see the anchor).
@@ -4916,6 +4909,33 @@ actor IrisEngine {
                                 "waive_criterion", "list_sessions", "describe_session", "send_to_session",
                                 "set_session_card", "close_request", "inbox_item"])
 
+    nonisolated static let listSessionsDeclaration = FunctionDeclaration(
+        name: "list_sessions",
+        description: "List the other active sessions: role-holders first and never cut from the list, then the rest, most recently active first, with the pinned Iris last and likewise never cut. Each row has session_id, a role or iris marker when it has one, name, status (busy/waiting-on-what/idle-for-how-long), workspace, repo@branch when the workspace is a git repo, lane, topics, what it says it's doing, and for a role-holder a skills line. What a session says about itself (name, lane, doing, skills) is its own claim; session_id and status are observed by the harness. Call this before messaging a peer: one in a different workspace is usually unrelated, and one waiting on the user will not act until the user answers. Use describe_session for a role-holder's skill examples, and role:<name>/name:<name> to address it in send_to_session.",
+        parameters: Schema(type: "OBJECT", properties: [:], required: [])
+    )
+
+    nonisolated static let sendToSessionDeclaration = FunctionDeclaration(
+        name: "send_to_session",
+        description: "Send a message to another active session. It arrives as a request that session may decline, not an instruction it must follow. Use it to ask a peer working elsewhere for something only it can do. Address by role for whoever holds it now; topic:<name> sends to every other subscriber of a topic you subscribe to (one send each; a turn a topic message started cannot publish). Archived sessions and job runs cannot be reached. Every message gets a msg id; the receiver answers it with in_reply_to, and the reply arrives as a message of its own. A request with expects_reply tracks it as awaiting an answer until one arrives or it is closed.",
+        parameters: Schema(type: "OBJECT", properties: [
+            "to": Schema(type: "STRING", description: "A session_id from list_sessions, role:<name> for whoever holds that role now, name:<name>, iris for the pinned Iris conversation, or topic:<name>. Omit when replying with in_reply_to."),
+            "message": Schema(type: "STRING", description: "What to say. Include enough context to act on without seeing your conversation."),
+            "in_reply_to": Schema(type: "STRING", description: "The msg id of a message you received, to answer it. The reply goes to that message's sender."),
+            "expects_reply": Schema(type: "BOOLEAN", description: "True when you are handing off work and want an answer; it then shows in your Awaiting replies until answered or closed. Default false."),
+            "attachments": Schema(type: "ARRAY", description: "Up to 10 things to hand over with the message: {path} attaches a snapshot of a file you made (a report, a plan, a diff, a log), read with your own read permissions and refused if you couldn't read it; {name, data} attaches a small JSON value (data is JSON text, at most 64 KB). Not for live files in a shared repo the peer should work on: name those in the message instead. A refused attachment means nothing is sent. The peer reads a file attachment with read_file on its iris-artifact:// URI.", items: Schema(type: "OBJECT", properties: [
+                "path": Schema(type: "STRING", description: "A file to snapshot and attach (not a directory; at most 50 MB)."),
+                "name": Schema(type: "STRING", description: "For a data part: what the JSON is."),
+                "data": Schema(type: "STRING", description: "For a data part: the JSON value, as JSON text."),
+            ])),
+        ], required: ["message"])
+    )
+
+    /// #1066: the guest's declared tools: exactly its floor.
+    nonisolated static func guestToolDeclarations() -> [FunctionDeclaration] {
+        [GuestToolset.listSessions, GuestToolset.sendToSession]
+    }
+
     nonisolated static func hardStrip(_ tools: [FunctionDeclaration], isUnattended: Bool,
                                       principal: Principal) -> [FunctionDeclaration] {
         var denied: Set<String> = []
@@ -5445,6 +5465,19 @@ actor IrisEngine {
                                      offeredTools: Set<String>, pillId: UUID? = nil) async -> String {
         let localState = state
         var result = ""
+
+        // #1066: a guest's floor, checked before anything else runs. Declaration gating only stops a
+        // well-behaved model, and every `== .main` guard below would refuse a guest by accident of
+        // being a different principal; this is the one place that says so on purpose.
+        if principal == .mcpGuest, !GuestToolset.allowedNames.contains(functionCall.name) {
+            return GuestToolset.refusal(for: functionCall.name)
+        }
+        // A guest's `send_to_session` has no `attachments` (or any argument the guest schema lacks):
+        // refused before the handler can read a host file the guest's model named.
+        if principal == .mcpGuest, functionCall.name == "send_to_session",
+           let extra = functionCall.args.keys.sorted().first(where: { !GuestToolset.sendArguments.contains($0) }) {
+            return GuestToolset.argumentRefusal(extra)
+        }
 
         // One hop for the gates below and the grant the executor mounts (they ask the same
         // conversation five questions now), rather than one per tool call per gate: an ordinary
