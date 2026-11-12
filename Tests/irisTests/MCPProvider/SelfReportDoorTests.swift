@@ -184,19 +184,103 @@ struct SelfReportDoorTests {
         #expect(text.contains("\"x\":3") && text.contains("\"y\":4"), Comment(rawValue: text))
     }
 
-    @Test("the door's source never reads a title, a string value, or anything but a derived `.string.isEmpty` from the composer")
+    @Test("a tripwire: no MCPProvider source reads a title, a string value or anything but `.string.isEmpty`, and none uses a reflection route to one")
     func sourceReadsOnlyBoundedFields() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let source = try String(contentsOf: root.appendingPathComponent("Sources/IrisKit/MCPProvider/SelfReportDoor.swift"), encoding: .utf8)
-        let code = source.split(separator: "\n", omittingEmptySubsequences: false)
-            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")
-        for forbidden in [".title", ".stringValue", "attributedString", "textStorage", ".documentView", "representedFilename", "conversations"] {
-            #expect(!code.contains(forbidden), "SelfReportDoor.swift must not read `\(forbidden)`")
+        let directory = root.appendingPathComponent("Sources/IrisKit/MCPProvider")
+        let files = try FileManager.default.contentsOfDirectory(atPath: directory.path).filter { $0.hasSuffix(".swift") }
+        #expect(files.contains("SelfReportDoor.swift"))
+        for name in files {
+            let source = try String(contentsOf: directory.appendingPathComponent(name), encoding: .utf8)
+            let code = source.split(separator: "\n", omittingEmptySubsequences: false)
+                .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")
+            for forbidden in [".title", ".stringValue", "attributedString", "textStorage", ".documentView", "representedFilename",
+                              "value(forKey", "Mirror(", "perform(", "accessibility"] {
+                #expect(!code.contains(forbidden), "\(name) must not use `\(forbidden)`")
+            }
+            // `.string` as a property read is only ever `.string.isEmpty`; `DateFormatter.string(from:)`
+            // is a method call, not a text read, and is the one other spelling in this directory.
+            let reads = code.components(separatedBy: ".string").dropFirst().map { $0.hasPrefix(".isEmpty") || $0.hasPrefix("(from:") }
+            if name == "SelfReportDoor.swift" {
+                #expect(!reads.isEmpty && reads.allSatisfy { $0 }, "the only `.string` access allowed is `.string.isEmpty`")
+            } else {
+                #expect(reads.allSatisfy { $0 }, "\(name) may not read a `.string` except as `.string.isEmpty`")
+            }
         }
-        // The one allowed read of the composer's string is the emptiness check, and only that.
-        let stringReads = code.components(separatedBy: ".string").dropFirst().map { $0.hasPrefix(".isEmpty") }
-        #expect(!stringReads.isEmpty && stringReads.allSatisfy { $0 }, "the only `.string` access allowed is `.string.isEmpty`")
+    }
+
+    @MainActor
+    @Test("the real live() wiring, run over sentinel-laden fixtures, never lets a title or any text into any query's JSON")
+    func liveWiringNeverLeaksSentinels() async throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 200), styleMask: [.titled], backing: .buffered, defer: true)
+        window.title = "SENTINEL-WINDOW-TITLE"
+        window.miniwindowTitle = "SENTINEL-MINIWINDOW-TITLE"
+        let composer = NSTextView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        composer.string = "SENTINEL-COMPOSER-TEXT"
+        window.contentView?.addSubview(composer)
+        _ = window.makeFirstResponder(composer)
+        let app = AppState(); app.conversations.removeAll()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        if let index = app.conversations.firstIndex(where: { $0.id == id }) {
+            app.conversations[index].title = "SENTINEL-CONVERSATION-TITLE"
+        }
+        app.beginEngineTurn(for: id)
+
+        let door = SelfReportDoor.live(window: { window }, composer: { composer }, appState: { app },
+                                       frontmostBundleId: { "com.example.front" }, isAppActive: { true },
+                                       eventRing: { [.init(timestamp: Date(), event: .windowAppearanceChanged(name: "darkAqua"))] },
+                                       mainActorTimeout: patient)
+        for query in SelfReportDoor.Query.allCases {
+            let snapshot = try #require(await door.handle(query: query, clientId: "a").successValue)
+            let text = try json(snapshot)
+            #expect(!text.contains("SENTINEL"), Comment(rawValue: "\(query): \(text)"))
+        }
+        // And the wiring does reach the fixtures it was handed (it is not answering from nowhere).
+        let owner = try #require(await door.handle(query: .windowOwner, clientId: "a").successValue)
+        #expect(try json(owner).contains("com.example.front"))
+        let turns = try #require(await door.handle(query: .turnState, clientId: "a").successValue)
+        #expect(try json(turns).contains("\"count\":1"))
+        let responder = try #require(await door.handle(query: .responderClass, clientId: "a").successValue)
+        #expect(try json(responder).contains("NSTextView"))
+        let composerSnapshot = try #require(await door.handle(query: .composerState, clientId: "a").successValue)
+        #expect(try json(composerSnapshot).contains("\"isEmpty\":false"))
+    }
+
+    @Test("a cancelled caller gets .cancelled, not the timeout diagnosis")
+    func cancellationIsReportedAsCancelled() async throws {
+        let release = DispatchSemaphore(value: 0)
+        let slow = SelfReportDoor(
+            windowOwnerReader: { _ = release.wait(timeout: .now() + 10); return "late" },
+            responderClassReader: { "x" }, composerStateReader: { .init(isPresent: false, isFirstResponder: false, isEmpty: true) },
+            turnStateReader: { .init(any: false, count: 0) }, activationReader: { (true, true) },
+            mainActorTimeout: patient)
+        let task = Task { await slow.handle(query: .windowOwner, clientId: "a") }
+        try await Task.sleep(for: .milliseconds(100))
+        task.cancel()
+        let result = try await value(of: task, within: 10)
+        release.signal()
+        #expect(result.failureValue == .cancelled)
+    }
+
+    @Test("a task with no conversation counts as one turn of its own, and an owned one is counted once")
+    func unownedTaskCountsAsATurn() {
+        let a = UUID(), b = UUID()
+        #expect(AppState.aggregateTurns(engineTurnCounts: [:], rotationHold: nil, activeTaskConversations: [nil]) == (true, 1))
+        #expect(AppState.aggregateTurns(engineTurnCounts: [:], rotationHold: nil, activeTaskConversations: [nil, nil]) == (true, 2))
+        // One conversation seen by all three sources is still one busy conversation.
+        #expect(AppState.aggregateTurns(engineTurnCounts: [a: 2], rotationHold: a, activeTaskConversations: [a]) == (true, 1))
+        #expect(AppState.aggregateTurns(engineTurnCounts: [a: 1, b: 0], rotationHold: nil, activeTaskConversations: [nil]) == (true, 2))
+        #expect(AppState.aggregateTurns(engineTurnCounts: [:], rotationHold: nil, activeTaskConversations: []) == (false, 0))
+    }
+
+    @Test("a class name is capped at the named bound")
+    func classNameIsBounded() {
+        #expect(SelfReportDoor.maxClassNameLength == 128)
+        let long = String(repeating: "A", count: 1000)
+        #expect(SelfReportDoor.boundedName(long).count == 128)
+        #expect(SelfReportDoor.boundedName("NSTextView") == "NSTextView")
     }
 }
 

@@ -1204,14 +1204,22 @@ class AppState {
     /// Whether any conversation has a turn in flight, and how many do (#1067's self-report door).
     /// The same three sources `hasTurnInFlight(for:)` reads, aggregated, and deliberately returning
     /// no conversation id: the door is diagnostic, and a conversational read (which conversation,
-    /// what it is doing) is outside what it may report. A task with no conversation counts as one
-    /// turn of its own, since it is a turn in flight even though no conversation owns it.
+    /// what it is doing) is outside what it may report.
     func anyTurnInFlight() -> (any: Bool, count: Int) {
+        Self.aggregateTurns(engineTurnCounts: engineTurnCounts, rotationHold: rotationHold,
+                            activeTaskConversations: activeTasks.values.map(\.conversationId))
+    }
+
+    /// The counting itself, pure so the branch a private `activeTasks` entry with no conversation
+    /// takes can be tested without reaching the private map. A task with no conversation counts as
+    /// one turn of its own: it is a turn in flight even though no conversation owns it.
+    nonisolated static func aggregateTurns(engineTurnCounts: [UUID: Int], rotationHold: UUID?,
+                               activeTaskConversations: [UUID?]) -> (any: Bool, count: Int) {
         var busy = Set(engineTurnCounts.filter { $0.value > 0 }.keys)
         if let rotationHold { busy.insert(rotationHold) }
         var unowned = 0
-        for entry in activeTasks.values {
-            if let id = entry.conversationId { busy.insert(id) } else { unowned += 1 }
+        for conversation in activeTaskConversations {
+            if let conversation { busy.insert(conversation) } else { unowned += 1 }
         }
         let count = busy.count + unowned
         return (count > 0, count)
