@@ -97,6 +97,9 @@ struct SelfReportDoor: Sendable {
         case mainActorUnresponsive(afterMilliseconds: Int)
         /// The caller went away (the request was cancelled) before the main actor answered.
         case cancelled
+        /// `withTimeout` threw something other than its two documented errors. Named rather than
+        /// folded into `.cancelled` or the timeout, so a future third error cannot be misreported.
+        case unexpected(errorType: String)
     }
 
     /// `MainActor`-isolated closures are `Sendable` by construction, so this struct is too.
@@ -126,24 +129,41 @@ struct SelfReportDoor: Sendable {
         self.mainActorTimeout = mainActorTimeout
     }
 
-    /// The production door, reading the real app. Every closure runs on the main actor.
-    static func live() -> SelfReportDoor {
+    /// The production door, reading the real app. Every closure runs on the main actor. Each source
+    /// is a parameter, defaulting to the real global, so a test can run the real wiring (this
+    /// function, not a copy of it) over sentinel-laden fixtures and assert no sentinel reaches a
+    /// snapshot.
+    static func live(window: @escaping @MainActor () -> NSWindow? = { MainWindow.current },
+                     composer: @escaping @MainActor () -> NSTextView? = { ComposerFocus.current },
+                     appState: @escaping @MainActor () -> AppState = { AppState.shared },
+                     frontmostBundleId: @escaping @MainActor () -> String? = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier },
+                     isAppActive: @escaping @MainActor () -> Bool = { NSApp.isActive },
+                     eventRing: @escaping @Sendable () -> [DiagnosticEventRing.Entry] = { DiagnosticEventRing.shared.snapshot() },
+                     mainActorTimeout: Duration = SelfReportDoor.mainActorTimeout) -> SelfReportDoor {
         SelfReportDoor(
-            windowOwnerReader: { NSWorkspace.shared.frontmostApplication?.bundleIdentifier },
-            responderClassReader: { Self.responderClassName(of: MainWindow.current) },
-            composerStateReader: { Self.composerState(of: ComposerFocus.current) },
+            windowOwnerReader: { frontmostBundleId() },
+            responderClassReader: { Self.responderClassName(of: window()) },
+            composerStateReader: { Self.composerState(of: composer()) },
             turnStateReader: {
-                let turns = AppState.shared.anyTurnInFlight()
+                let turns = appState().anyTurnInFlight()
                 return TurnState(any: turns.any, count: turns.count)
             },
-            activationReader: { (NSApp.isActive, MainWindow.current?.isKeyWindow ?? false) })
+            activationReader: { (isAppActive(), window()?.isKeyWindow ?? false) },
+            eventRingReader: eventRing,
+            mainActorTimeout: mainActorTimeout)
     }
+
+    /// A class name is bounded: SwiftUI's generic type names can run to hundreds of characters, and
+    /// every field this door emits has a fixed upper size.
+    static let maxClassNameLength = 128
+
+    static func boundedName(_ name: String) -> String { String(name.prefix(maxClassNameLength)) }
 
     /// The class name of the window's first responder, never anything it holds.
     @MainActor
     static func responderClassName(of window: NSWindow?) -> String {
         guard let responder = window?.firstResponder else { return "none" }
-        return String(describing: type(of: responder))
+        return boundedName(String(describing: type(of: responder)))
     }
 
     /// Booleans about the composer, never its text: `isEmpty` is the only thing derived from the
@@ -188,8 +208,10 @@ struct SelfReportDoor: Sendable {
             return .success(snapshot)
         } catch is TimeoutError {
             return .failure(.mainActorUnresponsive(afterMilliseconds: timeoutMilliseconds))
-        } catch {
+        } catch is CancellationError {
             return .failure(.cancelled)
+        } catch {
+            return .failure(.unexpected(errorType: Self.boundedName(String(describing: type(of: error)))))
         }
     }
 
