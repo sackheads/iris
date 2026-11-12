@@ -105,8 +105,11 @@ final class LoopbackHTTPListener: @unchecked Sendable {
 
     func start() async throws {
         let params = Self.loopbackParameters(port: requestedPort)
-        let nwPort = requestedPort == 0 ? NWEndpoint.Port.any : (NWEndpoint.Port(rawValue: requestedPort) ?? .any)
-        let listener = try NWListener(using: params, on: nwPort)
+        // The port lives in `requiredLocalEndpoint` and nowhere else. Passing it to
+        // `NWListener(using:on:)` as well throws POSIX 22 (EINVAL) for any fixed port, and worked
+        // only for port 0, which is all the tests used, so the configured default ports (8787 and
+        // 8788) never bound at all (#1086).
+        let listener = try NWListener(using: params)
         self.listener = listener
         listener.newConnectionHandler = { [weak self] connection in
             self?.accept(connection)
