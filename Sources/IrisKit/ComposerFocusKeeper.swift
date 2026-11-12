@@ -79,6 +79,9 @@ final class ComposerFocusKeeper {
     private let isAppActive: @MainActor () -> Bool
     private let composerOverride: (@MainActor (NSWindow) -> NSTextView?)?
     private weak var cachedComposer: NSTextView?
+    private var composerSearchCameUpEmpty = false
+    /// How many times the view tree was walked for a composer; a test reads it.
+    private(set) var composerSearches = 0
     /// Called once when the window closes, so the registry can drop this keeper.
     var onWindowClose: (@MainActor () -> Void)?
     private let monitorsEvents: Bool
@@ -105,6 +108,7 @@ final class ComposerFocusKeeper {
         self.window = window
         userHasChosenSinceKey = false
         reclaimsThisCycle = 0
+        composerSearchCameUpEmpty = false
         observers = [
             center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.windowBecameKey() }
@@ -130,7 +134,7 @@ final class ComposerFocusKeeper {
                 MainActor.assumeIsolated {
                     switch event.type {
                     case .keyDown:
-                        self?.noteKeyboardNavigation(keyCode: event.keyCode, in: event.window)
+                        self?.noteKeyboardNavigation(keyCode: event.keyCode, modifiers: event.modifierFlags, in: event.window)
                         self?.handleKeyDown(event)
                     default: self?.noteUserClick(in: event.window, at: event.locationInWindow)
                     }
@@ -155,6 +159,7 @@ final class ComposerFocusKeeper {
     /// yet, take it.
     func composerDidAttach(_ composer: NSTextView) {
         cachedComposer = composer
+        composerSearchCameUpEmpty = false
         DispatchQueue.main.async { MainActor.assumeIsolated { self.reclaimIfNeeded(.composerAttached) } }
     }
 
@@ -180,12 +185,15 @@ final class ComposerFocusKeeper {
         }
     }
 
-    /// Tab, Shift-Tab and Ctrl-Tab pressed while something other than the composer has focus move
-    /// focus on purpose (full keyboard access, the key-view loop), which is a choice like a click:
-    /// the keeper must not undo it. Pressed in the composer, Tab does not leave it.
-    func noteKeyboardNavigation(keyCode: UInt16, in eventWindow: NSWindow?) {
-        guard keyCode == 48, let window, eventWindow === window, let composer = currentComposer(in: window),
-              classify(window.firstResponder, composer: composer, in: window) != .composer else { return }
+    /// Tab and Shift-Tab pressed while something other than the composer has focus, and Control-Tab
+    /// from anywhere, move focus on purpose (full keyboard access, the key-view loop), which is a
+    /// choice like a click: the keeper must not undo it.
+    func noteKeyboardNavigation(keyCode: UInt16, modifiers: NSEvent.ModifierFlags = [], in eventWindow: NSWindow?) {
+        guard keyCode == 48, let window, eventWindow === window, let composer = currentComposer(in: window) else { return }
+        // Control-Tab is `selectNextKeyView:`, the keyboard-only way out of a text view, so it is a
+        // choice even from the composer; plain Tab inserts a tab there and does not leave it.
+        let leavesTheComposer = modifiers.contains(.control)
+        guard leavesTheComposer || classify(window.firstResponder, composer: composer, in: window) != .composer else { return }
         userHasChosenSinceKey = true
     }
 
@@ -287,7 +295,12 @@ final class ComposerFocusKeeper {
     private func currentComposer(in window: NSWindow) -> NSTextView? {
         if let composerOverride { return composerOverride(window) }
         if let cached = cachedComposer, cached.window === window { return cached }
+        // A window with no composer (the Inbox pane, say) is searched once, not on every key,
+        // click and responder change; `attach` and `composerDidAttach` reset the memory.
+        if composerSearchCameUpEmpty { return nil }
+        composerSearches += 1
         cachedComposer = window.contentView.flatMap(Self.findComposer)
+        composerSearchCameUpEmpty = cachedComposer == nil
         return cachedComposer
     }
 

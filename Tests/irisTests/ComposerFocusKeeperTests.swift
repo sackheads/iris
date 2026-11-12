@@ -282,6 +282,54 @@ struct ComposerFocusKeeperTests {
         #expect(rig.window.firstResponder === rig.sidebar, "a keyboard choice is not undone")
     }
 
+    @Test("Control-Tab leaves a text view, so it is a choice even from the composer; plain Tab there is not")
+    func controlTabFromTheComposerIsAChoice() async {
+        let rig = Rig()
+        rig.keeper.attach(rig.window)
+        defer { rig.keeper.detach() }
+        #expect(await eventually { rig.holdsComposer })
+
+        rig.keeper.noteKeyboardNavigation(keyCode: 48, modifiers: [], in: rig.window)
+        rig.keeper.noteKeyboardNavigation(keyCode: 48, modifiers: .shift, in: rig.window)
+        #expect(!rig.keeper.userHasChosenSinceKey, "Tab and Shift-Tab insert or do nothing in the composer")
+        rig.keeper.noteKeyboardNavigation(keyCode: 36, modifiers: .control, in: rig.window)
+        #expect(!rig.keeper.userHasChosenSinceKey, "Control-Return is not navigation")
+        rig.keeper.noteKeyboardNavigation(keyCode: 48, modifiers: .control, in: rig.window)
+        #expect(rig.keeper.userHasChosenSinceKey)
+    }
+
+    @Test("a window with no composer is searched once, not on every event, and a composer joining resets that")
+    func emptySearchIsRemembered() async {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: true)
+        window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+        let table = NSTableView()
+        table.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("c")))
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 200, height: 100))
+        scroll.documentView = table
+        window.contentView?.addSubview(scroll)
+        let keeper = ComposerFocusKeeper(center: NotificationCenter(), isWindowKey: { _ in true },
+                                         isAppActive: { true }, monitorsEvents: false)
+        keeper.attach(window)
+        defer { keeper.detach() }
+        for _ in 0..<5 { keeper.reclaimIfNeeded(.responderChanged) }
+        keeper.noteUserClick(in: window, at: NSPoint(x: 5, y: 5))
+        keeper.noteKeyboardNavigation(keyCode: 48, in: window)
+        #expect(keeper.composerSearches == 1)
+
+        // A composer arrives (a plain text view stands in for it): remembered, found without a walk.
+        let composer = NSTextView(frame: NSRect(x: 0, y: 120, width: 200, height: 40))
+        window.contentView?.addSubview(composer)
+        keeper.composerDidAttach(composer)
+        _ = window.makeFirstResponder(table)
+        // The earlier click had no composer to land on, so it counted as a choice; a click on the
+        // composer now clears that and the composer takes focus.
+        let frame = composer.convert(composer.bounds, to: nil)
+        keeper.noteUserClick(in: window, at: NSPoint(x: frame.midX, y: frame.midY))
+        #expect(await eventually { window.firstResponder === composer })
+        #expect(keeper.composerSearches == 1, "the attached composer is used as reported, no new walk")
+    }
+
     @Test("exactly maxReclaimsPerCycle reclaims happen, the next one gives up, and it gives up only once")
     func boundIsExact() {
         let rig = Rig()
