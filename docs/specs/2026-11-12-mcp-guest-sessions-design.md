@@ -144,20 +144,26 @@ get the full tool set. A guest asking a role session would run the **role's** tu
 `.mcpGuest` engine: the role session would answer under the guest floor, and its tool calls would be
 judged as a guest's.
 
-So a turn is routed by the **target conversation**, not by the caller:
+So a turn is routed by the **target conversation**, not by the caller, and in a way that changes
+nothing for any pair of non-guest sessions:
 
-- `AppState.engine(forTurnOn conversationId:)` returns the guest session's own engine (held by the
-  `GuestSessionRegistry`) for a guest conversation and `AppState.engine` for anything else. Every site
-  that starts a turn on a conversation another caller named (`deliverSanitizedSystemEvent`,
-  `AppState.startTurn`, `drainPendingUserMessages`, and any other the build finds by searching
-  `processInput(` callers) uses it.
-- A check at the head of `IrisEngine.processInputBody` makes any site that was missed fail **closed
-  and loud**: a turn is refused, with a visible diagnostic, unless
-  `(conversation.isGuest) == (principal == .mcpGuest)`. A guest conversation never runs under any other
-  principal, and a `.mcpGuest` engine never runs a turn on a non-guest conversation.
+- `AppState.engine(forTurnOn conversationId:, caller:)` returns the guest session's own engine (held
+  by the `GuestSessionRegistry`) for a guest target; `AppState.engine` when a `.mcpGuest` caller names a
+  non-guest target; and **the caller's own engine, unchanged, in every other case** (role to role, a
+  user's typed turn, the remote a2a path). Every site that starts a turn on a conversation another
+  caller named (`deliverSanitizedSystemEvent`, `AppState.startTurn`, `drainPendingUserMessages`, and
+  any other the build finds) uses it.
+- **One chokepoint.** On `origin/main` every turn funnels through `IrisEngine.processInput`, and
+  `processInputBody` has exactly one caller, inside `processInput`. The agreement check goes at the head
+  of `processInput`, before any turn bookkeeping: a turn is refused, with a visible diagnostic, unless
+  `conversation.isGuest == (principal == .mcpGuest)`. A guest conversation never runs under any other
+  principal, and a `.mcpGuest` engine never runs a turn on a non-guest conversation. Because a path that
+  does not reach the check is uncovered however good the check is, the plan pins the set of
+  `processInput(` call sites with a scan test, so a new entry point forces a conscious decision, and each
+  caller's reason it cannot reach a guest conversation is recorded.
 
 The review must show the routing and the agreement check on every path that starts a turn, with a test
-per path that drives it with the wrong engine and sees the refusal.
+per path that drives it with the wrong engine and sees the refusal, and the non-guest identity test.
 
 ### 5.3 Context confinement: what the guest model is given
 
