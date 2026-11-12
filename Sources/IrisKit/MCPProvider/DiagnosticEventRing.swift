@@ -11,17 +11,54 @@ import CoreGraphics
 final class DiagnosticEventRing: @unchecked Sendable {
     static let capacity = 200
 
-    enum Event: Sendable {
+    /// `Encodable` by hand: `CGPoint` is not `Codable`, and the wire shape is a flat
+    /// `{"kind": ..., fields}` object so a reader never has to know Swift's synthesized
+    /// enum-payload layout. Only the fields an event already carries are written.
+    enum Event: Sendable, Encodable {
         case transcriptMouseDown(atWindowPoint: CGPoint)
         case transcriptFocusHop(tookFocus: Bool)
         case composerAcceptsFirstMouse(Bool)
         case windowAppearanceChanged(name: String)
         case composerAppearanceChanged(name: String)
+
+        private enum CodingKeys: String, CodingKey { case kind, x, y, tookFocus, accepts, name }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            switch self {
+            case .transcriptMouseDown(let point):
+                try c.encode("transcriptMouseDown", forKey: .kind)
+                try c.encode(Double(point.x), forKey: .x)
+                try c.encode(Double(point.y), forKey: .y)
+            case .transcriptFocusHop(let tookFocus):
+                try c.encode("transcriptFocusHop", forKey: .kind)
+                try c.encode(tookFocus, forKey: .tookFocus)
+            case .composerAcceptsFirstMouse(let accepts):
+                try c.encode("composerAcceptsFirstMouse", forKey: .kind)
+                try c.encode(accepts, forKey: .accepts)
+            case .windowAppearanceChanged(let name):
+                try c.encode("windowAppearanceChanged", forKey: .kind)
+                try c.encode(name, forKey: .name)
+            case .composerAppearanceChanged(let name):
+                try c.encode("composerAppearanceChanged", forKey: .kind)
+                try c.encode(name, forKey: .name)
+            }
+        }
     }
 
-    struct Entry: Sendable {
+    /// The timestamp is written as whole Unix milliseconds, not as a `Date`, so the shape does not
+    /// depend on whichever date strategy the encoder in use was given.
+    struct Entry: Sendable, Encodable {
         let timestamp: Date
         let event: Event
+
+        private enum CodingKeys: String, CodingKey { case timestampUnixMs, event }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(Int((timestamp.timeIntervalSince1970 * 1000).rounded()), forKey: .timestampUnixMs)
+            try c.encode(event, forKey: .event)
+        }
     }
 
     static let shared = DiagnosticEventRing()

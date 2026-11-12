@@ -1201,6 +1201,22 @@ class AppState {
         return activeTasks.values.contains { $0.conversationId == conversationId }
     }
 
+    /// Whether any conversation has a turn in flight, and how many do (#1067's self-report door).
+    /// The same three sources `hasTurnInFlight(for:)` reads, aggregated, and deliberately returning
+    /// no conversation id: the door is diagnostic, and a conversational read (which conversation,
+    /// what it is doing) is outside what it may report. A task with no conversation counts as one
+    /// turn of its own, since it is a turn in flight even though no conversation owns it.
+    func anyTurnInFlight() -> (any: Bool, count: Int) {
+        var busy = Set(engineTurnCounts.filter { $0.value > 0 }.keys)
+        if let rotationHold { busy.insert(rotationHold) }
+        var unowned = 0
+        for entry in activeTasks.values {
+            if let id = entry.conversationId { busy.insert(id) } else { unowned += 1 }
+        }
+        let count = busy.count + unowned
+        return (count > 0, count)
+    }
+
     /// The subagent or evaluator conversation → the conversation that delegated it (#418), so an
     /// approval a delegate raises is charged to the session whose work is blocked on it. Transient:
     /// a delegate lives for one process at most, and nothing about it is persisted. It is also the

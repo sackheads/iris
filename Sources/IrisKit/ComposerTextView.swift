@@ -189,9 +189,28 @@ extension NSEvent {
     }
 }
 
+/// The composer's `NSTextView`, tracked weakly so the MCP self-report door (#1067) can ask whether
+/// it is the window's first responder and whether it is empty. Mirrors `MainWindow`'s
+/// `track(_:)`/`current` shape; it holds no text and never retains the view.
+@MainActor
+enum ComposerFocus {
+    private static weak var textView: NSTextView?
+    static func track(_ textView: NSTextView?) { self.textView = textView }
+    static var current: NSTextView? { textView }
+}
+
 /// NSTextView that routes Return / arrows / Tab / Escape through the coordinator.
 final class KeyCatchingTextView: NSTextView {
     weak var coordinator: ComposerTextView.Coordinator?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            ComposerFocus.track(self)
+        } else if ComposerFocus.current === self {
+            ComposerFocus.track(nil)
+        }
+    }
 
     /// #1055: a click that also reactivates the window (e.g. click away from Iris, then click
     /// back) is AppKit's default "activating click" — consumed to bring the window forward and
