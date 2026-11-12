@@ -4560,6 +4560,9 @@ actor IrisEngine {
         // #469 §7.6 J: the attachment exchange's sweep rides the same daily maintenance.
         let localState = state
         await MainActor.run { localState?.sweepArtifacts() }
+        // #1067: the MCP provider's own mailbox/artifact-store TTL sweeps, independent of the
+        // attachment exchange's above. A no-op when the provider was never started.
+        await MCPProviderRuntime.shared.sweepExpired()
         // #231: and the TTL auto-archive, so it too runs at launch and daily, in the app only.
         let days = ConfigManager.shared.autoArchiveDays.rawValue
         await MainActor.run { _ = localState?.sweepIdleSessions(days: days) }

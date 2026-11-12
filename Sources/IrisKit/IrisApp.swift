@@ -26,6 +26,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // and `openStore()` have happened, whichever is later. The gate also activates Iris,
             // except for a link launch while it waits (decision 13), and alerts a refused launch.
             LaunchGate.shared.didFinishLaunching()
+            // #1067: a no-op unless ConfigManager.shared.mcpProviderEnabled is on; read once here,
+            // not reactively — toggling the setting takes effect on the next launch.
+            Task { await MCPProviderRuntime.shared.start() }
         }
     }
 
@@ -43,6 +46,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Conversations live in their own database now (#163), but settings and other state
         // still ride on UserDefaults, and `_exit` skips the cfprefsd flush for those too.
         IrisDefaults.store.synchronize()
+        // #1067: no graceful MCPProviderRuntime.shared.stop() here on purpose — it is async, and
+        // blocking the main thread on it here to await it before `_exit` risks a deadlock against
+        // its own MainActor isolation. The listener is loopback-only and holds no durable state
+        // to flush; the OS closes its socket when this process exits. Flagged for the task
+        // reviewer, per the plan's Step 14 allowance.
         // Last, just before `_exit`: an empty payload under a held lock reads as an unnamed holder
         // (decision 5), so it must not sit there while anything else runs. A no-op in a process
         // that never held the lock, so a refused second GUI leaves the holder's payload alone.
