@@ -63,7 +63,7 @@ such symbol exists.
 | Piece | State on main | Consequence for the design |
 |---|---|---|
 | `Principal` (`SandboxPolicy.swift`) | `main`, `subagent`, `evaluator`. No guest, untrusted or external case. | A new `.mcpGuest` case is needed. |
-| Branch sites on `Principal` | Three exhaustive switches (`SandboxPolicy.resolve`, `IrisEngine.approvalOrigin`, `IrisEngine.turnAgentProfile`); most others are `== .main` / `!= .main` (`hardStrip`, the `jobCreationTools` removal, `CachePolicy.resolve`, `stickyApplies`, `retrievesFacts`, the `executeFunctionCall` `guard principal == .main` refusals). | The compiler flags only the three switches. Every `!= .main` site silently treats a new case as subagent-like **with no allowlist**. The guest floor must therefore be an explicit allowlist, not "whatever a subagent gets". |
+| Branch sites on `Principal` | Three exhaustive switches (`SandboxPolicy.resolve`, `IrisEngine.approvalOrigin`, `IrisEngine.turnAgentProfile`); most others are `== .main` / `!= .main` (`hardStrip`, the `jobCreationTools` removal, `CachePolicy.resolve`, `stickyApplies`, `retrievesFacts`, the `executeFunctionCall` `guard principal == .main` refusals). | The compiler flags only the three switches. The negative sites (`hardStrip`, the `jobCreationTools` removal, the `executeFunctionCall` refusals) treat a new case as subagent-like **with no allowlist**. Most tool *declarations* are positive `== .main` gates, so a new principal gets nothing there by default; the exposure is the tools that are **not principal-gated at all** (`run_command`, the file tools, `search_web`, memory). The guest floor must therefore be an explicit allowlist that covers those, not "whatever a subagent gets". |
 | Tool gating | `hardStrip` is a denylist (`mainOnlyDeclared`, `unattendedNeverDeclared`). The only allowlist is `EvaluatorToolset.restrict`. Dispatch refuses tools the round did not declare (`offeredToolNames`, `notOfferedRefusal`). | Add a guest allowlist applied last, in the same place as `EvaluatorToolset.restrict`, and enforce it again at dispatch. |
 | `send_to_session` / `inbox_item` | Both are in `mainOnlyDeclared`, so `hardStrip` removes them for any non-main principal, and the handlers `guard principal == .main`. | The guest needs `send_to_session` (and not `inbox_item`), so the strip and the dispatch guard each need a guest exception, applied after the strip. |
 | Hidden session kinds | `Conversation.isSubagent` and `isBackground`; `isUserFacing` is `!isSubagent && !isBackground`. There is no hidden-but-addressable kind. | A reply target must be `isUserFacing` (`decidePeerSend`), but `isBackground` implies `isUnattended`, which strips `send_to_session`, `list_sessions` and `inbox_item` and fails every approval closed. A guest session cannot be either existing kind: a new kind is needed (section 5.1). |
@@ -122,6 +122,10 @@ allowlist applied only before it could be undone), and re-checked at dispatch. I
   memory or goal tools, no subagents, no jobs. `inbox_item` being absent also means no attention
   budget is needed in this phase.
 
+An approval request from a `.mcpGuest` turn is **denied without raising any dialog**: a guest session is
+invisible to the user, so a prompt for it would be unattributable. (Nothing in the floor can raise one
+today; the rule keeps it that way if the floor grows.)
+
 Because most `Principal` branch sites are `== .main` / `!= .main`, the plan adds a mutation-backed
 test that enumerates every tool the engine can declare and asserts the guest sees exactly the
 allowlist, so a tool added later is denied to guests by default.
@@ -161,6 +165,14 @@ nothing for any pair of non-guest sessions:
   does not reach the check is uncovered however good the check is, the plan pins the set of
   `processInput(` call sites with a scan test, so a new entry point forces a conscious decision, and each
   caller's reason it cannot reach a guest conversation is recorded.
+
+A third site stores an engine rather than reading one: `enqueuePendingSystemEvent(..., engine: self)`
+puts the **sender's** engine in `PendingUserMessage.engine`, and `drainPendingUserMessages` runs
+`queue[0].engine ?? engine`. The routing therefore overrides a stored engine for a guest target, not only
+the engine `startTurn` reads. One path runs a model-adjacent action outside `processInput`:
+`IrisEngine.executeApprovedCall(_:conversationId:)`, which executes an approved blocked call. A guest
+cannot produce a blocked call (its floor has no approval-needing tool) and an approval request from a
+`.mcpGuest` principal is **denied without surfacing any UI**, so it is unreachable; the plan pins both.
 
 The review must show the routing and the agreement check on every path that starts a turn, with a test
 per path that drives it with the wrong engine and sees the refusal, and the non-guest identity test.
@@ -288,6 +300,20 @@ design's `AccessProfile` transport and peer allowlist) is the gate (#1089). The 
 section 5.5 is a structural bound on **who can be asked**, not on **what is said**; it does not
 replace #1089.
 
+**Ingress, stated plainly.** The mirror of the reply question is what a guest can make a role session
+do. A role session that receives a guest message is a **main-principal** session with its full tool set,
+reading text an external agent caused to be written through the guest's own model. The existing
+peer-arrival defences apply: the "request from a peer, not the user" footer, the sticky taint, the
+outbound-tool gate, approvals, and the never-steer rule. They are not a complete wall. The taint gate
+covers **outbound** tools; host writes and `run_command` run under their normal approval policy and are
+not taint-gated. So a guest message can lead a granted role session to *attempt* anything that role
+session may attempt on a user's behalf, such as reading a file or proposing a command, with the approval
+policy as the control on each. What bounds the reachable set is the **default-empty role allowlist**
+(section 5.5): a role that is not granted to a client cannot be asked at all. Brian should read the
+allowlist as "which sessions may be handed instructions by this outside agent", not only "which sessions
+may be asked questions". Hardening the answering side (a guest-origin turn that cannot run host tools)
+belongs with #1089, since it changes what role sessions can do.
+
 What the guest's own model could leak: only what the owner's sessions chose to tell it, plus whatever
 the guest itself was told. It holds nothing else (section 5.3), has no tool that reads the machine, and
 cannot reach the user.
@@ -349,6 +375,7 @@ added to the guest floor; the exact guest base prompt text.
   tool-dispatch path (declaration, `hardStrip`, stickiness, the hook, `offeredToolNames`, the
   `executeFunctionCall` guards, `agentToolScope`), not only that the allowlist is declared.
 - **Cost.** A guest turn is a real model turn. Mitigated by D4, the global cap and the idle TTL.
+- **Ingress to a main-principal role session** (section 6): bounded by the default-empty allowlist and the normal approval policy, not by taint.
 - **Reply disclosure is prompt-level.** Accepted for the dev team (section 6); #1089 gates widening.
 - **Role holders answering guests while a user turn runs.** The never-steer rule holds, but a busy
   role session delays the answer; the guest turn's budget bounds how long the guest waits.
