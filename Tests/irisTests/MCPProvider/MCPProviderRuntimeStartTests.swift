@@ -41,7 +41,7 @@ struct MCPProviderRuntimeStartTests {
     }
 
     @Test("a token store that cannot be read is reported, with a bounded reason and no server")
-    func keychainLoadFailureIsReported() async {
+    func keychainLoadFailureIsReported() async throws {
         let lines = Lines()
         let runtime = Self.runtime(registry: Self.registry(readFailure: errSecIO), lines: lines)
         await runtime.start()
@@ -50,7 +50,8 @@ struct MCPProviderRuntimeStartTests {
         }
         #expect(reason.count <= 120)
         #expect(lines.value.count == 1)
-        #expect(lines.value[0].contains("token store could not be read"))
+        let line = try #require(lines.value.first)
+        #expect(line.contains("token store could not be read"))
         // Starting again does not pretend it worked.
         await runtime.start()
         guard case .failed(.keychainLoad) = runtime.status else { Issue.record("status changed to \(runtime.status)"); return }
@@ -73,7 +74,8 @@ struct MCPProviderRuntimeStartTests {
         #expect(port == taken)
         #expect(reason.count <= 120)
         #expect(lines.value.count == 1)
-        #expect(lines.value[0].contains("127.0.0.1:\(taken)"))
+        let line = try #require(lines.value.first)
+        #expect(line.contains("127.0.0.1:\(taken)"))
     }
 
     @Test("a successful start reports running on the bound port and says nothing")
@@ -87,5 +89,30 @@ struct MCPProviderRuntimeStartTests {
         #expect(port != 0, "an ephemeral request resolves to the real bound port")
         #expect(lines.value.isEmpty)
         await runtime.stop()
+        #expect(runtime.status == .off, "a stopped provider is not still reported running")
+    }
+
+    @Test("two overlapping starts build one server")
+    func overlappingStartsAreOne() async throws {
+        let lines = Lines()
+        let runtime = Self.runtime(registry: Self.registry(), lines: lines)
+        async let first: Void = runtime.start()
+        async let second: Void = runtime.start()
+        _ = await (first, second)
+        #expect(runtime.startsBegun == 1, "the second start must not build a second server beside the first")
+        guard case .running = runtime.status else { Issue.record("expected .running, got \(runtime.status)"); return }
+        #expect(lines.value.isEmpty)
+        // Once stopped, it can start again.
+        await runtime.stop()
+        await runtime.start()
+        #expect(runtime.startsBegun == 2)
+        await runtime.stop()
+    }
+
+    @Test("a reason is capped at 120 characters however long the error's domain is")
+    func reasonIsBounded() {
+        let long = NSError(domain: String(repeating: "d", count: 500), code: 42)
+        #expect(MCPProviderRuntime.summary(of: long).count == 120)
+        #expect(MCPProviderRuntime.summary(of: NSError(domain: "short", code: 7)) == "short 7")
     }
 }
