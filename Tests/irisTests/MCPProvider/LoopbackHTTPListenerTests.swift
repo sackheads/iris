@@ -94,6 +94,51 @@ struct LoopbackHTTPListenerTests {
         #expect((response as? HTTPURLResponse)?.statusCode == 504)
     }
 
+    @Test("a FIXED port binds and serves: the configured default ports, not only port 0")
+    func fixedPortBindsAndServes() async throws {
+        // Every other test here asks for port 0. `requiredLocalEndpoint` with a port AND the same
+        // port in `NWListener(using:on:)` throws POSIX 22 on macOS for any fixed port, so a listener
+        // asked for 8787 or 8788 never started while all of those passed.
+        let port = try freeLoopbackPort()
+        let listener = LoopbackHTTPListener(port: port) { _ in .ok() }
+        try await listener.start()
+        defer { listener.stop() }
+        #expect(listener.boundPort == port)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/")!)
+        request.httpMethod = "POST"
+        request.httpBody = Data()
+        request.setValue("0", forHTTPHeaderField: "Content-Length")
+        let (_, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+    }
+
+    @Test("a fixed port is still loopback-only: its LAN address is not served")
+    func fixedPortStillRefusesNonLoopbackAddress() async throws {
+        guard let lanAddress = firstNonLoopbackIPv4Address() else { return }
+        let port = try freeLoopbackPort()
+        let listener = LoopbackHTTPListener(port: port) { _ in .ok() }
+        try await listener.start()
+        defer { listener.stop() }
+        #expect(listener.boundPort == port)
+
+        let connection = NWConnection(host: NWEndpoint.Host(lanAddress), port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
+        let connected = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let resumer = OneShotResumer(continuation)
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready: resumer.resume(true)
+                case .failed, .cancelled: resumer.resume(false)
+                default: break
+                }
+            }
+            connection.start(queue: .global())
+            DispatchQueue.global().asyncAfter(deadline: .now() + 3) { resumer.resume(false) }
+        }
+        connection.cancel()
+        #expect(!connected, "a connection to the LAN address must never succeed; the listener only bound 127.0.0.1")
+    }
+
     @Test("start() binds via NWParameters.requiredLocalEndpoint to 127.0.0.1, not just any interface on the port")
     func bindsToLoopbackAtConstructionTime() throws {
         let params = LoopbackHTTPListener.loopbackParameters(port: 12345)
@@ -468,4 +513,28 @@ private func rawConnect(port: UInt16) async throws -> RawConnection {
         connection.start(queue: .global())
     }
     return raw
+}
+
+/// A TCP port nothing is listening on right now: bound to port 0 on loopback by a BSD socket, read
+/// back, closed. Another process could take it before the test does; that is a flake only on a
+/// machine racing for the same ephemeral port in that instant.
+private func freeLoopbackPort() throws -> UInt16 {
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    guard fd >= 0 else { throw POSIXError(.EMFILE) }
+    defer { close(fd) }
+    var address = sockaddr_in()
+    address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    address.sin_family = sa_family_t(AF_INET)
+    address.sin_addr.s_addr = inet_addr("127.0.0.1")
+    address.sin_port = 0
+    let bound = withUnsafePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+    }
+    guard bound == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EINVAL) }
+    var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+    let named = withUnsafeMutablePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &length) }
+    }
+    guard named == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EINVAL) }
+    return UInt16(bigEndian: address.sin_port)
 }
