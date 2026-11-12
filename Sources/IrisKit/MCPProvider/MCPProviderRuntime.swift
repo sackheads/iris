@@ -17,12 +17,17 @@ final class MCPProviderRuntime {
         guard server == nil else { return }
 
         let tokenRegistry = ProviderTokenRegistry()
+        // A registry that failed to load its durable token store can authenticate nobody
+        // correctly (every `clientId(forToken:)` lookup runs against whatever partial/empty
+        // state construction left behind) — fail closed rather than silently start broken.
+        guard tokenRegistry.keychainLoadError == nil else { return }
+
         let mailbox = ProviderMailbox(registry: tokenRegistry)
         let artifactRoot = IrisPaths.default.root.appendingPathComponent("mcp-provider-artifacts", isDirectory: true)
         let artifactStore = ProviderArtifactStore(root: artifactRoot, isRegistered: { tokenRegistry.isRegistered(clientId: $0) })
         let door = SelfReportDoor.live()
-        let doorGate = ProviderRequestGate(registry: tokenRegistry, capacity: Self.doorGateCapacity, refillInterval: Self.gateRefillInterval)
-        let mailboxGate = ProviderRequestGate(registry: tokenRegistry, capacity: Self.mailboxGateCapacity, refillInterval: Self.gateRefillInterval)
+        let doorGate = ProviderRequestGate(registry: tokenRegistry, capacity: Self.doorGateCapacity, refillInterval: Self.refillInterval(forCapacity: Self.doorGateCapacity))
+        let mailboxGate = ProviderRequestGate(registry: tokenRegistry, capacity: Self.mailboxGateCapacity, refillInterval: Self.refillInterval(forCapacity: Self.mailboxGateCapacity))
         let port = UInt16(clamping: ConfigManager.shared.mcpProviderPort)
 
         let server = IrisMCPProviderServer(tokenRegistry: tokenRegistry, mailbox: mailbox, artifactStore: artifactStore,
@@ -48,9 +53,15 @@ final class MCPProviderRuntime {
         await server?.sweepExpired()
     }
 
-    /// Requests per minute before the self-report door refuses — distinct from the mailbox's own
-    /// budget (Task 3's Global Constraints: each gate's capacity is independent).
-    private static let doorGateCapacity = 120
-    private static let mailboxGateCapacity = 60
-    private static let gateRefillInterval: Duration = .seconds(60)
+    /// Sustained requests per minute before each gate refuses — distinct budgets (Task 3's
+    /// Global Constraints: each gate's capacity is independent). `ProviderRequestGate`'s
+    /// `refillInterval` is the time to refill *one* token, not the window `capacity` is spent
+    /// over, so a 120/minute sustained rate needs one token every 1/120 of a minute, not
+    /// `capacity: 120, refillInterval: .seconds(60)` (which refills to only 1/minute once the
+    /// initial burst of 120 is spent).
+    static let doorGateCapacity = 120
+    static let mailboxGateCapacity = 60
+    nonisolated static func refillInterval(forCapacity capacity: Int) -> Duration {
+        .seconds(60) / capacity
+    }
 }

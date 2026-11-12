@@ -199,12 +199,16 @@ struct SelfReportDoorTests {
                               "value(forKey", "Mirror(", "perform(", "accessibility"] {
                 #expect(!code.contains(forbidden), "\(name) must not use `\(forbidden)`")
             }
-            // The leak this guards against is AppKit UI text (a window title, a text view's
-            // string) reaching the door's response. `.stringValue`/`.string` pattern-matching the
-            // MCP SDK's own `Value` enum (#1067 Task 8's JSON-RPC argument parsing) is a different,
-            // legitimate concern with no AppKit text behind it — scope the stricter checks to
-            // files that actually import AppKit, the one place that leak could originate.
-            guard source.contains("import AppKit") else { continue }
+            // The leak this guards against is UI text (a window title, a text view's string, a
+            // SwiftUI view's text) reaching the door's response. `.stringValue`/`.string`
+            // pattern-matching the MCP SDK's own `Value` enum (#1067 Task 8's JSON-RPC argument
+            // parsing) is a different, legitimate concern with no UI text behind it — but scoping
+            // the exemption to "doesn't import AppKit" would silently stop covering a future file
+            // that reads UI text through SwiftUI or another framework instead. Allowlist the
+            // specific files that are pure JSON-RPC/actor plumbing instead, so a new file is
+            // covered by default and has to be added here deliberately to opt out.
+            let filesExemptFromStringChecks: Set<String> = ["IrisMCPProviderServer.swift", "MCPProviderRuntime.swift"]
+            guard !filesExemptFromStringChecks.contains(name) else { continue }
             #expect(!code.contains(".stringValue"), "\(name) must not use `.stringValue`")
             // `.string` as a property read is only ever `.string.isEmpty`; `DateFormatter.string(from:)`
             // is a method call, not a text read, and is the one other spelling in this directory.

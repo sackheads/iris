@@ -26,17 +26,6 @@ final class IrisMCPProviderServer: Sendable {
     static let mailboxToolNames: Set<String> = ["iris_send", "iris_poll", "iris_discover", "iris_status", "artifact_put"]
     static let allToolNames: Set<String> = doorToolNames.union(mailboxToolNames)
 
-    /// Test-only seam: called with each per-request `Server` right after construction, before
-    /// `start()`/`stop()`. Lets a test hold a weak reference and confirm it is released once the
-    /// request completes — proving `stop()` actually ran and nothing else kept the `Server`
-    /// alive, not merely that teardown code compiles. `nil` in production; zero cost there.
-    /// `Server`'s own default handlers (`initialize`/`ping`) capture it strongly into its
-    /// `methodHandlers` dictionary, so the actor never deallocates even after `stop()` — a
-    /// self-cycle in the SDK, not something teardown can break. The transport has no such cycle,
-    /// so the test proves teardown through it: `terminated` flips `handleRequest` to a fixed
-    /// "transport has been terminated" response once `stop()` has run.
-    nonisolated(unsafe) static var testOnlyServerConstructedHook: (@Sendable (Server, StatelessHTTPServerTransport) -> Void)?
-
     private let tokenRegistry: ProviderTokenRegistry
     private let mailbox: ProviderMailbox
     private let artifactStore: ProviderArtifactStore
@@ -45,6 +34,12 @@ final class IrisMCPProviderServer: Sendable {
     private let mailboxGate: ProviderRequestGate
     private let port: UInt16
     private let requestDeadline: Duration
+    /// Test-only seam: called with each per-request `Server` and `StatelessHTTPServerTransport`
+    /// right after construction, before `start()`/`stop()`. An instance property, not a mutable
+    /// static — a static hook is one process-global shared across every `IrisMCPProviderServer`
+    /// instance in the test binary, and the parallel test runner mutating it from multiple tests
+    /// at once raced (AGENTS.md Invariant 7). `nil` in production; zero cost there.
+    private let serverConstructedHook: (@Sendable (Server, StatelessHTTPServerTransport) -> Void)?
 
     private final class ListenerBox: @unchecked Sendable {
         private let lock = NSLock()
@@ -58,7 +53,8 @@ final class IrisMCPProviderServer: Sendable {
 
     init(tokenRegistry: ProviderTokenRegistry, mailbox: ProviderMailbox, artifactStore: ProviderArtifactStore,
          door: SelfReportDoor, doorGate: ProviderRequestGate, mailboxGate: ProviderRequestGate,
-         port: UInt16, requestDeadline: Duration = .seconds(10)) {
+         port: UInt16, requestDeadline: Duration = .seconds(10),
+         serverConstructedHook: (@Sendable (Server, StatelessHTTPServerTransport) -> Void)? = nil) {
         self.tokenRegistry = tokenRegistry
         self.mailbox = mailbox
         self.artifactStore = artifactStore
@@ -67,11 +63,19 @@ final class IrisMCPProviderServer: Sendable {
         self.mailboxGate = mailboxGate
         self.port = port
         self.requestDeadline = requestDeadline
+        self.serverConstructedHook = serverConstructedHook
     }
 
     func start() async throws {
         let listener = LoopbackHTTPListener(
             port: port,
+            // `handleTimeout` must sit strictly above `requestDeadline`: `handleAuthenticated`
+            // has its own 504-and-teardown deadline, and if the listener's own timeout could
+            // fire at the same instant, whichever one wins is undefined and the loser's response
+            // or teardown may never run. A fixed one-second margin, not a race between two
+            // independently-defaulted ten-second constants (the two previously landed on the
+            // same value by coincidence).
+            limits: .init(handleTimeout: requestDeadline + .seconds(1)),
             preBodyCheck: { [weak self] request in self?.preBodyAuthCheck(request) },
             handle: { [weak self] request in
                 guard let self else { return .error(statusCode: 500, .internalError("server stopped")) }
@@ -95,9 +99,24 @@ final class IrisMCPProviderServer: Sendable {
     /// future admin tool, a manual script — out of scope for Phase 1's own UI, per Task 1's
     /// onboarding note) must call this, never `tokenRegistry.revokeToken` directly.
     func revoke(clientId: String) async throws {
-        try tokenRegistry.revokeToken(forClientId: clientId)
+        // Every purge runs regardless of whether revokeToken itself throws (e.g. an already
+        // unknown client id): a failed token revoke must not leave that id's mailbox messages,
+        // artifact grants, or gate budget state behind for a later re-issue of the same id to
+        // inherit. The token error, if any, is what the caller sees.
+        //
+        // Registry-first is still deliberate, not just the natural order: a request already
+        // admitted before this call holds a resolved `clientId` in its own closure for up to
+        // `requestDeadline`, and could still write a message or a grant under it after the
+        // purges below have run but before `revokeToken` actually lands — nothing here closes
+        // that window (dev-2 review, #1079), and it is not pinned by a deterministic test. The
+        // mailbox/store's own re-check of `isRegistered` at the point of mutation (Task 6/7) is
+        // what actually closes it, by rejecting the write once the registry update lands.
+        let tokenError = Result { try tokenRegistry.revokeToken(forClientId: clientId) }
         await mailbox.purge(clientId: clientId)
         await artifactStore.purge(clientId: clientId)
+        await doorGate.purge(clientId: clientId)
+        await mailboxGate.purge(clientId: clientId)
+        try tokenError.get()
     }
 
     /// Schedules the two store sweeps. Called from the app's own maintenance hook (the same place
@@ -113,8 +132,8 @@ final class IrisMCPProviderServer: Sendable {
     }
 
     private static func bearerToken(from request: HTTPRequest) -> String? {
-        guard let authHeader = request.header("Authorization") else { return nil }
-        return authHeader.hasPrefix("Bearer ") ? String(authHeader.dropFirst("Bearer ".count)) : authHeader
+        guard let authHeader = request.header("Authorization"), authHeader.hasPrefix("Bearer ") else { return nil }
+        return String(authHeader.dropFirst("Bearer ".count))
     }
 
     /// Task 2's seam: answers from headers alone, before this connection ever reads its body — an
@@ -205,33 +224,52 @@ final class IrisMCPProviderServer: Sendable {
         // 4-6. Build the per-request Server+transport, dispatch, and always tear it down.
         do {
             return try await withTimeout(seconds: Self.seconds(requestDeadline)) {
-                await self.dispatch(body: body, clientId: clientId)
+                await self.dispatch(clientId: clientId, request: request)
             }
         } catch {
             return .error(statusCode: 504, .internalError("request deadline exceeded"))
         }
     }
 
-    private func dispatch(body: Data, clientId: String) async -> HTTPResponse {
+    /// Passes the caller's own `request` through to `transport.handleRequest`, unaltered —
+    /// never a stand-in with fixed headers, or the SDK's own `StatelessHTTPServerTransport`
+    /// validation pipeline (origin/host, `Accept`, `Content-Type`, method) never actually runs
+    /// against real traffic.
+    private func dispatch(clientId: String, request: HTTPRequest) async -> HTTPResponse {
         let server = Server(name: "iris", version: Constants.appVersion, capabilities: Self.serverCapabilities)
         await Self.registerHandlers(on: server, clientId: clientId, door: door, mailbox: mailbox, artifactStore: artifactStore)
 
         let transport = StatelessHTTPServerTransport()
-        Self.testOnlyServerConstructedHook?(server, transport)
-        let httpRequest = HTTPRequest(
-            method: "POST",
-            headers: ["Content-Type": "application/json", "Accept": "application/json"],
-            body: body, path: "/")
+        serverConstructedHook?(server, transport)
 
-        do {
-            try await server.start(transport: transport)
-        } catch {
+        return await withTaskCancellationHandler {
+            do {
+                try await server.start(transport: transport)
+            } catch {
+                await server.stop()
+                return .error(statusCode: 500, .internalError("server start failed"))
+            }
+            let response = await transport.handleRequest(request)
             await server.stop()
-            return .error(statusCode: 500, .internalError("server start failed"))
+            return response
+        } onCancel: {
+            // `withTimeout`'s deadline cancels this task but does not interrupt a plain `await`
+            // mid-flight (Timeout.swift's own doc comment) — without this, a timed-out request's
+            // Server/transport are torn down only once the abandoned operation eventually reaches
+            // its own `server.stop()`, whenever that is. This tears them down at once instead;
+            // `server.stop()` from the operation body afterward is a harmless second call.
+            //
+            // This frees the Server/transport promptly; it does not stop the request's own work.
+            // `withTimeout` abandons the operation task rather than cancelling the SDK's own
+            // internal handler task (the method handlers in `registerHandlers` run inside the
+            // SDK's receive loop, which this cancellation handler has no reach into), so a 504
+            // does not mean a tool call's side effect (a `mailbox.send`, an `artifactStore.put`)
+            // did not happen — only that the caller stopped waiting for its result. In practice
+            // every handler here is a fast actor call except `door.handle`, which races its own
+            // 500ms deadline well under any reasonable `requestDeadline`, so this is a real
+            // caveat, not a reachable one with the handlers this server actually registers today.
+            Task { await server.stop() }
         }
-        let response = await transport.handleRequest(httpRequest)
-        await server.stop()
-        return response
     }
 
     private static func registerHandlers(on server: Server, clientId: String, door: SelfReportDoor,
@@ -328,8 +366,29 @@ final class IrisMCPProviderServer: Sendable {
     /// ref that preflighted clean — the message is retracted rather than left half-delivered.
     private static func handleSend(_ params: CallTool.Parameters, clientId: String,
                                    mailbox: ProviderMailbox, artifactStore: ProviderArtifactStore) async throws -> CallTool.Result {
-        let text = params.arguments?["text"]?.stringValue ?? ""
-        let fileRefs = params.arguments?["fileRefs"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        // Reject a malformed shape outright rather than silently defaulting it into something
+        // sendable: a missing/non-string `text` is not the same request as an explicit empty
+        // string, and a non-array or mixed-type `fileRefs` is not the same as "no attachments" —
+        // either would otherwise send a message the caller did not actually ask to send, with no
+        // error telling them their attachment list was dropped.
+        guard let text = params.arguments?["text"]?.stringValue else {
+            return CallTool.Result(content: [.text(text: "text must be a string", annotations: nil, _meta: nil)], isError: true)
+        }
+        let fileRefs: [String]
+        if let fileRefsValue = params.arguments?["fileRefs"] {
+            guard let array = fileRefsValue.arrayValue, let strings = array.stringsIfAllStrings() else {
+                return CallTool.Result(content: [.text(text: "fileRefs must be an array of strings", annotations: nil, _meta: nil)], isError: true)
+            }
+            fileRefs = strings
+        } else {
+            fileRefs = []
+        }
+
+        // Cheap, no I/O: reject an oversized list before spending one actor hop per entry on the
+        // preflight below.
+        guard fileRefs.count <= ProviderMailbox.maxFileRefsPerMessage else {
+            return CallTool.Result(content: [.text(text: "too many fileRefs", annotations: nil, _meta: nil)], isError: true)
+        }
 
         for ref in fileRefs {
             do {
@@ -441,5 +500,19 @@ private extension Value {
     var uint64Value: UInt64? {
         if case .int(let i) = self, i >= 0 { return UInt64(i) }
         return nil
+    }
+}
+
+private extension [Value] {
+    /// `nil` if any element is not a `.string` — used where a mixed-type array must be refused
+    /// outright rather than have `compactMap(\.stringValue)` silently drop the non-string entries.
+    func stringsIfAllStrings() -> [String]? {
+        var result: [String] = []
+        result.reserveCapacity(count)
+        for value in self {
+            guard let string = value.stringValue else { return nil }
+            result.append(string)
+        }
+        return result
     }
 }
