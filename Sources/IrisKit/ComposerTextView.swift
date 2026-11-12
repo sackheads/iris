@@ -207,9 +207,22 @@ final class KeyCatchingTextView: NSTextView {
         super.viewDidMoveToWindow()
         if window != nil {
             ComposerFocus.track(self)
+            ComposerFocusKeeper.shared.composerDidAttach()
         } else if ComposerFocus.current === self {
             ComposerFocus.track(nil)
         }
+    }
+
+    /// #1055: a click on the composer must leave it first responder. `NSTextView` takes focus
+    /// inside `super.mouseDown`; if that did not stick (the holder refused to resign, or something
+    /// took focus back during the click's tracking loop) ask once more and record the answer, so
+    /// an attended pass can tell "the click never arrived" from "the click arrived and lost".
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+        guard let window, window.firstResponder !== self else { return }
+        let took = window.makeFirstResponder(self)
+        DiagnosticEventRing.shared.record(.composerFocusReclaim(
+            reason: ComposerFocusPolicy.Reason.clickedComposer.rawValue, tookFocus: took))
     }
 
     /// #1055: a click that also reactivates the window (e.g. click away from Iris, then click

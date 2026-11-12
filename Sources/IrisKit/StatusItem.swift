@@ -186,7 +186,11 @@ enum MainWindow {
     /// Opens a scene (the Run Log) through the best-ranked `openWindow` known.
     static func open(scene: String) { tracking.open(scene: scene) }
 
-    static func track(_ window: NSWindow?) { tracking.track(window) }
+    static func track(_ window: NSWindow?) {
+        tracking.track(window)
+        // #1055: the composer is where typing lands; this keeps it there for the chat window.
+        ComposerFocusKeeper.shared.attach(window)
+    }
     static var isVisible: Bool { tracking.isVisible }
     static var isFrontmost: Bool { tracking.isFrontmost }
 

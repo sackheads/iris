@@ -20,8 +20,11 @@ final class DiagnosticEventRing: @unchecked Sendable {
         case composerAcceptsFirstMouse(Bool)
         case windowAppearanceChanged(name: String)
         case composerAppearanceChanged(name: String)
+        /// The composer took first responder back (#1055): `reason` is one of `ComposerFocusPolicy.Reason`'s
+        /// raw values, `tookFocus` is `makeFirstResponder`'s own answer.
+        case composerFocusReclaim(reason: String, tookFocus: Bool)
 
-        private enum CodingKeys: String, CodingKey { case kind, x, y, tookFocus, accepts, name }
+        private enum CodingKeys: String, CodingKey { case kind, x, y, tookFocus, accepts, name, reason }
 
         func encode(to encoder: Encoder) throws {
             var c = encoder.container(keyedBy: CodingKeys.self)
@@ -42,6 +45,10 @@ final class DiagnosticEventRing: @unchecked Sendable {
             case .composerAppearanceChanged(let name):
                 try c.encode("composerAppearanceChanged", forKey: .kind)
                 try c.encode(name, forKey: .name)
+            case .composerFocusReclaim(let reason, let tookFocus):
+                try c.encode("composerFocusReclaim", forKey: .kind)
+                try c.encode(reason, forKey: .reason)
+                try c.encode(tookFocus, forKey: .tookFocus)
             }
         }
     }
