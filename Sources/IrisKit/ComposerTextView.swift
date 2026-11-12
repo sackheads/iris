@@ -19,6 +19,14 @@ enum HostedTextAppearance {
         }
     }
 
+    /// Whether an appearance name is a vibrant variant (plain or Increase Contrast).
+    static func isVibrant(_ name: NSAppearance.Name) -> Bool {
+        switch name {
+        case .vibrantDark, .vibrantLight, .accessibilityHighContrastVibrantDark, .accessibilityHighContrastVibrantLight: return true
+        default: return false
+        }
+    }
+
     /// The plain appearance for a scheme.
     static func plainName(for scheme: ColorScheme) -> NSAppearance.Name { scheme == .dark ? .darkAqua : .aqua }
 
@@ -27,10 +35,12 @@ enum HostedTextAppearance {
     /// `accessibilityHighContrast*` name by hand returns the plain appearance on this macOS, so it
     /// cannot be rebuilt from a name), otherwise the plain appearance for the scheme, so a window
     /// that disagrees with SwiftUI does not drag the text surface along. A window's own appearance
-    /// is never a vibrant variant. Before the view has a window there is nothing to agree with.
+    /// is lent only when it is not itself a vibrant variant (a HUD panel's is): lending that would
+    /// reintroduce what this pin removes. Before the view has a window there is nothing to agree with.
     @MainActor
     static func pinned(for view: NSView, scheme: ColorScheme) -> NSAppearance? {
-        if let windowAppearance = view.window?.effectiveAppearance, isDark(windowAppearance.name) == (scheme == .dark) {
+        if let windowAppearance = view.window?.effectiveAppearance, !isVibrant(windowAppearance.name),
+           isDark(windowAppearance.name) == (scheme == .dark) {
             return windowAppearance
         }
         return NSAppearance(named: plainName(for: scheme))

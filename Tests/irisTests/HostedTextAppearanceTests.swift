@@ -185,6 +185,23 @@ struct HostedTextAppearanceTests {
         #expect(HostedTextAppearance.pinned(for: view, scheme: .light) === window.effectiveAppearance)
     }
 
+    @Test("a window whose own appearance is a vibrant variant (a HUD, say) is not lent: the plain one is pinned")
+    func vibrantWindowAppearanceIsNotLent() throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100), styleMask: [.titled], backing: .buffered, defer: true)
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 50, height: 50))
+        window.contentView?.addSubview(view)
+        window.appearance = NSAppearance(named: .vibrantDark)
+        #expect(HostedTextAppearance.pinned(for: view, scheme: .dark)?.name == .darkAqua)
+        window.appearance = NSAppearance(named: .vibrantLight)
+        #expect(HostedTextAppearance.pinned(for: view, scheme: .light)?.name == .aqua)
+        for name in [NSAppearance.Name.vibrantDark, .vibrantLight, .accessibilityHighContrastVibrantDark, .accessibilityHighContrastVibrantLight] {
+            #expect(HostedTextAppearance.isVibrant(name), "\(name.rawValue)")
+        }
+        for name in [NSAppearance.Name.aqua, .darkAqua, .accessibilityHighContrastAqua, .accessibilityHighContrastDarkAqua] {
+            #expect(!HostedTextAppearance.isVibrant(name), "\(name.rawValue)")
+        }
+    }
+
     @Test("asking for an Increase Contrast name by hand returns a plain appearance: why the pin lends the window's own instead")
     func highContrastNamesCollapse() throws {
         // Documents the platform behaviour the design rests on (probed on this macOS): these names
