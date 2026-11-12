@@ -231,6 +231,12 @@ To configure MCP servers, create a JSON file at `~/.iris/mcp_servers.json` with 
 
 Once configured, Iris will automatically boot these servers in the background and their tools will be available for Iris to use.
 
+### MCP provider (Iris as an MCP server)
+
+The reverse direction: a developer's own MCP client can talk to Iris over a small, local,
+token-gated, off-by-default surface — read-only app self-report plus a plain client↔Iris
+messaging/file exchange, never client-to-client. [Details](mcp_provider.md)
+
 ## Core native tools
 
 The built-in tools the model is given (`run_command`, the file tools, `schedule_job` and the rest): see [docs/tools.md](tools.md).
