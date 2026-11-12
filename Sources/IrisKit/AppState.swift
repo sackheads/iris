@@ -200,6 +200,14 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// #187 — a conversation a scheduled job runs in: never shown in the sidebar, never selected,
     /// but persisted and searchable so a finished run's transcript can be opened from its card.
     var isBackground: Bool = false
+    /// #1066 — an external MCP guest's own confined session. Ephemeral like `isSubagent` (never
+    /// persisted: it is left out of `CodingKeys`, and `durableConversations` and `takeBatch` drop
+    /// it), hidden from the sidebar like a background run (`isUserFacing` stays false), and
+    /// addressable by another session only as the target of a reply it asked for (`isReplyTarget`).
+    var isGuest: Bool = false
+    /// #1066 — the registered MCP client this guest session belongs to: the provenance stamp
+    /// `mcpGuest:<clientId>`. Never persisted, like `isGuest`.
+    var guestClientId: String? = nil
     /// #187 — sorted to the top of the sidebar and refused by `/clear`. The "Iris" conversation
     /// event cards are delivered to is the first user of this.
     var isPinned: Bool = false
@@ -421,7 +429,12 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// added: every one of them (launch selection, the post-delete re-point, the two
     /// "is there anywhere left to type?" checks, and both sidebar sections) goes through this
     /// or `isSelectable` below rather than spelling the flags out.
-    var isUserFacing: Bool { !isSubagent && !isBackground }
+    var isUserFacing: Bool { !isSubagent && !isBackground && !isGuest }
+
+    /// #1066 — whether a reply may be addressed to this conversation: a user-facing session, or a
+    /// guest's own (which is never user-facing and so is never reachable by a name, role, topic or id).
+    /// Only the reply branch of `decidePeerSend` reads this; nothing else widens addressing.
+    var isReplyTarget: Bool { isUserFacing || isGuest }
 
     /// A conversation the app may point the selection at unprompted: user-facing and not archived.
     var isSelectable: Bool { isUserFacing && !isArchived }
@@ -1912,18 +1925,21 @@ class AppState {
     /// Pass `false` explicitly to create a conversation without disturbing the selection.
     @discardableResult
     func createNewConversation(id: UUID = UUID(), isSubagent: Bool = false, isBackground: Bool = false,
+                               isGuest: Bool = false, guestClientId: String? = nil,
                                title: String? = nil, select: Bool? = nil, agentProfile: String? = nil) -> UUID {
         var newConv = Conversation(id: id, title: title ?? Conversation.defaultTitle)
         newConv.isSubagent = isSubagent
         newConv.isBackground = isBackground
+        newConv.isGuest = isGuest
+        newConv.guestClientId = isGuest ? guestClientId : nil
         conversations.append(newConv)
-        if select ?? (!isSubagent && !isBackground) {
+        if select ?? (!isSubagent && !isBackground && !isGuest) {
             selectedConversationId = newConv.id
         }
         markChanged(newConv.id, .created)
         // #465: only the person's New Conversation menu passes a profile, and only for a session
         // of their own: never a subagent's thread or a job run.
-        if let agentProfile, !isSubagent, !isBackground { applyAgentProfile(agentProfile, to: newConv.id) }
+        if let agentProfile, !isSubagent, !isBackground, !isGuest { applyAgentProfile(agentProfile, to: newConv.id) }
 
         Task {
             _ = await HookManager.shared.fireSessionStart(conversationId: newConv.id)
@@ -5201,7 +5217,7 @@ class AppState {
     /// The conversations that belong on disk: durable, user-facing ones only. Sub-process
     /// (subagent / drift-evaluator) scratch conversations are ephemeral and must never persist.
     nonisolated static func durableConversations(_ all: [Conversation]) -> [Conversation] {
-        all.filter { !$0.isSubagent }
+        all.filter { !$0.isSubagent && !$0.isGuest }
     }
 
     /// Restores load-time invariants. The completion report and evaluation are per-session
@@ -5316,7 +5332,7 @@ class AppState {
         let batch: [ConversationWrite] = pendingChanges.compactMap { id, changes in
             var changes = changes
             let live = conversations.first { $0.id == id }
-            if let live, live.isSubagent { return nil }
+            if let live, live.isSubagent || live.isGuest { return nil }
             if live == nil && !changes.deleted { return nil }   // vanished without a delete: nothing to write
             // Deleted and re-created inside one window (the same id came back): the conversation
             // is live, so write the current snapshot rather than deleting the row out from under it.
@@ -6206,7 +6222,7 @@ class AppState {
         if conv.isPinned && !forAlarm {
             return "Iris can't run a loop: it's the conversation your memory and `/new` work from, and a loop would fill it with ticks. Start one in another conversation."
         }
-        if conv.isBackground || conv.isSubagent {
+        if conv.isBackground || conv.isSubagent || conv.isGuest {
             return "A loop needs someone to talk to, so it runs only in a conversation of your own."
         }
         if let goal = conv.activeGoal {

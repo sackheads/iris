@@ -772,6 +772,26 @@ struct JobToolsTests {
         #expect(result.contains("No matching conversations."))
     }
 
+    @Test("search_conversations never returns a guest conversation (#1066), even one forced into the store")
+    func searchConversationsExcludesGuest() async throws {
+        let (app, id) = pinnedApp()
+        var guest = Conversation(id: UUID(), title: "guest")
+        guest.isGuest = true
+        guest.guestClientId = "dev-1"
+        guest.messages = [ChatMessage(role: .agent, content: "kestrel in the guest's reply")]
+        var s = ChangeSet(); s.add(.created); s.add(.messagesAppended(from: 0))
+        try app.store.apply([ConversationWrite(id: guest.id, snapshot: guest, changes: s)])
+        app.conversations.append(guest)
+        #expect(try app.store.searchConversations(query: "kestrel").contains { $0.conversationId == guest.id })
+
+        let result = await runToolCall(
+            FunctionCall(name: "search_conversations", args: ["query": .string("kestrel")], id: "c1"),
+            on: app, as: id)
+
+        #expect(!result.contains(guest.id.uuidString))
+        #expect(result.contains("No matching conversations."))
+    }
+
     @Test("an archived conversation's message is still returned")
     func searchConversationsIncludesArchived() async throws {
         let (app, id) = pinnedApp()
@@ -1134,6 +1154,21 @@ struct JobToolsTests {
 
         let result = await runToolCall(
             FunctionCall(name: "read_conversation", args: ["id": .string(sub.uuidString)], id: "c1"),
+            on: app, as: id)
+
+        #expect(result == "No conversation with that id.")
+    }
+
+    @Test("read_conversation refuses a guest conversation (#1066): a peer frame carries its id")
+    func readConversationRefusesGuest() async throws {
+        let (app, id) = pinnedApp()
+        let guest = app.createNewConversation(isGuest: true, guestClientId: "dev-1", select: false)
+        if let idx = app.conversations.firstIndex(where: { $0.id == guest }) {
+            app.conversations[idx].messages.append(ChatMessage(role: .agent, content: "guest transcript"))
+        }
+
+        let result = await runToolCall(
+            FunctionCall(name: "read_conversation", args: ["id": .string(guest.uuidString)], id: "c1"),
             on: app, as: id)
 
         #expect(result == "No conversation with that id.")
