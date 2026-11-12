@@ -207,7 +207,7 @@ final class KeyCatchingTextView: NSTextView {
         super.viewDidMoveToWindow()
         if window != nil {
             ComposerFocus.track(self)
-            ComposerFocusKeeper.shared.composerDidAttach()
+            ComposerFocusKeepers.shared.composerDidAttach(self)
         } else if ComposerFocus.current === self {
             ComposerFocus.track(nil)
         }
