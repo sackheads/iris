@@ -113,7 +113,8 @@ struct LoopbackHTTPListenerTests {
         #expect((response as? HTTPURLResponse)?.statusCode == 200)
     }
 
-    @Test("a fixed port is still loopback-only: its LAN address is not served")
+    @Test("a fixed port is still loopback-only: its LAN address is not served",
+          .enabled(if: firstNonLoopbackIPv4Address() != nil, "needs a non-loopback interface that is up"))
     func fixedPortStillRefusesNonLoopbackAddress() async throws {
         guard let lanAddress = firstNonLoopbackIPv4Address() else { return }
         let port = try freeLoopbackPort()
@@ -158,7 +159,8 @@ struct LoopbackHTTPListenerTests {
         #expect(LoopbackHTTPListener.isLoopback(loopback))
     }
 
-    @Test("start()'s real bind refuses a connection to the machine's own LAN address at the same port")
+    @Test("start()'s real bind refuses a connection to the machine's own LAN address at the same port",
+          .enabled(if: firstNonLoopbackIPv4Address() != nil, "needs a non-loopback interface that is up"))
     func realBindRefusesNonLoopbackAddress() async throws {
         guard let lanAddress = firstNonLoopbackIPv4Address() else {
             // No non-loopback interface is up (a sandboxed/offline CI runner) — the injected-
