@@ -24,7 +24,7 @@ private final class DateBox: @unchecked Sendable {
 
 @Suite("ProviderMailbox")
 struct ProviderMailboxTests {
-    @Test("send always addresses Iris; there is no recipient argument to get wrong")
+    @Test("send always addresses Iris; there is no recipient or sender argument to get wrong")
     func sendAlwaysAddressesIris() async throws {
         let mailbox = ProviderMailbox(registry: registryWithClients(["a"]))
         let message = try await mailbox.send(from: "a", text: "hello", fileRefs: [])
@@ -96,6 +96,17 @@ struct ProviderMailboxTests {
         await #expect(throws: ProviderMailbox.MailboxError.malformedFileRef) {
             try await mailbox.deliverReply(to: "a", text: "x", fileRefs: ["not-a-hash"])
         }
+
+        // Shares ProviderArtifactStore.isValidHash, so these pin the same ASCII-only guard
+        // #1075's finding 1 was about, here too — not just "some string that isn't hex."
+        let fullwidth = String(repeating: "\u{FF41}", count: 64)
+        await #expect(throws: ProviderMailbox.MailboxError.malformedFileRef) {
+            try await mailbox.send(from: "a", text: "x", fileRefs: [fullwidth])
+        }
+        let uppercase = String(repeating: "A", count: 64)
+        await #expect(throws: ProviderMailbox.MailboxError.malformedFileRef) {
+            try await mailbox.send(from: "a", text: "x", fileRefs: [uppercase])
+        }
     }
 
     @Test("the inbox-full cap is per sender, not a single shared Iris inbox — one client filling its cap never blocks another's send")
@@ -124,34 +135,54 @@ struct ProviderMailboxTests {
         #expect(toB.to == .client("b"))
     }
 
-    @Test("the mailbox's public send signature has no way to assert a different sender than the resolved client id, and no way to name a recipient other than Iris")
-    func fromIsNotASeparateCallerControlledField() async throws {
-        let mailbox = ProviderMailbox(registry: registryWithClients(["a"]))
-        let message = try await mailbox.send(from: "a", text: "x", fileRefs: [])
-        #expect(message.from == .client("a"))
-        #expect(message.to == .iris)
-    }
-
-    @Test("sweepExpired removes only messages past the TTL in either direction; purge removes everything for one client id")
-    func sweepAndPurge() async throws {
+    /// Neither `poll` nor `status` can observe a message addressed *to* Iris, so these two
+    /// tests use `maxPendingPerClient` as the observable instead: if a sent message were still
+    /// counted against the cap, the next `send` would throw `.inboxFull`.
+    @Test("sweepExpired actually removes past-TTL messages sent to Iris, freeing the sender's cap")
+    func sweepExpiredFreesTheSenderCap() async throws {
         let base = Date()
         let clockBox = DateBox(base)
-        let mailbox = ProviderMailbox(registry: registryWithClients(["a", "b"]), now: { clockBox.value })
-        let oldFromA = try await mailbox.send(from: "a", text: "old", fileRefs: [])
+        let mailbox = ProviderMailbox(registry: registryWithClients(["a"]), now: { clockBox.value })
+        for _ in 0..<ProviderMailbox.maxPendingPerClient {
+            _ = try await mailbox.send(from: "a", text: "x", fileRefs: [])
+        }
+        await #expect(throws: ProviderMailbox.MailboxError.inboxFull) {
+            try await mailbox.send(from: "a", text: "one too many", fileRefs: [])
+        }
+
         clockBox.value = base.addingTimeInterval(ProviderMailbox.ttl + 1)
-        let freshFromB = try await mailbox.send(from: "b", text: "fresh", fileRefs: [])
-
         await mailbox.sweepExpired(now: clockBox.value)
-        let remaining = await mailbox.poll(for: "a", sinceSequence: nil)  // "a" has no replies either way
-        #expect(remaining.isEmpty)
-        _ = oldFromA
 
-        // purge removes everything for "b", both directions.
-        _ = try await mailbox.deliverReply(to: "b", text: "a reply", fileRefs: [])
-        await mailbox.purge(clientId: "b")
-        let bsReplies = await mailbox.poll(for: "b", sinceSequence: nil)
-        #expect(bsReplies.isEmpty)
-        _ = freshFromB
+        // If sweepExpired were a no-op, this would still throw .inboxFull.
+        let afterSweep = try await mailbox.send(from: "a", text: "fits now", fileRefs: [])
+        #expect(afterSweep.from == .client("a"))
+    }
+
+    @Test("purge removes a client's own sent-to-Iris messages too, not only Iris's replies to it")
+    func purgeRemovesBothDirections() async throws {
+        let mailbox = ProviderMailbox(registry: registryWithClients(["a"]))
+        for _ in 0..<ProviderMailbox.maxPendingPerClient {
+            _ = try await mailbox.send(from: "a", text: "x", fileRefs: [])
+        }
+        await #expect(throws: ProviderMailbox.MailboxError.inboxFull) {
+            try await mailbox.send(from: "a", text: "one too many", fileRefs: [])
+        }
+
+        await mailbox.purge(clientId: "a")
+
+        // If purge only cleared Iris's replies to "a" (the `to` side), this would still throw
+        // .inboxFull — a later holder of the id "a" would inherit the old occupant's full inbox.
+        let afterPurge = try await mailbox.send(from: "a", text: "fits now", fileRefs: [])
+        #expect(afterPurge.from == .client("a"))
+    }
+
+    @Test("purge also removes Iris's replies to the client")
+    func purgeRemovesRepliesToo() async throws {
+        let mailbox = ProviderMailbox(registry: registryWithClients(["a"]))
+        _ = try await mailbox.deliverReply(to: "a", text: "a reply", fileRefs: [])
+        await mailbox.purge(clientId: "a")
+        let remaining = await mailbox.poll(for: "a", sinceSequence: nil)
+        #expect(remaining.isEmpty)
     }
 
     @Test("a sender revoked after admission but before send cannot create a new message under its old id")

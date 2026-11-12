@@ -74,7 +74,10 @@ actor ProviderArtifactStore {
         }
     }
 
-    private static func isValidHash(_ sha256: String) -> Bool {
+    /// Shared with `ProviderMailbox`'s own `fileRefs` validation (#1067 Task 6 review) — one
+    /// definition of "a valid 64-lowercase-hex sha256", not two copies that can drift out of
+    /// sync with each other.
+    static func isValidHash(_ sha256: String) -> Bool {
         // ASCII only: `Character.isHexDigit` is Unicode-aware and accepts fullwidth digits like
         // U+FF41 ("ａ"), which would otherwise pass this check while being a different sequence
         // of bytes than the ASCII hex this type's paths are built from.
