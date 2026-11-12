@@ -1,6 +1,28 @@
 import SwiftUI
 import AppKit
 
+/// The appearance an AppKit text surface hosted in SwiftUI is pinned to (#1052). SwiftUI puts a
+/// platform view that sits on a material (`.background(.regularMaterial)`, which the chat composer
+/// has) in the *vibrant* variant of the window's appearance: the captured runs show the composer's
+/// `NSTextView` at `NSAppearanceNameVibrantDark` under a `DarkAqua` window. Vibrant variants are
+/// meant for views that do vibrancy compositing (`allowsVibrancy`), and a text view does not, so
+/// its adaptive colors resolved against a variant it never composites. Pinning the plain
+/// appearance that matches SwiftUI's own `colorScheme` removes the variant, and also makes the
+/// text surface agree with the rest of the SwiftUI tree rather than with whatever its ancestors
+/// resolved at attach time.
+enum HostedTextAppearance {
+    static func appearance(for scheme: ColorScheme) -> NSAppearance? {
+        NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+    }
+
+    @MainActor
+    static func apply(to view: NSView, scheme: ColorScheme) {
+        let wanted = appearance(for: scheme)
+        // Only on a change: assigning `appearance` invalidates the view's drawing.
+        if view.appearance?.name != wanted?.name { view.appearance = wanted }
+    }
+}
+
 /// An NSTextView-backed chat composer. Replaces the SwiftUI TextField so the true
 /// caret is available for emoji shortcode handling. Preserves Enter = send and
 /// Shift+Enter = newline.
@@ -38,6 +60,7 @@ struct ComposerTextView: NSViewRepresentable {
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = false
         scroll.borderType = .noBorder
+        HostedTextAppearance.apply(to: scroll, scheme: context.environment.colorScheme)
         context.coordinator.textView = tv
         context.coordinator.measureHeight(tv)
         context.coordinator.connectModel()
@@ -46,6 +69,7 @@ struct ComposerTextView: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let tv = nsView.documentView as? NSTextView else { return }
+        HostedTextAppearance.apply(to: nsView, scheme: context.environment.colorScheme)
         context.coordinator.parent = self
         let textChanged = (tv.string != text)
         if textChanged {

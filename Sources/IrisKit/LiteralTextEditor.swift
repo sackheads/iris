@@ -27,11 +27,13 @@ struct LiteralTextEditor: NSViewRepresentable {
         tv.applyComposerSubstitutionPolicy()
         // Nor a space added or dropped around a pasted word, inside a JSON string value too.
         tv.smartInsertDeleteEnabled = false
+        HostedTextAppearance.apply(to: scroll, scheme: context.environment.colorScheme)
         return scroll
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.text = $text
+        HostedTextAppearance.apply(to: scroll, scheme: context.environment.colorScheme)
         guard let tv = scroll.documentView as? NSTextView, tv.string != text else { return }
         tv.string = text
     }
