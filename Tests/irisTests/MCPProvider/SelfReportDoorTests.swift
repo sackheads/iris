@@ -195,10 +195,17 @@ struct SelfReportDoorTests {
             let source = try String(contentsOf: directory.appendingPathComponent(name), encoding: .utf8)
             let code = source.split(separator: "\n", omittingEmptySubsequences: false)
                 .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")
-            for forbidden in [".title", ".stringValue", "attributedString", "textStorage", ".documentView", "representedFilename",
+            for forbidden in [".title", "attributedString", "textStorage", ".documentView", "representedFilename",
                               "value(forKey", "Mirror(", "perform(", "accessibility"] {
                 #expect(!code.contains(forbidden), "\(name) must not use `\(forbidden)`")
             }
+            // The leak this guards against is AppKit UI text (a window title, a text view's
+            // string) reaching the door's response. `.stringValue`/`.string` pattern-matching the
+            // MCP SDK's own `Value` enum (#1067 Task 8's JSON-RPC argument parsing) is a different,
+            // legitimate concern with no AppKit text behind it — scope the stricter checks to
+            // files that actually import AppKit, the one place that leak could originate.
+            guard source.contains("import AppKit") else { continue }
+            #expect(!code.contains(".stringValue"), "\(name) must not use `.stringValue`")
             // `.string` as a property read is only ever `.string.isEmpty`; `DateFormatter.string(from:)`
             // is a method call, not a text read, and is the one other spelling in this directory.
             let reads = code.components(separatedBy: ".string").dropFirst().map { $0.hasPrefix(".isEmpty") || $0.hasPrefix("(from:") }
