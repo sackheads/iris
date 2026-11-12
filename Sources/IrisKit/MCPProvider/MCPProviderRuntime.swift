@@ -31,6 +31,11 @@ final class MCPProviderRuntime {
 
     private(set) var status: Status = .off
     private var server: IrisMCPProviderServer?
+    /// Set across the awaited bind, so a second `start()` that arrives meanwhile does not build a
+    /// second server (the `server == nil` guard alone is checked before the await).
+    private var isStarting = false
+    /// How many starts got past the guards and built a server; a test reads it.
+    private(set) var startsBegun = 0
 
     private let isEnabled: @MainActor () -> Bool
     private let makeRegistry: @MainActor () -> ProviderTokenRegistry
@@ -59,7 +64,10 @@ final class MCPProviderRuntime {
     /// Call from `AppDelegate.applicationDidFinishLaunching`. A no-op when the feature is off.
     func start() async {
         guard isEnabled() else { return }
-        guard server == nil else { return }
+        guard server == nil, !isStarting else { return }
+        isStarting = true
+        startsBegun += 1
+        defer { isStarting = false }
 
         let tokenRegistry = makeRegistry()
         // A registry that failed to load its durable token store can authenticate nobody
@@ -98,7 +106,7 @@ final class MCPProviderRuntime {
     }
 
     /// A bounded, secret-free description of an error: its domain and code, never a payload.
-    private static func summary(of error: Error) -> String {
+    static func summary(of error: Error) -> String {
         let ns = error as NSError
         return String("\(ns.domain) \(ns.code)".prefix(120))
     }
