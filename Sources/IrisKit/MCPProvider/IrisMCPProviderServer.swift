@@ -66,16 +66,20 @@ final class IrisMCPProviderServer: Sendable {
         self.serverConstructedHook = serverConstructedHook
     }
 
+    /// `handleTimeout` must sit strictly above `requestDeadline`: `handleAuthenticated` has its
+    /// own 504-and-teardown deadline, and if the listener's own timeout could fire at the same
+    /// instant, whichever one wins is undefined and the loser's response or teardown may never
+    /// run. A fixed one-second margin, not a race between two independently-defaulted ten-second
+    /// constants (the two previously landed on the same value by coincidence). A `static func`,
+    /// not inlined into `start()`, so a test can assert the margin directly.
+    static func listenerLimits(requestDeadline: Duration) -> LoopbackHTTPListener.Limits {
+        .init(handleTimeout: requestDeadline + .seconds(1))
+    }
+
     func start() async throws {
         let listener = LoopbackHTTPListener(
             port: port,
-            // `handleTimeout` must sit strictly above `requestDeadline`: `handleAuthenticated`
-            // has its own 504-and-teardown deadline, and if the listener's own timeout could
-            // fire at the same instant, whichever one wins is undefined and the loser's response
-            // or teardown may never run. A fixed one-second margin, not a race between two
-            // independently-defaulted ten-second constants (the two previously landed on the
-            // same value by coincidence).
-            limits: .init(handleTimeout: requestDeadline + .seconds(1)),
+            limits: Self.listenerLimits(requestDeadline: requestDeadline),
             preBodyCheck: { [weak self] request in self?.preBodyAuthCheck(request) },
             handle: { [weak self] request in
                 guard let self else { return .error(statusCode: 500, .internalError("server stopped")) }
@@ -104,13 +108,16 @@ final class IrisMCPProviderServer: Sendable {
         // artifact grants, or gate budget state behind for a later re-issue of the same id to
         // inherit. The token error, if any, is what the caller sees.
         //
-        // Registry-first is still deliberate, not just the natural order: a request already
-        // admitted before this call holds a resolved `clientId` in its own closure for up to
-        // `requestDeadline`, and could still write a message or a grant under it after the
-        // purges below have run but before `revokeToken` actually lands — nothing here closes
-        // that window (dev-2 review, #1079), and it is not pinned by a deterministic test. The
-        // mailbox/store's own re-check of `isRegistered` at the point of mutation (Task 6/7) is
-        // what actually closes it, by rejecting the write once the registry update lands.
+        // Registry-first is still deliberate, not just the natural order: `revokeToken` clears
+        // the registry's cache before this call does anything else, so a request that resolves
+        // its `clientId` *after* that point sees the revocation immediately. What this function
+        // alone does not close is a request that resolved `clientId` *before* `revoke` was even
+        // called — it holds that id in its own closure for up to `requestDeadline`, independent
+        // of anything `revoke` does, and could still write a message or a grant concurrently
+        // with or after this whole call returns (dev-2 review, #1079; not pinned by a
+        // deterministic test here). The mailbox/store's own re-check of `isRegistered` at the
+        // point of mutation (Task 6/7) is what actually closes that window, by rejecting the
+        // write once the registry update has landed.
         let tokenError = Result { try tokenRegistry.revokeToken(forClientId: clientId) }
         await mailbox.purge(clientId: clientId)
         await artifactStore.purge(clientId: clientId)

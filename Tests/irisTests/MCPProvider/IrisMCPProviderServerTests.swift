@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 import Network
+import Security
 @testable import IrisKit
 import MCP
 
@@ -18,6 +19,7 @@ private final class CallCounter: @unchecked Sendable {
 }
 
 private struct Fixture {
+    let keychain: KeychainManager
     let registry: ProviderTokenRegistry
     let mailbox: ProviderMailbox
     let artifactStore: ProviderArtifactStore
@@ -50,9 +52,79 @@ private struct Fixture {
         let server = IrisMCPProviderServer(tokenRegistry: registry, mailbox: mailbox, artifactStore: artifactStore,
                                            door: door, doorGate: doorGate, mailboxGate: mailboxGate, port: 0,
                                            serverConstructedHook: serverConstructedHook)
-        return Fixture(registry: registry, mailbox: mailbox, artifactStore: artifactStore,
+        return Fixture(keychain: keychain, registry: registry, mailbox: mailbox, artifactStore: artifactStore,
                        doorGate: doorGate, mailboxGate: mailboxGate, server: server, doorCallCounter: counter)
     }
+}
+
+// MARK: - minimal raw TCP helper (mirrors LoopbackHTTPListenerTests' RawConnection, scoped here
+// to this file's one real-socket preBodyCheck test — never reads a body, so no Content-Length
+// framing beyond what's needed to prove that)
+
+private final class OneShotResumer<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, Never>?
+    init(_ continuation: CheckedContinuation<T, Never>) { self.continuation = continuation }
+    func resume(_ value: T) {
+        lock.lock(); let c = continuation; continuation = nil; lock.unlock()
+        c?.resume(returning: value)
+    }
+}
+
+private final class OneShotThrowingResumer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+    init(_ continuation: CheckedContinuation<Void, Error>) { self.continuation = continuation }
+    func resume() {
+        lock.lock(); let c = continuation; continuation = nil; lock.unlock()
+        c?.resume()
+    }
+    func resume(throwing error: Error) {
+        lock.lock(); let c = continuation; continuation = nil; lock.unlock()
+        c?.resume(throwing: error)
+    }
+}
+
+private final class RawConnection: @unchecked Sendable {
+    let connection: NWConnection
+    init(_ connection: NWConnection) { self.connection = connection }
+
+    func send(_ string: String) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            connection.send(content: Data(string.utf8), completion: .contentProcessed { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            })
+        }
+    }
+
+    func readSome(timeout: TimeInterval) async -> String? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
+            let resumer = OneShotResumer(continuation)
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { data, _, _, _ in
+                resumer.resume(data.flatMap { String(data: $0, encoding: .utf8) })
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { resumer.resume(nil) }
+        }
+    }
+
+    func cancel() { connection.cancel() }
+}
+
+private func rawConnect(port: UInt16) async throws -> RawConnection {
+    let connection = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
+    let raw = RawConnection(connection)
+    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        let resumer = OneShotThrowingResumer(continuation)
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready: resumer.resume()
+            case .failed(let error): resumer.resume(throwing: error)
+            default: break
+            }
+        }
+        connection.start(queue: .global())
+    }
+    return raw
 }
 
 private final class TransportBox: @unchecked Sendable {
@@ -399,6 +471,25 @@ struct IrisMCPProviderServerTests {
         #expect(fixture.doorCallCounter.value == 0)
     }
 
+    @Test("preBodyAuthCheck answers a bad token before the body is ever read, over a real socket")
+    func preBodyAuthCheckNeverReadsTheBody() async throws {
+        let fixture = Fixture.build()
+        try await fixture.server.start()
+        defer { Task { await fixture.server.stop() } }
+        let port = try #require(fixture.server.boundPort)
+
+        // A huge Content-Length with no body ever sent: if the token check ran only after the
+        // body was buffered, this would hang waiting for bytes that never arrive. Answering
+        // within 2s proves the 401 came from preBodyCheck, not from handleAuthenticated's own
+        // (identical-looking, but post-body-read) auth check.
+        let connection = try await rawConnect(port: port)
+        try await connection.send("POST / HTTP/1.1\r\nAuthorization: Bearer nope\r\nContent-Length: 1000000\r\n\r\n")
+        let response = await connection.readSome(timeout: 2)
+        #expect(response?.contains("401") == true)
+        #expect(fixture.doorCallCounter.value == 0)
+        connection.cancel()
+    }
+
     @Test("sending a file reference authorizes Iris, but nobody else")
     func sendAuthorizesIrisOnly() async throws {
         let fixture = Fixture.build()
@@ -437,6 +528,14 @@ struct IrisMCPProviderServerTests {
             try await fixture.artifactStore.get(sha256: sha, requestingClientId: ProviderTokenRegistry.reservedClientId)
         }
         _ = tokenA
+    }
+
+    @Test("the listener's handleTimeout always sits strictly above requestDeadline")
+    func listenerLimitsMarginAboveRequestDeadline() {
+        for deadline: Duration in [.milliseconds(20), .seconds(1), .seconds(10), .seconds(60)] {
+            let limits = IrisMCPProviderServer.listenerLimits(requestDeadline: deadline)
+            #expect(limits.handleTimeout > deadline)
+        }
     }
 
     @Test("the caller's real method and headers reach the SDK's own validation pipeline, not a fixed stand-in")
@@ -627,5 +726,51 @@ struct IrisMCPProviderServerTests {
         await #expect(throws: ProviderArtifactStore.ArtifactError.unauthorized) {
             try await fixture.artifactStore.get(sha256: sha, requestingClientId: "x")
         }
+    }
+
+    @Test("revoke still purges the mailbox and the store's grants even when the Keychain write throws")
+    func revokePurgesEverythingDespiteKeychainThrow() async throws {
+        let fixture = Fixture.build()
+        _ = try fixture.registry.issueToken(forClientId: "a")
+        for _ in 0..<ProviderMailbox.maxPendingPerClient {
+            _ = try await fixture.mailbox.send(from: "a", text: "x", fileRefs: [])
+        }
+        let sha = try await fixture.artifactStore.put(bytes: Data("hi".utf8), from: "a")
+
+        fixture.keychain.simulateReadFailure(errSecIO)
+        await #expect(throws: (any Error).self) {
+            try await fixture.server.revoke(clientId: "a")
+        }
+        fixture.keychain.simulateReadFailure(nil)
+
+        // The purges ran anyway: once "a" is re-registered (revokeToken's cache clear already
+        // deregistered it, independent of the Keychain throw), its sent-to-Iris cap is free
+        // again, and its grant on sha is gone.
+        _ = try fixture.registry.issueToken(forClientId: "a")
+        let afterRevoke = try await fixture.mailbox.send(from: "a", text: "fits now", fileRefs: [])
+        #expect(afterRevoke.from == .client("a"))
+        await #expect(throws: ProviderArtifactStore.ArtifactError.unauthorized) {
+            try await fixture.artifactStore.get(sha256: sha, requestingClientId: "a")
+        }
+    }
+
+    @Test("revoke frees both gates' budget for the revoked client id")
+    func revokeFreesGateBudget() async throws {
+        let fixture = Fixture.build(doorGateCapacity: 1, mailboxGateCapacity: 1)
+        let token = try fixture.registry.issueToken(forClientId: "a")
+
+        let first = await fixture.server.handleAuthenticated(
+            httpRequest(body: rpcBody(method: "tools/call", params: ["name": "iris_window_owner"]), token: token))
+        #expect(!isErrorResponse(first))
+        let secondBeforeRevoke = await fixture.server.handleAuthenticated(
+            httpRequest(body: rpcBody(method: "tools/call", params: ["name": "iris_window_owner"]), token: token))
+        #expect(isErrorResponse(secondBeforeRevoke), "the door gate's single unit should already be spent")
+
+        try await fixture.server.revoke(clientId: "a")
+        let newToken = try fixture.registry.issueToken(forClientId: "a")
+
+        let afterRevoke = await fixture.server.handleAuthenticated(
+            httpRequest(body: rpcBody(method: "tools/call", params: ["name": "iris_window_owner"]), token: newToken))
+        #expect(!isErrorResponse(afterRevoke), "a re-issued \"a\" must not inherit its predecessor's spent budget")
     }
 }
