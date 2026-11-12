@@ -6123,7 +6123,7 @@ actor IrisEngine {
             let (isPinned, store, subagentIds) = await MainActor.run { () -> (Bool, ConversationStore?, Set<UUID>) in
                 (localState?.conversations.first(where: { $0.id == conversationId })?.isPinned == true,
                  localState?.store,
-                 Set(localState?.conversations.filter(\.isSubagent).map(\.id) ?? []))
+                 Set(localState?.conversations.filter { $0.isSubagent || $0.isGuest }.map(\.id) ?? []))
             }
             guard isPinned, let store else {
                 result = "Refused — search_conversations is only available in a pinned conversation."
@@ -6220,7 +6220,8 @@ actor IrisEngine {
             let target = await MainActor.run {
                 () -> (messages: [ChatMessage], isBackground: Bool, isSubagent: Bool)? in
                 guard let c = localState?.conversations.first(where: { $0.id == targetId }) else { return nil }
-                return (localState?.liveMessages(c.messages) ?? c.messages, c.isBackground, c.isSubagent)   // #541
+                // A guest (#1066) reads like a subagent: never persisted, never reachable by an id a peer frame carries.
+                return (localState?.liveMessages(c.messages) ?? c.messages, c.isBackground, c.isSubagent || c.isGuest)   // #541
             }
             guard let target else {
                 result = "No conversation with that id."
