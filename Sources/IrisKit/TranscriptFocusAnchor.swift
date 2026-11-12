@@ -83,6 +83,7 @@ struct TranscriptFocusAnchor: NSViewRepresentable {
             // regardless would log a refused hop as though it had succeeded.
             let tookFocus = window.makeFirstResponder(table)
             DiagnosticEventRing.shared.record(.transcriptFocusHop(tookFocus: tookFocus))
+            if tookFocus { ComposerFocusKeeper.shared.transcriptTookFocus(table) }
         }
 
         /// The table whose scroll view's frame, in window coordinates, contains `point`.

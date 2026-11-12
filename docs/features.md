@@ -239,6 +239,10 @@ The built-in tools the model is given (`run_command`, the file tools, `schedule_
 
 Iris runs in the background and can be summoned instantly over any other app by pressing **`Cmd + Shift + Space`** (configurable in Settings) — the installed app's default. A build from source uses `Cmd + Shift + Option + Space` instead (see [Building from source](building.md)).
 
+## Where typing lands
+
+The message composer is the default place to type. Until you click somewhere in the chat window, Iris puts keyboard focus in the composer when the window opens, comes back to the front, or has focus taken by the sidebar (#1055). Once you click, focus stays where you put it, except that a printable key typed while the sidebar list (or nothing in particular) has focus moves to the composer and types there. A text field you are typing in, and a transcript you clicked to select or copy from, are left alone. A dev build writes `[FOCUS]` lines about this to stderr.
+
 ## Slash commands
 
 Commands typed into the composer, most of which run without a model turn: see [docs/slash_commands.md](slash_commands.md).
