@@ -170,7 +170,7 @@ final class ComposerFocusKeeper {
     func reclaimIfNeeded(_ reason: ComposerFocusPolicy.Reason) {
         guard let window, let composer = usableComposer(in: window) else { return }
         let holder = classify(window.firstResponder, composer: composer, in: window)
-        defer { if holder != .composer { trace("reclaim(\(reason.rawValue))", window: window, holder: holder) } }
+        defer { if holder != .composer { trace("reclaim(\(reason.rawValue))", window: window, composer: composer, holder: holder) } }
         guard ComposerFocusPolicy.shouldReclaim(
             holder: holder, userHasClickedSinceKey: userHasClickedSinceKey, windowIsKey: isWindowKey(window),
             appIsActive: isAppActive(), hasSheetOrModal: hasSheetOrModal(window), composerUsable: true) else { return }
@@ -184,7 +184,7 @@ final class ComposerFocusKeeper {
         reclaimsThisCycle += 1
         let took = window.makeFirstResponder(composer)
         DiagnosticEventRing.shared.record(.composerFocusReclaim(reason: reason.rawValue, tookFocus: took))
-        trace("reclaimed(\(reason.rawValue))", window: window, holder: holder, took: took)
+        trace("reclaimed(\(reason.rawValue))", window: window, composer: composer, holder: holder, took: took)
     }
 
     /// Returns whether the key was redirected. The event itself always continues to normal
@@ -200,7 +200,7 @@ final class ComposerFocusKeeper {
         guard let window, eventWindow === window, let composer = usableComposer(in: window) else { return false }
         let holder = classify(window.firstResponder, composer: composer, in: window)
         if holder != .composer, ComposerFocusPolicy.isTypedCharacter(characters: characters, modifiers: modifiers) {
-            trace("typedKey", window: window, holder: holder)
+            trace("typedKey", window: window, composer: composer, holder: holder)
         }
         guard ComposerFocusPolicy.shouldRedirectKey(
             holder: holder, characters: characters, modifiers: modifiers,
@@ -216,12 +216,26 @@ final class ComposerFocusKeeper {
     /// pass launched from a terminal can read why a keystroke beeped (who held focus, and why the
     /// composer did or did not take it). Release builds write nothing. Class names only: never a
     /// title, a string value or any text the person typed.
-    private func trace(_ what: String, window: NSWindow, holder: FocusHolder, took: Bool? = nil) {
+    private func trace(_ what: String, window: NSWindow, composer: NSTextView, holder: FocusHolder, took: Bool? = nil) {
         guard BuildIdentity.current == .dev else { return }
         let responder = window.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
         let outcome = took.map { $0 ? " took=yes" : " took=no" } ?? ""
         FileHandle.standardError.write(Data(
-            "[FOCUS] \(what) holder=\(holder) responder=\(responder) key=\(isWindowKey(window)) active=\(isAppActive()) clicked=\(userHasClickedSinceKey) cycle=\(reclaimsThisCycle)\(outcome)\n".utf8))
+            "[FOCUS] \(what) holder=\(holder) responder=\(responder) key=\(isWindowKey(window)) active=\(isAppActive()) clicked=\(userHasClickedSinceKey) cycle=\(reclaimsThisCycle) \(Self.paint(of: composer))\(outcome)\n".utf8))
+    }
+
+    /// What the composer's glyphs would be drawn with: its resolved appearance name and the
+    /// foreground colour of its typing attributes, resolved against that appearance. #1052's
+    /// logs have the appearance name; the paint colour is the part nobody has captured. The
+    /// colour only, never the text.
+    private static func paint(of composer: NSTextView) -> String {
+        var rgb = "none"
+        composer.effectiveAppearance.performAsCurrentDrawingAppearance {
+            if let colour = (composer.typingAttributes[.foregroundColor] as? NSColor)?.usingColorSpace(.deviceRGB) {
+                rgb = String(format: "%.2f,%.2f,%.2f", colour.redComponent, colour.greenComponent, colour.blueComponent)
+            }
+        }
+        return "appearance=\(composer.effectiveAppearance.name.rawValue) typingFG=\(rgb)"
     }
 
     // MARK: - Reading the window

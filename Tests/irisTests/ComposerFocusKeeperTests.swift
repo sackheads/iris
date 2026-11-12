@@ -3,7 +3,7 @@ import AppKit
 @testable import IrisKit
 
 /// A stand-in for the chat window: a "sidebar" table, a "transcript" table, a text field and the
-/// real composer view, in one offscreen window, with the keeper built over seams for "is the
+/// stand-in composer text view, in one offscreen window, with the keeper built over seams for "is the
 /// window key" and "is the app active" (an unshown window is neither).
 @MainActor
 private final class Rig {
@@ -14,7 +14,10 @@ private final class Rig {
     let sidebar = NSTableView()
     let transcript = NSTableView()
     let field = NSTextField(frame: NSRect(x: 0, y: 360, width: 200, height: 24))
-    let composer = KeyCatchingTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 40))
+    // A plain NSTextView, not KeyCatchingTextView: that class registers itself in the process-global
+    // `ComposerFocus` when it joins a window, which would leak this rig into every other suite
+    // (AGENTS.md Invariant 7). The keeper takes its composer through an injected closure.
+    let composer = NSTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 40))
     let composerScroll = NSScrollView(frame: NSRect(x: 220, y: 0, width: 300, height: 40))
     let flags = Flags()
     let center = NotificationCenter()
