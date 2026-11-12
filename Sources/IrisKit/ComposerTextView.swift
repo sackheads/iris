@@ -11,15 +11,36 @@ import AppKit
 /// text surface agree with the rest of the SwiftUI tree rather than with whatever its ancestors
 /// resolved at attach time.
 enum HostedTextAppearance {
-    static func appearance(for scheme: ColorScheme) -> NSAppearance? {
-        NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+    /// Whether an appearance name is one of the dark ones (plain, vibrant, or Increase Contrast).
+    static func isDark(_ name: NSAppearance.Name) -> Bool {
+        switch name {
+        case .darkAqua, .vibrantDark, .accessibilityHighContrastDarkAqua, .accessibilityHighContrastVibrantDark: return true
+        default: return false
+        }
+    }
+
+    /// The plain appearance for a scheme.
+    static func plainName(for scheme: ColorScheme) -> NSAppearance.Name { scheme == .dark ? .darkAqua : .aqua }
+
+    /// The appearance to pin: the hosting window's own, when it agrees with SwiftUI's scheme (so
+    /// whatever the system encodes there, Increase Contrast included, is kept: asking for an
+    /// `accessibilityHighContrast*` name by hand returns the plain appearance on this macOS, so it
+    /// cannot be rebuilt from a name), otherwise the plain appearance for the scheme, so a window
+    /// that disagrees with SwiftUI does not drag the text surface along. A window's own appearance
+    /// is never a vibrant variant. Before the view has a window there is nothing to agree with.
+    @MainActor
+    static func pinned(for view: NSView, scheme: ColorScheme) -> NSAppearance? {
+        if let windowAppearance = view.window?.effectiveAppearance, isDark(windowAppearance.name) == (scheme == .dark) {
+            return windowAppearance
+        }
+        return NSAppearance(named: plainName(for: scheme))
     }
 
     @MainActor
     static func apply(to view: NSView, scheme: ColorScheme) {
-        let wanted = appearance(for: scheme)
+        guard let wanted = pinned(for: view, scheme: scheme) else { return }
         // Only on a change: assigning `appearance` invalidates the view's drawing.
-        if view.appearance?.name != wanted?.name { view.appearance = wanted }
+        if view.appearance?.name != wanted.name { view.appearance = wanted }
     }
 }
 
