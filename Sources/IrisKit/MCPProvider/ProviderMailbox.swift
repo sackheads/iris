@@ -59,6 +59,12 @@ actor ProviderMailbox {
     private let now: @Sendable () -> Date
 
     private var messages: [Message] = []
+    /// Restarts at 1 every launch (messages are memory-only, like `Record` in Task 7). A poller
+    /// that stored a cursor from before a restart would then see every reply as "already seen"
+    /// until the new counter passes its old cursor — inert in Phase 1 (nothing ever calls
+    /// `deliverReply` from a tool, so there is nothing for a cursor to miss yet), but the cursor
+    /// contract this type hands Phase 2 assumes monotonicity across the process's own lifetime,
+    /// not across restarts. Left as a known Phase 2 concern, not fixed here.
     private var nextSequence: UInt64 = 1
 
     init(registry: any MailboxRegistry, now: @escaping @Sendable () -> Date = Date.init) {
@@ -66,17 +72,16 @@ actor ProviderMailbox {
         self.now = now
     }
 
-    private static func isValidFileRef(_ ref: String) -> Bool {
-        ref.utf8.count == 64 && ref.count == 64
-            && ref.allSatisfy { $0.isASCII && $0.isHexDigit && !$0.isUppercase }
-    }
-
     private func pendingCount(from: MailboxParty, to: MailboxParty) -> Int {
         messages.lazy.filter { $0.from == from && $0.to == to }.count
     }
 
     /// Always stores `from: .client(clientId), to: .iris` — there is no parameter this signature
-    /// could pull an overriding `from` or any `to` other than Iris out of.
+    /// could pull an overriding `from` or any `to` other than Iris out of. Nothing drains this
+    /// direction yet (no Iris-side read, ack, or consuming call) — a client that sends
+    /// `maxPendingPerClient` times without ever being purged or swept will see `.inboxFull` on
+    /// its next send. That is accepted for Phase 1, where this type is otherwise dormant; wiring
+    /// an actual consumer of Iris's inbox is Task 8's concern (or a later follow-up), not this one.
     func send(from clientId: String, text: String, fileRefs: [String]) throws -> Message {
         guard registry.isRegistered(clientId: clientId) else { throw MailboxError.senderNoLongerRegistered }
         try Self.validate(text: text, fileRefs: fileRefs)
@@ -109,7 +114,10 @@ actor ProviderMailbox {
     private static func validate(text: String, fileRefs: [String]) throws {
         guard text.utf8.count <= maxTextBytes else { throw MailboxError.textTooLarge }
         guard fileRefs.count <= maxFileRefsPerMessage else { throw MailboxError.tooManyFileRefs }
-        guard fileRefs.allSatisfy(isValidFileRef) else { throw MailboxError.malformedFileRef }
+        // Shares ProviderArtifactStore's validation rather than keeping a second copy that can
+        // drift (dev-3 review on #1077 — #1075's finding 1 was exactly this bug, in that type's
+        // own copy of this check).
+        guard fileRefs.allSatisfy(ProviderArtifactStore.isValidHash) else { throw MailboxError.malformedFileRef }
     }
 
     private func store(from: MailboxParty, to: MailboxParty, text: String, fileRefs: [String]) -> Message {
@@ -123,7 +131,7 @@ actor ProviderMailbox {
     /// other registered clients is itself a client-to-client discovery primitive, struck along
     /// with direct `send`.
     func discover() -> ProviderIdentity {
-        ProviderIdentity(peerId: "iris", version: Constants.appVersion)
+        ProviderIdentity(peerId: ProviderTokenRegistry.reservedClientId, version: Constants.appVersion)
     }
 
     /// `clientId`'s own view of Iris's replies to it — equivalently, what `poll(for: clientId)`
@@ -139,8 +147,12 @@ actor ProviderMailbox {
         messages.removeAll { $0.id == id }
     }
 
-    func sweepExpired(now: Date = Date()) {
-        messages.removeAll { now.timeIntervalSince($0.sentAt) > Self.ttl }
+    /// `now` defaults to this actor's own injected clock, not a bare `Date()` — a caller that
+    /// omits it (production always will; only a test overrides it) must still see the same clock
+    /// every other method in this type uses.
+    func sweepExpired(now: Date? = nil) {
+        let cutoff = now ?? self.now()
+        messages.removeAll { cutoff.timeIntervalSince($0.sentAt) > Self.ttl }
     }
 
     /// Deletes every pending message to or from `clientId`, in both directions — a revoked client
