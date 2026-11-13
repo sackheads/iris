@@ -28,7 +28,8 @@ struct HarnessConfigImporter {
 
     /// Extracts the `mcpServers` object (top-level or nested among other settings) and
     /// returns each server's raw dict. Servers without a string `command` are skipped
-    /// (remote/HTTP servers are out of scope in v1).
+    /// (the importer and Convert to Plugin handle stdio servers only; remote entries in Iris's
+    /// own `mcp_servers.json` are run directly by `MCPManager`, #1096).
     ///
     /// Files without an `mcpServers` wrapper — like Iris's own `mcp_servers.json`, which is a
     /// bare `{ "name": { "command": ... } }` map — are treated as the server map itself; the

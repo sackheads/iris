@@ -146,14 +146,16 @@ failing it. See "Readiness semantics" below.
 
 ### `mcp` — MCP servers
 
-`components.mcp` points at a JSON file in the **bare server-object shape**
-only: a top-level object mapping server name to `{ command, args, env }`.
-This is the required on-disk format. Iris supports **stdio transport only**
-in this release; there is no HTTP or streamable-HTTP transport.
+`components.mcp` points at a JSON file mapping server name to
+`{ command, args, env }` (`args` optional). The bare server-object shape is
+the canonical form; an `{"mcpServers": {...}}` wrapper is also unwrapped.
+Each entry is read on its own, so one malformed entry is skipped (with a
+log line) without dropping its siblings.
 
-**Warning:** An `mcp.json` file wrapped in a `{"mcpServers": {...}}` object
-will load zero servers silently while the plugin still shows a green status.
-The bare form is required.
+Plugins support **stdio servers only** in this release. Remote Streamable
+HTTP servers are supported in the hand-edited `mcp_servers.json` (see
+[MCP in features.md](../features.md#model-context-protocol-mcp)), but a
+remote entry in a plugin's `mcp.json` is skipped for now.
 
 The install wizard's *From MCP Snippet* flow accepts `mcpServers`-wrapped
 JSON as a convenience — you can paste an `mcpServers` block directly — and
@@ -162,8 +164,8 @@ generates the bare form into the plugin's `mcp.json` file.
 Env values may use `${keychain:KEY}` and `${config:KEY}` references, which
 resolve immediately before the server process launches. Literal string
 values are also valid and pass through unchanged — this is the same
-syntax and behavior as the legacy `mcp_servers.json` file, so an `mcp.json`
-authored for a plugin looks exactly like a legacy server entry.
+syntax and behavior as a stdio entry in the legacy `mcp_servers.json` file,
+so an `mcp.json` authored for a plugin looks exactly like a legacy server entry.
 
 Env variable keys used inside `mcp.json`'s `env` map are restricted to the
 identifier charset `^[A-Za-z0-9_]+$`. A key outside that charset is

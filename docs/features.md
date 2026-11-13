@@ -214,22 +214,33 @@ An MCP tool's result counts as untrusted content, and a tool its server didn't m
 
 Iris natively supports the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/). 
 
-To configure MCP servers, create a JSON file at `~/.iris/mcp_servers.json` with your server configurations:
+Servers can come from a [plugin](#plugins) or be configured by hand in `~/.iris/config/mcp_servers.json` (`~/.iris-dev/config/` for a dev build). An entry is either a local **stdio** server Iris launches, or a **remote** server it reaches over Streamable HTTP:
 
 ```json
 {
-  "postgres": {
-    "command": "npx",
-    "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost/mydatabase"]
-  },
   "sqlite": {
     "command": "uvx",
     "args": ["mcp-server-sqlite", "--db-path", "~/mydatabase.db"]
+  },
+  "sharpei": {
+    "url": "https://sharpei.example.net/mcp",
+    "headers": { "Authorization": "Bearer ${keychain:SHARPEI_TOKEN}" },
+    "allowedKeys": ["SHARPEI_TOKEN"]
   }
 }
 ```
 
-Once configured, Iris will automatically boot these servers in the background and their tools will be available for Iris to use.
+An `{"mcpServers": {...}}` wrapper, as other harnesses write it, is accepted too, as are the `serverUrl` and `httpUrl` spellings of `url`. Iris starts the servers at launch, and restarts them when you save the file while the Plugins pane is open. Each entry stands alone: one that is malformed or fails to connect shows its reason in the Plugins pane and does not stop the rest.
+
+**Remote servers** must use `https`; plain `http` is allowed only to `localhost`/`127.x.x.x`/`::1`. The legacy HTTP+SSE transport (`"type": "sse"`) is not supported, and neither is OAuth sign-in yet. A server that doesn't connect within 30 seconds is marked failed.
+
+**Secrets.** `${keychain:KEY}` in a stdio `env` value or a remote `headers` value is read from one Keychain item, service `iris.mcp` (`iris.mcp.dev` for a dev build), account `all-keys`, whose password is a JSON object of key to value. Iris has no editor for it yet. From Terminal (this replaces the whole item, so include every key you keep there):
+
+```sh
+security add-generic-password -U -s iris.mcp -a all-keys -w '{"SHARPEI_TOKEN":"..."}'
+```
+
+A remote entry may use only the keys it lists in `allowedKeys`; a reference outside that list, or to a key that isn't stored, fails the entry instead of sending anything. This stops a pasted snippet from shipping any other secret you keep there to its own URL, but the grant sits in the same file as the URL, so read a snippet's `url` and `allowedKeys` before adding it. Literal header values also work, though they leave the token in a plain file.
 
 ### MCP provider (Iris as an MCP server)
 

@@ -490,8 +490,8 @@ struct PluginDetailView: View {
 }
 
 
-/// The legacy `mcp_servers.json`, a bare `{ "name": { "command": ... } }` map (see
-/// `HarnessConfigImporter.servers(at:)`). Absent on a home that never had a hand-written server.
+/// The legacy `mcp_servers.json`: a `{ "name": { ... } }` map of stdio or remote entries,
+/// optionally `mcpServers`-wrapped (see `MCPManager.parseLegacyFile`). Absent on a home that never had a hand-written server.
 enum LegacyServersFile {
     /// Creates an empty `{}` map (and its directory) when the file is missing. Returns whether
     /// the file exists afterwards. An existing file is never touched.

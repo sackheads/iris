@@ -52,8 +52,11 @@ struct PluginManagerTests {
         #expect(plugins[0].status == .ok)
 
         let configs = await pm.mcpConfigs()
-        #expect(configs["echo-plug.echo"]?.command == "/bin/echo")
-        #expect(configs["echo-plug.echo"]?.env?["TOKEN"] == "tok123")
+        guard case .stdio(let command, _, let env)? = configs["echo-plug.echo"] else {
+            Issue.record("echo-plug.echo missing or not stdio"); return
+        }
+        #expect(command == "/bin/echo")
+        #expect(env?["TOKEN"] == "tok123")
     }
 
     @Test("missing required secret means needsConfig, not failure")

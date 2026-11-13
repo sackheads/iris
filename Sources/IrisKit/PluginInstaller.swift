@@ -206,12 +206,13 @@ extension PluginInstaller {
             return draft
         }
         guard let servers = try? JSONDecoder().decode([String: MCPServerConfig].self, from: mcpData),
-              servers.count == 1, let (serverName, config) = servers.first else {
+              servers.count == 1, let (serverName, config) = servers.first,
+              case .stdio(let command, let args, _) = config else {
             throw IPFError.invalidJSON("Draft mcp.json is not a single-server map")
         }
         var rebuilt = try buildGeneratedDraft(
             id: draft.manifest.id, serverName: serverName,
-            command: config.command, args: config.args,
+            command: command, args: args,
             secretValues: draft.secretValues, configValues: draft.configValues,
             source: draft.source)
         rebuilt.source = draft.source
@@ -228,8 +229,8 @@ extension PluginInstaller {
         for key in secretValues.keys { refEnv[key] = "${keychain:\(key)}" }
         for key in configValues.keys { refEnv[key] = "${config:\(key)}" }
 
-        let mcpConfig = [serverName: MCPServerConfig(command: command, args: args,
-                                                     env: refEnv.isEmpty ? nil : refEnv)]
+        let mcpConfig = [serverName: MCPServerConfig.stdio(command: command, args: args,
+                                                           env: refEnv.isEmpty ? nil : refEnv)]
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let mcpData = try encoder.encode(mcpConfig)
