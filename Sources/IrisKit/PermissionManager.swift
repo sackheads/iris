@@ -17,7 +17,7 @@ struct AllowMatch: Equatable, Sendable {
 struct PermissionManager: Sendable {
     static let shared = PermissionManager()
 
-    private let paths: IrisPaths
+    let paths: IrisPaths
     /// A dev process's home is `~/.iris-dev`, which leaves the installed app's `config/` and
     /// `plugins/` as plain absolute paths to it; `isProtectedWrite` keeps them grants too.
     private let identity: BuildIdentity

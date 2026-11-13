@@ -97,9 +97,33 @@ final class VibecopService: @unchecked Sendable {
     ///
     /// nil when Vibecop is off: no pre-screen, so no decision. Never a stand-in APPROVE — that
     /// let every gated call through unasked on a default install (#334).
+    /// Builds the custom user and workspace Guardian prompt additions (#1017):
+    /// 1. Global user guidance from `<home>/config/vibecop.md` (applies to all sessions, including
+    ///    those with no workspace).
+    /// 2. Trusted workspace rules from `<workspace>/.iris/vibecop.md` (#617, #625).
+    static func guardianAdditions(workspace: String?, paths: IrisPaths = .default) -> String {
+        var additions = ""
+        let globalURL = paths.configDir.appendingPathComponent("vibecop.md")
+        if let data = try? Data(contentsOf: globalURL),
+           let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !text.isEmpty {
+            additions += "\n\nUSER VIBECOP GUIDANCE:\n" + text
+        }
+        if let ws = workspace {
+            // Through `WorkspaceIrisDir.read` (#617): rules behind a link may be the sandbox's.
+            let trust = WorkspaceIrisTrust(paths: paths)
+            if let data = WorkspaceIrisDir.read("vibecop.md", workspace: ws, trust: trust),
+               let guardianContent = String(data: data, encoding: .utf8),
+               !guardianContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                additions += "\n\nGUARDIAN MODE ENABLED. Workspace Specific Rules:\n" + guardianContent
+            }
+        }
+        return additions
+    }
+
     func evaluateAction(toolName: String, details: String, workspace: String?, inSandbox: Bool = false,
                         callerRole: VibecopCallerRole = .agent, allowedCommands: [String] = [],
-                        vibecopEnabled: Bool? = nil) async throws -> VibecopDecision? {
+                        vibecopEnabled: Bool? = nil, paths: IrisPaths = .default) async throws -> VibecopDecision? {
         guard vibecopEnabled ?? ConfigManager.shared.enableVibecop else { return nil }
         
         let manager = AuxiliaryModelManager.shared
@@ -113,16 +137,7 @@ final class VibecopService: @unchecked Sendable {
         
         let engine = try await manager.getEngine(for: "vibecop", config: config)
         
-        var prompt = baselinePrompt
-        
-        // Incorporate Guardian Prompt if available
-        if let ws = workspace {
-            // Through `WorkspaceIrisDir.read` (#617): rules behind a link may be the sandbox's.
-            if let data = WorkspaceIrisDir.read("vibecop.md", workspace: ws),
-               let guardianContent = String(data: data, encoding: .utf8) {
-                prompt += "\n\nGUARDIAN MODE ENABLED. Workspace Specific Rules:\n" + guardianContent
-            }
-        }
+        var prompt = baselinePrompt + Self.guardianAdditions(workspace: workspace, paths: paths)
         
         if !inSandbox {
             prompt += Self.hostLayerText

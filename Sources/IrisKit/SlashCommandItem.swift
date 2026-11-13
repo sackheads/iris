@@ -26,7 +26,7 @@ struct SlashCommandItem: Identifiable, Sendable, Equatable {
         SlashCommandItem(id: "unarchive", command: "/unarchive", usage: "/unarchive", description: "Return this conversation to the active list"),
         SlashCommandItem(id: "role", command: "/role", usage: "/role [<name>|clear]", description: "Show, assign or release this session's role"),
         SlashCommandItem(id: "reflect", command: "/reflect", usage: "/reflect", description: "Trigger manual memory reflection and grooming"),
-        SlashCommandItem(id: "vibecop", command: "/vibecop init", usage: "/vibecop init", description: "Initialize Vibecop Guardian rules for the workspace"),
+        SlashCommandItem(id: "vibecop", command: "/vibecop init", usage: "/vibecop [init|tweak <guidance>|show]", description: "Initialize, tweak, or view Vibecop Guardian rules"),
         SlashCommandItem(id: "yolo", command: "/yolo", usage: "/yolo [on|off]", description: "Show or toggle YOLO mode (auto-approve all tools in this session)"),
         SlashCommandItem(id: "rename", command: "/rename", usage: "/rename", description: "Automatically rename current conversation"),
         SlashCommandItem(id: "update", command: "/update", usage: "/update", description: "Check for a new version of Iris"),

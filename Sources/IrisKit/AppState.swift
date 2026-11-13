@@ -3398,12 +3398,8 @@ class AppState {
         } else if trimmed == "/yolo" || trimmed.hasPrefix("/yolo ") {
             handleYoloCommand(trimmed, convId: convId)
             return
-        } else if trimmed.hasPrefix("/vibecop init") {
-            appendMessage(role: .system, content: "Initializing Vibecop Guardian mode...", to: convId)
-            let initPrompt = "System Event [Vibecop Init]: Analyze the current workspace directory to understand the project structure, language, framework, and tooling. Generate a custom Guardian prompt that defines what terminal commands and file operations are 'routine' for this specific workspace, and what should be escalated to the user. Write this prompt to a new file at `.iris/vibecop.md` inside the workspace using the `write_file` tool; the user approves that write, then reviews and trusts the rules before they take effect, since rules in `.iris/` are theirs to accept. Output a transparent summary of the generated rules for the user."
-            runThinkingTask(conversationId: convId) { [self] in
-                await engine.processInput(initPrompt, source: "System", conversationId: convId)
-            }
+        } else if trimmed == "/vibecop" || trimmed.hasPrefix("/vibecop ") {
+            handleVibecopCommand(trimmed, convId: convId)
             return
         } else if trimmed.hasPrefix("/rename") {
             // 5b: the pinned conversation is exempt from all four rename paths (spec §0.2); this
@@ -4679,9 +4675,11 @@ class AppState {
             if timeout != configuredTimeout { print("Vibecop: Ollama model cold, using \(timeout)s timeout") }
         }
 
+        let activePaths = permissions.paths
         return await Self.boundedVibecopVerdict(seconds: timeout) {
             try await VibecopService.shared.evaluateAction(toolName: toolName, details: details, workspace: workspace, inSandbox: inSandbox,
-                                                           callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: enabled)
+                                                           callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: enabled,
+                                                           paths: activePaths)
         }
     }
 
@@ -6599,6 +6597,78 @@ class AppState {
         } else {
             yoloConversations.remove(root)
         }
+    }
+
+    private func handleVibecopCommand(_ trimmed: String, convId: UUID) {
+        let rest = String(trimmed.dropFirst("/vibecop".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        if rest == "init" || rest.hasPrefix("init ") {
+            appendMessage(role: .system, content: "Initializing Vibecop Guardian mode...", to: convId)
+            let initPrompt = "System Event [Vibecop Init]: Analyze the current workspace directory to understand the project structure, language, framework, and tooling. Generate a custom Guardian prompt that defines what terminal commands and file operations are 'routine' for this specific workspace, and what should be escalated to the user. Write this prompt to a new file at `.iris/vibecop.md` inside the workspace using the `write_file` tool; the user approves that write, then reviews and trusts the rules before they take effect, since rules in `.iris/` are theirs to accept. Output a transparent summary of the generated rules for the user."
+            runThinkingTask(conversationId: convId) { [self] in
+                await engine.processInput(initPrompt, source: "System", conversationId: convId)
+            }
+            return
+        }
+        if rest == "tweak" || rest.hasPrefix("tweak ") {
+            let guidance = String(rest.dropFirst("tweak".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !guidance.isEmpty else {
+                emitCommandOutput("Usage: `/vibecop tweak <guidance>` (or `/vibecop init`, `/vibecop show`)", format: .markdown, to: convId)
+                return
+            }
+            let workspace = conversations.first(where: { $0.id == convId })?.workspacePath
+            let trust = WorkspaceIrisTrust(paths: permissions.paths)
+            if let ws = workspace, !ws.isEmpty {
+                let expandedWS = IrisEngine.expandTilde(ws)
+                if let unverified = WorkspaceIrisDir.readUnverified("vibecop.md", workspace: expandedWS),
+                   !trust.isTrusted("vibecop.md", workspace: expandedWS, data: unverified) {
+                    emitCommandOutput("Cannot tweak `.iris/vibecop.md`: this workspace already has unreviewed Vibecop rules. Right-click the conversation and choose **Review Workspace Rules...** to trust or replace them first.", format: .markdown, to: convId)
+                    return
+                }
+                guard case .ready(let irisPath) = WorkspaceIrisDir.prepareForMount(expandedWS) else {
+                    emitCommandOutput("Cannot tweak `.iris/vibecop.md`: the workspace's `.iris` folder could not be prepared safely.", format: .markdown, to: convId)
+                    return
+                }
+                let fileURL = URL(fileURLWithPath: irisPath).appendingPathComponent("vibecop.md")
+                let existing = WorkspaceIrisDir.read("vibecop.md", workspace: expandedWS, trust: trust)
+                    .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                let separator = existing.isEmpty ? "" : (existing.hasSuffix("\n") ? "" : "\n")
+                let updated = existing + separator + "- \(guidance)\n"
+                let data = Data(updated.utf8)
+                do {
+                    try data.write(to: fileURL, options: .atomic)
+                    trust.recordWritten("vibecop.md", workspace: expandedWS, written: data)
+                    emitCommandOutput("Added Vibecop guidance to `\(ws)/.iris/vibecop.md`:\n- \(guidance)", format: .markdown, to: convId)
+                } catch {
+                    emitCommandOutput("Failed to write `.iris/vibecop.md`: \(error)", format: .markdown, to: convId)
+                }
+            } else {
+                let configDir = permissions.paths.configDir
+                try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+                let fileURL = configDir.appendingPathComponent("vibecop.md")
+                let existing = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? ""
+                let separator = existing.isEmpty ? "" : (existing.hasSuffix("\n") ? "" : "\n")
+                let updated = existing + separator + "- \(guidance)\n"
+                do {
+                    try Data(updated.utf8).write(to: fileURL, options: .atomic)
+                    emitCommandOutput("Added global Vibecop guidance (`config/vibecop.md`):\n- \(guidance)", format: .markdown, to: convId)
+                } catch {
+                    emitCommandOutput("Failed to write `config/vibecop.md`: \(error)", format: .markdown, to: convId)
+                }
+            }
+            return
+        }
+        if rest.isEmpty || rest == "show" {
+            let workspace = conversations.first(where: { $0.id == convId })?.workspacePath
+            let additions = VibecopService.guardianAdditions(workspace: workspace, paths: permissions.paths)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if additions.isEmpty {
+                emitCommandOutput("No custom Vibecop guidance configured. Use `/vibecop tweak <guidance>` to add guidance or `/vibecop init` to analyze the workspace.", format: .markdown, to: convId)
+            } else {
+                emitCommandOutput(additions, format: .markdown, to: convId)
+            }
+            return
+        }
+        emitCommandOutput("Usage: `/vibecop [init|tweak <guidance>|show]`", format: .markdown, to: convId)
     }
 
     private func handleYoloCommand(_ trimmed: String, convId: UUID) {
