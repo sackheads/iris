@@ -8,6 +8,8 @@ import Foundation
 struct ToolApproval: Codable, Equatable, Sendable {
     enum Layer: String, Codable, Sendable {
         case person, autoApprove, allowlist, grant, graderCheck, vibecop, vibecopRestricted
+        /// #1099: YOLO mode is on for this session, so all tool calls run without asking.
+        case yolo
         /// #812: an outbound tool the person exempted, for the conversation or for the job.
         case exemption
         /// The tool has no approval step: nobody was asked, and nothing had to say yes.
@@ -45,6 +47,8 @@ struct ToolApproval: Codable, Equatable, Sendable {
         switch source {
         case .person:
             self.init(layer: .person)
+        case .yolo:
+            self.init(layer: .yolo)
         case .autoApprove(let vibecop):
             self.init(layer: .autoApprove, detail: vibecop)
         case .allowlist(let match):
@@ -81,6 +85,8 @@ struct ToolApproval: Codable, Equatable, Sendable {
         switch layer {
         case .person:
             return nil
+        case .yolo:
+            return "Approved (YOLO mode)."
         case .ungated:
             return "No approval needed for this tool (nobody was asked)."
         case .exemption:

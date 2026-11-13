@@ -620,6 +620,13 @@ class AppState {
     /// approving, so a headless run pays what a real `run_command` pays. The verdict is never
     /// acted on: a benchmark measures the cost, it does not block on it (#135).
     var vibecopUnderAutoApprove = false
+    /// #1099: user-facing conversations where `/yolo on` is active. Transient, per-session, and
+    /// inherited by delegated subagents/evaluators through `delegationRoot(of:)`. Never set on a
+    /// background job run or an MCP guest session.
+    private(set) var yoloConversations: Set<UUID> = []
+    /// #1099: audio synth for `/yolo on` and `/yolo off`. No-op under unit tests unless injected.
+    @ObservationIgnored lazy var yoloAudio: any YoloAudioPlaying =
+        NSClassFromString("XCTestCase") == nil ? YoloSynth() : NoOpYoloAudio()
     /// The deterministic allowlist every approval consults. Injectable so a test can point it at
     /// a temp `IrisPaths` instead of the machine's real `~/.iris/config/permissions.json`.
     var permissions: PermissionManager = .shared
@@ -3093,6 +3100,7 @@ class AppState {
         mainStartTimeByConversation[id] = nil
         mainPhaseByConversation[id] = nil
         stickyTools.forget(id)   // archive keeps it (the conversation can come back); delete cannot
+        yoloConversations.remove(id)
         // An ask still queued for a deleted conversation is a dialog nobody's work waits on, and
         // with the delegate link gone below, `list_sessions` would read its parent idle while it
         // still shows (#426). Deny it so its waiter resumes and the dialog goes.
@@ -3386,6 +3394,9 @@ class AppState {
             runThinkingTask(conversationId: convId) { [self] in
                 await runReflection(Self.manualReflectionPrompt, in: convId, moveReplyToIris: false)
             }
+            return
+        } else if trimmed == "/yolo" || trimmed.hasPrefix("/yolo ") {
+            handleYoloCommand(trimmed, convId: convId)
             return
         } else if trimmed.hasPrefix("/vibecop init") {
             appendMessage(role: .system, content: "Initializing Vibecop Guardian mode...", to: convId)
@@ -4454,6 +4465,8 @@ class AppState {
     /// Each carries why, for the call's pill (#599, `ToolApproval`).
     enum ApprovalSource: Equatable, Sendable {
         case person
+        /// #1099: `/yolo on` is active for this session.
+        case yolo
         /// `vibecop` is the verdict `vibecopUnderAutoApprove` asked for and did not use.
         case autoApprove(vibecop: String?)
         case allowlist(AllowMatch)
@@ -4575,6 +4588,11 @@ class AppState {
                 verdict = "\(decision.decision): \(decision.reason)"
             }
             return .autoApprove(vibecop: verdict)
+        }
+        // #1099: YOLO mode approves every attended call in this session (and its delegates),
+        // skipping `humanOnly`, `irisWrite`, the allowlist, Vibecop, and the user prompt.
+        if isYoloMode(conversationId) {
+            return .yolo
         }
         // `humanOnly`: straight to the prompt, bypassing the allowlist below (a standing "yes"
         // from some earlier, different call). Vibecop needs no bypass of its own any more — `#336`
@@ -6542,6 +6560,63 @@ class AppState {
     private func handleUpdateCommand(convId: UUID) {
         if let reply = Self.updateCommandReply(updater: UpdaterController.shared) {
             emitCommandOutput(reply, format: .markdown, to: convId)
+        }
+    }
+
+    // MARK: - YOLO Mode (#1099)
+
+    /// Whether `/yolo on` is active for `conversationId` or the session it was delegated from.
+    /// Background job runs and MCP guests never qualify, even if their id or an ancestor was passed.
+    func isYoloMode(_ conversationId: UUID?) -> Bool {
+        guard let conversationId else { return false }
+        if let conv = conversations.first(where: { $0.id == conversationId }),
+           conv.isBackground || conv.isGuest {
+            return false
+        }
+        let root = delegationRoot(of: conversationId)
+        guard let rootConv = conversations.first(where: { $0.id == root }),
+              rootConv.isUserFacing else {
+            return false
+        }
+        return yoloConversations.contains(root)
+    }
+
+    /// Enables or disables YOLO mode for a user-facing conversation, resolving any pending
+    /// approval prompts for it (and its delegates) when turned on.
+    func setYoloMode(_ enabled: Bool, for conversationId: UUID) {
+        let root = delegationRoot(of: conversationId)
+        guard let conv = conversations.first(where: { $0.id == root }),
+              conv.isUserFacing else { return }
+        if enabled {
+            yoloConversations.insert(root)
+            let matching = pendingApprovals.filter { req in
+                guard let id = req.conversationId else { return false }
+                return delegationRoot(of: id) == root
+            }
+            for req in matching {
+                resolveApproval(id: req.id, .approve)
+            }
+        } else {
+            yoloConversations.remove(root)
+        }
+    }
+
+    private func handleYoloCommand(_ trimmed: String, convId: UUID) {
+        let arg = trimmed.dropFirst("/yolo".count).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch arg {
+        case "":
+            let status = isYoloMode(convId) ? "on" : "off"
+            emitCommandOutput("Yolo mode is \(status).", format: .markdown, to: convId)
+        case "on":
+            setYoloMode(true, for: convId)
+            yoloAudio.playVengabusYolo()
+            emitCommandOutput("Yolo mode is on.", format: .markdown, to: convId)
+        case "off":
+            setYoloMode(false, for: convId)
+            yoloAudio.playPowerDown()
+            emitCommandOutput("Yolo mode is off.", format: .markdown, to: convId)
+        default:
+            emitCommandOutput("Usage: `/yolo [on|off]`", format: .markdown, to: convId)
         }
     }
 }
