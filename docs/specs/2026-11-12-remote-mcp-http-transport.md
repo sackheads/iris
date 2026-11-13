@@ -61,7 +61,8 @@ entry is one of two forms:
   },
   "sharpei": {                      // remote
     "url": "https://sharpei.scromp.net/mcp",
-    "headers": { "Authorization": "Bearer ${keychain:SHARPEI_TOKEN}" }
+    "headers": { "Authorization": "Bearer ${keychain:SHARPEI_TOKEN}" },
+    "allowedKeys": ["SHARPEI_TOKEN"]
   }
 }
 ```
@@ -75,6 +76,7 @@ Decoding rules (`MCPServerConfig.init(from:)`):
 | `args` | Optional for stdio. Absent means `[]`. Today a missing `args` fails the whole file. |
 | `env` | Stdio only. Present on a remote entry is an error, so it doesn't get silently ignored. |
 | `headers` | Remote only. `[String: String]`. Present on a stdio entry is an error. |
+| `allowedKeys` | Remote only. `[String]`: the Keychain key names this entry's headers may reference (see *Per-server key allowlist*). Absent means `[]`. Present on a stdio entry is an error in phase 1. |
 | `type` | Optional. `http` and `streamable-http` (any case) mean remote, `stdio` means stdio, and either must agree with the keys present. `sse` is refused: "the legacy HTTP+SSE transport is not supported; use the server's Streamable HTTP endpoint". |
 | unknown keys | Ignored, as now. Other harnesses add fields such as `disabled` and `timeout`. |
 
@@ -83,11 +85,11 @@ In Swift it is an enum, so no code can touch a stdio field on a remote server:
 ```swift
 enum MCPServerConfig: Codable, Equatable, Sendable {
     case stdio(command: String, args: [String], env: [String: String]?)
-    case remote(url: URL, headers: [String: String])
+    case remote(url: URL, headers: [String: String], allowedKeys: Set<String>)
 }
 ```
 
-Encoding writes `command`/`args`/`env` or `url`/`headers`. The canonical keys are the only ones it
+Encoding writes `command`/`args`/`env` or `url`/`headers`/`allowedKeys`. The canonical keys are the only ones it
 emits. The plugin installer emits stdio entries only.
 
 ### URL policy
@@ -108,6 +110,39 @@ There is one deliberate difference from `env`:
   keeps its back-compatible pass-through (`legacyUnresolvable` test), because changing that is out
   of scope and could break a working stdio setup. A header has no such history, and sending
   `Bearer ${keychain:X}` to a remote host leaks the variable name and fails confusingly.
+
+### Per-server key allowlist (decision on #1097)
+
+`iris.mcp` is one Keychain item (account `all-keys`) whose password is a flat JSON object of every
+key the user has stored, with no record of which server owns which key. Without scoping, any remote
+entry pointed at any URL could reference `${keychain:GITHUB_TOKEN}` in its headers and ship that key
+to its own host at the next launch, with no prompt. For stdio, a key only reaches a local process the
+user chose to run. For a remote entry it reaches the network. The fix is policy, not storage:
+
+- **Storage is unchanged:** one item, one Keychain read, one SecurityAgent prompt (as today).
+- **Each remote entry declares `allowedKeys`,** the key names its headers may reference.
+- **Expansion is checked per reference.** Expanding `${keychain:X}` in a remote entry's headers
+  requires `X ∈ allowedKeys`. Otherwise the entry fails closed (`.failed("header Authorization
+  references SHARPEI_TOKEN, which is not in this server's allowedKeys")`), and nothing is sent. An
+  entry with no `allowedKeys` may reference no keys. The check runs before the Keychain is read for
+  that entry, and the lookup is given only the allowed subset of the blob, so a refused key's value
+  never reaches the expansion code at all.
+- **Precedence:** the allowlist check comes first, then resolution (an allowed key that is missing
+  from the Keychain still fails closed, as above). The two failures have different messages.
+
+**Scope: remote only.** Stdio `env` expansion is unchanged in phase 1. A stdio entry already runs an
+arbitrary local program as the user, so the allowlist would not bound what that entry can do, and
+retrofitting it would break working `env` setups. Revisit it with #966, which replaces this
+whole mechanism.
+
+**Residual risk, named on purpose.** The allowlist lives in the same file as the URL. A pasted
+snippet that carries its own `"allowedKeys": ["GITHUB_TOKEN"]` next to a hostile URL still
+exfiltrates that key. What the allowlist buys is that a grant is now explicit and written beside the
+destination, rather than implied by a reference anywhere in the file. It closes the accidental case
+(a snippet probing for common key names) but not a deliberately crafted one. Closing that needs the
+grant to live outside the file the snippet is pasted into: either binding a key to a host when it is
+provisioned (in the Keychain blob or the #966 registry), or a first-contact confirmation like the
+Outbound Send Gate. Both are out of phase 1, and #966/#974 is where this belongs.
 
 **Populating `iris.mcp`.** Nothing in Iris writes this service today. It is one Keychain item,
 account `all-keys`, whose password is a JSON object of key to value. Until the Plugins pane grows a
@@ -143,7 +178,9 @@ unchanged.
 
 Starting a remote server:
 
-1. Validate the URL (policy above) and expand the headers. Either failing means `.failed(reason)`.
+1. Validate the URL (policy above), check every `${keychain:}` reference in the headers against
+   `allowedKeys`, then expand them. Any of these failing means `.failed(reason)`, and no connection
+   is opened.
 2. `HTTPClientTransport(endpoint:, streaming: true, requestModifier:)`, where the modifier sets each
    header with `setValue(_:forHTTPHeaderField:)`. `streaming: true` keeps server push for stateful
    servers. Stateless ones answer 405 and lose nothing.
@@ -159,6 +196,13 @@ Everything downstream (`getGeminiTools`, `callTool`, `readOnlyToolNames`, the ou
 **A server error between calls.** If the server forgets a session, or the network drops, the next
 `callTool` gets an error, which already comes back to the model as `Error calling MCP tool: …`. There
 is no automatic reconnect in phase 1. The Plugins pane reload restarts the fleet.
+
+Named gap: **idle-session expiry.** Hosted servers often drop a session after some idle minutes. A
+stateful server's expired session then makes every `callTool` fail with an opaque error until the
+user reloads, and nothing distinguishes "session expired" from "server down". (A stateless server
+such as sharpei keeps no session, so it is not affected.) Expect the first "my MCP tool stopped
+working after I left Iris open overnight" report to be this. The fix (one reconnect-and-retry on a
+404 or unknown-session error) is the first follow-up.
 
 ### Per-entry decoding
 
@@ -201,10 +245,16 @@ Test-first, in `MCPManagerConfigTests` / a new `MCPRemoteServerTests`:
   round-trips both forms using canonical keys.
 - **File parsing:** bare map and wrapper; one bad entry gives one `.failed` and N-1 good ones; a
   non-object file gives one file-level status; `configuredServerNames` includes invalid entries.
-- **URL policy:** `https` passes; `http://localhost`, `http://127.0.0.1` and `http://[::1]` pass;
-  `http://example.com` fails; a non-http scheme fails.
-- **Headers:** a keychain reference expands; an unresolved reference fails the entry with the header
-  name in the reason; literals pass through.
+- **URL policy:** `https` passes; `http://localhost`, `http://127.0.0.1`, `http://127.8.9.10` (the
+  whole `127.0.0.0/8` is checked as an address range, not a string match) and `http://[::1]` pass;
+  `http://example.com` fails; `http://127.0.0.1.example.com` fails; a non-http scheme fails. Each
+  alias (`serverUrl`, `httpUrl`) is decoded and then run through the policy with a plain-http,
+  non-loopback URL, so a future change to alias handling cannot reintroduce a bypass.
+- **Headers:** an allowed keychain reference expands; a reference not in `allowedKeys` fails the
+  entry even when the key exists in the blob, and the refused value is never passed to the expander
+  (asserted by handing in a blob where it is present); no `allowedKeys` means no references; an
+  allowed but missing key fails with a different reason; literals pass through; `allowedKeys` on a
+  stdio entry fails to decode.
 - **`removeLegacyServer`:** the wrapper and an unmodellable sibling survive.
 - **Loopback integration:** an in-process server on `LoopbackHTTPListener` (port 0) with the SDK's
   `StatelessHTTPServerTransport`, the same pattern as `IrisMCPProviderServer.dispatch`, configured
@@ -226,7 +276,7 @@ Live check, by hand, not in CI: sharpei through the dev app, listing and calling
 
 ## Out of scope
 
-OAuth and discovery (a 401 or 403 is a clear `.failed`); automatic reconnect; the legacy HTTP+SSE
+Per-key host binding or a first-contact gate (the residual risk above, #966/#974); OAuth and discovery (a 401 or 403 is a clear `.failed`); automatic reconnect; the legacy HTTP+SSE
 dual-endpoint transport; remote entries in plugins and the import wizard; the Plugins pane revamp; a
 Keychain editing UI; moving the SDK pin (#1083), though this work is a reason to do it.
 
