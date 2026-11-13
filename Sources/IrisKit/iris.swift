@@ -1189,8 +1189,16 @@ actor IrisEngine {
         let notify = stringArray("notify")
         let rawThreadId = args["thread_id"]?.stringValue.trimmingCharacters(in: .whitespaces) ?? ""
         let threadId: String? = rawThreadId.isEmpty ? nil : rawThreadId
-        let deadlineRaw = args["deadline"]?.stringValue
-        let deadline: Date? = deadlineRaw.flatMap { ISO8601DateFormatter().date(from: $0) }
+        let now = Date()
+        let deadlineRaw = args["deadline"]?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let deadline: Date?
+        if deadlineRaw.isEmpty {
+            deadline = nil
+        } else if let parsed = Self.parseInboxDeadline(deadlineRaw, now: now) {
+            deadline = parsed
+        } else {
+            return "Not raised: response_mode timedVeto needs a deadline: could not parse deadline — pass an ISO 8601 timestamp in the future or a relative offset such as +30m, +2h, +1d."
+        }
         let rawVetoDefault = args["veto_default"]?.stringValue.trimmingCharacters(in: .whitespaces) ?? ""
         let vetoDefault: String? = rawVetoDefault.isEmpty ? nil : rawVetoDefault
 
@@ -1208,8 +1216,8 @@ actor IrisEngine {
             return "Options must have distinct ids."
         }
         if responseMode == .timedVeto {
-            guard let deadline, deadline > Date() else {
-                return "response_mode timedVeto needs a deadline: an ISO 8601 timestamp in the future."
+            guard let deadline, deadline > now else {
+                return "Not raised: response_mode timedVeto needs a deadline: pass an ISO 8601 timestamp in the future or a relative offset such as +30m, +2h, +1d."
             }
             guard let vetoDefault, optionIds.contains(vetoDefault) else {
                 return "response_mode timedVeto needs veto_default naming one of the options' ids; give each option an `id` and pass one of them."
@@ -1240,7 +1248,10 @@ actor IrisEngine {
         }
 
         let label = Self.flattenCardField(emitterLabel ?? ownerChain, cap: Self.cardNameCap)
-        let now = Date()
+        let deadlineNote = (responseMode == .timedVeto) ? (deadline.map { " (deadline \(Self.formatInboxDeadline($0)))" } ?? "") : ""
+        let taintHoldNote = (responseMode == .timedVeto && tainted)
+            ? " Note: this session has read outside content, so the default will be held at the deadline and wait for Brian's answer."
+            : ""
         do {
             if let threadId {
                 // The follow-up's own question replaces the item's current ask (#1024); route_back
@@ -1255,7 +1266,7 @@ actor IrisEngine {
                 case .success(let landed):
                     await MainActor.run { localState?.bumpInboxRevision() }
                     let routing = (routeBack.isEmpty && notify.isEmpty) ? "" : " route_back and notify were left as first raised."
-                    return "Follow-up recorded on #\(landed.itemId) (thread \(threadId)). It is open in Brian's inbox again with your new title, situation and options in place of the ones he answered.\(routing)"
+                    return "Follow-up recorded on #\(landed.itemId) (thread \(threadId))\(deadlineNote). It is open in Brian's inbox again with your new title, situation and options in place of the ones he answered.\(routing)\(taintHoldNote)"
                 case .failure(.notOwner):
                     await MainActor.run { localState?.refundInboxEmit(from: conversationId) }
                     return "Not raised: thread \(threadId) belongs to a different chain; you may not append to it."
@@ -1284,7 +1295,7 @@ actor IrisEngine {
                 switch result {
                 case .success:
                     await MainActor.run { localState?.bumpInboxRevision() }
-                    return "Recorded #\(id) (thread \(newThreadId)). It's in Brian's inbox now (sidebar row, open-items count) — you may tell him you raised it."
+                    return "Recorded #\(id) (thread \(newThreadId))\(deadlineNote). It's in Brian's inbox now (sidebar row, open-items count) — you may tell him you raised it.\(taintHoldNote)"
                 case .failure:
                     await MainActor.run { localState?.refundInboxEmit(from: conversationId) }
                     return "Not raised: could not record it."
@@ -1594,6 +1605,38 @@ actor IrisEngine {
     /// id or name or the pinned conversation, is refused at emit and dropped at answer time: an
     /// emitter picks WHICH CHAIN gets the answer, not an arbitrary session, or Brian's click (or a
     /// timer) becomes a way to push a message into a victim without the peer gates.
+    /// Parses an `inbox_item` deadline (#1094): a relative offset from `now` (`+30m`, `+2h`,
+    /// `+1d`, `+90s`, optional leading `+`) or an ISO 8601 timestamp (with or without fractional
+    /// seconds). Nil when `raw` matches neither or overflows a 10-year horizon.
+    nonisolated static func parseInboxDeadline(_ raw: String, now: Date = Date()) -> Date? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let match = try? /^\+?(\d+)\s*([smhdSMHD])$/.wholeMatch(in: trimmed),
+           let value = Double(match.1), value > 0 {
+            let unit = match.2.lowercased()
+            let multiplier: Double
+            switch unit {
+            case "s": multiplier = 1
+            case "m": multiplier = 60
+            case "h": multiplier = 3600
+            case "d": multiplier = 86_400
+            default: return nil
+            }
+            let seconds = value * multiplier
+            guard seconds <= 365 * 86_400 * 10 else { return nil }
+            return now.addingTimeInterval(seconds)
+        }
+        let standard = ISO8601DateFormatter()
+        if let date = standard.date(from: trimmed) { return date }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: trimmed)
+    }
+
+    nonisolated static func formatInboxDeadline(_ date: Date) -> String {
+        ISO8601DateFormatter().string(from: date)
+    }
+
     nonisolated static func isAllowedInboxRoute(_ target: String, emitter: UUID) -> Bool {
         let raw = target.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if raw == emitter.uuidString.lowercased() { return true }
@@ -3392,7 +3435,7 @@ actor IrisEngine {
                     "route_back": Schema(type: "ARRAY", description: "Who gets Brian's answer: role:<name> entries (whoever holds the role when he answers). Omit to get it yourself. Another session by id or name is refused.", items: Schema(type: "STRING")),
                     "notify": Schema(type: "ARRAY", description: "role:<name> entries told, once, when Brian has answered. Another session by id or name is refused.", items: Schema(type: "STRING")),
                     "thread_id": Schema(type: "STRING", description: "Omit for a new item; give an existing one to append a followup and reopen it with the title, situation, options and response_mode you pass now."),
-                    "deadline": Schema(type: "STRING", description: "ISO 8601. For response_mode timedVeto: when the default takes effect with no answer."),
+                    "deadline": Schema(type: "STRING", description: "For response_mode timedVeto: when the default takes effect with no answer, as a relative offset from now (e.g. +30m, +2h, +1d) or an ISO 8601 timestamp."),
                     "veto_default": Schema(type: "STRING", description: "For response_mode timedVeto: the id of the option that takes effect at the deadline if Brian has not answered. It must match an option's id. The default is not guaranteed to apply: an item may be held open for Brian to decide instead (for example after you read outside content)."),
                 ], required: ["title", "situation", "response_mode"])
             ))

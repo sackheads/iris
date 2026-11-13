@@ -367,4 +367,59 @@ struct InboxEmitTests {
         #expect(result.contains("Recorded"), Comment(rawValue: result))
         #expect(try app.store.inbox.openItems().first?.routeBack == ["role:planner", id.uuidString])
     }
+
+
+    @Test("relative deadlines (+30m, +2h, +1d, +90s) and fractional-seconds ISO 8601 resolve and echo in the result (#1094)")
+    func relativeAndFractionalDeadlinesResolveAndEcho() async throws {
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        #expect(IrisEngine.parseInboxDeadline("+30m", now: base) == base.addingTimeInterval(1800))
+        #expect(IrisEngine.parseInboxDeadline("45m", now: base) == base.addingTimeInterval(2700))
+        #expect(IrisEngine.parseInboxDeadline("+2h", now: base) == base.addingTimeInterval(7200))
+        #expect(IrisEngine.parseInboxDeadline("+1d", now: base) == base.addingTimeInterval(86_400))
+        #expect(IrisEngine.parseInboxDeadline("+90s", now: base) == base.addingTimeInterval(90))
+        #expect(IrisEngine.parseInboxDeadline("2030-01-02T03:04:05.678Z", now: base) != nil)
+
+        let (app, id) = app()
+        let options: [JSONValue] = [option("a", "Proceed"), option("b", "Hold")]
+        let before = Date()
+        let result = await runToolCall(
+            emitCall(responseMode: "timedVeto", options: options, deadline: "+30m", vetoDefault: "a"),
+            on: app, as: id
+        )
+        #expect(result.contains("Recorded #"), Comment(rawValue: result))
+        #expect(result.contains("(deadline "), Comment(rawValue: result))
+
+        let item = try #require(try app.store.inbox.openItems().first)
+        let storedDeadline = try #require(item.deadline)
+        #expect(storedDeadline >= before.addingTimeInterval(1795) && storedDeadline <= Date().addingTimeInterval(1805))
+        #expect(result.contains(IrisEngine.formatInboxDeadline(storedDeadline)), Comment(rawValue: result))
+    }
+
+    @Test("unparseable deadlines are refused with Not raised and never silently dropped (#1094)")
+    func unparseableDeadlinesRefused() async throws {
+        let (app, id) = app()
+        let options: [JSONValue] = [option("a", "Proceed")]
+        for bad in ["tomorrow", "2026-99-99T00:00:00Z", "+0m", "-10m", "30weeks"] {
+            let result = await runToolCall(
+                emitCall(responseMode: "timedVeto", options: options, deadline: bad, vetoDefault: "a"),
+                on: app, as: id
+            )
+            #expect(result.hasPrefix("Not raised:"), Comment(rawValue: "\(bad): \(result)"))
+            #expect(result.contains("needs a deadline"), Comment(rawValue: "\(bad): \(result)"))
+        }
+        #expect(try app.store.inbox.openItems().isEmpty)
+    }
+
+    @Test("a timedVeto raised from a session with outside content warns at filing that the default will be held (#1095)")
+    func taintedTimedVetoWarnsAtFiling() async throws {
+        let (app, id) = app()
+        app.conversations[app.conversations.firstIndex { $0.id == id }!].hasUntrustedToolOutput = true
+        let options: [JSONValue] = [option("a", "Proceed")]
+        let result = await runToolCall(
+            emitCall(responseMode: "timedVeto", options: options, deadline: "+15m", vetoDefault: "a"),
+            on: app, as: id
+        )
+        #expect(result.contains("Recorded #"), Comment(rawValue: result))
+        #expect(result.contains("default will be held at the deadline"), Comment(rawValue: result))
+    }
 }
