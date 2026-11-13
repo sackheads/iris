@@ -51,4 +51,24 @@ struct LiteralTextEditorTests {
         editor.insertText(typed, replacementRange: NSRange(location: 0, length: 0))
         #expect(box.text == typed)
     }
+
+    @Test("PluginsSettingsView fits inside a 600pt Settings window with verbatim prompts and no clipped controls")
+    func pluginsSettingsViewFitsAndPrompts() throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 600),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        let root = NSHostingView(rootView: PluginsSettingsView())
+        root.frame = window.contentView!.bounds
+        window.contentView!.addSubview(root)
+        root.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+
+        func allViews(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(allViews) }
+        let fields = allViews(root).compactMap { $0 as? NSTextField }.filter { $0.isEditable }
+        #expect(fields.count == 3)
+        for field in fields {
+            let rect = field.convert(field.bounds, to: nil)
+            #expect(rect.minX >= 0 && rect.maxX <= 600, "field frame \(rect) must sit inside the 600pt window")
+            #expect(!(field.placeholderString ?? "").isEmpty, "every field must have a plain-text placeholder")
+        }
+    }
 }

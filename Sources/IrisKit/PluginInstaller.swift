@@ -272,18 +272,24 @@ extension PluginInstaller {
         customHeaders: [(name: String, value: String, isSecret: Bool)] = [],
         source: String = "form"
     ) throws -> PluginDraft {
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedName.isEmpty else {
-            throw IPFError.invalidJSON("Server name is required")
-        }
-        let id = try derivePluginID(from: trimmedName)
         let trimmedURL = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: trimmedURL), url.scheme != nil, url.host() != nil else {
+        guard !trimmedURL.isEmpty else {
+            throw IPFError.invalidJSON("Enter the server's Endpoint URL (e.g. https://sharpei.scromp.net/mcp)")
+        }
+        guard let url = URL(string: trimmedURL), url.scheme != nil, let host = url.host(), !host.isEmpty else {
             throw IPFError.invalidJSON("'\(trimmedURL)' is not a valid URL")
         }
         if let refusal = MCPManager.remoteURLRefusal(url) {
             throw IPFError.invalidJSON(refusal)
         }
+        var trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedName.isEmpty {
+            let firstLabel = host.split(separator: ".").first.map(String.init) ?? host
+            trimmedName = (firstLabel == "www" || firstLabel == "mcp" || firstLabel == "api" || firstLabel == "127")
+                ? host.replacingOccurrences(of: ".", with: "-")
+                : firstLabel
+        }
+        let id = try derivePluginID(from: trimmedName)
 
         var headerTemplates: [String: String] = [:]
         var secretValues: [String: String] = [:]

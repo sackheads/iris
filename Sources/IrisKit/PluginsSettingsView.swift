@@ -60,7 +60,7 @@ struct PluginsSettingsView: View {
     var body: some View {
         HStack(spacing: 0) {
             sidebar
-                .frame(width: 250)
+                .frame(width: 205)
             Divider()
             detailPane
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -420,8 +420,8 @@ extension PluginsSettingsView {
 
 private struct AddMCPServerWorkspaceView: View {
     enum Mode: String, CaseIterable, Identifiable {
-        case remote = "Remote (HTTP)"
-        case stdio = "Local (stdio)"
+        case remote = "Remote HTTP"
+        case stdio = "Local Command"
         case snippet = "Paste JSON"
         case importExisting = "Import"
 
@@ -486,13 +486,23 @@ private struct AddMCPServerWorkspaceView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                Picker("Method", selection: $mode) {
+                HStack(spacing: 6) {
                     ForEach(Mode.allCases) { item in
-                        Text(item.rawValue).tag(item)
+                        Button {
+                            mode = item
+                        } label: {
+                            Text(item.rawValue)
+                                .font(.caption)
+                                .fontWeight(mode == item ? .semibold : .regular)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(mode == item ? Color.accentColor : Color.secondary.opacity(0.15))
+                                .foregroundStyle(mode == item ? Color.white : Color.primary)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
                 .onChange(of: mode) { _, newMode in
                     errorMessage = nil
                     if newMode == .importExisting {
@@ -537,13 +547,15 @@ private struct AddMCPServerWorkspaceView: View {
         GroupBox("Remote Streamable HTTP Server") {
             VStack(alignment: .leading, spacing: 12) {
                 labeledRow("Server Name") {
-                    TextField("e.g. sharpei", text: $remoteName)
+                    TextField("", text: $remoteName, prompt: Text(verbatim: "Optional (e.g. sharpei — derived from URL if blank)"))
                         .textFieldStyle(.roundedBorder)
+                        .onSubmit { Task { await submitRemoteForm() } }
                 }
                 labeledRow("Endpoint URL") {
                     VStack(alignment: .leading, spacing: 2) {
-                        TextField("https://sharpei.scromp.net/mcp", text: $remoteURL)
+                        TextField("", text: $remoteURL, prompt: Text(verbatim: "e.g. https://sharpei.scromp.net/mcp"))
                             .textFieldStyle(.roundedBorder)
+                            .onSubmit { Task { await submitRemoteForm() } }
                         Text("Requires https:// (or http:// to localhost / 127.0.0.1).")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
@@ -556,15 +568,17 @@ private struct AddMCPServerWorkspaceView: View {
                         }
                     }
                     .labelsHidden()
-                    .pickerStyle(.segmented)
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 200, alignment: .leading)
                 }
 
                 switch remoteAuthMode {
                 case .bearer:
                     labeledRow("Bearer Token") {
                         VStack(alignment: .leading, spacing: 2) {
-                            SecureField("Paste raw token (stored in macOS Keychain)", text: $remoteBearerToken)
+                            SecureField("", text: $remoteBearerToken, prompt: Text(verbatim: "Paste raw token (stored in macOS Keychain)"))
                                 .textFieldStyle(.roundedBorder)
+                                .onSubmit { Task { await submitRemoteForm() } }
                             Text("Iris sends `Authorization: Bearer <token>` and stores the token in Keychain (`iris.plugin.<id>`).")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
@@ -572,16 +586,16 @@ private struct AddMCPServerWorkspaceView: View {
                     }
                 case .customHeader:
                     labeledRow("Header Name") {
-                        TextField("e.g. X-API-Key", text: $customHeaderName)
+                        TextField("", text: $customHeaderName, prompt: Text(verbatim: "e.g. X-API-Key"))
                             .textFieldStyle(.roundedBorder)
                     }
                     labeledRow("Header Value") {
                         HStack {
                             if customHeaderIsSecret {
-                                SecureField("Stored in macOS Keychain", text: $customHeaderValue)
+                                SecureField("", text: $customHeaderValue, prompt: Text(verbatim: "Stored in macOS Keychain"))
                                     .textFieldStyle(.roundedBorder)
                             } else {
-                                TextField("Plain header value", text: $customHeaderValue)
+                                TextField("", text: $customHeaderValue, prompt: Text(verbatim: "Plain header value"))
                                     .textFieldStyle(.roundedBorder)
                             }
                             Toggle("Secret (Keychain)", isOn: $customHeaderIsSecret)
@@ -593,13 +607,16 @@ private struct AddMCPServerWorkspaceView: View {
                     EmptyView()
                 }
 
-                HStack {
-                    Spacer()
-                    Button(isSaving ? "Connecting..." : "Add & Connect") {
-                        Task { await submitRemoteForm() }
+                labeledRow("") {
+                    HStack {
+                        Button(isSaving ? "Connecting..." : "Add & Connect") {
+                            NSApp.keyWindow?.makeFirstResponder(nil)
+                            Task { await submitRemoteForm() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isSaving)
+                        Spacer()
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(isSaving || remoteName.trimmingCharacters(in: .whitespaces).isEmpty || remoteURL.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
             .padding(8)
@@ -673,13 +690,16 @@ private struct AddMCPServerWorkspaceView: View {
                     }
                 }
 
-                HStack {
-                    Spacer()
-                    Button(isSaving ? "Starting..." : "Add & Connect") {
-                        Task { await submitStdioForm() }
+                labeledRow("") {
+                    HStack {
+                        Button(isSaving ? "Starting..." : "Add & Connect") {
+                            NSApp.keyWindow?.makeFirstResponder(nil)
+                            Task { await submitStdioForm() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isSaving)
+                        Spacer()
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(isSaving || stdioName.trimmingCharacters(in: .whitespaces).isEmpty || stdioCommand.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
             .padding(8)
@@ -700,16 +720,17 @@ private struct AddMCPServerWorkspaceView: View {
                     .border(Color.gray.opacity(0.3))
 
                 HStack {
-                    Button("Preview & Extract Secrets") {
-                        parseSnippetPreview()
-                    }
-                    .disabled(snippetText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    Spacer()
                     Button(isSaving ? "Installing..." : "Install & Connect") {
+                        NSApp.keyWindow?.makeFirstResponder(nil)
                         Task { await submitSnippetForm() }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(isSaving || snippetText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(isSaving)
+                    Button("Preview & Extract Secrets") {
+                        NSApp.keyWindow?.makeFirstResponder(nil)
+                        parseSnippetPreview()
+                    }
+                    Spacer()
                 }
 
                 if let draft = parsedDraft {
@@ -832,9 +853,9 @@ private struct AddMCPServerWorkspaceView: View {
     // MARK: Actions
 
     private func labeledRow<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: 8) {
             Text(label)
-                .frame(width: 120, alignment: .trailing)
+                .frame(width: 95, alignment: .trailing)
                 .padding(.top, 4)
             content()
         }

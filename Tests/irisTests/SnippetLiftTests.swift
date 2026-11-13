@@ -234,6 +234,12 @@ struct SnippetLiftTests {
         #expect(headers["X-Org"] == "${config:X_ORG}")
         #expect(allowedKeys == ["BEARER_TOKEN"])
 
+        // Blank name auto-derives from hostname ("sharpei.scromp.net" -> "sharpei")
+        let autoNamed = try PluginInstaller.draftForRemoteServer(
+            name: "", urlString: "https://sharpei.scromp.net/mcp", bearerToken: "sec-token", customHeaders: [])
+        #expect(autoNamed.manifest.id == "sharpei")
+        #expect(autoNamed.manifest.name == "sharpei")
+
         #expect(throws: (any Error).self) {
             _ = try PluginInstaller.draftForRemoteServer(
                 name: "bad", urlString: "http://example.com/mcp", bearerToken: nil, customHeaders: [])
