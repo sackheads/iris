@@ -195,7 +195,7 @@ Everything downstream (`getGeminiTools`, `callTool`, `readOnlyToolNames`, the ou
 
 **A server error between calls.** If the server forgets a session, or the network drops, the next
 `callTool` gets an error, which already comes back to the model as `Error calling MCP tool: …`. There
-is no automatic reconnect in phase 1. The Plugins pane reload restarts the fleet.
+is no automatic reconnect in phase 1. Saving `mcp_servers.json` while the Plugins pane is open restarts the fleet.
 
 Named gap: **idle-session expiry.** Hosted servers often drop a session after some idle minutes. A
 stateful server's expired session then makes every `callTool` fail with an opaque error until the

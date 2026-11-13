@@ -104,13 +104,19 @@ actor PluginManager {
         for plugin in loaded.values where plugin.status == .ok {
             guard let mcpRel = plugin.manifest.components?.mcp else { continue }
             let mcpURL = plugin.directory.appendingPathComponent(mcpRel)
-            guard let data = try? Data(contentsOf: mcpURL),
-                  let servers = try? JSONDecoder().decode([String: MCPServerConfig].self, from: data) else {
-                continue
+            guard let data = try? Data(contentsOf: mcpURL) else { continue }
+            // Per entry, so one entry this build cannot model does not drop its siblings (#1096).
+            let parsed = MCPManager.parseLegacyFile(data)
+            for (serverName, reason) in parsed.failures {
+                print("Plugin \(plugin.manifest.id): MCP server \(serverName) skipped: \(reason)")
             }
             let config = effectiveConfigValues(plugin)
             let secrets = KeychainManager.shared.secrets(service: KeychainManager.pluginService(plugin.manifest.id))
-            for (serverName, server) in servers {
+            for (serverName, server) in parsed.configs {
+                guard case .stdio = server else {
+                    print("Plugin \(plugin.manifest.id): MCP server \(serverName) skipped: remote servers in plugins are not supported yet")
+                    continue
+                }
                 guard let resolved = resolveServer(server, plugin: plugin, serverName: serverName,
                                                    config: config, secrets: secrets) else { continue }
                 result["\(plugin.manifest.id).\(serverName)"] = resolved
@@ -212,9 +218,10 @@ actor PluginManager {
 
     private func resolveServer(_ server: MCPServerConfig, plugin: LoadedPlugin, serverName: String,
                                config: [String: String], secrets: [String: String]) -> MCPServerConfig? {
-        guard let command = BinaryResolver.resolve(command: server.command) else { return nil }
+        guard case .stdio(let rawCommand, let args, let rawEnv) = server,
+              let command = BinaryResolver.resolve(command: rawCommand) else { return nil }
         var env: [String: String]? = nil
-        if let rawEnv = server.env {
+        if let rawEnv {
             var expanded: [String: String] = [:]
             for (key, value) in rawEnv {
                 guard let v = try? PluginReferences.expand(value, config: config, secrets: secrets) else { return nil }
@@ -222,6 +229,6 @@ actor PluginManager {
             }
             env = expanded
         }
-        return MCPServerConfig(command: command, args: server.args, env: env)
+        return .stdio(command: command, args: args, env: env)
     }
 }
