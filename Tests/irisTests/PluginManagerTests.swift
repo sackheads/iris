@@ -217,4 +217,84 @@ struct PluginManagerTests {
         }
         #expect(message.contains("mcp.json"))
     }
+
+    @Test("loads a remote plugin, expands headers from plugin Keychain, and enforces allowedKeys")
+    func loadsRemotePlugin() async throws {
+        let manifest = """
+        ---
+        ipf: "1.0"
+        id: sharpei
+        name: Sharpei
+        version: 1.0.0
+        components:
+          mcp: mcp.json
+        secrets:
+          - key: BEARER_TOKEN
+            required: true
+        config:
+          - key: REGION
+            default: ca
+        ---
+        """
+        let remoteMCP = """
+        {
+          "sharpei": {
+            "url": "https://sharpei.scromp.net/mcp",
+            "headers": {
+              "Authorization": "Bearer ${keychain:BEARER_TOKEN}",
+              "X-Region": "${config:REGION}"
+            },
+            "allowedKeys": ["BEARER_TOKEN"]
+          }
+        }
+        """
+        let (paths, _) = try fixture(manifest: manifest, id: "sharpei", mcpJSON: remoteMCP)
+        defer { try? FileManager.default.removeItem(at: paths.root) }
+        KeychainManager.shared.replaceSecrets(["BEARER_TOKEN": "live-tok"], service: KeychainManager.pluginService("sharpei"))
+        defer { KeychainManager.shared.deleteSecrets(service: KeychainManager.pluginService("sharpei")) }
+
+        let pm = PluginManager(paths: paths)
+        await pm.loadAll()
+        let configs = await pm.mcpConfigs()
+        guard case .remote(let url, let headers, _)? = configs["sharpei.sharpei"] else {
+            Issue.record("sharpei.sharpei missing or not remote: \(configs)"); return
+        }
+        #expect(url.absoluteString == "https://sharpei.scromp.net/mcp")
+        #expect(headers["Authorization"] == "Bearer live-tok")
+        #expect(headers["X-Region"] == "ca")
+    }
+
+    @Test("remote plugin header referencing a secret outside allowedKeys is refused")
+    func remotePluginRefusesUnallowedKey() async throws {
+        let manifest = """
+        ---
+        ipf: "1.0"
+        id: sharpei
+        name: Sharpei
+        version: 1.0.0
+        components:
+          mcp: mcp.json
+        secrets:
+          - key: BEARER_TOKEN
+            required: true
+        ---
+        """
+        let remoteMCP = """
+        {
+          "sharpei": {
+            "url": "https://sharpei.scromp.net/mcp",
+            "headers": { "Authorization": "Bearer ${keychain:BEARER_TOKEN}" },
+            "allowedKeys": []
+          }
+        }
+        """
+        let (paths, _) = try fixture(manifest: manifest, id: "sharpei", mcpJSON: remoteMCP)
+        defer { try? FileManager.default.removeItem(at: paths.root) }
+        KeychainManager.shared.replaceSecrets(["BEARER_TOKEN": "live-tok"], service: KeychainManager.pluginService("sharpei"))
+        defer { KeychainManager.shared.deleteSecrets(service: KeychainManager.pluginService("sharpei")) }
+
+        let pm = PluginManager(paths: paths)
+        await pm.loadAll()
+        #expect(await pm.mcpConfigs().isEmpty)
+    }
 }

@@ -72,8 +72,16 @@ struct MCPRemoteServerTests {
             #expect(await manager.getGeminiTools().map(\.name) == ["sharpei___echo"])
             #expect(await manager.readOnlyToolNames() == ["sharpei___echo"])
 
+            let tools = await manager.serverTools()["sharpei"]
+            #expect(tools == [MCPManager.ToolSummary(
+                name: "echo", description: "Echoes its input", parameterNames: ["text"], isReadOnly: true
+            )])
+
             let out = await manager.callTool(name: "sharpei___echo", args: ["text": .string("hi")])
             #expect(out == "echo: hi")
+
+            await manager.restartServer(named: "sharpei")
+            #expect(await manager.serverStatuses()["sharpei"] == .running(toolCount: 1))
             await manager.stopServers()
         }
         #expect(!seen.all.isEmpty)

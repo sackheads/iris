@@ -113,7 +113,7 @@ struct PluginInstaller: Sendable {
     }
 }
 
-// MARK: - Wrap-and-lift (snippet -> plugin draft)
+// MARK: - Wrap-and-lift (snippet / form -> plugin draft)
 
 struct LiftedEnv: Sendable, Equatable {
     var secrets: [String: String] = [:]
@@ -121,7 +121,7 @@ struct LiftedEnv: Sendable, Equatable {
 }
 
 extension PluginInstaller {
-    private static let secretMarkers = ["KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "COOKIE", "CREDENTIAL"]
+    private static let secretMarkers = ["KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "COOKIE", "CREDENTIAL", "AUTH"]
 
     /// Heuristic pre-classification; the wizard shows the result for user confirmation and
     /// lets them re-tag any field before commit.
@@ -142,6 +142,23 @@ extension PluginInstaller {
         return lifted
     }
 
+    static func derivePluginID(from serverName: String) throws -> String {
+        let id = serverName.lowercased()
+            .replacing(/[^a-z0-9]+/, with: "-")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        guard !id.isEmpty else {
+            throw IPFError.invalidJSON("Cannot derive a plugin id from server name '\(serverName)'")
+        }
+        return id
+    }
+
+    static func headerKeyIdentifier(for headerName: String) -> String {
+        let cleaned = headerName.uppercased()
+            .replacing(/[^A-Z0-9]+/, with: "_")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+        return cleaned.isEmpty ? "HEADER_SECRET" : cleaned
+    }
+
     /// Produces a safe double-quoted YAML scalar: escapes backslashes and quotes, and turns
     /// newlines/tabs/carriage returns into their YAML double-quoted escapes so untrusted
     /// snippet strings can't break the manifest's structure or inject extra fields.
@@ -156,8 +173,9 @@ extension PluginInstaller {
     }
 
     /// Builds a single-server plugin draft from a standard `mcpServers` JSON snippet (or a
-    /// bare `{name: {command,...}}` object). Literal env values are lifted into declarations;
-    /// the generated mcp.json carries only `${...}` references.
+    /// bare `{name: {...}}` object), supporting both stdio (`command`) and remote HTTP
+    /// (`url` / `serverUrl` / `httpUrl`) servers (#1105). Literal secrets are lifted into
+    /// Keychain declarations; the generated `mcp.json` carries only `${...}` references.
     static func draft(fromSnippet json: String) throws -> PluginDraft {
         guard let data = json.data(using: .utf8),
               let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -170,29 +188,168 @@ extension PluginInstaller {
                 "Snippet contains \(serverDict.count) servers (\(names)); paste one server at a time")
         }
         guard let (serverName, serverAny) = serverDict.first,
-              let server = serverAny as? [String: Any],
-              let command = server["command"] as? String else {
-            throw IPFError.invalidJSON("Snippet has no server with a command")
+              let server = serverAny as? [String: Any] else {
+            throw IPFError.invalidJSON("Snippet contains no server object")
         }
-        let args = (server["args"] as? [String]) ?? []
-        let env = (server["env"] as? [String: String]) ?? [:]
-        let lifted = classifyEnv(env)
+        let id = try derivePluginID(from: serverName)
 
+        if let command = server["command"] as? String {
+            let args = (server["args"] as? [String]) ?? []
+            let env = (server["env"] as? [String: String]) ?? [:]
+            let lifted = classifyEnv(env)
+
+            let envKeyPattern = /^[A-Za-z0-9_]+$/
+            for key in env.keys where (try? envKeyPattern.wholeMatch(in: key)) == nil {
+                throw IPFError.invalidJSON("Env key '\(key)' is not a valid identifier (A-Za-z0-9_)")
+            }
+
+            return try buildGeneratedDraft(
+                id: id, serverName: serverName, command: command, args: args,
+                secretValues: lifted.secrets, configValues: lifted.config, source: "snippet")
+        }
+
+        // Remote server path (`url` / `serverUrl` / `httpUrl`). Decode via MCPServerConfig to
+        // enforce alias uniqueness, SSE refusal, and URL validity.
+        let entryData = try JSONSerialization.data(withJSONObject: server, options: [.fragmentsAllowed])
+        let decoded: MCPServerConfig
+        do {
+            decoded = try JSONDecoder().decode(MCPServerConfig.self, from: entryData)
+        } catch {
+            throw IPFError.invalidJSON(MCPManager.describe(error))
+        }
+        guard case .remote(let url, let rawHeaders, _) = decoded else {
+            throw IPFError.invalidJSON("Snippet has no server with a command or url")
+        }
+        if let refusal = MCPManager.remoteURLRefusal(url) {
+            throw IPFError.invalidJSON(refusal)
+        }
+
+        let legacySecrets = KeychainManager.shared.secrets(service: KeychainManager.mcpFileService)
+        var headerTemplates: [String: String] = [:]
+        var secretValues: [String: String] = [:]
+        var configValues: [String: String] = [:]
+
+        for (headerName, rawValue) in rawHeaders {
+            let existingKeychainRefs = PluginReferences.keychainKeys(in: rawValue)
+            let existingConfigRefs = PluginReferences.configKeys(in: rawValue)
+            if !existingKeychainRefs.isEmpty || !existingConfigRefs.isEmpty {
+                headerTemplates[headerName] = rawValue
+                for key in existingKeychainRefs {
+                    secretValues[key] = legacySecrets[key] ?? ""
+                }
+                for key in existingConfigRefs {
+                    configValues[key] = ""
+                }
+                continue
+            }
+
+            let keyID = headerKeyIdentifier(for: headerName)
+            let trimmed = rawValue.trimmingCharacters(in: .whitespaces)
+            if trimmed.lowercased().hasPrefix("bearer ") {
+                let token = String(trimmed.dropFirst(7)).trimmingCharacters(in: .whitespaces)
+                headerTemplates[headerName] = "Bearer ${keychain:\(keyID)}"
+                secretValues[keyID] = token
+            } else if headerName.lowercased() == "authorization" || isSecretLooking(key: headerName) {
+                headerTemplates[headerName] = "${keychain:\(keyID)}"
+                secretValues[keyID] = rawValue
+            } else {
+                headerTemplates[headerName] = "${config:\(keyID)}"
+                configValues[keyID] = rawValue
+            }
+        }
+
+        return try buildGeneratedRemoteDraft(
+            id: id, serverName: serverName, url: url, headerTemplates: headerTemplates,
+            secretValues: secretValues, configValues: configValues, source: "snippet")
+    }
+
+    /// Direct form builder for a Remote HTTP MCP server (#1105). Validates the URL policy and
+    /// lifts Bearer tokens and secret custom headers into Keychain declarations.
+    static func draftForRemoteServer(
+        name: String,
+        urlString: String,
+        bearerToken: String?,
+        customHeaders: [(name: String, value: String, isSecret: Bool)] = [],
+        source: String = "form"
+    ) throws -> PluginDraft {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            throw IPFError.invalidJSON("Server name is required")
+        }
+        let id = try derivePluginID(from: trimmedName)
+        let trimmedURL = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmedURL), url.scheme != nil, url.host() != nil else {
+            throw IPFError.invalidJSON("'\(trimmedURL)' is not a valid URL")
+        }
+        if let refusal = MCPManager.remoteURLRefusal(url) {
+            throw IPFError.invalidJSON(refusal)
+        }
+
+        var headerTemplates: [String: String] = [:]
+        var secretValues: [String: String] = [:]
+        var configValues: [String: String] = [:]
+
+        if let rawToken = bearerToken?.trimmingCharacters(in: .whitespacesAndNewlines), !rawToken.isEmpty {
+            let cleanToken = rawToken.lowercased().hasPrefix("bearer ")
+                ? String(rawToken.dropFirst(7)).trimmingCharacters(in: .whitespaces)
+                : rawToken
+            headerTemplates["Authorization"] = "Bearer ${keychain:BEARER_TOKEN}"
+            secretValues["BEARER_TOKEN"] = cleanToken
+        }
+
+        for item in customHeaders {
+            let hName = item.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !hName.isEmpty else { continue }
+            let keyID = headerKeyIdentifier(for: hName)
+            if item.isSecret {
+                headerTemplates[hName] = "${keychain:\(keyID)}"
+                secretValues[keyID] = item.value
+            } else {
+                headerTemplates[hName] = "${config:\(keyID)}"
+                configValues[keyID] = item.value
+            }
+        }
+
+        return try buildGeneratedRemoteDraft(
+            id: id, serverName: trimmedName, url: url, headerTemplates: headerTemplates,
+            secretValues: secretValues, configValues: configValues, source: source)
+    }
+
+    /// Direct form builder for a Local Command (stdio) MCP server (#1105).
+    static func draftForStdioServer(
+        name: String,
+        command: String,
+        args: [String],
+        env: [(key: String, value: String, isSecret: Bool)] = [],
+        source: String = "form"
+    ) throws -> PluginDraft {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            throw IPFError.invalidJSON("Server name is required")
+        }
+        let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedCommand.isEmpty else {
+            throw IPFError.invalidJSON("Command is required")
+        }
+        let id = try derivePluginID(from: trimmedName)
         let envKeyPattern = /^[A-Za-z0-9_]+$/
-        for key in env.keys where (try? envKeyPattern.wholeMatch(in: key)) == nil {
-            throw IPFError.invalidJSON("Env key '\(key)' is not a valid identifier (A-Za-z0-9_)")
+        var secretValues: [String: String] = [:]
+        var configValues: [String: String] = [:]
+        for item in env {
+            let k = item.key.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !k.isEmpty else { continue }
+            guard (try? envKeyPattern.wholeMatch(in: k)) != nil else {
+                throw IPFError.invalidJSON("Env key '\(k)' is not a valid identifier (A-Za-z0-9_)")
+            }
+            if item.isSecret {
+                secretValues[k] = item.value
+            } else {
+                configValues[k] = item.value
+            }
         }
-
-        let id = serverName.lowercased()
-            .replacing(/[^a-z0-9]+/, with: "-")
-            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-        guard !id.isEmpty else {
-            throw IPFError.invalidJSON("Cannot derive a plugin id from server name '\(serverName)'")
-        }
-
         return try buildGeneratedDraft(
-            id: id, serverName: serverName, command: command, args: args,
-            secretValues: lifted.secrets, configValues: lifted.config, source: "snippet")
+            id: id, serverName: trimmedName, command: trimmedCommand, args: args,
+            secretValues: secretValues, configValues: configValues, source: source)
     }
 
     /// Rebuilds a generated draft's `plugin.md` and `mcp.json` from its current
@@ -206,20 +363,41 @@ extension PluginInstaller {
             return draft
         }
         guard let servers = try? JSONDecoder().decode([String: MCPServerConfig].self, from: mcpData),
-              servers.count == 1, let (serverName, config) = servers.first,
-              case .stdio(let command, let args, _) = config else {
+              servers.count == 1, let (serverName, config) = servers.first else {
             throw IPFError.invalidJSON("Draft mcp.json is not a single-server map")
         }
-        var rebuilt = try buildGeneratedDraft(
-            id: draft.manifest.id, serverName: serverName,
-            command: command, args: args,
-            secretValues: draft.secretValues, configValues: draft.configValues,
-            source: draft.source)
-        rebuilt.source = draft.source
-        return rebuilt
+        switch config {
+        case .stdio(let command, let args, _):
+            var rebuilt = try buildGeneratedDraft(
+                id: draft.manifest.id, serverName: serverName,
+                command: command, args: args,
+                secretValues: draft.secretValues, configValues: draft.configValues,
+                source: draft.source)
+            rebuilt.source = draft.source
+            return rebuilt
+        case .remote(let url, let rawHeaders, _):
+            var rewritten: [String: String] = [:]
+            for (headerName, template) in rawHeaders {
+                var updated = template
+                for key in PluginReferences.keychainKeys(in: template).union(PluginReferences.configKeys(in: template)) {
+                    let target = draft.secretValues[key] != nil ? "${keychain:\(key)}" : "${config:\(key)}"
+                    updated = updated
+                        .replacingOccurrences(of: "${keychain:\(key)}", with: target)
+                        .replacingOccurrences(of: "${config:\(key)}", with: target)
+                }
+                rewritten[headerName] = updated
+            }
+            var rebuilt = try buildGeneratedRemoteDraft(
+                id: draft.manifest.id, serverName: serverName, url: url,
+                headerTemplates: rewritten,
+                secretValues: draft.secretValues, configValues: draft.configValues,
+                source: draft.source)
+            rebuilt.source = draft.source
+            return rebuilt
+        }
     }
 
-    /// The one generator for wrap-and-lift plugin files: emits mcp.json (references only,
+    /// The generator for stdio wrap-and-lift plugin files: emits mcp.json (references only,
     /// never literal values) and a plugin.md manifest declaring the given secret/config keys.
     private static func buildGeneratedDraft(
         id: String, serverName: String, command: String, args: [String],
@@ -249,6 +427,60 @@ extension PluginInstaller {
           binaries:
             - name: \(yamlQuoted(binaryName))
         """
+        yaml += manifestFieldsYAML(secretValues: secretValues, configValues: configValues, serverName: serverName)
+
+        var pluginDraft = PluginDraft(
+            manifest: try IPFManifest.parse(markdown: yaml, directoryName: id),
+            files: ["plugin.md": Data(yaml.utf8), "mcp.json": mcpData],
+            source: source)
+        pluginDraft.secretValues = secretValues
+        pluginDraft.configValues = configValues
+        return pluginDraft
+    }
+
+    /// The generator for remote HTTP wrap-and-lift plugin files (#1105): emits mcp.json with
+    /// `url`, `headers` (`${keychain:KEY}` / `${config:KEY}` templates), and `allowedKeys`,
+    /// plus a `plugin.md` manifest with no binary requirement.
+    private static func buildGeneratedRemoteDraft(
+        id: String, serverName: String, url: URL, headerTemplates: [String: String],
+        secretValues: [String: String], configValues: [String: String], source: String
+    ) throws -> PluginDraft {
+        var allowedKeys: Set<String> = []
+        for template in headerTemplates.values {
+            allowedKeys.formUnion(PluginReferences.keychainKeys(in: template))
+        }
+        let mcpConfig = [serverName: MCPServerConfig.remote(
+            url: url, headers: headerTemplates, allowedKeys: allowedKeys
+        )]
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let mcpData = try encoder.encode(mcpConfig)
+
+        var yaml = """
+        ---
+        ipf: "1.0"
+        id: \(id)
+        name: \(yamlQuoted(serverName))
+        version: 0.1.0
+        description: \(yamlQuoted("Remote MCP server \(serverName) (\(url.host() ?? url.absoluteString))."))
+        components:
+          mcp: mcp.json
+        """
+        yaml += manifestFieldsYAML(secretValues: secretValues, configValues: configValues, serverName: serverName)
+
+        var pluginDraft = PluginDraft(
+            manifest: try IPFManifest.parse(markdown: yaml, directoryName: id),
+            files: ["plugin.md": Data(yaml.utf8), "mcp.json": mcpData],
+            source: source)
+        pluginDraft.secretValues = secretValues
+        pluginDraft.configValues = configValues
+        return pluginDraft
+    }
+
+    private static func manifestFieldsYAML(
+        secretValues: [String: String], configValues: [String: String], serverName: String
+    ) -> String {
+        var yaml = ""
         if !configValues.isEmpty {
             yaml += "\nconfig:"
             for key in configValues.keys.sorted() {
@@ -261,14 +493,7 @@ extension PluginInstaller {
                 yaml += "\n  - key: \(key)\n    required: true"
             }
         }
-        yaml += "\n---\n\n# \(serverName)\n\nGenerated by Iris from an MCP snippet.\n"
-
-        var pluginDraft = PluginDraft(
-            manifest: try IPFManifest.parse(markdown: yaml, directoryName: id),
-            files: ["plugin.md": Data(yaml.utf8), "mcp.json": mcpData],
-            source: source)
-        pluginDraft.secretValues = secretValues
-        pluginDraft.configValues = configValues
-        return pluginDraft
+        yaml += "\n---\n\n# \(serverName)\n\nGenerated by Iris.\n"
+        return yaml
     }
 }

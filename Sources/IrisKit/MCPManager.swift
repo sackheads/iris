@@ -93,6 +93,14 @@ actor MCPManager {
         case running(toolCount: Int)
         case failed(String)
     }
+
+    struct ToolSummary: Sendable, Equatable, Identifiable {
+        var id: String { name }
+        let name: String
+        let description: String
+        let parameterNames: [String]
+        let isReadOnly: Bool
+    }
     private var pluginConfigs: [String: MCPServerConfig] = [:]
     private var statuses: [String: ServerStatus] = [:]
 
@@ -113,10 +121,39 @@ actor MCPManager {
     /// Stops exactly one server by its full name. Unlike `stopServers(withPrefix:)`, this
     /// never over-matches (e.g. stopping "sqlite" must not also stop "sqlite2").
     func stopServer(named name: String) async {
-        guard let server = servers[name] else { return }
-        servers[name] = nil
         statuses[name] = nil
+        guard let server = servers.removeValue(forKey: name) else { return }
         await server.stop()
+    }
+
+    /// Stops and restarts a single server by its full name (`<pluginId>.<server>` or legacy `<name>`)
+    /// without disrupting other running servers (#1105).
+    func restartServer(named name: String) async {
+        await stopServer(named: name)
+        await startServers()
+    }
+
+    /// Discovered tools per running server, for the settings inspector (#1105).
+    func serverTools() -> [String: [ToolSummary]] {
+        var result: [String: [ToolSummary]] = [:]
+        for (serverName, server) in servers {
+            result[serverName] = server.availableTools.map { tool in
+                var params: [String] = []
+                if case .object(let schemaDict) = tool.inputSchema,
+                   let propsValue = schemaDict["properties"],
+                   case .object(let props) = propsValue {
+                    params = props.keys.sorted()
+                }
+                let desc = tool.description ?? ""
+                return ToolSummary(
+                    name: tool.name,
+                    description: desc,
+                    parameterNames: params,
+                    isReadOnly: tool.annotations.readOnlyHint == true
+                )
+            }
+        }
+        return result
     }
 
     private let configPathOverride: String?
@@ -228,6 +265,10 @@ actor MCPManager {
         var failures: [String: String] = [:]
         /// Every entry name in the file, valid or not; a profile's `mcp:<name>` is judged against these.
         var names: Set<String> = []
+    }
+
+    func legacyFileSnapshot() -> LegacyFile {
+        loadLegacyFile()
     }
 
     private func loadLegacyFile() -> LegacyFile {

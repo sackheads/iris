@@ -81,8 +81,27 @@ struct HarnessConfigImporterTests {
     @Test("known locations cover the major harnesses")
     func coverage() {
         let names = HarnessConfigImporter.knownLocations.map(\.name)
-        for expected in ["Claude Desktop", "Claude Code", "Cursor", "Windsurf", "Gemini CLI", "VS Code Copilot"] {
+        for expected in ["Claude Desktop", "Claude Code", "Cursor", "Windsurf", "Antigravity", "Gemini CLI", "VS Code Copilot"] {
             #expect(names.contains(expected))
         }
+    }
+
+    @Test("remote Antigravity server entry is imported and converts to a remote plugin draft")
+    func remoteHarnessEntryRoundTrip() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iris-antigravity-\(UUID().uuidString).json")
+        try #"""
+        { "mcpServers": { "sharpei": {
+            "serverUrl": "https://sharpei.scromp.net/mcp",
+            "headers": { "Authorization": "Bearer secret-abc" } } } }
+        """#.write(to: path, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: path) }
+
+        let servers = try HarnessConfigImporter.servers(at: path)
+        let entry = try #require(servers["sharpei"])
+        let json = HarnessConfigImporter.snippetJSON(serverName: "sharpei", raw: entry)
+        let draft = try PluginInstaller.draft(fromSnippet: json)
+        #expect(draft.manifest.id == "sharpei")
+        #expect(draft.secretValues == ["AUTHORIZATION": "secret-abc"])
     }
 }
