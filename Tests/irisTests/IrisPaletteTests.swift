@@ -84,5 +84,25 @@ struct IrisPaletteTests {
         #expect(resolved(IrisPalette.pro, .aqua) == IrisPalette.proLight.usingColorSpace(.sRGB))
         #expect(resolved(IrisPalette.con, .darkAqua) == IrisPalette.conDark.usingColorSpace(.sRGB))
     }
-}
 
+
+    // MARK: Chat links on filled/selected surfaces (#1108)
+
+    @Test("links on purple user bubbles and blue selected rows use white for >= 4.5:1 contrast (#1108)")
+    func chatLinksAreReadableOnUserBubbleAndSelection() {
+        let indigoFill = NSColor(srgbRed: 0.42, green: 0.31, blue: 0.86, alpha: 1)
+        let selectedBlueFill = NSColor(srgbRed: 0.04, green: 0.38, blue: 0.82, alpha: 1)
+        for scheme in [ColorScheme.light, .dark] {
+            let onUser = NSColor(IrisPalette.chatLink(isUserBubble: true, isSelected: false, scheme)).usingColorSpace(.sRGB)!
+            let onSelected = NSColor(IrisPalette.chatLink(isUserBubble: false, isSelected: true, scheme)).usingColorSpace(.sRGB)!
+            #expect(contrast(onUser, indigoFill) >= 4.5)
+            #expect(contrast(onSelected, selectedBlueFill) >= 4.5)
+        }
+        let lightWindow = NSColor.white
+        let darkWindow = NSColor(srgbRed: 0.10, green: 0.10, blue: 0.10, alpha: 1)
+        let plainLight = NSColor(IrisPalette.chatLink(isUserBubble: false, isSelected: false, .light)).usingColorSpace(.sRGB)!
+        let plainDark = NSColor(IrisPalette.chatLink(isUserBubble: false, isSelected: false, .dark)).usingColorSpace(.sRGB)!
+        #expect(contrast(plainLight, lightWindow) >= 4.5)
+        #expect(contrast(plainDark, darkWindow) >= 4.5)
+    }
+}

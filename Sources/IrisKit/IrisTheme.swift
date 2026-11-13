@@ -52,6 +52,16 @@ enum IrisPalette {
     static let proDark = NSColor(srgbRed: 0.31, green: 0.61, blue: 0.86, alpha: 1)    // ~#4F9BDB, irisBlue
     static let conLight = NSColor(srgbRed: 0.72, green: 0.35, blue: 0.00, alpha: 1)   // ~#B85A00
     static let conDark = NSColor(srgbRed: 0.98, green: 0.62, blue: 0.25, alpha: 1)    // ~#FA9E40
+    /// Link text inside a chat row (#1108): white on a purple user bubble or a blue selected
+    /// transcript row so it passes 4.5:1 against both fills; accessible blue (`proLight` /
+    /// `proDark`) on an unselected non-user row.
+    static let chatLinkOnFill = NSColor.white
+    static func chatLink(isUserBubble: Bool, isSelected: Bool, _ scheme: ColorScheme) -> Color {
+        if isUserBubble || isSelected {
+            return Color(nsColor: chatLinkOnFill)
+        }
+        return Color(nsColor: scheme == .dark ? proDark : proLight)
+    }
     /// The spectrum line: pastel hues washed to 70% vanish on white, so it is full there.
     static func spectrumOpacity(_ scheme: ColorScheme) -> Double { scheme == .dark ? 0.7 : 1.0 }
 }
