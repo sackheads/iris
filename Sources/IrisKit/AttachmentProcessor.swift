@@ -109,4 +109,69 @@ public enum AttachmentProcessor {
             return (.unknown, "application/octet-stream")
         }
     }
+
+
+    public static func makeAttachment(for url: URL) -> FileAttachment? {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue else {
+            return nil
+        }
+        let (category, mime) = categorize(url: url)
+        let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
+        return FileAttachment(filename: url.lastPathComponent, fileURL: url, mimeType: mime, fileSize: size, category: category)
+    }
+
+    /// Extracts non-text clipboard items (copied files, screenshots, images, PDFs) as incoming
+    /// `FileAttachment`s (#1065). Returns `[]` for ordinary text pastes so `NSTextView.paste`
+    /// inserts text as usual.
+    public static func attachmentsFromPasteboard(
+        _ pasteboard: NSPasteboard,
+        stagingDirectory: URL = FileManager.default.temporaryDirectory.appendingPathComponent("iris-pasted-attachments", isDirectory: true)
+    ) -> [FileAttachment] {
+        // 1. Copied files (e.g. Finder Cmd-C puts both public.file-url and the bare filename string).
+        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
+           !urls.isEmpty {
+            let files = urls.compactMap { makeAttachment(for: $0) }
+            if !files.isEmpty { return files }
+        }
+
+        // 2. If plain text is on the pasteboard (and no file URLs), let NSTextView paste the text.
+        if let text = pasteboard.string(forType: .string), !text.isEmpty {
+            return []
+        }
+
+        let shortId = String(UUID().uuidString.prefix(8)).lowercased()
+        try? FileManager.default.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
+
+        // 3. Raw PNG or TIFF image data (macOS screenshots, Copy Image from browsers/Preview).
+        let pngData: Data? = pasteboard.data(forType: .png) ?? {
+            guard let tiff = pasteboard.data(forType: .tiff),
+                  let rep = NSBitmapImageRep(data: tiff) else { return nil }
+            return rep.representation(using: .png, properties: [:])
+        }()
+        if let pngData, !pngData.isEmpty {
+            let filename = "pasted-image-\(shortId).png"
+            let target = stagingDirectory.appendingPathComponent(filename)
+            if (try? pngData.write(to: target, options: .atomic)) != nil {
+                return [FileAttachment(
+                    filename: filename, fileURL: target, mimeType: "image/png",
+                    fileSize: Int64(pngData.count), category: .image
+                )]
+            }
+        }
+
+        // 4. Raw PDF data on the clipboard.
+        if let pdfData = pasteboard.data(forType: .pdf), !pdfData.isEmpty {
+            let filename = "pasted-document-\(shortId).pdf"
+            let target = stagingDirectory.appendingPathComponent(filename)
+            if (try? pdfData.write(to: target, options: .atomic)) != nil {
+                return [FileAttachment(
+                    filename: filename, fileURL: target, mimeType: "application/pdf",
+                    fileSize: Int64(pdfData.count), category: .pdf
+                )]
+            }
+        }
+
+        return []
+    }
 }

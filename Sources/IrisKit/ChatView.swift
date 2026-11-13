@@ -1087,20 +1087,19 @@ struct ChatView: View {
         pasteboard.setString(text, forType: .string)
     }
     
+    private func appendAttachments(_ incoming: [FileAttachment]) {
+        for att in incoming where !draftAttachments.contains(where: { $0.fileURL == att.fileURL }) {
+            draftAttachments.append(att)
+        }
+    }
+
     private func selectAttachments() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.prompt = "Attach"
         if panel.runModal() == .OK {
-            for url in panel.urls {
-                let (category, mime) = AttachmentProcessor.categorize(url: url)
-                let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
-                let att = FileAttachment(filename: url.lastPathComponent, fileURL: url, mimeType: mime, fileSize: size, category: category)
-                if !draftAttachments.contains(where: { $0.fileURL == url }) {
-                    draftAttachments.append(att)
-                }
-            }
+            appendAttachments(panel.urls.compactMap { AttachmentProcessor.makeAttachment(for: $0) })
         }
     }
 
@@ -1196,7 +1195,7 @@ struct ChatView: View {
                 .help("Attach Files")
                 .padding(.bottom, 8)
 
-                ComposerTextView(text: $inputText, onSubmit: submit, emoji: emojiModel, slash: slashModel, onEscape: handleEscape, onStash: handleStash, onHeightChange: { composerHeight = $0 }, focusTrigger: $composerShouldFocus)
+                ComposerTextView(text: $inputText, onSubmit: submit, emoji: emojiModel, slash: slashModel, onEscape: handleEscape, onStash: handleStash, onHeightChange: { composerHeight = $0 }, focusTrigger: $composerShouldFocus, onPasteAttachments: appendAttachments)
                     .frame(height: min(max(composerHeight, 24), 120))
                     .onAppear { emojiModel.defaultTone = SkinTone(rawValue: config.defaultEmojiSkinTone) ?? .none }
                     .onChange(of: config.defaultEmojiSkinTone) { _, new in

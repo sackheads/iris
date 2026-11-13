@@ -66,6 +66,7 @@ struct ComposerTextView: NSViewRepresentable {
     var onStash: () -> Void = {}
     var onHeightChange: (CGFloat) -> Void = { _ in }
     var focusTrigger: Binding<Bool> = .constant(false)
+    var onPasteAttachments: ([FileAttachment]) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -215,6 +216,15 @@ struct ComposerTextView: NSViewRepresentable {
             let len = (textView?.string as NSString?)?.length ?? 0
             replace(range: NSRange(location: 0, length: len), with: str)
         }
+
+        /// Handles non-text pasteboard items (#1065): returns true when attachments were
+        /// extracted and forwarded to the composer, or false so `super.paste` inserts text.
+        func handlePaste(from pasteboard: NSPasteboard) -> Bool {
+            let attachments = AttachmentProcessor.attachmentsFromPasteboard(pasteboard)
+            guard !attachments.isEmpty else { return false }
+            parent.onPasteAttachments(attachments)
+            return true
+        }
     }
 }
 
@@ -257,6 +267,13 @@ enum ComposerFocus {
 /// NSTextView that routes Return / arrows / Tab / Escape through the coordinator.
 final class KeyCatchingTextView: NSTextView {
     weak var coordinator: ComposerTextView.Coordinator?
+
+    override func paste(_ sender: Any?) {
+        if let coordinator, coordinator.handlePaste(from: .general) {
+            return
+        }
+        super.paste(sender)
+    }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
