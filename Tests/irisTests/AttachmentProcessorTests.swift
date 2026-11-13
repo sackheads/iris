@@ -253,4 +253,63 @@ final class AttachmentProcessorTests: XCTestCase {
         XCTAssertEqual(result.warnings[0], "File 'oversized.txt' exceeds the maximum allowed size limit.")
         XCTAssertTrue(result.extractedPromptText.isEmpty)
     }
+
+
+    // MARK: - Pasteboard Attachment Extraction Tests (#1065)
+
+    func testPasteboardPNGAndTIFFImageAttachments() throws {
+        let pb = NSPasteboard.withUniqueName()
+        defer { pb.releaseGlobally() }
+
+        // 1. Raw PNG data on clipboard
+        let pngBytes = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        pb.clearContents()
+        pb.setData(pngBytes, forType: .png)
+
+        let fromPNG = AttachmentProcessor.attachmentsFromPasteboard(pb, stagingDirectory: tempDirectory)
+        XCTAssertEqual(fromPNG.count, 1)
+        XCTAssertEqual(fromPNG[0].category, .image)
+        XCTAssertEqual(fromPNG[0].mimeType, "image/png")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fromPNG[0].fileURL.path))
+
+        // 2. Raw TIFF image on clipboard (e.g. macOS screenshot)
+        let img = NSImage(size: NSSize(width: 4, height: 4))
+        img.lockFocus()
+        NSColor.systemBlue.setFill()
+        NSBezierPath.fill(NSRect(x: 0, y: 0, width: 4, height: 4))
+        img.unlockFocus()
+        let tiffData = try XCTUnwrap(img.tiffRepresentation)
+
+        pb.clearContents()
+        pb.setData(tiffData, forType: .tiff)
+
+        let fromTIFF = AttachmentProcessor.attachmentsFromPasteboard(pb, stagingDirectory: tempDirectory)
+        XCTAssertEqual(fromTIFF.count, 1)
+        XCTAssertEqual(fromTIFF[0].category, .image)
+        XCTAssertEqual(fromTIFF[0].mimeType, "image/png")
+        XCTAssertTrue(fromTIFF[0].fileSize > 0)
+    }
+
+    func testPasteboardFileURLAndPlainTextBehavior() throws {
+        let pb = NSPasteboard.withUniqueName()
+        defer { pb.releaseGlobally() }
+
+        // 1. Copied file URL (Finder also writes the filename as .string)
+        let fileURL = tempDirectory.appendingPathComponent("notes.md")
+        try "# Notes".write(to: fileURL, atomically: true, encoding: .utf8)
+        pb.clearContents()
+        pb.writeObjects([fileURL as NSURL])
+        pb.setString("notes.md", forType: .string)
+
+        let fromFile = AttachmentProcessor.attachmentsFromPasteboard(pb, stagingDirectory: tempDirectory)
+        XCTAssertEqual(fromFile.count, 1)
+        XCTAssertEqual(fromFile[0].fileURL.standardizedFileURL, fileURL.standardizedFileURL)
+        XCTAssertEqual(fromFile[0].category, .text)
+
+        // 2. Plain text only -> returns [] so NSTextView pastes text normally
+        pb.clearContents()
+        pb.setString("just some text", forType: .string)
+        let fromText = AttachmentProcessor.attachmentsFromPasteboard(pb, stagingDirectory: tempDirectory)
+        XCTAssertTrue(fromText.isEmpty)
+    }
 }

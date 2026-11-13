@@ -284,7 +284,7 @@ The three that send or create (`gmail_send_email`, `google_calendar_create_event
 
 ## File attachments and auxiliary vision
 
-Iris supports attaching files directly to your prompt using the **📎 attachment button** or via **drag & drop**:
+Iris supports attaching files and images directly to your prompt using the **📎 attachment button**, **drag & drop**, or **pasting (`Cmd + V`)** screenshots, images, PDFs, or copied files into the message box:
 *   **Supported Formats**: Images (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`), PDFs (`.pdf`), rich documents (`.docx`, `.rtf`), and text/code files (`.txt`, `.md`, `.json`, `.swift`, `.py`, etc.).
 *   **Document Text Parsing**: Text, PDF, and rich text documents are automatically parsed into plain text blocks and appended to the prompt context (up to 100,000 characters per file).
 *   **Vision Routing & Auxiliary Configuration**: When attached to vision-capable models (e.g., Gemini 2.0 Flash, Claude 3.5 Sonnet, GPT-4o), images are passed directly in the inline payload. If the active model lacks vision capabilities, Iris automatically routes images to a configured Auxiliary Vision Model (such as local `ollama` with `llava`) to generate detailed image descriptions.
