@@ -859,7 +859,13 @@ actor IrisEngine {
             localState?.appendMessage(role: .system, content: notice + safeMessage, to: conversationId)
             if isUnattendedInput { localState?.markConversationTouchedByUnattendedInput(conversationId) }
         }
-        await processInput(safeMessage, source: source, conversationId: conversationId)
+        // #1066: the turn runs on the engine for the TARGET conversation, not on this (the sender's)
+        // engine. For any pair of non-guest sessions that is `self`, as before.
+        guard let routed = await MainActor.run(body: { localState?.engine(forTurnOn: conversationId, caller: self) }) else {
+            await pushToUI(role: .system, text: "[blocked] \(Self.noEngineRefusal)", conversationId: conversationId)
+            return
+        }
+        await routed.processInput(safeMessage, source: source, conversationId: conversationId)
     }
 
     /// A stopped background subagent's post-back (#236): the transcript line now and the result in
@@ -2749,6 +2755,14 @@ actor IrisEngine {
     /// being derived from what persists. See `Conversation.hasUnattendedInput` /
     /// `AppState.markConversationTouchedByUnattendedInput`.
     func processInput(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil, usageSink: (any TurnUsageSink)? = nil, lifetime: TurnLifetime? = nil, goalFacts: GoalFacts? = nil) async {
+        // #1066: the one chokepoint every turn passes (`processInputBody` has no other caller). A
+        // guest conversation runs only under `.mcpGuest` and a `.mcpGuest` engine runs only a guest
+        // conversation; anything else is refused loudly, before any bookkeeping, so a turn routed
+        // to the wrong engine can never run with the wrong principal's tools or context.
+        if await principalMismatch(conversationId: conversationId) {
+            await pushToUI(role: .system, text: "[blocked] \(Self.principalMismatchRefusal)", conversationId: conversationId)
+            return
+        }
         goalLoop.beginTurn(for: conversationId)
         defer { goalLoop.endTurn(for: conversationId) }
         await withEngineTurn(conversationId, lifetime: lifetime) {
@@ -2775,6 +2789,22 @@ actor IrisEngine {
             }
             PerformanceProfiler.shared.endTurn(turnID, totalMs: UptimeClock.live.seconds(since: turnStart) * 1000.0)
         }
+    }
+
+    static let principalMismatchRefusal = "This turn was not run: the conversation and the engine it reached do not agree on who is running it."
+    static let noEngineRefusal = "This turn was not run: no engine is available for this conversation."
+
+    /// Whether this engine may run a turn on `conversationId`: a guest conversation only under
+    /// `.mcpGuest`, and `.mcpGuest` only on a guest conversation. A conversation that does not
+    /// exist is left to the turn as before, except for a guest principal, which has none to run.
+    private func principalMismatch(conversationId: UUID) async -> Bool {
+        let localState = state
+        let isGuestEngine = principal == .mcpGuest
+        let conversationIsGuest: Bool? = await MainActor.run {
+            localState?.conversations.first(where: { $0.id == conversationId })?.isGuest
+        }
+        guard let conversationIsGuest else { return isGuestEngine }
+        return conversationIsGuest != isGuestEngine
     }
 
     /// Set by `AppState.runReflection` around its turn, and read once as that turn begins (#465
