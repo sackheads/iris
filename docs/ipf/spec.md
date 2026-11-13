@@ -146,26 +146,24 @@ failing it. See "Readiness semantics" below.
 
 ### `mcp` — MCP servers
 
-`components.mcp` points at a JSON file mapping server name to
-`{ command, args, env }` (`args` optional). The bare server-object shape is
-the canonical form; an `{"mcpServers": {...}}` wrapper is also unwrapped.
-Each entry is read on its own, so one malformed entry is skipped (with a
-log line) without dropping its siblings.
+`components.mcp` points at a JSON file mapping server name to either a
+local **stdio** entry (`{ command, args, env }`, `args` optional) or a
+**remote** Streamable HTTP entry (`{ url, headers, allowedKeys }`, with
+`serverUrl` and `httpUrl` accepted as aliases for `url`). The bare
+server-object shape is the canonical form; an `{"mcpServers": {...}}`
+wrapper is also unwrapped. Each entry is read on its own, so one malformed
+entry is skipped (with a log line) without dropping its siblings.
 
-Plugins support **stdio servers only** in this release. Remote Streamable
-HTTP servers are supported in the hand-edited `mcp_servers.json` (see
-[MCP in features.md](../features.md#model-context-protocol-mcp)), but a
-remote entry in a plugin's `mcp.json` is skipped for now.
+Both the inline **Add MCP Server** workspace and the *From MCP Snippet* flow
+accept `mcpServers`-wrapped or bare JSON for either transport and generate
+the canonical bare form into the plugin's `mcp.json` file.
 
-The install wizard's *From MCP Snippet* flow accepts `mcpServers`-wrapped
-JSON as a convenience — you can paste an `mcpServers` block directly — and
-generates the bare form into the plugin's `mcp.json` file.
-
-Env values may use `${keychain:KEY}` and `${config:KEY}` references, which
-resolve immediately before the server process launches. Literal string
-values are also valid and pass through unchanged — this is the same
-syntax and behavior as a stdio entry in the legacy `mcp_servers.json` file,
-so an `mcp.json` authored for a plugin looks exactly like a legacy server entry.
+Stdio `env` values and remote `headers` values may use `${keychain:KEY}`
+and `${config:KEY}` references, which resolve in memory against the
+plugin's `iris.plugin.<id>` Keychain item and `configValues` before the
+server starts. On a remote entry, every `${keychain:KEY}` reference in
+`headers` must also be listed in `allowedKeys` and declared in the
+manifest's `secrets` list.
 
 Env variable keys used inside `mcp.json`'s `env` map are restricted to the
 identifier charset `^[A-Za-z0-9_]+$`. A key outside that charset is

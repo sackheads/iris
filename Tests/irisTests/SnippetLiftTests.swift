@@ -166,4 +166,97 @@ struct SnippetLiftTests {
             _ = try PluginInstaller.draft(fromSnippet: snippet)
         }
     }
+
+    @Test("remote Antigravity serverUrl snippet lifts Bearer token without prefix into Keychain and sets allowedKeys")
+    func remoteSnippetLiftsBearerToken() throws {
+        let snippet = """
+        { "mcpServers": { "sharpei": {
+            "serverUrl": "https://sharpei.scromp.net/mcp",
+            "headers": {
+                "Authorization": "Bearer ec393e9bddc23190",
+                "X-Region": "na"
+            } } } }
+        """
+        let draft = try PluginInstaller.draft(fromSnippet: snippet)
+        #expect(draft.manifest.id == "sharpei")
+        #expect(draft.secretValues == ["AUTHORIZATION": "ec393e9bddc23190"])
+        #expect(draft.configValues == ["X_REGION": "na"])
+        #expect(draft.manifest.requires?.binaries == nil)
+
+        let mcpData = try #require(draft.files["mcp.json"])
+        let decoded = try JSONDecoder().decode([String: MCPServerConfig].self, from: mcpData)
+        guard case .remote(let url, let headers, let allowedKeys)? = decoded["sharpei"] else {
+            Issue.record("expected remote config in mcp.json"); return
+        }
+        #expect(url.absoluteString == "https://sharpei.scromp.net/mcp")
+        #expect(headers["Authorization"] == "Bearer ${keychain:AUTHORIZATION}")
+        #expect(headers["X-Region"] == "${config:X_REGION}")
+        #expect(allowedKeys == ["AUTHORIZATION"])
+    }
+
+    @Test("regenerate on a remote draft updates allowedKeys and references when re-tagged")
+    func remoteRegenerateAfterRetag() throws {
+        let snippet = """
+        { "mcpServers": { "sharpei": {
+            "url": "https://sharpei.scromp.net/mcp",
+            "headers": { "Authorization": "Bearer tok-1", "X-Custom": "val-2" } } } }
+        """
+        var draft = try PluginInstaller.draft(fromSnippet: snippet)
+        // Re-tag X_CUSTOM from config -> secret
+        draft.secretValues["X_CUSTOM"] = draft.configValues.removeValue(forKey: "X_CUSTOM")
+        let rebuilt = try PluginInstaller.regenerate(draft)
+        let decoded = try JSONDecoder().decode([String: MCPServerConfig].self, from: rebuilt.files["mcp.json"]!)
+        guard case .remote(_, let headers, let allowedKeys)? = decoded["sharpei"] else {
+            Issue.record("expected remote config"); return
+        }
+        #expect(headers["X-Custom"] == "${keychain:X_CUSTOM}")
+        #expect(allowedKeys == ["AUTHORIZATION", "X_CUSTOM"])
+        #expect(rebuilt.manifest.secrets?.map(\.key).sorted() == ["AUTHORIZATION", "X_CUSTOM"])
+    }
+
+    @Test("direct remote form builder creates a valid draft and refuses non-loopback plain http")
+    func directRemoteFormBuilder() throws {
+        let draft = try PluginInstaller.draftForRemoteServer(
+            name: "sharpei",
+            urlString: "https://sharpei.scromp.net/mcp",
+            bearerToken: "sec-token",
+            customHeaders: [("X-Org", "acme", false)]
+        )
+        #expect(draft.manifest.id == "sharpei")
+        #expect(draft.secretValues == ["BEARER_TOKEN": "sec-token"])
+        #expect(draft.configValues == ["X_ORG": "acme"])
+        let decoded = try JSONDecoder().decode([String: MCPServerConfig].self, from: draft.files["mcp.json"]!)
+        guard case .remote(let url, let headers, let allowedKeys)? = decoded["sharpei"] else {
+            Issue.record("expected remote config"); return
+        }
+        #expect(url.absoluteString == "https://sharpei.scromp.net/mcp")
+        #expect(headers["Authorization"] == "Bearer ${keychain:BEARER_TOKEN}")
+        #expect(headers["X-Org"] == "${config:X_ORG}")
+        #expect(allowedKeys == ["BEARER_TOKEN"])
+
+        #expect(throws: (any Error).self) {
+            _ = try PluginInstaller.draftForRemoteServer(
+                name: "bad", urlString: "http://example.com/mcp", bearerToken: nil, customHeaders: [])
+        }
+    }
+
+    @Test("direct stdio form builder creates a valid stdio draft")
+    func directStdioFormBuilder() throws {
+        let draft = try PluginInstaller.draftForStdioServer(
+            name: "sqlite",
+            command: "uvx",
+            args: ["mcp-server-sqlite", "--db-path", "test.db"],
+            env: [("DB_TOKEN", "s3cret", true), ("LOG_LEVEL", "info", false)]
+        )
+        #expect(draft.manifest.id == "sqlite")
+        #expect(draft.secretValues == ["DB_TOKEN": "s3cret"])
+        #expect(draft.configValues == ["LOG_LEVEL": "info"])
+        let decoded = try JSONDecoder().decode([String: MCPServerConfig].self, from: draft.files["mcp.json"]!)
+        guard case .stdio(let command, let args, let env)? = decoded["sqlite"] else {
+            Issue.record("expected stdio config"); return
+        }
+        #expect(command == "uvx")
+        #expect(args == ["mcp-server-sqlite", "--db-path", "test.db"])
+        #expect(env == ["DB_TOKEN": "${keychain:DB_TOKEN}", "LOG_LEVEL": "${config:LOG_LEVEL}"])
+    }
 }

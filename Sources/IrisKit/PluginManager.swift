@@ -113,10 +113,6 @@ actor PluginManager {
             let config = effectiveConfigValues(plugin)
             let secrets = KeychainManager.shared.secrets(service: KeychainManager.pluginService(plugin.manifest.id))
             for (serverName, server) in parsed.configs {
-                guard case .stdio = server else {
-                    print("Plugin \(plugin.manifest.id): MCP server \(serverName) skipped: remote servers in plugins are not supported yet")
-                    continue
-                }
                 guard let resolved = resolveServer(server, plugin: plugin, serverName: serverName,
                                                    config: config, secrets: secrets) else { continue }
                 result["\(plugin.manifest.id).\(serverName)"] = resolved
@@ -218,17 +214,31 @@ actor PluginManager {
 
     private func resolveServer(_ server: MCPServerConfig, plugin: LoadedPlugin, serverName: String,
                                config: [String: String], secrets: [String: String]) -> MCPServerConfig? {
-        guard case .stdio(let rawCommand, let args, let rawEnv) = server,
-              let command = BinaryResolver.resolve(command: rawCommand) else { return nil }
-        var env: [String: String]? = nil
-        if let rawEnv {
-            var expanded: [String: String] = [:]
-            for (key, value) in rawEnv {
-                guard let v = try? PluginReferences.expand(value, config: config, secrets: secrets) else { return nil }
-                expanded[key] = v
+        switch server {
+        case .stdio(let rawCommand, let args, let rawEnv):
+            guard let command = BinaryResolver.resolve(command: rawCommand) else { return nil }
+            var env: [String: String]? = nil
+            if let rawEnv {
+                var expanded: [String: String] = [:]
+                for (key, value) in rawEnv {
+                    guard let v = try? PluginReferences.expand(value, config: config, secrets: secrets) else { return nil }
+                    expanded[key] = v
+                }
+                env = expanded
             }
-            env = expanded
+            return .stdio(command: command, args: args, env: env)
+        case .remote(let url, let rawHeaders, let allowedKeys):
+            var expanded: [String: String] = [:]
+            for (header, value) in rawHeaders {
+                let referencedKeys = PluginReferences.keychainKeys(in: value)
+                guard referencedKeys.isSubset(of: allowedKeys) else {
+                    print("Plugin \(plugin.manifest.id): MCP server \(serverName) header \(header) references a key outside allowedKeys")
+                    return nil
+                }
+                guard let v = try? PluginReferences.expand(value, config: config, secrets: secrets) else { return nil }
+                expanded[header] = v
+            }
+            return .remote(url: url, headers: expanded, allowedKeys: allowedKeys)
         }
-        return .stdio(command: command, args: args, env: env)
     }
 }

@@ -179,28 +179,30 @@ directory that bundles an MCP server (`mcp.json`), Agent Skills
 (`skills/`), and always-on rules (`rules/`) behind a single `plugin.md`
 manifest.
 
-*   **Settings → Plugins tab:** Lists installed plugins with a status LED
-    (green = running, orange = needs configuration or sign-in, red =
-    failed, gray = disabled), plus a detail pane for configuration,
-    servers/tools, and skills/rules. The list pane opens with a one-line
-    explanation of what a plugin is and a link back to this section, and
-    servers still configured by hand in `mcp_servers.json` are listed under
-    "Configured in file"; its *Edit mcp_servers.json* button creates an
-    empty file when there is none, then opens it in your default editor
-    (revealing it in Finder if nothing takes it) (#992).
-*   **Three install flows:** *From Folder* (a local or symlinked plugin
-    directory, with a dev-mode Reload button), *From MCP Snippet* (paste a
-    standard `mcpServers` JSON block and Iris generates the plugin), and
-    *Import from Another Harness* (pull server configs from Claude
-    Desktop, Claude Code, Cursor, Windsurf, Gemini CLI, or VS Code
-    Copilot).
-*   **Secrets in Keychain:** Any secret a plugin declares is collected by
-    the install wizard and stored in the macOS Keychain under its own
-    service (`iris.plugin.<id>`) — never on disk, never in the plugin
-    directory. Uninstalling a plugin removes its Keychain entry too.
-*   The hand-edited `mcp_servers.json` file keeps working unchanged
-    alongside plugins; a **Convert to plugin** action wraps any of its
-    entries into a plugin on demand.
+*   **Settings → Plugins tab:** A unified sidebar lists all configured MCP
+    servers and plugins with a status LED (green = connected, orange =
+    needs configuration or sign-in, red = failed, gray = disabled) and live
+    connection status (`Connected · N tools` or the failure reason). Clicking
+    any entry opens its detail pane with a **Reconnect** button, Keychain
+    credential fields (**Save & Reconnect**), and a **Discovered Tools**
+    inspector showing each tool's description, parameters, and whether it is
+    marked `readOnlyHint: true` (`Read-only` vs. `Outbound-gated`) (#1105).
+*   **Four ways to add a server or plugin (+ Add MCP Server):**
+    *Remote (HTTP)* (enter a name, endpoint URL, and Bearer token or custom
+    header), *Local (stdio)* (command, arguments, and environment/secret
+    variables), *Paste JSON* (paste any `mcpServers` block or single entry —
+    stdio or `url`/`serverUrl`/`httpUrl` — and Iris lifts credentials into
+    the Keychain), and *Import* (one-click import from Claude Desktop,
+    Claude Code, Cursor, Windsurf, Antigravity, Gemini CLI, or VS Code
+    Copilot, or load a multi-component IPF plugin folder).
+*   **Secrets in Keychain:** Every secret is written directly by Iris to the
+    macOS Keychain under an isolated per-plugin service (`iris.plugin.<id>`)
+    — never on disk, never in the plugin directory, and with no `security`
+    CLI prompt. Removing a server deletes its Keychain entry too.
+*   The hand-edited `mcp_servers.json` file keeps working alongside managed
+    plugins: its entries appear as selectable rows in the same list, with
+    inline Keychain (`iris.mcp`) secret fields and a one-click **Convert to
+    Managed Server** upgrade.
 
 See [docs/ipf/spec.md](ipf/spec.md) for the normative manifest format
 and [docs/ipf/authoring.md](ipf/authoring.md) for a plugin-author
@@ -234,11 +236,7 @@ An `{"mcpServers": {...}}` wrapper, as other harnesses write it, is accepted too
 
 **Remote servers** must use `https`; plain `http` is allowed only to `localhost`/`127.x.x.x`/`::1`. The legacy HTTP+SSE transport (`"type": "sse"`) is not supported, and neither is OAuth sign-in yet. A server that doesn't connect within 30 seconds is marked failed.
 
-**Secrets.** `${keychain:KEY}` in a stdio `env` value or a remote `headers` value is read from one Keychain item, service `iris.mcp` (`iris.mcp.dev` for a dev build), account `all-keys`, whose password is a JSON object of key to value. Iris has no editor for it yet. From Terminal (this replaces the whole item, so include every key you keep there):
-
-```sh
-security add-generic-password -U -s iris.mcp -a all-keys -w '{"SHARPEI_TOKEN":"..."}'
-```
+**Secrets.** When you add a server through **Settings → Plugins** (or convert a file entry to a managed server), Iris stores its secrets in a dedicated per-server Keychain item (`iris.plugin.<id>`) that you can edit directly in the detail pane. For entries kept in raw `mcp_servers.json`, `${keychain:KEY}` in a stdio `env` value or a remote `headers` value is read from the shared `iris.mcp` Keychain item (`iris.mcp.dev` for a dev build, account `all-keys`), which you can also edit directly by selecting the entry in **Settings → Plugins** (or from Terminal with `security add-generic-password -U -s iris.mcp -a all-keys -w '{"SHARPEI_TOKEN":"..."}'`).
 
 A remote entry may use only the keys it lists in `allowedKeys`; a reference outside that list, or to a key that isn't stored, fails the entry instead of sending anything. This stops a pasted snippet from shipping any other secret you keep there to its own URL, but the grant sits in the same file as the URL, so read a snippet's `url` and `allowedKeys` before adding it. Literal header values also work, though they leave the token in a plain file.
 

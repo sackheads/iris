@@ -14,6 +14,7 @@ struct HarnessConfigImporter {
         ("Claude Code", ".claude.json"),
         ("Cursor", ".cursor/mcp.json"),
         ("Windsurf", ".codeium/windsurf/mcp_config.json"),
+        ("Antigravity", ".gemini/antigravity/mcp_config.json"),
         ("Gemini CLI", ".gemini/settings.json"),
         ("VS Code Copilot", "Library/Application Support/Code/User/mcp.json"),
     ]
@@ -27,13 +28,12 @@ struct HarnessConfigImporter {
     }
 
     /// Extracts the `mcpServers` object (top-level or nested among other settings) and
-    /// returns each server's raw dict. Servers without a string `command` are skipped
-    /// (the importer and Convert to Plugin handle stdio servers only; remote entries in Iris's
-    /// own `mcp_servers.json` are run directly by `MCPManager`, #1096).
+    /// returns each server's raw dict. Accepts both stdio (`command`) and remote HTTP
+    /// (`url` / `serverUrl` / `httpUrl`) server entries (#1105).
     ///
     /// Files without an `mcpServers` wrapper — like Iris's own `mcp_servers.json`, which is a
-    /// bare `{ "name": { "command": ... } }` map — are treated as the server map itself; the
-    /// command-is-String filter below naturally skips any non-server keys in such files.
+    /// bare `{ "name": { ... } }` map — are treated as the server map itself; the
+    /// server-key filter below naturally skips any non-server keys in such files.
     static func servers(at url: URL) throws -> [String: [String: Any]] {
         let data = try Data(contentsOf: url)
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -42,10 +42,17 @@ struct HarnessConfigImporter {
         let dict = (root["mcpServers"] as? [String: Any]) ?? root
         var result: [String: [String: Any]] = [:]
         for (name, any) in dict {
-            guard let server = any as? [String: Any], server["command"] is String else { continue }
+            guard let server = any as? [String: Any], isServerEntry(server) else { continue }
             result[name] = server
         }
         return result
+    }
+
+    static func isServerEntry(_ server: [String: Any]) -> Bool {
+        server["command"] is String
+            || server["url"] is String
+            || server["serverUrl"] is String
+            || server["httpUrl"] is String
     }
 
     /// Re-wraps one parsed server as a standard snippet so it flows through
