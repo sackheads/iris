@@ -24,6 +24,9 @@ final class YoloSynth: YoloAudioPlaying, @unchecked Sendable {
     private let player = AVAudioPlayerNode()
     static let sampleRate: Double = 44100.0
 
+    nonisolated(unsafe) private static let cachedVengabusBuffer = makeVengabusBuffer(sampleRate: sampleRate)
+    nonisolated(unsafe) private static let cachedPowerDownBuffer = makePowerDownBuffer(sampleRate: sampleRate)
+
     init() {
         engine.attach(player)
         if let format = AVAudioFormat(standardFormatWithSampleRate: Self.sampleRate, channels: 2) {
@@ -32,36 +35,32 @@ final class YoloSynth: YoloAudioPlaying, @unchecked Sendable {
         try? engine.start()
     }
 
-    /// PolyBLEP antialiasing residual for a sawtooth wave with phase in `0..<1` and phase
-    /// increment `dt = freq / sampleRate`. Eliminates the harsh piezo buzzing of raw modulo saws.
     @inline(__always)
-    private static func polyBLEP(phase: Double, dt: Double) -> Double {
-        guard dt > 0 else { return 0 }
-        if phase < dt {
-            let t = phase / dt
-            return t + t - t * t - 1.0
-        } else if phase > 1.0 - dt {
-            let t = (phase - 1.0) / dt
-            return t * t + t + t + 1.0
+    private static func polyBLEP(t: Double, dt: Double) -> Double {
+        if t < dt {
+            let x = t / dt
+            return x + x - x * x - 1.0
+        } else if t > 1.0 - dt {
+            let x = (t - 1.0) / dt
+            return x * x + x + x + 1.0
         }
         return 0.0
     }
 
     @inline(__always)
     private static func bandlimitedSaw(phase: Double, dt: Double) -> Double {
-        (2.0 * phase - 1.0) - polyBLEP(phase: phase, dt: dt)
+        (2.0 * phase - 1.0) - polyBLEP(t: phase, dt: dt)
     }
 
-    /// 90s Eurodance Vengabus horn hook at 136 BPM (#1104):
-    /// - 7-voice stereo-spread PolyBLEP supersaw playing triad brass chord stabs through a
-    ///   2-pole resonant low-pass filter with a brassy filter envelope + warm tanh saturation
-    /// - Four-on-the-floor 909 kick drum (pitch-swept sine + punchy body)
-    /// - Classic off-beat Eurodance octave bassline
+    /// 90s Eurodance Vengabus horn hook at 136 BPM (in Ab Major):
+    /// - Tight octave-stacked PolyBLEP synth-brass lead playing the staccato 16th-note melody
+    /// - Brass lip-scoop pitch envelope + snappy resonant SVF bandpass/lowpass bite
+    /// - 909 four-on-the-floor kick, off-beat open hi-hat ("untz-tss"), 2 & 4 clap, and Ab-Db-Eb bass
     static func makeVengabusBuffer(sampleRate: Double = YoloSynth.sampleRate) -> AVAudioPCMBuffer? {
         let bpm: Double = 136.0
         let beatDur: Double = 60.0 / bpm          // ~0.4412 s per quarter-note beat
         let sixteenth: Double = beatDur / 4.0     // ~0.1103 s per 16th note
-        let totalSixteenths = 32                  // 2 bars (8 beats) ≈ 3.53 s
+        let totalSixteenths = 64                  // Full 4-bar hook (16 beats) ≈ 7.06 s
         let totalDuration = Double(totalSixteenths) * sixteenth
         let totalFrames = AVAudioFrameCount(totalDuration * sampleRate)
 
@@ -72,117 +71,168 @@ final class YoloSynth: YoloAudioPlaying, @unchecked Sendable {
 
         buffer.frameLength = totalFrames
 
-        // Syncopated 2-bar Eurodance brass horn riff in C Major / A Minor (16th-note grid):
-        // (startSixteenth, lengthInSixteenths, chordFrequenciesHz, bassRootHz)
-        struct Stab {
-            let startStep: Int
-            let lengthSteps: Double
-            let chord: [Double]
+        // Pitch constants in Ab Major
+        let Eb4 = 311.13
+        let Ab4 = 415.30
+        let Bb4 = 466.16
+        let C5  = 523.25
+        let Db5 = 554.37
+        let Eb5 = 622.25
+        let F5  = 698.46
+
+        struct NoteEvent {
+            let step: Double      // Position on the 64-step 16th-note grid
+            let gateSteps: Double // Audible gate length (shorter than step delta for staccato brass)
+            let freq: Double      // Lead melody pitch (Hz)
         }
 
-        // Triad voicings for the horn hook:
-        // C5 major (G4, C5, E5), D5/G (G4, B4, D5), A4 minor (E4, A4, C5), G4 major (D4, G4, B4)
-        let cMaj: [Double] = [392.00, 523.25, 659.25]
-        let dMaj: [Double] = [440.00, 587.33, 739.99]
-        let aMin: [Double] = [329.63, 440.00, 523.25]
-        let gMaj: [Double] = [293.66, 392.00, 493.88]
+        let melody: [NoteEvent] = [
+            // Bar 1 (Ab Major): C5 - C5 Eb5 C5 Ab4 | C5 - C5 Eb5 C5 Ab4
+            NoteEvent(step: 0,  gateSteps: 1.45, freq: C5),
+            NoteEvent(step: 2,  gateSteps: 0.75, freq: C5),
+            NoteEvent(step: 3,  gateSteps: 0.80, freq: Eb5),
+            NoteEvent(step: 4,  gateSteps: 1.45, freq: C5),
+            NoteEvent(step: 6,  gateSteps: 1.45, freq: Ab4),
 
-        let stabs: [Stab] = [
-            // Bar 1: "We like to par-ty!" syncopated horn stabs
-            Stab(startStep: 0,  lengthSteps: 1.8, chord: cMaj),
-            Stab(startStep: 2,  lengthSteps: 1.8, chord: aMin),
-            Stab(startStep: 4,  lengthSteps: 1.8, chord: cMaj),
-            Stab(startStep: 6,  lengthSteps: 2.6, chord: dMaj),
-            Stab(startStep: 9,  lengthSteps: 2.6, chord: cMaj),
-            Stab(startStep: 12, lengthSteps: 1.8, chord: aMin),
-            Stab(startStep: 14, lengthSteps: 1.8, chord: gMaj),
+            NoteEvent(step: 8,  gateSteps: 1.45, freq: C5),
+            NoteEvent(step: 10, gateSteps: 0.75, freq: C5),
+            NoteEvent(step: 11, gateSteps: 0.80, freq: Eb5),
+            NoteEvent(step: 12, gateSteps: 1.45, freq: C5),
+            NoteEvent(step: 14, gateSteps: 1.45, freq: Ab4),
 
-            // Bar 2: answer phrase resolving to the high C5/E5 horn hold
-            Stab(startStep: 16, lengthSteps: 1.8, chord: aMin),
-            Stab(startStep: 18, lengthSteps: 1.8, chord: gMaj),
-            Stab(startStep: 20, lengthSteps: 1.8, chord: aMin),
-            Stab(startStep: 22, lengthSteps: 1.8, chord: cMaj),
-            Stab(startStep: 24, lengthSteps: 2.6, chord: dMaj),
-            Stab(startStep: 27, lengthSteps: 4.5, chord: cMaj)
+            // Bar 2 (Db Major -> Eb Major): Db5 - Db5 F5 Eb5 Db5 | C5 Bb4 Ab4 (pickup Eb4)
+            NoteEvent(step: 16, gateSteps: 1.45, freq: Db5),
+            NoteEvent(step: 18, gateSteps: 0.75, freq: Db5),
+            NoteEvent(step: 19, gateSteps: 0.80, freq: F5),
+            NoteEvent(step: 20, gateSteps: 1.45, freq: Eb5),
+            NoteEvent(step: 22, gateSteps: 1.45, freq: Db5),
+
+            NoteEvent(step: 24, gateSteps: 1.45, freq: C5),
+            NoteEvent(step: 26, gateSteps: 1.45, freq: Bb4),
+            NoteEvent(step: 28, gateSteps: 2.40, freq: Ab4),
+            NoteEvent(step: 31, gateSteps: 0.80, freq: Eb4),
+
+            // Bar 3 (Ab Major): C5 - C5 Eb5 C5 Ab4 | C5 - C5 Eb5 C5 Ab4
+            NoteEvent(step: 32, gateSteps: 1.45, freq: C5),
+            NoteEvent(step: 34, gateSteps: 0.75, freq: C5),
+            NoteEvent(step: 35, gateSteps: 0.80, freq: Eb5),
+            NoteEvent(step: 36, gateSteps: 1.45, freq: C5),
+            NoteEvent(step: 38, gateSteps: 1.45, freq: Ab4),
+
+            NoteEvent(step: 40, gateSteps: 1.45, freq: C5),
+            NoteEvent(step: 42, gateSteps: 0.75, freq: C5),
+            NoteEvent(step: 43, gateSteps: 0.80, freq: Eb5),
+            NoteEvent(step: 44, gateSteps: 1.45, freq: C5),
+            NoteEvent(step: 46, gateSteps: 1.45, freq: Ab4),
+
+            // Bar 4 (Db Major -> Eb Major -> Ab Major resolution)
+            NoteEvent(step: 48, gateSteps: 1.45, freq: Db5),
+            NoteEvent(step: 50, gateSteps: 0.75, freq: Db5),
+            NoteEvent(step: 51, gateSteps: 0.80, freq: F5),
+            NoteEvent(step: 52, gateSteps: 1.45, freq: Eb5),
+            NoteEvent(step: 54, gateSteps: 0.75, freq: Db5),
+            NoteEvent(step: 55, gateSteps: 0.80, freq: C5),
+
+            NoteEvent(step: 56, gateSteps: 1.45, freq: Bb4),
+            NoteEvent(step: 58, gateSteps: 1.45, freq: Eb5),
+            NoteEvent(step: 60, gateSteps: 3.40, freq: Ab4)
         ]
 
-        // Bass progression per 4-step beat (C2 -> A1 -> F1 -> G1)
+        // Bass root per quarter-note beat across the 4 bars (16 beats: Ab1, Db2, Eb2)
+        let Ab1 = 51.91, Db2 = 69.30, Eb2 = 77.78
         let bassRoots: [Double] = [
-            65.41, 65.41, 55.00, 55.00,
-            43.65, 43.65, 49.00, 65.41
+            Ab1, Ab1, Ab1, Ab1,
+            Db2, Db2, Eb2, Eb2,
+            Ab1, Ab1, Ab1, Ab1,
+            Db2, Eb2, Ab1, Ab1
         ]
 
-        // 7-voice JP-8000 style supersaw detune ratios and stereo pan positions (-1 = L, +1 = R)
-        let detunes: [Double] = [-0.019, -0.011, -0.0045, 0.0, 0.0045, 0.011, 0.019]
-        let pans: [Double]    = [-0.85,  -0.55,  -0.25,   0.0, 0.25,   0.55,  0.85]
-        let gains: [Double]   = [ 0.45,   0.65,   0.85,   1.0, 0.85,   0.65,  0.45]
+        // Tight Eurodance brass stack:
+        // 3 harmonic layers (Sub-octave 0.5x, Unison 1.0x, Fifth 1.498x for brassy bite)
+        // × 5 tightly detuned unison voices (±0.45% max so pitch stays laser-focused)
+        let layerMults: [Double] = [0.5, 1.0, 1.4983]
+        let layerGains: [Double] = [0.55, 1.0, 0.28]
+        let detunes: [Double]    = [-0.0045, -0.002, 0.0, 0.002, 0.0045]
+        let pans: [Double]       = [-0.70,   -0.35,  0.0, 0.35,  0.70]
 
-        // Continuous phase accumulators for 3 chord notes × 7 unison voices (21 oscillators)
-        var hornPhases = [Double](repeating: 0.0, count: 21)
-        for idx in 0..<21 {
-            // Deterministic initial phase offsets so unison voices don't start in a single spike
-            hornPhases[idx] = Double((idx * 37) % 100) / 100.0
-        }
+        var hornPhases = (0..<15).map { Double(($0 * 41) % 100) / 100.0 }
         var bassPhase: Double = 0.0
         var kickPhase: Double = 0.0
+        var rngState: UInt64 = 0xCAFEBABE_19981109
 
-        // 2-pole state-variable low-pass filter state (Left & Right)
+        @inline(__always)
+        func whiteNoise() -> Double {
+            rngState = rngState &* 6364136223846793005 &+ 1442695040888963407
+            let bits = UInt32(truncatingIfNeeded: rngState >> 32)
+            return Double(bits) / Double(UInt32.max) * 2.0 - 1.0
+        }
+
+        // Filter state
         var lpL: Double = 0.0, bpL: Double = 0.0
         var lpR: Double = 0.0, bpR: Double = 0.0
         var bassLp: Double = 0.0
+        var hatLp: Double = 0.0
+        var clapBp: Double = 0.0, clapLp: Double = 0.0
 
         var peak: Float = 0.0
 
         for frame in 0..<Int(totalFrames) {
             let time = Double(frame) / sampleRate
             let stepPos = time / sixteenth
-            let beatIndex = min(7, Int(time / beatDur))
+            let beatIndex = min(15, Int(time / beatDur))
             let posInBeat = (time / beatDur).truncatingRemainder(dividingBy: 1.0)
 
-            // 1. Supersaw Horn Chord Stabs
+            // 1. Staccato Synth-Brass Lead
             var hornL: Double = 0.0
             var hornR: Double = 0.0
-            var filterEnv: Double = 0.2
+            var filterEnv: Double = 0.08
 
-            if let active = stabs.first(where: {
-                let s = Double($0.startStep)
-                return stepPos >= s && stepPos < s + $0.lengthSteps
+            if let active = melody.first(where: {
+                stepPos >= $0.step && stepPos < $0.step + $0.gateSteps
             }) {
-                let stabElapsed = (stepPos - Double(active.startStep)) * sixteenth
-                let stabDuration = active.lengthSteps * sixteenth
-                let stabProgress = stabElapsed / stabDuration
+                let noteElapsed = (stepPos - active.step) * sixteenth
+                let noteDur = active.gateSteps * sixteenth
+                let noteProgress = noteElapsed / noteDur
 
-                // Punchy brass ADSR envelope: 8ms attack, snappy decay to 0.72 sustain, smooth release
-                let attack = min(1.0, stabElapsed / 0.008)
-                let decay = 0.72 + 0.28 * exp(-stabElapsed / 0.065)
-                let release = min(1.0, (1.0 - stabProgress) / 0.14)
+                // Snappy brass envelope: 3ms attack, punchy decay, crisp staccato release
+                let attack = min(1.0, noteElapsed / 0.003)
+                let decay = 0.65 + 0.35 * exp(-noteElapsed / 0.045)
+                let release = min(1.0, (1.0 - noteProgress) / 0.18)
                 let ampEnv = attack * decay * release
-                filterEnv = 0.30 + 0.70 * exp(-stabElapsed / 0.085)
 
-                for (nIdx, baseFreq) in active.chord.enumerated() {
-                    for vIdx in 0..<7 {
-                        let pIdx = nIdx * 7 + vIdx
-                        let f = baseFreq * (1.0 + detunes[vIdx])
+                // Classic 90s brass lip-scoop: starts ~45 cents flat and locks in within 12ms
+                let pitchScoop = 1.0 - 0.026 * exp(-noteElapsed / 0.008)
+                filterEnv = 0.22 + 0.78 * exp(-noteElapsed / 0.055)
+
+                for lIdx in 0..<3 {
+                    let baseF = active.freq * layerMults[lIdx] * pitchScoop
+                    let lGain = layerGains[lIdx]
+                    for vIdx in 0..<5 {
+                        let pIdx = lIdx * 5 + vIdx
+                        let f = baseF * (1.0 + detunes[vIdx])
                         let dt = f / sampleRate
                         hornPhases[pIdx] += dt
                         if hornPhases[pIdx] >= 1.0 { hornPhases[pIdx] -= 1.0 }
 
-                        let sample = bandlimitedSaw(phase: hornPhases[pIdx], dt: dt) * gains[vIdx]
+                        // Mix saw + square-ish pulse for nasal Eurodance trumpet/horn bite
+                        let saw = bandlimitedSaw(phase: hornPhases[pIdx], dt: dt)
+                        let pulsePhase = (hornPhases[pIdx] + 0.42).truncatingRemainder(dividingBy: 1.0)
+                        let pulse = saw - bandlimitedSaw(phase: pulsePhase, dt: dt)
+                        let osc = (0.65 * saw + 0.35 * pulse) * lGain
+
                         let pan = pans[vIdx]
-                        let gainL = 0.5 * (1.0 - pan)
-                        let gainR = 0.5 * (1.0 + pan)
-                        hornL += sample * gainL
-                        hornR += sample * gainR
+                        hornL += osc * 0.5 * (1.0 - pan)
+                        hornR += osc * 0.5 * (1.0 + pan)
                     }
                 }
-                hornL *= ampEnv * 0.14
-                hornR *= ampEnv * 0.14
+                hornL *= ampEnv * 0.16
+                hornR *= ampEnv * 0.16
             }
 
-            // 2-pole SVF resonant low-pass filter on the horn bus (sweeps 1.2 kHz .. 4.6 kHz)
-            let cutoffHz = 1200.0 + 3400.0 * filterEnv
-            let fCoeff = min(0.75, 2.0 * sin(.pi * cutoffHz / sampleRate))
-            let qCoeff = 0.55 // Warm brass resonance
+            // Brassy resonant SVF (blends low-pass body + band-pass horn formant around 1.1..5.0 kHz)
+            let cutoffHz = 950.0 + 4100.0 * filterEnv
+            let fCoeff = min(0.78, 2.0 * sin(.pi * cutoffHz / sampleRate))
+            let qCoeff = 0.48
             let hpL = hornL - lpL - qCoeff * bpL
             bpL += fCoeff * hpL
             lpL += fCoeff * bpL
@@ -190,46 +240,74 @@ final class YoloSynth: YoloAudioPlaying, @unchecked Sendable {
             bpR += fCoeff * hpR
             lpR += fCoeff * bpR
 
-            // 2. Four-on-the-floor 909 Kick Drum (every quarter-note beat)
+            let brassL = lpL * 0.75 + bpL * 0.55
+            let brassR = lpR * 0.75 + bpR * 0.55
+
+            // 2. Four-on-the-floor 909 Kick Drum
             let kickTime = posInBeat * beatDur
             var kickSample: Double = 0.0
             if kickTime < 0.18 {
-                let kickFreq = 48.0 + 115.0 * exp(-kickTime / 0.022)
+                let kickFreq = 50.0 + 130.0 * exp(-kickTime / 0.018)
                 kickPhase += kickFreq / sampleRate
                 if kickPhase >= 1.0 { kickPhase -= 1.0 }
-                let kickEnv = min(1.0, kickTime / 0.002) * exp(-kickTime / 0.065)
-                kickSample = sin(2.0 * .pi * kickPhase) * kickEnv * 0.55
+                let kickEnv = min(1.0, kickTime / 0.0015) * exp(-kickTime / 0.062)
+                kickSample = sin(2.0 * .pi * kickPhase) * kickEnv * 0.62
             } else {
                 kickPhase = 0.0
             }
 
-            // 3. Off-beat Eurodance Octave Bass (second half of every beat)
+            // 3. Off-beat Eurodance Octave Bass (pumps on the "&" of every beat)
             var bassSample: Double = 0.0
-            if posInBeat >= 0.48 && posInBeat < 0.95 {
-                let bassTime = (posInBeat - 0.48) * beatDur
+            if posInBeat >= 0.46 && posInBeat < 0.94 {
+                let bassTime = (posInBeat - 0.46) * beatDur
                 let bassFreq = bassRoots[beatIndex] * 2.0
                 let dt = bassFreq / sampleRate
                 bassPhase += dt
                 if bassPhase >= 1.0 { bassPhase -= 1.0 }
                 let rawBass = bandlimitedSaw(phase: bassPhase, dt: dt)
-                let bassEnv = min(1.0, bassTime / 0.005) * exp(-bassTime / 0.09)
-                bassLp += 0.22 * (rawBass - bassLp)
-                bassSample = bassLp * bassEnv * 0.42
+                let bassEnv = min(1.0, bassTime / 0.004) * exp(-bassTime / 0.085)
+                bassLp += 0.26 * (rawBass - bassLp)
+                bassSample = bassLp * bassEnv * 0.44
             }
 
-            // Smooth tail fade on the final quarter-note
-            let globalProgress = Double(frame) / Double(totalFrames)
-            let masterFade = globalProgress > 0.86 ? pow((1.0 - globalProgress) / 0.14, 1.3) : 1.0
+            // 4. 909 Off-Beat Open Hi-Hat ("untz-tss")
+            var hatSample: Double = 0.0
+            if posInBeat >= 0.48 && posInBeat < 0.88 {
+                let hatTime = (posInBeat - 0.48) * beatDur
+                let noise = whiteNoise()
+                hatLp += 0.35 * (noise - hatLp)
+                let hpNoise = noise - hatLp
+                let hatEnv = min(1.0, hatTime / 0.003) * exp(-hatTime / 0.055)
+                hatSample = hpNoise * hatEnv * 0.16
+            }
 
-            let mixL = Float(tanh((lpL + kickSample + bassSample) * 1.15) * masterFade)
-            let mixR = Float(tanh((lpR + kickSample + bassSample) * 1.15) * masterFade)
+            // 5. 909 Handclap on Beats 2 and 4 (beatIndex % 2 == 1)
+            var clapSample: Double = 0.0
+            if beatIndex % 2 == 1 && kickTime < 0.11 {
+                let noise = whiteNoise()
+                let cHp = noise - clapLp - 0.4 * clapBp
+                clapBp += 0.28 * cHp
+                clapLp += 0.28 * clapBp
+                // Multi-burst flam in the first 25ms + reverb tail
+                let burst = kickTime < 0.024 ? (0.6 + 0.4 * sin(kickTime * 950.0)) : 1.0
+                let clapEnv = burst * exp(-kickTime / 0.032)
+                clapSample = clapBp * clapEnv * 0.22
+            }
+
+            // Duck the horn slightly under the kick transient for that club pump
+            let duck = 1.0 - 0.28 * exp(-kickTime / 0.045)
+
+            let globalProgress = Double(frame) / Double(totalFrames)
+            let masterFade = globalProgress > 0.92 ? pow((1.0 - globalProgress) / 0.08, 1.3) : 1.0
+
+            let mixL = Float(tanh(((brassL + bassSample) * duck + kickSample + hatSample + clapSample) * 1.2) * masterFade)
+            let mixR = Float(tanh(((brassR + bassSample) * duck + kickSample + hatSample + clapSample) * 1.2) * masterFade)
 
             leftChannel[frame] = mixL
             rightChannel[frame] = mixR
             peak = max(peak, max(abs(mixL), abs(mixR)))
         }
 
-        // Normalize to target peak 0.24 (within the 0.05..0.26 ear-safe window)
         if peak > 0 {
             let scale: Float = 0.24 / peak
             for i in 0..<Int(totalFrames) {
@@ -240,7 +318,7 @@ final class YoloSynth: YoloAudioPlaying, @unchecked Sendable {
         return buffer
     }
 
-    /// 1.6-second stereo supersaw turntable brake & sub-bass spin-down for `/yolo off` (#1104).
+    /// Turntable brake spin-down from an Ab Major triad + sub-bass sine anchor with closing SVF.
     static func makePowerDownBuffer(sampleRate: Double = YoloSynth.sampleRate) -> AVAudioPCMBuffer? {
         let duration: Double = 1.6
         let totalFrames = AVAudioFrameCount(duration * sampleRate)
@@ -251,12 +329,11 @@ final class YoloSynth: YoloAudioPlaying, @unchecked Sendable {
 
         buffer.frameLength = totalFrames
 
-        // Start on a rich C-major chord (C4, G4, C5) and brake exponentially down into a 32 Hz sub drop
-        let baseNotes: [Double] = [261.63, 392.00, 523.25]
-        let detunes: [Double] = [-0.014, -0.006, 0.0, 0.006, 0.014]
-        let pans: [Double]    = [-0.75,  -0.35,  0.0, 0.35,  0.75]
+        let startChord: [Double] = [415.30, 523.25, 622.25] // Ab4, C5, Eb5
+        let detunes: [Double] = [-0.008, 0.0, 0.008]
+        let pans: [Double] = [-0.6, 0.0, 0.6]
 
-        var phases = (0..<15).map { Double(($0 * 29) % 100) / 100.0 }
+        var phases = (0..<9).map { Double(($0 * 37) % 100) / 100.0 }
         var subPhase: Double = 0.0
         var lpL: Double = 0.0, bpL: Double = 0.0
         var lpR: Double = 0.0, bpR: Double = 0.0
@@ -264,60 +341,53 @@ final class YoloSynth: YoloAudioPlaying, @unchecked Sendable {
 
         for i in 0..<Int(totalFrames) {
             let progress = Double(i) / Double(totalFrames)
-            // Turntable brake curve: pitch ratios drop from 1.0 down to 0.07
-            let pitchRatio = pow(0.07, pow(progress, 1.3))
+            let pitchMult = pow(0.07, pow(progress, 1.3))
 
             var sumL: Double = 0.0
             var sumR: Double = 0.0
 
-            for (nIdx, noteFreq) in baseNotes.enumerated() {
-                for vIdx in 0..<5 {
-                    let idx = nIdx * 5 + vIdx
-                    let freq = noteFreq * pitchRatio * (1.0 + detunes[vIdx])
-                    let dt = freq / sampleRate
-                    phases[idx] += dt
-                    if phases[idx] >= 1.0 { phases[idx] -= 1.0 }
-                    let s = bandlimitedSaw(phase: phases[idx], dt: dt)
+            for nIdx in 0..<3 {
+                for vIdx in 0..<3 {
+                    let pIdx = nIdx * 3 + vIdx
+                    let f = startChord[nIdx] * pitchMult * (1.0 + detunes[vIdx])
+                    let dt = f / sampleRate
+                    phases[pIdx] += dt
+                    if phases[pIdx] >= 1.0 { phases[pIdx] -= 1.0 }
+                    let saw = bandlimitedSaw(phase: phases[pIdx], dt: dt)
                     let pan = pans[vIdx]
-                    sumL += s * 0.5 * (1.0 - pan)
-                    sumR += s * 0.5 * (1.0 + pan)
+                    sumL += saw * 0.5 * (1.0 - pan)
+                    sumR += saw * 0.5 * (1.0 + pan)
                 }
             }
 
-            // Deep sub-bass sine anchor that carries the bottom end as the saws filter out
-            let subFreq = 130.81 * pitchRatio + 28.0 * (1.0 - progress)
+            let subFreq = 207.65 * pow(32.0 / 207.65, pow(progress, 1.25))
             subPhase += subFreq / sampleRate
             if subPhase >= 1.0 { subPhase -= 1.0 }
-            let sub = sin(2.0 * .pi * subPhase) * 0.65
+            let subSine = sin(2.0 * .pi * subPhase) * 0.55
 
-            // Resonant low-pass filter closing from 3800 Hz down to 75 Hz
-            let cutoffHz = 75.0 + 3725.0 * pow(1.0 - progress, 1.6)
+            let cutoffHz = 3800.0 * pow(75.0 / 3800.0, pow(progress, 0.9))
             let fCoeff = min(0.75, 2.0 * sin(.pi * cutoffHz / sampleRate))
-            let qCoeff = 0.65
-            let inL = sumL * 0.12 + sub
-            let inR = sumR * 0.12 + sub
-
-            let hpL = inL - lpL - qCoeff * bpL
+            let qCoeff = 0.55
+            let hpL = (sumL * 0.18) - lpL - qCoeff * bpL
             bpL += fCoeff * hpL
             lpL += fCoeff * bpL
-
-            let hpR = inR - lpR - qCoeff * bpR
+            let hpR = (sumR * 0.18) - lpR - qCoeff * bpR
             bpR += fCoeff * hpR
             lpR += fCoeff * bpR
 
-            let attack = min(1.0, progress * 40.0)
+            let attack = min(1.0, progress * 35.0)
             let release = pow(1.0 - progress, 1.15)
             let env = attack * release
 
-            let outL = Float(tanh(lpL * 1.2) * env)
-            let outR = Float(tanh(lpR * 1.2) * env)
+            let outL = Float(tanh((lpL + subSine) * env * 1.4))
+            let outR = Float(tanh((lpR + subSine) * env * 1.4))
             leftChannel[i] = outL
             rightChannel[i] = outR
             peak = max(peak, max(abs(outL), abs(outR)))
         }
 
         if peak > 0 {
-            let scale: Float = 0.34 / peak
+            let scale: Float = 0.28 / peak
             for i in 0..<Int(totalFrames) {
                 leftChannel[i] *= scale
                 rightChannel[i] *= scale
@@ -327,7 +397,7 @@ final class YoloSynth: YoloAudioPlaying, @unchecked Sendable {
     }
 
     func playVengabusYolo() {
-        guard let buffer = Self.makeVengabusBuffer(sampleRate: Self.sampleRate) else { return }
+        guard let buffer = Self.cachedVengabusBuffer else { return }
         if !engine.isRunning { try? engine.start() }
         player.stop()
         player.scheduleBuffer(buffer, at: nil, options: .interrupts, completionHandler: nil)
@@ -335,7 +405,7 @@ final class YoloSynth: YoloAudioPlaying, @unchecked Sendable {
     }
 
     func playPowerDown() {
-        guard let buffer = Self.makePowerDownBuffer(sampleRate: Self.sampleRate) else { return }
+        guard let buffer = Self.cachedPowerDownBuffer else { return }
         if !engine.isRunning { try? engine.start() }
         player.stop()
         player.scheduleBuffer(buffer, at: nil, options: .interrupts, completionHandler: nil)
