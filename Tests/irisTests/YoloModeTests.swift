@@ -229,38 +229,50 @@ struct YoloModeTests {
         }
     }
 
-    @Test("YoloSynth generates valid PCM buffers for Vengabus and power-down")
+    @Test("YoloSynth generates stereo supersaw PCM buffers for Vengabus and power-down (#1104)")
     func synthGeneratesValidBuffers() {
         let vengabus = YoloSynth.makeVengabusBuffer()
         #expect(vengabus != nil)
-        if let buffer = vengabus, let data = buffer.floatChannelData?[0] {
+        if let buffer = vengabus,
+           let left = buffer.floatChannelData?[0],
+           let right = buffer.floatChannelData?[1] {
+            #expect(buffer.format.channelCount == 2)
             let count = Int(buffer.frameLength)
             #expect(count > 44100 * 3)
             var maxAmp: Float = 0
+            var maxStereoDiff: Float = 0
             var allFinite = true
             for i in 0..<count {
-                let sample = data[i]
-                if !sample.isFinite { allFinite = false }
-                maxAmp = max(maxAmp, abs(sample))
+                let l = left[i], r = right[i]
+                if !l.isFinite || !r.isFinite { allFinite = false }
+                maxAmp = max(maxAmp, max(abs(l), abs(r)))
+                maxStereoDiff = max(maxStereoDiff, abs(l - r))
             }
             #expect(allFinite)
             #expect(maxAmp > 0.05 && maxAmp <= 0.26)
+            #expect(maxStereoDiff > 0.02, "supersaw unison voices must spread across stereo L/R")
         }
 
         let powerDown = YoloSynth.makePowerDownBuffer()
         #expect(powerDown != nil)
-        if let buffer = powerDown, let data = buffer.floatChannelData?[0] {
+        if let buffer = powerDown,
+           let left = buffer.floatChannelData?[0],
+           let right = buffer.floatChannelData?[1] {
+            #expect(buffer.format.channelCount == 2)
             let count = Int(buffer.frameLength)
             #expect(count == Int(1.6 * 44100.0))
             var maxAmp: Float = 0
+            var maxStereoDiff: Float = 0
             var allFinite = true
             for i in 0..<count {
-                let sample = data[i]
-                if !sample.isFinite { allFinite = false }
-                maxAmp = max(maxAmp, abs(sample))
+                let l = left[i], r = right[i]
+                if !l.isFinite || !r.isFinite { allFinite = false }
+                maxAmp = max(maxAmp, max(abs(l), abs(r)))
+                maxStereoDiff = max(maxStereoDiff, abs(l - r))
             }
             #expect(allFinite)
             #expect(maxAmp > 0.05 && maxAmp <= 0.36)
+            #expect(maxStereoDiff > 0.02, "power-down chord brake must spread across stereo L/R")
         }
     }
 }
