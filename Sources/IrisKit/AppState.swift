@@ -1511,7 +1511,8 @@ class AppState {
         guard !hasTurnInFlight(for: conversationId),
               var queue = pendingUserMessages[conversationId], !queue.isEmpty else { return }
         let lead = queue[0].origin
-        let owner = queue[0].engine ?? engine
+        // #1066: routed by the target conversation; the stored engine is the SENDER's.
+        let owner = engine(forTurnOn: conversationId, caller: queue[0].engine)
         // A pending follow-up, not `goalLoopIsLive`: an ordinary turn is still counted live there
         // while this drain runs at its end, and holding then left the entry with no drain to come.
         if queue[0].isArrival, owner?.goalFollowUpPending(for: conversationId) == true { return }
@@ -1598,6 +1599,32 @@ class AppState {
     }
 
     private(set) var engine: IrisEngine!
+
+    /// #1066: each live guest session's own engine, keyed by its conversation. Registered by the
+    /// guest-session registry when it creates a session and dropped with the conversation.
+    @ObservationIgnored private(set) var guestEngines: [UUID: IrisEngine] = [:]
+
+    func register(guestEngine: IrisEngine, for conversationId: UUID) {
+        guestEngines[conversationId] = guestEngine
+    }
+
+    func unregisterGuestEngine(for conversationId: UUID) {
+        guestEngines[conversationId] = nil
+    }
+
+    /// #1066: the engine that runs a turn on `conversationId`, chosen by the TARGET and not by
+    /// whoever started the delivery. A peer message used to run on the sender's engine; with a
+    /// second engine kind that would run a role's reply to a guest under `.main` (a floor escape)
+    /// and a guest's message under a role's principal. Everything that is not a guest on either
+    /// side is returned exactly as before: the caller's own engine, or `AppState.engine` when
+    /// there is none. A guest target with no registered engine gets nil: no turn, never a fallback.
+    func engine(forTurnOn conversationId: UUID, caller: IrisEngine?) -> IrisEngine? {
+        if conversations.first(where: { $0.id == conversationId })?.isGuest == true {
+            return guestEngines[conversationId]
+        }
+        if let caller, caller.principal == .mcpGuest { return engine }
+        return caller ?? engine
+    }
     /// #813: standing-context writes held from a conversation that has read untrusted output,
     /// in every state (the report and Settings read decided ones too). Loaded with the store.
     var pendingContextWrites: [PendingContextWrite] = []
@@ -3075,6 +3102,7 @@ class AppState {
     }
 
     func deleteConversation(_ id: UUID) {
+        unregisterGuestEngine(for: id)
         for (messageId, _) in streaming.boxes(in: id) { streaming.remove(messageId) }   // #541
         clearUnread(id)   // #592
         cancelTasks(for: id)
@@ -3480,6 +3508,11 @@ class AppState {
     /// target's turn end, and the drain used to hand the target a depth of zero regardless of how
     /// deep the chain already was.
     private func startTurn(text: String, attachments: [FileAttachment], in convId: UUID, isPeer: Bool = false) {
+        // #1066: the engine for THIS conversation. A guest target with no engine runs no turn.
+        guard let turnEngine = engine(forTurnOn: convId, caller: nil) else {
+            appendMessage(role: .system, content: "[blocked] \(IrisEngine.noEngineRefusal)", to: convId)
+            return
+        }
         // #469 §6: a person typing resets this session's hop depth. Deliberately here and not in
         // `runThinkingTask`, which also carries the `/goal` draft kickoff and every goal resume —
         // machine-initiated continuations that would hand a running chain a fresh depth on each
@@ -3495,8 +3528,8 @@ class AppState {
             let userMessagesCount = conversations[idx].messages.filter { $0.role == .user }.count
             // 5b: the pinned conversation is exempt from the 3-message auto-rename trigger
             // (spec §0.2) — it keeps the name "Iris".
-            let shouldRename = !conversations[idx].isPinned && userMessagesCount == 3 && conversations[idx].messageCountSinceReflection == 3
-            let shouldReflect = conversations[idx].messageCountSinceReflection >= 30
+            let shouldRename = !conversations[idx].isPinned && !conversations[idx].isGuest && userMessagesCount == 3 && conversations[idx].messageCountSinceReflection == 3
+            let shouldReflect = !conversations[idx].isGuest && conversations[idx].messageCountSinceReflection >= 30
             if shouldReflect {
                 conversations[idx].messageCountSinceReflection = 0
                 markChanged(convId, .metadata)
@@ -3545,7 +3578,7 @@ class AppState {
                     inlineParts = processed.inlineParts
                 }
 
-                await engine.processInput(promptForEngine, source: "UI", conversationId: convId, inlineParts: inlineParts)
+                await turnEngine.processInput(promptForEngine, source: "UI", conversationId: convId, inlineParts: inlineParts)
 
                 if shouldReflect {
                     if let idx = conversations.firstIndex(where: { $0.id == convId }) {
@@ -3557,7 +3590,7 @@ class AppState {
                 } else if shouldRename {
                     let renamePrompt = "System Event [Rename Trigger]: Evaluate the conversation history and use the `rename_conversation` tool to assign a short, descriptive title (1-4 words) that captures the true gist of this conversation."
                     appendMessage(role: .system, content: "Triggering automatic conversation rename...", to: convId)
-                    await engine.processInput(renamePrompt, source: "System", conversationId: convId)
+                    await turnEngine.processInput(renamePrompt, source: "System", conversationId: convId)
                 }
 
                 // 5b §0, decision 4 (last paragraph): the pinned conversation gets a one-line
@@ -3574,8 +3607,8 @@ class AppState {
                 }
             }
         } else {
-            runThinkingTask(conversationId: convId) { [self] in
-                await engine.processInput(text, source: "UI", conversationId: convId)
+            runThinkingTask(conversationId: convId) {
+                await turnEngine.processInput(text, source: "UI", conversationId: convId)
             }
         }
     }
