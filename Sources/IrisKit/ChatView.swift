@@ -265,7 +265,8 @@ struct ChatView: View {
                                                         for: message, in: state.conversations),
                                                     conversationId: conv.id,
                                                     conversationTitle: conv.title,
-                                                    isTainted: conv.hasUntrustedToolOutput)
+                                                    isTainted: conv.hasUntrustedToolOutput,
+                                                    isSelected: selectedMessageIDs.contains(item.id))
                                     case .systemGroup(_, let messages):
                                         SystemGroupView(messages: messages, appState: state)
                                     }
@@ -1243,6 +1244,7 @@ struct MessageView: View {
     var conversationId: UUID
     var conversationTitle: String
     var isTainted: Bool
+    var isSelected: Bool = false
 
     var body: some View {
         HStack(alignment: .top) {
@@ -1339,7 +1341,15 @@ struct MessageView: View {
     /// bubble lost drag-to-select when it moved here (#968). Whole-message copy still works.
     @ViewBuilder
     private func messageMarkdown(_ content: String) -> some View {
+        let linkColor = IrisPalette.chatLink(isUserBubble: message.role == .user, isSelected: isSelected, scheme)
         Markdown(content)
+            // #1108: default link blue/indigo is unreadable on the purple user bubble and on a
+            // blue selected transcript row; contrast both with underlined white.
+            .markdownTextStyle(\.link) {
+                ForegroundColor(linkColor)
+                UnderlineStyle(.single)
+            }
+            .tint(linkColor)
             // Render fenced code blocks WITHOUT MarkdownUI's default horizontal
             // ScrollView (Theme.basic wraps the label in ScrollView(.horizontal)).
             // That scroll view swallows trackpad scroll when hovered (#30); wrapping
