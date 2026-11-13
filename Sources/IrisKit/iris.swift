@@ -4494,6 +4494,7 @@ actor IrisEngine {
         GateScriptReview(
             verdict: { details in
                 guard let state else { return nil }
+                if await MainActor.run(body: { state.isYoloMode(conversationId) }) { return nil }
                 return await state.vibecopVerdict(
                     for: BlockedCall(toolName: "run_command", args: ["command": .string(details)]),
                     inSandbox: true, vibecopEnabled: vibecopEnabled)
@@ -4503,6 +4504,7 @@ actor IrisEngine {
                 // time to reach the same escalation. `schedule_job` is never offered to a
                 // background run, so there is always someone to answer this.
                 guard let state else { return false }
+                if await MainActor.run(body: { state.isYoloMode(conversationId) }) { return true }
                 // No Always Allow (#648): its rule would match the composed gate text as a host
                 // command, where the person is approving it for the sandbox. Human-only (#687):
                 // Vibecop has already given its view, and nothing may stand in for this click.
@@ -4745,6 +4747,8 @@ actor IrisEngine {
             createdAt: Date(), state: .pending, turnId: PerformanceProfiler.currentTurnID)
         guard let localState = state else { return ContextHolds.uncheckedResult(call.name) }
         let held = await MainActor.run { () -> Bool in
+            // #1099: YOLO mode bypasses context holds for attended sessions and their delegates.
+            if localState.isYoloMode(conversationId) { return false }
             guard localState.readUntrustedThroughDelegation(conversationId) else { return false }
             let root = localState.delegationRoot(of: conversationId)
             var row = item
