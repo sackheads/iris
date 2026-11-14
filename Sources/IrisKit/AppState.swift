@@ -1063,6 +1063,9 @@ class AppState {
         var isPeer: Bool { origin == .peer }
         /// #696: the peer delivery is a topic message, so the turn that reads it may not publish.
         var isTopic = false
+        /// #1119: the peer delivery came from an MCP guest, so the turn that reads it runs with
+        /// YOLO off (`guestOriginTurnConversations`).
+        var isGuestOrigin = false
         /// #1064: true when the user chose to queue this entry for after the running turn (`⌘-Enter`
         /// or `⌘`/`⌥`-click send) instead of steering the next model round.
         var queued = false
@@ -1186,6 +1189,8 @@ class AppState {
             markUnreadIfReplied(conversationId)
             // #696: no turn is left that a topic message started; a drain below sets it again.
             topicTurnConversations.remove(conversationId)
+            // #1119: likewise for a guest-origin turn; a drain below sets it again.
+            guestOriginTurnConversations.remove(conversationId)
         }
         // An arrival turn — scheduler, watcher, subagent post-back — never passes through
         // `runThinkingTask`, so without this the message a user typed while one was running is
@@ -1504,10 +1509,12 @@ class AppState {
     }
 
     func enqueuePendingUserMessage(text: String, attachments: [FileAttachment], for conversationId: UUID, isPeer: Bool = false,
-                                   isTopic: Bool = false, queued: Bool = false, messageId: UUID? = nil) {
+                                   isTopic: Bool = false, isGuestOrigin: Bool = false,
+                                   queued: Bool = false, messageId: UUID? = nil) {
         var entry = PendingUserMessage(text: text, attachments: attachments, isPeer: isPeer,
                                        queued: queued, messageId: messageId)
         entry.isTopic = isTopic
+        entry.isGuestOrigin = isGuestOrigin
         pendingUserMessages[conversationId, default: []].append(entry)
     }
 
@@ -1579,6 +1586,7 @@ class AppState {
         pendingUserMessages[conversationId] = queue.isEmpty ? nil : queue
         if !taken.isEmpty { markReflectionBoundary(for: conversationId) }
         if taken.contains(where: \.isTopic) { topicTurnConversations.insert(conversationId) }
+        if taken.contains(where: \.isGuestOrigin) { guestOriginTurnConversations.insert(conversationId) }
         return taken
     }
 
@@ -1608,9 +1616,11 @@ class AppState {
         if case .systemEvent = lead, owner == nil { return }
         var texts: [String] = []
         var anyTopic = false
+        var anyGuest = false
         while let first = queue.first, first.attachments.isEmpty, first.origin == lead {
             texts.append(first.text)
             anyTopic = anyTopic || first.isTopic
+            anyGuest = anyGuest || first.isGuestOrigin
             queue.removeFirst()
         }
         var next = texts.isEmpty
@@ -1619,6 +1629,9 @@ class AppState {
         // A joined turn is a topic turn if any of its parts was (#696): the stricter reading.
         if anyTopic { next.isTopic = true }
         if next.isTopic { topicTurnConversations.insert(conversationId) }
+        // Same stricter reading for a guest part (#1119).
+        if anyGuest { next.isGuestOrigin = true }
+        if next.isGuestOrigin { guestOriginTurnConversations.insert(conversationId) }
         pendingUserMessages[conversationId] = queue.isEmpty ? nil : queue
         if case .systemEvent(let source) = next.origin {
             // Not `startTurn`: that is the composer's path, which runs as a "UI" turn. Reserved
@@ -3049,6 +3062,16 @@ class AppState {
     @ObservationIgnored private var topicTurnConversations: Set<UUID> = []
 
     func markTopicTurn(_ id: UUID) { topicTurnConversations.insert(id) }
+
+    /// The conversations whose running turn was started, or steered, by a message from an MCP
+    /// guest (#1119). A turn that reads a guest's text runs with YOLO off, even in a `/yolo`
+    /// session: the guest is an outside party and its text is not the owner's instruction, so
+    /// every tool call that turn makes takes the ordinary approval path. Cleared when the last turn
+    /// on the conversation ends. Transient, on no `Codable` type (Invariants 1 and 5).
+    @ObservationIgnored private var guestOriginTurnConversations: Set<UUID> = []
+
+    func markGuestOriginTurn(_ id: UUID) { guestOriginTurnConversations.insert(id) }
+    func isGuestOriginTurn(_ id: UUID) -> Bool { guestOriginTurnConversations.contains(id) }
     func isTopicTurn(_ id: UUID) -> Bool { topicTurnConversations.contains(id) }
 
     func notePeerArrival(depth: Int, at id: UUID) {
@@ -3138,7 +3161,11 @@ class AppState {
             }
         }
         // (the guest branch above set `target` itself)
-        let depth = peerDepth(for: sender) + 1
+        // #1066: a guest message arrives at a fixed hop depth of 1, whatever the guest's own depth:
+        // a guest is where a chain starts, and +1 per message would walk a role session's depth up
+        // until a local planner-to-reviewer send hit the cascade limit.
+        let isGuestSender = senderIsGuest || senderConversation?.isGuest == true
+        let depth = isGuestSender ? 1 : peerDepth(for: sender) + 1
         let limit = ConfigManager.shared.maxSessionCascade
         guard depth <= limit else {
             return .refused("Not sent: this chain of session messages is \(limit) hops deep, the limit. It resets when the user types into this session.")
@@ -6746,6 +6773,9 @@ class AppState {
     /// Background job runs and MCP guests never qualify, even if their id or an ancestor was passed.
     func isYoloMode(_ conversationId: UUID?) -> Bool {
         guard let conversationId else { return false }
+        // #1119: a turn a guest's message started or steered is never YOLO, whichever session in
+        // the delegation chain asks (a delegate's calls ride the same turn).
+        if isGuestOriginTurn(conversationId) || isGuestOriginTurn(delegationRoot(of: conversationId)) { return false }
         if let conv = conversations.first(where: { $0.id == conversationId }),
            conv.isBackground || conv.isGuest {
             return false
