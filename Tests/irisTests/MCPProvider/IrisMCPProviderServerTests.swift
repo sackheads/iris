@@ -727,7 +727,7 @@ struct IrisMCPProviderServerTests {
         #expect(result["isError"] as? Bool != true)
         #expect(sessions.liveCount == 1)
         let replies = await polledReplies(fixture, "a")
-        #expect(replies.map(\.text) == ["guest answer"] && replies.first?.sequence == 1)
+        #expect(replies.map(\.text) == ["guest answer"] && replies.first?.sequence == 2, "the client's own message was sequence 1")
     }
 
     @Test("iris_send to a full guest registry is a tool error and leaves no message queued")
