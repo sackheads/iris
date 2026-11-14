@@ -1,5 +1,7 @@
 import Testing
 import Foundation
+import SwiftUI
+import AppKit
 @testable import IrisKit
 
 /// Releases waiting callers on demand so a scripted round can be held open deterministically.
@@ -173,5 +175,108 @@ struct SteerInboxTests {
         #expect(await eventually { client.calls == 2 && !app.isThinking })
         #expect(app.pendingUserMessageCount(for: id) == 0, "the arrival's end hop drained it")
         #expect(texts(app, id, .agent) == ["arrival", "answer"])
+    }
+
+    @Test("a queued text message stops takePendingSteers and holds entries behind it (#1064)")
+    func queuedMessageStopsTakePendingSteers() {
+        let app = AppState()
+        let id = UUID()
+        app.enqueuePendingUserMessage(text: "steer ahead", attachments: [], for: id)
+        app.enqueuePendingUserMessage(text: "queued middle", attachments: [], for: id, queued: true)
+        app.enqueuePendingUserMessage(text: "steer behind", attachments: [], for: id)
+
+        #expect(app.takePendingSteers(for: id).map(\.text) == ["steer ahead"])
+        #expect(app.pendingUserMessageCount(for: id) == 2)
+        #expect(app.takePendingSteers(for: id).isEmpty)
+    }
+
+    @Test("sending with queue: true waits for a multi-round turn to finish and merges queued messages (#1064)")
+    func queuedMessageWaitsForMultiRoundTurnToFinish() async {
+        let gate = Gate()
+        let call = FunctionCall(name: "run_command", args: ["command": .string("echo round1")], id: "c1")
+        let client = ScriptedStreamClient([
+            [.event(.functionCall(call)), .block { await gate.wait() }, .event(.done(finishReason: "tool_use"))],
+            [.event(.textDelta("finished first turn")), .event(.done(finishReason: nil))],
+            [.event(.textDelta("answered queued turn")), .event(.done(finishReason: nil))]
+        ])
+        let (app, id) = session(client)
+        app.sendMessage("first")
+        #expect(await eventually { client.calls == 1 })
+
+        app.sendMessage("do this after", queue: true)
+        app.sendMessage("and also this", queue: true)
+        #expect(app.pendingUserItems(for: id).map { "\($0.summary):\($0.isQueued)" } == [
+            "do this after:true",
+            "and also this:true"
+        ])
+
+        await gate.release()
+        #expect(await eventually { client.calls == 3 && !app.isThinking })
+        #expect(texts(app, id, .agent) == ["finished first turn", "answered queued turn"])
+        #expect(historyShape(app, id) == [
+            "user[text:first]", "model[call:run_command]", "user[resp:run_command]",
+            "model[text:finished first turn]",
+            "user[text:do this after\n\nand also ]", "model[text:answered queued turn]"
+        ])
+        #expect(client.requests.last?.contents.last?.parts.last?.text == "do this after\n\nand also this")
+        #expect(app.pendingUserItems(for: id).isEmpty)
+    }
+
+    @Test("pendingUserItems marks entries behind a queued message as Queued and flips back to Steer if the blocker is cancelled (#1064)")
+    func pendingUserItemsReflectBlockingAndCancellation() {
+        let client = ScriptedStreamClient([[.event(.textDelta("hold")), .hang]])
+        let (app, id) = session(client)
+        app.sendMessage("first")
+        app.sendMessage("queued blocker", queue: true)
+        app.sendMessage("steer behind blocker", queue: false)
+
+        let itemsBefore = app.pendingUserItems(for: id)
+        #expect(itemsBefore.count == 2)
+        #expect(itemsBefore[0].summary == "queued blocker")
+        #expect(itemsBefore[0].isQueued == true)
+        #expect(itemsBefore[1].summary == "steer behind blocker")
+        #expect(itemsBefore[1].isQueued == true, "behind a queued entry, so it waits for turn end too")
+        #expect(texts(app, id, .user) == ["first", "queued blocker", "steer behind blocker"])
+
+        let cancelled = app.cancelPendingUserMessage(id: itemsBefore[0].id, in: id)
+        #expect(cancelled == true)
+        #expect(texts(app, id, .user) == ["first", "steer behind blocker"],
+                "cancelling a pending entry removes its user bubble from the transcript")
+
+        let itemsAfter = app.pendingUserItems(for: id)
+        #expect(itemsAfter.count == 1)
+        #expect(itemsAfter[0].summary == "steer behind blocker")
+        #expect(itemsAfter[0].isQueued == false,
+                "once the queued blocker ahead of it is cancelled, the entry steers again")
+
+        #expect(app.cancelPendingUserMessage(id: itemsBefore[0].id, in: id) == false,
+                "cancelling an already-removed entry is a no-op")
+        app.interruptActiveConversation()
+    }
+
+    @Test("PendingMessagesChip shrinks to one item and caps at 120 pt for many items (Invariant 8, #1064)")
+    func pendingMessagesChipHeightIsCapped() {
+        let app = AppState()
+        let id = UUID()
+        app.enqueuePendingUserMessage(text: "one pending message", attachments: [], for: id)
+
+        func measureChip() -> CGFloat {
+            let hc = NSHostingController(
+                rootView: PendingMessagesChip(state: app, conversationId: id).frame(width: 500)
+            )
+            hc.view.layoutSubtreeIfNeeded()
+            return hc.view.fittingSize.height
+        }
+
+        let oneRowHeight = measureChip()
+        #expect(oneRowHeight > 16 && oneRowHeight < 60,
+                "1-item chip should take its natural height, got \(oneRowHeight) pt")
+
+        for i in 2...20 {
+            app.enqueuePendingUserMessage(text: "pending message \(i)", attachments: [], for: id, queued: i.isMultiple(of: 2))
+        }
+        let cappedHeight = measureChip()
+        #expect(cappedHeight <= 120.5,
+                "20-item chip should cap at 120 pt (Invariant 8), got \(cappedHeight) pt")
     }
 }

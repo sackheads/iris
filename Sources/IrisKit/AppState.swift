@@ -1035,14 +1035,15 @@ class AppState {
     /// Test seam for the pin's meta write; nil writes through `store`.
     @ObservationIgnored var pinnedMetaWriter: ((String) throws -> Void)?
 
-    // MARK: - Mid-turn user messages (#172)
+    // MARK: - Mid-turn user messages (#172, #1064)
 
     /// A user message sent while a turn was already running on its conversation. Text-only
-    /// entries are handed to the engine at its next model round (`takePendingSteers`); an entry
-    /// with attachments, and anything queued behind it, waits and starts a fresh turn when the
-    /// running one ends. Starting a second turn instead interleaves two turns on one history,
-    /// which the providers answer with empty or rejected responses.
-    struct PendingUserMessage: Sendable {
+    /// entries are handed to the engine at its next model round (`takePendingSteers`) unless
+    /// explicitly queued (`queued == true`, #1064); a queued entry or an entry with attachments,
+    /// and anything queued behind it, waits and starts a fresh turn when the running one ends.
+    /// Starting a second turn instead interleaves two turns on one history, which the providers
+    /// answer with empty or rejected responses.
+    struct PendingUserMessage: Identifiable, Sendable {
         /// Who the entry is from, which decides the label it is read under: the consumer must never
         /// render a peer's or a subagent's words under the user's own (#185 §5).
         enum Origin: Equatable, Sendable {
@@ -1052,6 +1053,7 @@ class AppState {
             /// A background subagent's post-back queued by `IrisEngine.handleSystemEvent` (#478).
             case systemEvent(source: String)
         }
+        let id: UUID
         let text: String
         let attachments: [FileAttachment]
         let origin: Origin
@@ -1061,17 +1063,60 @@ class AppState {
         var isPeer: Bool { origin == .peer }
         /// #696: the peer delivery is a topic message, so the turn that reads it may not publish.
         var isTopic = false
+        /// #1064: true when the user chose to queue this entry for after the running turn (`⌘-Enter`
+        /// or `⌘`/`⌥`-click send) instead of steering the next model round.
+        var queued = false
+        /// #1064: the transcript `ChatMessage.id` appended when the user submitted this message, so
+        /// cancelling it from the pending strip before it is consumed removes the user bubble too.
+        var messageId: UUID? = nil
+        /// Whether this entry waits for `drainPendingUserMessages` at turn end rather than being
+        /// consumed mid-turn by `takePendingSteers` (#1064).
+        var waitsForTurnEnd: Bool { queued || !attachments.isEmpty }
         /// An arrival rather than something the user typed: it waits for a goal follow-up too.
         var isArrival: Bool { origin != .user }
-        init(text: String, attachments: [FileAttachment], isPeer: Bool = false) {
-            self.init(text: text, attachments: attachments, origin: isPeer ? .peer : .user)
+        /// Single-line summary for the composer's pending-messages strip (#1064).
+        var summaryLine: String {
+            let singleLine = text
+                .components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+            if !singleLine.isEmpty {
+                return singleLine
+            }
+            if attachments.count == 1 {
+                return attachments[0].filename
+            }
+            if attachments.count > 1 {
+                return "\(attachments.count) attachments"
+            }
+            return "(empty)"
         }
-        init(text: String, attachments: [FileAttachment], origin: Origin, engine: IrisEngine? = nil) {
+        init(id: UUID = UUID(), text: String, attachments: [FileAttachment], isPeer: Bool = false,
+             queued: Bool = false, messageId: UUID? = nil) {
+            self.init(id: id, text: text, attachments: attachments, origin: isPeer ? .peer : .user,
+                      queued: queued, messageId: messageId)
+        }
+        init(id: UUID = UUID(), text: String, attachments: [FileAttachment], origin: Origin,
+             engine: IrisEngine? = nil, queued: Bool = false, messageId: UUID? = nil) {
+            self.id = id
             self.text = text
             self.attachments = attachments
             self.origin = origin
             self.engine = engine
+            self.queued = queued
+            self.messageId = messageId
         }
+    }
+
+    /// A user-submitted pending message exposed to the composer's strip (#1064), paired with its
+    /// effective mode (`isQueued == false` for `"Steer"`, `true` for `"Queued"`). Because
+    /// `takePendingSteers` stops at the first entry where `waitsForTurnEnd` is true so order is
+    /// preserved, any entry behind a queued or attachment entry is also effectively `"Queued"`.
+    struct PendingUserItem: Identifiable, Equatable, Sendable {
+        let id: UUID
+        let summary: String
+        let isQueued: Bool
     }
     private var pendingUserMessages: [UUID: [PendingUserMessage]] = [:]
 
@@ -1459,10 +1504,53 @@ class AppState {
     }
 
     func enqueuePendingUserMessage(text: String, attachments: [FileAttachment], for conversationId: UUID, isPeer: Bool = false,
-                                   isTopic: Bool = false) {
-        var entry = PendingUserMessage(text: text, attachments: attachments, isPeer: isPeer)
+                                   isTopic: Bool = false, queued: Bool = false, messageId: UUID? = nil) {
+        var entry = PendingUserMessage(text: text, attachments: attachments, isPeer: isPeer,
+                                       queued: queued, messageId: messageId)
         entry.isTopic = isTopic
         pendingUserMessages[conversationId, default: []].append(entry)
+    }
+
+    /// User-submitted pending messages in arrival order with their effective mode (#1064).
+    /// Anything behind a queued or attachment entry waits for turn end (`isQueued == true`) so
+    /// arrival order is preserved; if the blocking entry ahead of it is cancelled, a steer behind
+    /// it flips back to `isQueued == false`.
+    func pendingUserItems(for conversationId: UUID) -> [PendingUserItem] {
+        guard let queue = pendingUserMessages[conversationId], !queue.isEmpty else { return [] }
+        var blockedByQueued = false
+        var items: [PendingUserItem] = []
+        for entry in queue {
+            if entry.waitsForTurnEnd {
+                blockedByQueued = true
+            }
+            guard entry.origin == .user else { continue }
+            items.append(PendingUserItem(
+                id: entry.id,
+                summary: entry.summaryLine,
+                isQueued: blockedByQueued
+            ))
+        }
+        return items
+    }
+
+    /// Cancels an unconsumed user message from the pending inbox and removes its transcript bubble
+    /// from the conversation (#1064). Returns `false` if the entry was already consumed by the
+    /// engine or does not belong to the user.
+    @discardableResult
+    func cancelPendingUserMessage(id: UUID, in conversationId: UUID) -> Bool {
+        guard var queue = pendingUserMessages[conversationId],
+              let idx = queue.firstIndex(where: { $0.id == id && $0.origin == .user }) else {
+            return false
+        }
+        let removed = queue.remove(at: idx)
+        pendingUserMessages[conversationId] = queue.isEmpty ? nil : queue
+        if let messageId = removed.messageId,
+           let convIdx = conversations.firstIndex(where: { $0.id == conversationId }),
+           let msgIdx = conversations[convIdx].messages.firstIndex(where: { $0.id == messageId }) {
+            conversations[convIdx].messages.remove(at: msgIdx)
+            markChanged(conversationId, .messagesReplaced)
+        }
+        return true
     }
 
     /// A background subagent's post-back, already sanitised, held for the turn in flight or the
@@ -1476,14 +1564,15 @@ class AppState {
         pendingUserMessages[conversationId]?.count ?? 0
     }
 
-    /// The leading text-only entries, removed from the inbox, in arrival order, paired with
-    /// whether each is a peer delivery (#185 §5) rather than something the user typed — the
-    /// engine must not present a peer entry under the user's own label. Stops at the first entry
-    /// with attachments so order is preserved. The engine calls this at every model round.
+    /// The leading steer entries, removed from the inbox, in arrival order, paired with whether
+    /// each is a peer delivery (#185 §5) rather than something the user typed — the engine must
+    /// not present a peer entry under the user's own label. Stops at the first entry that waits
+    /// for turn end (`queued` or has attachments, #1064) so order is preserved. The engine calls
+    /// this at every model round.
     func takePendingSteers(for conversationId: UUID) -> [PendingUserMessage] {
         var queue = pendingUserMessages[conversationId] ?? []
         var taken: [PendingUserMessage] = []
-        while let first = queue.first, first.attachments.isEmpty {
+        while let first = queue.first, !first.waitsForTurnEnd {
             taken.append(first)
             queue.removeFirst()
         }
@@ -3311,7 +3400,7 @@ class AppState {
         launchEngine(engine)
     }
     
-    func sendMessage(_ text: String, attachments: [FileAttachment] = []) {
+    func sendMessage(_ text: String, attachments: [FileAttachment] = [], queue: Bool = false) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (!trimmed.isEmpty || !attachments.isEmpty), let convId = selectedConversationId else { return }
         touch(convId)   // #231
@@ -3487,12 +3576,15 @@ class AppState {
 
         // #182 §6.2's un-archive is not here: `runThinkingTask` carries it for every turn-starting
         // path, this one included (via `startTurn`).
-        appendMessage(role: .user, content: messageContent, attachments: attachments, to: convId)
+        let messageId = UUID()
+        appendMessage(role: .user, content: messageContent, attachments: attachments, id: messageId, to: convId)
 
         // A turn is already running on this conversation: the message steers it (text) or
-        // follows it (attachments) instead of starting a second, interleaved turn (#172).
+        // follows it (`queue == true` or attachments, #1064) instead of starting a second,
+        // interleaved turn (#172).
         if hasTurnInFlight(for: convId) {
-            enqueuePendingUserMessage(text: messageContent, attachments: attachments, for: convId)
+            enqueuePendingUserMessage(text: messageContent, attachments: attachments, for: convId,
+                                      queued: queue, messageId: messageId)
             return
         }
         startTurn(text: messageContent, attachments: attachments, in: convId)
