@@ -16,7 +16,7 @@ Built on modern Swift 6 Concurrency (`async/await`, `actor`), providing a high-p
 
 ### Streaming Replies
 
-Iris's answer appears as the model writes it, on Gemini (including Vertex), Anthropic, and OpenAI, with the reply growing in place at most every 50 ms. Tool calls are never acted on until their arguments have fully arrived. A failure after the first token keeps the partial text and shows the provider's error beneath it instead of retrying and duplicating what you already read; pressing Stop keeps the partial text too. Turn it off in Settings → Preferences if you prefer whole replies.
+Iris's answer appears as the model writes it, on Gemini (including Vertex), Anthropic, and OpenAI, with the reply growing in place at most every 50 ms. While the model is streaming thoughts before its reply, the `Iris is thinking...` row shows the current thought line left-aligned; hovering over (or clicking to pin) that row opens a floating thought-bubble overlay above the indicator that streams the full thoughts in place and fades out automatically as soon as the reply begins or you start typing in the composer. Tool calls are never acted on until their arguments have fully arrived. A failure after the first token keeps the partial text and shows the provider's error beneath it instead of retrying and duplicating what you already read; pressing Stop keeps the partial text too. Turn it off in Settings → Preferences if you prefer whole replies.
 
 ### Steer a Running Turn
 

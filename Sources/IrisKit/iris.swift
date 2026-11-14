@@ -7596,10 +7596,17 @@ actor IrisEngine {
             guard let conversationId else { return }
             await MainActor.run { localState?.thinkingNotes.clear(conversationId) }
         }
+        var markedReplyStreaming = false
         do {
             for try await event in stream {
                 assembler.apply(event, now: MonotonicClock.nowMs())
-                if case .textDelta(let delta) = event { await streamer.append(delta) }
+                if case .textDelta(let delta) = event {
+                    if !markedReplyStreaming, let conversationId {
+                        markedReplyStreaming = true
+                        await MainActor.run { localState?.thinkingNotes.markReplyStreaming(conversationId) }
+                    }
+                    await streamer.append(delta)
+                }
                 if case .thinkingText(let fragment) = event, let conversationId {
                     await MainActor.run { localState?.thinkingNotes.append(fragment, to: conversationId) }
                 }

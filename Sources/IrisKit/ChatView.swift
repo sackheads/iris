@@ -286,11 +286,7 @@ struct ChatView: View {
                             
                             if state.isThinking(in: conv.id) || DebugForceAnimation.isOn(.dots) {
                                 HStack(spacing: 8) {
-                                    TypingIndicator()
-                                    Text("Iris is thinking...")
-                                        .font(.callout)
-                                        .foregroundColor(.secondary)
-                                    ThinkingNoteLine(note: state.thinkingNotes.note(for: conv.id))
+                                    ThinkingIndicatorLabel(note: state.thinkingNotes.note(for: conv.id), config: config)
 
                                     Button(action: { state.interruptActiveConversation() }) {
                                         Label("Stop", systemImage: "stop.circle.fill")
@@ -318,6 +314,14 @@ struct ChatView: View {
                                 IrisWelcomeView()
                                     .id(conv.id)
                             }
+                        }
+                        .overlay(alignment: .bottomLeading) {
+                            ThinkingBubbleOverlay(
+                                note: state.thinkingNotes.note(for: conv.id),
+                                config: config,
+                                isThinking: state.isThinking(in: conv.id) || DebugForceAnimation.isOn(.dots),
+                                composerHasText: !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            )
                         }
                         // Claimed only while something is selected (#703): a handler that returns
                         // nothing still takes the command and empties the pasteboard, which wiped
@@ -2211,19 +2215,213 @@ struct PendingMessagesChip: View {
 }
 
 
-/// The thinking text the API returned so far, on the "Iris is thinking..." row (#314 PR 7). Its own
-/// view so a note's per-update re-render stays here (see `ThinkingNotes`); empty when the model
-/// returned none.
-private struct ThinkingNoteLine: View {
+/// The "Iris is thinking..." label + stabilized one-line preview (#314 PR 7, #1100). Hovering
+/// reveals `ThinkingBubbleOverlay`; clicking toggles `config.autoShowThinkingBubble` so the user
+/// can pin the thought bubble open across turns. Isolated in its own view so `ThinkingNotes.Note`
+/// updates never re-render the parent `List`.
+private struct ThinkingIndicatorLabel: View {
     let note: ThinkingNotes.Note
+    @Bindable var config: ConfigManager
+    @State private var hoverClearTask: Task<Void, Never>?
 
     var body: some View {
-        if !note.text.isEmpty {
-            Text(note.text)
+        HStack(spacing: 8) {
+            TypingIndicator()
+            Text("Iris is thinking...")
                 .font(.callout)
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
-                .truncationMode(.head)
+                .foregroundColor(.secondary)
+            ThinkingNoteLine(note: note, autoShow: config.autoShowThinkingBubble)
         }
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            hoverClearTask?.cancel()
+            if hovering {
+                note.isHoveringLine = true
+            } else {
+                hoverClearTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 180_000_000)
+                    guard !Task.isCancelled else { return }
+                    note.isHoveringLine = false
+                }
+            }
+        }
+        .onTapGesture {
+            guard !note.headline.isEmpty else { return }
+            config.autoShowThinkingBubble.toggle()
+            if config.autoShowThinkingBubble {
+                note.isDismissedForRound = false
+            }
+        }
+        .help(note.headline.isEmpty ? "" : (config.autoShowThinkingBubble
+            ? "Hover to peek thoughts · Click to stop auto-showing thought bubble"
+            : "Hover to peek thoughts · Click to auto-show thought bubble while thinking"))
+    }
+}
+
+/// The stabilized single-line thinking preview on the "Iris is thinking..." row (#314 PR 7, #1100).
+/// Left-anchored (`.truncationMode(.tail)`) on `note.headline` so the line grows left-to-right per
+/// sentence instead of sliding horizontally on every token.
+private struct ThinkingNoteLine: View {
+    let note: ThinkingNotes.Note
+    var autoShow: Bool = false
+
+    var body: some View {
+        let headline = note.headline
+        if !headline.isEmpty {
+            HStack(spacing: 4) {
+                Image(systemName: autoShow ? "pin.fill" : "ellipsis.bubble")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Text(verbatim: headline)
+                    .font(.callout)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
+    }
+}
+
+/// Floating thought-bubble overlay rendered above the "Iris is thinking..." row (#1100). Lives in
+/// `.overlay(alignment: .bottomLeading)` on the transcript `List` so showing, growing, or hiding
+/// it never shifts a single row in the chat transcript.
+struct ThinkingBubbleOverlay: View {
+    let note: ThinkingNotes.Note
+    @Bindable var config: ConfigManager
+    let isThinking: Bool
+    let composerHasText: Bool
+    @State private var hoverClearTask: Task<Void, Never>?
+
+    private var visible: Bool {
+        note.shouldShowBubble(
+            isThinking: isThinking,
+            autoShow: config.autoShowThinkingBubble,
+            composerHasText: composerHasText
+        )
+    }
+
+    private var displayText: String {
+        note.bubbleText.isEmpty ? note.text : note.bubbleText
+    }
+
+    var body: some View {
+        if visible {
+            VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "ellipsis.bubble.fill")
+                            .font(.caption)
+                            .foregroundColor(.irisIndigo)
+                        Text("Thinking")
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 8)
+                        Button {
+                            config.autoShowThinkingBubble.toggle()
+                            if config.autoShowThinkingBubble {
+                                note.isDismissedForRound = false
+                            }
+                        } label: {
+                            Image(systemName: config.autoShowThinkingBubble ? "pin.fill" : "pin")
+                                .font(.caption)
+                                .foregroundColor(config.autoShowThinkingBubble ? .irisIndigo : .secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help(config.autoShowThinkingBubble
+                              ? "Auto-show while thinking is on (click to show only on hover)"
+                              : "Pin to auto-show whenever Iris is thinking")
+                        .accessibilityLabel(config.autoShowThinkingBubble
+                                            ? "Unpin thought bubble"
+                                            : "Pin thought bubble to auto-show")
+
+                        if config.autoShowThinkingBubble {
+                            Button {
+                                note.isDismissedForRound = true
+                                note.isHoveringBubble = false
+                                note.isHoveringLine = false
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Hide for this turn")
+                            .accessibilityLabel("Dismiss thought bubble for this turn")
+                        }
+                    }
+
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 0) {
+                                Text(verbatim: displayText)
+                                    .font(.callout)
+                                    .foregroundStyle(.primary.opacity(0.88))
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                Color.clear
+                                    .frame(height: 1)
+                                    .id("thinkingBubbleBottom")
+                            }
+                        }
+                        .defaultScrollAnchor(.bottom)
+                        .frame(maxHeight: 240)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .onChange(of: displayText) { _, _ in
+                            proxy.scrollTo("thinkingBubbleBottom", anchor: .bottom)
+                        }
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .frame(minWidth: 260, maxWidth: 540, alignment: .leading)
+                .background(.regularMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color.irisIndigo.opacity(0.28), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.12), radius: 10, x: 0, y: 4)
+
+                // Classic comic thought-bubble tail dots leading down to "Iris is thinking...".
+                VStack(alignment: .leading, spacing: 3) {
+                    thoughtDot(size: 10)
+                        .padding(.leading, 26)
+                    thoughtDot(size: 7)
+                        .padding(.leading, 21)
+                    thoughtDot(size: 4.5)
+                        .padding(.leading, 17)
+                }
+            }
+            .padding(.leading, 16)
+            .padding(.bottom, 30)
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                hoverClearTask?.cancel()
+                if hovering {
+                    note.isHoveringBubble = true
+                } else {
+                    hoverClearTask = Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 180_000_000)
+                        guard !Task.isCancelled else { return }
+                        note.isHoveringBubble = false
+                    }
+                }
+            }
+            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomLeading)))
+            .animation(Motion.animation(Motion.reveal), value: visible)
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Iris thought bubble")
+        }
+    }
+
+    private func thoughtDot(size: CGFloat) -> some View {
+        Circle()
+            .fill(.regularMaterial)
+            .frame(width: size, height: size)
+            .overlay(
+                Circle()
+                    .stroke(Color.irisIndigo.opacity(0.28), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.08), radius: 2, x: 0, y: 1)
     }
 }

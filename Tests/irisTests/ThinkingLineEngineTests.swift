@@ -99,6 +99,74 @@ struct ThinkingLineEngineTests {
         #expect(app.thinkingNotes.note(for: id).text.isEmpty)
     }
 
+    @Test("headline extraction strips markdown framing, tracks the latest line, and advances by sentence on long lines (#1100)")
+    func headlineStabilizesLeftEdge() {
+        #expect(ThinkingNotes.extractHeadline(from: "**Checking workspace**\n\n") == "Checking workspace")
+        #expect(ThinkingNotes.extractHeadline(from: "### Step 1\nReading `AppState.swift` now") == "Reading AppState.swift now")
+
+        let longFirstSentence = String(repeating: "word ", count: 25).trimmingCharacters(in: .whitespaces) + "."
+        let combined = "\(longFirstSentence) Now checking the second sentence"
+        #expect(combined.count > ThinkingNotes.headlineClauseLimit)
+        #expect(ThinkingNotes.extractHeadline(from: combined) == "Now checking the second sentence")
+    }
+
+    @Test("bubbleText retains up to bubbleLimit characters while text retains tailLimit (#1100)")
+    func bubbleTextRetainsLongerWindow() {
+        let notes = ThinkingNotes()
+        let id = UUID()
+        let longThought = String(repeating: "a", count: 600) + "\nFinal paragraph"
+        notes.append(longThought, to: id)
+        let note = notes.note(for: id)
+        #expect(note.text.count == ThinkingNotes.tailLimit)
+        #expect(note.bubbleText.count == longThought.count)
+        #expect(note.headline == "Final paragraph")
+    }
+
+    @Test("thought bubble visibility is hover-only by default, and when pinned auto-fades on typing or reply streaming (#1100)")
+    func bubbleVisibilityRules() {
+        let notes = ThinkingNotes()
+        let id = UUID()
+        let note = notes.note(for: id)
+        notes.append("Considering two approaches...", to: id)
+
+        // Default (autoShow == false): hidden until hovered.
+        #expect(note.shouldShowBubble(isThinking: true, autoShow: false, composerHasText: false) == false)
+        note.isHoveringLine = true
+        #expect(note.shouldShowBubble(isThinking: true, autoShow: false, composerHasText: false) == true)
+        note.isHoveringLine = false
+        note.isHoveringBubble = true
+        #expect(note.shouldShowBubble(isThinking: true, autoShow: false, composerHasText: true) == true,
+                "explicit hover still shows the bubble even when text is in the composer")
+        note.isHoveringBubble = false
+
+        // Pinned (autoShow == true): shows while thinking, fades out on composer typing, reply streaming, or dismiss.
+        #expect(note.shouldShowBubble(isThinking: true, autoShow: true, composerHasText: false) == true)
+        #expect(note.shouldShowBubble(isThinking: true, autoShow: true, composerHasText: true) == false,
+                "typing in the composer fades out the auto-shown bubble")
+
+        notes.markReplyStreaming(id)
+        #expect(note.shouldShowBubble(isThinking: true, autoShow: true, composerHasText: false) == false,
+                "streaming reply tokens fade out the auto-shown bubble so it never covers the answer")
+
+        notes.clear(id)
+        #expect(note.isStreamingReply == false)
+        #expect(note.bubbleText.isEmpty)
+    }
+
+    @Test("ConfigManager.autoShowThinkingBubble defaults to false and persists to its store (#1100)")
+    func configAutoShowDefaultsOffAndPersists() {
+        let name = "iris-thinking-bubble-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: name)!
+        defer {
+            store.removePersistentDomain(forName: name)
+            IrisDefaults.removeSuiteFile(named: name, in: IrisDefaults.preferencesDirectory)
+        }
+        let config = ConfigManager(store: store)
+        #expect(config.autoShowThinkingBubble == false)
+        config.autoShowThinkingBubble = true
+        #expect(store.bool(forKey: "AUTO_SHOW_THINKING_BUBBLE") == true)
+    }
+
     private final class FailingAfterThinking: LLMClientProtocol, @unchecked Sendable {
         var supportsStreaming: Bool { true }
         func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
