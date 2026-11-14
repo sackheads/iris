@@ -58,7 +58,8 @@ struct GuestPromptTests {
         let id = f.app.createNewConversation(isGuest: true, guestClientId: "dev-1", title: "guest")
         f.app.setWorkspace(for: id, path: f.workspace.path)
         let client = CapturingLLMClient(reply: "ok")
-        let engine = IrisEngine.makeGuestEngine(state: f.app, clientId: "dev-1", client: client)
+        let engine = IrisEngine.makeGuestEngine(state: f.app, clientId: "dev-1", client: client, factStore: f.facts,
+                                                protectionEnabled: false, memory: f.memory)
         await engine.processInput(askAboutFact, source: "UI", conversationId: id)
         return client.requests.first
     }

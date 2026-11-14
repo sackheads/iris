@@ -5051,9 +5051,11 @@ actor IrisEngine {
 
     /// #1066: the engine an external MCP client's guest conversation runs on: principal `.mcpGuest`,
     /// the cheapest tier, a role label naming the guest. Its prompt is `GuestPrompt` alone.
-    static func makeGuestEngine(state: AppState, clientId: String, client: any LLMClientProtocol = LLMClient()) -> IrisEngine {
+    static func makeGuestEngine(state: AppState, clientId: String, client: any LLMClientProtocol = LLMClient(),
+                                factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil,
+                                memory: MemoryManager? = nil) -> IrisEngine {
         IrisEngine(state: state, tier: .easy, principal: .mcpGuest, roleLabel: "guest:\(clientId)", client: client,
-                   guestClientId: clientId)
+                   factStore: factStore, protectionEnabled: protectionEnabled, memory: memory, guestClientId: clientId)
     }
 
     /// #1066: the guest's declared tools: exactly its floor.
