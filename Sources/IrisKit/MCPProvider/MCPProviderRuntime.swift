@@ -94,7 +94,7 @@ final class MCPProviderRuntime {
         let port = configuredPort()
         let guests = makeGuestRegistry()
         let driver = guests.map { registry in
-            GuestSessionDriver(state: AppState.shared, registry: registry, mailbox: mailbox,
+            GuestSessionDriver(state: registry.state, registry: registry, mailbox: mailbox,
                                turnGate: ProviderRequestGate(registry: tokenRegistry, capacity: GuestSessionDriver.turnsPerHour,
                                                              refillInterval: GuestSessionDriver.turnRefillInterval))
         }

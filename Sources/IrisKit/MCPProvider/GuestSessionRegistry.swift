@@ -21,7 +21,8 @@ final class GuestSessionRegistry {
         var lastTouched: SuspendingClock.Instant
     }
 
-    private let state: AppState
+    /// The app state the sessions live in; the driver reads its replies from the same one.
+    let state: AppState
     private let ttl: Duration
     private let maxLive: Int
     private let now: @Sendable () -> SuspendingClock.Instant
