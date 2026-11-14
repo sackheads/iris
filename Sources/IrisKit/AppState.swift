@@ -3161,11 +3161,12 @@ class AppState {
             }
         }
         // (the guest branch above set `target` itself)
-        // #1066: a guest message arrives at a fixed hop depth of 1, whatever the guest's own depth:
-        // a guest is where a chain starts, and +1 per message would walk a role session's depth up
-        // until a local planner-to-reviewer send hit the cascade limit.
+        // #1066: a guest's own hop is not counted: a first message arrives at depth 1, and +1 per
+        // message would walk a role session's depth up until a local planner-to-reviewer send hit
+        // the limit. A reply to the guest raises the guest's depth, and its next send carries it,
+        // so a guest/role ping-pong still climbs one per round and meets the cascade limit.
         let isGuestSender = senderIsGuest || senderConversation?.isGuest == true
-        let depth = isGuestSender ? 1 : peerDepth(for: sender) + 1
+        let depth = isGuestSender ? max(1, peerDepth(for: sender)) : peerDepth(for: sender) + 1
         let limit = ConfigManager.shared.maxSessionCascade
         guard depth <= limit else {
             return .refused("Not sent: this chain of session messages is \(limit) hops deep, the limit. It resets when the user types into this session.")

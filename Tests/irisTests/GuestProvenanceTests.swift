@@ -113,12 +113,12 @@ struct GuestProvenanceTests {
             w.app.notePeerArrival(depth: depth, at: target)
         }
         #expect(w.app.peerDepth(for: w.reviewer) == 1)
-        // Even a guest whose own depth was raised by replies arrives at 1.
+        // A guest whose own depth was raised by replies carries that depth, not +1.
         w.app.notePeerArrival(depth: 6, at: w.guest)
         guard case .allowed(_, let depth) = w.app.decidePeerSend(to: "role:reviewer", from: w.guest, replyTarget: nil) else {
             Issue.record("refused"); return
         }
-        #expect(depth == 1)
+        #expect(depth == 6)
         // A local send from the reviewer is unaffected.
         guard case .allowed(_, let local) = w.app.decidePeerSend(to: "role:builder", from: w.reviewer, replyTarget: nil) else {
             Issue.record("a local send was blocked"); return
@@ -145,6 +145,21 @@ struct GuestProvenanceTests {
             if hops > limit + 2 { break }
         }
         #expect(hops == limit, "the guest's message was hop 1; the chain stopped at the limit (\(limit)), got \(hops)")
+    }
+
+    @Test("a guest/role ping-pong climbs one depth per round and stops at the cascade limit")
+    func guestPingPongIsBounded() {
+        let w = world()
+        let limit = ConfigManager.shared.maxSessionCascade
+        var rounds = 0
+        while rounds < limit + 5 {
+            guard case .allowed(let r, let d1) = w.app.decidePeerSend(to: "role:reviewer", from: w.guest, replyTarget: nil) else { break }
+            w.app.notePeerArrival(depth: d1, at: r)
+            guard case .allowed(let g, let d2) = w.app.decidePeerSend(to: "", from: w.reviewer, replyTarget: w.guest) else { break }
+            w.app.notePeerArrival(depth: d2, at: g)
+            rounds += 1
+        }
+        #expect(rounds < limit, "the loop must stop below the cascade limit (\(limit)), ran \(rounds) rounds")
     }
 
     @Test("a guest draws from its own bucket: the 21st send in a burst is refused and a role session is unaffected")
@@ -216,6 +231,37 @@ struct GuestProvenanceTests {
         #expect(taken.count == 1 && taken[0].isGuestOrigin)
         #expect(!w.app.isYoloMode(w.reviewer))
         w.app.endEngineTurn(for: w.reviewer)
+    }
+
+    private func drainedTurn(_ entries: [Bool]) -> Bool {
+        let w = world()
+        yoloReviewer(w)
+        let engine = IrisEngine(state: w.app, tier: .medium, client: FakeLLMClient(responses: [
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil)]),
+            retryDelays: [], protectionEnabled: false)
+        w.app.installEngine(engine)
+        w.app.beginEngineTurn(for: w.reviewer)
+        // Queued for after the turn, so only the drain can read them.
+        for fromGuest in entries {
+            w.app.enqueuePendingUserMessage(text: fromGuest ? "from a guest" : "from a peer", attachments: [], for: w.reviewer,
+                                            isPeer: true, isGuestOrigin: fromGuest, queued: true)
+        }
+        w.app.endEngineTurn(for: w.reviewer)   // drains synchronously into the next turn
+        #expect(w.app.pendingUserMessageCount(for: w.reviewer) == 0, "the entries were drained into a turn")
+        #expect(w.app.hasTurnInFlight(for: w.reviewer), "the drained turn is the one under test")
+        return w.app.isYoloMode(w.reviewer)
+    }
+
+    @Test("a guest message queued behind a running YOLO turn makes the drained next turn guest-origin")
+    func drainedTurnIsGuestOrigin() {
+        #expect(drainedTurn([true]) == false)
+        #expect(drainedTurn([false]) == true, "control: an ordinary peer's drained turn stays YOLO")
+    }
+
+    @Test("a joined drain is guest-origin when any part was a guest's, in either order")
+    func joinedDrainIsGuestOrigin() {
+        #expect(drainedTurn([false, true]) == false)
+        #expect(drainedTurn([true, false]) == false)
     }
 
     /// A YOLO role session; a guest's message starts its turn; the turn calls `schedule_job`
