@@ -172,8 +172,9 @@ values:
 
 ```sh
 scripts/gen-xcodeproj.sh
-# Pin to the same dependency revisions `swift test`/`build-app.sh` used: swift-sdk and
-# llama.swift track branch main, so an unpinned xcodebuild here could resolve different commits
+# Pin to the same dependency revisions `swift test`/`build-app.sh` used: llama.swift
+# tracks branch main (swift-sdk is pinned to a revision in Package.swift, #1083), so an unpinned
+# xcodebuild here could resolve different commits
 # than the ones actually tested. Both xcodebuild invocations below pass
 # -disableAutomaticPackageResolution to build from this pinned Package.resolved rather than
 # re-resolving (mirrors scripts/build-app.sh and scripts/release.sh).
