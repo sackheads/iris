@@ -45,6 +45,8 @@ final class MCPProviderRuntime {
     private let makeGuestRegistry: @MainActor () -> GuestSessionRegistry?
     /// The live guest sessions (#1066 Task 7); nil until `start()` has built the server.
     private(set) var guestSessions: GuestSessionRegistry?
+    /// Runs guest turns for `iris_send`; nil until `start()` has built the server.
+    private(set) var guestDriver: GuestSessionDriver?
 
     /// Production defaults read the real settings, Keychain and home; a test injects its own.
     init(isEnabled: @escaping @MainActor () -> Bool = { ConfigManager.shared.mcpProviderEnabled },
@@ -101,12 +103,16 @@ final class MCPProviderRuntime {
 
         let server = IrisMCPProviderServer(tokenRegistry: tokenRegistry, mailbox: mailbox, artifactStore: artifactStore,
                                            door: door, doorGate: doorGate, mailboxGate: mailboxGate, port: port,
-                                           closeGuestSession: { clientId in await MainActor.run { guests?.close(clientId: clientId) } },
+                                           closeGuestSession: { clientId in
+                                               await MainActor.run { guests?.close(clientId: clientId) }
+                                               await driver?.forget(clientId: clientId)
+                                           },
                                            guestDriver: driver)
         do {
             try await server.start()
             self.server = server
             guestSessions = guests
+            guestDriver = driver
             guests?.startReaper()
             status = .running(port: server.boundPort ?? port)
         } catch {
@@ -135,8 +141,14 @@ final class MCPProviderRuntime {
         // A guest session does not outlive the runtime that served it.
         guestSessions?.closeAll()
         guestSessions = nil
+        guestDriver = nil
         server = nil
         if case .running = status { status = .off }
+    }
+
+    /// Revokes `clientId` through the server's one teardown path. A no-op when not running.
+    func revoke(clientId: String) async throws {
+        try await server?.revoke(clientId: clientId)
     }
 
     /// Mirrors `AppState.sweepArtifacts`'s own cadence (called beside it in

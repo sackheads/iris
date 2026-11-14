@@ -76,7 +76,7 @@ final class GuestSessionDriver {
     private let state: AppState
     private let registry: GuestSessionRegistry
     private let mailbox: ProviderMailbox
-    private let turnGate: ProviderRequestGate
+    let turnGate: ProviderRequestGate
     private let isEnabled: @MainActor () -> Bool
     private let turnTimeout: Double
     private let runTurn: TurnRunner
@@ -105,6 +105,15 @@ final class GuestSessionDriver {
     }
 
     var isActive: Bool { isEnabled() }
+
+    /// A revoked client: its session closes and its turns bucket goes, so a later re-issue of the
+    /// same id starts clean and the gate holds no state for ids that no longer exist. Revoke only:
+    /// an idle reap must keep the bucket, or a client could reset its hourly limit by waiting out
+    /// the TTL.
+    func forget(clientId: String) async {
+        registry.close(clientId: clientId)
+        await turnGate.purge(clientId: clientId)
+    }
 
     /// The turn in flight for `clientId`, if any; a test awaits it.
     func turnTask(for clientId: String) -> Task<Void, Never>? { turnTasks[clientId] }
