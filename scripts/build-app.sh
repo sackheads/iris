@@ -34,8 +34,8 @@ fi
 
 build_or_die scripts/gen-xcodeproj.sh
 
-# Pin the app build to the same dependency revisions `swift test` used: swift-sdk and llama.swift
-# track branch main, so an unpinned xcodebuild could resolve newer commits than the ones the suite
+# Pin the app build to the same dependency revisions `swift test` used: llama.swift
+# tracks branch main, so an unpinned xcodebuild could resolve newer commits than the ones the suite
 # just ran against. XcodeGen's workspace has no shared SwiftPM resolution yet, so seed it from the
 # root Package.resolved and tell xcodebuild not to touch it.
 resolved_dir="Iris.xcodeproj/project.xcworkspace/xcshareddata/swiftpm"

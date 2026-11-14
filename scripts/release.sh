@@ -79,8 +79,8 @@ TREE_CHANGES=$(git status --porcelain) || die "git status failed"
 python3 -I "$REPO_ROOT/scripts/third-party-notices.py" check \
   || die "THIRD_PARTY_NOTICES.md is out of date with Package.resolved"
 build_or_die "$REPO_ROOT/scripts/gen-xcodeproj.sh"
-# Pin the archive to the same dependency revisions `swift test` used: swift-sdk and llama.swift
-# track branch main. Every xcodebuild below passes -disableAutomaticPackageResolution.
+# Pin the archive to the same dependency revisions `swift test` used: llama.swift
+# tracks branch main. Every xcodebuild below passes -disableAutomaticPackageResolution.
 mkdir -p "$PROJECT/project.xcworkspace/xcshareddata/swiftpm"
 cp "$REPO_ROOT/Package.resolved" "$PROJECT/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
 git fetch -q origin gh-pages || die "cannot fetch origin/gh-pages (see docs/releasing.md)"
