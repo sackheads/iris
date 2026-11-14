@@ -201,6 +201,23 @@ struct GuestProvenanceTests {
         #expect(!w.app.isYoloMode(child))
     }
 
+    @Test("a guest's message queued behind a running YOLO turn takes YOLO off once the turn reads it")
+    func queuedGuestMessageTurnsYoloOff() async {
+        let w = world()
+        yoloReviewer(w)
+        let engine = IrisEngine(state: w.app, tier: .medium, client: FakeLLMClient(responses: []), retryDelays: [], protectionEnabled: false)
+        w.app.installEngine(engine)
+        w.app.beginEngineTurn(for: w.reviewer)   // the owner's turn is running
+        let outcome = await engine.deliverPeerMessage("do it", from: w.guest, senderName: nil, to: w.reviewer,
+                                                      envelope: envelope(), guestClientId: "dev-1")
+        guard case .queued = outcome else { Issue.record("expected the busy path, got \(outcome)"); return }
+        #expect(w.app.isYoloMode(w.reviewer), "queued, not yet read")
+        let taken = w.app.takePendingSteers(for: w.reviewer)
+        #expect(taken.count == 1 && taken[0].isGuestOrigin)
+        #expect(!w.app.isYoloMode(w.reviewer))
+        w.app.endEngineTurn(for: w.reviewer)
+    }
+
     /// A YOLO role session; a guest's message starts its turn; the turn calls `schedule_job`
     /// (human-only). YOLO would approve it unasked, so a pending approval is the proof it is off.
     private func scheduleJobTurn(guestOrigin: Bool) async -> (pending: Int, jobs: Int) {
