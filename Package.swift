@@ -14,11 +14,10 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", from: "2.0.0"),
-        // A fixed revision, not a branch (#1083): no tagged release has `StatelessHTTPServerTransport`
-        // (newest tag, 0.9.0, predates it), and the MCP provider depends on the validation pipeline,
-        // per-instance `Server` state and `withMethodHandler` behaviour of exactly this commit.
-        // Moving it is a deliberate edit here, with the provider's suites re-run.
-        .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", revision: "a0ae212ebf6eab5f754c3129608bc5557637e605"),
+        // An exact tag, not a branch (#1083): the MCP provider depends on `StatelessHTTPServerTransport`'s
+        // validation pipeline, per-instance `Server` state and `withMethodHandler` behaviour of this
+        // release. Moving it is a deliberate edit here, with the provider's suites re-run.
+        .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.0"),
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "6.0.0"),
         .package(url: "https://github.com/mattt/llama.swift.git", branch: "main"),

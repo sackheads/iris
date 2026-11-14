@@ -3349,7 +3349,7 @@ Source: https://github.com/apple/swift-numerics
         you may redistribute such product without providing attribution as would
         otherwise be required by Sections 4(a), 4(b) and 4(d) of the License.
 
-## swift-sdk (a0ae212)
+## swift-sdk (0.12.1)
 
 Source: https://github.com/modelcontextprotocol/swift-sdk
 
