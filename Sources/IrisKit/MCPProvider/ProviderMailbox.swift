@@ -26,8 +26,9 @@ struct ProviderIdentity: Sendable, Codable, Equatable {
 
 /// Client<->Iris messaging for the loopback MCP provider (#1067). Deliberately client<->Iris
 /// only: `send` always addresses Iris (no recipient argument exists to get wrong), and
-/// `deliverReply` — the only API that ever addresses a client — is never wired to any MCP tool
-/// (Task 8), so no MCP client can write into another client's inbox, directly or by naming it.
+/// `deliverReply` — the only API that ever addresses a client — is never wired to any MCP tool;
+/// only `GuestSessionDriver` calls it (#1066), with the id of the client whose turn just ended, so
+/// no MCP client can write into another client's inbox, directly or by naming it.
 actor ProviderMailbox {
     enum MailboxError: Error, Equatable {
         case senderNoLongerRegistered
@@ -61,10 +62,9 @@ actor ProviderMailbox {
     private var messages: [Message] = []
     /// Restarts at 1 every launch (messages are memory-only, like `Record` in Task 7). A poller
     /// that stored a cursor from before a restart would then see every reply as "already seen"
-    /// until the new counter passes its old cursor — inert in Phase 1 (nothing ever calls
-    /// `deliverReply` from a tool, so there is nothing for a cursor to miss yet), but the cursor
-    /// contract this type hands Phase 2 assumes monotonicity across the process's own lifetime,
-    /// not across restarts. Left as a known Phase 2 concern, not fixed here.
+    /// until the new counter passes its old cursor. Inert while guest sessions are off (nothing
+    /// files a reply); with them on, the cursor contract assumes monotonicity across the process's
+    /// own lifetime, not across restarts. A known concern, not fixed here.
     private var nextSequence: UInt64 = 1
 
     init(registry: any MailboxRegistry, now: @escaping @Sendable () -> Date = Date.init) {
@@ -91,8 +91,8 @@ actor ProviderMailbox {
     }
 
     /// Iris's replies to `clientId`, oldest first, filtered to `sequence > sinceSequence`. Never
-    /// deletes — a dropped connection that polls again still sees them. Always empty in Phase 1:
-    /// nothing calls `deliverReply` from any MCP tool yet.
+    /// deletes — a dropped connection that polls again still sees them. Empty unless guest sessions
+    /// are on: only `GuestSessionDriver` files a reply.
     func poll(for clientId: String, sinceSequence: UInt64?) -> [Message] {
         let party = MailboxParty.client(clientId)
         return messages
@@ -101,8 +101,8 @@ actor ProviderMailbox {
     }
 
     /// The Iris-side half of the mailbox: stores `from: .iris, to: .client(clientId)`. Not wired
-    /// to any MCP tool in Phase 1 (an MCP client has no business writing "from Iris" messages —
-    /// see Task 8's source-scan test).
+    /// to any MCP tool (an MCP client has no business writing "from Iris" messages): its one
+    /// production caller is `GuestSessionDriver`, pinned by a source-scan test.
     func deliverReply(to clientId: String, text: String, fileRefs: [String]) throws -> Message {
         guard registry.isRegistered(clientId: clientId) else { throw MailboxError.unknownRecipient }
         try Self.validate(text: text, fileRefs: fileRefs)
@@ -135,7 +135,7 @@ actor ProviderMailbox {
     }
 
     /// `clientId`'s own view of Iris's replies to it — equivalently, what `poll(for: clientId)`
-    /// would return right now. Always `(0, nil)` in Phase 1, for the same reason `poll` is.
+    /// would return right now. `(0, nil)` unless guest sessions are on, for the same reason `poll` is.
     func status(for clientId: String) -> (pendingCount: Int, lastMessageAt: Date?) {
         let mine = poll(for: clientId, sinceSequence: nil)
         return (mine.count, mine.last?.sentAt)
