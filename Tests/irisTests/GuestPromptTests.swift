@@ -57,6 +57,11 @@ struct GuestPromptTests {
     private func guestRequest(_ f: Fixture) async -> GeminiRequest? {
         let id = f.app.createNewConversation(isGuest: true, guestClientId: "dev-1", title: "guest")
         f.app.setWorkspace(for: id, path: f.workspace.path)
+        // Create refuses a profile for a guest; apply one anyway, so a leak through it would show.
+        f.app.applyAgentProfile("reviewer", toExisting: id)
+        // A role and a peer: what the This Session identity section and the roster read.
+        if let idx = f.app.conversations.firstIndex(where: { $0.id == id }) { f.app.conversations[idx].role = "reviewer" }
+        _ = f.app.createNewConversation(title: "peer", select: false)
         let client = CapturingLLMClient(reply: "ok")
         let engine = IrisEngine.makeGuestEngine(state: f.app, clientId: "dev-1", client: client, factStore: f.facts,
                                                 protectionEnabled: false, memory: f.memory)
@@ -96,7 +101,10 @@ struct GuestPromptTests {
         #expect(system.contains(GuestPrompt.cautionMarker))
         #expect(system.contains("external agent and cannot act as Iris"))
         #expect(system.contains("dev-1"))
-        #expect(system.hasPrefix(GuestPrompt.text(clientId: "dev-1").prefix(40)))
+        #expect(system == GuestPrompt.text(clientId: "dev-1"), "the guest prompt is the guest text alone: no date line, no time zone")
+        #expect(!system.contains("Current Date"))
+        let turnText = request.contents.flatMap(\.parts).compactMap(\.text).joined(separator: "\n")
+        #expect(!turnText.contains("This Session") && !turnText.contains("Active Sessions"), "no identity or roster section for a guest")
     }
 
     @Test("the same inputs on a main engine still surface every sentinel (the branch did not leak the other way)")
