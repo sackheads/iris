@@ -244,7 +244,8 @@ A remote entry may use only the keys it lists in `allowedKeys`; a reference outs
 
 The reverse direction: a developer's own MCP client can talk to Iris over a small, local,
 token-gated, off-by-default surface — read-only app self-report plus a plain client↔Iris
-messaging/file exchange, never client-to-client. [Details](mcp_provider.md)
+messaging/file exchange, never client-to-client. A second off-by-default setting lets it answer
+each client in a confined guest session, which spends your tokens. [Details](mcp_provider.md)
 
 ## Core native tools
 
