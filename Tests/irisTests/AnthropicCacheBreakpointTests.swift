@@ -306,7 +306,7 @@ struct AnthropicWholeRequestPrefixTests {
         }
     }
 
-    @Test("tools, system and every message through the previous turn are byte-identical turn to turn")
+    @Test("tools, system and every message through the end of turn k-2 are byte-identical turn to turn, and turn k-1's entry differs only by dropping its turn_context")
     func consecutiveTurnsSharePrefix() async throws {
         let app = AppState()
         let id = UUID()
@@ -315,23 +315,31 @@ struct AnthropicWholeRequestPrefixTests {
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, retryDelays: [],
                                 streamResponses: false, factStore: try FactStoreManager(inMemory: true),
                                 protectionEnabled: false, sessionPeerCount: 0)
-        for prompt in ["first question", "second question", "third question"] {
+        for prompt in ["first question", "second question", "third question", "fourth question"] {
             await engine.processInput(prompt, source: "UI", conversationId: id)
         }
         let requests = client.requests
-        try #require(requests.count == 3)
+        try #require(requests.count == 4)
         let bodies = try requests.map(body)
         for k in 1..<bodies.count {
             let before = bodies[k - 1], after = bodies[k]
             #expect(after["tools"] != nil)
             #expect(try json(before["tools"] as Any) == json(after["tools"] as Any), "tools, turn \(k + 1)")
             #expect(try json(before["system"] as Any) == json(after["system"] as Any), "system, turn \(k + 1)")
-            let prev = try #require(before["messages"] as? [[String: Any]])
-            let cur = try #require(after["messages"] as? [[String: Any]])
+            let prev = unmarked(try #require(before["messages"] as? [[String: Any]]))
+            let cur = unmarked(try #require(after["messages"] as? [[String: Any]]))
             // The previous request held turns 1..k; this one adds turn k's reply and the new entry.
             #expect(cur.count == prev.count + 2)
             let n = prev.count
-            #expect(try json(unmarked(prev)) == json(unmarked(Array(cur.prefix(n)))), "messages[0..<\(n)], turn \(k + 1)")
+            // Everything through the end of turn k-2 (marker (b)'s read point) is byte-identical.
+            #expect(try json(Array(prev.prefix(n - 1))) == json(Array(cur.prefix(n - 1))),
+                    "messages[0..<\(n - 1)], turn \(k + 1)")
+            // Turn k-1's user entry carried its <turn_context> block on turn k-1 and is plain now.
+            let prevEntryBlocks = try #require(prev[n - 1]["content"] as? [[String: Any]])
+            let curEntryBlocks = try #require(cur[n - 1]["content"] as? [[String: Any]])
+            #expect((prevEntryBlocks.first?["text"] as? String)?.hasPrefix("<turn_context>") == true)
+            #expect(try json(Array(prevEntryBlocks.dropFirst())) == json(curEntryBlocks),
+                    "turn \(k) entry after dropping <turn_context>")
         }
     }
 }
