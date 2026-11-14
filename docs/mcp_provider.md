@@ -36,13 +36,18 @@ always Iris — a client asking it learns what else has the user's focus, not on
 
 And a messaging/file-exchange surface addressed to Iris itself — `iris_send`/`iris_poll`/
 `iris_discover`/`iris_status`/`artifact_put`, no recipient argument, no tool or method here lets
-one registered client reach another. In this build the surface only stores: `iris_send` writes a
+one registered client reach another. By default the surface only stores: `iris_send` writes a
 message into the mailbox (capped at 500 pending per sender, 16 KiB of text and 8 file references
 per message, swept after a 7-day TTL) and `artifact_put` stores bytes in a content-addressed store
-(8 MiB per object, 200 MiB per client per day, a 2 GiB total cap, also swept after 7 days) — but
-nothing on the Iris side drains a sent message or calls `deliverReply`, so `iris_poll`/`iris_status`
-are always empty and a client never receives a reply. The round trip (Iris actually reading and
-answering) is Phase 2's work, on top of this storage.
+(8 MiB per object, 200 MiB per client per day, a 2 GiB total cap, also swept after 7 days), and
+nothing on the Iris side drains a sent message, so `iris_poll`/`iris_status` stay empty and a client
+never receives a reply. Turning on the guarded `MCP_GUEST_SESSIONS_ENABLED` setting (off by default,
+no Settings toggle yet, a `"true"` written from outside the app does not count, #678) changes that:
+`iris_send` also starts one model turn in that client's own guest session, on the cheapest model
+tier with the two-tool guest floor, and the final answer comes back through `iris_poll`. A client
+gets at most 12 such turns an hour (one more every 5 minutes), one turn at a time, and a turn that
+cannot start (every guest slot taken, or the hourly limit) is a tool error, not a queued message.
+A turn that fails or runs out of time is answered with a short failure message rather than silence.
 
 ## Security posture
 

@@ -486,7 +486,7 @@ final class IrisMCPProviderServer: Sendable {
         }
         tools.append(MCP.Tool(
             name: "iris_send",
-            description: "Send a message to Iris. There is no recipient argument — every message addresses Iris.",
+            description: "Send a message to Iris. There is no recipient argument — every message addresses Iris. Where Iris answers, the reply arrives through iris_poll; if it cannot take the message now the call returns an error and nothing is queued.",
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
