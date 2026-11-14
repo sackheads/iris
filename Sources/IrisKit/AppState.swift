@@ -3104,11 +3104,21 @@ class AppState {
     /// a check and its act would let another session's turn run in between (#480 review).
     func decidePeerSend(to: String, from sender: UUID, replyTarget: UUID?) -> PeerSendDecision {
         let target: UUID
-        if let replyTarget {
-            guard let c = conversations.first(where: { $0.id == replyTarget }), c.isUserFacing
+        // #1066: a guest addresses only what its client was granted, and never through the generic
+        // resolve below, which would let it name `iris`, a session id, a name or a topic.
+        if let guest = conversations.first(where: { $0.id == sender }), guest.isGuest {
+            switch guestTarget(to: to, guest: guest, replyTarget: replyTarget) {
+            case .failure(let refusal): return .refused(refusal.text)
+            case .success(let id): target = id
+            }
+        } else if let replyTarget {
+            guard let c = conversations.first(where: { $0.id == replyTarget }), c.isReplyTarget
             else { return .refused("The session that sent that message is no longer active.") }
             if c.isArchived { return .refused(SessionAddressError.archived.message) }
-            if !to.isEmpty {
+            if c.isGuest {
+                // A guest is hidden and has no address: the reply goes to it by `in_reply_to` alone.
+                guard to.isEmpty else { return .refused("A reply goes to the session that sent the original message; omit `to`.") }
+            } else if !to.isEmpty {
                 switch SessionDirectory.resolve(to, in: conversations, excluding: sender) {
                 case .success(let id) where id == replyTarget: break
                 case .success: return .refused("A reply goes to the session that sent the original message; omit `to` or name that session.")
@@ -3122,6 +3132,7 @@ class AppState {
             case .failure(let e): return .refused(e.message)
             }
         }
+        // (the guest branch above set `target` itself)
         let depth = peerDepth(for: sender) + 1
         let limit = ConfigManager.shared.maxSessionCascade
         guard depth <= limit else {
@@ -3131,6 +3142,44 @@ class AppState {
             return .refused("Not sent: rate limit — this session has sent \(PeerRateLimiter.capacity) messages in quick succession. The next is allowed in about \(Int(wait.rounded(.up)))s.")
         }
         return .allowed(target: target, depth: depth)
+    }
+
+    /// The roles each guest client may address, by client id. Injected so `AppState` imports no
+    /// provider type (`ProviderTokenRegistry.roles(forClientId:)` is the production source). The
+    /// default is empty, so a guest with no provider behind it can reach nobody.
+    @ObservationIgnored var guestRoleAllowlist: (String) -> Set<String> = { _ in [] }
+
+    /// One refusal for every address a guest may not use, so its text says nothing about whether
+    /// the session it named exists, is vacant, or is a guest.
+    struct GuestAddressRefusal: Error, Equatable {
+        static let text = "That address is not available to you. You can message only the roles list_sessions shows you, as role:<name>."
+        var text: String { Self.text }
+    }
+
+    /// The conversation a guest's send reaches: the holder of a `role:<name>` its client was
+    /// granted, or, for a reply, the sender of the original message when that sender is such a
+    /// holder. Anything else is the one refusal above.
+    func guestTarget(to: String, guest: Conversation, replyTarget: UUID?) -> Result<UUID, GuestAddressRefusal> {
+        let refused = Result<UUID, GuestAddressRefusal>.failure(GuestAddressRefusal())
+        let allowed = guest.guestClientId.map(guestRoleAllowlist) ?? []
+        guard !allowed.isEmpty else { return refused }
+        // `role:<name>` only. No prefix match and no fallback: a granted role is matched whole,
+        // after the same normalisation a role is stored under.
+        func grantedHolder(_ address: String) -> UUID? {
+            let raw = address.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard raw.lowercased().hasPrefix("role:"),
+                  let role = SessionRoles.normalizedName(String(raw.dropFirst(5))),
+                  allowed.contains(role) else { return nil }
+            return SessionRoles.holder(of: role, in: conversations)
+        }
+        if let replyTarget {
+            guard let c = conversations.first(where: { $0.id == replyTarget }), SessionRoles.mayHoldRole(c),
+                  let role = c.role, allowed.contains(role) else { return refused }
+            if !to.isEmpty, grantedHolder(to) != replyTarget { return refused }
+            return .success(replyTarget)
+        }
+        guard let holder = grantedHolder(to) else { return refused }
+        return .success(holder)
     }
 
     enum InboxEmitDecision: Equatable {

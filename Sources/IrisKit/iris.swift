@@ -2069,6 +2069,17 @@ actor IrisEngine {
         return .init(heading: awaitingRepliesHeading, body: "Awaiting replies: " + shown.joined(separator: ", ") + more)
     }
 
+    /// A guest's `list_sessions` text: role, name, description, each session-authored value quoted
+    /// and flattened like `renderPeerList`'s.
+    nonisolated static func renderGuestPeerList(_ rows: [GuestPeerRow]) -> String {
+        guard !rows.isEmpty else { return "No sessions are available to you right now." }
+        return rows.map { row in
+            let name = row.name.map { flattenCardField($0, cap: cardNameCap) } ?? "(no name set)"
+            let description = row.description.map { flattenCardField($0, cap: cardDescriptionCap) } ?? "(no description set)"
+            return "role: \(row.role) | name: \"\(name)\" | doing: \"\(description)\""
+        }.joined(separator: "\n")
+    }
+
     /// `list_sessions`'s response body (#185 §6.1): one line per peer, `session_id` spelled out
     /// verbatim since `send_to_session` needs it copied exactly, not inferred from prose.
     nonisolated static func renderPeerList(_ peers: [SessionPeer], total: Int, now: Date = Date()) -> String {
@@ -5826,6 +5837,16 @@ actor IrisEngine {
             // line, and it is this sentence, not the stored `currentWorkspace`, that reaches the
             // model. Flatten only the echo.
             result = "Workspace successfully set to \(Self.flattenToolEcho(currentWorkspace)). You will now load AGENTS.md from this directory." + extraHint
+        } else if functionCall.name == "list_sessions", principal == .mcpGuest {
+            // #1066: a guest sees the granted roles that have a holder, three fields each, and never
+            // the roster, ids, or the count of what else is active.
+            let rows = await MainActor.run { () -> [GuestPeerRow] in
+                guard let s = localState,
+                      let guest = s.conversations.first(where: { $0.id == conversationId }), guest.isGuest,
+                      let clientId = guest.guestClientId else { return [] }
+                return SessionDirectory.peersForGuest(roles: s.guestRoleAllowlist(clientId), in: s.conversations)
+            }
+            result = Self.renderGuestPeerList(rows)
         } else if functionCall.name == "list_sessions" {
             // Defense in depth (#185 review round 2, M2): declaration gating is `principal ==
             // .main` too, but that only stops a well-behaved model from ever seeing the tool.
@@ -5887,7 +5908,7 @@ actor IrisEngine {
             // can neither originate nor extend a cascade." Declaration gating alone does not hold
             // that property — it only stops a model from being offered the tool, not from calling
             // a name the dispatcher will still act on.
-            guard principal == .main else {
+            guard principal == .main || principal == .mcpGuest else {
                 result = "Refused — a subagent is not a session."
                 return result
             }
@@ -5899,13 +5920,21 @@ actor IrisEngine {
                 result = Self.unattendedSessionMessageRefusal
                 return result
             }
-            // 5c §0.2: declared stickily now; with nobody to talk to the call has no meaning.
-            guard await sessionPeerCount(excluding: conversationId) > 0 else {
+            // 5c §0.2: declared stickily now; with nobody to talk to the call has no meaning. Not for
+            // a guest: "nobody is active" would tell it what the roster holds; `decidePeerSend`
+            // answers every guest address with the same refusal.
+            let hasPeers = principal == .mcpGuest ? true : await sessionPeerCount(excluding: conversationId) > 0
+            guard hasPeers else {
                 result = Self.noPeersRefusal
                 return result
             }
             guard !message.trimmingCharacters(in: .whitespaces).isEmpty else {
                 result = "A message is required."
+                return result
+            }
+            // #1066: a guest cannot publish to a topic; its one refusal, before the publish path.
+            if principal == .mcpGuest, Topics.address(to) != nil {
+                result = AppState.GuestAddressRefusal.text
                 return result
             }
             // #696: a topic address is a publish, shorthand for one send per subscriber.

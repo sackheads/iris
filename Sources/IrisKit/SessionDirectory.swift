@@ -155,6 +155,27 @@ enum SessionDirectory {
     }
 }
 
+/// What a guest sees of a session it may message (#1066): the role it addresses and the holder's
+/// card, and nothing else. No id, workspace, status, lane, skills or topics.
+struct GuestPeerRow: Equatable, Sendable {
+    let role: String
+    let name: String?
+    let description: String?
+}
+
+extension SessionDirectory {
+    /// The rows a guest's `list_sessions` returns: one per granted role that has an active holder,
+    /// ordered by role name. A granted role nobody holds is omitted, and so is every session whose
+    /// role was not granted, so the listing cannot be used to find out what else exists.
+    static func peersForGuest(roles: Set<String>, in conversations: [Conversation]) -> [GuestPeerRow] {
+        roles.sorted().compactMap { role in
+            guard let id = SessionRoles.holder(of: role, in: conversations),
+                  let c = conversations.first(where: { $0.id == id }) else { return nil }
+            return GuestPeerRow(role: role, name: c.sessionCard?.name, description: c.sessionCard?.description)
+        }
+    }
+}
+
 enum SessionAddressError: Error, Equatable {
     case notFound, ambiguous(Int), inactive, archived, isSelf, malformed
     /// `role:<name>` with no active holder: the address is well-formed, so the sender can wait or

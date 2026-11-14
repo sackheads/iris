@@ -18,6 +18,10 @@ public final class KeychainManager: @unchecked Sendable {
     /// written here by `issueToken`, but a pre-existing entry under that key is still skipped on
     /// load rather than trusted.
     public static let mcpProviderService = "iris.mcp.provider"
+    /// Per-client role allowlists for MCP guests (#1066), keyed `[clientId: JSON array of role
+    /// names]`. A second item beside `mcpProviderService`, so a token write never rewrites a grant
+    /// and a grant write never rewrites a token; `revokeToken` removes both.
+    public static let mcpProviderRolesService = "iris.mcp.provider.roles"
     public static func pluginService(_ id: String) -> String { "iris.plugin.\(id)" }
 
     /// Under `swift test` the manager uses an in-memory store instead of the real login

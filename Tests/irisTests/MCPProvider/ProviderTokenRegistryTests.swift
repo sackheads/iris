@@ -165,4 +165,89 @@ struct ProviderTokenRegistryTests {
         #expect(registry.isRegistered(clientId: "a"))
         #expect(!registry.isRegistered(clientId: "c"))
     }
+
+    // MARK: guest role grants (#1066)
+
+    private func fresh() -> (KeychainManager, ProviderTokenRegistry) {
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
+        return (keychain, ProviderTokenRegistry(keychain: keychain))
+    }
+
+    @Test("a client holds no roles until granted")
+    func rolesDefaultEmpty() throws {
+        let (_, registry) = fresh()
+        _ = try registry.issueToken(forClientId: "dev-1")
+        #expect(registry.roles(forClientId: "dev-1").isEmpty)
+        #expect(registry.roles(forClientId: "never-seen").isEmpty)
+    }
+
+    @Test("granted roles are normalised, replace the earlier grant, and survive a reload")
+    func rolesSurviveReload() throws {
+        let (keychain, registry) = fresh()
+        _ = try registry.issueToken(forClientId: "dev-1")
+        try registry.setRoles(["Reviewer", " builder "], forClientId: "dev-1")
+        #expect(registry.roles(forClientId: "dev-1") == ["reviewer", "builder"])
+        try registry.setRoles(["builder"], forClientId: "dev-1")
+        #expect(ProviderTokenRegistry(keychain: keychain).roles(forClientId: "dev-1") == ["builder"])
+        try registry.setRoles([], forClientId: "dev-1")
+        #expect(ProviderTokenRegistry(keychain: keychain).roles(forClientId: "dev-1").isEmpty, "an empty set clears the grant")
+    }
+
+    @Test("revoking the token removes the client's roles, in memory and in the Keychain")
+    func revokeRemovesRoles() throws {
+        let (keychain, registry) = fresh()
+        _ = try registry.issueToken(forClientId: "dev-1")
+        _ = try registry.issueToken(forClientId: "dev-2")
+        try registry.setRoles(["reviewer"], forClientId: "dev-1")
+        try registry.setRoles(["builder"], forClientId: "dev-2")
+        try registry.revokeToken(forClientId: "dev-1")
+        #expect(registry.roles(forClientId: "dev-1").isEmpty)
+        let reloaded = ProviderTokenRegistry(keychain: keychain)
+        #expect(reloaded.roles(forClientId: "dev-1").isEmpty)
+        #expect(reloaded.roles(forClientId: "dev-2") == ["builder"], "another client's grant is untouched")
+        // Re-registering the same id does not bring the old grant back.
+        _ = try reloaded.issueToken(forClientId: "dev-1")
+        #expect(reloaded.roles(forClientId: "dev-1").isEmpty)
+    }
+
+    @Test("re-issuing a token keeps the client's grant")
+    func reissueKeepsRoles() throws {
+        let (_, registry) = fresh()
+        _ = try registry.issueToken(forClientId: "dev-1")
+        try registry.setRoles(["reviewer"], forClientId: "dev-1")
+        _ = try registry.issueToken(forClientId: "dev-1")
+        #expect(registry.roles(forClientId: "dev-1") == ["reviewer"])
+    }
+
+    @Test("a client id that fails the shape check, or is reserved, cannot hold roles; a bad role name changes nothing")
+    func badInputsHoldNothing() throws {
+        let (_, registry) = fresh()
+        for bad in ["Iris", "ir\u{200B}is", "has/slash", "", String(repeating: "a", count: 65)] {
+            #expect(throws: ProviderTokenRegistry.RegistryError.invalidClientId) { try registry.setRoles(["reviewer"], forClientId: bad) }
+            #expect(registry.roles(forClientId: bad).isEmpty)
+        }
+        #expect(throws: ProviderTokenRegistry.RegistryError.reservedClientId) { try registry.setRoles(["reviewer"], forClientId: "iris") }
+        _ = try registry.issueToken(forClientId: "dev-1")
+        try registry.setRoles(["reviewer"], forClientId: "dev-1")
+        for bad in ["iris", "clear", "has space", "", "UPPER_case", String(repeating: "a", count: 33)] {
+            #expect(throws: ProviderTokenRegistry.RegistryError.invalidRole) { try registry.setRoles(["builder", bad], forClientId: "dev-1") }
+        }
+        #expect(registry.roles(forClientId: "dev-1") == ["reviewer"], "a rejected call changed nothing")
+    }
+
+    @Test("the load path drops a stored grant that is malformed, for an unusable client id, or for a role that does not normalise")
+    func loadDropsBadGrants() throws {
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
+        try keychain.updateSecretsOrThrow(service: KeychainManager.mcpProviderRolesService) { dict in
+            dict["good"] = #"["Reviewer","iris","bad name"]"#
+            dict["Iris"] = #"["reviewer"]"#
+            dict["iris"] = #"["reviewer"]"#
+            dict["has/slash"] = #"["reviewer"]"#
+            dict["garbled"] = "not json"
+            dict["only-bad"] = #"["iris","clear"]"#
+        }
+        let registry = ProviderTokenRegistry(keychain: keychain)
+        #expect(registry.roles(forClientId: "good") == ["reviewer"])
+        for id in ["Iris", "iris", "has/slash", "garbled", "only-bad"] { #expect(registry.roles(forClientId: id).isEmpty, "\(id)") }
+    }
 }
