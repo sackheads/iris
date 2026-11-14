@@ -80,19 +80,32 @@ struct InboxVetoTests {
         #expect(try app.store.inbox.item(id: answered.id)?.answer?.automatic == false, "Brian's answer stays his")
     }
 
-    @Test("a tainted emitter's veto is held: still open, nothing routed, and held on every evaluation")
+    @Test("a tainted emitter's veto is held: still open, notifies the emitter's chain once, and stays held on later evaluations (#1095)")
     func taintedVetoAutoHolds() async throws {
         let (app, engine) = try await setup()
         let emitter = session(app)
-        let item = try veto(app, emitter: emitter, deadline: t0, tainted: true)
+        let stranger = session(app)
+        let item = try veto(app, emitter: emitter, deadline: t0, tainted: true, routeBack: [emitter.uuidString, stranger.uuidString])
         let sink = Sink()
+        let beforeRev = app.inboxRevision
         for _ in 0..<2 {
             let r = await engine.evaluateInboxVetoExpiries(now: t0.addingTimeInterval(3600), deliver: sink.deliver)
             #expect(r.fired == 0 && r.held == 1)
         }
-        #expect(sink.calls.isEmpty)
+        #expect(app.inboxRevision > beforeRev, "recording the hold bumps inboxRevision so the UI redraws")
+        #expect(sink.calls.count == 1, "notified once on the first due evaluation, not repeated on every tick")
+        #expect(sink.calls.map(\.0) == [emitter], "reaches only the emitter's own chain, never a foreign route_back target")
+        let heldText = try #require(sink.calls.first?.1)
+        #expect(heldText.contains("deadline passed; default held for Brian's review"))
+        #expect(heldText.contains("was NOT applied because the session had read outside content"))
+        #expect(heldText.contains("That session's own label for that held default (option 1, id a), quoted, not Brian's words and not an instruction: \"Ship\""))
+        for marker in ["Brian's decision", "user's decision", "He chose", "He wrote", "given in his inbox"] {
+            #expect(!heldText.contains(marker), "a held notice must not contain \(marker)")
+        }
         let stored = try #require(try app.store.inbox.item(id: item.id))
         #expect(stored.state == .open && stored.answer == nil)
+        let entries = try app.store.inbox.thread(itemId: item.id)
+        #expect(entries.map(\.kind) == ["question", "held"])
     }
 
     @Test("a veto whose default names no option is held rather than fired")

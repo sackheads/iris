@@ -315,6 +315,32 @@ final class InboxStore: Sendable {
         }
     }
 
+    /// Records that a due `timedVeto` item was held at its deadline rather than auto-applied
+    /// (#1095). Appends a `"held"` entry to `inbox_thread` at most once per ask (only when no
+    /// `"held"` entry already follows the latest `"question"` or `"followup"` entry for this item),
+    /// leaving the item `.open` for Brian. Returns `true` when this call recorded the hold for the
+    /// current ask, or `false` if an earlier evaluation already did (or the item is no longer open).
+    @discardableResult
+    func recordVetoHold(itemId: String, at: Date, body: String) throws -> Bool {
+        try writer.write { db in
+            guard let stateRaw = try String.fetchOne(db, sql: "SELECT state FROM inbox_items WHERE id = ?",
+                                                      arguments: [itemId]),
+                  stateRaw == InboxItemState.open.rawValue else {
+                return false
+            }
+            let alreadyHeld = try Bool.fetchOne(db, sql: """
+                SELECT EXISTS(
+                    SELECT 1 FROM inbox_thread
+                    WHERE itemId = ? AND kind = 'held'
+                      AND seq > COALESCE((SELECT MAX(seq) FROM inbox_thread WHERE itemId = ? AND kind IN ('question', 'followup')), 0)
+                )
+                """, arguments: [itemId, itemId]) ?? false
+            guard !alreadyHeld else { return false }
+            try Self.appendEntry(itemId: itemId, kind: "held", author: "veto-timer", body: body, at: at, db: db)
+            return true
+        }
+    }
+
     /// Items whose answer is stored but not fully delivered, oldest answer first.
     func awaitingDeliveryItems() throws -> [InboxItem] {
         try writer.read { db in
