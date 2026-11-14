@@ -90,8 +90,8 @@ struct JobProfileTests {
                     Comment(rawValue: name))
             #expect(!JobProfile.readOnlyAllowed.contains(name), Comment(rawValue: name))
         }
-        for name in ["read_file", "search_web", "search_memory", "reflect", "list_jobs",
-                     "get_job_run", "gmail_list_unread", "google_calendar_list_events"] {
+        for name in ["read_file", "search_web", "search_memory", "reflect", IrisEngine.currentTimeTool,
+                     "list_jobs", "get_job_run", "gmail_list_unread", "google_calendar_list_events"] {
             #expect(!JobProfile.readOnlyDenies(name, sandboxedRunCommand: false, readOnlyMCPTools: []),
                     Comment(rawValue: name))
         }
@@ -141,7 +141,7 @@ struct JobProfileTests {
         try await fire(job(), client: client, store: store, state: app)
 
         let names = Set(client.requests.first?.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? [])
-        #expect(names == ["read_file", "search_web", "search_memory", "reflect"])
+        #expect(names == ["read_file", "search_web", "search_memory", "reflect", IrisEngine.currentTimeTool])
         // The property behind the equality: whatever a future config change adds to the surface,
         // every name on it has to be one the gate itself allows.
         #expect(names.allSatisfy { !JobProfile.readOnlyDenies($0, sandboxedRunCommand: true,

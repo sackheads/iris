@@ -91,7 +91,7 @@ struct ToolExecutor {
         var tools = [
             FunctionDeclaration(
             name: "run_command",
-            description: "Executes a shell command. Use this for standard operations. To wait for something, use set_alarm; a `sleep` here holds the whole session. When the command exits on the host, any background process still holding its output pipes is killed; redirect its output (`cmd > log 2>&1 &`) to keep it running. Output over 32 KB keeps its first 24 KB and last 8 KB; for all of it, redirect to a file and read it in parts with read_file's start_line and line_count.",
+            description: "Executes a shell command. Use this for standard operations. To wait for something, use set_alarm; a `sleep` here holds the whole session. For the current time, use current_time rather than `date`. When the command exits on the host, any background process still holding its output pipes is killed; redirect its output (`cmd > log 2>&1 &`) to keep it running. Output over 32 KB keeps its first 24 KB and last 8 KB; for all of it, redirect to a file and read it in parts with read_file's start_line and line_count.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
