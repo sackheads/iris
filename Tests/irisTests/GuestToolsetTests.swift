@@ -41,7 +41,8 @@ struct GuestToolsetTests {
         let client = CapturingLLMClient(reply: "ok")
         let engine = IrisEngine(state: app, tier: .medium, principal: principal, client: client, retryDelays: [],
                                 protectionEnabled: false, sessionPeerCount: 3, declareStateGatedTools: true,
-                                stickyTools: true, hooks: hooks)
+                                stickyTools: true, hooks: hooks,
+                                guestClientId: principal == .mcpGuest ? "dev-1" : nil)
         await engine.processInput("hello", source: "UI", conversationId: id)
         return client.requests.first?.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? []
     }
