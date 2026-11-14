@@ -47,6 +47,8 @@ final class MCPProviderRuntime {
     private(set) var guestSessions: GuestSessionRegistry?
     /// Runs guest turns for `iris_send`; nil until `start()` has built the server.
     private(set) var guestDriver: GuestSessionDriver?
+    /// The driver the running server was handed; a test checks it is the one `start()` built.
+    var serverGuestDriver: GuestSessionDriver? { server?.guestDriver }
 
     /// Production defaults read the real settings, Keychain and home; a test injects its own.
     init(isEnabled: @escaping @MainActor () -> Bool = { ConfigManager.shared.mcpProviderEnabled },

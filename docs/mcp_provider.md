@@ -44,7 +44,7 @@ nothing on the Iris side drains a sent message, so `iris_poll`/`iris_status` sta
 never receives a reply. Turning on the guarded `MCP_GUEST_SESSIONS_ENABLED` setting (off by default,
 no Settings toggle yet, a `"true"` written from outside the app does not count, #678) changes that:
 `iris_send` also starts one model turn in that client's own guest session, on the cheapest model
-tier with the two-tool guest floor, and the final answer comes back through `iris_poll`. A client
+tier with the two-tool guest floor, and the final answer comes back through `iris_poll`. Only the message text reaches that session: file references are stored and granted as before, but are not shown to it. A client
 gets at most 12 such turns an hour (one more every 5 minutes), one turn at a time, and a turn that
 cannot start (every guest slot taken, or the hourly limit) is a tool error, not a queued message.
 A turn that fails or runs out of time is answered with a short failure message rather than silence.

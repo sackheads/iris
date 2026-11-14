@@ -38,7 +38,7 @@ final class IrisMCPProviderServer: Sendable {
     private let closeGuestSession: @Sendable (String) async -> Void
     /// Runs `iris_send` as a guest turn when guest sessions are on (#1066 Task 8); nil keeps the
     /// Phase 1 mailbox-only behaviour.
-    private let guestDriver: GuestSessionDriver?
+    let guestDriver: GuestSessionDriver?
     /// Test-only seam: called with each per-request `Server` and `StatelessHTTPServerTransport`
     /// right after construction, before `start()`/`stop()`. An instance property, not a mutable
     /// static — a static hook is one process-global shared across every `IrisMCPProviderServer`
@@ -440,7 +440,7 @@ final class IrisMCPProviderServer: Sendable {
         // guest session, and the reply comes back through `iris_poll`. A refused turn is a tool
         // error and the message is retracted, so nothing is left queued behind it.
         if let guestDriver {
-            switch await guestDriver.submit(text: text, from: clientId) {
+            switch await guestDriver.submit(text: text, from: clientId, storedMessageId: message.id) {
             case .accepted, .disabled:
                 break
             case .busy:
@@ -486,7 +486,7 @@ final class IrisMCPProviderServer: Sendable {
         }
         tools.append(MCP.Tool(
             name: "iris_send",
-            description: "Send a message to Iris. There is no recipient argument — every message addresses Iris. Where Iris answers, the reply arrives through iris_poll; if it cannot take the message now the call returns an error and nothing is queued.",
+            description: "Send a message to Iris. There is no recipient argument — every message addresses Iris. Where Iris answers, the reply arrives through iris_poll; if it cannot take the message now the call returns an error and nothing is queued. Only the text is read: fileRefs are stored but not shown to the answering session.",
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([

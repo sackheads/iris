@@ -71,6 +71,23 @@ struct MCPProviderRuntimeStartTests {
         #expect(runtime.guestSessions == nil)
     }
 
+    @Test("a running provider hands its guest driver to the server, and with the setting off a send starts nothing (#1066)")
+    func serverGetsTheDriver() async throws {
+        let app = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
+        let guests = GuestSessionRegistry(state: app) { s, c in IrisEngine.makeGuestEngine(state: s, clientId: c, protectionEnabled: false) }
+        let tokens = Self.registry()
+        _ = try tokens.issueToken(forClientId: "dev-1")
+        let runtime = MCPProviderRuntime(isEnabled: { true }, makeRegistry: { tokens }, configuredPort: { 0 },
+                                         artifactRoot: Self.tempRoot(), report: { _ in }, makeGuestRegistry: { guests })
+        await runtime.start()
+        defer { Task { await runtime.stop() } }
+        let driver = try #require(runtime.guestDriver)
+        #expect(runtime.serverGuestDriver === driver)
+        #expect(!driver.isActive, "the setting is off by default")
+        #expect(await driver.submit(text: "hi", from: "dev-1") == .disabled)
+        #expect(guests.liveCount == 0)
+    }
+
     @Test("stopping the provider closes its live guest sessions (#1066)")
     func stopClosesLiveGuestSessions() async throws {
         let app = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
