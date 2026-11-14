@@ -448,6 +448,11 @@ struct ChatView: View {
                             .transition(Motion.slide())
                     }
 
+                    if !state.pendingUserItems(for: conv.id).isEmpty {
+                        PendingMessagesChip(state: state, conversationId: conv.id)
+                            .transition(Motion.slide())
+                    }
+
                     SpectrumLine(active: state.isThinking(in: conv.id))
 
                     // #779: above the LED bar, outside its `if`, so it shows with the LEDs hidden.
@@ -1126,7 +1131,7 @@ struct ChatView: View {
         return handled
     }
 
-    private func submit() {
+    private func submit(queue: Bool = false) {
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !draftAttachments.isEmpty else { return }
         selectedMessageIDs.removeAll()
@@ -1142,7 +1147,7 @@ struct ChatView: View {
         inputText = result.newInput
         stashedPrompt = result.newStash
 
-        state.sendMessage(result.send, attachments: attachments)
+        state.sendMessage(result.send, attachments: attachments, queue: queue)
     }
 
     /// Escape behavior shared by the message list (`.onExitCommand`) and the composer:
@@ -1196,7 +1201,7 @@ struct ChatView: View {
                 .help("Attach Files")
                 .padding(.bottom, 8)
 
-                ComposerTextView(text: $inputText, onSubmit: submit, emoji: emojiModel, slash: slashModel, onEscape: handleEscape, onStash: handleStash, onHeightChange: { composerHeight = $0 }, focusTrigger: $composerShouldFocus, onPasteAttachments: appendAttachments)
+                ComposerTextView(text: $inputText, onSubmit: { submit(queue: false) }, onQueueSubmit: { submit(queue: true) }, emoji: emojiModel, slash: slashModel, onEscape: handleEscape, onStash: handleStash, onHeightChange: { composerHeight = $0 }, focusTrigger: $composerShouldFocus, onPasteAttachments: appendAttachments)
                     .frame(height: min(max(composerHeight, 24), 120))
                     .onAppear { emojiModel.defaultTone = SkinTone(rawValue: config.defaultEmojiSkinTone) ?? .none }
                     .onChange(of: config.defaultEmojiSkinTone) { _, new in
@@ -1210,12 +1215,16 @@ struct ChatView: View {
                             .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
                     )
 
-                Button(action: submit) {
+                Button(action: {
+                    let mods = NSApp.currentEvent?.modifierFlags.intersection([.command, .option]) ?? []
+                    submit(queue: !mods.isEmpty)
+                }) {
                     Image(systemName: "paperplane.fill")
                         .foregroundColor(isSendDisabled ? .secondary : .irisIndigo)
                 }
                 .buttonStyle(.plain)
                 .disabled(isSendDisabled)
+                .help("Send (Return — steers running turn; ⌘-Return or ⌘/⌥-click queues for next turn)")
                 .padding(.bottom, 8)
             }
         }
@@ -2140,6 +2149,64 @@ struct LoopChip: View {
                 }
             }
             .padding(8)
+    }
+}
+
+/// Strip above the composer showing unconsumed mid-turn user messages (#1064), each marked
+/// `"Steer"` (delivered at the next model round) or `"Queued"` (held until the running turn ends)
+/// with a cancel button that removes both the pending entry and its user bubble. Height-capped
+/// with `ScrollView` + `.frame(maxHeight: 120)` + `.fixedSize(horizontal: false, vertical: true)`
+/// (Invariant 8).
+struct PendingMessagesChip: View {
+    let state: AppState
+    let conversationId: UUID
+
+    private var items: [AppState.PendingUserItem] {
+        state.pendingUserItems(for: conversationId)
+    }
+
+    var body: some View {
+        ScrollView { content }
+            .frame(maxHeight: 120)
+            .fixedSize(horizontal: false, vertical: true)
+            .background(Color.accentColor.opacity(0.06))
+            .cornerRadius(8)
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Pending messages, \(items.count)")
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(items) { item in
+                HStack(spacing: 8) {
+                    Text(item.isQueued ? "Queued" : "Steer")
+                        .font(.caption2.bold())
+                        .foregroundColor(item.isQueued ? .orange : .irisIndigo)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background((item.isQueued ? Color.orange : Color.irisIndigo).opacity(0.14))
+                        .cornerRadius(4)
+                    Text(verbatim: item.summary)
+                        .font(.caption)
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer(minLength: 4)
+                    Button {
+                        state.cancelPendingUserMessage(id: item.id, in: conversationId)
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Cancel pending message")
+                    .accessibilityLabel("Cancel \(item.isQueued ? "queued" : "steer") message")
+                }
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
     }
 }
 

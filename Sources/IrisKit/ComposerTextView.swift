@@ -55,11 +55,12 @@ enum HostedTextAppearance {
 }
 
 /// An NSTextView-backed chat composer. Replaces the SwiftUI TextField so the true
-/// caret is available for emoji shortcode handling. Preserves Enter = send and
-/// Shift+Enter = newline.
+/// caret is available for emoji shortcode handling. Preserves Enter = send (steer while a turn
+/// is running), Cmd+Enter = send queued for after the running turn (#1064), and Shift+Enter = newline.
 struct ComposerTextView: NSViewRepresentable {
     @Binding var text: String
     var onSubmit: () -> Void
+    var onQueueSubmit: () -> Void = {}
     var emoji: EmojiTokenModel
     var slash: SlashCommandModel
     var onEscape: () -> Void = {}
@@ -252,6 +253,15 @@ extension NSEvent {
         charactersIgnoringModifiers?.lowercased() == "s"
             && modifierFlags.intersection(.deviceIndependentFlagsMask) == .command
     }
+
+    /// Whether this key event is Cmd-Return / Cmd-Enter with no Shift, Option, or Control modifier
+    /// (#1064: submit as queued for the next turn rather than steering the running turn). Masks only
+    /// `[.command, .shift, .option, .control]` so numpad Enter (`keyCode == 76`, which sets
+    /// `.numericPad` inside `.deviceIndependentFlagsMask`) works with Command too.
+    var isQueueSubmitShortcut: Bool {
+        (keyCode == 36 || keyCode == 76)
+            && modifierFlags.intersection([.command, .shift, .option, .control]) == .command
+    }
 }
 
 /// The composer's `NSTextView`, tracked weakly so the MCP self-report door (#1067) can ask whether
@@ -324,6 +334,8 @@ final class KeyCatchingTextView: NSTextView {
                 insertNewline(nil)                      // Option/Ctrl+Enter → newline (from PR #24)
             } else if coordinator.handleNavKey(.enter) {
                 return                                   // popup consumed it (emoji commit)
+            } else if event.isQueueSubmitShortcut {
+                coordinator.parent.onQueueSubmit()      // Cmd+Enter → submit queued (#1064)
             } else {
                 coordinator.parent.onSubmit()
             }

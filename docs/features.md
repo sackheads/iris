@@ -20,7 +20,7 @@ Iris's answer appears as the model writes it, on Gemini (including Vertex), Anth
 
 ### Steer a Running Turn
 
-Sending a message while Iris is still working does not start a second, tangled turn. The message is handed to the running turn at its next model round, after the tool results, so Iris can change course mid-task; a message with attachments waits and runs as the next turn. A turn that is stopped or fails leaves a marker in the model's history, so Iris does not quietly resume the old request when you ask something new.
+Sending a message while Iris is still working does not start a second, tangled turn. By default (`Return`), a text message steers the running turn at its next model round, after the tool results, so Iris can change course mid-task; pressing `⌘-Return` (or `⌘`/`⌥`-clicking the send button) queues the message so it waits until the running turn finishes and then runs as the next turn (consecutive queued messages merge into that turn), just as a message with attachments does. While a message is still waiting to be read, a strip above the composer shows whether it is set to **Steer** or **Queued** and lets you cancel it before it is consumed. A turn that is stopped or fails leaves a marker in the model's history, so Iris does not quietly resume the old request when you ask something new.
 
 ### Per-Conversation Store
 

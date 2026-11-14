@@ -66,4 +66,42 @@ struct ComposerStashShortcutTests {
         let tv = KeyCatchingTextView()
         #expect(tv.acceptsFirstMouse(for: nil))
     }
+
+    @Test("Cmd-Return and Cmd-Enter match isQueueSubmitShortcut, and other modifiers do not (#1064)")
+    func queueSubmitShortcutMatching() {
+        #expect(keyEvent(characters: "\r", flags: .command, keyCode: 36).isQueueSubmitShortcut)
+        #expect(keyEvent(characters: "\u{03}", flags: [.command, .numericPad], keyCode: 76).isQueueSubmitShortcut)
+        #expect(keyEvent(characters: "\r", flags: [], keyCode: 36).isQueueSubmitShortcut == false)
+        #expect(keyEvent(characters: "\r", flags: [.command, .shift], keyCode: 36).isQueueSubmitShortcut == false)
+        #expect(keyEvent(characters: "\r", flags: [.command, .option], keyCode: 36).isQueueSubmitShortcut == false)
+        #expect(keyEvent(characters: "\r", flags: [.command, .control], keyCode: 36).isQueueSubmitShortcut == false)
+    }
+
+    @Test("KeyCatchingTextView routes Return to onSubmit and Cmd-Return to onQueueSubmit (#1064)")
+    func keyCatchingTextViewRoutesQueueSubmit() {
+        var submitCount = 0
+        var queueSubmitCount = 0
+        var text = "hello"
+        let binding = Binding(get: { text }, set: { text = $0 })
+        let composer = ComposerTextView(text: binding,
+                                        onSubmit: { submitCount += 1 },
+                                        onQueueSubmit: { queueSubmitCount += 1 },
+                                        emoji: EmojiTokenModel(),
+                                        slash: SlashCommandModel())
+        let coordinator = composer.makeCoordinator()
+        let tv = KeyCatchingTextView()
+        tv.coordinator = coordinator
+
+        tv.keyDown(with: keyEvent(characters: "\r", flags: [], keyCode: 36))
+        #expect(submitCount == 1)
+        #expect(queueSubmitCount == 0)
+
+        tv.keyDown(with: keyEvent(characters: "\r", flags: .command, keyCode: 36))
+        #expect(submitCount == 1)
+        #expect(queueSubmitCount == 1)
+
+        tv.keyDown(with: keyEvent(characters: "\u{03}", flags: [.command, .numericPad], keyCode: 76))
+        #expect(submitCount == 1)
+        #expect(queueSubmitCount == 2)
+    }
 }
