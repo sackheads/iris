@@ -275,17 +275,18 @@ final class ComposerFocusKeeper {
     }
 
     /// What the composer's glyphs would be drawn with: its resolved appearance name and the
-    /// foreground colour of its typing attributes, resolved against that appearance. #1052's
-    /// logs have the appearance name; the paint colour is the part nobody has captured. The
-    /// colour only, never the text.
+    /// foreground colour of its typing attributes and `textColor`, resolved under the ambient
+    /// drawing appearance (#1127: wrapping in `composer.effectiveAppearance.performAsCurrentDrawingAppearance`
+    /// masked dynamic catalog colours that resolved to black when drawn under an ambient light
+    /// `currentDrawingAppearance`). The colour only, never the text.
     private static func paint(of composer: NSTextView) -> String {
-        var rgb = "none"
-        composer.effectiveAppearance.performAsCurrentDrawingAppearance {
-            if let colour = (composer.typingAttributes[.foregroundColor] as? NSColor)?.usingColorSpace(.deviceRGB) {
-                rgb = String(format: "%.2f,%.2f,%.2f", colour.redComponent, colour.greenComponent, colour.blueComponent)
-            }
+        func resolveAmbient(_ color: NSColor?) -> String {
+            guard let rgb = color?.usingColorSpace(.deviceRGB) else { return "none" }
+            return String(format: "%.2f,%.2f,%.2f", rgb.redComponent, rgb.greenComponent, rgb.blueComponent)
         }
-        return "appearance=\(composer.effectiveAppearance.name.rawValue) typingFG=\(rgb)"
+        let typing = resolveAmbient(composer.typingAttributes[.foregroundColor] as? NSColor)
+        let text = resolveAmbient(composer.textColor)
+        return "appearance=\(composer.effectiveAppearance.name.rawValue) typingFG=\(typing) textFG=\(text)"
     }
 
     // MARK: - Reading the window

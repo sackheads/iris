@@ -46,11 +46,50 @@ enum HostedTextAppearance {
         return NSAppearance(named: plainName(for: scheme))
     }
 
+    /// Resolves `NSColor.labelColor` under `appearance` into a concrete (non-dynamic) sRGB `NSColor`
+    /// (#1127). Leaving `tv.textColor` / `typingAttributes[.foregroundColor]` as a dynamic catalog
+    /// color (`NSColor.textColor` or `NSColor.labelColor`) allowed AppKit / TextKit to resolve it
+    /// against an ambient light `NSAppearance.currentDrawingAppearance` at attribute-fixup or layer
+    /// draw time even when `effectiveAppearance` was `DarkAqua`, painting black text on dark. A
+    /// concrete sRGB color has no dynamic catalog lookup left to misfire.
+    @MainActor
+    static func concreteTextColor(for appearance: NSAppearance, scheme: ColorScheme) -> NSColor {
+        var resolved: NSColor?
+        appearance.performAsCurrentDrawingAppearance {
+            if let rgb = NSColor.labelColor.usingColorSpace(.sRGB) {
+                resolved = NSColor(srgbRed: rgb.redComponent, green: rgb.greenComponent,
+                                   blue: rgb.blueComponent, alpha: rgb.alphaComponent)
+            }
+        }
+        if let resolved { return resolved }
+        return scheme == .dark
+            ? NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
+            : NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)
+    }
+
+    /// Applies the concrete sRGB text color for `appearance`/`scheme` to `textView`'s properties,
+    /// `typingAttributes`, and any existing characters in `textStorage` (#1127).
+    @MainActor
+    static func applyTextColor(to textView: NSTextView, appearance: NSAppearance, scheme: ColorScheme) {
+        let color = concreteTextColor(for: appearance, scheme: scheme)
+        textView.textColor = color
+        textView.insertionPointColor = color
+        var attrs = textView.typingAttributes
+        attrs[.foregroundColor] = color
+        textView.typingAttributes = attrs
+        if let storage = textView.textStorage, storage.length > 0 {
+            storage.addAttribute(.foregroundColor, value: color, range: NSRange(location: 0, length: storage.length))
+        }
+    }
+
     @MainActor
     static func apply(to view: NSView, scheme: ColorScheme) {
         guard let wanted = pinned(for: view, scheme: scheme) else { return }
         // Only on a change: assigning `appearance` invalidates the view's drawing.
         if view.appearance?.name != wanted.name { view.appearance = wanted }
+        if let tv = (view as? NSScrollView)?.documentView as? NSTextView ?? (view as? NSTextView) {
+            applyTextColor(to: tv, appearance: wanted, scheme: scheme)
+        }
     }
 }
 
@@ -73,6 +112,11 @@ struct ComposerTextView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSScrollView {
         let tv = KeyCatchingTextView()
+        // #1127: `NSTextView()` starts on TextKit 2, and `measureHeight` below bails out while
+        // `bounds.width == 0`, so touching `tv.layoutManager` only after layout caused a live
+        // TextKit 2 → TextKit 1 compatibility downgrade after the view attached to the window.
+        // Force TextKit 1 up front before setting text, attributes, or window attachment.
+        _ = tv.layoutManager
         tv.delegate = context.coordinator
         tv.coordinator = context.coordinator
         tv.string = text
@@ -102,7 +146,6 @@ struct ComposerTextView: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let tv = nsView.documentView as? NSTextView else { return }
-        HostedTextAppearance.apply(to: nsView, scheme: context.environment.colorScheme)
         context.coordinator.parent = self
         let textChanged = (tv.string != text)
         if textChanged {
@@ -110,6 +153,7 @@ struct ComposerTextView: NSViewRepresentable {
             let len = (text as NSString).length
             tv.setSelectedRange(NSRange(location: len, length: 0))
         }
+        HostedTextAppearance.apply(to: nsView, scheme: context.environment.colorScheme)
         // Only re-measure on a real content/width change. Measuring on every update pass
         // (including the ones our own height write triggers) is an AttributeGraph cycle.
         context.coordinator.measureHeight(tv, force: textChanged)
@@ -320,6 +364,16 @@ final class KeyCatchingTextView: NSTextView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         DiagnosticEventRing.shared.record(.composerAppearanceChanged(name: effectiveAppearance.name.rawValue))
+    }
+
+    override func didChangeText() {
+        if let color = textColor {
+            typingAttributes[.foregroundColor] = color
+            if let storage = textStorage, storage.length > 0 {
+                storage.addAttribute(.foregroundColor, value: color, range: NSRange(location: 0, length: storage.length))
+            }
+        }
+        super.didChangeText()
     }
 
     override func keyDown(with event: NSEvent) {

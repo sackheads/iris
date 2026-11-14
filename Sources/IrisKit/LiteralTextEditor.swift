@@ -33,9 +33,10 @@ struct LiteralTextEditor: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.text = $text
+        if let tv = scroll.documentView as? NSTextView, tv.string != text {
+            tv.string = text
+        }
         HostedTextAppearance.apply(to: scroll, scheme: context.environment.colorScheme)
-        guard let tv = scroll.documentView as? NSTextView, tv.string != text else { return }
-        tv.string = text
     }
 
     @MainActor
