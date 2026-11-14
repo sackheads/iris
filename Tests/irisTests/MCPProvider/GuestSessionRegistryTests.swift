@@ -183,6 +183,8 @@ struct GuestSessionRegistryTests {
         let named = CapturingLLMClient(reply: "x")
         let namedEngine = IrisEngine.makeGuestEngine(state: app, clientId: "a", client: named, protectionEnabled: false)
         await namedEngine.processInput("hi", source: "UI", conversationId: noId)
+        // Neither side names a client: nil must not equal nil.
+        await anonEngine.processInput("hi", source: "UI", conversationId: noId)
         #expect(anon.requests.isEmpty && named.requests.isEmpty)
     }
 
