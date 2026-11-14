@@ -195,6 +195,10 @@ arc) — inline `DataPart`/`FilePart` bytes on `send`, or an `artifact_put` MCP 
 
 ### 3.2 The delivery path — and which authority the receiving turn runs under
 
+> **Built as (#1066, Phase 2):** guest sessions — see [mcp_provider.md#guest-sessions](../mcp_provider.md#guest-sessions)
+> and [2026-11-12-mcp-guest-sessions-design.md](2026-11-12-mcp-guest-sessions-design.md). The
+> options below are the open fork as it stood before that decision.
+
 `a2aRemote` delivers a task into a fresh, isolated, off-foreground session (confined, three-tier
 path/tool policy, approval-capable — it is *not* stateless; it reads files under auto-allowed
 dirs, with `session_search` and raw `fact_store` hard-blocked). The dev-team value differs in
