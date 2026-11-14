@@ -108,6 +108,14 @@ class ConfigManager: @unchecked Sendable {
         didSet { store.set(showModelLEDs, forKey: "SHOW_MODEL_LEDS") }
     }
 
+    /// #1100 — when true, the floating thought-bubble overlay opens automatically while Iris emits
+    /// thinking text (fading out as soon as reply tokens stream or the user types in the composer).
+    /// Off by default: hovering or clicking the thinking status line opens the bubble, and its pin
+    /// button toggles this preference.
+    var autoShowThinkingBubble: Bool {
+        didSet { store.set(autoShowThinkingBubble, forKey: "AUTO_SHOW_THINKING_BUBBLE") }
+    }
+
     /// Slice D3 — when true (the default), a checkpoint the grader passes cleanly advances without
     /// stopping the human. False forces every checkpoint to pause, which is pre-D3 behaviour.
     var checkpointAutoAdvance: Bool {
@@ -668,6 +676,7 @@ class ConfigManager: @unchecked Sendable {
         } else {
             self.showModelLEDs = true
         }
+        self.autoShowThinkingBubble = saved.bool(forKey: "AUTO_SHOW_THINKING_BUBBLE")
         if saved.object(forKey: "STREAM_RESPONSES") != nil {
             self.streamResponses = saved.bool(forKey: "STREAM_RESPONSES")
         } else {
