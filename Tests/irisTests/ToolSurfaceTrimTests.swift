@@ -55,7 +55,9 @@ struct ToolSurfaceTrimTests {
         #expect(names.contains("run_command"))
         // 18 -> 19 for `set_alarm` (#1022): a model-initiated wait has no trigger to gate on, so it
         // is declared on every attended main turn, as `schedule_job` is; the planner accepted the cost.
-        #expect(names.count <= 19, "expected the plain-turn surface to shrink from 30; got \(names.count): \(names)")
+        // 19 -> 20 for `current_time` (#1093): wall-clock time on demand so plain turns keep an
+        // empty <turn_context> and sessions need not shell out to `date`.
+        #expect(names.count <= 20, "expected the plain-turn surface to shrink from 30; got \(names.count): \(names)")
         // #187 §0.5, invariant 6: search_conversations and read_conversation (like list_jobs/
         // get_job_run before them) are declared only in the pinned conversation, so a plain,
         // unpinned turn's count must not grow when either is added.

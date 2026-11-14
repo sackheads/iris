@@ -437,7 +437,7 @@ actor IrisEngine {
         return composed
     }
 
-    /// Wall time for the system prompt's date line and the turn context's time section; a test sets it to pin or roll the clock.
+    /// Wall time for the system prompt's date line and `current_time`; a test sets it to pin or roll the clock.
     private var wallClock: @Sendable () -> Date = { Date() }
     func setWallClockForTesting(_ clock: @escaping @Sendable () -> Date) { wallClock = clock }
 
@@ -698,6 +698,15 @@ actor IrisEngine {
         ], required: ["delay_seconds", "note"]))
     /// What a `set_alarm` call is told when it is not an attended main turn.
     nonisolated static let alarmUnavailableRefusal = "Not available: an alarm wakes a conversation someone is in, so only the main agent's attended turns can set one."
+
+    /// Wall-clock time on demand (#1093), so the model need not shell out to `date` (which spawns a
+    /// process or container and taints the session as outside content) and `<turn_context>` stays
+    /// empty on plain turns (preserving the whole-request prompt cache across turns).
+    nonisolated static let currentTimeTool = "current_time"
+    nonisolated static let currentTimeDeclaration = FunctionDeclaration(
+        name: currentTimeTool,
+        description: "Return the current wall-clock time in UTC (ISO 8601) and the user's local time zone. Use this instead of `date` in `run_command`.",
+        parameters: Schema(type: "OBJECT", properties: [:], required: []))
 
     /// What a `schedule_next_tick` call is told without a self-paced loop in its conversation.
     nonisolated static let noSelfPacedLoopRefusal = "Not available: this conversation has no self-paced /loop, so there is no next tick to schedule. Only `/loop <prompt>` with no interval is paced this way."
@@ -1980,25 +1989,23 @@ actor IrisEngine {
 
     /// Today's date in the user's time zone, as the last line of the system prompt (#951). Whole
     /// days, so the prompt changes once a day and the provider's prefix cache keeps hitting between
-    /// turns; exact wall time rides the turn's own `<turn_context>` instead (`currentTimeSection`,
-    /// #1093). The cached base prompt is untouched, since it lives for days of uptime and would
-    /// freeze the date. A fixed en_US_POSIX format keeps the text the same shape on every Mac.
+    /// turns. A per-turn context block would not do: it rides the turn's own entry, which the next
+    /// request sends without it, so every turn would re-bill the whole previous turn; exact wall
+    /// time is on demand through `current_time` (#1093). The cached base prompt is untouched, since
+    /// it lives for days of uptime and would freeze the date. A fixed en_US_POSIX format keeps the
+    /// text the same shape on every Mac.
     nonisolated static func currentDateLine(now: Date, timeZone: TimeZone = .current) -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = timeZone
         f.dateFormat = "EEEE, d MMMM yyyy (VV)"
-        return "# Current Date\nToday is \(f.string(from: now)). Trust this over file dates and your own guess."
+        return "# Current Date\nToday is \(f.string(from: now)). Trust this over file dates and your own guess. Call `\(currentTimeTool)` when you need the time of day."
     }
 
-    nonisolated static let currentTimeHeading = "Current Time"
-
     /// Wall-clock time in UTC (with seconds, so a timestamp copied or offset from it parses under
-    /// `ISO8601DateFormatter`'s default options) and the user's local zone (#1093). Rides the
-    /// turn's own entry (`TurnContext`), never the system prompt, so the cached prefix stays
-    /// byte-stable across the day and the model need not run `date` (whose output counts as
-    /// outside content and taints the session).
-    nonisolated static func currentTimeSection(now: Date, timeZone: TimeZone = .current) -> TurnContext.Section {
+    /// `ISO8601DateFormatter`'s default options) and the user's local zone (#1093), returned by
+    /// `current_time`.
+    nonisolated static func formatCurrentTime(now: Date, timeZone: TimeZone = .current) -> String {
         let utc = DateFormatter()
         utc.locale = Locale(identifier: "en_US_POSIX")
         utc.timeZone = TimeZone(secondsFromGMT: 0)
@@ -2007,7 +2014,7 @@ actor IrisEngine {
         local.locale = Locale(identifier: "en_US_POSIX")
         local.timeZone = timeZone
         local.dateFormat = "HH:mm VV"
-        return .init(heading: currentTimeHeading, body: "\(utc.string(from: now)) (\(local.string(from: now)))")
+        return "\(utc.string(from: now)) (\(local.string(from: now)))"
     }
 
     nonisolated static func sessionIdentitySection(id: UUID, title: String, card: SessionCard?, role: String? = nil,
@@ -3081,9 +3088,6 @@ actor IrisEngine {
         // Per-turn content rides this turn's own entry in the request, not the system prompt, so the
         // cached prefix (tools, system, older history) stays byte-stable across turns (5a §0.2).
         var turnContext = TurnContext(sections: [])
-        if principal != .evaluator {
-            turnContext.sections.append(Self.currentTimeSection(now: wallClock()))
-        }
         if !facts.isEmpty {
             // The ids go in so `manage_fact` — first offered on these turns, then kept declared
             // (5c §0.1) — has something to name.
@@ -3305,6 +3309,7 @@ actor IrisEngine {
                 required: ["thoughts"]
             )
         ))
+        toolsList.append(Self.currentTimeDeclaration)
         
         // `goal_complete` terminates a goal loop, so it is first offered only when there IS one, and
         // once declared, stays declared (5c §0.1). In a plain chat it has nothing to complete, and
@@ -4765,7 +4770,7 @@ actor IrisEngine {
         "write_file", "create_skill", "update_skill", "delete_skill",
         "set_workspace", "register_directory_watcher",
         "update_user_profile", "update_soul", "update_memory", "save_fact", "reflect",
-        "rename_conversation", "inbox_item", scheduleNextTickTool, setAlarmTool,
+        "rename_conversation", "inbox_item", scheduleNextTickTool, setAlarmTool, currentTimeTool,
     ]
 
     /// #813: a read under ~/.iris that is Iris's own standing context: SOUL, USER, memory.md,
@@ -6519,6 +6524,8 @@ actor IrisEngine {
             result = "Memory updated."
         } else if functionCall.name == "reflect" {
             result = "Reflection logged. Proceed with your next action."
+        } else if functionCall.name == Self.currentTimeTool {
+            result = Self.formatCurrentTime(now: wallClock())
         } else if functionCall.name == "invoke_subagent",
                   let role = functionCall.args["role"]?.stringValue,
                   let task = functionCall.args["task"]?.stringValue {
@@ -7150,7 +7157,7 @@ actor IrisEngine {
         "reflect", "goal_complete", "search_memory", "update_user_profile", "update_soul",
         "update_memory", "propose_goal_contract", "list_sessions", "describe_session", "send_to_session",
         "set_session_card", "close_request", "amend_goal_contract", "reach_checkpoint", "waive_criterion",
-        "invoke_subagent", "delegate_milestone", "inbox_item", scheduleNextTickTool, setAlarmTool,
+        "invoke_subagent", "delegate_milestone", "inbox_item", scheduleNextTickTool, setAlarmTool, currentTimeTool,
     ]
 
     /// Every tool name the app can ever declare to any conversation (main agent, subagent or

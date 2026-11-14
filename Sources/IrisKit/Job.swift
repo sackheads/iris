@@ -47,7 +47,7 @@ extension JobProfile {
     /// the sandbox it is confined to. Since #282 §0.10 no unattended run of either profile may
     /// call it: the dispatcher refuses it (`IrisEngine.unattendedWorkspaceRefusal`).
     static let readOnlyAllowed: Set<String> = [
-        "read_file", "search_web", "search_memory", "reflect",
+        "read_file", "search_web", "search_memory", "reflect", IrisEngine.currentTimeTool,
         "list_jobs", "get_job_run",
         "google_tasks_list_tasklists", "google_tasks_list_tasks", "google_calendar_list_events",
         "google_docs_get", "google_drive_search", "google_sheets_get", "gmail_list_unread",

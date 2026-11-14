@@ -274,7 +274,7 @@ struct TurnContextEngineTests {
     /// `seedFact` is false). Round 1 calls `search_memory`, round 2 answers, so the turn has two
     /// model rounds. `steer`, when set, is queued while round 1 is in flight.
     private func run(seedFact: Bool = true, peers: Int = 2, steer: String? = nil,
-                     principal: Principal = .main, store: ConversationStore? = nil) async throws -> Run {
+                     store: ConversationStore? = nil) async throws -> Run {
         let facts = try FactStoreManager(inMemory: true)
         if seedFact { _ = try facts.addFact(content: "Brian lives in Seattle") }
         let app = store.map { AppState(store: $0, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned) } ?? AppState()
@@ -287,7 +287,7 @@ struct TurnContextEngineTests {
                 guard n == 1, let steer else { return }
                 await MainActor.run { app.enqueuePendingUserMessage(text: steer, attachments: [], for: id) }
             })
-        let engine = IrisEngine(state: app, tier: .medium, principal: principal, client: client,
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
                                 retryDelays: [], streamResponses: false, factStore: facts,
                                 protectionEnabled: false, sessionPeerCount: peers)
         await engine.processInput("Tell me about Seattle", source: "UI", conversationId: id)
@@ -348,22 +348,12 @@ struct TurnContextEngineTests {
         #expect(clean(loaded))
     }
 
-    @Test("a main turn with no fact match and no peers carries only Current Time in turn_context, and an evaluator turn with an empty context adds nothing (#1093)")
-    func emptyAddsNothingBeyondCurrentTime() async throws {
-        let mainRun = try await run(seedFact: false, peers: 0)
-        try #require(mainRun.client.requests.count == 2)
-        for request in mainRun.client.requests {
-            let lead = try #require(request.contents.first?.parts.first?.text)
-            #expect(lead.hasPrefix("<turn_context>\n# Current Time\n"), "\(lead)")
-            #expect(!lead.contains(factHeading))
-            #expect(!lead.contains("# Active Sessions"))
-            #expect(request.contents.first?.parts.dropFirst().first?.text == "Tell me about Seattle")
-        }
-
-        let evalRun = try await run(seedFact: false, peers: 0, principal: .evaluator)
-        let requests = evalRun.client.requests
+    @Test("a turn with no fact match and no peers sends the turn entry exactly as saved")
+    func emptyAddsNothing() async throws {
+        let r = try await run(seedFact: false, peers: 0)
+        let requests = r.client.requests
         try #require(requests.count == 2)
-        let saved = evalRun.history
+        let saved = r.history
         for request in requests {
             #expect(encoded(request.contents) == encoded(Array(saved.prefix(request.contents.count))))
         }
