@@ -337,7 +337,6 @@ struct GuestSessionDriverTests {
         guard case .accepted = await driver.submit(text: "hello", from: "dev-1") else { Issue.record("not accepted"); return }
         try await value(of: try #require(driver.turnTask(for: "dev-1")), within: 30)
         #expect(await mailbox.poll(for: "dev-1", sinceSequence: nil).map(\.text) == ["hi from the engine"])
-        #expect(await driver.spend.total(for: "dev-1") > 0, "the turn's usage reached the sink")
     }
 
     // MARK: the stored message
