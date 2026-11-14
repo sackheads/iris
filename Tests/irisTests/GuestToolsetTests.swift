@@ -202,13 +202,13 @@ struct GuestToolsetTests {
         #expect(other == GuestToolset.argumentRefusal("topic"))
     }
 
-    @Test("a guest's floor tools are refused for now: no session is reachable until the role allowlist (Task 5)")
-    func floorToolsReachNothingYet() async {
-        for name in ["send_to_session", "list_sessions"] {
-            let (text, app) = await result(of: name, args: ["to": .string("iris"), "message": .string("hi")])
-            #expect(text.hasPrefix("Refused"), "\(name): \(text)")
-            #expect(app.conversations.filter { !$0.isGuest }.allSatisfy { $0.messages.isEmpty }, "nothing was delivered anywhere")
-        }
+    @Test("a guest with no granted role reaches nothing: its send is refused, its listing is empty, nothing is delivered")
+    func floorToolsReachNothingWithoutAGrant() async {
+        let (sent, app) = await result(of: "send_to_session", args: ["to": .string("iris"), "message": .string("hi")])
+        #expect(sent == AppState.GuestAddressRefusal.text)
+        #expect(app.conversations.filter { !$0.isGuest }.allSatisfy { $0.messages.isEmpty }, "nothing was delivered anywhere")
+        let (listed, _) = await result(of: "list_sessions")
+        #expect(listed == IrisEngine.renderGuestPeerList([]))
     }
 
     // MARK: the other principal branches
