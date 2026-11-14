@@ -236,4 +236,40 @@ struct GuestAddressingTests {
             #expect(w.app.conversations.filter { !$0.isGuest }.allSatisfy { $0.messages.isEmpty })
         }
     }
+
+    /// Answers with a send_to_session call, deleting the guest's conversation first: the guest is
+    /// reaped between its turn starting and its tool call running.
+    private final class ReapingClient: LLMClientProtocol, @unchecked Sendable {
+        private let lock = NSLock()
+        private var calls = 0
+        private let call: FunctionCall
+        private let reap: @Sendable () async -> Void
+        init(call: FunctionCall, reap: @escaping @Sendable () async -> Void) { self.call = call; self.reap = reap }
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            let n = lock.withLock { calls += 1; return calls }
+            if n == 1 {
+                await reap()
+                return GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: call)]))], usageMetadata: nil)
+            }
+            return GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil)
+        }
+    }
+
+    @Test("a guest engine whose conversation is reaped mid-turn still cannot send to a session id: the engine's principal reaches decidePeerSend")
+    func reapedGuestEngineRefused() async throws {
+        for address in ["role:reviewer", "iris"] {
+            let w = world()
+            let call = FunctionCall(name: "send_to_session", args: ["to": .string(address), "message": .string("hello"),
+                                                                       "expects_reply": .bool(true)], id: "c1")
+            let app = w.app, guest = w.guest
+            let client = ReapingClient(call: call) { await MainActor.run { app.deleteConversation(guest) } }
+            let engine = IrisEngine(state: w.app, tier: .medium, principal: .mcpGuest, client: client, retryDelays: [],
+                                    protectionEnabled: false, sessionPeerCount: 0)
+            await engine.processInput("go", source: "UI", conversationId: w.guest)
+            #expect(!w.app.conversations.contains { $0.id == w.guest }, "the guest was reaped")
+            let open = try w.app.store.peers.openRequests(from: w.guest)
+            #expect(open.isEmpty, "\(address): a message was recorded from a reaped guest")
+            #expect(w.app.conversations.filter { !$0.isGuest }.allSatisfy { $0.messages.isEmpty }, "nothing was delivered")
+        }
+    }
 }
