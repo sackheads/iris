@@ -19,6 +19,9 @@ final class ProviderTokenRegistry: @unchecked Sendable {
         case invalidClientId
         /// A role name `SessionRoles.normalizedName` rejects (invalid or reserved).
         case invalidRole
+        /// A grant needs a registered client: an id with no token must not lend its roles to the
+        /// next registrant.
+        case notRegistered
     }
 
     private let keychain: KeychainManager
@@ -92,7 +95,7 @@ final class ProviderTokenRegistry: @unchecked Sendable {
         do {
             let loaded = try keychain.secretsOrThrow(service: KeychainManager.mcpProviderRolesService)
             for (clientId, json) in loaded
-            where Self.isValidClientIdShape(clientId) && !Self.isReservedSpelling(clientId) {
+            where Self.isValidClientIdShape(clientId) && !Self.isReservedSpelling(clientId) && cache[clientId] != nil {
                 guard let data = json.data(using: .utf8), let names = try? JSONDecoder().decode([String].self, from: data)
                 else { continue }
                 let roles = Set(names.compactMap { SessionRoles.normalizedName($0) })
@@ -112,6 +115,13 @@ final class ProviderTokenRegistry: @unchecked Sendable {
         precondition(status == errSecSuccess, "SecRandomCopyBytes failed with status \(status)")
         let token = Data(bytes).base64EncodedString()
         return try writeLock.withLock {
+            // A first registration starts with no roles: a grant left in the Keychain by an earlier
+            // registration of this id (a revoke whose roles write failed) is cleared, not inherited.
+            if !isRegistered(clientId: clientId) {
+                try keychain.updateSecretsOrThrow(service: KeychainManager.mcpProviderRolesService) { dict in
+                    dict[clientId] = nil
+                }
+            }
             try keychain.updateSecretsOrThrow(service: KeychainManager.mcpProviderService) { dict in
                 dict[clientId] = token
             }
@@ -145,10 +155,12 @@ final class ProviderTokenRegistry: @unchecked Sendable {
             // The grant goes first for the same reason: a revoked client must not keep reaching
             // roles in this process because a Keychain write failed.
             lock.withLock { roleCache[clientId] = nil }
-            try keychain.updateSecretsOrThrow(service: KeychainManager.mcpProviderService) { dict in
+            // The roles item first: a failed write after this point can leave a token that still
+            // authenticates, never a grant that outlives its token.
+            try keychain.updateSecretsOrThrow(service: KeychainManager.mcpProviderRolesService) { dict in
                 dict[clientId] = nil
             }
-            try keychain.updateSecretsOrThrow(service: KeychainManager.mcpProviderRolesService) { dict in
+            try keychain.updateSecretsOrThrow(service: KeychainManager.mcpProviderService) { dict in
                 dict[clientId] = nil
             }
         }
@@ -156,7 +168,7 @@ final class ProviderTokenRegistry: @unchecked Sendable {
 
     /// What `clientId` may address as a guest (#1066): empty unless granted here.
     func roles(forClientId clientId: String) -> Set<String> {
-        lock.withLock { roleCache[clientId] ?? [] }
+        lock.withLock { cache[clientId] == nil ? [] : (roleCache[clientId] ?? []) }
     }
 
     /// Replaces `clientId`'s granted roles. Every name goes through `SessionRoles.normalizedName`
@@ -171,6 +183,7 @@ final class ProviderTokenRegistry: @unchecked Sendable {
             normalised.insert(name)
         }
         try writeLock.withLock {
+            guard isRegistered(clientId: clientId) else { throw RegistryError.notRegistered }
             let encoded = String(data: try JSONEncoder().encode(normalised.sorted()), encoding: .utf8) ?? "[]"
             try keychain.updateSecretsOrThrow(service: KeychainManager.mcpProviderRolesService) { dict in
                 dict[clientId] = normalised.isEmpty ? nil : encoded

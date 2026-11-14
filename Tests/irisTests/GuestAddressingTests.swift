@@ -153,6 +153,33 @@ struct GuestAddressingTests {
                     == .refused(SessionAddressError.inactive.message))
     }
 
+    @Test("a reply to an archived holder or to the pinned Iris is refused even when its role is granted")
+    func replyTargetMustHoldTheRole() {
+        let w = world(granted: ["reviewer", "pinned-role"])
+        let pinned = w.app.conversations.firstIndex { $0.id == w.iris }!
+        w.app.conversations[pinned].role = "pinned-role"
+        #expect(w.app.decidePeerSend(to: "", from: w.guest, replyTarget: w.iris) == refusal, "the pinned conversation may not hold a role")
+        w.app.conversations[w.app.conversations.firstIndex { $0.id == w.reviewer }!].isArchived = true
+        #expect(w.app.decidePeerSend(to: "", from: w.guest, replyTarget: w.reviewer) == refusal, "an archived holder")
+    }
+
+    @Test("a guest sender that is no longer in conversations is refused, never served by the generic resolve")
+    func goneGuestSenderRefused() {
+        let w = world()
+        let gone = UUID()
+        for address in ["role:reviewer", w.worker.uuidString, "iris", "name:worker-bee", "topic:x"] {
+            #expect(w.app.decidePeerSend(to: address, from: gone, replyTarget: nil, senderIsGuest: true) == refusal, "\(address)")
+        }
+        #expect(w.app.decidePeerSend(to: "", from: gone, replyTarget: w.reviewer, senderIsGuest: true) == refusal)
+        // The same unknown sender as a non-guest is the generic path, as before.
+        guard case .allowed = w.app.decidePeerSend(to: w.worker.uuidString, from: gone, replyTarget: nil) else {
+            Issue.record("a non-guest unknown sender changed"); return
+        }
+        // And a guest reaped mid-call, through the engine's flag, is refused too.
+        w.app.deleteConversation(w.guest)
+        #expect(w.app.decidePeerSend(to: "role:reviewer", from: w.guest, replyTarget: nil, senderIsGuest: true) == refusal)
+    }
+
     // MARK: list_sessions
 
     @Test("a guest's listing is the granted, held roles with three fields each, and nothing else")

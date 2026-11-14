@@ -5985,8 +5985,9 @@ actor IrisEngine {
             // self-send, archived, background-run and unknown-id refusals the old inline guards
             // used to spell out individually, plus the hop-depth and rate limits, and — for a
             // reply — that `to`, if given, must resolve to the original message's sender.
+            let isGuest = principal == .mcpGuest
             let decision = await MainActor.run { () -> AppState.PeerSendDecision in
-                localState?.decidePeerSend(to: to, from: conversationId, replyTarget: parent?.fromSession) ?? .refused("No session matches that.")
+                localState?.decidePeerSend(to: to, from: conversationId, replyTarget: parent?.fromSession, senderIsGuest: isGuest) ?? .refused("No session matches that.")
             }
             let targetId: UUID, depth: Int
             switch decision {
