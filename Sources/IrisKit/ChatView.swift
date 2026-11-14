@@ -2407,7 +2407,7 @@ struct ThinkingBubbleOverlay: View {
                     }
                 }
             }
-            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomLeading)))
+            .transition(Motion.scaleFadeIn())
             .animation(Motion.animation(Motion.reveal), value: visible)
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Iris thought bubble")

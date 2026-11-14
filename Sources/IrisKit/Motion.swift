@@ -31,6 +31,11 @@ enum Motion {
         slides(reduceMotion) ? .move(edge: .bottom).combined(with: .opacity) : .opacity
     }
 
+    /// The thought bubble scaling in from its anchor as it fades, or only the fade under Reduce Motion (#1100).
+    static func scaleFadeIn(_ reduceMotion: ReduceMotion = .system) -> AnyTransition {
+        slides(reduceMotion) ? .opacity.combined(with: .scale(scale: 0.96, anchor: .bottomLeading)) : .opacity
+    }
+
     /// Whether `slide` moves the view, or only fades it: the rule, apart from `AnyTransition`, which
     /// cannot be compared.
     static func slides(_ reduceMotion: ReduceMotion = .system) -> Bool { !reduceMotion.isOn }
