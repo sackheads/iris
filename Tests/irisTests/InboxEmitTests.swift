@@ -429,6 +429,21 @@ struct InboxEmitTests {
         #expect(IrisEngine.parseInboxDeadline("+3651d", now: base) == nil, "relative > 10y rejected")
         let overHorizonISO = ISO8601DateFormatter().string(from: base.addingTimeInterval(365 * 86_400 * 10 + 60))
         #expect(IrisEngine.parseInboxDeadline(overHorizonISO, now: base) == nil, "ISO > 10y rejected")
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let inRangeFractionalISO = fractional.string(from: base.addingTimeInterval(3600.5))
+        #expect(IrisEngine.parseInboxDeadline(inRangeFractionalISO, now: base) != nil, "fractional ISO in range accepted")
+        let overHorizonFractionalISO = fractional.string(from: base.addingTimeInterval(365 * 86_400 * 10 + 60.5))
+        #expect(IrisEngine.parseInboxDeadline(overHorizonFractionalISO, now: base) == nil, "fractional ISO > 10y rejected")
+
+        // Post-await re-anchoring (#1121): relative deadlines shift forward with the post-await `now`,
+        // while absolute ISO 8601 deadlines stay unchanged.
+        let initialRel = IrisEngine.parseInboxDeadline("+15m", now: base)
+        let laterNow = base.addingTimeInterval(12)
+        #expect(IrisEngine.reanchorInboxDeadline("+15m", initial: initialRel, now: laterNow) == laterNow.addingTimeInterval(900))
+        let initialISO = try #require(IrisEngine.parseInboxDeadline(inRangeFractionalISO, now: base))
+        #expect(IrisEngine.reanchorInboxDeadline(inRangeFractionalISO, initial: initialISO, now: laterNow) == initialISO)
+        #expect(IrisEngine.reanchorInboxDeadline("", initial: nil, now: laterNow) == nil)
 
         let (app, id) = app()
         let options: [JSONValue] = [option("a", "Proceed"), option("b", "Hold")]
