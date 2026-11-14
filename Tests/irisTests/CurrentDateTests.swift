@@ -21,15 +21,53 @@ struct CurrentDateTests {
     // 2026-11-08 22:32:00 UTC, a Sunday.
     private let instant = Date(timeIntervalSince1970: 1_794_177_120)
 
-    @Test("the line names weekday, date and zone, in the zone it is given, and points to current_time")
+    @Test("the line names weekday, date and zone, in the zone it is given, and points to current_time only when offered")
     func formatsInTheGivenZone() throws {
         let la = try #require(TimeZone(identifier: "America/Los_Angeles"))
         let tokyo = try #require(TimeZone(identifier: "Asia/Tokyo"))
         let a = IrisEngine.currentDateLine(now: instant, timeZone: la)
         let b = IrisEngine.currentDateLine(now: instant, timeZone: tokyo)
+        let withoutTool = IrisEngine.currentDateLine(now: instant, timeZone: la, hasCurrentTimeTool: false)
         #expect(a.hasPrefix("# Current Date\nToday is Sunday, 8 November 2026 (America/Los_Angeles)."), "\(a)")
         #expect(b.hasPrefix("# Current Date\nToday is Monday, 9 November 2026 (Asia/Tokyo)."), "\(b)")
         #expect(a.contains(IrisEngine.currentTimeTool), "\(a)")
+        #expect(!withoutTool.contains(IrisEngine.currentTimeTool), "\(withoutTool)")
+    }
+
+    @Test("an evaluator or profile-narrowed turn without current_time omits the current_time nudge from currentDateLine (#1093)")
+    @MainActor
+    func omitsCurrentTimeNudgeWhenToolNotOffered() async throws {
+        let app = AppState()
+        app.conversations.removeAll()
+        let evalId = UUID()
+        app.createNewConversation(id: evalId)
+        let evalClient = DateTurnClient()
+        let evalEngine = IrisEngine(state: app, tier: .medium, principal: .evaluator, client: evalClient,
+                                    retryDelays: [], streamResponses: false,
+                                    protectionEnabled: false, sessionPeerCount: 0)
+        await evalEngine.setWallClockForTesting { [instant] in instant }
+        await evalEngine.processInput("grade", source: "GoalEvaluator", conversationId: evalId)
+        let evalSystem = try #require(evalClient.requests.first?.systemInstruction?.parts.compactMap(\.text).joined())
+        #expect(!evalSystem.contains(IrisEngine.currentTimeTool), "\(evalSystem)")
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("iris-1093-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = AgentProfileStore(paths: IrisPaths(root: root))
+        try FileManager.default.createDirectory(at: store.directory, withIntermediateDirectories: true)
+        try Data("---\ntools: [read_file]\n---\nNarrow.\n".utf8)
+            .write(to: store.directory.appendingPathComponent("narrow.md"))
+        app.agentProfiles = store
+        let parent = app.createNewConversation(select: false, agentProfile: "narrow")
+        let child = app.createNewConversation(isSubagent: true, select: false)
+        app.linkDelegate(child, of: parent)
+        let subClient = DateTurnClient()
+        let subEngine = IrisEngine(state: app, tier: .medium, principal: .subagent, roleLabel: "helper",
+                                   client: subClient, retryDelays: [], streamResponses: false,
+                                   protectionEnabled: false, sessionPeerCount: 0)
+        await subEngine.setWallClockForTesting { [instant] in instant }
+        await subEngine.processInput("check", source: "System", conversationId: child)
+        let subSystem = try #require(subClient.requests.first?.systemInstruction?.parts.compactMap(\.text).joined())
+        #expect(!subSystem.contains(IrisEngine.currentTimeTool), "\(subSystem)")
     }
 
     @Test("formatCurrentTime formats UTC ISO 8601 with seconds and the given local HH:mm + IANA zone (#1093)")
@@ -47,12 +85,11 @@ struct CurrentDateTests {
                 "the UTC half must parse under default ISO8601DateFormatter so model-copied deadlines work")
     }
 
-    @Test("run_command's description and SYSTEM.md send a clock check to current_time (#1093)")
-    func steeringAndRunCommandMentionCurrentTime() async throws {
+    @Test("run_command's description sends a clock check to current_time (#1093)")
+    func runCommandDescriptionMentionsCurrentTime() async throws {
         let tools = await ToolExecutor.shared.getTools(workspaceToolsEnabled: false)
         let desc = try #require(tools.first { $0.name == "run_command" }?.description)
         #expect(desc.contains(IrisEngine.currentTimeTool))
-        #expect(SystemSteering.shipped().contains(IrisEngine.currentTimeTool))
     }
 
     @Test("current_time returns the engine's wallClock and does not taint the conversation (#1093)")

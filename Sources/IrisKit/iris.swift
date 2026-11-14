@@ -432,7 +432,9 @@ actor IrisEngine {
         var composed = await composedSystemPrompt(workspacePath: workspacePath, additionalRoots: additionalRoots, agentProfile: agentProfile)
         // After the cached composition, never inside it: the date must not freeze in a cache entry.
         if let text = composed.parts.first?.text {
-            composed.parts[0].text = text + "\n\n" + Self.currentDateLine(now: wallClock())
+            let hasCurrentTime = principal != .evaluator && principal != .mcpGuest
+                && (Self.agentToolScope?.allows(Self.currentTimeTool) ?? true)
+            composed.parts[0].text = text + "\n\n" + Self.currentDateLine(now: wallClock(), hasCurrentTimeTool: hasCurrentTime)
         }
         return composed
     }
@@ -1994,12 +1996,16 @@ actor IrisEngine {
     /// time is on demand through `current_time` (#1093). The cached base prompt is untouched, since
     /// it lives for days of uptime and would freeze the date. A fixed en_US_POSIX format keeps the
     /// text the same shape on every Mac.
-    nonisolated static func currentDateLine(now: Date, timeZone: TimeZone = .current) -> String {
+    nonisolated static func currentDateLine(now: Date, timeZone: TimeZone = .current,
+                                            hasCurrentTimeTool: Bool = true) -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = timeZone
         f.dateFormat = "EEEE, d MMMM yyyy (VV)"
-        return "# Current Date\nToday is \(f.string(from: now)). Trust this over file dates and your own guess. Call `\(currentTimeTool)` when you need the time of day."
+        let nudge = hasCurrentTimeTool
+            ? " Call `\(currentTimeTool)` when you need the current wall-clock time — for deadlines, calendar RFC 3339 timestamps, or time-of-day questions — rather than guessing or running `date`."
+            : ""
+        return "# Current Date\nToday is \(f.string(from: now)). Trust this over file dates and your own guess.\(nudge)"
     }
 
     /// Wall-clock time in UTC (with seconds, so a timestamp copied or offset from it parses under
