@@ -84,7 +84,7 @@ struct GuestProvenanceTests {
             GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil),
         ])
         let guestEngine = IrisEngine(state: w.app, tier: .medium, principal: .mcpGuest, client: guestClient, retryDelays: [],
-                                     protectionEnabled: false, sessionPeerCount: 0)
+                                     protectionEnabled: false, sessionPeerCount: 0, guestClientId: "dev-1")
         let main = IrisEngine(state: w.app, tier: .medium, principal: .main,
                               client: FakeLLMClient(responses: [GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "noted")]))], usageMetadata: nil)]),
                               retryDelays: [], protectionEnabled: false)

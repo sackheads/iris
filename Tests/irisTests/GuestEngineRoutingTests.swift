@@ -36,7 +36,7 @@ struct GuestEngineRoutingTests {
         let main = IrisEngine(state: app, tier: .medium, principal: .main, client: mainClient, retryDelays: [],
                               protectionEnabled: false, sessionPeerCount: 0)
         let guest = IrisEngine(state: app, tier: .medium, principal: .mcpGuest, client: guestClient, retryDelays: [],
-                               protectionEnabled: false, sessionPeerCount: 0)
+                               protectionEnabled: false, sessionPeerCount: 0, guestClientId: "dev-1")
         app.installEngine(main)
         let roleId = app.createNewConversation(title: "role", select: false)
         let guestId = app.createNewConversation(isGuest: true, guestClientId: "dev-1", title: "guest")

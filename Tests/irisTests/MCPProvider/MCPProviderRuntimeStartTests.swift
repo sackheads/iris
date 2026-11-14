@@ -28,7 +28,7 @@ struct MCPProviderRuntimeStartTests {
     private static func runtime(enabled: Bool = true, registry: ProviderTokenRegistry, port: UInt16 = 0,
                                 lines: Lines) -> MCPProviderRuntime {
         MCPProviderRuntime(isEnabled: { enabled }, makeRegistry: { registry }, configuredPort: { port },
-                           artifactRoot: tempRoot(), report: { lines.add($0) })
+                           artifactRoot: tempRoot(), report: { lines.add($0) }, makeGuestRegistry: { nil })
     }
 
     @Test("off by default: nothing starts, nothing is reported")

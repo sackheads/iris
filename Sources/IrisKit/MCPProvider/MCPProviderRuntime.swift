@@ -42,18 +42,25 @@ final class MCPProviderRuntime {
     private let configuredPort: @MainActor () -> UInt16
     private let artifactRoot: URL
     private let report: @MainActor (String) -> Void
+    private let makeGuestRegistry: @MainActor () -> GuestSessionRegistry?
+    /// The live guest sessions (#1066 Task 7); nil until `start()` has built the server.
+    private(set) var guestSessions: GuestSessionRegistry?
 
     /// Production defaults read the real settings, Keychain and home; a test injects its own.
     init(isEnabled: @escaping @MainActor () -> Bool = { ConfigManager.shared.mcpProviderEnabled },
          makeRegistry: @escaping @MainActor () -> ProviderTokenRegistry = { ProviderTokenRegistry() },
          configuredPort: @escaping @MainActor () -> UInt16 = { UInt16(clamping: ConfigManager.shared.mcpProviderPort) },
          artifactRoot: URL = IrisPaths.default.root.appendingPathComponent("mcp-provider-artifacts", isDirectory: true),
-         report: @escaping @MainActor (String) -> Void = MCPProviderRuntime.logToConsole) {
+         report: @escaping @MainActor (String) -> Void = MCPProviderRuntime.logToConsole,
+         makeGuestRegistry: @escaping @MainActor () -> GuestSessionRegistry? = {
+             GuestSessionRegistry(state: AppState.shared, makeEngine: { IrisEngine.makeGuestEngine(state: $0, clientId: $1) })
+         }) {
         self.isEnabled = isEnabled
         self.makeRegistry = makeRegistry
         self.configuredPort = configuredPort
         self.artifactRoot = artifactRoot
         self.report = report
+        self.makeGuestRegistry = makeGuestRegistry
     }
 
     /// One line per failure, readable in Console.app or `log stream --predicate 'subsystem ==
@@ -85,12 +92,16 @@ final class MCPProviderRuntime {
         let doorGate = ProviderRequestGate(registry: tokenRegistry, capacity: Self.doorGateCapacity, refillInterval: Self.refillInterval(forCapacity: Self.doorGateCapacity))
         let mailboxGate = ProviderRequestGate(registry: tokenRegistry, capacity: Self.mailboxGateCapacity, refillInterval: Self.refillInterval(forCapacity: Self.mailboxGateCapacity))
         let port = configuredPort()
+        let guests = makeGuestRegistry()
 
         let server = IrisMCPProviderServer(tokenRegistry: tokenRegistry, mailbox: mailbox, artifactStore: artifactStore,
-                                           door: door, doorGate: doorGate, mailboxGate: mailboxGate, port: port)
+                                           door: door, doorGate: doorGate, mailboxGate: mailboxGate, port: port,
+                                           closeGuestSession: { clientId in await MainActor.run { guests?.close(clientId: clientId) } })
         do {
             try await server.start()
             self.server = server
+            guestSessions = guests
+            guests?.startReaper()
             status = .running(port: server.boundPort ?? port)
         } catch {
             // Loopback-only, best-effort: a port already in use (another Iris process, or a
@@ -114,6 +125,8 @@ final class MCPProviderRuntime {
     /// Call from `AppDelegate.applicationWillTerminate`, before `_exit`.
     func stop() async {
         await server?.stop()
+        guestSessions?.stopReaper()
+        guestSessions = nil
         server = nil
         if case .running = status { status = .off }
     }

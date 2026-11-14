@@ -206,7 +206,7 @@ struct GuestAddressingTests {
         let final = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil)
         let engine = IrisEngine(state: w.app, tier: .medium, principal: .mcpGuest,
                                 client: FakeLLMClient(responses: [first, final]), retryDelays: [],
-                                protectionEnabled: false, sessionPeerCount: 0)
+                                protectionEnabled: false, sessionPeerCount: 0, guestClientId: "dev-1")
         await engine.processInput("go", source: "UI", conversationId: w.guest)
         let history = w.app.conversations.first { $0.id == w.guest }?.history ?? []
         let text = history.flatMap { $0.parts }.compactMap { part -> String? in
@@ -225,7 +225,7 @@ struct GuestAddressingTests {
             let final = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil)
             let engine = IrisEngine(state: w.app, tier: .medium, principal: .mcpGuest,
                                     client: FakeLLMClient(responses: [first, final]), retryDelays: [],
-                                    protectionEnabled: false, sessionPeerCount: 0)
+                                    protectionEnabled: false, sessionPeerCount: 0, guestClientId: "dev-1")
             await engine.processInput("go", source: "UI", conversationId: w.guest)
             let history = w.app.conversations.first { $0.id == w.guest }?.history ?? []
             let text = history.flatMap { $0.parts }.compactMap { part -> String? in
@@ -264,7 +264,7 @@ struct GuestAddressingTests {
             let app = w.app, guest = w.guest
             let client = ReapingClient(call: call) { await MainActor.run { app.deleteConversation(guest) } }
             let engine = IrisEngine(state: w.app, tier: .medium, principal: .mcpGuest, client: client, retryDelays: [],
-                                    protectionEnabled: false, sessionPeerCount: 0)
+                                    protectionEnabled: false, sessionPeerCount: 0, guestClientId: "dev-1")
             await engine.processInput("go", source: "UI", conversationId: w.guest)
             #expect(!w.app.conversations.contains { $0.id == w.guest }, "the guest was reaped")
             let open = try w.app.store.peers.openRequests(from: w.guest)

@@ -166,7 +166,7 @@ struct GuestToolsetTests {
             role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil)
         let engine = IrisEngine(state: app, tier: .medium, principal: .mcpGuest,
                                 client: FakeLLMClient(responses: [first, final]), retryDelays: [],
-                                protectionEnabled: false, sessionPeerCount: 0)
+                                protectionEnabled: false, sessionPeerCount: 0, guestClientId: "dev-1")
         await engine.processInput("go", source: "UI", conversationId: id)
         let history = app.conversations.first { $0.id == id }?.history ?? []
         let text = history.flatMap { $0.parts }.compactMap { part -> String? in
