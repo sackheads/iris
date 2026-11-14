@@ -13,9 +13,9 @@ private final class DateTurnClient: LLMClientProtocol, @unchecked Sendable {
     }
 }
 
-/// The model is told today's date on every turn (#951), from the clock at turn time and never
-/// from the cached system prompt, which would freeze it across days of uptime.
-@Suite("Current date in the turn context (#951)", .timeLimit(.minutes(1)))
+/// The model is told today's date in the system prompt (#951) and the current UTC + local time in
+/// `<turn_context>` (#1093), both from the clock at turn time and never from the cached base prompt.
+@Suite("Current date and time (#951, #1093)", .timeLimit(.minutes(1)))
 struct CurrentDateTests {
     // 2026-11-08 22:32:00 UTC, a Sunday.
     private let instant = Date(timeIntervalSince1970: 1_794_177_120)
@@ -30,9 +30,24 @@ struct CurrentDateTests {
         #expect(b.hasPrefix("# Current Date\nToday is Monday, 9 November 2026 (Asia/Tokyo)."), "\(b)")
     }
 
-    @Test("a plain turn's request carries today's date as the last line of its system prompt, and not in the turn context")
+    @Test("currentTimeSection formats UTC ISO 8601 with seconds and the given local HH:mm + IANA zone (#1093)")
+    func formatsCurrentTimeSection() throws {
+        // 2026-11-12 21:39:18 UTC -> 16:39 America/Toronto (EST, UTC-5).
+        let nov12 = Date(timeIntervalSince1970: 1_794_519_558)
+        let toronto = try #require(TimeZone(identifier: "America/Toronto"))
+        let tokyo = try #require(TimeZone(identifier: "Asia/Tokyo"))
+        let a = IrisEngine.currentTimeSection(now: nov12, timeZone: toronto)
+        let b = IrisEngine.currentTimeSection(now: nov12, timeZone: tokyo)
+        #expect(a == .init(heading: "Current Time", body: "2026-11-12T21:39:18Z (16:39 America/Toronto)"))
+        #expect(b == .init(heading: "Current Time", body: "2026-11-12T21:39:18Z (06:39 Asia/Tokyo)"))
+        let utcPart = try #require(a.body.split(separator: " ").first.map(String.init))
+        #expect(ISO8601DateFormatter().date(from: utcPart) == nov12,
+                "the UTC half must parse under default ISO8601DateFormatter so model-copied deadlines work")
+    }
+
+    @Test("a plain turn's request carries today's date in the system prompt and Current Time in turn_context (#951, #1093)")
     @MainActor
-    func plainTurnCarriesTheDate() async throws {
+    func plainTurnCarriesDateAndTime() async throws {
         let app = AppState()
         app.conversations.removeAll()
         let id = UUID()
@@ -41,16 +56,37 @@ struct CurrentDateTests {
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
                                 retryDelays: [], streamResponses: false,
                                 protectionEnabled: false, sessionPeerCount: 0)
-        let before = Date()
-        await engine.processInput("what day is it?", source: "UI", conversationId: id)
+        await engine.setWallClockForTesting { [instant] in instant }
+        await engine.processInput("what time is it?", source: "UI", conversationId: id)
         let request = try #require(client.requests.first)
         let texts = request.contents.flatMap(\.parts).compactMap(\.text)
-        #expect(!texts.contains { $0.contains("Current Date") }, "the date must not ride the turn entry")
+        #expect(!texts.contains { $0.contains("Current Date") }, "the date line must not ride the turn entry")
+        let expectedTime = IrisEngine.currentTimeSection(now: instant)
+        let lead = try #require(request.contents.first?.parts.first?.text)
+        #expect(lead.contains("# \(expectedTime.heading)\n\(expectedTime.body)"), "\(lead)")
         let system = request.systemInstruction?.parts.compactMap(\.text).joined() ?? ""
-        let year = Calendar.current.component(.year, from: before)
+        #expect(!system.contains("# Current Time"), "the exact time must not sit in the cached system prompt")
         let line = try #require(system.components(separatedBy: "\n\n").last)
         #expect(line.hasPrefix("# Current Date\nToday is "), "\(line)")
-        #expect(line.contains(String(year)), "\(line)")
+        #expect(line.contains("2026"), "\(line)")
+    }
+
+    @Test("an evaluator turn omits Current Time from turn_context (#1093)")
+    @MainActor
+    func evaluatorOmitsCurrentTime() async throws {
+        let app = AppState()
+        app.conversations.removeAll()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        let client = DateTurnClient()
+        let engine = IrisEngine(state: app, tier: .medium, principal: .evaluator, client: client,
+                                retryDelays: [], streamResponses: false,
+                                protectionEnabled: false, sessionPeerCount: 0)
+        await engine.setWallClockForTesting { [instant] in instant }
+        await engine.processInput("grade the contract", source: "GoalEvaluator", conversationId: id)
+        let request = try #require(client.requests.first)
+        let texts = request.contents.flatMap(\.parts).compactMap(\.text)
+        #expect(!texts.contains { $0.contains("Current Time") }, "\(texts)")
     }
 
     @Test("the day rolling over moves only the date suffix: the composed prompt before it is byte-identical")
