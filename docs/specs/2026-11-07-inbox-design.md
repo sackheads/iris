@@ -204,7 +204,10 @@ given the async premise and the trust model; I've settled those as planner calls
 
 **Auto-approve the default at the deadline, except auto-hold when the emitter carries the taint
 marker** (read outside content, #813). A clean internal decision proceeds if Brian is away; anything
-an injection could have shaped never auto-approves and instead goes overdue and waits.
+an injection could have shaped never auto-approves and instead goes overdue and waits. When a
+tainted item's deadline passes, the store records a `"held"` thread entry once for that ask and
+notifies the emitter's own chain once (with no user-authority framing) that the default was held for
+Brian's review (#1095).
 
 When the Mac was asleep or Iris wasn't running at the deadline, an auto-approve fires on next launch
 or at the wake, flagged "decided while you were away," and routes the default through the

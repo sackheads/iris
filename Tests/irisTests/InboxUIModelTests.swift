@@ -173,5 +173,14 @@ struct InboxHistoryTests {
     func answeredItem() {
         #expect(InboxUIModel.history(of: [entry(1, "question"), entry(2, "answer")]).map(\.seq) == [2])
     }
+
+    @Test("a held entry appears in history and maps to Held at deadline (#1095)")
+    func heldEntryKindLabel() {
+        #expect(InboxUIModel.history(of: [entry(1, "question"), entry(2, "held")]).map(\.seq) == [2])
+        #expect(InboxUIModel.historyKindLabel("held") == "Held at deadline")
+        #expect(InboxUIModel.historyKindLabel("question") == "Asked")
+        #expect(InboxUIModel.historyKindLabel("followup") == "Follow-up")
+        #expect(InboxUIModel.historyKindLabel("answer") == "Answered")
+    }
 }
 
