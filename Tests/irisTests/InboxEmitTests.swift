@@ -422,4 +422,31 @@ struct InboxEmitTests {
         #expect(result.contains("Recorded #"), Comment(rawValue: result))
         #expect(result.contains("default will be held at the deadline"), Comment(rawValue: result))
     }
+
+    @Test("timedVeto enforces a 15-minute minimum window and a 10-year horizon on both relative and ISO 8601 deadlines (#1121)")
+    func timedVetoEnforcesMinimumWindowAndHorizon() async throws {
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        #expect(IrisEngine.parseInboxDeadline("+3651d", now: base) == nil, "relative > 10y rejected")
+        let overHorizonISO = ISO8601DateFormatter().string(from: base.addingTimeInterval(365 * 86_400 * 10 + 60))
+        #expect(IrisEngine.parseInboxDeadline(overHorizonISO, now: base) == nil, "ISO > 10y rejected")
+
+        let (app, id) = app()
+        let options: [JSONValue] = [option("a", "Proceed"), option("b", "Hold")]
+        let fiveMinISO = ISO8601DateFormatter().string(from: Date().addingTimeInterval(300))
+        for tooShort in ["+1s", "+5m", "+14m", fiveMinISO] {
+            let result = await runToolCall(
+                emitCall(responseMode: "timedVeto", options: options, deadline: tooShort, vetoDefault: "a"),
+                on: app, as: id
+            )
+            #expect(result.hasPrefix("Not raised:"), Comment(rawValue: "\(tooShort): \(result)"))
+            #expect(result.contains("at least \(IrisEngine.timedVetoMinWindowMinutes)m"), Comment(rawValue: "\(tooShort): \(result)"))
+        }
+        #expect(try app.store.inbox.openItems().isEmpty, "short-window emits must not be stored")
+
+        let ok = await runToolCall(
+            emitCall(responseMode: "timedVeto", options: options, deadline: "+15m", vetoDefault: "a"),
+            on: app, as: id
+        )
+        #expect(ok.contains("Recorded #"), Comment(rawValue: ok))
+    }
 }
