@@ -480,7 +480,7 @@ actor IrisEngine {
     let principal: Principal
     let roleLabel: String?
     /// The external MCP client a `.mcpGuest` engine serves; nil for every other principal (#1066).
-    let guestClientId: String?
+    nonisolated let guestClientId: String?
     let evaluatorChecks: [String]
     /// Backoff schedule for transient provider errors (429/503/529); one wait per retry.
     let retryDelays: [TimeInterval]
@@ -2900,14 +2900,20 @@ actor IrisEngine {
     /// Whether this engine may run a turn on `conversationId`: a guest conversation only under
     /// `.mcpGuest`, and `.mcpGuest` only on a guest conversation. A conversation that does not
     /// exist is left to the turn as before, except for a guest principal, which has none to run.
+    /// Guest to guest also needs the same client (#1124): with several guests live at once, a
+    /// principal-only check would let one client's engine run a turn on another client's session.
+    /// A guest on either side with no client id never matches.
     private func principalMismatch(conversationId: UUID) async -> Bool {
         let localState = state
         let isGuestEngine = principal == .mcpGuest
-        let conversationIsGuest: Bool? = await MainActor.run {
-            localState?.conversations.first(where: { $0.id == conversationId })?.isGuest
+        let conversation: (isGuest: Bool, clientId: String?)? = await MainActor.run {
+            localState?.conversations.first(where: { $0.id == conversationId }).map { ($0.isGuest, $0.guestClientId) }
         }
-        guard let conversationIsGuest else { return isGuestEngine }
-        return conversationIsGuest != isGuestEngine
+        guard let conversation else { return isGuestEngine }
+        if conversation.isGuest != isGuestEngine { return true }
+        guard isGuestEngine else { return false }
+        guard let mine = guestClientId, let theirs = conversation.clientId else { return true }
+        return mine != theirs
     }
 
     /// Set by `AppState.runReflection` around its turn, and read once as that turn begins (#465

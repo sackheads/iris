@@ -29,6 +29,7 @@ private struct Fixture {
     let doorCallCounter: CallCounter
 
     static func build(doorGateCapacity: Int = 1000, mailboxGateCapacity: Int = 1000,
+                      closeGuestSession: @escaping @Sendable (String) async -> Void = { _ in },
                       serverConstructedHook: (@Sendable (Server, StatelessHTTPServerTransport) -> Void)? = nil) -> Fixture {
         let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
         let registry = ProviderTokenRegistry(keychain: keychain)
@@ -51,6 +52,7 @@ private struct Fixture {
         let mailboxGate = ProviderRequestGate(registry: registry, capacity: mailboxGateCapacity, refillInterval: .seconds(60))
         let server = IrisMCPProviderServer(tokenRegistry: registry, mailbox: mailbox, artifactStore: artifactStore,
                                            door: door, doorGate: doorGate, mailboxGate: mailboxGate, port: 0,
+                                           closeGuestSession: closeGuestSession,
                                            serverConstructedHook: serverConstructedHook)
         return Fixture(keychain: keychain, registry: registry, mailbox: mailbox, artifactStore: artifactStore,
                        doorGate: doorGate, mailboxGate: mailboxGate, server: server, doorCallCounter: counter)
@@ -752,6 +754,26 @@ struct IrisMCPProviderServerTests {
         await #expect(throws: ProviderArtifactStore.ArtifactError.unauthorized) {
             try await fixture.artifactStore.get(sha256: sha, requestingClientId: "a")
         }
+    }
+
+    @Test("revoke closes the client's guest session, even when the token revoke throws (#1066)")
+    func revokeClosesGuestSessionDespiteThrow() async throws {
+        final class Closed: @unchecked Sendable {
+            private let lock = NSLock(); private var ids: [String] = []
+            func add(_ id: String) { lock.withLock { ids.append(id) } }
+            var value: [String] { lock.withLock { ids } }
+        }
+        let closed = Closed()
+        let fixture = Fixture.build(closeGuestSession: { closed.add($0) })
+        _ = try fixture.registry.issueToken(forClientId: "a")
+        try await fixture.server.revoke(clientId: "a")
+        #expect(closed.value == ["a"])
+
+        _ = try fixture.registry.issueToken(forClientId: "b")
+        fixture.keychain.simulateReadFailure(errSecIO)
+        await #expect(throws: (any Error).self) { try await fixture.server.revoke(clientId: "b") }
+        fixture.keychain.simulateReadFailure(nil)
+        #expect(closed.value == ["a", "b"], "the guest session closes whether or not the token revoke threw")
     }
 
     @Test("revoke frees both gates' budget for the revoked client id")

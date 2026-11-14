@@ -34,6 +34,8 @@ final class IrisMCPProviderServer: Sendable {
     private let mailboxGate: ProviderRequestGate
     private let port: UInt16
     private let requestDeadline: Duration
+    /// Closes the client's guest session, if it has one (#1066 Task 7). Run on every revoke.
+    private let closeGuestSession: @Sendable (String) async -> Void
     /// Test-only seam: called with each per-request `Server` and `StatelessHTTPServerTransport`
     /// right after construction, before `start()`/`stop()`. An instance property, not a mutable
     /// static — a static hook is one process-global shared across every `IrisMCPProviderServer`
@@ -54,6 +56,7 @@ final class IrisMCPProviderServer: Sendable {
     init(tokenRegistry: ProviderTokenRegistry, mailbox: ProviderMailbox, artifactStore: ProviderArtifactStore,
          door: SelfReportDoor, doorGate: ProviderRequestGate, mailboxGate: ProviderRequestGate,
          port: UInt16, requestDeadline: Duration = .seconds(10),
+         closeGuestSession: @escaping @Sendable (String) async -> Void = { _ in },
          serverConstructedHook: (@Sendable (Server, StatelessHTTPServerTransport) -> Void)? = nil) {
         self.tokenRegistry = tokenRegistry
         self.mailbox = mailbox
@@ -63,6 +66,7 @@ final class IrisMCPProviderServer: Sendable {
         self.mailboxGate = mailboxGate
         self.port = port
         self.requestDeadline = requestDeadline
+        self.closeGuestSession = closeGuestSession
         self.serverConstructedHook = serverConstructedHook
     }
 
@@ -119,6 +123,8 @@ final class IrisMCPProviderServer: Sendable {
         // point of mutation (Task 6/7) is what actually closes that window, by rejecting the
         // write once the registry update has landed.
         let tokenError = Result { try tokenRegistry.revokeToken(forClientId: clientId) }
+        // A revoked client keeps no guest session, whether or not the token revoke threw.
+        await closeGuestSession(clientId)
         await mailbox.purge(clientId: clientId)
         await artifactStore.purge(clientId: clientId)
         await doorGate.purge(clientId: clientId)

@@ -1706,8 +1706,14 @@ class AppState {
     /// guest-session registry when it creates a session and dropped with the conversation.
     @ObservationIgnored private(set) var guestEngines: [UUID: IrisEngine] = [:]
 
-    func register(guestEngine: IrisEngine, for conversationId: UUID) {
+    /// Refused (false) unless `conversationId` is a guest conversation of the same client as the
+    /// engine (#1124): an engine is never routable to another client's session.
+    @discardableResult
+    func register(guestEngine: IrisEngine, for conversationId: UUID) -> Bool {
+        guard let conversation = conversations.first(where: { $0.id == conversationId }), conversation.isGuest,
+              let clientId = conversation.guestClientId, guestEngine.guestClientId == clientId else { return false }
         guestEngines[conversationId] = guestEngine
+        return true
     }
 
     func unregisterGuestEngine(for conversationId: UUID) {
