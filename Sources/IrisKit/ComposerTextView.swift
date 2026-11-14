@@ -68,17 +68,31 @@ enum HostedTextAppearance {
     }
 
     /// Applies the concrete sRGB text color for `appearance`/`scheme` to `textView`'s properties,
-    /// `typingAttributes`, and any existing characters in `textStorage` (#1127).
+    /// `typingAttributes`, and any existing characters in `textStorage` (#1127). Writes only when a
+    /// property or storage run is missing, still holds a dynamic `.catalog` color, or differs from
+    /// `color`, avoiding redundant attribute writes on unchanged `updateNSView` passes.
     @MainActor
     static func applyTextColor(to textView: NSTextView, appearance: NSAppearance, scheme: ColorScheme) {
         let color = concreteTextColor(for: appearance, scheme: scheme)
-        textView.textColor = color
-        textView.insertionPointColor = color
-        var attrs = textView.typingAttributes
-        attrs[.foregroundColor] = color
-        textView.typingAttributes = attrs
+        if textView.textColor?.type == .catalog || textView.textColor != color {
+            textView.textColor = color
+        }
+        if textView.insertionPointColor.type == .catalog || textView.insertionPointColor != color {
+            textView.insertionPointColor = color
+        }
+        let currentTyping = textView.typingAttributes[.foregroundColor] as? NSColor
+        if currentTyping?.type == .catalog || currentTyping != color {
+            var attrs = textView.typingAttributes
+            attrs[.foregroundColor] = color
+            textView.typingAttributes = attrs
+        }
         if let storage = textView.textStorage, storage.length > 0 {
-            storage.addAttribute(.foregroundColor, value: color, range: NSRange(location: 0, length: storage.length))
+            let fullRange = NSRange(location: 0, length: storage.length)
+            var effectiveRange = NSRange(location: 0, length: 0)
+            let existing = storage.attribute(.foregroundColor, at: 0, effectiveRange: &effectiveRange) as? NSColor
+            if effectiveRange != fullRange || existing?.type == .catalog || existing != color {
+                storage.addAttribute(.foregroundColor, value: color, range: fullRange)
+            }
         }
     }
 
@@ -367,12 +381,8 @@ final class KeyCatchingTextView: NSTextView {
     }
 
     override func didChangeText() {
-        if let color = textColor {
-            typingAttributes[.foregroundColor] = color
-            if let storage = textStorage, storage.length > 0 {
-                storage.addAttribute(.foregroundColor, value: color, range: NSRange(location: 0, length: storage.length))
-            }
-        }
+        let scheme: ColorScheme = HostedTextAppearance.isDark(effectiveAppearance.name) ? .dark : .light
+        HostedTextAppearance.applyTextColor(to: self, appearance: effectiveAppearance, scheme: scheme)
         super.didChangeText()
     }
 

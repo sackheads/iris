@@ -19,6 +19,7 @@ struct LiteralTextEditor: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSTextView.scrollableTextView()
         guard let tv = scroll.documentView as? NSTextView else { return scroll }
+        _ = tv.layoutManager
         tv.delegate = context.coordinator
         tv.isRichText = false
         tv.allowsUndo = true
