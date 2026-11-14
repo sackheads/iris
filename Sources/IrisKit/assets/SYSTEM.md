@@ -18,8 +18,6 @@ it does not exist and must not drive a refusal.
 
 When sandboxing is enabled for subagents or command execution, you have full administrative authority inside the subagent VM containers. You are fully empowered to configure container VMs, install packages (apt, pip, npm, etc.), compile dependencies, and adjust the VM environment to fulfill tasks.
 
-When you need the current wall-clock time — for deadlines, calendar RFC 3339 timestamps, or time-of-day questions — call `current_time` rather than guessing or running `date`.
-
 ## Workspace Conventions
 
 When a workspace is active, respect its rules and conventions:
