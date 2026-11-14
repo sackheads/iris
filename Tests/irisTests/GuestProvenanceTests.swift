@@ -100,6 +100,16 @@ struct GuestProvenanceTests {
         #expect(w.app.conversations.first { $0.id == w.reviewer }?.hasUntrustedToolOutput == true)
     }
 
+    @Test("a guest whose conversation was reaped mid-call is still stamped, with the engine's client id")
+    func reapedSenderStillStamped() {
+        let w = world()
+        let guestConv = w.app.conversations.first { $0.id == w.guest }
+        #expect(IrisEngine.stampedGuestClient(engineIsGuest: true, sender: guestConv, engineClientId: "other") == "dev-1", "the conversation wins")
+        #expect(IrisEngine.stampedGuestClient(engineIsGuest: true, sender: nil, engineClientId: "dev-1") == "dev-1", "reaped: the engine's id")
+        #expect(IrisEngine.stampedGuestClient(engineIsGuest: true, sender: nil, engineClientId: nil) == "unknown", "never framed as a peer")
+        #expect(IrisEngine.stampedGuestClient(engineIsGuest: false, sender: w.app.conversations.first { $0.id == w.reviewer }, engineClientId: "dev-1") == nil)
+    }
+
     // MARK: depth and rate
 
     @Test("repeated guest messages leave the receiver at depth 1 and do not block a local send")
