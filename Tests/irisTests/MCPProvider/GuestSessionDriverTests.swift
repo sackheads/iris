@@ -113,6 +113,32 @@ struct GuestSessionDriverTests {
         #expect(await r.gate.admit(clientId: "never-issued") == .unauthorized)
     }
 
+    @Test("forget(clientId:) closes the session and clears the turns bucket: a re-issued id starts with a full one")
+    func forgetClearsTheBucketAndSession() async throws {
+        let r = try rig()
+        for _ in 0..<GuestSessionDriver.turnsPerHour { _ = await r.gate.admit(clientId: "dev-1") }
+        #expect(await r.gate.admit(clientId: "dev-1") == .budgetExceeded)
+        _ = try r.sessions.session(for: "dev-1")
+        try r.tokens.revokeToken(forClientId: "dev-1")
+        await r.driver.forget(clientId: "dev-1")
+        #expect(r.sessions.liveCount == 0)
+        _ = try r.tokens.issueToken(forClientId: "dev-1")
+        for i in 0..<GuestSessionDriver.turnsPerHour {
+            #expect(await r.gate.admit(clientId: "dev-1") == .admitted(clientId: "dev-1"), "turn \(i) of the new bucket")
+        }
+    }
+
+    @Test("an idle reap keeps the turns bucket, so waiting out the TTL does not reset the hourly limit")
+    func reapKeepsTheBucket() async throws {
+        let r = try rig(ttl: .seconds(10))
+        for _ in 0..<GuestSessionDriver.turnsPerHour { _ = await r.gate.admit(clientId: "dev-1") }
+        _ = try r.sessions.session(for: "dev-1")
+        r.clock.advance(.seconds(60))
+        r.sessions.reapIdle()
+        #expect(r.sessions.liveCount == 0)
+        #expect(await r.driver.submit(text: "again", from: "dev-1") == .rateLimited)
+    }
+
     // MARK: flag off, flag on
 
     @Test("with the flag off, submit starts nothing and creates no session")

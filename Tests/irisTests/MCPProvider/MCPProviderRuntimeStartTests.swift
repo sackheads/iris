@@ -84,6 +84,26 @@ struct MCPProviderRuntimeStartTests {
         #expect(guests.liveCount == 0 && !app.conversations.contains { $0.id == id } && app.guestEngines[id] == nil)
     }
 
+    @Test("revoking through the runtime clears the guest turns bucket as well as the session (#1066)")
+    func revokeClearsTheTurnsBucket() async throws {
+        let app = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
+        let guests = GuestSessionRegistry(state: app) { s, c in IrisEngine.makeGuestEngine(state: s, clientId: c, protectionEnabled: false) }
+        let tokens = Self.registry()
+        _ = try tokens.issueToken(forClientId: "dev-1")
+        let runtime = MCPProviderRuntime(isEnabled: { true }, makeRegistry: { tokens }, configuredPort: { 0 },
+                                         artifactRoot: Self.tempRoot(), report: { _ in }, makeGuestRegistry: { guests })
+        await runtime.start()
+        defer { Task { await runtime.stop() } }
+        let gate = try #require(runtime.guestDriver).turnGate
+        for _ in 0..<GuestSessionDriver.turnsPerHour { _ = await gate.admit(clientId: "dev-1") }
+        #expect(await gate.admit(clientId: "dev-1") == .budgetExceeded)
+        let id = try guests.session(for: "dev-1")
+        try await runtime.revoke(clientId: "dev-1")
+        #expect(!app.conversations.contains { $0.id == id })
+        _ = try tokens.issueToken(forClientId: "dev-1")
+        #expect(await gate.admit(clientId: "dev-1") == .admitted(clientId: "dev-1"), "a re-issued id starts with a fresh bucket")
+    }
+
     @Test("a port already in use is reported, naming the port")
     func bindFailureIsReported() async throws {
         // Hold a real loopback port, then ask the runtime for the same one.
