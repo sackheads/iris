@@ -80,8 +80,8 @@ actor ProviderMailbox {
     /// could pull an overriding `from` or any `to` other than Iris out of. Nothing drains this
     /// direction yet (no Iris-side read, ack, or consuming call) — a client that sends
     /// `maxPendingPerClient` times without ever being purged or swept will see `.inboxFull` on
-    /// its next send. That is accepted for Phase 1, where this type is otherwise dormant; wiring
-    /// an actual consumer of Iris's inbox is Task 8's concern (or a later follow-up), not this one.
+    /// its next send. With guest sessions off that is accepted (nothing consumes the message); with
+    /// them on, `GuestSessionDriver` retracts it once its turn has taken the text.
     func send(from clientId: String, text: String, fileRefs: [String]) throws -> Message {
         guard registry.isRegistered(clientId: clientId) else { throw MailboxError.senderNoLongerRegistered }
         try Self.validate(text: text, fileRefs: fileRefs)

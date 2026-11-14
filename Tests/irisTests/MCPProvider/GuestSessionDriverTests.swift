@@ -312,6 +312,46 @@ struct GuestSessionDriverTests {
         #expect(await r.driver.spend.total(for: "dev-2") == 0)
     }
 
+    // MARK: production wiring (nothing injected)
+
+    @Test("a driver with the default flag reader is inactive in a process that never turned the setting on")
+    func defaultFlagIsOff() async throws {
+        let r = try rig()
+        let driver = GuestSessionDriver(state: r.app, registry: r.sessions, mailbox: r.mailbox, turnGate: r.gate)
+        #expect(!driver.isActive)
+        #expect(await driver.submit(text: "hello", from: "dev-1") == .disabled)
+        #expect(r.sessions.liveCount == 0)
+    }
+
+    @Test("the default turn runner reaches the guest's own engine: a real turn's final message is the reply")
+    func defaultRunnerRunsARealTurn() async throws {
+        let app = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
+        let tokens = ProviderTokenRegistry(keychain: KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true))
+        _ = try tokens.issueToken(forClientId: "dev-1")
+        let mailbox = ProviderMailbox(registry: tokens)
+        let sessions = GuestSessionRegistry(state: app) { s, c in
+            IrisEngine.makeGuestEngine(state: s, clientId: c, client: CapturingLLMClient(reply: "hi from the engine"), protectionEnabled: false)
+        }
+        let gate = ProviderRequestGate(registry: tokens, capacity: GuestSessionDriver.turnsPerHour, refillInterval: GuestSessionDriver.turnRefillInterval)
+        let driver = GuestSessionDriver(state: app, registry: sessions, mailbox: mailbox, turnGate: gate, isEnabled: { true })
+        guard case .accepted = await driver.submit(text: "hello", from: "dev-1") else { Issue.record("not accepted"); return }
+        try await value(of: try #require(driver.turnTask(for: "dev-1")), within: 30)
+        #expect(await mailbox.poll(for: "dev-1", sinceSequence: nil).map(\.text) == ["hi from the engine"])
+        #expect(await driver.spend.total(for: "dev-1") > 0, "the turn's usage reached the sink")
+    }
+
+    // MARK: the stored message
+
+    @Test("the stored client message is retracted when its turn ends, so sends never fill the client's allowance")
+    func storedMessageIsRetracted() async throws {
+        let r = try rig()
+        let stored = try await r.mailbox.send(from: "dev-1", text: "hello", fileRefs: [])
+        _ = await r.driver.submit(text: "hello", from: "dev-1", storedMessageId: stored.id)
+        try await finish(r, "dev-1")
+        // The whole allowance is still free: a left-behind message would make the last one inboxFull.
+        for i in 0..<ProviderMailbox.maxPendingPerClient { _ = try await r.mailbox.send(from: "dev-1", text: "m\(i)", fileRefs: []) }
+    }
+
     // MARK: sources
 
     @Test("deliverReply( is called only from GuestSessionDriver.swift and ProviderMailbox.swift, and the driver never names the reserved id")

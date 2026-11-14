@@ -120,7 +120,11 @@ final class GuestSessionDriver {
 
     /// Starts one guest turn for `clientId`, or says why not. The refusals are decided before any
     /// turn exists: a turn that was refused spent nothing.
-    func submit(text: String, from clientId: String) async -> GuestSubmitResult {
+    ///
+    /// `storedMessageId` is the mailbox copy of `text` that `iris_send` stored: the turn has the
+    /// text, and nothing else ever drains that direction, so it is retracted when the turn ends or
+    /// a client's pending allowance would fill up and lock it out after 500 sends.
+    func submit(text: String, from clientId: String, storedMessageId: UUID? = nil) async -> GuestSubmitResult {
         guard isEnabled() else { return .disabled }
         guard running.insert(clientId).inserted else { return .busy }
         var started = false
@@ -136,11 +140,11 @@ final class GuestSessionDriver {
 
         started = true
         let messageId = UUID()
-        turnTasks[clientId] = Task { await self.complete(clientId: clientId, conversationId: conversationId, text: text) }
+        turnTasks[clientId] = Task { await self.complete(clientId: clientId, conversationId: conversationId, text: text, storedMessageId: storedMessageId) }
         return .accepted(messageId: messageId)
     }
 
-    private func complete(clientId: String, conversationId: UUID, text: String) async {
+    private func complete(clientId: String, conversationId: UUID, text: String, storedMessageId: UUID?) async {
         let before = messageCount(conversationId)
         let sink = GuestSpendSink(clientId: clientId, ledger: spend)
         let budget = TurnBudget(maxTokens: Self.turnMaxTokens, seconds: Self.turnTimeoutSeconds)
@@ -150,8 +154,9 @@ final class GuestSessionDriver {
             try await withTimeout(seconds: turnTimeout) { await runTurn(conversationId, text, budget, sink) }
         } catch {
             finished = false
-            // Past its bound the turn is abandoned, not stopped: closing the session deletes the
-            // conversation, which cancels the turn and ends its spend.
+            // `withTimeout` cancelled the turn's task, which a cooperative engine call answers at its
+            // next boundary; closing the session also deletes the conversation, so nothing the
+            // abandoned turn still writes outlives it.
             registry.close(clientId: clientId)
         }
         // The turn is over: the session's idle clock starts now, not when the message arrived, or a
@@ -161,6 +166,7 @@ final class GuestSessionDriver {
         // `deliverReply` re-checks that the client is still registered: a client revoked while its
         // turn ran gets nothing, and the refusal is dropped here on purpose.
         _ = try? await mailbox.deliverReply(to: clientId, text: Self.clamp(reply ?? Self.failureReply), fileRefs: [])
+        if let storedMessageId { await mailbox.retract(id: storedMessageId) }
         running.remove(clientId)
         turnTasks[clientId] = nil
     }
