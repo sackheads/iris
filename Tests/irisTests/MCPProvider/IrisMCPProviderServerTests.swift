@@ -739,10 +739,11 @@ struct IrisMCPProviderServerTests {
         let result = try await sendResult(fixture, token: token, text: "hi")
         #expect(result["isError"] as? Bool == true)
         #expect(sessions.liveCount == 1)
-        #expect(await fixture.mailbox.status(for: "a").pendingCount == 0)
-        // The refused message was retracted: the next accepted one is the first in the mailbox.
-        let kept = try await fixture.mailbox.send(from: "a", text: "next", fileRefs: [])
-        #expect(kept.sequence == 2, "sequence 1 was the retracted message, not a queued one")
+        // The refused message was retracted, not left queued: the client's whole inbox allowance is
+        // still free (a left-behind message would make the last of these `inboxFull`).
+        for i in 0..<ProviderMailbox.maxPendingPerClient {
+            _ = try await fixture.mailbox.send(from: "a", text: "m\(i)", fileRefs: [])
+        }
     }
 
     private func polledReplies(_ fixture: Fixture, _ client: String) async -> [ProviderMailbox.Message] {
