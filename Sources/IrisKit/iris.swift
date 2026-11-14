@@ -993,6 +993,14 @@ actor IrisEngine {
         // cannot be archived (a reserved conversation refuses), so the handoff needs no unarchive.
         enum Claim { case claimed, busy, gone(String) }
         let loop = goalLoop
+        // #1119: guest-origin travels: a message from a guest, or from a session whose own turn a
+        // guest's message started (or its delegation root's), marks the receiving turn. Otherwise
+        // guest text could launder through a granted role into a user-facing YOLO session. The
+        // framing still names the actual sender; this decides the marker only.
+        let guestOrigin: Bool = guestClientId != nil || (await MainActor.run {
+            guard let localState else { return false }
+            return localState.isGuestOriginTurn(senderId) || localState.isGuestOriginTurn(localState.delegationRoot(of: senderId))
+        })
         let claim: Claim = await MainActor.run {
             guard let localState else { return .busy }
             if let reason = localState.peerTargetGoneReason(targetId) {
@@ -1008,14 +1016,14 @@ actor IrisEngine {
             // #696: the turn this starts was started by a topic message.
             if envelope.topic != nil { localState.markTopicTurn(targetId) }
             // #1119: the turn this starts was started by a guest's message, so YOLO is off for it.
-            if guestClientId != nil { localState.markGuestOriginTurn(targetId) }
+            if guestOrigin { localState.markGuestOriginTurn(targetId) }
             return .claimed
         }
         switch claim {
         case .gone(let reason):
             return .refused(reason)
         case .busy:
-            await queuePeerArrival(safe, to: targetId, isTopic: envelope.topic != nil, isGuestOrigin: guestClientId != nil)
+            await queuePeerArrival(safe, to: targetId, isTopic: envelope.topic != nil, isGuestOrigin: guestOrigin)
             return .queued
         case .claimed:
             break

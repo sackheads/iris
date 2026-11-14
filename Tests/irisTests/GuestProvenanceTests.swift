@@ -264,6 +264,28 @@ struct GuestProvenanceTests {
         #expect(drainedTurn([true, false]) == false)
     }
 
+    @Test("guest-origin crosses a hop: a send from a guest-started turn marks a user-facing YOLO receiver, and an ordinary sender does not")
+    func guestOriginPropagates() async {
+        for (fromGuestTurn, viaDelegate) in [(true, false), (true, true), (false, false)] {
+            let w = world()
+            w.app.setYoloMode(true, for: w.builder)
+            let engine = IrisEngine(state: w.app, tier: .medium, client: FakeLLMClient(responses: []), retryDelays: [], protectionEnabled: false)
+            w.app.installEngine(engine)
+            var sender = w.reviewer
+            if viaDelegate {
+                sender = w.app.createNewConversation(isSubagent: true, select: false)
+                w.app.linkDelegate(sender, of: w.reviewer)
+            }
+            if fromGuestTurn { w.app.markGuestOriginTurn(w.reviewer) }
+            w.app.beginEngineTurn(for: w.builder)   // busy, so the entry queues
+            let outcome = await engine.deliverPeerMessage("please do it", from: sender, senderName: "r", to: w.builder, envelope: envelope())
+            guard case .queued = outcome else { Issue.record("expected the busy path, got \(outcome)"); continue }
+            _ = w.app.takePendingSteers(for: w.builder)
+            #expect(w.app.isYoloMode(w.builder) == !fromGuestTurn, "guest-started sender: \(fromGuestTurn), via delegate: \(viaDelegate)")
+            w.app.endEngineTurn(for: w.builder)
+        }
+    }
+
     /// A YOLO role session; a guest's message starts its turn; the turn calls `schedule_job`
     /// (human-only). YOLO would approve it unasked, so a pending approval is the proof it is off.
     private func scheduleJobTurn(guestOrigin: Bool) async -> (pending: Int, jobs: Int) {
