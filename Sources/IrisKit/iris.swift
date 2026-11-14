@@ -444,6 +444,11 @@ actor IrisEngine {
     func setWallClockForTesting(_ clock: @escaping @Sendable () -> Date) { wallClock = clock }
 
     private func composedSystemPrompt(workspacePath: String?, additionalRoots: [String] = [], agentProfile: AgentProfile? = nil) async -> Content {
+        // #1066: a guest gets its own text and nothing of the owner's. First, ahead of every read of
+        // SOUL.md, USER.md, AGENTS.md, the skills catalogue and the profile below.
+        if principal == .mcpGuest {
+            return Content(role: "system", parts: [Part(text: GuestPrompt.text(clientId: guestClientId ?? "unknown"), functionCall: nil, functionResponse: nil)])
+        }
         let base = await ensureSystemPrompt(skills: agentProfile?.skills)
         guard let baseText = base.parts.first?.text else { return base }
         let profileText = await guardedUserProfileText()
@@ -473,6 +478,8 @@ actor IrisEngine {
     nonisolated let modelTier: ModelTier
     let principal: Principal
     let roleLabel: String?
+    /// The external MCP client a `.mcpGuest` engine serves; nil for every other principal (#1066).
+    let guestClientId: String?
     let evaluatorChecks: [String]
     /// Backoff schedule for transient provider errors (429/503/529); one wait per retry.
     let retryDelays: [TimeInterval]
@@ -596,8 +603,10 @@ actor IrisEngine {
          primaryClient: (any LLMClientProtocol)? = nil,
          routedClient: @escaping @Sendable (ProviderRoute) -> any LLMClientProtocol = { LLMClient(route: $0) },
          mutatingJobsAvailable: @escaping @Sendable () -> Bool = { SandboxPolicy.mutatingJobCanRun() },
-         skillCheckWillClaim: (@Sendable (UUID) async -> Void)? = nil) {
+         skillCheckWillClaim: (@Sendable (UUID) async -> Void)? = nil,
+         guestClientId: String? = nil) {
         self.state = state
+        self.guestClientId = guestClientId
         self.mutatingJobsAvailable = mutatingJobsAvailable
         self.skillCheckWillClaim = skillCheckWillClaim
         self.subagentConfig = subagentConfig
@@ -5039,6 +5048,13 @@ actor IrisEngine {
             ])),
         ], required: ["message"])
     )
+
+    /// #1066: the engine an external MCP client's guest conversation runs on: principal `.mcpGuest`,
+    /// the cheapest tier, a role label naming the guest. Its prompt is `GuestPrompt` alone.
+    static func makeGuestEngine(state: AppState, clientId: String, client: any LLMClientProtocol = LLMClient()) -> IrisEngine {
+        IrisEngine(state: state, tier: .easy, principal: .mcpGuest, roleLabel: "guest:\(clientId)", client: client,
+                   guestClientId: clientId)
+    }
 
     /// #1066: the guest's declared tools: exactly its floor.
     nonisolated static func guestToolDeclarations() -> [FunctionDeclaration] {
