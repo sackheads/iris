@@ -93,10 +93,16 @@ final class MCPProviderRuntime {
         let mailboxGate = ProviderRequestGate(registry: tokenRegistry, capacity: Self.mailboxGateCapacity, refillInterval: Self.refillInterval(forCapacity: Self.mailboxGateCapacity))
         let port = configuredPort()
         let guests = makeGuestRegistry()
+        let driver = guests.map { registry in
+            GuestSessionDriver(state: AppState.shared, registry: registry, mailbox: mailbox,
+                               turnGate: ProviderRequestGate(registry: tokenRegistry, capacity: GuestSessionDriver.turnsPerHour,
+                                                             refillInterval: GuestSessionDriver.turnRefillInterval))
+        }
 
         let server = IrisMCPProviderServer(tokenRegistry: tokenRegistry, mailbox: mailbox, artifactStore: artifactStore,
                                            door: door, doorGate: doorGate, mailboxGate: mailboxGate, port: port,
-                                           closeGuestSession: { clientId in await MainActor.run { guests?.close(clientId: clientId) } })
+                                           closeGuestSession: { clientId in await MainActor.run { guests?.close(clientId: clientId) } },
+                                           guestDriver: driver)
         do {
             try await server.start()
             self.server = server
@@ -126,6 +132,8 @@ final class MCPProviderRuntime {
     func stop() async {
         await server?.stop()
         guestSessions?.stopReaper()
+        // A guest session does not outlive the runtime that served it.
+        guestSessions?.closeAll()
         guestSessions = nil
         server = nil
         if case .running = status { status = .off }

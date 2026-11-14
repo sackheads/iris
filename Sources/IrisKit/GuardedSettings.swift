@@ -39,6 +39,10 @@ enum GuardedKey: String, CaseIterable, Sendable {
     /// off is the protective value — an unreadable or missing item must not silently start
     /// listening.
     case mcpProviderEnabled = "MCP_PROVIDER_ENABLED"
+    /// #1066: lets an MCP client's `iris_send` start a guest session and a model turn, which
+    /// spends the owner's tokens. Off is protective, as for `mcpProviderEnabled`: an unreadable
+    /// item, or a `"true"` written outside the app, must not turn spending on.
+    case mcpGuestSessionsEnabled = "MCP_GUEST_SESSIONS_ENABLED"
 
     enum Kind { case url, cap(Int), flag(protectiveOn: Bool), sandboxPref, blob }
 
@@ -59,7 +63,7 @@ enum GuardedKey: String, CaseIterable, Sendable {
         case .loopTickCap: .cap(ConfigManager.defaultLoopTickCap)
         case .vibecopTimeoutSeconds: .cap(5)
         case .enableSandboxing, .enableVibecop, .enablePromptInjectionProtection: .flag(protectiveOn: true)
-        case .mcpProviderEnabled: .flag(protectiveOn: false)
+        case .mcpProviderEnabled, .mcpGuestSessionsEnabled: .flag(protectiveOn: false)
         case .mainAgentSandboxDefault: .sandboxPref
         case .subagentProviders, .subagentBuiltIns, .subagentRates: .blob
         }
@@ -328,6 +332,7 @@ extension ConfigManager {
         case .enableVibecop: enableVibecop ? "true" : "false"
         case .enablePromptInjectionProtection: enableAdvancedPromptInjectionProtection ? "true" : "false"
         case .mcpProviderEnabled: mcpProviderEnabled ? "true" : "false"
+        case .mcpGuestSessionsEnabled: mcpGuestSessionsEnabled ? "true" : "false"
         case .subagentProviders, .subagentBuiltIns, .subagentRates: guardedBlob(key)
         }
     }
