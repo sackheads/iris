@@ -36,6 +36,9 @@ final class IrisMCPProviderServer: Sendable {
     private let requestDeadline: Duration
     /// Closes the client's guest session, if it has one (#1066 Task 7). Run on every revoke.
     private let closeGuestSession: @Sendable (String) async -> Void
+    /// Runs `iris_send` as a guest turn when guest sessions are on (#1066 Task 8); nil keeps the
+    /// Phase 1 mailbox-only behaviour.
+    private let guestDriver: GuestSessionDriver?
     /// Test-only seam: called with each per-request `Server` and `StatelessHTTPServerTransport`
     /// right after construction, before `start()`/`stop()`. An instance property, not a mutable
     /// static — a static hook is one process-global shared across every `IrisMCPProviderServer`
@@ -57,6 +60,7 @@ final class IrisMCPProviderServer: Sendable {
          door: SelfReportDoor, doorGate: ProviderRequestGate, mailboxGate: ProviderRequestGate,
          port: UInt16, requestDeadline: Duration = .seconds(10),
          closeGuestSession: @escaping @Sendable (String) async -> Void = { _ in },
+         guestDriver: GuestSessionDriver? = nil,
          serverConstructedHook: (@Sendable (Server, StatelessHTTPServerTransport) -> Void)? = nil) {
         self.tokenRegistry = tokenRegistry
         self.mailbox = mailbox
@@ -67,6 +71,7 @@ final class IrisMCPProviderServer: Sendable {
         self.port = port
         self.requestDeadline = requestDeadline
         self.closeGuestSession = closeGuestSession
+        self.guestDriver = guestDriver
         self.serverConstructedHook = serverConstructedHook
     }
 
@@ -250,7 +255,7 @@ final class IrisMCPProviderServer: Sendable {
     /// against real traffic.
     private func dispatch(clientId: String, request: HTTPRequest) async -> HTTPResponse {
         let server = Server(name: "iris", version: Constants.appVersion, capabilities: Self.serverCapabilities)
-        await Self.registerHandlers(on: server, clientId: clientId, door: door, mailbox: mailbox, artifactStore: artifactStore)
+        await Self.registerHandlers(on: server, clientId: clientId, door: door, mailbox: mailbox, artifactStore: artifactStore, guestDriver: guestDriver)
 
         let transport = StatelessHTTPServerTransport()
         serverConstructedHook?(server, transport)
@@ -286,7 +291,8 @@ final class IrisMCPProviderServer: Sendable {
     }
 
     private static func registerHandlers(on server: Server, clientId: String, door: SelfReportDoor,
-                                         mailbox: ProviderMailbox, artifactStore: ProviderArtifactStore) async {
+                                         mailbox: ProviderMailbox, artifactStore: ProviderArtifactStore,
+                                         guestDriver: GuestSessionDriver?) async {
         await server.withMethodHandler(ListTools.self) { _ in
             ListTools.Result(tools: Self.allTools)
         }
@@ -300,7 +306,7 @@ final class IrisMCPProviderServer: Sendable {
             try await Self.handleReadResource(params, clientId: clientId, artifactStore: artifactStore)
         }
         await server.withMethodHandler(CallTool.self) { params in
-            try await Self.handleCallTool(params, clientId: clientId, door: door, mailbox: mailbox, artifactStore: artifactStore)
+            try await Self.handleCallTool(params, clientId: clientId, door: door, mailbox: mailbox, artifactStore: artifactStore, guestDriver: guestDriver)
         }
     }
 
@@ -331,13 +337,14 @@ final class IrisMCPProviderServer: Sendable {
     // MARK: - tools/call
 
     private static func handleCallTool(_ params: CallTool.Parameters, clientId: String, door: SelfReportDoor,
-                                       mailbox: ProviderMailbox, artifactStore: ProviderArtifactStore) async throws -> CallTool.Result {
+                                       mailbox: ProviderMailbox, artifactStore: ProviderArtifactStore,
+                                       guestDriver: GuestSessionDriver?) async throws -> CallTool.Result {
         if let query = doorToolNamesByQuery.first(where: { $0.value == params.name })?.key {
             return try await handleDoorCall(query: query, clientId: clientId, door: door)
         }
         switch params.name {
         case "iris_send":
-            return try await handleSend(params, clientId: clientId, mailbox: mailbox, artifactStore: artifactStore)
+            return try await handleSend(params, clientId: clientId, mailbox: mailbox, artifactStore: artifactStore, guestDriver: guestDriver)
         case "iris_poll":
             let since = params.arguments?["sinceSequence"]?.uint64Value
             let messages = await mailbox.poll(for: clientId, sinceSequence: since)
@@ -378,7 +385,8 @@ final class IrisMCPProviderServer: Sendable {
     /// narrow window between preflight and grant where `sweepExpired`/`purge` could invalidate a
     /// ref that preflighted clean — the message is retracted rather than left half-delivered.
     private static func handleSend(_ params: CallTool.Parameters, clientId: String,
-                                   mailbox: ProviderMailbox, artifactStore: ProviderArtifactStore) async throws -> CallTool.Result {
+                                   mailbox: ProviderMailbox, artifactStore: ProviderArtifactStore,
+                                   guestDriver: GuestSessionDriver?) async throws -> CallTool.Result {
         // Reject a malformed shape outright rather than silently defaulting it into something
         // sendable: a missing/non-string `text` is not the same request as an explicit empty
         // string, and a non-array or mixed-type `fileRefs` is not the same as "no attachments" —
@@ -426,6 +434,21 @@ final class IrisMCPProviderServer: Sendable {
             } catch {
                 await mailbox.retract(id: message.id)
                 return CallTool.Result(content: [.text(text: "file reference grant failed; message not sent", annotations: nil, _meta: nil)], isError: true)
+            }
+        }
+        // #1066: with guest sessions on, the stored message also starts one turn in this client's
+        // guest session, and the reply comes back through `iris_poll`. A refused turn is a tool
+        // error and the message is retracted, so nothing is left queued behind it.
+        if let guestDriver {
+            switch await guestDriver.submit(text: text, from: clientId) {
+            case .accepted, .disabled:
+                break
+            case .busy:
+                await mailbox.retract(id: message.id)
+                return CallTool.Result(content: [.text(text: "Iris is busy answering other guests, or still answering your previous message. Try again later.", annotations: nil, _meta: nil)], isError: true)
+            case .rateLimited:
+                await mailbox.retract(id: message.id)
+                return CallTool.Result(content: [.text(text: "turn limit reached for this hour; try again later", annotations: nil, _meta: nil)], isError: true)
             }
         }
         return try CallTool.Result(structuredContent: message)

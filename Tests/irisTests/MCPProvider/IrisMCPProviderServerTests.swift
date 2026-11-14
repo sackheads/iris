@@ -30,6 +30,7 @@ private struct Fixture {
 
     static func build(doorGateCapacity: Int = 1000, mailboxGateCapacity: Int = 1000,
                       closeGuestSession: @escaping @Sendable (String) async -> Void = { _ in },
+                      guestDriver: ((ProviderTokenRegistry, ProviderMailbox) -> GuestSessionDriver)? = nil,
                       serverConstructedHook: (@Sendable (Server, StatelessHTTPServerTransport) -> Void)? = nil) -> Fixture {
         let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
         let registry = ProviderTokenRegistry(keychain: keychain)
@@ -53,6 +54,7 @@ private struct Fixture {
         let server = IrisMCPProviderServer(tokenRegistry: registry, mailbox: mailbox, artifactStore: artifactStore,
                                            door: door, doorGate: doorGate, mailboxGate: mailboxGate, port: 0,
                                            closeGuestSession: closeGuestSession,
+                                           guestDriver: guestDriver?(registry, mailbox),
                                            serverConstructedHook: serverConstructedHook)
         return Fixture(keychain: keychain, registry: registry, mailbox: mailbox, artifactStore: artifactStore,
                        doorGate: doorGate, mailboxGate: mailboxGate, server: server, doorCallCounter: counter)
@@ -679,7 +681,80 @@ struct IrisMCPProviderServerTests {
         }
     }
 
-    @Test("ProviderMailbox.deliverReply is never called from production code outside ProviderMailbox.swift itself")
+    // MARK: #1066 Task 8: iris_send with guest sessions
+
+    @MainActor
+    private func guestFixture(enabled: Bool = true, maxLive: Int = 4) throws -> (Fixture, GuestSessionRegistry, AppState) {
+        let app = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
+        let sessions = GuestSessionRegistry(state: app, maxLive: maxLive) { s, c in
+            IrisEngine.makeGuestEngine(state: s, clientId: c, client: CapturingLLMClient(reply: "unused"), protectionEnabled: false)
+        }
+        let fixture = Fixture.build(guestDriver: { tokens, mailbox in
+            let gate = ProviderRequestGate(registry: tokens, capacity: GuestSessionDriver.turnsPerHour,
+                                           refillInterval: GuestSessionDriver.turnRefillInterval)
+            return GuestSessionDriver(state: app, registry: sessions, mailbox: mailbox, turnGate: gate, isEnabled: { enabled },
+                                      runTurn: { conversationId, _, _, _ in
+                                          await MainActor.run { app.appendMessage(role: .agent, content: "guest answer", to: conversationId) }
+                                      })
+        })
+        return (fixture, sessions, app)
+    }
+
+    private func sendResult(_ fixture: Fixture, token: String, text: String) async throws -> [String: Any] {
+        let response = await fixture.server.handleAuthenticated(
+            httpRequest(body: rpcBody(method: "tools/call", params: ["name": "iris_send", "arguments": ["text": text]]), token: token))
+        let body = try #require(decodedBody(response))
+        return try #require(body["result"] as? [String: Any])
+    }
+
+    @Test("iris_send with guest sessions off stores the message and starts no session or turn, as in Phase 1")
+    @MainActor
+    func sendGuestOffIsPhase1() async throws {
+        let (fixture, sessions, _) = try guestFixture(enabled: false)
+        let token = try fixture.registry.issueToken(forClientId: "a")
+        let result = try await sendResult(fixture, token: token, text: "hi")
+        #expect(result["isError"] as? Bool != true)
+        #expect(sessions.liveCount == 0)
+        #expect(await fixture.mailbox.poll(for: "a", sinceSequence: nil).isEmpty)
+    }
+
+    @Test("iris_send with guest sessions on starts a turn, and the reply is what iris_poll then returns")
+    @MainActor
+    func sendGuestOnAnswersThroughPoll() async throws {
+        let (fixture, sessions, _) = try guestFixture()
+        let token = try fixture.registry.issueToken(forClientId: "a")
+        let result = try await sendResult(fixture, token: token, text: "hi")
+        #expect(result["isError"] as? Bool != true)
+        #expect(sessions.liveCount == 1)
+        let replies = await polledReplies(fixture, "a")
+        #expect(replies.map(\.text) == ["guest answer"] && replies.first?.sequence == 1)
+    }
+
+    @Test("iris_send to a full guest registry is a tool error and leaves no message queued")
+    @MainActor
+    func sendGuestBusyIsAToolError() async throws {
+        let (fixture, sessions, _) = try guestFixture(maxLive: 1)
+        _ = try sessions.session(for: "other")
+        let token = try fixture.registry.issueToken(forClientId: "a")
+        let result = try await sendResult(fixture, token: token, text: "hi")
+        #expect(result["isError"] as? Bool == true)
+        #expect(sessions.liveCount == 1)
+        #expect(await fixture.mailbox.status(for: "a").pendingCount == 0)
+        // The refused message was retracted: the next accepted one is the first in the mailbox.
+        let kept = try await fixture.mailbox.send(from: "a", text: "next", fileRefs: [])
+        #expect(kept.sequence == 2, "sequence 1 was the retracted message, not a queued one")
+    }
+
+    private func polledReplies(_ fixture: Fixture, _ client: String) async -> [ProviderMailbox.Message] {
+        for _ in 0..<200 {
+            let replies = await fixture.mailbox.poll(for: client, sinceSequence: nil)
+            if !replies.isEmpty { return replies }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return []
+    }
+
+    @Test("ProviderMailbox.deliverReply is never called from production code outside ProviderMailbox.swift and GuestSessionDriver.swift")
     func deliverReplyHasNoProductionCallSite() throws {
         let sourcesRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -692,12 +767,13 @@ struct IrisMCPProviderServerTests {
                 guard url.pathExtension == "swift" else { continue }
                 guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
                 guard text.contains("deliverReply(") else { continue }
-                if url.lastPathComponent != "ProviderMailbox.swift" {
+                // Phase 2 (#1066): the guest driver files a guest turn's reply; no MCP tool does.
+                if !["ProviderMailbox.swift", "GuestSessionDriver.swift"].contains(url.lastPathComponent) {
                     offendingFiles.append(url.path)
                 }
             }
         }
-        #expect(offendingFiles.isEmpty, "deliverReply( referenced outside ProviderMailbox.swift: \(offendingFiles)")
+        #expect(offendingFiles.isEmpty, "deliverReply( referenced outside ProviderMailbox.swift and GuestSessionDriver.swift: \(offendingFiles)")
     }
 
     @Test("revoke tears down the token, the mailbox, and the store's grants for that client in one call")

@@ -43,6 +43,18 @@ actor ProviderRequestGate {
         guard let bearerToken, let clientId = registry.clientId(forToken: bearerToken) else {
             return .unauthorized
         }
+        return take(clientId: clientId)
+    }
+
+    /// Admits an already-resolved client id (#1066's turns-per-hour gate, behind the request gate
+    /// that resolved the token). A client revoked since it was resolved is `.unauthorized`, not
+    /// charged: the id alone is not proof it is still registered.
+    func admit(clientId: String) -> Admission {
+        guard registry.isRegistered(clientId: clientId) else { return .unauthorized }
+        return take(clientId: clientId)
+    }
+
+    private func take(clientId: String) -> Admission {
         let t = now()
         var bucket = buckets[clientId] ?? (Double(capacity), t)
         let elapsedSeconds = Self.seconds(t - bucket.at)

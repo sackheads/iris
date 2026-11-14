@@ -373,6 +373,12 @@ class ConfigManager: @unchecked Sendable {
         didSet { persistGuarded(.mcpProviderEnabled) { $0.set(mcpProviderEnabled, forKey: "MCP_PROVIDER_ENABLED") } }
     }
 
+    /// Lets an MCP client's `iris_send` start a guest session and a model turn (#1066). Off is
+    /// the protective default, like `mcpProviderEnabled`; read per request, not once at launch.
+    var mcpGuestSessionsEnabled: Bool {
+        didSet { persistGuarded(.mcpGuestSessionsEnabled) { $0.set(mcpGuestSessionsEnabled, forKey: "MCP_GUEST_SESSIONS_ENABLED") } }
+    }
+
     /// The MCP provider's loopback bind port (#1067). A bind port, not a spend or safety
     /// control, so it is plain `ConfigManager` state, not a `GuardedKey`. Dev and release builds
     /// can both have the provider enabled on the same machine at once, so they default to
@@ -797,6 +803,7 @@ class ConfigManager: @unchecked Sendable {
         self.googleTokenExpiry = saved.double(forKey: "GOOGLE_TOKEN_EXPIRY")
         self.enableSandboxing = guardedBool(.enableSandboxing, "ENABLE_SANDBOXING")
         self.mcpProviderEnabled = guardedBool(.mcpProviderEnabled, "MCP_PROVIDER_ENABLED")
+        self.mcpGuestSessionsEnabled = guardedBool(.mcpGuestSessionsEnabled, "MCP_GUEST_SESSIONS_ENABLED")
         let savedMCPProviderPort = saved.integer(forKey: "MCP_PROVIDER_PORT")
         self.mcpProviderPort = Self.validMCPProviderPortRange.contains(savedMCPProviderPort)
             ? savedMCPProviderPort : Self.defaultMCPProviderPort

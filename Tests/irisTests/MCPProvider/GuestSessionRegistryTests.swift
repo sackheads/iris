@@ -111,6 +111,17 @@ struct GuestSessionRegistryTests {
         #expect(!exists(r, id))
     }
 
+    @Test("closeAll deletes every session, a turn in flight or not, and frees the slots")
+    func closeAllDeletesEverything() throws {
+        let r = rig()
+        let a = try r.registry.session(for: "a"), b = try r.registry.session(for: "b")
+        r.app.beginEngineTurn(for: a)
+        r.registry.closeAll()
+        #expect(!exists(r, a) && !exists(r, b) && r.registry.liveCount == 0)
+        #expect(r.app.guestEngines[a] == nil && r.app.guestEngines[b] == nil)
+        r.registry.closeAll()   // idempotent
+    }
+
     @Test("close(clientId:) deletes at once, and an unknown client is a no-op")
     func closeNow() throws {
         let r = rig()

@@ -71,6 +71,19 @@ struct MCPProviderRuntimeStartTests {
         #expect(runtime.guestSessions == nil)
     }
 
+    @Test("stopping the provider closes its live guest sessions (#1066)")
+    func stopClosesLiveGuestSessions() async throws {
+        let app = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
+        let guests = GuestSessionRegistry(state: app) { s, c in IrisEngine.makeGuestEngine(state: s, clientId: c, protectionEnabled: false) }
+        let runtime = MCPProviderRuntime(isEnabled: { true }, makeRegistry: { Self.registry() }, configuredPort: { 0 },
+                                         artifactRoot: Self.tempRoot(), report: { _ in }, makeGuestRegistry: { guests })
+        await runtime.start()
+        let id = try guests.session(for: "dev-1")
+        #expect(app.conversations.contains { $0.id == id })
+        await runtime.stop()
+        #expect(guests.liveCount == 0 && !app.conversations.contains { $0.id == id } && app.guestEngines[id] == nil)
+    }
+
     @Test("a port already in use is reported, naming the port")
     func bindFailureIsReported() async throws {
         // Hold a real loopback port, then ask the runtime for the same one.

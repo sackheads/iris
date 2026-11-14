@@ -32,7 +32,7 @@ struct GuardedSettingsTests {
         #expect(GuardedKey.mcpProviderEnabled.protective == "false")
         #expect(GuardedKey.mcpProviderEnabled.builtIn == "false")
         // Every other flag still defaults protective "true" — this key is the one exception.
-        for key in GuardedKey.allCases where key != .mcpProviderEnabled {
+        for key in GuardedKey.allCases where key != .mcpProviderEnabled && key != .mcpGuestSessionsEnabled {
             if case .flag = key.kind { #expect(key.protective == "true") }
         }
     }
@@ -42,6 +42,34 @@ struct GuardedSettingsTests {
         let load = GuardedSettings.load(item: .read([:]), defaults: ["MCP_PROVIDER_ENABLED": "true"], defaultsMarker: false)
         #expect(load.values[.mcpProviderEnabled] == "false")
         #expect(load.notices.first?.contains("MCP_PROVIDER_ENABLED") == true)
+    }
+
+    // MARK: #1066 mcpGuestSessionsEnabled
+
+    @Test("mcpGuestSessionsEnabled is off by default, and a \"true\" in the defaults domain does not carry across the upgrade")
+    func guestSessionsFlagDoesNotCarryOver() {
+        #expect(GuardedKey.mcpGuestSessionsEnabled.protective == "false" && GuardedKey.mcpGuestSessionsEnabled.builtIn == "false")
+        let load = GuestFlagLoad.load(["MCP_GUEST_SESSIONS_ENABLED": "true"])
+        #expect(load.values[.mcpGuestSessionsEnabled] == "false")
+        #expect(load.notices.first?.contains("MCP_GUEST_SESSIONS_ENABLED") == true)
+        // Control: a stored "false" is carried (the rule keeps only the protective value).
+        #expect(GuestFlagLoad.load(["MCP_GUEST_SESSIONS_ENABLED": "false"]).values[.mcpGuestSessionsEnabled] == "false")
+    }
+
+    @Test("an unreadable guarded item loads the guest-sessions flag off")
+    func guestSessionsFlagUnreadableIsOff() {
+        let load = GuardedSettings.load(item: .unreadable(-25308), defaults: ["MCP_GUEST_SESSIONS_ENABLED": "true"], defaultsMarker: true)
+        #expect(load.values[.mcpGuestSessionsEnabled] == "false")
+    }
+
+    @Test("a ConfigManager over a fresh store reads the guest-sessions flag off, and a Settings change to it persists")
+    func guestSessionsConfigRoundTrip() {
+        let (store, keychain, suite) = harness()
+        defer { teardown(suite) }
+        let config = ConfigManager(store: store, guardedSecrets: keychain)
+        #expect(!config.mcpGuestSessionsEnabled)
+        config.mcpGuestSessionsEnabled = true
+        #expect(ConfigManager(store: store, guardedSecrets: keychain).mcpGuestSessionsEnabled)
     }
 
     // MARK: the decision, pure
@@ -360,5 +388,11 @@ struct GuardedSettingsTests {
         #expect(GuardedSettings.approvalWarning(for: "DEFAULTS WRITE COM.BNAYLOR.IRIS X 1") != nil)
         #expect(GuardedSettings.approvalWarning(for: "defaults delete \"$D\" GUARDED_SETTINGS_V1") != nil)
         #expect(GuardedSettings.approvalWarning(for: "ls -la ~/src") == nil)
+    }
+}
+
+private enum GuestFlagLoad {
+    static func load(_ defaults: [String: String]) -> GuardedSettings.Load {
+        GuardedSettings.load(item: .read([:]), defaults: defaults, defaultsMarker: false)
     }
 }

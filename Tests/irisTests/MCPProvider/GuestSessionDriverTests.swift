@@ -1,0 +1,310 @@
+import Testing
+import Foundation
+@testable import IrisKit
+
+/// #1066 Phase 2, Task 8: the guest driver. A fake turn runner stands in for the model; what is
+/// under test is who is admitted, which turn runs, and where the reply goes.
+@MainActor
+@Suite("Guest session driver (#1066)", .timeLimit(.minutes(2)))
+struct GuestSessionDriverTests {
+    private final class Clock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var instant = SuspendingClock().now
+        var now: SuspendingClock.Instant { lock.withLock { instant } }
+        func advance(_ d: Duration) { lock.withLock { instant = instant.advanced(by: d) } }
+    }
+
+    private actor Latch {
+        private var opened = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        func wait() async {
+            if opened { return }
+            await withCheckedContinuation { waiters.append($0) }
+        }
+        func open() {
+            opened = true
+            for w in waiters { w.resume() }
+            waiters = []
+        }
+    }
+
+    /// What the fake runner does, and what it saw.
+    private final class Script: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _texts: [String] = []
+        private var _reply: String? = "an answer"
+        var latch: Latch?
+        var reply: String? {
+            get { lock.withLock { _reply } }
+            set { lock.withLock { _reply = newValue } }
+        }
+        var texts: [String] { lock.withLock { _texts } }
+        func saw(_ text: String) { lock.withLock { _texts.append(text) } }
+    }
+
+    private struct Rig {
+        let app: AppState
+        let clock: Clock
+        let gateClock: Clock
+        let tokens: ProviderTokenRegistry
+        let mailbox: ProviderMailbox
+        let sessions: GuestSessionRegistry
+        let gate: ProviderRequestGate
+        let script: Script
+        let driver: GuestSessionDriver
+        let enabled: Flag
+    }
+
+    private final class Flag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _on = true
+        var on: Bool { get { lock.withLock { _on } } set { lock.withLock { _on = newValue } } }
+    }
+
+    private func rig(enabled: Bool = true, ttl: Duration = .seconds(900), maxLive: Int = 4,
+                     turnTimeout: Double = 30, clients: [String] = ["dev-1"]) throws -> Rig {
+        let app = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
+        let clock = Clock(), gateClock = Clock()
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
+        let tokens = ProviderTokenRegistry(keychain: keychain)
+        for c in clients { _ = try tokens.issueToken(forClientId: c) }
+        let mailbox = ProviderMailbox(registry: tokens)
+        let sessions = GuestSessionRegistry(state: app, ttl: ttl, maxLive: maxLive, now: { clock.now }) { s, c in
+            IrisEngine.makeGuestEngine(state: s, clientId: c, client: CapturingLLMClient(reply: "unused"), protectionEnabled: false)
+        }
+        let gate = ProviderRequestGate(registry: tokens, capacity: GuestSessionDriver.turnsPerHour,
+                                       refillInterval: GuestSessionDriver.turnRefillInterval, now: { gateClock.now })
+        let script = Script()
+        let flag = Flag()
+        flag.on = enabled
+        let driver = GuestSessionDriver(
+            state: app, registry: sessions, mailbox: mailbox, turnGate: gate, isEnabled: { flag.on }, turnTimeout: turnTimeout,
+            runTurn: { [script] conversationId, text, _, sink in
+                script.saw(text)
+                await MainActor.run { app.beginEngineTurn(for: conversationId) }
+                await script.latch?.wait()
+                if let reply = script.reply {
+                    await MainActor.run { app.appendMessage(role: .agent, content: reply, to: conversationId) }
+                }
+                await sink.record(TokenUsage(promptTokenCount: 60, candidatesTokenCount: 40, totalTokenCount: 100))
+                await MainActor.run { app.endEngineTurn(for: conversationId) }
+            })
+        return Rig(app: app, clock: clock, gateClock: gateClock, tokens: tokens, mailbox: mailbox, sessions: sessions,
+                   gate: gate, script: script, driver: driver, enabled: flag)
+    }
+
+    private func finish(_ r: Rig, _ client: String) async throws {
+        if let task = r.driver.turnTask(for: client) { try await value(of: task, within: 20) }
+    }
+
+    private func replies(_ r: Rig, _ client: String) async -> [ProviderMailbox.Message] {
+        await r.mailbox.poll(for: client, sinceSequence: nil)
+    }
+
+    // MARK: the gate overload
+
+    @Test("admit(clientId:) charges a registered client and refuses one that is not registered, without charging")
+    func admitByClientId() async throws {
+        let r = try rig()
+        #expect(await r.gate.admit(clientId: "dev-1") == .admitted(clientId: "dev-1"))
+        // Revoked between the request gate resolving its token and this gate.
+        try r.tokens.revokeToken(forClientId: "dev-1")
+        #expect(await r.gate.admit(clientId: "dev-1") == .unauthorized)
+        #expect(await r.gate.admit(clientId: "never-issued") == .unauthorized)
+    }
+
+    // MARK: flag off, flag on
+
+    @Test("with the flag off, submit starts nothing and creates no session")
+    func flagOff() async throws {
+        let r = try rig(enabled: false)
+        #expect(await r.driver.submit(text: "hello", from: "dev-1") == .disabled)
+        #expect(r.sessions.liveCount == 0 && r.script.texts.isEmpty)
+        #expect(await replies(r, "dev-1").isEmpty)
+    }
+
+    @Test("with the flag on, submit creates the session, runs one turn, and files the final reply for that client")
+    func flagOnRunsOneTurn() async throws {
+        let r = try rig()
+        let result = await r.driver.submit(text: "hello", from: "dev-1")
+        guard case .accepted = result else { Issue.record("not accepted: \(result)"); return }
+        try await finish(r, "dev-1")
+        #expect(r.script.texts == ["hello"])
+        #expect(r.sessions.liveCount == 1)
+        let mine = await replies(r, "dev-1")
+        #expect(mine.count == 1)
+        #expect(mine.first?.text == "an answer" && mine.first?.from == .iris && mine.first?.sequence == 1)
+    }
+
+    @Test("a reply goes to the client that sent, never to another registered client")
+    func replyGoesToTheSender() async throws {
+        let r = try rig(clients: ["dev-1", "dev-2"])
+        _ = await r.driver.submit(text: "hello", from: "dev-1")
+        try await finish(r, "dev-1")
+        #expect(await replies(r, "dev-1").count == 1)
+        #expect(await replies(r, "dev-2").isEmpty)
+    }
+
+    @Test("the reserved client id is never admitted and never gets a session")
+    func reservedIdIsNeverAGuest() async throws {
+        let r = try rig()
+        let result = await r.driver.submit(text: "hi", from: ProviderTokenRegistry.reservedClientId)
+        #expect(result == .disabled)
+        #expect(r.sessions.liveCount == 0 && r.script.texts.isEmpty)
+    }
+
+    // MARK: the turns-per-hour gate
+
+    @Test("the 13th turn in an hour is rateLimited and starts no turn; five minutes later one more is allowed")
+    func thirteenthIsRateLimited() async throws {
+        let r = try rig()
+        for i in 1...GuestSessionDriver.turnsPerHour {
+            guard case .accepted = await r.driver.submit(text: "m\(i)", from: "dev-1") else { Issue.record("turn \(i) refused"); return }
+            try await finish(r, "dev-1")
+        }
+        #expect(await r.driver.submit(text: "one too many", from: "dev-1") == .rateLimited)
+        #expect(r.script.texts.count == GuestSessionDriver.turnsPerHour && !r.script.texts.contains("one too many"))
+        r.gateClock.advance(GuestSessionDriver.turnRefillInterval)
+        guard case .accepted = await r.driver.submit(text: "after the refill", from: "dev-1") else { Issue.record("refill did not admit"); return }
+        try await finish(r, "dev-1")
+    }
+
+    // MARK: busy
+
+    @Test("a full registry is busy for a new client, creates no session and starts no turn; an existing client is still served")
+    func fullRegistryIsBusy() async throws {
+        let r = try rig(maxLive: 2, clients: ["a", "b", "c"])
+        _ = try r.sessions.session(for: "a")
+        _ = try r.sessions.session(for: "b")
+        #expect(await r.driver.submit(text: "hi", from: "c") == .busy)
+        #expect(r.sessions.liveCount == 2 && r.script.texts.isEmpty)
+        guard case .accepted = await r.driver.submit(text: "hi", from: "a") else { Issue.record("existing client refused"); return }
+        try await finish(r, "a")
+    }
+
+    @Test("a second message from a client whose turn is still running is busy, not a second turn")
+    func secondWhileRunningIsBusy() async throws {
+        let r = try rig()
+        let latch = Latch()
+        r.script.latch = latch
+        guard case .accepted = await r.driver.submit(text: "first", from: "dev-1") else { Issue.record("first refused"); return }
+        #expect(await r.driver.submit(text: "second", from: "dev-1") == .busy)
+        await latch.open()
+        try await finish(r, "dev-1")
+        #expect(r.script.texts == ["first"])
+        // The refused attempt spent no turn: the answer to the first is the only reply.
+        #expect(await replies(r, "dev-1").count == 1)
+        guard case .accepted = await r.driver.submit(text: "third", from: "dev-1") else { Issue.record("not free after the turn"); return }
+        try await finish(r, "dev-1")
+    }
+
+    // MARK: failure is a reply, not silence
+
+    @Test("a turn that adds no agent message files a short failure reply")
+    func noAnswerIsAFailureReply() async throws {
+        let r = try rig()
+        r.script.reply = nil
+        _ = await r.driver.submit(text: "hello", from: "dev-1")
+        try await finish(r, "dev-1")
+        #expect(await replies(r, "dev-1").map(\.text) == [GuestSessionDriver.failureReply])
+    }
+
+    @Test("a turn past its bound files the failure reply and closes the session")
+    func timeoutIsAFailureReply() async throws {
+        let r = try rig(turnTimeout: 0.2)
+        r.script.latch = Latch()   // never opened: the turn hangs
+        _ = await r.driver.submit(text: "hello", from: "dev-1")
+        try await finish(r, "dev-1")
+        #expect(await replies(r, "dev-1").map(\.text) == [GuestSessionDriver.failureReply])
+        #expect(r.sessions.liveCount == 0, "the abandoned turn's conversation is deleted, ending its spend")
+    }
+
+    @Test("a reply longer than the mailbox accepts is cut to fit, not dropped")
+    func longReplyIsClamped() async throws {
+        let r = try rig()
+        r.script.reply = String(repeating: "é", count: ProviderMailbox.maxTextBytes)   // 2 bytes each
+        _ = await r.driver.submit(text: "hello", from: "dev-1")
+        try await finish(r, "dev-1")
+        let text = try #require(await replies(r, "dev-1").first?.text)
+        #expect(text.utf8.count <= ProviderMailbox.maxTextBytes && text.utf8.count > ProviderMailbox.maxTextBytes - 2)
+        #expect(!text.contains("\u{FFFD}"))
+    }
+
+    // MARK: revoke mid-turn
+
+    @Test("a client revoked while its turn runs is never sent the reply; a client that is not revoked is")
+    func revokedMidTurnGetsNothing() async throws {
+        let r = try rig(clients: ["dev-1", "dev-2"])
+        let latch = Latch()
+        r.script.latch = latch
+        _ = await r.driver.submit(text: "one", from: "dev-1")
+        _ = await r.driver.submit(text: "two", from: "dev-2")
+        try r.tokens.revokeToken(forClientId: "dev-1")
+        r.sessions.close(clientId: "dev-1")
+        await latch.open()
+        try await finish(r, "dev-1")
+        try await finish(r, "dev-2")
+        #expect(await replies(r, "dev-1").isEmpty, "a revoked id gets no reply, not even a failure one")
+        #expect(await replies(r, "dev-2").map(\.text) == ["an answer"], "control: the same flow delivers to a live client")
+    }
+
+    // MARK: the session clock
+
+    @Test("a session is not reaped mid-turn however long the turn runs, and its TTL restarts when the turn ends")
+    func touchAtTurnEnd() async throws {
+        let r = try rig(ttl: .seconds(900))
+        let latch = Latch()
+        r.script.latch = latch
+        _ = await r.driver.submit(text: "long", from: "dev-1")
+        let script = r.script
+        #expect(await polled(within: 10) { script.texts.count == 1 })
+        r.clock.advance(.seconds(1000))
+        r.sessions.reapIdle()
+        #expect(r.sessions.liveCount == 1, "a turn is running")
+        await latch.open()
+        try await finish(r, "dev-1")
+        r.sessions.reapIdle()
+        #expect(r.sessions.liveCount == 1, "the turn just ended: its idle time starts now, not when it began")
+        r.clock.advance(.seconds(800))
+        r.sessions.reapIdle()
+        #expect(r.sessions.liveCount == 1, "800 s after the turn is inside the 900 s TTL")
+        r.clock.advance(.seconds(200))
+        r.sessions.reapIdle()
+        #expect(r.sessions.liveCount == 0)
+    }
+
+    // MARK: spend
+
+    @Test("a turn's tokens are tallied against its client and the tally outlives the session")
+    func spendSurvivesTheSession() async throws {
+        let r = try rig()
+        _ = await r.driver.submit(text: "hello", from: "dev-1")
+        try await finish(r, "dev-1")
+        #expect(await r.driver.spend.total(for: "dev-1") == 100)
+        r.sessions.close(clientId: "dev-1")
+        #expect(await r.driver.spend.total(for: "dev-1") == 100)
+        #expect(await r.driver.spend.total(for: "dev-2") == 0)
+    }
+
+    // MARK: sources
+
+    @Test("deliverReply( is called only from GuestSessionDriver.swift and ProviderMailbox.swift, and the driver never names the reserved id")
+    func deliverReplyCallSites() throws {
+        let sources = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources")
+        var callers: Set<String> = []
+        for sub in ["IrisKit", "iris"] {
+            guard let walk = FileManager.default.enumerator(at: sources.appendingPathComponent(sub), includingPropertiesForKeys: nil) else { continue }
+            while let url = walk.nextObject() as? URL {
+                guard url.pathExtension == "swift" else { continue }
+                if let text = try? String(contentsOf: url, encoding: .utf8), text.contains("deliverReply(") { callers.insert(url.lastPathComponent) }
+            }
+        }
+        #expect(callers == ["GuestSessionDriver.swift", "ProviderMailbox.swift"])
+        for file in ["GuestSessionDriver.swift", "GuestSessionRegistry.swift"] {
+            let url = sources.appendingPathComponent("IrisKit/MCPProvider/\(file)")
+            #expect(!(try String(contentsOf: url, encoding: .utf8)).contains("reservedClientId"), "\(file)")
+        }
+    }
+}

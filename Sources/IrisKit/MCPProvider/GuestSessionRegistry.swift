@@ -75,6 +75,12 @@ final class GuestSessionRegistry {
         state.deleteConversation(entry.conversationId)
     }
 
+    /// Closes every session now, for the provider stopping: a guest session does not outlive the
+    /// runtime that served it.
+    func closeAll() {
+        for clientId in Array(entries.keys) { close(clientId: clientId) }
+    }
+
     /// Closes every session idle past the TTL, except one with a turn in flight: that one is left
     /// for the next pass, which closes it once the turn has ended.
     func reapIdle() {
