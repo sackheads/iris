@@ -274,19 +274,30 @@ final class ComposerFocusKeeper {
             "[FOCUS] \(what) holder=\(holder) responder=\(responder) key=\(isWindowKey(window)) active=\(isAppActive()) clicked=\(userHasChosenSinceKey) cycle=\(reclaimsThisCycle) \(Self.paint(of: composer))\(outcome)\n".utf8))
     }
 
-    /// What the composer's glyphs would be drawn with: its resolved appearance name and the
-    /// foreground colour of its typing attributes and `textColor`, resolved under the ambient
-    /// drawing appearance (#1127: wrapping in `composer.effectiveAppearance.performAsCurrentDrawingAppearance`
-    /// masked dynamic catalog colours that resolved to black when drawn under an ambient light
-    /// `currentDrawingAppearance`). The colour only, never the text.
-    private static func paint(of composer: NSTextView) -> String {
+    /// What the composer's glyphs would be drawn with: its resolved appearance name, the ambient-
+    /// resolved foreground colours of `typingAttributes`, `textColor`, and `textStorage`'s first
+    /// run, and whether any of the three is still a dynamic `.catalog` colour (#1127). The colour
+    /// only, never the text.
+    static func paint(of composer: NSTextView) -> String {
         func resolveAmbient(_ color: NSColor?) -> String {
             guard let rgb = color?.usingColorSpace(.deviceRGB) else { return "none" }
             return String(format: "%.2f,%.2f,%.2f", rgb.redComponent, rgb.greenComponent, rgb.blueComponent)
         }
-        let typing = resolveAmbient(composer.typingAttributes[.foregroundColor] as? NSColor)
-        let text = resolveAmbient(composer.textColor)
-        return "appearance=\(composer.effectiveAppearance.name.rawValue) typingFG=\(typing) textFG=\(text)"
+        let typingColor = composer.typingAttributes[.foregroundColor] as? NSColor
+        let propColor = composer.textColor
+        let storageColor: NSColor?
+        let storageDesc: String
+        if let storage = composer.textStorage, storage.length > 0 {
+            storageColor = storage.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+            storageDesc = resolveAmbient(storageColor)
+        } else {
+            storageColor = nil
+            storageDesc = "empty"
+        }
+        let isDynamic = typingColor?.type == .catalog
+            || propColor?.type == .catalog
+            || storageColor?.type == .catalog
+        return "appearance=\(composer.effectiveAppearance.name.rawValue) typingFG=\(resolveAmbient(typingColor)) textFG=\(resolveAmbient(propColor)) storageFG=\(storageDesc) dynamic=\(isDynamic)"
     }
 
     // MARK: - Reading the window
