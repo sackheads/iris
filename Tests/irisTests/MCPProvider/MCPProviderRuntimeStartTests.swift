@@ -57,6 +57,20 @@ struct MCPProviderRuntimeStartTests {
         guard case .failed(.keychainLoad) = runtime.status else { Issue.record("status changed to \(runtime.status)"); return }
     }
 
+    @Test("a running provider owns the guest registry (reaper started), and stopping drops it (#1066)")
+    func runtimeOwnsTheGuestRegistry() async throws {
+        let app = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
+        let guests = GuestSessionRegistry(state: app) { s, c in IrisEngine.makeGuestEngine(state: s, clientId: c, protectionEnabled: false) }
+        let runtime = MCPProviderRuntime(isEnabled: { true }, makeRegistry: { Self.registry() }, configuredPort: { 0 },
+                                         artifactRoot: Self.tempRoot(), report: { _ in }, makeGuestRegistry: { guests })
+        #expect(runtime.guestSessions == nil)
+        await runtime.start()
+        guard case .running = runtime.status else { Issue.record("not running: \(runtime.status)"); return }
+        #expect(runtime.guestSessions === guests)
+        await runtime.stop()
+        #expect(runtime.guestSessions == nil)
+    }
+
     @Test("a port already in use is reported, naming the port")
     func bindFailureIsReported() async throws {
         // Hold a real loopback port, then ask the runtime for the same one.
