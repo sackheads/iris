@@ -15,7 +15,12 @@ import Foundation
 /// fixed prefix and overrides neutralising the worktree's half.
 enum ReadOnlyCommand {
     static func isReadOnly(_ command: String) -> Bool {
-        guard let words = words(command), let program = words.first else { return false }
+        guard let words = words(command) else { return false }
+        return isReadOnly(words: words)
+    }
+
+    static func isReadOnly(words: [String]) -> Bool {
+        guard let program = words.first else { return false }
         let args = Array(words.dropFirst())
         // `echo` (a zsh builtin) prints its arguments and nothing else, whatever they are.
         if program == "echo" { return true }

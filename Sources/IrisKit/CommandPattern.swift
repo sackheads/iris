@@ -129,13 +129,15 @@ enum CommandPattern {
 
     // MARK: Parts that need no rule
 
-    /// A part that only rides along in a chain: `cd` to a plain path, `pwd`, `true`, `echo`, or a
-    /// filter on the right of a pipe that reads nothing but its input. On its own it is never
-    /// enough: a command matches only when at least one part matched a rule (`matchedPrefixes`).
+    /// A part that only rides along in a chain: `pwd`, `true`, `echo`, or a filter on the right of
+    /// a pipe that reads nothing but its input. (`cd` is handled in `alwaysAllowPrefixes` and
+    /// `matchedPrefixes`, where `matchedPrefixes` checks it stays inside the workspace.) On its
+    /// own it is never enough: a command matches only when at least one part matched a rule
+    /// (`matchedPrefixes`).
     static func isRideAlong(_ segment: Segment) -> Bool {
         let words = segment.words
         switch words[0] {
-        case "cd": return words.count == 1 || (words.count == 2 && !words[1].hasPrefix("-"))
+        case "cd": return !segment.afterPipe && (words.count == 1 || (words.count == 2 && !words[1].hasPrefix("-")))
         case "pwd", "true": return words.count == 1
         case "echo": return true
         default: return segment.afterPipe && isPipeFilter(words)
@@ -219,23 +221,24 @@ enum CommandPattern {
         "diskutil", "tccutil", "networksetup", "pmset", "shutdown", "reboot", "csrutil", "spctl", "dscl",
     ]
 
-    /// Programs whose arguments carry no verb worth keeping: the program alone is the rule.
-    private static let wholePrograms: Set<String> = [
-        "ls", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "ps", "du", "df", "stat", "file",
-        "which", "whoami", "uname", "date", "tree", "diff", "cmp", "sort", "uniq", "cut", "printenv",
-        "hostname", "id", "groups", "uptime", "sw_vers", "lsof", "pgrep", "otool", "nm", "plutil",
-        "mdls", "mkdir", "touch", "xcodebuild", "swiftlint", "swiftformat", "shellcheck", "pytest",
-        "tsc", "eslint", "prettier", "ruff", "black",
+    /// Programs whose arguments carry no verb worth keeping: only programs with a flag allowlist in
+    /// `ReadOnlyCommand`, which is also re-checked at match time so no write/exec flag slips in.
+    private static let wholePrograms: Set<String> = Set(ReadOnlyCommand.programs.keys).union(["date"])
+
+    /// Read-only verbs for an unlisted tool (`tailscale status`, `diskutil list`): any other verb
+    /// saves the exact command so nested CLIs (`gcloud compute ...`, `terraform apply`) don't widen.
+    private static let unlistedReadVerbs: Set<String> = [
+        "status", "list", "ls", "show", "get", "describe", "version", "info", "inspect", "logs", "help",
     ]
 
     /// Tools with subcommands: the subcommands a prefix may be made for, and how many words the
     /// prefix keeps (2: `swift test`; 3: `npm run build`, `gh pr view`). Any other subcommand saves
-    /// the exact command.
+    /// the exact command. Destructive or program-running git subcommands (`branch`, `checkout`,
+    /// `restore`, `stash`, `remote`, `worktree`, `reflog`, `tag`, `grep`) are left out.
     private static let subcommands: [String: [String: Int]] = [
         "git": Dictionary(uniqueKeysWithValues: [
-            "status", "diff", "log", "show", "branch", "add", "commit", "checkout", "switch", "restore",
-            "stash", "fetch", "pull", "rev-parse", "ls-files", "blame", "grep", "remote", "tag", "worktree",
-            "merge-base", "describe", "shortlog", "reflog",
+            "status", "diff", "log", "show", "add", "commit", "switch", "fetch", "pull",
+            "rev-parse", "ls-files", "blame", "merge-base", "describe", "shortlog",
         ].map { ($0, 2) }),
         "swift": ["build": 2, "test": 2],
         "npm": ["test": 2, "run": 3, "ls": 2, "outdated": 2],
@@ -254,10 +257,11 @@ enum CommandPattern {
         "systemctl": ["status": 2, "is-active": 2, "list-units": 2],
     ]
 
-    /// git arguments a prefix never covers, wherever they stand: each runs a program or writes a
-    /// file of the caller's choosing.
-    private static let gitDeniedArgs = ["--upload-pack", "--receive-pack", "--exec", "--open-files-in-pager",
-                                        "--output", "--ext-diff", "--textconv", "-O"]
+    /// git long options a prefix never covers, wherever they stand (or any 3+ char abbreviation of
+    /// one, since git accepts unambiguous prefixes): each runs a program or writes a file.
+    private static let gitDeniedLongArgs = [
+        "upload-pack", "receive-pack", "exec", "open-files-in-pager", "output", "ext-diff", "textconv",
+    ]
 
     /// A word a saved prefix may hold: plain, no `=`, no quotes or spaces.
     private static func isRuleWord(_ word: String) -> Bool {
@@ -269,22 +273,39 @@ enum CommandPattern {
         }
     }
 
-    /// The words a prefix is judged against: git's two harmless global options (`-C <dir>`,
-    /// `--no-pager`) dropped, or nil when the part can't be matched by a prefix at all (a relative
-    /// program, which a `cd` moves; a variable assignment; git with any other global option or a
-    /// denied argument).
-    static func canonicalWords(_ segment: Segment) -> [String]? {
+    private static func resolvedInsideWorkspace(_ path: String, cwd: String, workspaceReal: String) -> String? {
+        let resolved = ToolExecutor.resolvePath(path, cwd: cwd)
+        let real = IrisPaths.realPath(resolved)
+        guard real == workspaceReal || real.hasPrefix(workspaceReal == "/" ? "/" : workspaceReal + "/") else {
+            return nil
+        }
+        return real
+    }
+
+    /// The words a prefix is judged against: normalized program name (`lastPathComponent`), git's
+    /// two harmless global options (`-C <dir>`, `--no-pager`) dropped, or nil when the part can't
+    /// be matched by a prefix at all (a relative program, which a `cd` moves; git with any other
+    /// global option or a denied argument; or `-C <dir>` outside the workspace when matching).
+    static func canonicalWords(_ segment: Segment, cwd: String? = nil, workspaceReal: String? = nil,
+                               enforceWorkspace: Bool = false) -> [String]? {
         let words = segment.words
         let program = words[0]
         guard isRuleWord(program), !program.hasPrefix("-") else { return nil }
         if program.contains("/"), !program.hasPrefix("/") { return nil }
-        guard program == "git" else { return words }
+        let programName = (program as NSString).lastPathComponent
+        guard programName == "git" else { return [programName] + words.dropFirst() }
         var out = ["git"]
         var i = 1
         while i < words.count, words[i].hasPrefix("-") {
             switch words[i] {
             case "-C":
                 guard i + 1 < words.count else { return nil }
+                if enforceWorkspace {
+                    guard let ws = workspaceReal,
+                          resolvedInsideWorkspace(words[i + 1], cwd: cwd ?? ws, workspaceReal: ws) != nil else {
+                        return nil
+                    }
+                }
                 i += 2
             case "--no-pager":
                 i += 1
@@ -293,9 +314,13 @@ enum CommandPattern {
             }
         }
         out.append(contentsOf: words[i...])
-        if out.dropFirst().contains(where: { arg in gitDeniedArgs.contains { arg == $0 || arg.hasPrefix($0 + "=") } }) {
-            return nil
+        let denied = out.dropFirst().contains { arg in
+            if arg.hasPrefix("-O") { return true }
+            guard arg.hasPrefix("--") else { return false }
+            let name = String(arg.dropFirst(2).prefix { $0 != "=" })
+            return name.count >= 3 && gitDeniedLongArgs.contains { $0.hasPrefix(name) }
         }
+        if denied { return nil }
         return out
     }
 
@@ -303,17 +328,15 @@ enum CommandPattern {
     static func prefix(for segment: Segment) -> [String]? {
         guard let words = canonicalWords(segment) else { return nil }
         let program = words[0]
-        guard !neverGeneralized.contains((program as NSString).lastPathComponent) else { return nil }
+        guard !neverGeneralized.contains(program) else { return nil }
         if let subs = subcommands[program] {
             guard words.count >= 2, let depth = subs[words[1]], words.count >= depth else { return nil }
             let prefix = Array(words.prefix(depth))
             return prefix.allSatisfy({ isRuleWord($0) && !$0.hasPrefix("-") }) ? prefix : nil
         }
         if wholePrograms.contains(program) { return [program] }
-        // Anything else: the program and its verb (`diskutil list`), never the program alone,
-        // since an unknown tool's other verbs may do anything. No verb, no prefix.
-        guard words.count >= 2, !words[1].hasPrefix("-"), isRuleWord(words[1]),
-              words[1].unicodeScalars.allSatisfy({ CharacterSet.letters.contains($0) || $0 == "-" }) else { return nil }
+        // Unlisted tools: only a short read-only verb list, never the program alone or arbitrary verbs.
+        guard words.count >= 2, unlistedReadVerbs.contains(words[1]) else { return nil }
         return [program, words[1]]
     }
 
@@ -331,14 +354,32 @@ enum CommandPattern {
     }
 
     /// For each part that is not a ride-along, the index in `prefixes` of the first prefix it
-    /// starts with; nil when any such part matches none, the command doesn't parse, or every part
-    /// is a ride-along (`cd x && pwd` is not approved by a rule it never used).
-    static func matchedPrefixes(_ command: String, prefixes: [[String]]) -> [Int]? {
+    /// starts with; nil when any such part matches none, the command doesn't parse, a `cd` or
+    /// `git -C` leaves `workspace`, a bare-program prefix fails `ReadOnlyCommand`'s flag check, or
+    /// every part is a ride-along (`cd x && pwd` is not approved by a rule it never used).
+    static func matchedPrefixes(_ command: String, prefixes: [[String]], workspace: String? = nil) -> [Int]? {
         guard !prefixes.isEmpty, let segments = segments(command) else { return nil }
+        let workspaceReal = workspace.map { IrisPaths.realPath(IrisEngine.expandTilde($0)) }
+        var currentCwd = workspaceReal
         var used: [Int] = []
-        for segment in segments where !isRideAlong(segment) {
-            guard let words = canonicalWords(segment),
-                  let index = prefixes.firstIndex(where: { !$0.isEmpty && words.starts(with: $0) }) else { return nil }
+        for segment in segments {
+            if segment.words[0] == "cd", !segment.afterPipe {
+                guard segment.words.count == 2, !segment.words[1].hasPrefix("-"),
+                      let ws = workspaceReal, let cwd = currentCwd,
+                      let nextDir = resolvedInsideWorkspace(segment.words[1], cwd: cwd, workspaceReal: ws) else {
+                    return nil
+                }
+                currentCwd = nextDir
+                continue
+            }
+            if isRideAlong(segment) { continue }
+            guard let words = canonicalWords(segment, cwd: currentCwd, workspaceReal: workspaceReal, enforceWorkspace: true),
+                  let index = prefixes.firstIndex(where: { !$0.isEmpty && words.starts(with: $0) }) else {
+                return nil
+            }
+            if prefixes[index].count == 1, !ReadOnlyCommand.isReadOnly(words: words) {
+                return nil
+            }
             used.append(index)
         }
         return used.isEmpty ? nil : used

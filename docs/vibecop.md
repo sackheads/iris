@@ -27,4 +27,4 @@ It is deliberately narrow. These commands get no prefix, and Always Allow saves 
 - git with any global option other than `-C` and `--no-pager`, or an argument that runs a program or writes a file (`--upload-pack`, `--output`, `--ext-diff`)
 - a program spelled as a relative path
 
-A tool Iris doesn't know keeps its verb (`tailscale status`), never just its name. Prefix rules apply only in attended chats. An unattended job run never uses them, only its grant and exact rules. Rules saved before this change keep matching exactly as before.
+A tool Iris doesn't know keeps its verb only when that verb is on a short read-only list (`status`, `list`, `ls`, `show`, `get`, `describe`, `version`, `info`, `inspect`, `logs`, `help`), never just its name or an arbitrary verb. Prefix rules apply only in attended, non-guest-origin chats, and `cd` or `git -C` must stay inside the conversation's workspace. An unattended job run never uses them, only its grant and exact rules. Rules saved before this change keep matching exactly as before.
