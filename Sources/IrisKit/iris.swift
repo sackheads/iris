@@ -431,7 +431,8 @@ actor IrisEngine {
     private func assembledSystemPrompt(workspacePath: String?, additionalRoots: [String] = [], agentProfile: AgentProfile? = nil) async -> Content {
         var composed = await composedSystemPrompt(workspacePath: workspacePath, additionalRoots: additionalRoots, agentProfile: agentProfile)
         // After the cached composition, never inside it: the date must not freeze in a cache entry.
-        if let text = composed.parts.first?.text {
+        // Not for a guest: the line carries the owner's IANA time zone (#1066).
+        if principal != .mcpGuest, let text = composed.parts.first?.text {
             let hasCurrentTime = principal != .evaluator && principal != .mcpGuest
                 && (Self.agentToolScope?.allows(Self.currentTimeTool) ?? true)
             composed.parts[0].text = text + "\n\n" + Self.currentDateLine(now: wallClock(), hasCurrentTimeTool: hasCurrentTime)
