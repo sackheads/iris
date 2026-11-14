@@ -52,7 +52,13 @@ struct ToolApproval: Codable, Equatable, Sendable {
         case .autoApprove(let vibecop):
             self.init(layer: .autoApprove, detail: vibecop)
         case .allowlist(let match):
-            self.init(layer: .allowlist, detail: match.rule.map { "\($0.toolName) \($0.details)" }, scope: match.scope.rawValue)
+            // #1102: a prefix rule covers more than its text, so its record says so.
+            let detail = match.rule.map { rule in
+                rule.isPrefix
+                    ? "\(rule.toolName) " + rule.details.components(separatedBy: "; ").map { $0 + " …" }.joined(separator: "; ")
+                    : "\(rule.toolName) \(rule.details)"
+            }
+            self.init(layer: .allowlist, detail: detail, scope: match.scope.rawValue)
         case .grant(let mount):
             self.init(layer: .grant, detail: mount)
         case .graderCheck(let kind):

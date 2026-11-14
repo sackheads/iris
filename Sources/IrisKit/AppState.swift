@@ -479,6 +479,9 @@ struct ToolApprovalRequest: Identifiable {
     /// composed text would let the same text run on the host unasked, where the person approved
     /// it for the sandbox. Off means no button and, in `resolveApproval`, no rule.
     let offersAlwaysAllow: Bool
+    /// #1102: what an Always Allow click saves, decided once when the ask is raised so the dialog
+    /// shows exactly what `resolveApproval` writes. Empty when `offersAlwaysAllow` is off.
+    let alwaysAllowRules: [PermissionRule]
     /// #812: whether the dialog offers "Allow in this conversation", which adds the tool to the
     /// conversation's `outboundAllowedTools`. On only for a tainted outbound send's card.
     let offersConversationAllow: Bool
@@ -498,6 +501,7 @@ struct ToolApprovalRequest: Identifiable {
         self.origin = origin
         self.humanOnly = humanOnly
         self.offersAlwaysAllow = offersAlwaysAllow && !humanOnly
+        self.alwaysAllowRules = self.offersAlwaysAllow ? PermissionRule.forAlwaysAllow(toolName: toolName, details: details) : []
         self.offersConversationAllow = offersConversationAllow
         self.continuation = continuation
     }
@@ -5409,15 +5413,15 @@ class AppState {
             // did approve it — only the standing rule is refused. The same for a gate script
             // (#648): `offersAlwaysAllow` is off for both.
             if pending.offersAlwaysAllow {
-                permissions.allowGlobally(toolName: pending.toolName, details: pending.details)
+                permissions.allowGlobally(pending.alwaysAllowRules)
             }
             approved = true
         case .alwaysAllowProject:
             if pending.offersAlwaysAllow {
                 if let workspace = pending.workspace {
-                    permissions.allowInProject(toolName: pending.toolName, details: pending.details, workspace: workspace)
+                    permissions.allowInProject(pending.alwaysAllowRules, workspace: workspace)
                 } else {
-                    permissions.allowGlobally(toolName: pending.toolName, details: pending.details)
+                    permissions.allowGlobally(pending.alwaysAllowRules)
                 }
             }
             approved = true

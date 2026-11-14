@@ -1778,6 +1778,17 @@ struct ApprovalBannerView: View {
     let queueDepth: Int
     let onResolve: (AppState.ApprovalResolution) -> Void
 
+    /// What the banner says Always Allow saves (#1102): the prefixes, or that it is the exact
+    /// command. nil for a non-command rule, whose text is the call shown above.
+    static func alwaysAllowSummary(_ rules: [PermissionRule]) -> String? {
+        guard let first = rules.first, first.toolName == "run_command" else { return nil }
+        if rules.allSatisfy(\.isPrefix) {
+            let list = rules.map { "`\($0.details) …`" }.joined(separator: ", ")
+            return "Always Allow saves: \(list) (any arguments; attended chats only)."
+        }
+        return "Always Allow saves this exact command only: Iris can't make a general rule for it."
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -1822,6 +1833,14 @@ struct ApprovalBannerView: View {
                 Label(warning, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // #1102: the rule Always Allow would save, before it is clicked.
+            if request.offersAlwaysAllow, let summary = Self.alwaysAllowSummary(request.alwaysAllowRules) {
+                Text((try? AttributedString(markdown: summary)) ?? AttributedString(summary))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             

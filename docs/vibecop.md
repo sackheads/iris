@@ -15,3 +15,16 @@ Iris includes a reimplementation of [**Vibecop**](https://github.com/bnaylor/vib
 ## Always allow, and the path a file operation is judged by
 
 Includes "Always allow" and "Always allow in project" persistence. A file operation is asked about, checked against those rules and run by the path it will actually touch: `~` expanded, a relative path joined onto the conversation's workspace (or the app's own directory when there is none), and `..` and symlinks resolved, so a link in the workspace that points elsewhere is shown at its target, and a rule saved in another spelling of the same file still matches. The file is then opened one directory at a time without following any symlink, so if a link has been swapped into that path by the time the tool runs (or by the time you click **Approve and run** on a card), the call is refused rather than followed. For the same reason a write to a dangling symlink is refused, not turned into a file. A path containing a NUL character is refused outright. One consequence for existing rules: an "Always allow" rule saved for a *relative* path no longer matches, because a relative path names no file until it is resolved, so you will be asked once more for those and the new rule is saved as the full path. A project rule's relative path is still read relative to that project.
+
+### Always allow on a command saves what it does, not its exact text (#1102)
+
+A command rule used to be the whole command, byte for byte, so it almost never matched again. Now Always Allow on a command saves a *prefix* for each part of it: the program, plus the subcommand for tools that have them. `cd /tmp && git -C foo status --short | head` saves `git status`, and `swift test --filter X 2>&1 | tail -40` saves `swift test`. The dialog shows the rule before you click. A later command matches when every part of it starts with a saved prefix and its other words are plain arguments. Parts that need no rule can ride along: `cd` to a path, `pwd`, `true`, `echo`, a filter after a pipe that reads only its input (`head`, `tail`, `wc`, `sort`, `uniq`, `cut`, a `grep` with only a pattern), and `2>&1` or `>/dev/null`. A command made only of ride-alongs is never approved by a rule.
+
+It is deliberately narrow. These commands get no prefix, and Always Allow saves the exact command as before:
+- anything with shell features the check doesn't model: substitution, redirection to a file, subshells, globs, variables, background `&`
+- programs where any arguments can mean any code, any destination or any destruction: shells and interpreters, `env`, `xargs`, `sudo`, `find`, `make`, `curl`, `ssh`, `rm`, `mv`, `cp`, `sed`, `awk`, and others
+- a subcommand off its tool's short list (`git push`, `git config`, `npm install`, `gh api`)
+- git with any global option other than `-C` and `--no-pager`, or an argument that runs a program or writes a file (`--upload-pack`, `--output`, `--ext-diff`)
+- a program spelled as a relative path
+
+A tool Iris doesn't know keeps its verb (`tailscale status`), never just its name. Prefix rules apply only in attended chats. An unattended job run never uses them, only its grant and exact rules. Rules saved before this change keep matching exactly as before.

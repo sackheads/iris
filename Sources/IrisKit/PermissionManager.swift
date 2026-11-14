@@ -1,8 +1,39 @@
 import Foundation
 
 struct PermissionRule: Codable, Equatable, Sendable {
+    /// How a rule's `details` is compared with a call's (#1102). A string, not an enum, so a kind a
+    /// newer build writes neither makes the whole file unreadable here nor is lost when this build
+    /// saves it back; such a rule matches nothing.
+    struct Match: RawRepresentable, Codable, Equatable, Sendable {
+        let rawValue: String
+        init(rawValue: String) { self.rawValue = rawValue }
+        /// The whole text, or for a file tool the same file (`PermissionManager.rule(_:matches:)`).
+        static let exact = Match(rawValue: "exact")
+        /// `run_command` only: `details` is a space-separated word prefix (`git status`), and a
+        /// command matches when each of its parts starts with one (`CommandPattern`). Attended
+        /// calls only.
+        static let prefix = Match(rawValue: "prefix")
+    }
+
     let toolName: String
     let details: String
+    /// nil is `exact`: every rule saved before #1102, and the key is left out when written, so an
+    /// older build reads a new file's exact rules unchanged. Optional, so a missing key decodes
+    /// (Invariant 1). An older build reads a prefix rule as an exact one, which matches only the
+    /// bare prefix itself (`git status`), never more.
+    var match: Match? = nil
+
+    var isPrefix: Bool { match == .prefix }
+    var isExact: Bool { match == nil || match == .exact }
+
+    /// The rules an "Always Allow" click on this call saves: a prefix per part of a command that
+    /// has one (#1102), else the call exactly as asked.
+    static func forAlwaysAllow(toolName: String, details: String) -> [PermissionRule] {
+        if toolName == "run_command", let prefixes = CommandPattern.alwaysAllowPrefixes(details) {
+            return prefixes.map { PermissionRule(toolName: toolName, details: $0.joined(separator: " "), match: .prefix) }
+        }
+        return [PermissionRule(toolName: toolName, details: details)]
+    }
 }
 
 /// Which part of the allowlist let a call run (#599): Iris's own folder, or a rule, with the
@@ -68,17 +99,35 @@ struct PermissionManager: Sendable {
             if paths.isUnderIrisDir(details) { return AllowMatch(scope: .irisHome, rule: nil) }
         }
 
+        let globalRules = loadRules(from: globalPermissionsURL) ?? []
+        let projectRules = workspace.flatMap { loadProjectRules(workspace: $0) } ?? []
+
         // Check global
-        if let globalRules = loadRules(from: globalPermissionsURL),
-           let rule = globalRules.first(where: { Self.rule($0, matches: toolName, details, base: nil) }) {
+        if let rule = globalRules.first(where: { Self.rule($0, matches: toolName, details, base: nil) }) {
             return AllowMatch(scope: .global, rule: rule)
         }
         
         // Check project
-        if let workspace = workspace {
-            if let projectRules = loadProjectRules(workspace: workspace),
-               let rule = projectRules.first(where: { Self.rule($0, matches: toolName, details, base: workspace) }) {
-                return AllowMatch(scope: .project, rule: rule)
+        if let workspace, let rule = projectRules.first(where: { Self.rule($0, matches: toolName, details, base: workspace) }) {
+            return AllowMatch(scope: .project, rule: rule)
+        }
+
+        // #1102: prefix rules, global and project together, since one part of a chain can match a
+        // global rule and another a project one. Attended only: an unattended run has its grant,
+        // and a standing rule widened for a person's convenience is not one to read unwatched.
+        if toolName == "run_command", !isBackground {
+            let prefixRules = (globalRules.map { ($0, AllowMatch.Scope.global) } + projectRules.map { ($0, AllowMatch.Scope.project) })
+                .filter { $0.0.toolName == toolName && $0.0.isPrefix }
+            let prefixes = prefixRules.map { $0.0.details.split(separator: " ").map(String.init) }
+            if let used = CommandPattern.matchedPrefixes(details, prefixes: prefixes) {
+                var seen: [Int] = []
+                for index in used where !seen.contains(index) { seen.append(index) }
+                let scope: AllowMatch.Scope = seen.contains { prefixRules[$0].1 == .project } ? .project : .global
+                // What the pill records: every rule that matched, as it read when it matched.
+                let record = PermissionRule(toolName: toolName,
+                                            details: seen.map { prefixRules[$0].0.details }.joined(separator: "; "),
+                                            match: .prefix)
+                return AllowMatch(scope: scope, rule: record)
             }
         }
         
@@ -92,7 +141,7 @@ struct PermissionManager: Sendable {
     /// is the same file and matches. A relative global rule has no directory to be relative to and
     /// matches only its exact spelling, which a resolved path never is.
     private static func rule(_ rule: PermissionRule, matches toolName: String, _ details: String, base: String?) -> Bool {
-        guard rule.toolName == toolName else { return false }
+        guard rule.toolName == toolName, rule.isExact else { return false }
         if rule.details == details { return true }
         guard toolName == "read_file" || toolName == "write_file", details.hasPrefix("/") else { return false }
         let spelled = ToolExecutor.resolvePath(rule.details, cwd: base)
@@ -149,24 +198,34 @@ struct PermissionManager: Sendable {
     }
 
     func allowGlobally(toolName: String, details: String) {
-        let rule = PermissionRule(toolName: toolName, details: details)
+        allowGlobally([PermissionRule(toolName: toolName, details: details)])
+    }
+
+    func allowGlobally(_ new: [PermissionRule]) {
         var rules = loadRules(from: globalPermissionsURL) ?? []
-        if !rules.contains(rule) {
-            rules.append(rule)
-            saveRules(rules, to: globalPermissionsURL)
-        }
+        let added = new.filter { !rules.contains($0) }
+        guard !added.isEmpty else { return }
+        rules.append(contentsOf: added)
+        saveRules(rules, to: globalPermissionsURL)
     }
     
     func allowInProject(toolName: String, details: String, workspace: String) {
+        allowInProject([PermissionRule(toolName: toolName, details: details)], workspace: workspace)
+    }
+
+    func allowInProject(_ new: [PermissionRule], workspace: String) {
         let projectURL = projectPermissionsURL(for: workspace)
         // A real `.iris/` only (#617): one that is a link would put the rule where the sandbox
         // can write it, and the reader would refuse it anyway.
         guard case .ready = WorkspaceIrisDir.prepareForMount(IrisEngine.expandTilde(workspace)) else { return }
 
-        let rule = PermissionRule(toolName: toolName, details: details)
         var rules = loadProjectRules(workspace: workspace) ?? []
-        if !rules.contains(rule) {
+        var added = false
+        for rule in new where !rules.contains(rule) {
             rules.append(rule)
+            added = true
+        }
+        if added {
             // Iris wrote it, so Iris trusts it (#625): the person's click is the consent. The bytes
             // written, not a second encode: JSONEncoder's key order is not stable across calls, so a
             // re-encode can differ from the file and leave the click untrusted.
