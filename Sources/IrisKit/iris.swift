@@ -1216,15 +1216,15 @@ actor IrisEngine {
         let notify = stringArray("notify")
         let rawThreadId = args["thread_id"]?.stringValue.trimmingCharacters(in: .whitespaces) ?? ""
         let threadId: String? = rawThreadId.isEmpty ? nil : rawThreadId
-        let now = Date()
+        let checkNow = Date()
         let deadlineRaw = args["deadline"]?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let deadline: Date?
+        let initialDeadline: Date?
         if deadlineRaw.isEmpty {
-            deadline = nil
-        } else if let parsed = Self.parseInboxDeadline(deadlineRaw, now: now) {
-            deadline = parsed
+            initialDeadline = nil
+        } else if let parsed = Self.parseInboxDeadline(deadlineRaw, now: checkNow) {
+            initialDeadline = parsed
         } else {
-            return "Not raised: response_mode timedVeto needs a deadline: could not parse deadline — pass an ISO 8601 timestamp in the future or a relative offset such as +30m, +2h, +1d."
+            return "Not raised: response_mode timedVeto needs a deadline: could not parse deadline — pass an ISO 8601 timestamp in the future or a relative offset such as +\(Self.timedVetoMinWindowMinutes)m, +30m, +2h, +1d."
         }
         let rawVetoDefault = args["veto_default"]?.stringValue.trimmingCharacters(in: .whitespaces) ?? ""
         let vetoDefault: String? = rawVetoDefault.isEmpty ? nil : rawVetoDefault
@@ -1243,8 +1243,8 @@ actor IrisEngine {
             return "Options must have distinct ids."
         }
         if responseMode == .timedVeto {
-            guard let deadline, deadline > now else {
-                return "Not raised: response_mode timedVeto needs a deadline: pass an ISO 8601 timestamp in the future or a relative offset such as +30m, +2h, +1d."
+            guard let initialDeadline, initialDeadline.timeIntervalSince(checkNow) >= Self.timedVetoMinWindowSeconds else {
+                return "Not raised: response_mode timedVeto needs a deadline at least \(Self.timedVetoMinWindowMinutes)m in the future: pass an ISO 8601 timestamp or a relative offset such as +\(Self.timedVetoMinWindowMinutes)m, +30m, +2h, +1d."
             }
             guard let vetoDefault, optionIds.contains(vetoDefault) else {
                 return "response_mode timedVeto needs veto_default naming one of the options' ids; give each option an `id` and pass one of them."
@@ -1274,6 +1274,10 @@ actor IrisEngine {
         case .passed: break
         }
 
+        // #1121: anchor `now` and re-resolve a relative deadline after the rate-limit and
+        // InjectionGuard awaits so guard latency never shortens Brian's veto window.
+        let now = Date()
+        let deadline: Date? = deadlineRaw.isEmpty ? nil : (Self.parseInboxDeadline(deadlineRaw, now: now) ?? initialDeadline)
         let label = Self.flattenCardField(emitterLabel ?? ownerChain, cap: Self.cardNameCap)
         let deadlineNote = (responseMode == .timedVeto) ? (deadline.map { " (deadline \(Self.formatInboxDeadline($0)))" } ?? "") : ""
         let taintHoldNote = (responseMode == .timedVeto && tainted)
@@ -1632,7 +1636,11 @@ actor IrisEngine {
     /// id or name or the pinned conversation, is refused at emit and dropped at answer time: an
     /// emitter picks WHICH CHAIN gets the answer, not an arbitrary session, or Brian's click (or a
     /// timer) becomes a way to push a message into a victim without the peer gates.
-    /// Parses an `inbox_item` deadline (#1094): a relative offset from `now` (`+30m`, `+2h`,
+    nonisolated static let timedVetoMinWindowMinutes = 15
+    nonisolated static let timedVetoMinWindowSeconds: TimeInterval = Double(timedVetoMinWindowMinutes * 60)
+    nonisolated static let inboxDeadlineMaxSeconds: TimeInterval = 365 * 86_400 * 10
+
+    /// Parses an `inbox_item` deadline (#1094, #1121): a relative offset from `now` (`+30m`, `+2h`,
     /// `+1d`, `+90s`, optional leading `+`) or an ISO 8601 timestamp (with or without fractional
     /// seconds). Nil when `raw` matches neither or overflows a 10-year horizon.
     nonisolated static func parseInboxDeadline(_ raw: String, now: Date = Date()) -> Date? {
@@ -1650,14 +1658,19 @@ actor IrisEngine {
             default: return nil
             }
             let seconds = value * multiplier
-            guard seconds <= 365 * 86_400 * 10 else { return nil }
+            guard seconds <= inboxDeadlineMaxSeconds else { return nil }
             return now.addingTimeInterval(seconds)
         }
         let standard = ISO8601DateFormatter()
-        if let date = standard.date(from: trimmed) { return date }
+        if let date = standard.date(from: trimmed) {
+            return date.timeIntervalSince(now) <= inboxDeadlineMaxSeconds ? date : nil
+        }
         let fractional = ISO8601DateFormatter()
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return fractional.date(from: trimmed)
+        if let date = fractional.date(from: trimmed) {
+            return date.timeIntervalSince(now) <= inboxDeadlineMaxSeconds ? date : nil
+        }
+        return nil
     }
 
     nonisolated static func formatInboxDeadline(_ date: Date) -> String {
@@ -3518,7 +3531,7 @@ actor IrisEngine {
                     "route_back": Schema(type: "ARRAY", description: "Who gets Brian's answer: role:<name> entries (whoever holds the role when he answers). Omit to get it yourself. Another session by id or name is refused.", items: Schema(type: "STRING")),
                     "notify": Schema(type: "ARRAY", description: "role:<name> entries told, once, when Brian has answered. Another session by id or name is refused.", items: Schema(type: "STRING")),
                     "thread_id": Schema(type: "STRING", description: "Omit for a new item; give an existing one to append a followup and reopen it with the title, situation, options and response_mode you pass now."),
-                    "deadline": Schema(type: "STRING", description: "For response_mode timedVeto: when the default takes effect with no answer, as a relative offset from now (e.g. +30m, +2h, +1d) or an ISO 8601 timestamp."),
+                    "deadline": Schema(type: "STRING", description: "For response_mode timedVeto: when the default takes effect with no answer (at least \(Self.timedVetoMinWindowMinutes)m in the future), as a relative offset from now (e.g. +\(Self.timedVetoMinWindowMinutes)m, +30m, +2h, +1d) or an ISO 8601 timestamp."),
                     "veto_default": Schema(type: "STRING", description: "For response_mode timedVeto: the id of the option that takes effect at the deadline if Brian has not answered. It must match an option's id. The default is not guaranteed to apply: an item may be held open for Brian to decide instead (for example after you read outside content)."),
                 ], required: ["title", "situation", "response_mode"])
             ))
