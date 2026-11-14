@@ -269,6 +269,7 @@ struct ProcessInputCallSitesTests {
             "AppState.swift": 11,           // drain (system event), startTurn x3, goal reprompt/kickoff/skill check, /init, /new, rename, draft
             "ConversationRotation.swift": 1, // reflection: on a user conversation, main engine
             "GoalEvaluator.swift": 1,        // a fresh evaluator engine on its own evaluator conversation
+            "GuestSessionDriver.swift": 1,    // the guest's own engine (guestEngines[conv]) on its own guest conversation; the head check refuses any other pairing
             "JobRunner.swift": 1,            // a job run's own conversation, main engine
             "ScenarioRunner.swift": 1,       // headless scenarios
             "SubagentManager.swift": 1,      // a subagent engine on its own conversation
