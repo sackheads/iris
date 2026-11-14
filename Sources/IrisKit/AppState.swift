@@ -3102,11 +3102,16 @@ class AppState {
     /// One synchronous decision for a send: resolve the target, check depth, take a token. One
     /// MainActor step, because every main session shares one engine actor and an `await` between
     /// a check and its act would let another session's turn run in between (#480 review).
-    func decidePeerSend(to: String, from sender: UUID, replyTarget: UUID?) -> PeerSendDecision {
+    /// `senderIsGuest` is the calling engine's own principal (`.mcpGuest`), not a lookup: a guest
+    /// whose conversation was reaped mid-call must still be a guest here, never a sender the
+    /// generic resolve below would serve.
+    func decidePeerSend(to: String, from sender: UUID, replyTarget: UUID?, senderIsGuest: Bool = false) -> PeerSendDecision {
         let target: UUID
         // #1066: a guest addresses only what its client was granted, and never through the generic
         // resolve below, which would let it name `iris`, a session id, a name or a topic.
-        if let guest = conversations.first(where: { $0.id == sender }), guest.isGuest {
+        let senderConversation = conversations.first(where: { $0.id == sender })
+        if senderIsGuest || senderConversation?.isGuest == true {
+            guard let guest = senderConversation, guest.isGuest else { return .refused(GuestAddressRefusal.text) }
             switch guestTarget(to: to, guest: guest, replyTarget: replyTarget) {
             case .failure(let refusal): return .refused(refusal.text)
             case .success(let id): target = id

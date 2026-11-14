@@ -240,14 +240,32 @@ struct ProviderTokenRegistryTests {
         let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
         try keychain.updateSecretsOrThrow(service: KeychainManager.mcpProviderRolesService) { dict in
             dict["good"] = #"["Reviewer","iris","bad name"]"#
+            dict["no-token"] = #"["reviewer"]"#
             dict["Iris"] = #"["reviewer"]"#
             dict["iris"] = #"["reviewer"]"#
             dict["has/slash"] = #"["reviewer"]"#
             dict["garbled"] = "not json"
             dict["only-bad"] = #"["iris","clear"]"#
         }
+        try keychain.updateSecretsOrThrow(service: KeychainManager.mcpProviderService) { dict in
+            for id in ["good", "garbled", "only-bad"] { dict[id] = "token-\(id)" }
+        }
         let registry = ProviderTokenRegistry(keychain: keychain)
         #expect(registry.roles(forClientId: "good") == ["reviewer"])
+        #expect(registry.roles(forClientId: "no-token").isEmpty, "a stored grant with no token is not served")
         for id in ["Iris", "iris", "has/slash", "garbled", "only-bad"] { #expect(registry.roles(forClientId: id).isEmpty, "\(id)") }
+    }
+
+    @Test("a grant needs a registered client, and an id with no token lends nothing to the next registrant")
+    func grantNeedsARegisteredClient() throws {
+        let (keychain, registry) = fresh()
+        #expect(throws: ProviderTokenRegistry.RegistryError.notRegistered) { try registry.setRoles(["reviewer"], forClientId: "dev-1") }
+        #expect(registry.roles(forClientId: "dev-1").isEmpty)
+        // A grant left in the Keychain by an earlier registration is not inherited by a new one.
+        try keychain.updateSecretsOrThrow(service: KeychainManager.mcpProviderRolesService) { $0["dev-1"] = #"["reviewer"]"# }
+        let reloaded = ProviderTokenRegistry(keychain: keychain)
+        _ = try reloaded.issueToken(forClientId: "dev-1")
+        #expect(reloaded.roles(forClientId: "dev-1").isEmpty)
+        #expect(ProviderTokenRegistry(keychain: keychain).roles(forClientId: "dev-1").isEmpty)
     }
 }
