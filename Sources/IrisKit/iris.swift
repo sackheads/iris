@@ -1277,7 +1277,7 @@ actor IrisEngine {
         // #1121: anchor `now` and re-resolve a relative deadline after the rate-limit and
         // InjectionGuard awaits so guard latency never shortens Brian's veto window.
         let now = Date()
-        let deadline: Date? = deadlineRaw.isEmpty ? nil : (Self.parseInboxDeadline(deadlineRaw, now: now) ?? initialDeadline)
+        let deadline: Date? = Self.reanchorInboxDeadline(deadlineRaw, initial: initialDeadline, now: now)
         let label = Self.flattenCardField(emitterLabel ?? ownerChain, cap: Self.cardNameCap)
         let deadlineNote = (responseMode == .timedVeto) ? (deadline.map { " (deadline \(Self.formatInboxDeadline($0)))" } ?? "") : ""
         let taintHoldNote = (responseMode == .timedVeto && tainted)
@@ -1671,6 +1671,14 @@ actor IrisEngine {
             return date.timeIntervalSince(now) <= inboxDeadlineMaxSeconds ? date : nil
         }
         return nil
+    }
+
+    /// Re-resolves a deadline string at `now` (after the rate-limit and guard awaits) so a relative
+    /// offset (`+15m`, `+30m`) is anchored to the post-await `now`, while an ISO 8601 timestamp
+    /// keeps its exact date (#1121).
+    nonisolated static func reanchorInboxDeadline(_ raw: String, initial: Date?, now: Date) -> Date? {
+        guard !raw.isEmpty else { return nil }
+        return parseInboxDeadline(raw, now: now) ?? initial
     }
 
     nonisolated static func formatInboxDeadline(_ date: Date) -> String {
