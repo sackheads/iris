@@ -224,4 +224,43 @@ struct HostedTextAppearanceTests {
         HostedTextAppearance.apply(to: view, scheme: .light)
         #expect(view.appearance?.name == .aqua)
     }
+
+    @Test("composer and literal editor stamp a concrete non-dynamic sRGB text color that stays light under an ambient Aqua drawing appearance (#1127)")
+    func concreteTextColorSurvivesAmbientLightDrawingAppearance() async throws {
+        let root = Self.composer().padding(8).background(.regularMaterial).environment(\.colorScheme, .dark)
+        let (tv, window) = try Self.textView(in: root, windowAppearance: .darkAqua)
+        _ = window
+        _ = await Self.eventually { tv.effectiveAppearance.name == .darkAqua }
+
+        // Even when an ambient light (.aqua) drawing appearance is current (the failure mode of
+        // dynamic catalog colors in #1051/#1081/#1127), the concrete sRGB color must resolve light.
+        let lightAppearance = try #require(NSAppearance(named: .aqua))
+        var textRed: CGFloat = 0
+        var caretRed: CGFloat = 0
+        var typingRed: CGFloat = 0
+        var storageRed: CGFloat = 0
+        lightAppearance.performAsCurrentDrawingAppearance {
+            textRed = tv.textColor?.usingColorSpace(.deviceRGB)?.redComponent ?? 0
+            caretRed = tv.insertionPointColor.usingColorSpace(.deviceRGB)?.redComponent ?? 0
+            typingRed = (tv.typingAttributes[.foregroundColor] as? NSColor)?.usingColorSpace(.deviceRGB)?.redComponent ?? 0
+            storageRed = (tv.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor)?
+                .usingColorSpace(.deviceRGB)?.redComponent ?? 0
+        }
+        #expect(textRed > 0.8, "tv.textColor resolved to \(textRed) under ambient Aqua")
+        #expect(caretRed > 0.8, "tv.insertionPointColor resolved to \(caretRed) under ambient Aqua")
+        #expect(typingRed > 0.8, "tv.typingAttributes[.foregroundColor] resolved to \(typingRed) under ambient Aqua")
+        #expect(storageRed > 0.8, "tv.textStorage foregroundColor resolved to \(storageRed) under ambient Aqua")
+    }
+
+    @Test("composer initializes TextKit 1 in makeNSView before layout so it never downgrades mid-flight (#1127)")
+    func composerStartsOnTextKit1UpFront() throws {
+        let root = Self.composer()
+        let host = NSHostingView(rootView: root)
+        // Before any non-zero frame or window attachment: makeNSView has run, measureHeight bailed
+        // on zero width, and the text view must already be on TextKit 1 (textLayoutManager == nil).
+        host.layoutSubtreeIfNeeded()
+        let tv = try #require(Self.allSubviews(host).compactMap { $0 as? NSTextView }.first)
+        #expect(tv.textLayoutManager == nil, "composer must not remain on TextKit 2 waiting to downgrade mid-flight")
+        #expect(tv.layoutManager != nil)
+    }
 }
