@@ -78,12 +78,12 @@ struct PermissionManager: Sendable {
     
     /// `isBackground` is the unattended caller: a job run, or any subagent descended from one.
     /// It narrows the `~/.iris` carve-out to reads, because nobody is watching what it writes.
-    func isAllowed(toolName: String, details: String, workspace: String?, isBackground: Bool = false) -> Bool {
-        match(toolName: toolName, details: details, workspace: workspace, isBackground: isBackground) != nil
+    func isAllowed(toolName: String, details: String, workspace: String?, isBackground: Bool = false, isGuestOrigin: Bool = false) -> Bool {
+        match(toolName: toolName, details: details, workspace: workspace, isBackground: isBackground, isGuestOrigin: isGuestOrigin) != nil
     }
 
     /// `isAllowed`, saying which part of the allowlist let the call run (#599).
-    func match(toolName: String, details: String, workspace: String?, isBackground: Bool = false) -> AllowMatch? {
+    func match(toolName: String, details: String, workspace: String?, isBackground: Bool = false, isGuestOrigin: Bool = false) -> AllowMatch? {
         let isWrite = (toolName == "write_file")
         // A write that grants permissions must not come from an auto-allow. `IrisPaths`
         // enumerates the directories that qualify (`config/`, `plugins/`) and resolves case and
@@ -113,13 +113,14 @@ struct PermissionManager: Sendable {
         }
 
         // #1102: prefix rules, global and project together, since one part of a chain can match a
-        // global rule and another a project one. Attended only: an unattended run has its grant,
-        // and a standing rule widened for a person's convenience is not one to read unwatched.
-        if toolName == "run_command", !isBackground {
+        // global rule and another a project one. Attended only, and not on a guest-origin turn:
+        // an unattended run has its grant, and a standing rule widened for a person's convenience is
+        // not one to read unwatched or under guest-influenced input.
+        if toolName == "run_command", !isBackground, !isGuestOrigin {
             let prefixRules = (globalRules.map { ($0, AllowMatch.Scope.global) } + projectRules.map { ($0, AllowMatch.Scope.project) })
                 .filter { $0.0.toolName == toolName && $0.0.isPrefix }
             let prefixes = prefixRules.map { $0.0.details.split(separator: " ").map(String.init) }
-            if let used = CommandPattern.matchedPrefixes(details, prefixes: prefixes) {
+            if let used = CommandPattern.matchedPrefixes(details, prefixes: prefixes, workspace: workspace) {
                 var seen: [Int] = []
                 for index in used where !seen.contains(index) { seen.append(index) }
                 let scope: AllowMatch.Scope = seen.contains { prefixRules[$0].1 == .project } ? .project : .global

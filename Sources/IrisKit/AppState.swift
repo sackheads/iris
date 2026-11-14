@@ -4817,7 +4817,8 @@ class AppState {
                                              offersConversationAllow: offersConversationAllow) ? .person : nil
         }
         // Fast path: deterministic permissions.
-        if let match = permissions.match(toolName: toolName, details: details, workspace: workspace) {
+        let guestOrigin = conversationId.map { isGuestOriginTurn($0) || isGuestOriginTurn(delegationRoot(of: $0)) } ?? false
+        if let match = permissions.match(toolName: toolName, details: details, workspace: workspace, isGuestOrigin: guestOrigin) {
             return .allowlist(match)
         }
         // Deterministic too, and only for the grader, never the agent or subagents: exactly a check
