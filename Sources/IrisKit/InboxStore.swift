@@ -320,6 +320,8 @@ final class InboxStore: Sendable {
     /// `"held"` entry already follows the latest `"question"` or `"followup"` entry for this item),
     /// leaving the item `.open` for Brian. Returns `true` when this call recorded the hold for the
     /// current ask, or `false` if an earlier evaluation already did (or the item is no longer open).
+    /// Recorded before delivery so notice delivery is strictly at-most-once per ask (a refused
+    /// delivery to an archived or gone session is not retried on later ticks).
     @discardableResult
     func recordVetoHold(itemId: String, at: Date, body: String) throws -> Bool {
         try writer.write { db in

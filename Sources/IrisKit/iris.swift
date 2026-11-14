@@ -1774,7 +1774,8 @@ actor IrisEngine {
             }
             if item.emitterTainted {
                 held += 1
-                let holdBody = "deadline passed; default \(defaultOption.label) held for review (read outside content)"
+                let safeLabel = Self.flattenCardField(defaultOption.label, cap: 80)
+                let holdBody = "deadline passed; default \(safeLabel) held for review (read outside content)"
                 if (try? store.inbox.recordVetoHold(itemId: item.id, at: now, body: holdBody)) == true {
                     await MainActor.run { localState0?.bumpInboxRevision() }
                     await deliverInboxVetoHeld(item: item, now: now, deliver: deliver)
@@ -3599,7 +3600,7 @@ actor IrisEngine {
                     "notify": Schema(type: "ARRAY", description: "role:<name> entries told, once, when Brian has answered. Another session by id or name is refused.", items: Schema(type: "STRING")),
                     "thread_id": Schema(type: "STRING", description: "Omit for a new item; give an existing one to append a followup and reopen it with the title, situation, options and response_mode you pass now."),
                     "deadline": Schema(type: "STRING", description: "For response_mode timedVeto: when the default takes effect with no answer, as a relative offset from now (e.g. +30m, +2h, +1d) or an ISO 8601 timestamp."),
-                    "veto_default": Schema(type: "STRING", description: "For response_mode timedVeto: the id of the option that takes effect at the deadline if Brian has not answered. It must match an option's id. The default is not guaranteed to apply: an item may be held open for Brian to decide instead (for example after you read outside content)."),
+                    "veto_default": Schema(type: "STRING", description: "For response_mode timedVeto: the id of the option that takes effect at the deadline if Brian has not answered. It must match an option's id. The default is not guaranteed to apply: an item may be held open for Brian to decide instead (for example after you read outside content), and you are told once when that happens."),
                 ], required: ["title", "situation", "response_mode"])
             ))
         }
