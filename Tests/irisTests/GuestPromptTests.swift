@@ -84,9 +84,8 @@ struct GuestPromptTests {
         let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
         let request = try #require(await guestRequest(f))
         let all = everything(request)
-        for sentinel in [userSentinel, soulSentinel, agentsSentinel, factSentinel, profileSentinel] {
-            #expect(!all.contains(sentinel), "\(sentinel) reached a guest's request")
-        }
+        let leaked = [userSentinel, soulSentinel, agentsSentinel, factSentinel, profileSentinel].filter(all.contains)
+        #expect(leaked.isEmpty, "reached a guest's request: \(leaked)")
         #expect(!all.contains("Available Skills"), "no skills catalogue")
         #expect(!all.contains("# User Profile"), "no USER.md section")
         #expect(!all.contains("# Project Workspace Rules"), "no AGENTS.md section")
