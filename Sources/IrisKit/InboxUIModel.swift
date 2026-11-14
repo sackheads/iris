@@ -84,6 +84,7 @@ enum InboxUIModel {
         case "question": return "Asked"
         case "followup": return "Follow-up"
         case "answer": return "Answered"
+        case "held": return "Held at deadline"
         default: return kind
         }
     }
