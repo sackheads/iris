@@ -187,6 +187,29 @@ struct GitHubConfigSetterCLITests {
         }
     }
 
+    @Test("an unreadable guarded item gets its own message, not the misleading \"launch Iris once first\" (dev-2's finding)")
+    func setReposGivesTheRightMessageWhenUnreadable() {
+        let name = "iris-966t6-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: name)!
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)")
+        keychain.simulateReadFailure(errSecAuthFailed)   // the person denied a Keychain prompt
+        let config = ConfigManager(store: store, guardedSecrets: keychain)
+        defer { teardown(store, name) }
+        guard case .unreadable = config.guardedState else {
+            Issue.record("expected .unreadable, got \(config.guardedState)")
+            return
+        }
+
+        let result = GitHubConfigSetterCLI.setRepos(stdin: Data("sackheads/iris\n".utf8), config: config)
+
+        switch result {
+        case .success: Issue.record("expected failure: the guarded item is unreadable")
+        case .failure(let error):
+            #expect(error == .settingsUnreadable)
+            #expect(!error.description.lowercased().contains("launch iris once first"))
+        }
+    }
+
     @Test("reports failure rather than silent success when the Keychain item's writes are blocked (dev-2's finding)")
     func setReposReportsFailureWhenWritesAreBlocked() {
         let (config, keychain, store, name) = isolatedConfig()

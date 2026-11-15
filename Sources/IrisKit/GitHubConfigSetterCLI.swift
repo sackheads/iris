@@ -10,13 +10,21 @@ import Foundation
 /// **Cross-process.** This runs as its own process invocation and exits; it writes the Keychain
 /// item (or the guarded blob) directly and has no way to reach an already-running app's in-memory
 /// state. `ConfigManager.hasGitHubToken` is cached once at that other process's launch (Task 1), so
-/// a token this setter writes takes effect the next time Iris launches, not live.
+/// a token this setter writes is seen only the next time Iris launches, not live.
+///
+/// **Quit Iris before `--set-github-repos`, relaunch after (dev-2's finding).** A running app
+/// caches the whole guarded item at its own launch; `setGuardedBlob` always writes every guarded
+/// key from that cached snapshot, so an unrelated Settings change in the app after this setter
+/// runs overwrites the allowlist this setter just wrote, back to whatever the app still has
+/// cached -- silently, and fail-closed (the list is lost, never widened). Fast-follow #1167
+/// tracks a real fix; until then this is the safe way to run it.
 enum GitHubConfigSetterCLI {
     enum Failure: Error, Equatable, CustomStringConvertible {
         case emptyToken
         case malformedToken
         case malformedRepo(String)
         case notYetConfigured
+        case settingsUnreadable
         case writesBlocked
 
         var description: String {
@@ -25,6 +33,7 @@ enum GitHubConfigSetterCLI {
             case .malformedToken: "a token may not contain interior whitespace or control characters"
             case .malformedRepo(let name): "not a valid owner/name: \(name.debugDescription)"
             case .notYetConfigured: "launch Iris once first, then re-run this command (its settings have never been read)"
+            case .settingsUnreadable: "Iris's protected settings couldn't be read from the Keychain; this command can't change them until it can -- check for a denied Keychain prompt"
             case .writesBlocked: "Iris's settings could not be saved (the Keychain item is unreadable); nothing was written"
             }
         }
@@ -57,7 +66,7 @@ enum GitHubConfigSetterCLI {
             return .failure(.malformedToken)
         }
         keychain.updateSecrets(service: KeychainManager.githubService) { $0["token"] = token }
-        return .success("GitHub token saved to the iris.github Keychain item. It takes effect the next time Iris launches.")
+        return .success("GitHub token saved to the iris.github Keychain item. Iris reads it only at launch, so this takes effect the next time Iris launches.")
     }
 
     /// Writes a comma- or newline-separated repo list read from `stdin` to the guarded
@@ -75,6 +84,9 @@ enum GitHubConfigSetterCLI {
     /// safe fix is to require the item already be at `.normal` -- the user has launched Iris at
     /// least once -- before this setter touches it at all.
     static func setRepos(stdin: Data, config: ConfigManager) -> Result<String, Failure> {
+        // .unreadable gets its own message (dev-2's finding): "launch Iris once first" is wrong
+        // advice for a denied Keychain prompt or a damaged item -- relaunching alone won't fix it.
+        if case .unreadable = config.guardedState { return .failure(.settingsUnreadable) }
         guard config.guardedState == .normal else { return .failure(.notYetConfigured) }
 
         let raw = String(decoding: stdin, as: UTF8.self)
@@ -89,9 +101,12 @@ enum GitHubConfigSetterCLI {
         // setGuardedBlob no-ops silently if the Keychain item's writes are blocked (an earlier
         // denied prompt) -- dev-2's finding. Check after, since setGuardedBlob gives no signal.
         if config.guardedKeychain?.areWritesBlocked == true { return .failure(.writesBlocked) }
+        // "Takes effect" would be wrong (dev-2's finding): a running app caches the whole guarded
+        // item at its own launch and can overwrite this write on any later unrelated settings
+        // change (fail-closed; #1167 tracks the real fix). Quit Iris first, relaunch after.
         return .success(names.isEmpty
-            ? "GitHub allowed repos cleared (none configured)."
-            : "GitHub allowed repos saved: \(names.joined(separator: ", "))")
+            ? "GitHub allowed repos cleared (none configured). Quit Iris before running this, and relaunch it after, or a running app can overwrite this change (#1167)."
+            : "GitHub allowed repos saved: \(names.joined(separator: ", ")). Quit Iris before running this, and relaunch it after, or a running app can overwrite this change (#1167).")
     }
 
     // MARK: - Real CLI entry points (IrisMain.swift)
