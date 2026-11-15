@@ -34,9 +34,11 @@ enum SecretLikeDetector {
         return Pattern(name: name, regex: regex)
     }
 
-    /// `(?!\$)` guards an opaque value against a shell-variable reference: `$TOKEN` or `${TOKEN}`
-    /// is a placeholder, not a literal secret.
-    private static let notAVarRef = "(?!\\$)"
+    /// Guards an opaque value against a shell-variable reference: `$TOKEN` or `${TOKEN}` is a
+    /// placeholder, not a literal secret, and so is one quoted (`"$TOKEN"`, `'$TOKEN'`) — the
+    /// quote character is the first char after the separator, not `$`, so the bare `(?!\$)`
+    /// version missed it (round 2, dev-2's finding).
+    private static let notAVarRef = "(?!['\"]?\\$)"
 
     /// Named provider/header token shapes and flag/URL/env-var shapes: all anchored, bounded
     /// quantifiers with no nested repetition over a shared alphabet, so none of these can
@@ -74,13 +76,23 @@ enum SecretLikeDetector {
                 "[=: ]\\s*" + notAVarRef + "\\S{4,}"),
         // A lowercase compound env-style assignment: `client_secret=`, `db_password=`,
         // `oauth_token=` (round 1's env-var pattern only matches UPPERCASE names; this is its
-        // lowercase sibling, same `\b` reasoning). Deliberately excludes a bare `_key=` suffix:
-        // `primary_key=`/`foreign_key=` are common, non-secret database column arguments, and
-        // "key" alone has no secret-shaped qualifier the way "secret"/"token"/"password" do.
+        // lowercase sibling, same `\b` reasoning). `[a-z0-9_]*` before the suffix word (not
+        // `[a-z0-9]*`) lets a multi-segment prefix like `my_client_secret=` match — the first
+        // cut stopped at the first underscore, so a name that long never reached the suffix word
+        // at all (round 2, dev-2/dev-3's finding). `(_[a-z0-9]+)*` after the suffix word lets a
+        // multi-segment SUFFIX like `aws_secret_access_key=` match too — the first cut required
+        // the suffix word to be immediately followed by `=`, so `secret` followed by `_access_key`
+        // never matched (round 2, the planner's ruling: this is a fix, not an accepted gap, since
+        // `aws_secret_access_key` contains a whole `_secret_` segment, squarely in scope).
+        // Deliberately still excludes a bare `_key=` suffix with no accompanying secret/token/
+        // password segment: `primary_key=`/`foreign_key=` are common, non-secret database column
+        // arguments, and "key" alone has no secret-shaped qualifier the other three do.
         pattern("lowercase-env-style-assignment",
-                "\\b[a-z][a-z0-9]*_(secret|token|password)=" + notAVarRef + "\\S{4,}"),
-        // A PEM private-key block marker — the shape alone is the credential, no value floor needed.
-        pattern("pem-private-key-marker", "-----BEGIN( [A-Z]+)? PRIVATE KEY-----"),
+                "\\b[a-z][a-z0-9_]*_(secret|token|password)(_[a-z0-9]+)*=" + notAVarRef + "\\S{4,}"),
+        // A PEM (or PGP) private-key block marker — the shape alone is the credential, no value
+        // floor needed. PGP's marker ends "PRIVATE KEY BLOCK-----", not "PRIVATE KEY-----" (round
+        // 2, dev-2's finding).
+        pattern("pem-private-key-marker", "-----BEGIN( [A-Z]+)? PRIVATE KEY( BLOCK)?-----"),
         // user:pass@host in a URL, e.g. a `git clone` with embedded basic-auth credentials.
         // Bounded quantifiers ({1,64}/{1,128}), not `+`: an unbounded negated-class quantifier
         // followed by a required literal is still quadratic to backtrack over an adversarial run

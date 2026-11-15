@@ -13,12 +13,14 @@ struct SecretLikeDetectorTests {
     // "Authorization: Bearer"/"token" context for realism, were each caught by TWO patterns, so
     // deleting either alone left the suite green).
 
-    @Test("an OAuth bearer header fires, and a Bearer value that is a $VAR reference does not")
+    @Test("an OAuth bearer header fires, and a Bearer value that is a $VAR reference does not, quoted or not")
     func bearerHeaderFires() {
         #expect(SecretLikeDetector.containsSecretLikeSubstring("curl -H 'Authorization: Bearer shortvalue123' https://x"))
         #expect(!SecretLikeDetector.containsSecretLikeSubstring("curl -H 'Authorization: Bearer $GITHUB_TOKEN' https://x"),
                 "a shell-variable reference is a placeholder, not a literal secret")
         #expect(!SecretLikeDetector.containsSecretLikeSubstring("curl -H 'Authorization: Bearer ${GITHUB_TOKEN}' https://x"))
+        // round 2, dev-2's finding: the quote is the first char after the separator, not `$`.
+        #expect(!SecretLikeDetector.containsSecretLikeSubstring(#"curl -H 'Authorization: Bearer "$GITHUB_TOKEN"' https://x"#))
     }
 
     @Test("a JWT fires, isolated from the Authorization-header and generic patterns")
@@ -116,16 +118,31 @@ struct SecretLikeDetectorTests {
         #expect(SecretLikeDetector.containsSecretLikeSubstring("\(name)=shortvalue123"))
     }
 
-    @Test("primary_key= and foreign_key= do not fire: a bare '_key=' is a common, non-secret DB column argument (#1156)")
-    func dbColumnKeyArgumentsDoNotFire() {
-        #expect(!SecretLikeDetector.containsSecretLikeSubstring("UPDATE users SET primary_key=1 WHERE id=2"))
-        #expect(!SecretLikeDetector.containsSecretLikeSubstring("SELECT * FROM orders WHERE foreign_key=42"))
+    @Test("a multi-segment lowercase name fires on both sides of the suffix word (#1156 round 2)")
+    func multiSegmentLowercaseAssignmentFires() {
+        // round 2, dev-2/dev-3's finding: the first cut stopped at the first underscore before
+        // the suffix word (missing "my_client_secret=") and required the suffix word to be
+        // immediately followed by "=" (missing "aws_secret_access_key=", which has "access_key"
+        // after "secret"). The planner's ruling: the latter is a fix, not an accepted gap —
+        // "aws_secret_access_key" contains a whole "_secret_" segment, squarely in scope.
+        #expect(SecretLikeDetector.containsSecretLikeSubstring("export my_client_secret=shortvalue123"))
+        #expect(SecretLikeDetector.containsSecretLikeSubstring("export aws_secret_access_key=shortvalue123"))
+        #expect(SecretLikeDetector.containsSecretLikeSubstring("export slack_bot_token=shortvalue123"))
     }
 
-    @Test("a PEM private-key block marker fires, with or without a key-type word (#1156)", arguments: [
+    @Test("primary_key= and foreign_key= do not fire: a bare '_key=' is a common, non-secret DB column argument (#1156)")
+    func dbColumnKeyArgumentsDoNotFire() {
+        // Values at or above the 4-char floor (\S{4,}) — a value under the floor would pass this
+        // test even if "key" were (wrongly) added to the pattern's alternation, proving nothing.
+        #expect(!SecretLikeDetector.containsSecretLikeSubstring("UPDATE users SET primary_key=12345 WHERE id=2"))
+        #expect(!SecretLikeDetector.containsSecretLikeSubstring("SELECT * FROM orders WHERE foreign_key=67890"))
+    }
+
+    @Test("a PEM or PGP private-key block marker fires, with or without a key-type word (#1156)", arguments: [
         "-----BEGIN PRIVATE KEY-----",
         "-----BEGIN RSA PRIVATE KEY-----",
         "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "-----BEGIN PGP PRIVATE KEY BLOCK-----",
     ])
     func pemPrivateKeyMarkerFires(_ marker: String) {
         #expect(SecretLikeDetector.containsSecretLikeSubstring("echo '\(marker)' > key.pem"))
