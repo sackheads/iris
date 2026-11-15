@@ -59,6 +59,29 @@ struct GitHubConfigSetterCLITests {
         #expect(!config.hasGitHubToken)
     }
 
+    @Test("a token with interior whitespace or a control character is malformed and writes nothing (dev-3's finding)", arguments: [
+        "ghp_abc\nghp_def", "ghp_abc ghp_def", "ghp_abc\tghp_def", "ghp_abc\u{0007}ghp_def",
+    ])
+    func setTokenRejectsInteriorWhitespaceOrControl(_ stdin: String) {
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)")
+        let result = GitHubConfigSetterCLI.setToken(stdin: Data(stdin.utf8), keychain: keychain)
+        switch result {
+        case .success: Issue.record("\(stdin.debugDescription) should have been rejected")
+        case .failure(let error): #expect(error == .malformedToken)
+        }
+        #expect(keychain.secrets(service: KeychainManager.githubService).isEmpty)
+    }
+
+    @Test("writing the token merges into the Keychain item rather than replacing it (updateSecrets, #750)")
+    func setTokenMergesRatherThanReplaces() {
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)")
+        keychain.replaceSecrets(["other_key": "untouched"], service: KeychainManager.githubService)
+        _ = GitHubConfigSetterCLI.setToken(stdin: Data("ghp_realtoken123\n".utf8), keychain: keychain)
+        let secrets = keychain.secrets(service: KeychainManager.githubService)
+        #expect(secrets["token"] == "ghp_realtoken123")
+        #expect(secrets["other_key"] == "untouched")
+    }
+
     // MARK: --set-github-repos
 
     @Test("writes a comma- or newline-separated repo list to the guarded blob")
@@ -110,6 +133,72 @@ struct GitHubConfigSetterCLITests {
         switch result {
         case .success: Issue.record("\(entry.debugDescription) should have been rejected")
         case .failure(let error): #expect(error == .malformedRepo(entry))
+        }
+    }
+
+    @Test("a repo shape the GitHub client would refuse anyway is malformed here too, so the list can never hold one (dev-3's finding)", arguments: [
+        "sackheads/iris/../../admin", "sackheads/iris?x=1", "sackheads/iris#f", "a b/c",
+    ])
+    func setReposRejectsShapesTheClientWouldRefuse(_ entry: String) {
+        let (config, _, store, name) = isolatedConfig()
+        defer { teardown(store, name) }
+        let result = GitHubConfigSetterCLI.setRepos(stdin: Data(entry.utf8), config: config)
+        switch result {
+        case .success: Issue.record("\(entry.debugDescription) should have been rejected")
+        case .failure(let error): #expect(error == .malformedRepo(entry))
+        }
+    }
+
+    @Test("refuses when the guarded item has never been upgraded and this process doesn't announce (#679, dev-3's finding)")
+    func setReposRefusesWhenDeferredToApp() {
+        let name = "iris-966t6-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: name)!
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)")
+        // mayChange: false, over an unmarked (never-upgraded) item: a non-app role that does not
+        // announce must not silently complete the upgrade that #679 reserves for the app.
+        let config = ConfigManager(store: store, guardedSecrets: keychain, guardedMayChange: false)
+        defer { teardown(store, name) }
+        #expect(config.guardedState == .deferredToApp)
+
+        let result = GitHubConfigSetterCLI.setRepos(stdin: Data("sackheads/iris\n".utf8), config: config)
+
+        switch result {
+        case .success: Issue.record("expected failure: the guarded item was never upgraded")
+        case .failure(let error): #expect(error == .notYetConfigured)
+        }
+        #expect(keychain.secrets(service: KeychainManager.legacyService)[GuardedKey.githubAllowedRepos.rawValue] == nil)
+    }
+
+    @Test("also refuses over a .missing guarded item (upgrade ran before, item now empty), not just .deferredToApp (dev-3's \"for good measure\")")
+    func setReposRefusesWhenGuardedStateIsMissing() {
+        let name = "iris-966t6-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: name)!
+        store.set(true, forKey: GuardedSettings.markerKey)
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)")
+        let config = ConfigManager(store: store, guardedSecrets: keychain)
+        defer { teardown(store, name) }
+        #expect(config.guardedState == .missing)
+
+        let result = GitHubConfigSetterCLI.setRepos(stdin: Data("sackheads/iris\n".utf8), config: config)
+
+        switch result {
+        case .success: Issue.record("expected failure: the guarded item is missing its values")
+        case .failure(let error): #expect(error == .notYetConfigured)
+        }
+    }
+
+    @Test("reports failure rather than silent success when the Keychain item's writes are blocked (dev-2's finding)")
+    func setReposReportsFailureWhenWritesAreBlocked() {
+        let (config, keychain, store, name) = isolatedConfig()
+        defer { teardown(store, name) }
+        #expect(config.guardedState == .normal)
+        keychain.blockWrites()
+
+        let result = GitHubConfigSetterCLI.setRepos(stdin: Data("sackheads/iris\n".utf8), config: config)
+
+        switch result {
+        case .success: Issue.record("expected failure: setGuardedBlob silently no-ops when writes are blocked")
+        case .failure(let error): #expect(error == .writesBlocked)
         }
     }
 
