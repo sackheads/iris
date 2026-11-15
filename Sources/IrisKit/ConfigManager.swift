@@ -66,6 +66,13 @@ class ConfigManager: @unchecked Sendable {
     /// Where the guarded settings (#678) live: the secrets item. Nil only for a test's manager
     /// over its own suite that passes no keychain, which keeps them in that suite as before.
     @ObservationIgnored let guardedKeychain: KeychainManager?
+    /// Whether the `iris-main` GitHub PAT is present (#966), read once here rather than on every
+    /// `ToolExecutor.getTools` call: a per-turn Keychain read risked re-triggering the `.dev`
+    /// SecurityAgent prompt every turn (#578), the same reasoning `googleRefreshToken`'s one-shot
+    /// read already follows. Fixed for this launch: `iris --set-github-token` (a separate process
+    /// invocation) writes the Keychain item directly and cannot update an already-running app's
+    /// in-memory flag, so the token it stores takes effect on the app's next launch.
+    var hasGitHubToken: Bool = false
     /// What this launch found in the secrets item for the guarded settings.
     @ObservationIgnored var guardedState: GuardedSettings.State = .normal
     /// Launch notices about the guarded settings, taken once by `AppState`.
@@ -627,6 +634,7 @@ class ConfigManager: @unchecked Sendable {
         // also supplies the API keys below so a denied prompt is asked only once.
         let keychain = guardedSecrets ?? (storeOverride == nil ? KeychainManager.shared : nil)
         self.guardedKeychain = keychain
+        self.hasGitHubToken = keychain.map { GitHubProxyClient.hasToken(keychain: $0) } ?? false
         var secretsRead: [String: String]?
         var guarded: [GuardedKey: String]?
         var guardedWrite: [String: String]?

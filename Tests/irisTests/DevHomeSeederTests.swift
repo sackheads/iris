@@ -39,6 +39,19 @@ struct DevHomeSeederTests {
             .contains(dstKC.resolvedService(KeychainManager.pluginService("p"))))
     }
 
+    @Test("copies the iris.github service, so a dev build inherits the GitHub token (#966 Task 1)")
+    func seedsGithubToken() throws {
+        let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }
+        let srcKC = KeychainManager(serviceSuffix: "")
+        let dstKC = KeychainManager(serviceSuffix: ".dev")
+        srcKC.replaceSecrets(["token": "ghp_realtoken"], service: KeychainManager.githubService)
+
+        let report = try DevHomeSeeder.seed(from: src, to: dst, identity: .dev, sourceKeychain: srcKC, destKeychain: dstKC)
+
+        #expect(dstKC.secrets(service: KeychainManager.githubService) == ["token": "ghp_realtoken"])
+        #expect(report.keychainServices.contains(dstKC.resolvedService(KeychainManager.githubService)))
+    }
+
     @Test("refuses under the release identity")
     func refusesRelease() throws {
         let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }

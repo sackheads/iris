@@ -83,7 +83,7 @@ enum DevHomeSeeder {
             try Data().write(to: staging.seedMarker)
 
             var report = Report()
-            let services = [KeychainManager.legacyService, KeychainManager.mcpFileService]
+            let services = [KeychainManager.legacyService, KeychainManager.mcpFileService, KeychainManager.githubService]
                 + (try sourceKeychain.storedServicesOrThrow(withPrefix: "iris.plugin."))
             for service in services {
                 let secrets = try sourceKeychain.secretsOrThrow(service: service)
