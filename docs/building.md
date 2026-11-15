@@ -38,8 +38,9 @@ reseed, quit the dev build and run `rm -rf ~/.iris-dev && scripts/run-dev.sh`.
 
 The seeded Keychain items trust only the binary that made them, the bare `iris` that `run-dev.sh`
 runs, so Iris Dev.app asks for your login password once for each of them, the first time it reads
-it: `com.iris.secrets.dev` at launch, then `iris.mcp.dev` and each plugin's
-`iris.plugin.<id>.dev` when first used. The seeder's success line lists the ones it copied. Keep
+it: `com.iris.secrets.dev` at launch, and `iris.github.dev` too if a GitHub token was seeded, then
+`iris.mcp.dev` and each plugin's `iris.plugin.<id>.dev` when first used. The seeder's success line
+lists the ones it copied. Keep
 the app open and choose **Always Allow** each time: that adds the app to that item's access list
 for good, rebuilds included as long as they are signed with the same Developer ID (`build-app.sh`
 does). **Deny**, or quitting the app before you answer, means that item asks again at the next
