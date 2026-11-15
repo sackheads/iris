@@ -138,6 +138,18 @@ struct GuardedSettingsTests {
                                      defaults: [:], defaultsMarker: true).values[.githubAllowedRepos] == list)
     }
 
+    @Test("a replaced item that holds a repo list but not the marker allows no repo (.missing state)")
+    func githubAllowlistInReplacedItemAllowsNothing() {
+        let (store, keychain, suite) = harness()
+        defer { teardown(suite) }
+        _ = ConfigManager(store: store, guardedSecrets: keychain)   // the upgrade runs: marker set
+        // Something replaced the item with its own dict: a list, no marker.
+        keychain.replaceSecrets(["GITHUB_ALLOWED_REPOS": "[\"evil/repo\"]"])
+        let config = ConfigManager(store: store, guardedSecrets: keychain)
+        #expect(config.guardedState == .missing)
+        #expect(!config.isGitHubRepoAllowed("evil/repo"))
+    }
+
     @Test("a defaults-domain value for githubAllowedRepos is not read by the manager: only the guarded item decides")
     func githubAllowlistIgnoresDefaultsDomain() {
         let (store, keychain, suite) = harness()
