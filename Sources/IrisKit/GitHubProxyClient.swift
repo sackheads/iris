@@ -258,9 +258,10 @@ extension GitHubProxyClient {
     }
 
     /// A repo-relative path inside `docs/` or `assets/`: at least one segment below the folder, no
-    /// empty, `.` or `..` segment, no leading slash, no backslash or control character.
+    /// empty, `.` or `..` segment, no backslash or control character. A leading slash is refused
+    /// by the same rules: it makes the first segment empty, which is neither root.
     static func isRoutinePath(_ path: String) -> Bool {
-        guard !path.isEmpty, !path.hasPrefix("/"),
+        guard !path.isEmpty,
               !path.unicodeScalars.contains(where: { $0 == "\\" || CharacterSet.controlCharacters.contains($0) }) else { return false }
         let segments = path.split(separator: "/", omittingEmptySubsequences: false)
         guard segments.count >= 2, routineRoots.contains(String(segments[0])) else { return false }
