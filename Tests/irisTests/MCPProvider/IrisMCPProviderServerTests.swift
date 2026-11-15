@@ -684,7 +684,7 @@ struct IrisMCPProviderServerTests {
     // MARK: #1066 Task 8: iris_send with guest sessions
 
     @MainActor
-    private func guestFixture(enabled: Bool = true, maxLive: Int = 4) throws -> (Fixture, GuestSessionRegistry, AppState) {
+    private func guestFixture(enabled: Bool = true, maxLive: Int = 4, dailyCap: Int = GuestSessionDriver.dailyTokenCap) throws -> (Fixture, GuestSessionRegistry, AppState) {
         let app = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
         let sessions = GuestSessionRegistry(state: app, maxLive: maxLive) { s, c in
             IrisEngine.makeGuestEngine(state: s, clientId: c, client: CapturingLLMClient(reply: "unused"), protectionEnabled: false)
@@ -693,6 +693,7 @@ struct IrisMCPProviderServerTests {
             let gate = ProviderRequestGate(registry: tokens, capacity: GuestSessionDriver.turnsPerHour,
                                            refillInterval: GuestSessionDriver.turnRefillInterval)
             return GuestSessionDriver(state: app, registry: sessions, mailbox: mailbox, turnGate: gate, isEnabled: { enabled },
+                                      dailyCap: dailyCap,
                                       runTurn: { conversationId, _, _, _ in
                                           await MainActor.run { app.appendMessage(role: .agent, content: "guest answer", to: conversationId) }
                                       })
@@ -741,6 +742,21 @@ struct IrisMCPProviderServerTests {
         #expect(sessions.liveCount == 1)
         // The refused message was retracted, not left queued: the client's whole inbox allowance is
         // still free (a left-behind message would make the last of these `inboxFull`).
+        for i in 0..<ProviderMailbox.maxPendingPerClient {
+            _ = try await fixture.mailbox.send(from: "a", text: "m\(i)", fileRefs: [])
+        }
+    }
+
+    @Test("iris_send over the daily token cap is a tool error that names the budget and leaves no message queued")
+    @MainActor
+    func sendGuestOverDailyBudgetIsAToolError() async throws {
+        let (fixture, sessions, _) = try guestFixture(dailyCap: 0)
+        let token = try fixture.registry.issueToken(forClientId: "a")
+        let result = try await sendResult(fixture, token: token, text: "hi")
+        #expect(result["isError"] as? Bool == true)
+        let text = ((result["content"] as? [[String: Any]])?.first?["text"] as? String) ?? ""
+        #expect(text.contains("daily token budget"))
+        #expect(sessions.liveCount == 0)
         for i in 0..<ProviderMailbox.maxPendingPerClient {
             _ = try await fixture.mailbox.send(from: "a", text: "m\(i)", fileRefs: [])
         }

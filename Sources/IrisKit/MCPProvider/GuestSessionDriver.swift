@@ -9,6 +9,8 @@ enum GuestSubmitResult: Equatable, Sendable {
     case busy
     /// No turn: this client has used its turns for the hour.
     case rateLimited
+    /// No turn: this client has spent its token budget for the UTC day (#1135).
+    case overDailyBudget
     /// No turn: guest sessions are off (or the client is no longer registered). The caller keeps
     /// the Phase 1 behaviour: the message sits in the mailbox.
     case disabled
@@ -17,15 +19,37 @@ enum GuestSubmitResult: Equatable, Sendable {
 /// What guest turns have spent, per client, in tokens. The guest conversation is deleted when its
 /// session is reaped and is never persisted, so a figure kept on it would go with it; this tally
 /// is the one place a reaped guest's spend survives (memory only: a restart starts it empty).
+///
+/// Besides the running total it keeps today's total, by UTC day, which the driver reads to refuse a
+/// client that has used its daily budget (#1135). A day is `floor(unix time / 86400)`, so the
+/// count restarts at 00:00 UTC without a timer.
 actor GuestSpendLedger {
     private var totals: [String: Int] = [:]
+    private var daily: [String: (day: Int, tokens: Int)] = [:]
+    private let now: @Sendable () -> Date
+
+    init(now: @escaping @Sendable () -> Date = Date.init) {
+        self.now = now
+    }
+
+    private func today() -> Int { Int((now().timeIntervalSince1970 / 86_400).rounded(.down)) }
 
     func add(_ tokens: Int, for clientId: String) {
         guard tokens > 0 else { return }
         totals[clientId, default: 0] += tokens
+        let day = today()
+        // Entries from an earlier day are dead weight: drop them as the day turns.
+        daily = daily.filter { $0.value.day == day }
+        daily[clientId] = (day, (daily[clientId]?.tokens ?? 0) + tokens)
     }
 
     func total(for clientId: String) -> Int { totals[clientId] ?? 0 }
+
+    /// What `clientId` has spent so far this UTC day.
+    func todayTotal(for clientId: String) -> Int {
+        guard let entry = daily[clientId], entry.day == today() else { return 0 }
+        return entry.tokens
+    }
 }
 
 /// Feeds one turn's running usage into the ledger. `record` is absolute (the turn's total so far),
@@ -63,6 +87,12 @@ final class GuestSessionDriver {
     /// The weighted-token ceiling and the wall-clock bound of one guest turn. D5.
     static let turnMaxTokens = 30_000
     static let turnTimeoutSeconds: Double = 180
+    /// The most one client may spend in a UTC day, in the tokens a turn's ceiling counts (the plain
+    /// prompt plus output total: a guest turn has no provider stamp, so no price weighting).
+    /// Checked before a turn starts, so a client can overshoot it by at most one turn
+    /// (`turnMaxTokens`); one turn at a time per client keeps it at one. D6, #1135, for the owner
+    /// to tune. At 12 turns an hour the per-turn ceiling alone would allow 8,640,000 a day.
+    static let dailyTokenCap = 500_000
     /// The `source` a guest turn runs under.
     static let turnSource = "mcp-guest"
     /// Filed when a turn ends with nothing to say: an error, a timeout, a refusal. Short and free
@@ -79,8 +109,9 @@ final class GuestSessionDriver {
     let turnGate: ProviderRequestGate
     private let isEnabled: @MainActor () -> Bool
     private let turnTimeout: Double
+    private let dailyCap: Int
     private let runTurn: TurnRunner
-    let spend = GuestSpendLedger()
+    let spend: GuestSpendLedger
 
     /// Clients with a turn running, claimed before the first suspension so two sends racing from
     /// one client cannot both start a turn on one conversation.
@@ -90,6 +121,8 @@ final class GuestSessionDriver {
     init(state: AppState, registry: GuestSessionRegistry, mailbox: ProviderMailbox, turnGate: ProviderRequestGate,
          isEnabled: @escaping @MainActor () -> Bool = { ConfigManager.shared.mcpGuestSessionsEnabled },
          turnTimeout: Double = GuestSessionDriver.turnTimeoutSeconds,
+         dailyCap: Int = GuestSessionDriver.dailyTokenCap,
+         spend: GuestSpendLedger = GuestSpendLedger(),
          runTurn: TurnRunner? = nil) {
         self.state = state
         self.registry = registry
@@ -97,6 +130,8 @@ final class GuestSessionDriver {
         self.turnGate = turnGate
         self.isEnabled = isEnabled
         self.turnTimeout = turnTimeout
+        self.dailyCap = dailyCap
+        self.spend = spend
         self.runTurn = runTurn ?? { [weak state] conversationId, text, budget, sink in
             let engine = await MainActor.run { state?.guestEngines[conversationId] }
             await engine?.processInput(text, source: GuestSessionDriver.turnSource, conversationId: conversationId,
@@ -119,7 +154,8 @@ final class GuestSessionDriver {
     func turnTask(for clientId: String) -> Task<Void, Never>? { turnTasks[clientId] }
 
     /// Starts one guest turn for `clientId`, or says why not. The refusals are decided before any
-    /// turn exists: a turn that was refused spent nothing.
+    /// turn exists: a turn that was refused spent nothing. A client that has already used its
+    /// `dailyTokenCap` for the UTC day is refused (#1135).
     ///
     /// `storedMessageId` is the mailbox copy of `text` that `iris_send` stored: the turn has the
     /// text, and nothing else ever drains that direction, so it is retracted when the turn ends or
@@ -130,6 +166,8 @@ final class GuestSessionDriver {
         var started = false
         defer { if !started { running.remove(clientId) } }
 
+        // Before the turns gate, so a refusal here does not also spend one of the client's hourly turns.
+        if await spend.todayTotal(for: clientId) >= dailyCap { return .overDailyBudget }
         switch await turnGate.admit(clientId: clientId) {
         case .admitted: break
         case .budgetExceeded: return .rateLimited

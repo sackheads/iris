@@ -449,6 +449,9 @@ final class IrisMCPProviderServer: Sendable {
             case .rateLimited:
                 await mailbox.retract(id: message.id)
                 return CallTool.Result(content: [.text(text: "turn limit reached for this hour; try again later", annotations: nil, _meta: nil)], isError: true)
+            case .overDailyBudget:
+                await mailbox.retract(id: message.id)
+                return CallTool.Result(content: [.text(text: "daily token budget reached for this client; it resets at 00:00 UTC", annotations: nil, _meta: nil)], isError: true)
             }
         }
         return try CallTool.Result(structuredContent: message)

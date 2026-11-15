@@ -98,12 +98,15 @@ it: a guest never gets an address a role session could message first.
   session per client, at most 4 live at once (a fifth client gets a busy error, nothing is queued),
   a session closed after 15 idle minutes (a turn in flight is never reaped; the clock restarts when
   it ends), 12 turns an hour per client (one more every 5 minutes), one turn at a time per client,
-  and a per-turn ceiling of 30,000 weighted tokens and 180 seconds
-  (`GuestSessionDriver`'s named constants). A turn that fails or times out is answered with a short
-  failure message. There is **no per-client daily or total spend cap yet**: that is tracked in
-  #1135 and should land before this setting is turned on for anyone. `GuestSpendLedger` tallies
-  each client's tokens in memory so the spend is at least visible; it enforces nothing and does not
-  survive a restart.
+  a per-turn ceiling of 30,000 weighted tokens and 180 seconds, and **500,000 tokens per client per
+  UTC day** (all `GuestSessionDriver`'s named constants). A client that has used its day's tokens is
+  refused, and the message it sent is not queued; the count restarts at 00:00 UTC. The cap is
+  checked when a turn would start, so one turn in flight at the limit can run it over by up to the
+  per-turn ceiling. A turn that fails or times out is answered with a short failure message.
+  `GuestSpendLedger` tallies each client's tokens, and that tally is what the cap reads. It is kept
+  in memory only: a restart starts every client's day at zero, so the cap resets when Iris restarts
+  (a durable count is #1135's open question). Revoking a client does not clear its day's count, so
+  re-issuing an id does not reset its cap; it does not survive a restart either.
 - **The flag.** `MCP_GUEST_SESSIONS_ENABLED` is a guarded setting, off by default (off is its
   protective value): a `"true"` written from outside the app is not carried across an upgrade and
   an unreadable settings item loads it off. Off, `iris_send` is exactly the mailbox above. It is read
@@ -114,7 +117,7 @@ it: a guest never gets an address a role session could message first.
   Stopping the provider closes every live guest session. A reply is never filed for a client that
   was revoked while its turn ran.
 - **Dormant for now.** Nothing issues a token or sets a role allowlist from the app, and there is
-  no Settings toggle for the flag, so this is code and tests until that wiring and #1135 land.
+  no Settings toggle for the flag, so this is code and tests until that wiring lands.
 
 See [docs/superpowers/plans/2026-11-11-mcp-provider-phase1.md](superpowers/plans/2026-11-11-mcp-provider-phase1.md)
 for the full design history and the invariants this surface is built against.
