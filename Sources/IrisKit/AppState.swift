@@ -565,9 +565,10 @@ struct ToolApprovalRequest: Identifiable {
     /// `humanOnly` request, whose call never reads the allowlist, for a gate script's escalation
     /// (#648): Vibecop has already ruled on that one, and a rule written from its composed text
     /// would let the same text run on the host unasked, where the person approved it for the
-    /// sandbox; and for a command whose text looks like it contains a credential (#1140): a saved
-    /// rule would write it to plaintext `permissions.json`. Off means no button and, in
-    /// `resolveApproval`, no rule.
+    /// sandbox; and for a call whose rule — what Always Allow would actually save, not necessarily
+    /// the whole call (#1102's prefix generalization) — looks like it contains a credential
+    /// (#1140): a saved rule would write it to plaintext `permissions.json`. Off means no button
+    /// and, in `resolveApproval`, no rule.
     let offersAlwaysAllow: Bool
     /// #1102: what an Always Allow click saves, decided once when the ask is raised so the dialog
     /// shows exactly what `resolveApproval` writes. Empty when `offersAlwaysAllow` is off.
@@ -575,9 +576,9 @@ struct ToolApprovalRequest: Identifiable {
     /// #812: whether the dialog offers "Allow in this conversation", which adds the tool to the
     /// conversation's `outboundAllowedTools`. On only for a tainted outbound send's card.
     let offersConversationAllow: Bool
-    /// #1140: set when `details` looks like it contains a credential, so the dialog can tell the
-    /// person why there is no Always Allow button. The call still runs now, once, as approved —
-    /// only the saved rule is refused.
+    /// #1140: set when the rule Always Allow would save looks like it contains a credential, so
+    /// the dialog can tell the person why there is no Always Allow button. The call still runs
+    /// now, once, as approved — only the saved rule is refused.
     let secretDetectedNote: String?
     let continuation: CheckedContinuation<Bool, Never>
     /// When the ask was raised, so `list_sessions` can say how long a peer has waited (#418).

@@ -45,7 +45,10 @@ enum SecretLikeDetector {
     /// `ToolApprovalRequest.init`).
     static let patterns: [Pattern] = [
         pattern("authorization-header", "(?i)Authorization:\\s*(Bearer|Basic|Token)\\s+" + notAVarRef + "\\S{4,}"),
-        pattern("jwt", "eyJ[A-Za-z0-9_-]{5,}\\.[A-Za-z0-9_-]{5,}\\.[A-Za-z0-9_-]{5,}"),
+        // Bounded ({5,500} per segment, not {5,}): three chained unbounded-quantifier-then-literal
+        // segments made this the worst of the quadratic patterns (dev-2's round-3 finding: 26s on
+        // a 99,000-char adversarial "eyJabcdef" repeat). 500 is generous for a real JWT segment.
+        pattern("jwt", "eyJ[A-Za-z0-9_-]{5,500}\\.[A-Za-z0-9_-]{5,500}\\.[A-Za-z0-9_-]{5,500}"),
         pattern("openai-or-anthropic-key", "\\bsk-(ant-)?[A-Za-z0-9_-]{16,}\\b"),
         pattern("github-token", "\\b(ghp|gho|ghs|github_pat)_[A-Za-z0-9_]{16,}\\b"),
         pattern("aws-access-key-id", "\\b(AKIA|ASIA)[0-9A-Z]{16}\\b"),
@@ -68,7 +71,11 @@ enum SecretLikeDetector {
         pattern("named-flag-opaque-value",
                 "(?i)\\b(token|apikey|api-key|api_key|access_token|password|secret)[=: ]\\s*" + notAVarRef + "\\S{4,}"),
         // user:pass@host in a URL, e.g. a `git clone` with embedded basic-auth credentials.
-        pattern("url-userinfo", "://[^/\\s:@]+:[^@\\s]+@"),
+        // Bounded quantifiers ({1,64}/{1,128}), not `+`: an unbounded negated-class quantifier
+        // followed by a required literal is still quadratic to backtrack over an adversarial run
+        // with no `@` (dev-3's round-3 finding: 1.13s at 40,000 chars). A real userinfo section is
+        // short; the cap excludes nothing real and keeps the scan linear-bounded.
+        pattern("url-userinfo", "://[^/\\s:@]{1,64}:[^@\\s]{1,128}@"),
         // `curl -u user:pass`.
         pattern("curl-basic-auth-flag", "\\s-u\\s+" + notAVarRef + "[^\\s:]+:\\S+"),
     ]

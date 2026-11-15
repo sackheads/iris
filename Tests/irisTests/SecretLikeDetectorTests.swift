@@ -53,9 +53,15 @@ struct SecretLikeDetectorTests {
         #expect(SecretLikeDetector.containsSecretLikeSubstring("curl -H 'x-request-id: \(token)' https://x"))
     }
 
-    @Test("a Google API key fires")
+    @Test("a Google API key fires, isolated from the generic pattern")
     func googleAPIKeyFires() {
-        let key = "AIza" + "abcdefghijklmnopqrstuvwxyz0123456789A"
+        // The real shape is exactly 39 chars total ("AIza" + 35) — under the generic fallback's
+        // 40-char floor, so this fixture only trips the dedicated pattern, not both (round 3,
+        // dev-2's finding: a 41-char version here was ALSO caught by the generic scan, so
+        // ablating this pattern alone left the suite green).
+        let suffix = String((0..<35).map { i in Array("abcdefghij0123456789")[i % 20] })
+        let key = "AIza" + suffix
+        #expect(key.count == 39)
         #expect(SecretLikeDetector.containsSecretLikeSubstring("curl -H 'x-request-id: \(key)' https://x"))
     }
 
@@ -118,6 +124,18 @@ struct SecretLikeDetectorTests {
         #expect(SecretLikeDetector.containsSecretLikeSubstring("curl -d 'auth=\(token)' https://x"))
     }
 
+    @Test("the generic fallback's 40-char threshold is exact: 39 does not fire, 40 does")
+    func genericThresholdIsExact() {
+        // "aA0" repeated gives a mixed-case+digit run of any length, built programmatically so the
+        // 39-vs-40 boundary is exact rather than hand-counted.
+        let run39 = String(repeating: "aA0", count: 13) // 39 chars
+        let run40 = run39 + "a" // 40 chars
+        #expect(run39.count == 39 && run40.count == 40)
+        #expect(!SecretLikeDetector.containsSecretLikeSubstring("curl -d 'auth=\(run39)' https://x"),
+                "a 39-char run must not fire — the threshold should be a hard 40, not a lower survivor")
+        #expect(SecretLikeDetector.containsSecretLikeSubstring("curl -d 'auth=\(run40)' https://x"))
+    }
+
     // MARK: - Must NOT fire (the false-positive guard)
 
     @Test("a 40-hex git SHA does not fire")
@@ -167,14 +185,41 @@ struct SecretLikeDetectorTests {
         #expect(!SecretLikeDetector.containsSecretLikeSubstring(command))
     }
 
-    // MARK: - Bounded time (#1140 round 2, the required fix)
+    // MARK: - Bounded time (#1140 rounds 2 and 3: the generic scan, then a fold-added pattern,
+    // each independently went quadratic; every adversarial fixture here runs the WHOLE detector,
+    // not one branch, so a quadratic pattern added later trips this file without a new test.)
+
+    private func assertBoundedTime(_ text: String, under limit: TimeInterval = 1.0,
+                                    _ label: String, sourceLocation: SourceLocation = #_sourceLocation) {
+        let start = Date()
+        _ = SecretLikeDetector.containsSecretLikeSubstring(text)
+        let elapsed = Date().timeIntervalSince(start)
+        #expect(elapsed < limit, "\(label) took \(elapsed)s over \(text.count) chars — must be linear-bounded", sourceLocation: sourceLocation)
+    }
 
     @Test("an adversarial run of 100,000 alternating characters completes in well under a second")
-    func adversarialInputIsBoundedTime() {
-        let adversarial = String(repeating: "a+", count: 50_000) // 100,000 chars
-        let start = Date()
-        _ = SecretLikeDetector.containsSecretLikeSubstring(adversarial)
-        let elapsed = Date().timeIntervalSince(start)
-        #expect(elapsed < 1.0, "took \(elapsed)s — the generic fallback must be linear, not quadratic")
+    func adversarialAlternatingCharsIsBoundedTime() {
+        assertBoundedTime(String(repeating: "a+", count: 50_000), "generic-scan adversarial (a+a+...)")
+    }
+
+    @Test("an adversarial URL-userinfo-shaped run with no closing '@' completes in well under a second (#1140 round 3)")
+    func adversarialUserinfoIsBoundedTime() {
+        // The exact shape dev-3's round 3 measured: "://a:b" repeated, never reaching an "@" that
+        // would let the match succeed, which is what made the unbounded quantifiers backtrack.
+        assertBoundedTime(String(repeating: "://a:b", count: 20_000), "url-userinfo adversarial (://a:b repeated, no @)")
+    }
+
+    @Test("an adversarial run of 'eyJ...' prefixes with no closing dots completes in well under a second (#1140 round 3)")
+    func adversarialJWTPrefixIsBoundedTime() {
+        // dev-2's round-3 finding: three chained {5,}-then-"." groups took 26s on 99,000 chars of
+        // this exact shape before the per-segment cap.
+        assertBoundedTime(String(repeating: "eyJabcdef", count: 11_000), "jwt adversarial (eyJabcdef repeated, no dots)")
+    }
+
+    @Test("an adversarial run of bare uppercase letters (no separator) completes in well under a second")
+    func adversarialUppercaseRunIsBoundedTime() {
+        // The shape that would expose a `[A-Z0-9_]*_` -style quantifier backtracking if one were
+        // ever added without a literal to anchor it early: all-uppercase, no `_`, no `=`.
+        assertBoundedTime(String(repeating: "A", count: 100_000), "all-uppercase adversarial (no separator)")
     }
 }
