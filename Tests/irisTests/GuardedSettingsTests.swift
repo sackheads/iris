@@ -72,6 +72,83 @@ struct GuardedSettingsTests {
         #expect(ConfigManager(store: store, guardedSecrets: keychain).mcpGuestSessionsEnabled)
     }
 
+    // MARK: #966 githubAllowedRepos
+
+    @Test("githubAllowedRepos is a blob whose built-in and protective value is empty, so a fresh install allows no repo")
+    func githubAllowedReposDefaultsEmpty() {
+        let key = GuardedKey.githubAllowedRepos
+        #expect(key.rawValue == "GITHUB_ALLOWED_REPOS")
+        if case .blob = key.kind {} else { Issue.record("expected a .blob key") }
+        #expect(key.builtIn.isEmpty && key.protective.isEmpty)
+        let (store, keychain, suite) = harness()
+        defer { teardown(suite) }
+        let config = ConfigManager(store: store, guardedSecrets: keychain)
+        #expect(!config.isGitHubRepoAllowed("sackheads/iris"))
+    }
+
+    @Test("a repo is allowed only if it is exactly in the configured list")
+    func githubRepoAllowedOnlyWhenListed() {
+        let (store, keychain, suite) = harness()
+        defer { teardown(suite) }
+        let config = ConfigManager(store: store, guardedSecrets: keychain)
+        config.setGuardedBlob(.githubAllowedRepos, "[\"sackheads/iris\",\"bnaylor/notes\"]")
+        #expect(config.isGitHubRepoAllowed("sackheads/iris"))
+        #expect(config.isGitHubRepoAllowed("bnaylor/notes"))
+        #expect(!config.isGitHubRepoAllowed("evil/repo"))
+        // Not a prefix, a suffix, a different case, padded, or empty.
+        for near in ["sackheads", "sackheads/iris-fork", "sackheads/ir", "other/sackheads/iris",
+                     "Sackheads/Iris", " sackheads/iris", "sackheads/iris ", "sackheads/iris/", ""] {
+            #expect(!config.isGitHubRepoAllowed(near), "\(near.debugDescription) must not be allowed")
+        }
+        // It survives a restart (a new manager over the same stores).
+        #expect(ConfigManager(store: store, guardedSecrets: keychain).isGitHubRepoAllowed("sackheads/iris"))
+    }
+
+    @Test("an empty, malformed or wrongly shaped list allows nothing", arguments: [
+        "", "[]", "not json", "{", "{\"sackheads/iris\":true}", "\"sackheads/iris\"", "null", "42",
+        "[1,2]", "[\"sackheads/iris\",7]", "[[\"sackheads/iris\"]]", "[null]",
+    ])
+    func githubAllowlistFailsClosed(_ blob: String) {
+        let (store, keychain, suite) = harness()
+        defer { teardown(suite) }
+        let config = ConfigManager(store: store, guardedSecrets: keychain)
+        config.setGuardedBlob(.githubAllowedRepos, blob)
+        #expect(!config.isGitHubRepoAllowed("sackheads/iris"))
+    }
+
+    @Test("an empty repo string is not allowed even when the list holds an empty entry")
+    func githubEmptyRepoNeverAllowed() {
+        let (store, keychain, suite) = harness()
+        defer { teardown(suite) }
+        let config = ConfigManager(store: store, guardedSecrets: keychain)
+        config.setGuardedBlob(.githubAllowedRepos, "[\"\"]")
+        #expect(!config.isGitHubRepoAllowed(""))
+    }
+
+    @Test("an unreadable guarded item allows no repo, and an outside defaults write does not carry across the upgrade")
+    func githubAllowlistUnreadableAndDefaultsWrite() {
+        let list = "[\"sackheads/iris\"]"
+        let load = GuardedSettings.load(item: .read([:]), defaults: ["GITHUB_ALLOWED_REPOS": list], defaultsMarker: false)
+        #expect(load.values[.githubAllowedRepos] == "")
+        #expect(load.notices.first?.contains("GITHUB_ALLOWED_REPOS") == true)
+        let unreadable = GuardedSettings.load(item: .unreadable(-25308), defaults: ["GITHUB_ALLOWED_REPOS": list], defaultsMarker: true)
+        #expect(unreadable.values[.githubAllowedRepos] == "")
+        // Control: the same list stored in the item itself is read.
+        #expect(GuardedSettings.load(item: .read(["GITHUB_ALLOWED_REPOS": list, GuardedSettings.markerKey: "1"]),
+                                     defaults: [:], defaultsMarker: true).values[.githubAllowedRepos] == list)
+    }
+
+    @Test("a defaults-domain value for githubAllowedRepos is not read by the manager: only the guarded item decides")
+    func githubAllowlistIgnoresDefaultsDomain() {
+        let (store, keychain, suite) = harness()
+        defer { teardown(suite) }
+        let config = ConfigManager(store: store, guardedSecrets: keychain)
+        // The shape of `defaults write <domain> GITHUB_ALLOWED_REPOS '["evil/repo"]'`.
+        store.set("[\"evil/repo\"]", forKey: "GITHUB_ALLOWED_REPOS")
+        #expect(!config.isGitHubRepoAllowed("evil/repo"))
+        #expect(!ConfigManager(store: store, guardedSecrets: keychain).isGitHubRepoAllowed("evil/repo"))
+    }
+
     // MARK: the decision, pure
 
     @Test("the upgrade carries a value only if it's no looser than built-in, and says which it reset")

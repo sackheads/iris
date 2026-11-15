@@ -43,6 +43,10 @@ enum GuardedKey: String, CaseIterable, Sendable {
     /// spends the owner's tokens. Off is protective, as for `mcpProviderEnabled`: an unreadable
     /// item, or a `"true"` written outside the app, must not turn spending on.
     case mcpGuestSessionsEnabled = "MCP_GUEST_SESSIONS_ENABLED"
+    /// #966: the repos the `github_*` tools may touch, a JSON array of `"owner/name"`. Guarded
+    /// because it decides where Iris, acting as her own GitHub account, may write. Empty is none:
+    /// a fresh install, an unreadable item and a value written outside the app all allow no repo.
+    case githubAllowedRepos = "GITHUB_ALLOWED_REPOS"
 
     enum Kind { case url, cap(Int), flag(protectiveOn: Bool), sandboxPref, blob }
 
@@ -65,7 +69,7 @@ enum GuardedKey: String, CaseIterable, Sendable {
         case .enableSandboxing, .enableVibecop, .enablePromptInjectionProtection: .flag(protectiveOn: true)
         case .mcpProviderEnabled, .mcpGuestSessionsEnabled: .flag(protectiveOn: false)
         case .mainAgentSandboxDefault: .sandboxPref
-        case .subagentProviders, .subagentBuiltIns, .subagentRates: .blob
+        case .subagentProviders, .subagentBuiltIns, .subagentRates, .githubAllowedRepos: .blob
         }
     }
 
@@ -333,7 +337,7 @@ extension ConfigManager {
         case .enablePromptInjectionProtection: enableAdvancedPromptInjectionProtection ? "true" : "false"
         case .mcpProviderEnabled: mcpProviderEnabled ? "true" : "false"
         case .mcpGuestSessionsEnabled: mcpGuestSessionsEnabled ? "true" : "false"
-        case .subagentProviders, .subagentBuiltIns, .subagentRates: guardedBlob(key)
+        case .subagentProviders, .subagentBuiltIns, .subagentRates, .githubAllowedRepos: guardedBlob(key)
         }
     }
 
@@ -372,6 +376,22 @@ extension ConfigManager {
         guard guardedState == .normal else { return "" }
         let value = secretsSnapshot(keychain)[key.rawValue] ?? ""
         return key.isValid(value) ? value : ""
+    }
+
+    /// Whether the `github_*` tools may act on `repo` (`owner/name`). True only for an exact
+    /// match against the guarded `githubAllowedRepos` list; an empty, unreadable, malformed or
+    /// wrongly shaped list (any element not a string) allows nothing, so a bad value never
+    /// widens access.
+    func isGitHubRepoAllowed(_ repo: String) -> Bool {
+        guard !repo.isEmpty,
+              let object = try? JSONSerialization.jsonObject(with: Data(guardedBlob(.githubAllowedRepos).utf8)),
+              let list = object as? [Any] else { return false }
+        var allowed: [String] = []
+        for element in list {
+            guard let name = element as? String else { return false }
+            allowed.append(name)
+        }
+        return allowed.contains(repo)
     }
 
     /// Saves a blob-kind guarded value with every other guarded value, as `persistGuarded` does.
