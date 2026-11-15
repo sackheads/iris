@@ -25,7 +25,7 @@ not itself close ambient host auth for guests — it just stops Iris from acting
 by giving her a real second identity and a token path that doesn't touch `@bnaylor`'s `gh`.
 
 **Explicitly no "forge" abstraction** (Brian, 2026-11-15: kube-agents' forge layer is too much).
-GitHub only, two tools.
+GitHub only, three proxy tools (§3).
 
 ## 2. The clickhole root cause (Iris found it) — and the config fix
 
@@ -35,7 +35,7 @@ from approving his own PR. That is the actual clickhole on Iris-authored PRs. So
 
 1. **Iris authors as `iris-main`** (not ambient `@bnaylor`) — via the `github_create_pr` proxy tool
    (§3), which calls `POST /pulls` as the token's identity. `gh pr create` via `run_command` would
-   author as `@bnaylor`, which is the clickhole; the proxy is what actually fixes §2.1.
+   author as `@bnaylor`, which is the clickhole; the proxy is what actually delivers part 1 of this fix.
 2. **CODEOWNERS split (fail-safe, config-only, no iris code):**
    ```
    * @bnaylor                               # default: Brian (floor)
@@ -58,12 +58,20 @@ REST API directly; the token value never enters a prompt, tool arg, tool result,
 the sandbox env. Three tools (Iris's review finding 2 added the third):
 
 - **`github_create_pr(repo, head, base, title, body, draft?)`** — `POST /repos/{owner}/{repo}/pulls`.
-  **This is what makes Iris author as `iris-main` (§2.1).** `gh pr create` via `run_command` would author
-  as ambient `@bnaylor`; the proxy authors as the token's identity. Code (`git push`) continues over the
-  existing SSH remote, so the token never needs `Contents: write` (§4).
-- **`github_comment(repo, pr, body)`** — `POST /issues/{n}/comments`. Satisfied by `Issues: write` (M2).
-- **`github_approve(repo, pr)`** — `POST /pulls/{n}/reviews` with `APPROVE`. M2's deliberate escalation
-  (needs `Pull requests: write`), made safe by the §3.2 code gate.
+  **This is what makes Iris author as `iris-main` (§2, part 1).** `gh pr create` via `run_command` would
+  author as ambient `@bnaylor`; the proxy authors as the token's identity. Code (`git push`) continues over
+  the existing SSH remote, so the token never needs `Contents: write` (§4).
+- **`github_comment(repo, pr, body)`** — `POST /issues/{n}/comments`. Satisfied by `Issues: write`.
+- **`github_approve(repo, pr)`** — `POST /pulls/{n}/reviews` with `APPROVE`. Needs `Pull requests: write`,
+  made safe by the §3.3 code gate.
+
+**Relation to 11-09's M2.** M2 is about the *reviewer-role* token (`Issues: write` + `PR: read`,
+comments-only, **cannot** self-approve). `iris-main` here is **not** that token: it is an *owner-class
+service* account (per 11-09's registry), and its `Pull requests: write` deliberately gives it the approve
+capability M2's reviewer token is denied. What keeps that safe is **not** "comments-only" but the §3.3
+code gate (routine-file allowlist + SHA bind) plus attended-`.main`-only execution. Stating this so the
+spec doesn't read as contradicting M2: M2 constrains the reviewer token; this slice's account is a
+different principal with a different, code-gated bound.
 
 ### 3.1 Harness integration — specify it or it collides (Iris finding 1)
 Adding these tools to `ToolExecutor`/`IrisEngine` must be specified against three existing mechanisms:
@@ -114,7 +122,7 @@ bound to an exact commit — hardened against three bypasses Iris flagged:
 The token value is scrubbed from any tool output as defence in depth; the primary control is that it was
 never reachable.
 
-## 4. The one account + the §8.1 interim (isolated `gh` config)
+## 4. The one account + the interim isolated `gh` config
 
 - **One account, minimal:** `iris-main` as a `github` **service** account (owner-class *service*, per
   11-09). Not the full typed registry — a single Keychain item + a lookup the proxy tools use. It is the
@@ -162,7 +170,7 @@ never reachable.
 
 1. **Config-only (no iris code), ships first:** create/scope `iris-main`'s token; CODEOWNERS split (§2);
    enable stale-approval dismissal on the ruleset. Lands independent of any build.
-2. **The two proxy tools + the account lookup + the approve gate (§3/§4):** the iris-code slice. Small,
+2. **The three proxy tools + the account lookup + the approve gate (§3/§4):** the iris-code slice. Small,
    contained, host-side; rule-26 reviewed (it is credential + approval boundary code).
 3. Everything else is 11-09.
 
