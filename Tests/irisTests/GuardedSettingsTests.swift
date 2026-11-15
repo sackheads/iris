@@ -478,6 +478,12 @@ struct GuardedSettingsTests {
         #expect(GuardedSettings.approvalWarning(for: "defaults delete \"$D\" GUARDED_SETTINGS_V1") != nil)
         #expect(GuardedSettings.approvalWarning(for: "ls -la ~/src") == nil)
     }
+
+    @Test("the dialog also warns on the headless GitHub config setters (#966 Task 6, dev-2's finding): an approved run_command is the only control over them")
+    func approvalHintCoversGitHubSetters() {
+        #expect(GuardedSettings.approvalWarning(for: "echo evil/repo | iris --set-github-repos") != nil)
+        #expect(GuardedSettings.approvalWarning(for: "pbpaste | iris --set-github-token") != nil)
+    }
 }
 
 private enum GuestFlagLoad {

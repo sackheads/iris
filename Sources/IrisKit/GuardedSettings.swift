@@ -148,7 +148,8 @@ enum GuardedSettings {
     /// that builds the name at run time gets no warning.
     static func approvalWarning(for details: String) -> String? {
         let text = details.lowercased()
-        let named = ["com.iris.secrets", "com.bnaylor.iris", markerKey.lowercased()].first { text.contains($0) }
+        let named = ["com.iris.secrets", "com.bnaylor.iris", markerKey.lowercased(),
+                     "--set-github-token", "--set-github-repos"].first { text.contains($0) }
         guard let named else { return nil }
         return "This names Iris's own settings (`\(named)`). A command that changes them can change Iris's limits, guards or provider addresses. Deny it unless you meant to."
     }
