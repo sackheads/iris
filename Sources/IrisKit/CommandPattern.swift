@@ -317,6 +317,7 @@ enum CommandPattern {
             if arg.hasPrefix("--") {
                 let body = arg.dropFirst(2)
                 let name = String(body.prefix { $0 != "=" })
+                if program == "rg", name == "files" { hasPatternFlag = true }
                 if !body.contains("="), flags.longValued.contains(name), i < args.count {
                     i += 1
                 }
@@ -335,7 +336,7 @@ enum CommandPattern {
                 } else {
                     value = nil
                 }
-                if c == "e" { hasPatternFlag = true }
+                if c == "e" || c == "f" { hasPatternFlag = true }
                 if c == "f", searchWholePrograms.contains(program), let value {
                     pathFlagValues.append(value)
                 }

@@ -108,6 +108,8 @@ struct CommandPatternTests {
         #expect(matches("cat Sources/a.swift", ["cat"], workspace: "/tmp/proj"))
         #expect(matches("rg -n foo Sources", ["rg"], workspace: "/tmp/proj"))
         #expect(matches("rg -e foo Sources", ["rg"], workspace: "/tmp/proj"))
+        #expect(matches("grep -rn /outside/pattern Sources", ["grep"], workspace: "/tmp/proj"))
+        #expect(matches("rg --files Sources", ["rg"], workspace: "/tmp/proj"))
         #expect(matches("ls -la", ["ls"], workspace: "/tmp/proj"))
     }
 
@@ -144,7 +146,13 @@ struct CommandPatternTests {
         #expect(!matches("ls -la", ["ls"], workspace: nil))
         #expect(!matches("rg -n foo /etc", ["rg"], workspace: "/tmp/proj"))
         #expect(!matches("rg -e foo /etc", ["rg"], workspace: "/tmp/proj"))
+        #expect(!matches("rg --files /etc", ["rg"], workspace: "/tmp/proj"))
+        #expect(!matches("rg -n --files /etc", ["rg"], workspace: "/tmp/proj"))
         #expect(!matches("grep -f /etc/passwd foo", ["grep"], workspace: "/tmp/proj"))
+        #expect(!matches("grep -f p /etc/passwd", ["grep"], workspace: "/tmp/proj"))
+        #expect(!matches("grep -rf p /etc", ["grep"], workspace: "/tmp/proj"))
+        #expect(!matches("fgrep -f p /etc/passwd", ["fgrep"], workspace: "/tmp/proj"))
+        #expect(!matches("grep -fp /etc/passwd", ["grep"], workspace: "/tmp/proj"))
         // cd and git -C cannot carry a rule outside the workspace (or with no workspace):
         #expect(!matches("cd /tmp/evil && swift test", ["swift test"], workspace: "/tmp/proj"))
         #expect(!matches("cd /tmp/evil && swift test", ["swift test"], workspace: nil))
