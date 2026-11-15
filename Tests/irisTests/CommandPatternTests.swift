@@ -189,9 +189,11 @@ struct CommandPatternTests {
         #expect(!permissions.isAllowed(toolName: "run_command", details: "git push", workspace: nil))
     }
 
-    @Test("AppState's approval ladder skips prefix rules on a guest-origin turn (#1102)")
+    /// The ladder's answer for `details` in an ordinary conversation and in a guest-origin one, with `rule` saved.
     @MainActor
-    func appStateGuestOriginSkipsPrefix() async throws {
+    private func ladder(saving rule: [PermissionRule], toolName: String = "run_command", details: String,
+                        guestDelegate: Bool = false)
+        async throws -> (ordinary: AppState.ApprovalSource?, guest: AppState.ApprovalSource?) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("iris-1102-ladder-\(UUID().uuidString)")
         let paths = IrisPaths(root: root.appendingPathComponent("iris-home"))
         try paths.ensureDirectories()
@@ -201,27 +203,82 @@ struct CommandPatternTests {
                              tier2Provisioning: .provisioned, tier3Provisioning: .provisioned,
                              createIfEmpty: false, emitLaunchNotices: false)
         state.permissions = PermissionManager(paths: paths)
-        state.permissions.allowGlobally(PermissionRule.forAlwaysAllow(toolName: "run_command", details: "git status"))
+        state.permissions.allowGlobally(rule)
 
         let ordinaryId = state.createNewConversation(isBackground: false, select: false)
-        let ordinarySource = await state.requestApprovalSource(
-            toolName: "run_command", details: "git status -sb", conversationId: ordinaryId, vibecopEnabled: false)
-        #expect(ordinarySource == .allowlist(AllowMatch(
-            scope: .global, rule: PermissionRule(toolName: "run_command", details: "git status", match: .prefix))))
+        let ordinary = await state.requestApprovalSource(
+            toolName: toolName, details: details, conversationId: ordinaryId, vibecopEnabled: false)
 
-        let guestId = state.createNewConversation(isBackground: false, select: false)
-        state.markGuestOriginTurn(guestId)
+        let guestRoot = state.createNewConversation(isBackground: false, select: false)
+        state.markGuestOriginTurn(guestRoot)
+        // A delegate rides its root's turn: only the root carries the marker.
+        var guestId = guestRoot
+        if guestDelegate {
+            guestId = state.createNewConversation(isSubagent: true, select: false)
+            state.linkDelegate(guestId, of: guestRoot)
+            #expect(!state.isGuestOriginTurn(guestId))
+        }
         let askTask = Task { @MainActor in
-            await state.requestApprovalSource(
-                toolName: "run_command", details: "git status -sb", conversationId: guestId, vibecopEnabled: false)
+            await state.requestApprovalSource(toolName: toolName, details: details, conversationId: guestId, vibecopEnabled: false)
         }
         for _ in 0..<200 where !state.pendingApprovals.contains(where: { $0.conversationId == guestId }) {
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
-        let pending = try #require(state.pendingApprovals.first(where: { $0.conversationId == guestId }))
+        let pending = try #require(state.pendingApprovals.first(where: { $0.conversationId == guestId }),
+                                   "a guest-origin turn asks the person")
         state.resolveApproval(id: pending.id, .approve)
-        let guestSource = try await value(of: askTask)
-        #expect(guestSource == .person)
+        return (ordinary, try await value(of: askTask))
+    }
+
+    @Test("AppState's approval ladder skips prefix rules on a guest-origin turn (#1102)")
+    @MainActor
+    func appStateGuestOriginSkipsPrefix() async throws {
+        let got = try await ladder(saving: PermissionRule.forAlwaysAllow(toolName: "run_command", details: "git status"),
+                                   details: "git status -sb")
+        #expect(got.ordinary == .allowlist(AllowMatch(
+            scope: .global, rule: PermissionRule(toolName: "run_command", details: "git status", match: .prefix))))
+        #expect(got.guest == .person)
+    }
+
+    @Test("AppState's approval ladder skips an exact saved rule on a guest-origin turn (#1141)")
+    @MainActor
+    func appStateGuestOriginSkipsExact() async throws {
+        // `git push` has no prefix form, so Always Allow saves it exact.
+        let rule = PermissionRule.forAlwaysAllow(toolName: "run_command", details: "git push origin main")
+        #expect(rule.count == 1 && !rule[0].isPrefix)
+        let got = try await ladder(saving: rule, details: "git push origin main")
+        #expect(got.ordinary == .allowlist(AllowMatch(scope: .global, rule: rule[0])))
+        #expect(got.guest == .person)
+    }
+
+    @Test("a delegate of a guest-origin turn skips saved rules too (#1141)")
+    @MainActor
+    func appStateGuestDelegateSkipsExact() async throws {
+        let rule = PermissionRule.forAlwaysAllow(toolName: "run_command", details: "git push origin main")
+        let exact = try await ladder(saving: rule, details: "git push origin main", guestDelegate: true)
+        #expect(exact.ordinary == .allowlist(AllowMatch(scope: .global, rule: rule[0])))
+        #expect(exact.guest == .person)
+        let prefix = try await ladder(saving: PermissionRule.forAlwaysAllow(toolName: "run_command", details: "git status"),
+                                      details: "git status -sb", guestDelegate: true)
+        #expect(prefix.guest == .person)
+    }
+
+    @Test("a guest-origin turn skips a saved rule for any tool, not only commands (#1141)")
+    @MainActor
+    func appStateGuestOriginSkipsFileRule() async throws {
+        let rule = PermissionRule.forAlwaysAllow(toolName: "write_file", details: "/tmp/proj/notes.txt")
+        let got = try await ladder(saving: rule, toolName: "write_file", details: "/tmp/proj/notes.txt")
+        #expect(got.ordinary == .allowlist(AllowMatch(scope: .global, rule: rule[0])))
+        #expect(got.guest == .person)
+    }
+
+    @Test("PermissionManager.match returns nothing for a guest-origin turn, exact rule or not (#1141)")
+    func managerSkipsExactForGuest() throws {
+        let (permissions, root) = try manager()
+        defer { try? FileManager.default.removeItem(at: root) }
+        permissions.allowGlobally(PermissionRule.forAlwaysAllow(toolName: "run_command", details: "git push origin main"))
+        #expect(permissions.isAllowed(toolName: "run_command", details: "git push origin main", workspace: nil))
+        #expect(!permissions.isAllowed(toolName: "run_command", details: "git push origin main", workspace: nil, isGuestOrigin: true))
     }
 
     @Test("a chain can match one global rule and one project rule")

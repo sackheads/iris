@@ -78,6 +78,8 @@ struct PermissionManager: Sendable {
     
     /// `isBackground` is the unattended caller: a job run, or any subagent descended from one.
     /// It narrows the `~/.iris` carve-out to reads, because nobody is watching what it writes.
+    /// `isGuestOrigin` (#1141) is a turn a guest's message started or steered: no saved rule, exact or
+    /// prefix, applies to it.
     func isAllowed(toolName: String, details: String, workspace: String?, isBackground: Bool = false, isGuestOrigin: Bool = false) -> Bool {
         match(toolName: toolName, details: details, workspace: workspace, isBackground: isBackground, isGuestOrigin: isGuestOrigin) != nil
     }
@@ -99,6 +101,11 @@ struct PermissionManager: Sendable {
             if paths.isUnderIrisDir(details) { return AllowMatch(scope: .irisHome, rule: nil) }
         }
 
+        // #1141: a turn a guest's message started or steered re-asks for every call a saved rule
+        // would have waved through, exact or prefix. A standing "yes" is the person's answer to
+        // their own request, not to one a guest steered the session toward (#1119's class).
+        if isGuestOrigin { return nil }
+
         let globalRules = loadRules(from: globalPermissionsURL) ?? []
         let projectRules = workspace.flatMap { loadProjectRules(workspace: $0) } ?? []
 
@@ -113,10 +120,10 @@ struct PermissionManager: Sendable {
         }
 
         // #1102: prefix rules, global and project together, since one part of a chain can match a
-        // global rule and another a project one. Attended only, and not on a guest-origin turn:
+        // global rule and another a project one. Attended only (a guest-origin turn returned above):
         // an unattended run has its grant, and a standing rule widened for a person's convenience is
-        // not one to read unwatched or under guest-influenced input.
-        if toolName == "run_command", !isBackground, !isGuestOrigin {
+        // not one to read unwatched.
+        if toolName == "run_command", !isBackground {
             let prefixRules = (globalRules.map { ($0, AllowMatch.Scope.global) } + projectRules.map { ($0, AllowMatch.Scope.project) })
                 .filter { $0.0.toolName == toolName && $0.0.isPrefix }
             let prefixes = prefixRules.map { $0.0.details.split(separator: " ").map(String.init) }
