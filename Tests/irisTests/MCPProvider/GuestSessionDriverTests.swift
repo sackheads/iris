@@ -14,6 +14,15 @@ struct GuestSessionDriverTests {
         func advance(_ d: Duration) { lock.withLock { instant = instant.advanced(by: d) } }
     }
 
+    /// Wall time for the ledger's UTC day, moved by hand.
+    private final class WallClock: @unchecked Sendable {
+        private let lock = NSLock()
+        // 2026-11-14 23:00:00 UTC
+        private var date = Date(timeIntervalSince1970: 1_794_870_000)
+        var now: Date { lock.withLock { date } }
+        func advance(_ seconds: TimeInterval) { lock.withLock { date = date.addingTimeInterval(seconds) } }
+    }
+
     private actor Latch {
         private var opened = false
         private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -46,6 +55,7 @@ struct GuestSessionDriverTests {
         let app: AppState
         let clock: Clock
         let gateClock: Clock
+        let wall: WallClock
         let tokens: ProviderTokenRegistry
         let mailbox: ProviderMailbox
         let sessions: GuestSessionRegistry
@@ -62,9 +72,9 @@ struct GuestSessionDriverTests {
     }
 
     private func rig(enabled: Bool = true, ttl: Duration = .seconds(900), maxLive: Int = 4,
-                     turnTimeout: Double = 30, clients: [String] = ["dev-1"]) throws -> Rig {
+                     turnTimeout: Double = 30, clients: [String] = ["dev-1"], dailyCap: Int? = nil) throws -> Rig {
         let app = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
-        let clock = Clock(), gateClock = Clock()
+        let clock = Clock(), gateClock = Clock(), wall = WallClock()
         let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
         let tokens = ProviderTokenRegistry(keychain: keychain)
         for c in clients { _ = try tokens.issueToken(forClientId: c) }
@@ -77,20 +87,30 @@ struct GuestSessionDriverTests {
         let script = Script()
         let flag = Flag()
         flag.on = enabled
-        let driver = GuestSessionDriver(
+        let spend = GuestSpendLedger(now: { wall.now })
+        // A nil `dailyCap` leaves the driver's own default, so a test can pin the named constant.
+        let driver = dailyCap.map {
+            GuestSessionDriver(
+                state: app, registry: sessions, mailbox: mailbox, turnGate: gate, isEnabled: { flag.on }, turnTimeout: turnTimeout,
+                dailyCap: $0, spend: spend, runTurn: Self.fakeTurn(app, script))
+        } ?? GuestSessionDriver(
             state: app, registry: sessions, mailbox: mailbox, turnGate: gate, isEnabled: { flag.on }, turnTimeout: turnTimeout,
-            runTurn: { [script] conversationId, text, _, sink in
-                script.saw(text)
-                await MainActor.run { app.beginEngineTurn(for: conversationId) }
-                await script.latch?.wait()
-                if let reply = script.reply {
-                    await MainActor.run { app.appendMessage(role: .agent, content: reply, to: conversationId) }
-                }
-                await sink.record(TokenUsage(promptTokenCount: 60, candidatesTokenCount: 40, totalTokenCount: 100))
-                await MainActor.run { app.endEngineTurn(for: conversationId) }
-            })
-        return Rig(app: app, clock: clock, gateClock: gateClock, tokens: tokens, mailbox: mailbox, sessions: sessions,
+            spend: spend, runTurn: Self.fakeTurn(app, script))
+        return Rig(app: app, clock: clock, gateClock: gateClock, wall: wall, tokens: tokens, mailbox: mailbox, sessions: sessions,
                    gate: gate, script: script, driver: driver, enabled: flag)
+    }
+
+    private static func fakeTurn(_ app: AppState, _ script: Script) -> GuestSessionDriver.TurnRunner {
+        { [script] conversationId, text, _, sink in
+            script.saw(text)
+            await MainActor.run { app.beginEngineTurn(for: conversationId) }
+            await script.latch?.wait()
+            if let reply = script.reply {
+                await MainActor.run { app.appendMessage(role: .agent, content: reply, to: conversationId) }
+            }
+            await sink.record(TokenUsage(promptTokenCount: 60, candidatesTokenCount: 40, totalTokenCount: 100))
+            await MainActor.run { app.endEngineTurn(for: conversationId) }
+        }
     }
 
     private func finish(_ r: Rig, _ client: String) async throws {
@@ -193,6 +213,75 @@ struct GuestSessionDriverTests {
         r.gateClock.advance(GuestSessionDriver.turnRefillInterval)
         guard case .accepted = await r.driver.submit(text: "after the refill", from: "dev-1") else { Issue.record("refill did not admit"); return }
         try await finish(r, "dev-1")
+    }
+
+    // MARK: the daily token cap (#1135)
+
+    @Test("the daily cap is the named constant: one token under is admitted, at the cap is refused")
+    func dailyCapIsTheConstant() async throws {
+        let r = try rig()
+        await r.driver.spend.add(GuestSessionDriver.dailyTokenCap - 1, for: "dev-1")
+        guard case .accepted = await r.driver.submit(text: "under", from: "dev-1") else { Issue.record("under the cap was refused"); return }
+        try await finish(r, "dev-1")           // the turn adds 100 more, past the cap
+        #expect(await r.driver.submit(text: "over", from: "dev-1") == .overDailyBudget)
+        #expect(r.script.texts == ["under"])
+    }
+
+    @Test("an over-cap client gets no session and no turn, and the refusal does not spend an hourly turn")
+    func overCapStartsNothing() async throws {
+        let r = try rig()
+        await r.driver.spend.add(GuestSessionDriver.dailyTokenCap, for: "dev-1")
+        #expect(await r.driver.submit(text: "no", from: "dev-1") == .overDailyBudget)
+        #expect(r.sessions.liveCount == 0 && r.script.texts.isEmpty)
+        #expect(await replies(r, "dev-1").isEmpty)
+        // All twelve of this hour's turns are still there: the refusal came before the turns gate.
+        for i in 0..<GuestSessionDriver.turnsPerHour {
+            #expect(await r.gate.admit(clientId: "dev-1") == .admitted(clientId: "dev-1"), "turn \(i)")
+        }
+    }
+
+    @Test("turns add up toward the cap: three 100-token turns pass a 250 cap, the fourth is refused")
+    func turnsAccumulate() async throws {
+        let r = try rig(dailyCap: 250)
+        for i in 1...3 {
+            guard case .accepted = await r.driver.submit(text: "m\(i)", from: "dev-1") else { Issue.record("turn \(i) refused"); return }
+            try await finish(r, "dev-1")
+        }
+        #expect(await r.driver.spend.todayTotal(for: "dev-1") == 300)
+        #expect(await r.driver.submit(text: "m4", from: "dev-1") == .overDailyBudget)
+        #expect(r.script.texts == ["m1", "m2", "m3"])
+    }
+
+    @Test("one client's cap does not refuse another client")
+    func capIsPerClient() async throws {
+        let r = try rig(clients: ["dev-1", "dev-2"])
+        await r.driver.spend.add(GuestSessionDriver.dailyTokenCap, for: "dev-1")
+        #expect(await r.driver.submit(text: "no", from: "dev-1") == .overDailyBudget)
+        guard case .accepted = await r.driver.submit(text: "yes", from: "dev-2") else { Issue.record("dev-2 refused"); return }
+        try await finish(r, "dev-2")
+    }
+
+    @Test("the count restarts at 00:00 UTC, not 24 hours after the first spend")
+    func dayRollover() async throws {
+        let r = try rig()          // the wall clock starts at 23:00 UTC
+        await r.driver.spend.add(GuestSessionDriver.dailyTokenCap, for: "dev-1")
+        r.wall.advance(59 * 60)    // 23:59
+        #expect(await r.driver.submit(text: "still today", from: "dev-1") == .overDailyBudget)
+        r.wall.advance(2 * 60)     // 00:01 the next day, only 61 minutes after the spend
+        guard case .accepted = await r.driver.submit(text: "new day", from: "dev-1") else { Issue.record("not admitted after midnight"); return }
+        try await finish(r, "dev-1")
+        #expect(await r.driver.spend.todayTotal(for: "dev-1") == 100 && r.script.texts == ["new day"])
+        #expect(await r.driver.spend.total(for: "dev-1") == GuestSessionDriver.dailyTokenCap + 100, "the lifetime tally is not reset")
+    }
+
+    @Test("revoking and re-issuing a client does not reset its day's count")
+    func revokeKeepsTheDayCount() async throws {
+        let r = try rig()
+        await r.driver.spend.add(GuestSessionDriver.dailyTokenCap, for: "dev-1")
+        try r.tokens.revokeToken(forClientId: "dev-1")
+        await r.driver.forget(clientId: "dev-1")
+        _ = try r.tokens.issueToken(forClientId: "dev-1")
+        #expect(await r.driver.submit(text: "again", from: "dev-1") == .overDailyBudget)
     }
 
     // MARK: busy
