@@ -1,12 +1,26 @@
 import Foundation
 
-/// Detects a secret-shaped substring in an Always-Allow candidate's command text, so #1140's save
-/// path can refuse to persist it to plaintext `permissions.json`. A named, testable pattern table,
-/// not a bare entropy scan: a bare high-entropy check over hex would flag git SHAs, SHA-256
-/// checksums and content hashes constantly, which are common and legitimate to generalize. A false
-/// positive here costs one command that stays ungeneralized (the person re-approves it); a false
-/// negative writes a credential to disk — so the generic fallback (3) still errs toward catching,
-/// but only for shapes a SHA or UUID cannot produce.
+/// Detects a secret-shaped substring in what an Always-Allow click would actually persist, so
+/// #1140's save path can refuse to write it to plaintext `permissions.json`. Checked against the
+/// rule text `PermissionRule.forAlwaysAllow` would save, not the raw command: since #1102 a
+/// `run_command` Always-Allow usually saves only a prefix (`swift test`, `git status`), never its
+/// arguments, so an argument that merely looks secret-shaped protects nothing by losing the
+/// button. An exact rule (no prefix — `curl ...`, `gh api ...`) still saves the whole text, so a
+/// real credential there is still caught.
+///
+/// A named, testable pattern table, not a bare entropy scan: a bare high-entropy check over hex
+/// would flag git SHAs, SHA-256 checksums and content hashes constantly, which are common and
+/// legitimate to generalize. A false positive here costs one command that stays ungeneralized (the
+/// person re-approves it); a false negative writes a credential to disk — so the generic fallback
+/// (see `hasGenericMixedCaseToken`) still errs toward catching, but only for shapes a SHA or UUID
+/// cannot produce.
+///
+/// Known gaps, accepted rather than chased: a 64-hex API key is indistinguishable from a SHA-256
+/// digest by shape alone and is not flagged; an AWS secret access key (40 base64-ish chars,
+/// commonly containing `/`) is split into short runs by the generic scan below, which deliberately
+/// excludes `/` (a path separator) from its charset (round 1 regression). A `$VAR`/`${VAR}` shell
+/// reference is excluded from firing a named pattern: it is not a literal secret, and is common in
+/// real commands (`Authorization: Bearer $GITHUB_TOKEN`).
 enum SecretLikeDetector {
     struct Pattern {
         let name: String
@@ -20,31 +34,80 @@ enum SecretLikeDetector {
         return Pattern(name: name, regex: regex)
     }
 
-    /// 1. Named provider/header token shapes: zero-to-low false positive, catch #1140's reported
-    /// case (an OAuth bearer header) and the other common provider formats directly.
-    /// 2. A named flag or key immediately followed by an opaque value of plausible secret length.
-    /// 3. A generic, unlabeled token: a run of base64-alphabet characters at least 40 long that
-    /// mixes an uppercase letter, a lowercase letter and a digit. The mixed-case+digit requirement
-    /// is what excludes a 40-hex git SHA (lowercase hex only, no uppercase) and a UUID (lowercase
-    /// hex and dashes) without naming either as an exception.
+    /// `(?!\$)` guards an opaque value against a shell-variable reference: `$TOKEN` or `${TOKEN}`
+    /// is a placeholder, not a literal secret.
+    private static let notAVarRef = "(?!\\$)"
+
+    /// Named provider/header token shapes and flag/URL/env-var shapes: all anchored, bounded
+    /// quantifiers with no nested repetition over a shared alphabet, so none of these can
+    /// backtrack catastrophically the way the old regex-based generic fallback did (round 2,
+    /// dev-3's finding: 128s on an 80,000-char `a+a+...` run, on the main actor in
+    /// `ToolApprovalRequest.init`).
     static let patterns: [Pattern] = [
-        pattern("authorization-header", "(?i)Authorization:\\s*(Bearer|Basic|Token)\\s+\\S{8,}"),
+        pattern("authorization-header", "(?i)Authorization:\\s*(Bearer|Basic|Token)\\s+" + notAVarRef + "\\S{4,}"),
         pattern("jwt", "eyJ[A-Za-z0-9_-]{5,}\\.[A-Za-z0-9_-]{5,}\\.[A-Za-z0-9_-]{5,}"),
         pattern("openai-or-anthropic-key", "\\bsk-(ant-)?[A-Za-z0-9_-]{16,}\\b"),
         pattern("github-token", "\\b(ghp|gho|ghs|github_pat)_[A-Za-z0-9_]{16,}\\b"),
-        pattern("aws-access-key-id", "\\bAKIA[0-9A-Z]{16}\\b"),
+        pattern("aws-access-key-id", "\\b(AKIA|ASIA)[0-9A-Z]{16}\\b"),
         pattern("slack-token", "\\bxox[baprs]-[A-Za-z0-9-]{10,}\\b"),
-        pattern("named-flag-opaque-value", "(?i)\\b(token|apikey|api_key|access_token|password|secret)[=: ]\\S{16,}"),
-        // No `-` or `/` in the charset: both are path and UUID separators, and letting the run
-        // span them turned "ordinary-<UUID>" and a temp-dir path's "iris-NNN-<UUID>/..." segment
-        // into one 40+-char run with all three character classes present (#1140 round 1, caught
-        // by the full suite: ApprovalResolvedPathTests, GateScriptAlwaysAllowTests). `+` and `_`
-        // stay, since neither is a common path or UUID separator.
-        pattern("generic-mixed-case-token",
-                "\\b(?=[A-Za-z0-9+_]{40,}\\b)(?=[A-Za-z0-9+_]*[a-z])(?=[A-Za-z0-9+_]*[A-Z])(?=[A-Za-z0-9+_]*[0-9])[A-Za-z0-9+_]{40,}\\b"),
+        pattern("google-api-key", "\\bAIza[A-Za-z0-9_-]{35}\\b"),
+        pattern("stripe-key", "\\b[sp]k_live_[A-Za-z0-9]{10,}\\b"),
+        pattern("huggingface-token", "\\bhf_[A-Za-z0-9]{20,}\\b"),
+        pattern("gitlab-token", "\\bglpat-[A-Za-z0-9_-]{20,}\\b"),
+        pattern("npm-auth-token", "_authToken=npm_[A-Za-z0-9]{10,}"),
+        // An uppercase ENV_VAR-shaped assignment ending in a credential-shaped suffix:
+        // `NPM_TOKEN=`, `DB_PASSWORD=`, `GITHUB_TOKEN=`, `AWS_SECRET_ACCESS_KEY=`. No leading `\b`
+        // before the suffix word is needed or wanted — `\b` would not match inside `NPM_TOKEN`
+        // anyway, since `_` is a word character with no boundary before `TOKEN` (round 2, dev-2's
+        // finding against the CLI-flag pattern below).
+        pattern("env-var-assignment",
+                "\\b[A-Z][A-Z0-9_]*_(TOKEN|SECRET|PASSWORD|API_?KEY|ACCESS_KEY|ACCESS_TOKEN|AUTH)=" + notAVarRef + "\\S{4,}"),
+        // A CLI flag or key, named plainly (not an env-var): `--password=hunter2`,
+        // `--password hunter2`, `--api-key abc`, `token: abc123`. A real password is often short,
+        // so no length floor beyond 4 to exclude trivial placeholders ("ok", "1").
+        pattern("named-flag-opaque-value",
+                "(?i)\\b(token|apikey|api-key|api_key|access_token|password|secret)[=: ]\\s*" + notAVarRef + "\\S{4,}"),
+        // user:pass@host in a URL, e.g. a `git clone` with embedded basic-auth credentials.
+        pattern("url-userinfo", "://[^/\\s:@]+:[^@\\s]+@"),
+        // `curl -u user:pass`.
+        pattern("curl-basic-auth-flag", "\\s-u\\s+" + notAVarRef + "[^\\s:]+:\\S+"),
     ]
 
+    /// The generic, unlabeled-token fallback: a run of base64-ish characters (letters, digits, `+`,
+    /// `_` — no `-` or `/`, both path/UUID separators, round 1's regression) at least 40 long that
+    /// mixes an uppercase letter, a lowercase letter and a digit. The mixed-case+digit requirement
+    /// is what excludes a 40-hex git SHA (lowercase hex only) and a UUID (lowercase hex and dashes)
+    /// without naming either as an exception.
+    ///
+    /// Hand-scanned, not a regex: splitting on the charset boundary first makes this linear in
+    /// `text`'s length, with no lookahead to backtrack. A regex equivalent re-scanned the tail of
+    /// a run from every `\b`, which a `+`-heavy run (a `\b` every other character) made quadratic
+    /// (dev-3's finding: 2.7s at 10,000 chars, 128s at 80,000).
+    static func hasGenericMixedCaseToken(_ text: String) -> Bool {
+        func isTokenChar(_ c: Character) -> Bool { c.isASCII && (c.isLetter || c.isNumber || c == "+" || c == "_") }
+        var run: [Character] = []
+        func checkRun() -> Bool {
+            defer { run.removeAll(keepingCapacity: true) }
+            guard run.count >= 40 else { return false }
+            var hasLower = false, hasUpper = false, hasDigit = false
+            for c in run {
+                if c.isLowercase { hasLower = true } else if c.isUppercase { hasUpper = true }
+                else if c.isNumber { hasDigit = true }
+            }
+            return hasLower && hasUpper && hasDigit
+        }
+        for c in text {
+            if isTokenChar(c) {
+                run.append(c)
+            } else if checkRun() {
+                return true
+            }
+        }
+        return checkRun()
+    }
+
     static func containsSecretLikeSubstring(_ text: String) -> Bool {
+        if hasGenericMixedCaseToken(text) { return true }
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
         return patterns.contains { $0.regex.firstMatch(in: text, range: range) != nil }
     }
