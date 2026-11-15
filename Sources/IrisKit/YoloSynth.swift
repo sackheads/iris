@@ -52,18 +52,16 @@ final class YoloSynth: YoloAudioPlaying, @unchecked Sendable {
         (2.0 * phase - 1.0) - polyBLEP(t: phase, dt: dt)
     }
 
-    /// 90s Eurodance Vengabus full drop at 136 BPM (#1143):
-    /// - Layer 1 (Lead Hook): High-pitched staccato synth-trumpet playing the iconic
-    ///   "ba-dat-dat-dat-dat-DAHHH-dahh" carnival horn melody in Eb Major
-    /// - Layer 2 (Backing Stabs): Warm supersaw triad chords pumping underneath
-    /// - Layer 3 (Rhythm Section): 909 four-on-the-floor kick, off-beat octave bass, open hi-hat
+    /// 90s Eurodance Vengabus dominant synth horn hook at 136 BPM (#1143):
+    /// - Exact tab transcription: G-F-G-F-G -> C-C (x2), then G-F-G-F-G -> high Ab-Ab / Bb-C (x2)
+    /// - Layered over C minor / Ab Major backing stabs, 909 kick, off-beat bass, and open hi-hat
     static func makeVengabusBuffer(sampleRate: Double = YoloSynth.sampleRate) -> AVAudioPCMBuffer? {
         let bpm: Double = 136.0
         let beatDur: Double = 60.0 / bpm          // ~0.4412 s per quarter-note beat
         let sixteenth: Double = beatDur / 4.0     // ~0.1103 s per 16th note
-        let pickupSteps: Double = 2.0             // 2-sixteenth pickup ("ba-") before Bar 1 Beat 1
-        let totalSixteenths = 64                  // 4 bars (16 beats) + pickup ≈ 7.28 s
-        let totalDuration = (Double(totalSixteenths) + pickupSteps) * sixteenth
+        let pickupSteps = 2                       // "& of 4" pickup before Bar 1
+        let totalSixteenths = 64 + pickupSteps    // pickup + 4 bars (16 beats) ≈ 7.28 s
+        let totalDuration = Double(totalSixteenths) * sixteenth
         let totalFrames = AVAudioFrameCount(totalDuration * sampleRate)
 
         guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2),
@@ -73,84 +71,79 @@ final class YoloSynth: YoloAudioPlaying, @unchecked Sendable {
 
         buffer.frameLength = totalFrames
 
-        // Lead Horn Pitches in Eb Major (High Register so it cuts right over the backing track)
-        let Bb4 = 466.16
-        let Eb5 = 622.25
+        // Exact pitches for the dominant 2:55 synth lead:
+        // G|-12-10-12-10-12-| D|-10-10-| (G - F - G - F - G -> C - C)
+        // and B|-8-8-| (G - G)
+        let C5  = 523.25
         let F5  = 698.46
         let G5  = 783.99
-        let Ab5 = 830.61
-        let Bb5 = 932.33
-        let C6  = 1046.50
 
         struct LeadNote {
-            let step: Double      // Step relative to Bar 1 Beat 1 (negative = pickup)
-            let gateSteps: Double // Short for "dat", long for "DAHHH"
+            let step: Double
+            let gateSteps: Double
             let freq: Double
-            let accent: Double    // Extra filter brightness & punch on "DAHHH-dahh"
+            let accent: Double
         }
 
-        // The "ba - dat-dat-dat-dat-dat - DAHHH - dahh" Vengabus trumpet melody:
+        // "di-du-di-du-di-daaa daa / di-du-di-du-di-daaa daa"
+        // 8th-note hook with "& of 4" pickup:
+        //   & of 4 (step -2/14): G5 ("di")
+        //   1      (step 0):     F5 ("du")
+        //   & of 1 (step 2):     G5 ("di")
+        //   2      (step 4):     F5 ("du")
+        //   & of 2 (step 6):     G5 ("di")
+        //   3      (step 8):     C5 / G5 ("daaa", quarter note)
+        //   4      (step 12):    C5 / G5 ("daa", 8th note before next pickup)
         let leadMelody: [LeadNote] = [
-            // Pickup: "ba-"
-            LeadNote(step: -1.0, gateSteps: 0.65, freq: Bb4, accent: 0.9),
+            // --- Bar 1: (G) -> F-G-F-G -> C-C ---
+            LeadNote(step: -2.0, gateSteps: 0.95, freq: G5, accent: 1.05), // pickup (& of 4)
+            LeadNote(step: 0.0,  gateSteps: 0.95, freq: F5, accent: 0.95),
+            LeadNote(step: 2.0,  gateSteps: 0.95, freq: G5, accent: 1.05),
+            LeadNote(step: 4.0,  gateSteps: 0.95, freq: F5, accent: 0.95),
+            LeadNote(step: 6.0,  gateSteps: 0.95, freq: G5, accent: 1.05),
+            LeadNote(step: 8.0,  gateSteps: 2.90, freq: C5, accent: 1.25), // "daaa" (beat 3)
+            LeadNote(step: 12.0, gateSteps: 1.35, freq: C5, accent: 1.15), // "daa"  (beat 4)
 
-            // Phrase 1 (Bar 1): "dat-dat-dat-dat-dat   DAHHH - dahh" (Eb5 x5 -> C6 - Bb5)
-            LeadNote(step: 0.0,  gateSteps: 0.58, freq: Eb5, accent: 1.0),
-            LeadNote(step: 1.0,  gateSteps: 0.58, freq: Eb5, accent: 0.85),
-            LeadNote(step: 2.0,  gateSteps: 0.58, freq: Eb5, accent: 0.9),
-            LeadNote(step: 3.0,  gateSteps: 0.58, freq: Eb5, accent: 0.85),
-            LeadNote(step: 4.0,  gateSteps: 1.35, freq: Eb5, accent: 1.0),
-            LeadNote(step: 6.0,  gateSteps: 2.40, freq: C6,  accent: 1.25),  // "DAHHH"
-            LeadNote(step: 9.0,  gateSteps: 2.20, freq: Bb5, accent: 1.15),  // "dahh"
+            // --- Bar 2: (G) -> F-G-F-G -> C-C ---
+            LeadNote(step: 14.0, gateSteps: 0.95, freq: G5, accent: 1.05), // pickup (& of 4)
+            LeadNote(step: 16.0, gateSteps: 0.95, freq: F5, accent: 0.95),
+            LeadNote(step: 18.0, gateSteps: 0.95, freq: G5, accent: 1.05),
+            LeadNote(step: 20.0, gateSteps: 0.95, freq: F5, accent: 0.95),
+            LeadNote(step: 22.0, gateSteps: 0.95, freq: G5, accent: 1.05),
+            LeadNote(step: 24.0, gateSteps: 2.90, freq: C5, accent: 1.25),
+            LeadNote(step: 28.0, gateSteps: 1.35, freq: C5, accent: 1.15),
 
-            // Phrase 2 (Bar 2): "dat-dat-dat-dat-dat   DAAHHH - dahhh" (Eb5 x5 -> Ab5 - G5)
-            LeadNote(step: 15.0, gateSteps: 0.60, freq: Bb4, accent: 0.85),  // tiny "ba" pickup
-            LeadNote(step: 16.0, gateSteps: 0.58, freq: Eb5, accent: 1.0),
-            LeadNote(step: 17.0, gateSteps: 0.58, freq: Eb5, accent: 0.85),
-            LeadNote(step: 18.0, gateSteps: 0.58, freq: Eb5, accent: 0.9),
-            LeadNote(step: 19.0, gateSteps: 0.58, freq: Eb5, accent: 0.85),
-            LeadNote(step: 20.0, gateSteps: 1.35, freq: Eb5, accent: 1.0),
-            LeadNote(step: 22.0, gateSteps: 2.40, freq: Ab5, accent: 1.25),  // "DAAHHH"
-            LeadNote(step: 25.0, gateSteps: 2.20, freq: G5,  accent: 1.15),  // "dahhh"
+            // --- Bar 3: (G) -> F-G-F-G -> G-G ---
+            LeadNote(step: 30.0, gateSteps: 0.95, freq: G5, accent: 1.05), // pickup (& of 4)
+            LeadNote(step: 32.0, gateSteps: 0.95, freq: F5, accent: 0.95),
+            LeadNote(step: 34.0, gateSteps: 0.95, freq: G5, accent: 1.05),
+            LeadNote(step: 36.0, gateSteps: 0.95, freq: F5, accent: 0.95),
+            LeadNote(step: 38.0, gateSteps: 0.95, freq: G5, accent: 1.05),
+            LeadNote(step: 40.0, gateSteps: 2.90, freq: G5, accent: 1.25),
+            LeadNote(step: 44.0, gateSteps: 1.35, freq: G5, accent: 1.15),
 
-            // Phrase 3 (Bar 3): "ba - dat-dat-dat-dat-dat   DAHHH - dahh" (Eb5 x5 -> C6 - Bb5)
-            LeadNote(step: 31.0, gateSteps: 0.60, freq: Bb4, accent: 0.85),
-            LeadNote(step: 32.0, gateSteps: 0.58, freq: Eb5, accent: 1.0),
-            LeadNote(step: 33.0, gateSteps: 0.58, freq: Eb5, accent: 0.85),
-            LeadNote(step: 34.0, gateSteps: 0.58, freq: Eb5, accent: 0.9),
-            LeadNote(step: 35.0, gateSteps: 0.58, freq: Eb5, accent: 0.85),
-            LeadNote(step: 36.0, gateSteps: 1.35, freq: Eb5, accent: 1.0),
-            LeadNote(step: 38.0, gateSteps: 2.40, freq: C6,  accent: 1.25),  // "DAHHH"
-            LeadNote(step: 41.0, gateSteps: 2.20, freq: Bb5, accent: 1.15),  // "dahh"
-
-            // Phrase 4 (Bar 4 turnaround): "dat-dat-dat-dat-dat   DAHHH - dahh - dahh - dahh"
-            LeadNote(step: 47.0, gateSteps: 0.60, freq: Bb4, accent: 0.85),
-            LeadNote(step: 48.0, gateSteps: 0.58, freq: Eb5, accent: 1.0),
-            LeadNote(step: 49.0, gateSteps: 0.58, freq: Eb5, accent: 0.85),
-            LeadNote(step: 50.0, gateSteps: 0.58, freq: Eb5, accent: 0.9),
-            LeadNote(step: 51.0, gateSteps: 0.58, freq: Eb5, accent: 0.85),
-            LeadNote(step: 52.0, gateSteps: 1.35, freq: Eb5, accent: 1.0),
-            LeadNote(step: 54.0, gateSteps: 1.75, freq: Ab5, accent: 1.25),  // "DAHHH"
-            LeadNote(step: 56.0, gateSteps: 1.75, freq: G5,  accent: 1.15),  // "dahh"
-            LeadNote(step: 58.0, gateSteps: 1.75, freq: F5,  accent: 1.10),  // "dahh"
-            LeadNote(step: 60.0, gateSteps: 3.20, freq: Eb5, accent: 1.20)   // resolves on Eb5
+            // --- Bar 4: (G) -> F-G-F-G -> G-G ---
+            LeadNote(step: 46.0, gateSteps: 0.95, freq: G5, accent: 1.05), // pickup (& of 4)
+            LeadNote(step: 48.0, gateSteps: 0.95, freq: F5, accent: 0.95),
+            LeadNote(step: 50.0, gateSteps: 0.95, freq: G5, accent: 1.05),
+            LeadNote(step: 52.0, gateSteps: 0.95, freq: F5, accent: 0.95),
+            LeadNote(step: 54.0, gateSteps: 0.95, freq: G5, accent: 1.05),
+            LeadNote(step: 56.0, gateSteps: 2.90, freq: G5, accent: 1.25),
+            LeadNote(step: 60.0, gateSteps: 2.90, freq: G5, accent: 1.20)
         ]
 
-        // Backing chord stabs (Eb Major -> Ab Major -> Eb Major -> Bb Major)
-        let ebMaj: [Double] = [311.13, 392.00, 466.16] // Eb4, G4, Bb4
-        let abMaj: [Double] = [261.63, 311.13, 415.30] // C4, Eb4, Ab4
-        let bbMaj: [Double] = [293.66, 349.23, 466.16] // D4, F4, Bb4
-        let barChords: [[Double]] = [ebMaj, abMaj, ebMaj, bbMaj]
+        // Backing chords in C minor (Cm -> Cm -> Bb -> Cm)
+        let cMin: [Double] = [261.63, 311.13, 392.00]
+        let bbMaj: [Double] = [233.08, 293.66, 349.23]
+        let barChords: [[Double]] = [cMin, cMin, bbMaj, cMin]
+        let bassBarRoots: [Double] = [65.41, 65.41, 58.27, 65.41]
 
-        // Bass roots per bar (Eb1 -> Ab1 -> Eb1 -> Bb1)
-        let bassBarRoots: [Double] = [38.89, 51.91, 38.89, 58.27]
+        // Lead synth-horn unison voices (tight detune so pitch is razor-sharp)
+        let leadDetunes: [Double] = [-0.003, -0.001, 0.0, 0.001, 0.003]
+        let leadPans: [Double]    = [-0.50,  -0.25,  0.0, 0.25,  0.50]
 
-        // Lead trumpet unison stack (tight detune + octave below for brass body)
-        let leadDetunes: [Double] = [-0.0035, -0.0012, 0.0, 0.0012, 0.0035]
-        let leadPans: [Double]    = [-0.45,   -0.20,   0.0, 0.20,   0.45]
-
-        // Wide backing pad/stab supersaw detunes
-        let padDetunes: [Double]  = [-0.014, 0.0, 0.014]
+        // Background chord detunes
+        let padDetunes: [Double]  = [-0.012, 0.0, 0.012]
         let padPans: [Double]     = [-0.80,  0.0, 0.80]
 
         var leadPhases = (0..<10).map { Double(($0 * 43) % 100) / 100.0 }
@@ -166,7 +159,6 @@ final class YoloSynth: YoloAudioPlaying, @unchecked Sendable {
             return Double(bits) / Double(UInt32.max) * 2.0 - 1.0
         }
 
-        // Filter states
         var leadLpL: Double = 0.0, leadBpL: Double = 0.0
         var leadLpR: Double = 0.0, leadBpR: Double = 0.0
         var padLpL: Double = 0.0,  padLpR: Double = 0.0
@@ -176,10 +168,9 @@ final class YoloSynth: YoloAudioPlaying, @unchecked Sendable {
 
         for frame in 0..<Int(totalFrames) {
             let time = Double(frame) / sampleRate
-            // stepPos is negative during the 2-step pickup, 0.0 at Bar 1 Beat 1
-            let stepPos = (time / sixteenth) - pickupSteps
+            let stepPos = (time / sixteenth) - Double(pickupSteps)
 
-            // 1. HIGH MELODIC TRUMPET HOOK ("ba-dat-dat-dat-dat-DAHHH-dahh")
+            // 1. DOMINANT SYNTH-HORN HOOK (G5-F5-G5-F5-G5 -> C5-C5)
             var leadL: Double = 0.0
             var leadR: Double = 0.0
             var leadFilterEnv: Double = 0.15
@@ -191,17 +182,16 @@ final class YoloSynth: YoloAudioPlaying, @unchecked Sendable {
                 let dur = note.gateSteps * sixteenth
                 let prog = elapsed / dur
 
-                // Ultra-snappy 2ms trumpet tongue attack + crisp staccato cut
                 let attack = min(1.0, elapsed / 0.002)
-                let decay = 0.78 + 0.22 * exp(-elapsed / 0.04)
-                let release = min(1.0, (1.0 - prog) / 0.16)
+                let decay = 0.70 + 0.30 * exp(-elapsed / 0.04)
+                let relFrac = min(1.0, max(0.0, (1.0 - prog) / 0.30))
+                let release = relFrac * relFrac * (3.0 - 2.0 * relFrac)
                 let ampEnv = attack * decay * release * note.accent
 
-                // Quick brass lip-scoop on attack + subtle vibrato on held "DAHHH" notes
-                let scoop = 1.0 - 0.018 * exp(-elapsed / 0.006)
-                let vibrato = elapsed > 0.12 ? (1.0 + 0.003 * sin(2.0 * .pi * 6.0 * elapsed)) : 1.0
-                let baseFreq = note.freq * scoop * vibrato
-                leadFilterEnv = (0.35 + 0.65 * exp(-elapsed / 0.065)) * note.accent
+                // Slight brass attack scoop
+                let scoop = 1.0 - 0.015 * exp(-elapsed / 0.005)
+                let baseFreq = note.freq * scoop
+                leadFilterEnv = (0.40 + 0.60 * exp(-elapsed / 0.07)) * note.accent
 
                 for vIdx in 0..<5 {
                     let fMain = baseFreq * (1.0 + leadDetunes[vIdx])
@@ -209,32 +199,32 @@ final class YoloSynth: YoloAudioPlaying, @unchecked Sendable {
                     leadPhases[vIdx] += dtMain
                     if leadPhases[vIdx] >= 1.0 { leadPhases[vIdx] -= 1.0 }
 
-                    // Sub-octave layer (0.5x) gives the high C6/Bb5 trumpet real horn chest
+                    // Octave-down brass body layer (plays G4-F4-G4-F4-G4 -> C4-C4 underneath)
                     let dtSub = dtMain * 0.5
                     leadPhases[vIdx + 5] += dtSub
                     if leadPhases[vIdx + 5] >= 1.0 { leadPhases[vIdx + 5] -= 1.0 }
 
                     let sawMain = bandlimitedSaw(phase: leadPhases[vIdx], dt: dtMain)
-                    let pulsePhase = (leadPhases[vIdx] + 0.38).truncatingRemainder(dividingBy: 1.0)
+                    let pulsePhase = (leadPhases[vIdx] + 0.40).truncatingRemainder(dividingBy: 1.0)
                     let pulseMain = sawMain - bandlimitedSaw(phase: pulsePhase, dt: dtMain)
                     let subSaw = bandlimitedSaw(phase: leadPhases[vIdx + 5], dt: dtSub)
 
-                    let voice = (0.55 * sawMain + 0.45 * pulseMain) + 0.40 * subSaw
+                    let voice = (0.55 * sawMain + 0.45 * pulseMain) + 0.50 * subSaw
                     let pan = leadPans[vIdx]
                     leadL += voice * 0.5 * (1.0 - pan)
                     leadR += voice * 0.5 * (1.0 + pan)
                 }
-                leadL *= ampEnv * 0.19
-                leadR *= ampEnv * 0.19
+                // Dominant lead level so it unmistakably sits on top of the mix
+                leadL *= ampEnv * 0.24
+                leadR *= ampEnv * 0.24
             } else {
-                leadBpL *= 0.98
-                leadBpR *= 0.98
+                leadBpL *= 0.96
+                leadBpR *= 0.96
             }
 
-            // Bright resonant brass filter for the lead (sweeps up to 6.5 kHz so it cuts through)
-            let leadCutoff = min(6500.0, 1400.0 + 3800.0 * leadFilterEnv)
+            let leadCutoff = min(6800.0, 1500.0 + 4000.0 * leadFilterEnv)
             let fLead = min(0.82, 2.0 * sin(.pi * leadCutoff / sampleRate))
-            let qLead = 0.50
+            let qLead = 0.45
             let hpL = leadL - leadLpL - qLead * leadBpL
             leadBpL += fLead * hpL
             leadLpL += fLead * leadBpL
@@ -242,10 +232,10 @@ final class YoloSynth: YoloAudioPlaying, @unchecked Sendable {
             leadBpR += fLead * hpR
             leadLpR += fLead * leadBpR
 
-            let trumpetOutL = leadLpL * 0.70 + leadBpL * 0.65
-            let trumpetOutR = leadLpR * 0.70 + leadBpR * 0.65
+            let trumpetOutL = leadLpL * 0.75 + leadBpL * 0.65
+            let trumpetOutR = leadLpR * 0.75 + leadBpR * 0.65
 
-            // 2. RHYTHM SECTION & BACKING CHORDS (engaged once stepPos >= 0)
+            // 2. BACKGROUND GROOVE (909 Kick, Off-Beat Bass, Hi-Hat & Backing Stabs)
             var backingL: Double = 0.0
             var backingR: Double = 0.0
             var kickSample: Double = 0.0
@@ -258,10 +248,10 @@ final class YoloSynth: YoloAudioPlaying, @unchecked Sendable {
                 let posInBeat = (stepPos / 4.0).truncatingRemainder(dividingBy: 1.0)
                 let kickTime = posInBeat * beatDur
 
-                // Backing off-beat Eurodance chord stabs
+                // Subtle off-beat chord stabs
                 let chord = barChords[barIndex]
-                let stabGate = posInBeat >= 0.50 && posInBeat < 0.92
-                let stabEnv = stabGate ? exp(-(posInBeat - 0.50) * beatDur / 0.09) : 0.0
+                let stabGate = posInBeat >= 0.50 && posInBeat < 0.90
+                let stabEnv = stabGate ? exp(-(posInBeat - 0.50) * beatDur / 0.08) : 0.0
                 if stabEnv > 0.001 {
                     for (nIdx, cFreq) in chord.enumerated() {
                         for vIdx in 0..<3 {
@@ -269,27 +259,27 @@ final class YoloSynth: YoloAudioPlaying, @unchecked Sendable {
                             let dt = (cFreq * (1.0 + padDetunes[vIdx])) / sampleRate
                             padPhases[idx] += dt
                             if padPhases[idx] >= 1.0 { padPhases[idx] -= 1.0 }
-                            let s = bandlimitedSaw(phase: padPhases[idx], dt: dt) * stabEnv * 0.065
+                            let s = bandlimitedSaw(phase: padPhases[idx], dt: dt) * stabEnv * 0.045
                             backingL += s * 0.5 * (1.0 - padPans[vIdx])
                             backingR += s * 0.5 * (1.0 + padPans[vIdx])
                         }
                     }
                 }
-                padLpL += 0.25 * (backingL - padLpL)
-                padLpR += 0.25 * (backingR - padLpR)
+                padLpL += 0.22 * (backingL - padLpL)
+                padLpR += 0.22 * (backingR - padLpR)
 
-                // 909 Four-on-the-Floor Kick
+                // 909 Kick
                 if kickTime < 0.18 {
                     let kickFreq = 48.0 + 125.0 * exp(-kickTime / 0.019)
                     kickPhase += kickFreq / sampleRate
                     if kickPhase >= 1.0 { kickPhase -= 1.0 }
                     let kickEnv = min(1.0, kickTime / 0.0015) * exp(-kickTime / 0.062)
-                    kickSample = sin(2.0 * .pi * kickPhase) * kickEnv * 0.56
+                    kickSample = sin(2.0 * .pi * kickPhase) * kickEnv * 0.50
                 } else {
                     kickPhase = 0.0
                 }
 
-                // Off-beat Octave Bass
+                // Off-beat Bass
                 if posInBeat >= 0.50 && posInBeat < 0.95 {
                     let bassTime = (posInBeat - 0.50) * beatDur
                     let bassFreq = bassBarRoots[barIndex] * 2.0
@@ -299,26 +289,25 @@ final class YoloSynth: YoloAudioPlaying, @unchecked Sendable {
                     let rawBass = bandlimitedSaw(phase: bassPhase, dt: dt)
                     let bassEnv = min(1.0, bassTime / 0.004) * exp(-bassTime / 0.085)
                     bassLp += 0.24 * (rawBass - bassLp)
-                    bassSample = bassLp * bassEnv * 0.40
+                    bassSample = bassLp * bassEnv * 0.35
                 } else {
                     bassPhase = 0.0
                 }
 
-                // 909 Off-Beat Open Hi-Hat
+                // 909 Off-Beat Open Hat
                 if posInBeat >= 0.50 && posInBeat < 0.88 {
                     let hatTime = (posInBeat - 0.50) * beatDur
                     let noise = whiteNoise()
                     hatLp += 0.35 * (noise - hatLp)
                     let hpNoise = noise - hatLp
                     let hatEnv = min(1.0, hatTime / 0.002) * exp(-hatTime / 0.055)
-                    hatSample = hpNoise * hatEnv * 0.14
+                    hatSample = hpNoise * hatEnv * 0.12
                 }
             }
 
             let globalProgress = Double(frame) / Double(totalFrames)
-            let masterFade = globalProgress > 0.93 ? pow((1.0 - globalProgress) / 0.07, 1.3) : 1.0
+            let masterFade = globalProgress > 0.80 ? pow((1.0 - globalProgress) / 0.20, 1.5) : 1.0
 
-            // Mix the high trumpet lead on top of the backing stabs + 909 rhythm section
             let mixL = Float(tanh((trumpetOutL + padLpL + kickSample + bassSample + hatSample) * 1.15) * masterFade)
             let mixR = Float(tanh((trumpetOutR + padLpR + kickSample + bassSample + hatSample) * 1.15) * masterFade)
 
