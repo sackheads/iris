@@ -102,9 +102,33 @@ struct SecretLikeDetectorTests {
         "mytool --access_token=abcdefghijklmnop",
         "mytool --password=SuperSecret1",
         "mysql --password hunter2x",
+        "mytool --private-key abcdefghijklmnop",
+        "mytool --private_key=abcdefghijklmnop",
     ])
     func namedFlagOpaqueValueFires(_ command: String) {
         #expect(SecretLikeDetector.containsSecretLikeSubstring(command))
+    }
+
+    @Test("a lowercase compound env-style assignment fires (#1156), and a DB column name does not", arguments: [
+        "client_secret", "db_password", "oauth_token",
+    ])
+    func lowercaseEnvStyleAssignmentFires(_ name: String) {
+        #expect(SecretLikeDetector.containsSecretLikeSubstring("\(name)=shortvalue123"))
+    }
+
+    @Test("primary_key= and foreign_key= do not fire: a bare '_key=' is a common, non-secret DB column argument (#1156)")
+    func dbColumnKeyArgumentsDoNotFire() {
+        #expect(!SecretLikeDetector.containsSecretLikeSubstring("UPDATE users SET primary_key=1 WHERE id=2"))
+        #expect(!SecretLikeDetector.containsSecretLikeSubstring("SELECT * FROM orders WHERE foreign_key=42"))
+    }
+
+    @Test("a PEM private-key block marker fires, with or without a key-type word (#1156)", arguments: [
+        "-----BEGIN PRIVATE KEY-----",
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+    ])
+    func pemPrivateKeyMarkerFires(_ marker: String) {
+        #expect(SecretLikeDetector.containsSecretLikeSubstring("echo '\(marker)' > key.pem"))
     }
 
     @Test("credentials embedded in a URL's userinfo fire")

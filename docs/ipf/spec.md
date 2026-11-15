@@ -305,7 +305,11 @@ previous click already wrote; that needs the general permissions UI. The checkbo
 its own click, with no way to make it unasked. A command containing a line
 break or another invisible character is shown with a warning, disables
 both the button and the checkbox, and cannot be run or always-allowed from
-the pane. `setup_command` runs through `run_command`; `check_command` runs
+the pane. Checking the box writes no rule either when the command looks
+like it contains a credential (#1155): the check still runs on that click,
+but the exact command is not persisted to `permissions.json`, the same
+guard the chat window's own Always Allow applies. `setup_command` runs
+through `run_command`; `check_command` runs
 via `/bin/sh -c`, with stdout and stderr captured together. A check that
 runs past 30 seconds has its process group killed (SIGTERM, then SIGKILL)
 and reads as not signed in.
