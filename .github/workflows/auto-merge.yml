@@ -3,9 +3,14 @@ name: Auto-merge
 # A pull request that is out of draft is armed to merge on its own: once the code owner approves
 # and the required checks pass, it joins the merge queue. Approving is the last step.
 # A `hold` label disarms it (and takes it out of the queue); removing the label re-arms it.
+# A queue eject (the PR ahead of it merged and left this one conflicting) strips the standing
+# auto-merge request GitHub held; `synchronize` (the author's resolving push) re-fires this and
+# re-arms it the same way any other push-triggered re-check does (#1048) — `gh pr merge --auto`
+# only sets intent, so re-running it on an already-armed or not-yet-approved PR is a no-op either
+# way, same as `labeled`/`unlabeled` already firing on every unrelated label change today.
 on:
   pull_request_target:
-    types: [opened, reopened, ready_for_review, labeled, unlabeled]
+    types: [opened, reopened, ready_for_review, synchronize, labeled, unlabeled]
 
 permissions: {}
 
