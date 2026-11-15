@@ -191,9 +191,12 @@ struct SecretLikeDetectorTests {
 
     private func assertBoundedTime(_ text: String, under limit: TimeInterval = 1.0,
                                     _ label: String, sourceLocation: SourceLocation = #_sourceLocation) {
-        let start = Date()
+        // TestClock (#605), not Date(): a maintenance sleep mid-measurement would inflate a true
+        // sub-second CPU-bound call past the bound, failing the test for a reason that has
+        // nothing to do with the detector (#1159).
+        let start = TestClock.now()
         _ = SecretLikeDetector.containsSecretLikeSubstring(text)
-        let elapsed = Date().timeIntervalSince(start)
+        let elapsed = TestClock.seconds(since: start)
         #expect(elapsed < limit, "\(label) took \(elapsed)s over \(text.count) chars — must be linear-bounded", sourceLocation: sourceLocation)
     }
 
