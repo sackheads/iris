@@ -15,7 +15,7 @@
 - **C2 "spend, never possess":** the token value never enters a prompt, tool arg, tool result, error string, `run_command` env, or the sandbox env. The proxy reads the Keychain itself. (Spec §3.)
 - **Invariant 6:** the three tools are declared only when a token is present, behind an injectable `githubToolsEnabled: Bool` seam on `ToolExecutor.getTools`. A plain no-credential turn must not carry them (`ToolSurfaceTrimTests.plainTurn` asserts tool-count ≤ 20).
 - **Attended `.main` only:** never reachable by `.subagent`, `.evaluator`, `.mcpGuest`, or an unattended background job — declaration-stripped AND dispatch-refused (defence in depth).
-- **Allowlist is enforced in code, user-configured, model-unwritable, default empty (fail-closed).** No repo is allowed until the user adds one via Settings. (Spec §3.2.)
+- **Allowlist is enforced in code, user-configured, model-unwritable, default empty (fail-closed).** No repo is allowed until the user adds one via `iris --set-github-repos` (Task 6; no Settings UI in this slice). (Spec §3.2.)
 - **Token scope backstop:** `Pull requests: write` + `Issues: write`, never `Contents: write`. The in-Swift allowlist + §3.3 gate are the primary control; the PAT scope is the backstop.
 - **No warnings** in `Sources/`/`Tests/` (`scripts/check-warnings.sh` exits 0). Swift Testing only (`@Suite`/`@Test`/`#expect`).
 - **Any new persisted field** uses `decodeIfPresent` (Invariant 1). **No `ConfigManager.shared` mutation in tests** (Invariant 7) — inject a `ConfigManager(store:)`.
