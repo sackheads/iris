@@ -87,8 +87,16 @@ enum SecretLikeDetector {
         // Deliberately still excludes a bare `_key=` suffix with no accompanying secret/token/
         // password segment: `primary_key=`/`foreign_key=` are common, non-secret database column
         // arguments, and "key" alone has no secret-shaped qualifier the other three do.
+        //
+        // Both `*`-quantified groups are capped ({0,63} and {0,4} of {1,16}), not unbounded: an
+        // input with no `=` anywhere lets `_secret_` (or `_token_`/`_password_`) recur throughout
+        // the whole text, and at EACH recurrence the engine backtracked the unbounded prefix and
+        // the unbounded trailing-segment repetition together before giving up — quadratic (round
+        // 2's own fix went in bounded already; this one wasn't, caught by dev-2's round-3 sweep:
+        // "a_secret_" x4000 took 1.6s, "token_" x7000 took 3.1s). The caps exceed any real
+        // identifier's length by a wide margin and change no fixture's outcome.
         pattern("lowercase-env-style-assignment",
-                "\\b[a-z][a-z0-9_]*_(secret|token|password)(_[a-z0-9]+)*=" + notAVarRef + "\\S{4,}"),
+                "\\b[a-z][a-z0-9_]{0,63}_(secret|token|password)(_[a-z0-9]{1,16}){0,4}=" + notAVarRef + "\\S{4,}"),
         // A PEM (or PGP) private-key block marker — the shape alone is the credential, no value
         // floor needed. PGP's marker ends "PRIVATE KEY BLOCK-----", not "PRIVATE KEY-----" (round
         // 2, dev-2's finding).

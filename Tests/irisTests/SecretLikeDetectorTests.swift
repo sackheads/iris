@@ -257,10 +257,42 @@ struct SecretLikeDetectorTests {
         assertBoundedTime(String(repeating: "eyJabcdef", count: 11_000), "jwt adversarial (eyJabcdef repeated, no dots)")
     }
 
+    @Test("an adversarial run of recurring lowercase-env-style anchors with no '=' completes in well under a second (#1158 round 3)", arguments: [
+        "a_secret_", "token_",
+    ])
+    func adversarialLowercaseEnvStyleIsBoundedTime(_ anchor: String) {
+        // dev-2's round-3 finding: the unbounded prefix (`[a-z0-9_]*`) and the unbounded trailing-
+        // segment repetition (`(_[a-z0-9]+)*`) backtracked together at every recurrence of the
+        // anchor in a long run with no `=` — "a_secret_" x4000 (36,000 chars) took 1.6s, "token_"
+        // x7000 (42,000 chars) took 3.1s, before both groups were capped.
+        assertBoundedTime(String(repeating: anchor, count: 7000), "lowercase-env-style adversarial (\(anchor) repeated, no =)")
+    }
+
     @Test("an adversarial run of bare uppercase letters (no separator) completes in well under a second")
     func adversarialUppercaseRunIsBoundedTime() {
         // The shape that would expose a `[A-Z0-9_]*_` -style quantifier backtracking if one were
         // ever added without a literal to anchor it early: all-uppercase, no `_`, no `=`.
         assertBoundedTime(String(repeating: "A", count: 100_000), "all-uppercase adversarial (no separator)")
+    }
+
+    @Test("the whole detector completes in bounded time over a combined, 300,000+ char adversarial stress input (#1158 round 3)")
+    func combinedAdversarialStressIsBoundedTime() {
+        // The planner's steer after this class recurred twice (#1154 round 2's url-userinfo,
+        // #1158 round 2's lowercase-env-style): a per-pattern probe only guards the shape someone
+        // happened to think of when they wrote it. This one runs the WHOLE detector — every
+        // pattern plus the generic scan — over one large input combining every adversarial shape
+        // found so far, so a newly added pattern that goes quadratic on ANY of these (or their
+        // combination) trips this test without anyone writing a new one for it. Well over the
+        // planner's 160,000-char floor.
+        let stress = [
+            String(repeating: "a_secret_", count: 4000),   // lowercase-env-style's class (#1158)
+            String(repeating: "a+", count: 20_000),        // the generic scan's class (#1140 r2)
+            String(repeating: "://a:b", count: 10_000),    // url-userinfo's class (#1140 r3)
+            String(repeating: "eyJabcdef", count: 10_000), // jwt's class (#1140 r3)
+            String(repeating: "A", count: 50_000),         // a long non-matching run
+            String(repeating: "token_", count: 7_000),     // the other lowercase-env-style anchor
+        ].joined(separator: " ")
+        #expect(stress.count > 300_000)
+        assertBoundedTime(stress, under: 2.0, "combined adversarial stress input")
     }
 }
