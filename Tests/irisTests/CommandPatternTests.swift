@@ -28,7 +28,6 @@ struct CommandPatternTests {
         #expect(prefixes("git status; git status") == ["git status"])
         #expect(prefixes("tailscale status --json") == ["tailscale status"], "an unknown tool keeps a read-only verb, never the program alone")
         #expect(prefixes("echo --- && git log --oneline -5 >/dev/null") == ["git log"])
-        #expect(prefixes("/usr/bin/git status") == ["git status"], "absolute-path git still normalizes through git handling")
     }
 
     @Test("no prefix for code runners, network tools, destructive tools, unlisted subcommands or non-read verbs")
@@ -50,10 +49,11 @@ struct CommandPatternTests {
             "ls | sort -o evil.txt", "sort -o evil.txt f", "tree -o /tmp/x", "touch ~/.zshenv",
             // Nested CLIs with non-read verbs:
             "gcloud compute instances list", "terraform apply",
-            // Unlisted subcommands and relative paths:
+            // Unlisted subcommands and path-qualified programs:
             "npm install", "gh api /user", "swift package plugin x",
-            "ffmpeg -i in.mp4 out.mp4", "scripts/test-filter.sh Foo", "./build.sh", "FOO=1 make",
-            "defaults write com.x y 1", "kubectl exec -it pod sh",
+            "ffmpeg -i in.mp4 out.mp4", "scripts/test-filter.sh Foo", "./build.sh",
+            "/usr/bin/git status", "/tmp/evil/ls -la", "/tmp/evil/git status", "/tmp/evil/swift test",
+            "FOO=1 make", "defaults write com.x y 1", "kubectl exec -it pod sh",
         ] {
             #expect(prefixes(command) == nil, "\(command)")
         }
@@ -104,7 +104,6 @@ struct CommandPatternTests {
         #expect(matches("cd sub && git -C nested status", ["git status"], workspace: "/tmp/proj"))
         #expect(matches("swift test --filter Other 2>&1 | tail -80", ["swift test"]))
         #expect(matches("swift build && swift test", ["swift test", "swift build"]))
-        #expect(matches("/usr/bin/git status -sb", ["git status"]))
     }
 
     @Test("every part must match, flags stay read-only for bare programs, and cd/-C stay in workspace")
@@ -120,6 +119,10 @@ struct CommandPatternTests {
         #expect(!matches("git log --ext-diff", ["git log"]))
         #expect(!matches("git log --textconv", ["git log"]))
         #expect(!matches("/usr/bin/git log --output=/Users/x/.zshrc", ["git log"]))
+        #expect(!matches("/usr/bin/git status -sb", ["git status"]))
+        #expect(!matches("/tmp/evil/ls -la", ["ls"]))
+        #expect(!matches("/tmp/evil/git status", ["git status"]))
+        #expect(!matches("/tmp/evil/swift test", ["swift test"]))
         #expect(!matches("git grep -O/tmp/x.sh foo", ["git grep"]))
         #expect(!matches("git grep -Osh foo", ["git grep"]))
         #expect(!matches("git grep --open=/tmp/x.sh foo", ["git grep"]))
@@ -161,6 +164,41 @@ struct CommandPatternTests {
         #expect(!permissions.isAllowed(toolName: "run_command", details: "git status -sb", workspace: nil, isGuestOrigin: true),
                 "a guest-origin turn must not use a saved prefix rule")
         #expect(!permissions.isAllowed(toolName: "run_command", details: "git push", workspace: nil))
+    }
+
+    @Test("AppState's approval ladder skips prefix rules on a guest-origin turn (#1102)")
+    @MainActor
+    func appStateGuestOriginSkipsPrefix() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("iris-1102-ladder-\(UUID().uuidString)")
+        let paths = IrisPaths(root: root.appendingPathComponent("iris-home"))
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let state = AppState(store: try ConversationStore.inMemory(),
+                             tier2Provisioning: .provisioned, tier3Provisioning: .provisioned,
+                             createIfEmpty: false, emitLaunchNotices: false)
+        state.permissions = PermissionManager(paths: paths)
+        state.permissions.allowGlobally(PermissionRule.forAlwaysAllow(toolName: "run_command", details: "git status"))
+
+        let ordinaryId = state.createNewConversation(isBackground: false, select: false)
+        let ordinarySource = await state.requestApprovalSource(
+            toolName: "run_command", details: "git status -sb", conversationId: ordinaryId, vibecopEnabled: false)
+        #expect(ordinarySource == .allowlist(AllowMatch(
+            scope: .global, rule: PermissionRule(toolName: "run_command", details: "git status", match: .prefix))))
+
+        let guestId = state.createNewConversation(isBackground: false, select: false)
+        state.markGuestOriginTurn(guestId)
+        let askTask = Task { @MainActor in
+            await state.requestApprovalSource(
+                toolName: "run_command", details: "git status -sb", conversationId: guestId, vibecopEnabled: false)
+        }
+        for _ in 0..<200 where !state.pendingApprovals.contains(where: { $0.conversationId == guestId }) {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let pending = try #require(state.pendingApprovals.first(where: { $0.conversationId == guestId }))
+        state.resolveApproval(id: pending.id, .approve)
+        let guestSource = try await value(of: askTask)
+        #expect(guestSource == .person)
     }
 
     @Test("a chain can match one global rule and one project rule")
