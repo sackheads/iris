@@ -146,6 +146,36 @@ struct YoloModeTests {
         #expect(guestSource == nil)
     }
 
+    // Layer 1 of isYoloMode (the named conversation's own isBackground/isGuest) is the only thing
+    // standing here: the delegation root is a user-facing session with /yolo on, so layer 2 passes.
+    @Test("A background or guest conversation linked under a YOLO session is still never YOLO (#1117)")
+    func directCheckAloneExcludesBackgroundAndGuest() async throws {
+        let root = try home(); defer { try? FileManager.default.removeItem(at: root) }
+        let state = try makeState(root)
+        let main = state.createNewConversation(isBackground: false, select: true)
+        state.setYoloMode(true, for: main)
+        let bg = state.createNewConversation(isBackground: true, select: false)
+        let guest = state.createNewConversation(isGuest: true, guestClientId: "c1", select: false)
+        let control = state.createNewConversation(isSubagent: true, isBackground: false, select: false)
+        state.linkDelegate(bg, of: main)
+        state.linkDelegate(guest, of: main)
+        state.linkDelegate(control, of: main)
+
+        #expect(state.delegationRoot(of: bg) == main)
+        #expect(state.delegationRoot(of: guest) == main)
+        #expect(state.isYoloMode(main))
+        #expect(state.isYoloMode(control))   // the link alone grants YOLO to an ordinary delegate
+        #expect(!state.isYoloMode(bg))
+        #expect(!state.isYoloMode(guest))
+
+        let bgSource = await state.requestApprovalSource(toolName: "run_command", details: "ls",
+                                                         workspace: root.path, conversationId: bg)
+        #expect(bgSource == nil)
+        let guestSource = await state.requestApprovalSource(toolName: "run_command", details: "ls",
+                                                            workspace: root.path, conversationId: guest)
+        #expect(guestSource == nil)
+    }
+
     @Test("Turning /yolo on resolves any pending approvals for that conversation and its delegates")
     func turningOnFlushesPendingApprovals() async throws {
         let root = try home(); defer { try? FileManager.default.removeItem(at: root) }
