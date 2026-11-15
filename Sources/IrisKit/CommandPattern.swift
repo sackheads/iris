@@ -282,6 +282,74 @@ enum CommandPattern {
         return real
     }
 
+    private static let nonPathWholePrograms: Set<String> = [
+        "pwd", "whoami", "uname", "date", "which", "basename", "dirname", "echo",
+    ]
+    private static let searchWholePrograms: Set<String> = ["grep", "egrep", "fgrep", "rg"]
+
+    /// Whether a bare-program (`wholePrograms`) command's file-reading paths all stay inside
+    /// `workspaceReal`. Non-file programs (`pwd`, `uname`, `date`, `which`, ...) need no path
+    /// check; file-reading programs (`cat`, `ls`, `rg`, `grep`, ...) require a workspace and
+    /// resolve every path operand (plus `-f` pattern files) inside it.
+    private static func bareProgramStaysInWorkspace(_ words: [String], cwd: String?, workspaceReal: String?) -> Bool {
+        let program = words[0]
+        if nonPathWholePrograms.contains(program) { return true }
+        guard let ws = workspaceReal else { return false }
+        let base = cwd ?? ws
+        guard let flags = ReadOnlyCommand.programs[program] else { return false }
+
+        var operands: [String] = []
+        var pathFlagValues: [String] = []
+        var hasPatternFlag = false
+        let args = Array(words.dropFirst())
+        var i = 0
+        while i < args.count {
+            let arg = args[i]
+            i += 1
+            if arg == "--" {
+                operands.append(contentsOf: args[i...])
+                break
+            }
+            guard arg.hasPrefix("-"), arg != "-" else {
+                operands.append(arg)
+                continue
+            }
+            if arg.hasPrefix("--") {
+                let body = arg.dropFirst(2)
+                let name = String(body.prefix { $0 != "=" })
+                if !body.contains("="), flags.longValued.contains(name), i < args.count {
+                    i += 1
+                }
+                continue
+            }
+            var cluster = Substring(arg.dropFirst())
+            while let c = cluster.first {
+                cluster = cluster.dropFirst()
+                guard flags.shortValued.contains(c) else { continue }
+                let value: String?
+                if !cluster.isEmpty {
+                    value = String(cluster)
+                } else if i < args.count {
+                    value = args[i]
+                    i += 1
+                } else {
+                    value = nil
+                }
+                if c == "e" { hasPatternFlag = true }
+                if c == "f", searchWholePrograms.contains(program), let value {
+                    pathFlagValues.append(value)
+                }
+                break
+            }
+        }
+
+        let operandPaths = searchWholePrograms.contains(program) && !hasPatternFlag && !operands.isEmpty
+            ? Array(operands.dropFirst())
+            : operands
+        let paths = (operandPaths + pathFlagValues).filter { $0 != "-" }
+        return paths.allSatisfy { resolvedInsideWorkspace($0, cwd: base, workspaceReal: ws) != nil }
+    }
+
     /// The words a prefix is judged against: git's two harmless global options (`-C <dir>`,
     /// `--no-pager`) dropped, or nil when the part can't be matched by a prefix at all (any program
     /// spelled with a path `/`, since a `cd` moves relative paths and an explicit path could point
@@ -376,8 +444,11 @@ enum CommandPattern {
                   let index = prefixes.firstIndex(where: { !$0.isEmpty && words.starts(with: $0) }) else {
                 return nil
             }
-            if prefixes[index].count == 1, !ReadOnlyCommand.isReadOnly(words: words) {
-                return nil
+            if prefixes[index].count == 1 {
+                guard ReadOnlyCommand.isReadOnly(words: words),
+                      bareProgramStaysInWorkspace(words, cwd: currentCwd, workspaceReal: workspaceReal) else {
+                    return nil
+                }
             }
             used.append(index)
         }
