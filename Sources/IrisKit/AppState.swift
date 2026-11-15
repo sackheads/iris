@@ -596,10 +596,16 @@ struct ToolApprovalRequest: Identifiable {
         self.conversationId = conversationId
         self.origin = origin
         self.humanOnly = humanOnly
-        let looksLikeSecret = SecretLikeDetector.containsSecretLikeSubstring(details)
+        // #1140: checked against what Always Allow would actually SAVE, not the raw call — a
+        // `run_command` usually saves only a generalized prefix (#1102), never its arguments, so a
+        // secret-shaped argument that is never persisted shouldn't cost the button. An exact rule
+        // (no prefix) still carries the whole text, so a real credential there is still caught.
+        let candidateRules = (offersAlwaysAllow && !humanOnly)
+            ? PermissionRule.forAlwaysAllow(toolName: toolName, details: details) : []
+        let looksLikeSecret = candidateRules.contains { SecretLikeDetector.containsSecretLikeSubstring($0.details) }
         self.secretDetectedNote = looksLikeSecret ? Self.secretDetectedMessage : nil
         self.offersAlwaysAllow = offersAlwaysAllow && !humanOnly && !looksLikeSecret
-        self.alwaysAllowRules = self.offersAlwaysAllow ? PermissionRule.forAlwaysAllow(toolName: toolName, details: details) : []
+        self.alwaysAllowRules = self.offersAlwaysAllow ? candidateRules : []
         self.offersConversationAllow = offersConversationAllow
         self.continuation = continuation
     }

@@ -1,54 +1,115 @@
+import Foundation
 import Testing
 @testable import IrisKit
 
 @Suite("A secret-shaped substring blocks Always-Allow from saving it (#1140)")
 struct SecretLikeDetectorTests {
-    // MARK: - Must fire
+    // MARK: - Must fire, one fixture per named pattern, isolated from every other pattern
+    //
+    // Each fixture is built so deleting the ONE pattern it targets reds its test, and only that
+    // test: no "Authorization"/"token"/"password"/etc. keyword appears near a fixture unless that
+    // keyword IS the thing under test, and no fixture's value is long/mixed enough to also trip
+    // `hasGenericMixedCaseToken` (round 2, dev-2's finding: the old fixtures, wrapped in an
+    // "Authorization: Bearer"/"token" context for realism, were each caught by TWO patterns, so
+    // deleting either alone left the suite green).
 
-    @Test("an OAuth bearer header fires", arguments: [
-        "curl -H 'Authorization: Bearer ya29.a0AfH6SMBx7example0123456789abcdefghij' https://api.example.com",
-        "curl --header \"Authorization: Bearer sk-test-not-a-real-token-but-long-enough\" https://x",
-    ])
-    func bearerHeaderFires(_ command: String) {
-        #expect(SecretLikeDetector.containsSecretLikeSubstring(command))
+    @Test("an OAuth bearer header fires, and a Bearer value that is a $VAR reference does not")
+    func bearerHeaderFires() {
+        #expect(SecretLikeDetector.containsSecretLikeSubstring("curl -H 'Authorization: Bearer shortvalue123' https://x"))
+        #expect(!SecretLikeDetector.containsSecretLikeSubstring("curl -H 'Authorization: Bearer $GITHUB_TOKEN' https://x"),
+                "a shell-variable reference is a placeholder, not a literal secret")
+        #expect(!SecretLikeDetector.containsSecretLikeSubstring("curl -H 'Authorization: Bearer ${GITHUB_TOKEN}' https://x"))
     }
 
-    @Test("a JWT fires")
+    @Test("a JWT fires, isolated from the Authorization-header and generic patterns")
     func jwtFires() {
-        let jwt = "eyJhbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiIxMjM0NTY3ODkwIn0" + "." + "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
-        #expect(SecretLikeDetector.containsSecretLikeSubstring("curl -H 'Authorization: \(jwt)' https://x"))
+        // No "Authorization" wording nearby, and the last segment kept under 40 chars so the
+        // generic fallback can't also claim this fixture.
+        let jwt = "eyJhbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiIxMjM0NTY3ODkwIn0" + "." + "dGVzdHNpZ25hdHVyZTEyMw"
+        #expect(SecretLikeDetector.containsSecretLikeSubstring("curl -d 'jwt=\(jwt)' https://x"))
     }
 
-    // Built as whole strings assembled from parts ahead of the macro, not inline in its argument
-    // list (that broke the type checker): a provider-shaped literal in the committed source also
-    // trips GitHub's push protection (it did, for the Slack shape, round 1), even as a fixture,
-    // never a real credential.
-    private static let providerKeyFixtures: [String] = {
-        let anthropic = "sk-ant-api03-" + "abcdefghijklmnopqrstuvwxyz0123456789"
-        let github = "ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789"
-        let aws = "AKIA" + "ABCDEFGHIJKLMNOP"
-        let slack = "xoxb-" + "NOTAREALSLACKTOKEN-fixtureonly"
-        return [
-            "curl -H 'x-api-key: \(anthropic)' https://x",
-            "curl -H 'Authorization: token \(github)' https://x",
-            "aws configure set aws_access_key_id \(aws)",
-            "curl -H 'Authorization: Bearer \(slack)' https://x",
-        ]
-    }()
-
-    @Test("provider key prefixes fire", arguments: providerKeyFixtures)
-    func providerKeyPrefixesFire(_ command: String) {
-        #expect(SecretLikeDetector.containsSecretLikeSubstring(command))
+    @Test("an OpenAI/Anthropic sk- key fires, isolated from the named-flag pattern")
+    func openAIOrAnthropicKeyFires() {
+        let key = "sk-ant-api03-" + "abcdefghijklmnopqrstuvwxyz"
+        #expect(SecretLikeDetector.containsSecretLikeSubstring("curl -H 'x-request-id: \(key)' https://x"))
     }
 
-    @Test("a named flag with a long opaque value fires", arguments: [
-        "curl https://x?token=abcdefghijklmnopqrstuvwxyz0123456789",
-        "mytool --apikey abcdefghijklmnopqrstuvwxyz0123456789",
-        "mytool --access_token=abcdefghijklmnopqrstuvwxyz0123456789",
-        "mytool --password=SuperSecretPassphrase1234567890",
+    @Test("a GitHub token fires, isolated from the named-flag pattern")
+    func githubTokenFires() {
+        let token = "ghp_" + "abcdefghijklmnopqrstuvwxyz"
+        #expect(SecretLikeDetector.containsSecretLikeSubstring("curl -H 'x-request-id: \(token)' https://x"))
+    }
+
+    @Test("an AWS access key id fires, both the standing and temporary (ASIA) prefix")
+    func awsAccessKeyIdFires() {
+        #expect(SecretLikeDetector.containsSecretLikeSubstring("aws configure set aws_access_key_id " + "AKIA" + "ABCDEFGHIJKLMNOP"))
+        #expect(SecretLikeDetector.containsSecretLikeSubstring("aws configure set aws_access_key_id " + "ASIA" + "ABCDEFGHIJKLMNOP"))
+    }
+
+    @Test("a Slack token fires, isolated from the Authorization-header pattern")
+    func slackTokenFires() {
+        let token = "xoxb-" + "NOTAREALSLACKTOKEN-fixtureonly"
+        #expect(SecretLikeDetector.containsSecretLikeSubstring("curl -H 'x-request-id: \(token)' https://x"))
+    }
+
+    @Test("a Google API key fires")
+    func googleAPIKeyFires() {
+        let key = "AIza" + "abcdefghijklmnopqrstuvwxyz0123456789A"
+        #expect(SecretLikeDetector.containsSecretLikeSubstring("curl -H 'x-request-id: \(key)' https://x"))
+    }
+
+    @Test("a Stripe live key fires")
+    func stripeKeyFires() {
+        let key = "sk_live_" + "abcdefghijklmnop"
+        #expect(SecretLikeDetector.containsSecretLikeSubstring("curl -H 'x-request-id: \(key)' https://x"))
+    }
+
+    @Test("a Hugging Face token fires")
+    func huggingFaceTokenFires() {
+        let token = "hf_" + "abcdefghijklmnopqrstuvwxyz"
+        #expect(SecretLikeDetector.containsSecretLikeSubstring("curl -H 'x-request-id: \(token)' https://x"))
+    }
+
+    @Test("a GitLab personal access token fires")
+    func gitlabTokenFires() {
+        let token = "glpat-" + "abcdefghijklmnopqrstuvwxyz"
+        #expect(SecretLikeDetector.containsSecretLikeSubstring("curl -H 'x-request-id: \(token)' https://x"))
+    }
+
+    @Test("an npm auth token fires")
+    func npmAuthTokenFires() {
+        #expect(SecretLikeDetector.containsSecretLikeSubstring("echo '_authToken=" + "npm_abcdefghijklmnop" + "' >> .npmrc"))
+    }
+
+    @Test("an uppercase env-var assignment fires, and a $VAR-referencing one does not", arguments: [
+        "NPM_TOKEN", "DB_PASSWORD", "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY",
+    ])
+    func envVarAssignmentFires(_ name: String) {
+        #expect(SecretLikeDetector.containsSecretLikeSubstring("export \(name)=shortvalue123"))
+        #expect(!SecretLikeDetector.containsSecretLikeSubstring("export \(name)=$SOME_OTHER_VAR"))
+    }
+
+    @Test("a named CLI flag with an opaque value fires, hyphenated or not, space or = separated", arguments: [
+        "mytool --apikey abcdefghijklmnop",
+        "mytool --api-key abcdefghijklmnop",
+        "mytool --access_token=abcdefghijklmnop",
+        "mytool --password=SuperSecret1",
+        "mysql --password hunter2x",
     ])
     func namedFlagOpaqueValueFires(_ command: String) {
         #expect(SecretLikeDetector.containsSecretLikeSubstring(command))
+    }
+
+    @Test("credentials embedded in a URL's userinfo fire")
+    func urlUserinfoFires() {
+        #expect(SecretLikeDetector.containsSecretLikeSubstring("git clone https://bob:hunter2hunter2@github.com/org/repo.git"))
+    }
+
+    @Test("curl's -u basic-auth flag fires, and a $VAR-referencing one does not")
+    func curlBasicAuthFlagFires() {
+        #expect(SecretLikeDetector.containsSecretLikeSubstring("curl -u bob:hunter2hunter2 https://x"))
+        #expect(!SecretLikeDetector.containsSecretLikeSubstring("curl -u $USER:$PASS https://x"))
     }
 
     @Test("an unlabeled mixed-case base64-shaped token of 40+ chars fires")
@@ -94,7 +155,7 @@ struct SecretLikeDetectorTests {
         #expect(!SecretLikeDetector.containsSecretLikeSubstring("mytool --name foo"))
     }
 
-    @Test("a short password value under the length floor does not fire")
+    @Test("a password value under the length floor does not fire")
     func shortPasswordDoesNotFire() {
         #expect(!SecretLikeDetector.containsSecretLikeSubstring("mytool --password=x"))
     }
@@ -104,5 +165,16 @@ struct SecretLikeDetectorTests {
     ])
     func ordinaryCommandsDoNotFire(_ command: String) {
         #expect(!SecretLikeDetector.containsSecretLikeSubstring(command))
+    }
+
+    // MARK: - Bounded time (#1140 round 2, the required fix)
+
+    @Test("an adversarial run of 100,000 alternating characters completes in well under a second")
+    func adversarialInputIsBoundedTime() {
+        let adversarial = String(repeating: "a+", count: 50_000) // 100,000 chars
+        let start = Date()
+        _ = SecretLikeDetector.containsSecretLikeSubstring(adversarial)
+        let elapsed = Date().timeIntervalSince(start)
+        #expect(elapsed < 1.0, "took \(elapsed)s — the generic fallback must be linear, not quadratic")
     }
 }
