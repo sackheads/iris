@@ -48,7 +48,7 @@ extension GitHubProxyClient {
         let payload: [String: Any] = ["title": title, "body": body, "head": head, "base": base, "draft": draft]
         switch await post(repo: repo, path: "pulls", payload: payload) {
         case .refused(let message): return message
-        case .done(let json):
+        case .done(let json, _):
             let number = json["number"] as? Int
             let url = Self.githubURL(json["html_url"])
             var result = number.map { "Opened pull request #\($0)" } ?? "Opened pull request"
@@ -63,7 +63,7 @@ extension GitHubProxyClient {
         guard pr > 0 else { return "Refused: a pull request number must be positive." }
         switch await post(repo: repo, path: "issues/\(pr)/comments", payload: ["body": body]) {
         case .refused(let message): return message
-        case .done(let json):
+        case .done(let json, _):
             let url = Self.githubURL(json["html_url"])
             return sanitize(url.map { "Posted comment: \($0)" } ?? "Posted comment.",
                             token: Self.token(keychain: keychain))
@@ -72,12 +72,18 @@ extension GitHubProxyClient {
 
     private enum Outcome {
         case refused(String)
-        case done([String: Any])
+        /// The decoded JSON object, and the response's `Link` header (pagination).
+        case done([String: Any], link: String?)
     }
 
     /// The one request path. Order matters: allowlist, repo shape, then the token, and only then a
     /// request, so a refused call has read nothing and sent nothing.
     private func post(repo: String, path: String, payload: [String: Any]) async -> Outcome {
+        await perform(method: "POST", repo: repo, path: path, payload: payload)
+    }
+
+    private func perform(method: String, repo: String, path: String, query: String? = nil,
+                         payload: [String: Any]? = nil) async -> Outcome {
         guard isRepoAllowed(repo) else {
             return .refused("Refused: repository \"\(Self.shown(repo))\" is not allowed for the GitHub tools. "
                             + "The user adds repositories to the allowed list; it is empty until they do.")
@@ -88,17 +94,19 @@ extension GitHubProxyClient {
         guard let token = Self.token(keychain: keychain) else {
             return .refused("GitHub is not configured: no iris-main token is set.")
         }
-        guard let url = URL(string: "\(Self.apiBase)/repos/\(repo)/\(path)"),
-              let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
+        let suffix = query.map { "?\($0)" } ?? ""
+        let data = payload.flatMap { try? JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys]) }
+        guard let url = URL(string: "\(Self.apiBase)/repos/\(repo)/\(path)\(suffix)"),
+              payload == nil || data != nil else {
             return .refused("Refused: the request could not be built.")
         }
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"
+        request.httpMethod = method
         request.httpBody = data
         request.timeoutInterval = 30
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if data != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         request.setValue("iris", forHTTPHeaderField: "User-Agent")
 
         do {
@@ -108,7 +116,7 @@ extension GitHubProxyClient {
                 let message = (json["message"] as? String).map { ": \($0)" } ?? ""
                 return .refused(sanitize("GitHub returned HTTP \(response.statusCode)\(message)", token: token))
             }
-            return .done(json)
+            return .done(json, link: response.value(forHTTPHeaderField: "Link"))
         } catch is CancellationError {
             return .refused("The GitHub request was cancelled.")
         } catch {
@@ -152,6 +160,111 @@ extension GitHubProxyClient {
     private static func githubURL(_ value: Any?) -> String? {
         guard let text = value as? String, text.hasPrefix("https://github.com/") else { return nil }
         return text
+    }
+}
+
+// MARK: - Approve (the routine-file gate, spec section 3.3)
+
+extension GitHubProxyClient {
+    /// The most changed files one approval will look at. GitHub pages a file list at this size;
+    /// a PR that fills a page may have more on the next, so it is refused rather than guessed at.
+    static let filePageSize = 100
+    /// The only top-level folders whose changes `github_approve` will approve.
+    static let routineRoots: Set<String> = ["docs", "assets"]
+
+    /// `POST /repos/{repo}/pulls/{pr}/reviews` with `APPROVE`, only for an open PR whose every
+    /// changed file is routine, and bound to the exact commit that was checked.
+    ///
+    /// 1. Resolve `head.sha` and `base.sha` from `GET /pulls/{pr}`.
+    /// 2. Fetch the changed files keyed to those two SHAs (`GET /compare/{base}...{head}`), not
+    ///    `GET /pulls/{pr}/files`, which follows whatever the head is when it is asked.
+    /// 3. Refuse unless every file, and every rename source, is routine; refuse a full page or a
+    ///    `rel="next"` link; refuse an empty list (nothing was verified).
+    /// 4. Re-read the head: refuse if it moved during the check.
+    /// 5. Submit the review with `commit_id = head`, so a push after step 4 cannot ride it.
+    ///
+    /// `base.sha` can lag the base branch. The three-dot compare starts at the merge base of that
+    /// SHA and the head, which can only add files to the list (never hide one), so a stale base
+    /// refuses more, not less.
+    func approve(repo: String, pr: Int) async -> String {
+        guard pr > 0 else { return "Refused: a pull request number must be positive." }
+        let first = await perform(method: "GET", repo: repo, path: "pulls/\(pr)")
+        let head: String, base: String
+        switch first {
+        case .refused(let message): return message
+        case .done(let json, _):
+            guard (json["state"] as? String) == "open" else {
+                return "Refused: pull request #\(pr) is not open."
+            }
+            guard let headSHA = Self.commitSHA(json, side: "head"), let baseSHA = Self.commitSHA(json, side: "base") else {
+                return "Refused: GitHub did not report the pull request's commits in a form I can check."
+            }
+            head = headSHA
+            base = baseSHA
+        }
+
+        switch await perform(method: "GET", repo: repo, path: "compare/\(base)...\(head)",
+                             query: "per_page=\(Self.filePageSize)") {
+        case .refused(let message): return message
+        case .done(let json, let link):
+            guard let files = json["files"] as? [[String: Any]] else {
+                return "Refused: GitHub did not list the changed files, so none were checked."
+            }
+            guard !files.isEmpty else { return "Refused: the pull request lists no changed files, so there is nothing to check." }
+            guard files.count < Self.filePageSize, !Self.hasNextPage(link) else {
+                return "Refused: the pull request changes too many files for me to check them all."
+            }
+            if let offending = files.first(where: { !Self.isRoutineChange($0) }) {
+                let name = (offending["filename"] as? String).map(Self.shown) ?? "(unnamed)"
+                return "Refused: \(name) is not a routine docs/assets change, so I will not approve this pull request."
+            }
+        }
+
+        switch await perform(method: "GET", repo: repo, path: "pulls/\(pr)") {
+        case .refused(let message): return message
+        case .done(let json, _):
+            guard Self.commitSHA(json, side: "head") == head else {
+                return "Refused: the pull request was updated while I checked it. Ask me to look again."
+            }
+        }
+
+        switch await post(repo: repo, path: "pulls/\(pr)/reviews", payload: ["event": "APPROVE", "commit_id": head]) {
+        case .refused(let message): return message
+        case .done:
+            return sanitize("Approved pull request #\(pr) at \(head.prefix(7)).", token: Self.token(keychain: keychain))
+        }
+    }
+
+    /// `side`'s commit SHA from a pull request object, only if it is 40 lowercase hex digits: it is
+    /// spliced into a URL path, and nothing else may go there.
+    private static func commitSHA(_ pull: [String: Any], side: String) -> String? {
+        guard let sha = (pull[side] as? [String: Any])?["sha"] as? String,
+              sha.utf8.count == 40, sha.utf8.allSatisfy({ ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102) }) else { return nil }
+        return sha
+    }
+
+    /// Whether a `Link` header advertises a further page.
+    private static func hasNextPage(_ link: String?) -> Bool {
+        link?.range(of: #"rel\s*=\s*"?next"?"#, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    /// A changed file is routine only if its path, and its previous path when it was renamed or
+    /// copied, are both routine. A `previous_filename` that is present but not a string fails.
+    static func isRoutineChange(_ file: [String: Any]) -> Bool {
+        guard let name = file["filename"] as? String, isRoutinePath(name) else { return false }
+        guard let previous = file["previous_filename"], !(previous is NSNull) else { return true }
+        guard let previousName = previous as? String else { return false }
+        return isRoutinePath(previousName)
+    }
+
+    /// A repo-relative path inside `docs/` or `assets/`: at least one segment below the folder, no
+    /// empty, `.` or `..` segment, no leading slash, no backslash or control character.
+    static func isRoutinePath(_ path: String) -> Bool {
+        guard !path.isEmpty, !path.hasPrefix("/"),
+              !path.unicodeScalars.contains(where: { $0 == "\\" || CharacterSet.controlCharacters.contains($0) }) else { return false }
+        let segments = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard segments.count >= 2, routineRoots.contains(String(segments[0])) else { return false }
+        return segments.allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
     }
 }
 
