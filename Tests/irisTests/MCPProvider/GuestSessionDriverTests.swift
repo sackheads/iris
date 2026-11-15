@@ -17,7 +17,7 @@ struct GuestSessionDriverTests {
     /// Wall time for the ledger's UTC day, moved by hand.
     private final class WallClock: @unchecked Sendable {
         private let lock = NSLock()
-        // 2026-11-14 23:00:00 UTC
+        // 2026-11-16 23:00:00 UTC
         private var date = Date(timeIntervalSince1970: 1_794_870_000)
         var now: Date { lock.withLock { date } }
         func advance(_ seconds: TimeInterval) { lock.withLock { date = date.addingTimeInterval(seconds) } }

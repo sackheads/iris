@@ -89,9 +89,10 @@ final class GuestSessionDriver {
     static let turnTimeoutSeconds: Double = 180
     /// The most one client may spend in a UTC day, in the tokens a turn's ceiling counts (the plain
     /// prompt plus output total: a guest turn has no provider stamp, so no price weighting).
-    /// Checked before a turn starts, so a client can overshoot it by at most one turn
-    /// (`turnMaxTokens`); one turn at a time per client keeps it at one. D6, #1135, for the owner
-    /// to tune. At 12 turns an hour the per-turn ceiling alone would allow 8,640,000 a day.
+    /// Checked before a turn starts, so a client can overshoot it by at most one turn, and one turn
+    /// at a time per client keeps it at one. That turn ends at `turnMaxTokens` plus the model round
+    /// that crossed it (the ceiling is read between rounds), and a turn cut off by its timeout loses
+    /// the round in flight, which the ledger never saw. D6, #1135, for the owner to tune. At 12 turns an hour the per-turn ceiling alone would allow 8,640,000 a day.
     static let dailyTokenCap = 500_000
     /// The `source` a guest turn runs under.
     static let turnSource = "mcp-guest"

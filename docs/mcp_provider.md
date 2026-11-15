@@ -101,8 +101,9 @@ it: a guest never gets an address a role session could message first.
   a per-turn ceiling of 30,000 weighted tokens and 180 seconds, and **500,000 tokens per client per
   UTC day** (all `GuestSessionDriver`'s named constants). A client that has used its day's tokens is
   refused, and the message it sent is not queued; the count restarts at 00:00 UTC. The cap is
-  checked when a turn would start, so one turn in flight at the limit can run it over by up to the
-  per-turn ceiling. A turn that fails or times out is answered with a short failure message.
+  checked when a turn would start, so one turn in flight at the limit can run it over: by up to
+  the per-turn ceiling plus the model round that crosses it. A round a timed-out turn was in the
+  middle of is not counted. A turn that fails or times out is answered with a short failure message.
   `GuestSpendLedger` tallies each client's tokens, and that tally is what the cap reads. It is kept
   in memory only: a restart starts every client's day at zero, so the cap resets when Iris restarts
   (a durable count is #1135's open question). Revoking a client does not clear its day's count, so
