@@ -104,6 +104,11 @@ struct CommandPatternTests {
         #expect(matches("cd sub && git -C nested status", ["git status"], workspace: "/tmp/proj"))
         #expect(matches("swift test --filter Other 2>&1 | tail -80", ["swift test"]))
         #expect(matches("swift build && swift test", ["swift test", "swift build"]))
+        #expect(matches("cat README.md", ["cat"], workspace: "/tmp/proj"))
+        #expect(matches("cat Sources/a.swift", ["cat"], workspace: "/tmp/proj"))
+        #expect(matches("rg -n foo Sources", ["rg"], workspace: "/tmp/proj"))
+        #expect(matches("rg -e foo Sources", ["rg"], workspace: "/tmp/proj"))
+        #expect(matches("ls -la", ["ls"], workspace: "/tmp/proj"))
     }
 
     @Test("every part must match, flags stay read-only for bare programs, and cd/-C stay in workspace")
@@ -130,6 +135,16 @@ struct CommandPatternTests {
         #expect(!matches("file -C -m /tmp/x", ["file"]))
         #expect(!matches("rg --pre=evil foo", ["rg"]))
         #expect(!matches("rg -z foo", ["rg"]))
+        // Bare-program file reads are confined to the workspace:
+        #expect(!matches("cat ~/.ssh/id_rsa", ["cat"], workspace: "/tmp/proj"))
+        #expect(!matches("cat /etc/passwd", ["cat"], workspace: "/tmp/proj"))
+        #expect(!matches("cat ../secret", ["cat"], workspace: "/tmp/proj"))
+        #expect(!matches("cat README.md", ["cat"], workspace: nil))
+        #expect(!matches("ls /etc", ["ls"], workspace: "/tmp/proj"))
+        #expect(!matches("ls -la", ["ls"], workspace: nil))
+        #expect(!matches("rg -n foo /etc", ["rg"], workspace: "/tmp/proj"))
+        #expect(!matches("rg -e foo /etc", ["rg"], workspace: "/tmp/proj"))
+        #expect(!matches("grep -f /etc/passwd foo", ["grep"], workspace: "/tmp/proj"))
         // cd and git -C cannot carry a rule outside the workspace (or with no workspace):
         #expect(!matches("cd /tmp/evil && swift test", ["swift test"], workspace: "/tmp/proj"))
         #expect(!matches("cd /tmp/evil && swift test", ["swift test"], workspace: nil))
