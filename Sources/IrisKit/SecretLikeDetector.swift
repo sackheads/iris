@@ -66,10 +66,21 @@ enum SecretLikeDetector {
         pattern("env-var-assignment",
                 "\\b[A-Z][A-Z0-9_]*_(TOKEN|SECRET|PASSWORD|API_?KEY|ACCESS_KEY|ACCESS_TOKEN|AUTH)=" + notAVarRef + "\\S{4,}"),
         // A CLI flag or key, named plainly (not an env-var): `--password=hunter2`,
-        // `--password hunter2`, `--api-key abc`, `token: abc123`. A real password is often short,
-        // so no length floor beyond 4 to exclude trivial placeholders ("ok", "1").
+        // `--password hunter2`, `--api-key abc`, `token: abc123`, `--private-key <path-or-value>`.
+        // A real password is often short, so no length floor beyond 4 to exclude trivial
+        // placeholders ("ok", "1").
         pattern("named-flag-opaque-value",
-                "(?i)\\b(token|apikey|api-key|api_key|access_token|password|secret)[=: ]\\s*" + notAVarRef + "\\S{4,}"),
+                "(?i)\\b(token|apikey|api-key|api_key|access_token|password|secret|private-key|private_key)" +
+                "[=: ]\\s*" + notAVarRef + "\\S{4,}"),
+        // A lowercase compound env-style assignment: `client_secret=`, `db_password=`,
+        // `oauth_token=` (round 1's env-var pattern only matches UPPERCASE names; this is its
+        // lowercase sibling, same `\b` reasoning). Deliberately excludes a bare `_key=` suffix:
+        // `primary_key=`/`foreign_key=` are common, non-secret database column arguments, and
+        // "key" alone has no secret-shaped qualifier the way "secret"/"token"/"password" do.
+        pattern("lowercase-env-style-assignment",
+                "\\b[a-z][a-z0-9]*_(secret|token|password)=" + notAVarRef + "\\S{4,}"),
+        // A PEM private-key block marker — the shape alone is the credential, no value floor needed.
+        pattern("pem-private-key-marker", "-----BEGIN( [A-Z]+)? PRIVATE KEY-----"),
         // user:pass@host in a URL, e.g. a `git clone` with embedded basic-auth credentials.
         // Bounded quantifiers ({1,64}/{1,128}), not `+`: an unbounded negated-class quantifier
         // followed by a required literal is still quadratic to backtrack over an adversarial run

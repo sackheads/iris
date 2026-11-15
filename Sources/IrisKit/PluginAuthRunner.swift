@@ -57,7 +57,11 @@ enum PluginAuthRunner {
     /// signs in), so it always needs a click — and a command with hidden characters is refused
     /// even if `requested` is true, the same rule `runnable` applies to the Check button itself
     /// (#336). `command` is nil when nothing is declared or a reference does not resolve, in
-    /// which case there is nothing to allow. Returns whether a rule was written.
+    /// which case there is nothing to allow. Also refused for a command that looks like it
+    /// contains a credential (#1155): this is the plugin's own config, not model-written text, so
+    /// it is not #1140's injection vector, but it is still a second path to plaintext
+    /// `permissions.json` and the same defence-in-depth guard is cheap. Returns whether a rule
+    /// was written.
     ///
     /// Unchecking the box does not retract a rule written on an earlier click:
     /// `PermissionManager` has no removal API (it only ever appends to `permissions.json`), so
@@ -65,7 +69,8 @@ enum PluginAuthRunner {
     /// permissions UI that already owns that file, once one exists.
     @discardableResult
     static func applyAlwaysAllow(command: String?, requested: Bool, permissions: PermissionManager) -> Bool {
-        guard requested, let command, !command.containsHiddenCharacters else { return false }
+        guard requested, let command, !command.containsHiddenCharacters,
+              !SecretLikeDetector.containsSecretLikeSubstring(command) else { return false }
         permissions.allowGlobally(toolName: "run_command", details: command)
         return true
     }

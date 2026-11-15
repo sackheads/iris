@@ -212,6 +212,16 @@ struct PluginAuthRunnerTests {
         #expect(!PluginAuthRunner.isAlwaysAllowed(command, permissions: perms))
     }
 
+    @Test("a command that looks like it contains a credential cannot be allowed even if requested (#1155)")
+    func alwaysAllowRefusesSecretLikeCommand() {
+        let (perms, home) = permissions()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let command = "curl -H 'Authorization: Bearer shortvalue123' https://api.example.com"
+        let wrote = PluginAuthRunner.applyAlwaysAllow(command: command, requested: true, permissions: perms)
+        #expect(!wrote)
+        #expect(!PluginAuthRunner.isAlwaysAllowed(command, permissions: perms))
+    }
+
     @Test("a command with hidden characters cannot be allowed even if requested")
     func alwaysAllowRefusesHiddenCharacters() {
         let (perms, home) = permissions()
