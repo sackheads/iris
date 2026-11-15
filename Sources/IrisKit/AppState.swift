@@ -4925,7 +4925,9 @@ class AppState {
                                                callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: vibecopEnabled) {
             // On the host, an APPROVE stands in for the person only on a read (#600), and not at all
             // for a command once the person has denied one in this conversation.
-            if decision.decision == "APPROVE", !(toolName == "run_command" && commandDenied(in: conversationId)) {
+            // #1151: and never on a guest-origin turn: Vibecop may still DENY there, but a read-only
+            // call is not harmless (cat takes any path), so a guest-steered one asks the person.
+            if decision.decision == "APPROVE", !guestOrigin, !(toolName == "run_command" && commandDenied(in: conversationId)) {
                 switch ReadOnlyCommand.vibecopGate(toolName: toolName, details: details, inSandbox: inSandbox,
                                                    homeWritable: homeWritable(conversationId, workspace: workspace),
                                                    cwd: workspace, lookup: hostLookup()) {

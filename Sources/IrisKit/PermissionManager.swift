@@ -96,9 +96,10 @@ struct PermissionManager: Sendable {
         if targetsProtected && isBackground { return nil }
 
         // Automatically allow access to agent's own ~/.iris directory — reads for anyone, writes
-        // only for an attended caller and only outside the protected directories.
+        // only for an attended caller and only outside the protected directories. Not on a
+        // guest-origin turn (#1150): a guest-steered write there could plant memory or a skill.
         if toolName == "read_file" || (isWrite && !isBackground && !targetsProtected) {
-            if paths.isUnderIrisDir(details) { return AllowMatch(scope: .irisHome, rule: nil) }
+            if !isGuestOrigin, paths.isUnderIrisDir(details) { return AllowMatch(scope: .irisHome, rule: nil) }
         }
 
         // #1141: a turn a guest's message started or steered re-asks for every call a saved rule

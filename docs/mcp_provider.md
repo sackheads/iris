@@ -84,6 +84,8 @@ it: a guest never gets an address a role session could message first.
   Every other tool, and any argument those two do not take (no `attachments`, no `to` other than a
   role), is refused at dispatch. Its YOLO mode is never on, and a role session's turn that a guest
   message started or steered asks for approvals as usual for that turn (#1119): no saved Always Allow rule, exact or prefix, answers for it either (#1141).
+  Neither the `~/.iris` file carve-out nor a Vibecop approval answers for such a turn either: the call asks
+  the person (#1150, #1151).
 - **The per-client role allowlist.** A guest reaches only the roles its client was granted
   (`ProviderTokenRegistry.setRoles`). The default is empty: a guest with no role can message
   nobody. It cannot name `iris`, a session id, a name, a topic or another guest. A role session
