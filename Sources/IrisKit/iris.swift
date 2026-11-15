@@ -4110,9 +4110,12 @@ actor IrisEngine {
                     request.prefixMismatchBehavior = .dropBlock
                     await MainActor.run { localState?.recordPrefixMismatchFallback(conversationId) }
                 }
+                // #1057: the model this round ran on, for the conversation's per-model cost. A routed
+                // subagent's rounds name none: its conversation prices at its current model as before.
+                let usageModel = subagentRoute == nil ? (provider: effectiveProvider, model: turnModel()) : nil
                 let (spentSoFar, runSink) = await MainActor.run { () -> (TokenUsage, (any TurnUsageSink)?) in
                     if let usage = activeResponse.usageMetadata {
-                        localState?.updateTokenUsage(for: conversationId, usage: usage)
+                        localState?.updateTokenUsage(for: conversationId, usage: usage, model: usageModel)
                     }
                     // A delegated round meters the run it works for (#313), so a quit in the
                     // middle of a delegation still leaves that spend on the run's row.

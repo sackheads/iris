@@ -64,6 +64,11 @@ struct TokenUsage: Codable, Equatable, Sendable {
     /// What a run's subagents on other models spent, per model (#239 3b), set only by
     /// `runUsage(for:)`. Transient like the field above.
     var delegatedCharges: [DelegatedCharge] = []
+    /// What each model on this conversation's own rounds spent, at the rate in force when it was
+    /// spent (#1057). Bounded by `maxModelBuckets`, never by conversation length. Usage recorded
+    /// before this existed, or with no model to name (a guard call), sits only in the totals above.
+    var byModel: [ModelUsageBucket] = []
+    static let maxModelBuckets = 16
 
     /// The weighted figure a budget reads: this usage at `provider`/`model`'s weights, plus the
     /// other models' charges, already converted to the primary's weighted tokens.
@@ -73,7 +78,7 @@ struct TokenUsage: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case promptTokenCount, candidatesTokenCount, totalTokenCount, cacheReadTokenCount, cacheWriteTokenCount
-        case cacheWrite1hTokenCount
+        case cacheWrite1hTokenCount, byModel
     }
 
     init(promptTokenCount: Int = 0, candidatesTokenCount: Int = 0, totalTokenCount: Int = 0,
@@ -111,6 +116,89 @@ struct TokenUsage: Codable, Equatable, Sendable {
         cacheReadTokenCount = try c.decodeIfPresent(Int.self, forKey: .cacheReadTokenCount)
         cacheWriteTokenCount = try c.decodeIfPresent(Int.self, forKey: .cacheWriteTokenCount)
         cacheWrite1hTokenCount = try c.decodeIfPresent(Int.self, forKey: .cacheWrite1hTokenCount)
+        byModel = try c.decodeIfPresent([ModelUsageBucket].self, forKey: .byModel) ?? []
+    }
+
+    /// Adds one call's counts. Unknown is not zero (5a §0.4): a nil cache count leaves the field as it was.
+    mutating func add(_ usage: UsageMetadata) {
+        promptTokenCount += usage.promptTokenCount ?? 0
+        candidatesTokenCount += usage.candidatesTokenCount ?? 0
+        totalTokenCount += usage.totalTokenCount ?? 0
+        if let read = usage.cacheReadTokens { cacheReadTokenCount = (cacheReadTokenCount ?? 0) + read }
+        if let write = usage.cacheWriteTokens { cacheWriteTokenCount = (cacheWriteTokenCount ?? 0) + write }
+        if let write1h = usage.cacheWrite1hTokens { cacheWrite1hTokenCount = (cacheWrite1hTokenCount ?? 0) + write1h }
+    }
+
+    /// Charges a call to the bucket for `provider`/`model` at `rate`, opening one if there is room.
+    /// A call that finds no room is left in the totals alone, which is the unattributed share.
+    mutating func record(_ usage: UsageMetadata, provider: String, model: String, rate: ResolvedRate) {
+        if let i = byModel.firstIndex(where: { $0.matches(provider: provider, model: model, rate: rate) }) {
+            byModel[i].usage.add(usage)
+        } else if byModel.count < Self.maxModelBuckets {
+            var bucket = ModelUsageBucket(provider: provider, model: model, rate: rate)
+            bucket.usage.add(usage)
+            byModel.append(bucket)
+        }
+    }
+
+    /// The totals less every bucket: what no model was recorded for. Zero when the ledger covers all of it.
+    var unattributed: TokenUsage {
+        func rest(_ total: Int?, _ parts: [Int?]) -> Int? {
+            guard let total else { return nil }
+            return max(0, total - parts.reduce(0) { $0 + ($1 ?? 0) })
+        }
+        let usage = byModel.map(\.usage)
+        return TokenUsage(promptTokenCount: rest(promptTokenCount, usage.map(\.promptTokenCount)) ?? 0,
+                          candidatesTokenCount: rest(candidatesTokenCount, usage.map(\.candidatesTokenCount)) ?? 0,
+                          totalTokenCount: rest(totalTokenCount, usage.map(\.totalTokenCount)) ?? 0,
+                          cacheReadTokenCount: rest(cacheReadTokenCount, usage.map(\.cacheReadTokenCount)),
+                          cacheWriteTokenCount: rest(cacheWriteTokenCount, usage.map(\.cacheWriteTokenCount)),
+                          cacheWrite1hTokenCount: rest(cacheWrite1hTokenCount, usage.map(\.cacheWrite1hTokenCount)))
+    }
+}
+
+/// One model's share of a conversation's usage, with the rate it was priced at when it was spent,
+/// so a later price-list change or tier switch never rewrites what it cost (#1057).
+struct ModelUsageBucket: Codable, Equatable, Sendable {
+    var provider: String
+    var model: String
+    /// Never itself carries a ledger.
+    var usage: TokenUsage = TokenUsage()
+    var rates: TokenRates
+    var rateSource: RateSource
+    var rateAsOf: String?
+    var rateEstimated: Bool
+    var rateNote: String?
+
+    init(provider: String, model: String, rate: ResolvedRate) {
+        self.provider = provider
+        self.model = model
+        rates = rate.rates
+        rateSource = rate.source
+        rateAsOf = rate.asOf
+        rateEstimated = rate.estimated
+        rateNote = rate.note
+    }
+
+    var rate: ResolvedRate {
+        ResolvedRate(rates: rates, source: rateSource, asOf: rateAsOf, estimated: rateEstimated, note: rateNote)
+    }
+
+    func matches(provider: String, model: String, rate: ResolvedRate) -> Bool {
+        self.provider == provider && self.model == model && rates == rate.rates && rateSource == rate.source
+    }
+
+    /// Lenient (invariant 1). A rate source this build does not know reads as the fallback.
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try c.decodeIfPresent(String.self, forKey: .provider) ?? ""
+        model = try c.decodeIfPresent(String.self, forKey: .model) ?? ""
+        usage = try c.decodeIfPresent(TokenUsage.self, forKey: .usage) ?? TokenUsage()
+        rates = try c.decodeIfPresent(TokenRates.self, forKey: .rates) ?? TokenRates(input: 0, output: 0, cacheRead: 0, cacheWrite: nil)
+        rateSource = (try? c.decodeIfPresent(RateSource.self, forKey: .rateSource)) ?? .fallback
+        rateAsOf = try c.decodeIfPresent(String.self, forKey: .rateAsOf)
+        rateEstimated = try c.decodeIfPresent(Bool.self, forKey: .rateEstimated) ?? true
+        rateNote = try c.decodeIfPresent(String.self, forKey: .rateNote)
     }
 }
 
@@ -4072,22 +4160,16 @@ class AppState {
     
     /// `onPrimary`: the call ran on the primary's provider whatever the conversation's own model,
     /// as a guard call does (#689), so it is never priced at a routed subagent's rate (#705 review).
-    func updateTokenUsage(for conversationId: UUID, usage: UsageMetadata, onPrimary: Bool = false) {
+    /// `model`: the provider and model the call ran on, when the caller knows them; the call is then
+    /// also charged to that model's bucket at its rate now (#1057). A call that names none lands in
+    /// the totals only.
+    func updateTokenUsage(for conversationId: UUID, usage: UsageMetadata, onPrimary: Bool = false,
+                          model: (provider: String, model: String)? = nil) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
-            conversations[idx].tokenUsage.promptTokenCount += usage.promptTokenCount ?? 0
-            conversations[idx].tokenUsage.candidatesTokenCount += usage.candidatesTokenCount ?? 0
-            conversations[idx].tokenUsage.totalTokenCount += usage.totalTokenCount ?? 0
-            // Unknown is not zero (5a §0.4): a nil incoming value leaves the field exactly as it
-            // was, so a provider that has never reported a cache count keeps reading as unknown
-            // rather than accidentally locking in a zero.
-            if let read = usage.cacheReadTokens {
-                conversations[idx].tokenUsage.cacheReadTokenCount = (conversations[idx].tokenUsage.cacheReadTokenCount ?? 0) + read
-            }
-            if let write = usage.cacheWriteTokens {
-                conversations[idx].tokenUsage.cacheWriteTokenCount = (conversations[idx].tokenUsage.cacheWriteTokenCount ?? 0) + write
-            }
-            if let write1h = usage.cacheWrite1hTokens {
-                conversations[idx].tokenUsage.cacheWrite1hTokenCount = (conversations[idx].tokenUsage.cacheWrite1hTokenCount ?? 0) + write1h
+            conversations[idx].tokenUsage.add(usage)
+            if let model {
+                let rate = priceBook.resolve(family: model.provider.lowercased(), model: model.model, side: .primary)
+                conversations[idx].tokenUsage.record(usage, provider: model.provider, model: model.model, rate: rate)
             }
             markChanged(conversationId, .metadata)
         }

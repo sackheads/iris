@@ -1,18 +1,25 @@
 import Foundation
 
-/// The toolbar's cost figure for a conversation (#985): its token usage at one model's rates. An
-/// estimate, always: usage is kept as conversation totals, not per turn, so the whole conversation
-/// is priced at the model it runs on now, and a tier switched mid-conversation reprices it all.
+/// The toolbar's cost figure for a conversation (#985): its token usage at model rates. An
+/// estimate, always. Rounds on a model the engine named are kept per model at the rate in force
+/// when they ran (`TokenUsage.byModel`, #1057) and priced at that; the rest of the totals (a
+/// conversation from before, a guard call) is priced at the model the conversation runs on now.
 /// A subagent's tokens sit in its own conversation and are not added.
 struct ConversationCost: Equatable {
     var dollars: Double
     var model: String
     var rate: ResolvedRate
+    /// Whether the figure is the sum of per-model buckets, each at its own rate (#1057).
+    var hasLedger = false
 
     /// `provider` is an `LLMProvider` raw value ("Anthropic"); the price list keys families in lower case.
     static func estimate(usage: TokenUsage, provider: String, model: String, book: PriceBook = .shared) -> ConversationCost {
         let rate = book.resolve(family: provider.lowercased(), model: model, side: .primary)
-        return ConversationCost(dollars: ModelPricing.dollars(usage.components, rate.rates), model: model, rate: rate)
+        // #1057: what a model spent is priced at the rate it was spent at; the rest, at the current model.
+        let dollars = usage.byModel.reduce(ModelPricing.dollars(usage.unattributed.components, rate.rates)) {
+            $0 + ModelPricing.dollars($1.usage.components, $1.rates)
+        }
+        return ConversationCost(dollars: dollars, model: model, rate: rate, hasLedger: !usage.byModel.isEmpty)
     }
 
     /// "~$0.42", or "<$0.01" below a cent. The tilde stays on every figure: it is never exact.
@@ -32,7 +39,9 @@ struct ConversationCost: Equatable {
 
     var help: String {
         var text = "Estimated cost: this conversation's tokens at \(model)'s rates (\(rateSourceNote))"
-        text += ". The whole conversation is priced at its current model, and subagents are not included."
+        text += hasLedger
+            ? ". Each model's tokens are priced at its own rate when it spent them; any not attributed to a model are priced at the current model. Subagents are not included."
+            : ". The whole conversation is priced at its current model, and subagents are not included."
         if rate.estimated { text += " No exact rate is known for this model: \(rate.note ?? "a fallback rate stands in")." }
         return text
     }
@@ -40,8 +49,8 @@ struct ConversationCost: Equatable {
 
 /// The toolbar figure taken apart by token type (#1011): the same four terms `ModelPricing.dollars`
 /// adds, each as tokens x rate, so the lines sum to the figure and a person can set them beside an
-/// invoice. It breaks down what is stored (conversation totals) and nothing finer: per-turn and
-/// per-model costs need usage recorded per turn, which is not (#1011's remainder).
+/// invoice. A conversation with a per-model ledger breaks down into one section per model, then
+/// one for what no model was recorded for; per-turn costs are not recorded (#1057).
 struct CostBreakdown: Equatable {
     struct Line: Equatable {
         enum Kind: Equatable { case input, cacheRead, cacheWrite, output }
@@ -56,20 +65,32 @@ struct CostBreakdown: Equatable {
         var note: String? = nil
     }
 
+    /// One model's lines, at the rates it was spent at (#1057).
+    struct Section: Equatable {
+        var title: String
+        var rateSourceNote: String
+        var lines: [Line]
+        var total: Double
+        var note: String? = nil
+    }
+
+    /// The conversation's lines at one rate: all of it when no ledger was kept, else empty and `sections` speaks.
     var lines: [Line]
+    /// Per model, then what no model was recorded for; empty for a conversation with no ledger.
+    var sections: [Section] = []
     var total: Double
     var model: String
     var rateSourceNote: String
     /// What the figure does not say, in the words the popover shows. Never empty: it is an estimate.
     var caveats: [String]
 
-    static func make(usage: TokenUsage, cost: ConversationCost) -> CostBreakdown {
-        let r = cost.rate.rates
+    /// The four lines `ModelPricing.dollars` adds, for `usage` at `r`.
+    static func lines(usage: TokenUsage, rates r: TokenRates) -> [Line] {
         let u = usage.components
         // The same arithmetic as `ModelPricing.dollars`, term by term.
         let uncached = max(0, u.prompt - u.cacheRead - u.cacheWrite)
         let writeRate = r.cacheWrite ?? r.input
-        let lines = [
+        return [
             Line(kind: .input, label: "Input (not cached)", tokens: uncached, ratePerMTok: r.input * 1e6,
                  dollars: Double(uncached) * r.input),
             Line(kind: .cacheRead, label: "Cache read", tokens: usage.cacheReadTokenCount, ratePerMTok: r.cacheRead * 1e6,
@@ -82,8 +103,39 @@ struct CostBreakdown: Equatable {
                  note: u.output > usage.candidatesTokenCount
                      ? "Includes \(tokens(u.output - usage.candidatesTokenCount)) thinking tokens (the provider's total minus the prompt), billed as output." : nil),
         ]
-        var caveats = ["An estimate, not a bill. The whole conversation is priced at \(cost.model)'s rates, its current model: a tier switched mid-conversation reprices all of it.",
-                       "Subagents' tokens sit in their own conversations and are not included."]
+    }
+
+    private static func section(title: String, usage: TokenUsage, rate: ResolvedRate, note: String? = nil) -> Section {
+        let lines = lines(usage: usage, rates: rate.rates)
+        var notes = [note].compactMap { $0 }
+        if rate.estimated { notes.append("No exact rate is known: \(rate.note ?? "a fallback rate stands in").") }
+        if (usage.cacheWrite1hTokenCount ?? 0) > 0 {
+            notes.append("\(tokens(usage.cacheWrite1hTokenCount)) cache-write tokens were 1-hour writes, which bill above the rate used here.")
+        }
+        let source = rate.source == .snapshot ? "price list of \(rate.asOf ?? "unknown date")"
+            : rate.source == .loopback ? "a server on this Mac: no charge" : rate.source.rawValue
+        return Section(title: title, rateSourceNote: source, lines: lines, total: lines.reduce(0) { $0 + $1.dollars },
+                       note: notes.isEmpty ? nil : notes.joined(separator: " "))
+    }
+
+    static func make(usage: TokenUsage, cost: ConversationCost) -> CostBreakdown {
+        let r = cost.rate.rates
+        var caveats = ["Subagents' tokens sit in their own conversations and are not included."]
+        if !usage.byModel.isEmpty {
+            // #1057: each model at the rate it was spent at; what was never attributed at the current model.
+            var sections = usage.byModel.map { section(title: $0.model, usage: $0.usage, rate: $0.rate) }
+            let rest = usage.unattributed
+            if rest.totalTokenCount > 0 || rest.promptTokenCount > 0 {
+                sections.append(section(title: "Not attributed to a model", usage: rest, rate: cost.rate,
+                                        note: "Earlier usage, or usage with no model recorded (guard checks), priced at \(cost.model)'s rates."))
+            }
+            caveats.insert("An estimate, not a bill. Each model's tokens are priced at the rate in force when they were spent.", at: 0)
+            if cost.rate.estimated { caveats.append("No exact rate is known for \(cost.model): \(cost.rate.note ?? "a fallback rate stands in").") }
+            return CostBreakdown(lines: [], sections: sections, total: sections.reduce(0) { $0 + $1.total }, model: cost.model,
+                                 rateSourceNote: cost.rateSourceNote, caveats: caveats)
+        }
+        let lines = lines(usage: usage, rates: r)
+        caveats.insert("An estimate, not a bill. The whole conversation is priced at \(cost.model)'s rates, its current model: a tier switched mid-conversation reprices all of it.", at: 0)
         if (usage.cacheWrite1hTokenCount ?? 0) > 0 {
             caveats.append("\(tokens(usage.cacheWrite1hTokenCount)) of the cache-write tokens were 1-hour writes, which bill above the rate used here.")
         }
