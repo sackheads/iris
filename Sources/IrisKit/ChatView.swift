@@ -1843,7 +1843,15 @@ struct ApprovalBannerView: View {
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            
+
+            // #1140: why there is no Always Allow button this time.
+            if let note = request.secretDetectedNote {
+                Label(note, systemImage: "key.fill")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             HStack {
                 // No "Always Allow" where a rule would mean nothing or too much: a `humanOnly`
                 // request never reads the allowlist (#187), and a gate script's rule would let its

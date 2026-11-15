@@ -562,10 +562,12 @@ struct ToolApprovalRequest: Identifiable {
     /// `enqueueUserApproval` for the lifetime of one pending ask.
     let humanOnly: Bool
     /// Whether the dialog offers "Always Allow", which writes a `PermissionRule`. Off for a
-    /// `humanOnly` request, whose call never reads the allowlist, and for a gate script's
-    /// escalation (#648): Vibecop has already ruled on that one, and a rule written from its
-    /// composed text would let the same text run on the host unasked, where the person approved
-    /// it for the sandbox. Off means no button and, in `resolveApproval`, no rule.
+    /// `humanOnly` request, whose call never reads the allowlist, for a gate script's escalation
+    /// (#648): Vibecop has already ruled on that one, and a rule written from its composed text
+    /// would let the same text run on the host unasked, where the person approved it for the
+    /// sandbox; and for a command whose text looks like it contains a credential (#1140): a saved
+    /// rule would write it to plaintext `permissions.json`. Off means no button and, in
+    /// `resolveApproval`, no rule.
     let offersAlwaysAllow: Bool
     /// #1102: what an Always Allow click saves, decided once when the ask is raised so the dialog
     /// shows exactly what `resolveApproval` writes. Empty when `offersAlwaysAllow` is off.
@@ -573,9 +575,15 @@ struct ToolApprovalRequest: Identifiable {
     /// #812: whether the dialog offers "Allow in this conversation", which adds the tool to the
     /// conversation's `outboundAllowedTools`. On only for a tainted outbound send's card.
     let offersConversationAllow: Bool
+    /// #1140: set when `details` looks like it contains a credential, so the dialog can tell the
+    /// person why there is no Always Allow button. The call still runs now, once, as approved —
+    /// only the saved rule is refused.
+    let secretDetectedNote: String?
     let continuation: CheckedContinuation<Bool, Never>
     /// When the ask was raised, so `list_sessions` can say how long a peer has waited (#418).
     let requestedAt: Date
+
+    static let secretDetectedMessage = "This command looks like it contains a credential, so it won't be saved as an Always-Allow rule."
 
     init(id: UUID, toolName: String, details: String, workspace: String?, conversationId: UUID?, origin: String,
          humanOnly: Bool = false, offersAlwaysAllow: Bool = true, offersConversationAllow: Bool = false,
@@ -588,7 +596,9 @@ struct ToolApprovalRequest: Identifiable {
         self.conversationId = conversationId
         self.origin = origin
         self.humanOnly = humanOnly
-        self.offersAlwaysAllow = offersAlwaysAllow && !humanOnly
+        let looksLikeSecret = SecretLikeDetector.containsSecretLikeSubstring(details)
+        self.secretDetectedNote = looksLikeSecret ? Self.secretDetectedMessage : nil
+        self.offersAlwaysAllow = offersAlwaysAllow && !humanOnly && !looksLikeSecret
         self.alwaysAllowRules = self.offersAlwaysAllow ? PermissionRule.forAlwaysAllow(toolName: toolName, details: details) : []
         self.offersConversationAllow = offersConversationAllow
         self.continuation = continuation
