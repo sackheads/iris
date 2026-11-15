@@ -282,18 +282,17 @@ enum CommandPattern {
         return real
     }
 
-    /// The words a prefix is judged against: normalized program name (`lastPathComponent`), git's
-    /// two harmless global options (`-C <dir>`, `--no-pager`) dropped, or nil when the part can't
-    /// be matched by a prefix at all (a relative program, which a `cd` moves; git with any other
-    /// global option or a denied argument; or `-C <dir>` outside the workspace when matching).
+    /// The words a prefix is judged against: git's two harmless global options (`-C <dir>`,
+    /// `--no-pager`) dropped, or nil when the part can't be matched by a prefix at all (any program
+    /// spelled with a path `/`, since a `cd` moves relative paths and an explicit path could point
+    /// anywhere; git with any other global option or a denied argument; or `-C <dir>` outside the
+    /// workspace when matching).
     static func canonicalWords(_ segment: Segment, cwd: String? = nil, workspaceReal: String? = nil,
                                enforceWorkspace: Bool = false) -> [String]? {
         let words = segment.words
         let program = words[0]
-        guard isRuleWord(program), !program.hasPrefix("-") else { return nil }
-        if program.contains("/"), !program.hasPrefix("/") { return nil }
-        let programName = (program as NSString).lastPathComponent
-        guard programName == "git" else { return [programName] + words.dropFirst() }
+        guard isRuleWord(program), !program.hasPrefix("-"), !program.contains("/") else { return nil }
+        guard program == "git" else { return words }
         var out = ["git"]
         var i = 1
         while i < words.count, words[i].hasPrefix("-") {
