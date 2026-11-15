@@ -1,13 +1,15 @@
 # First slice: Iris reviews routine PRs as herself (`iris-main`) — consumer-spec under #974
 
-> **Status:** spec by iris-planner, 2026-11-15. **This is a FIRST-SLICE consumer-spec, not a design.**
-> The boundary design is `docs/specs/2026-11-09-unified-access-boundary-design.md` (#974 v2, audited).
-> This doc does **not** redefine `Principal` / `AccessProfile` / `Binding` / the C1–C8 seam closures —
-> 11-09 owns those. It scopes the **minimum wedge** that gets "Iris clears routine PRs as herself"
-> working safely, using 11-09's **C2 proxy** pattern for its one credential. It **supersedes** the
-> retired standalone draft `2026-11-14-profile-credential-substrate-SPEC.md`, which reinvented the
-> boundary and was correctly rejected (Iris's review, 2026-11-14: dropped C1/C2/M2/M3, wrong seam,
-> contradicted M2). Destination on sign-off: `docs/specs/2026-11-15-iris-github-identity-first-slice.md`.
+> **Status:** spec by iris-planner, 2026-11-15; **Iris-reviewed (approve + 4 amendments, all folded)**,
+> the four amendments (§3.1 harness integration, `github_create_pr`, the §3.3 approve-check hardening,
+> §4 keychain naming) plus Brian's user-configurable-repo-allowlist steer (§3.2) incorporated.
+> **This is a FIRST-SLICE consumer-spec, not a design.** The boundary design is
+> `docs/specs/2026-11-09-unified-access-boundary-design.md` (#974 v2, audited). This doc does **not**
+> redefine `Principal` / `AccessProfile` / `Binding` / the C1–C8 seam closures — 11-09 owns those. It
+> scopes the **minimum wedge** that gets "Iris clears routine PRs as herself" working safely, using
+> 11-09's **C2 proxy** pattern for its one credential. It **supersedes** the retired standalone draft
+> `2026-11-14-profile-credential-substrate-SPEC.md`, which reinvented the boundary and was correctly
+> rejected (Iris's 11-14 review: dropped C1/C2/M2/M3, wrong seam, contradicted M2).
 
 ## 1. What this slice is (and is not)
 
@@ -31,7 +33,9 @@ Iris sessions run `gh pr create` under Brian's **ambient** `gh` auth, so their P
 `@bnaylor`. With `CODEOWNERS = * @bnaylor`, **nobody can approve them** — GitHub blocks `@bnaylor`
 from approving his own PR. That is the actual clickhole on Iris-authored PRs. So the fix has two parts:
 
-1. **Iris authors as `iris-main`** (not ambient `@bnaylor`) — via the §4 token path.
+1. **Iris authors as `iris-main`** (not ambient `@bnaylor`) — via the `github_create_pr` proxy tool
+   (§3), which calls `POST /pulls` as the token's identity. `gh pr create` via `run_command` would
+   author as `@bnaylor`, which is the clickhole; the proxy is what actually fixes §2.1.
 2. **CODEOWNERS split (fail-safe, config-only, no iris code):**
    ```
    * @bnaylor                               # default: Brian (floor)
@@ -47,20 +51,65 @@ from approving his own PR. That is the actual clickhole on Iris-authored PRs. So
    **Ruleset requirement:** the `main` ruleset must have **"Dismiss stale PR approvals when new commits
    are pushed"** enabled, or an approval rides a later push.
 
-## 3. The two proxy tools (C2 — spend, never possess)
+## 3. The proxy tools (C2 — spend, never possess)
 
-Host-side Swift tools, reading `iris-main`'s token from the Keychain **themselves**; the token value
-never enters a prompt, tool arg, tool result, `run_command` env, or the sandbox env.
+Host-side Swift tools that read `iris-main`'s token from the Keychain **themselves** and call the GitHub
+REST API directly; the token value never enters a prompt, tool arg, tool result, `run_command` env, or
+the sandbox env. Three tools (Iris's review finding 2 added the third):
 
-- **`github_comment(repo, pr, body)`** — posts a PR conversation comment. Satisfied by an
-  `Issues: write` token (M2).
-- **`github_approve(repo, pr)`** — submits an `APPROVE` review. This is M2's **deliberate escalation**
-  (approve needs `Pull requests: write`), made safe by a **code gate that runs before the API call**
-  (Iris's finding 2):
-  1. resolve the PR's current `headRefOid`;
-  2. refuse unless **every changed file at that `headRefOid`** is inside the routine allowlist
-     (`/docs/`, `/assets/`) — an injected PR touching anything else cannot be self-approved;
-  3. bind the review to that exact `headRefOid` (`commit_id`), so a push after the check can't ride it.
+- **`github_create_pr(repo, head, base, title, body, draft?)`** — `POST /repos/{owner}/{repo}/pulls`.
+  **This is what makes Iris author as `iris-main` (§2.1).** `gh pr create` via `run_command` would author
+  as ambient `@bnaylor`; the proxy authors as the token's identity. Code (`git push`) continues over the
+  existing SSH remote, so the token never needs `Contents: write` (§4).
+- **`github_comment(repo, pr, body)`** — `POST /issues/{n}/comments`. Satisfied by `Issues: write` (M2).
+- **`github_approve(repo, pr)`** — `POST /pulls/{n}/reviews` with `APPROVE`. M2's deliberate escalation
+  (needs `Pull requests: write`), made safe by the §3.2 code gate.
+
+### 3.1 Harness integration — specify it or it collides (Iris finding 1)
+Adding these tools to `ToolExecutor`/`IrisEngine` must be specified against three existing mechanisms:
+
+- **Declare only when configured (Invariant 6).** Omit the three declarations when no `iris-main` token
+  is present in the Keychain, behind an injectable `githubToolsEnabled: Bool` seam on
+  `ToolExecutor.getTools` (like `workspaceToolsEnabled`). Otherwise an unconfigured install pays prompt
+  tokens every turn and `ToolSurfaceTrimTests.plainTurn` (tool-count ≤ 20) fails.
+- **Attended `.main` only.** None of the three is reachable by `.subagent`, `.evaluator`, `.mcpGuest`, or
+  an unattended background job. Add them to `IrisEngine.mainOnlyDeclared` and
+  `IrisEngine.unattendedNeverDeclared`, add them to `JobProfile.readOnlyDenies`, and require
+  `principal == .main && !isUnattended` in `executeFunctionCall` (defence in depth: declared *and*
+  dispatch-refused, per Invariant 6).
+- **OutboundTools / taint.** A reviewer session reads untrusted content (`gh pr diff`, repo files, a peer
+  message) before calling these, setting `hasUntrustedToolOutput`. If the three are in
+  `OutboundTools.builtIn`, every review comment/approval raises a `humanOnly` card in a non-YOLO session —
+  trading the GitHub clickhole for an Iris clickhole. **Decision: these three are EXEMPT from
+  `OutboundTools.builtIn`** — the taint-based outbound gate is replaced here by the stronger, specific
+  controls (the §3.2 repo allowlist + routine-file + SHA-bind gate, attended-`.main`-only, and the
+  least-privilege token). State this exemption explicitly and pin it with a test.
+
+### 3.2 The repo allowlist — user-configurable, enforced in code (Brian + Iris finding 1)
+Every `github_*` tool refuses, **in Swift before any network call**, a `repo` not on an allowlist. But the
+allowlist is **not hardcoded** (Brian, 2026-11-15: Iris will work on many repos, not just `sackheads/iris`):
+
+- The allowed-repo set is a **user-configurable setting** the user edits in the #961/settings UI.
+- It lives in a **protected, non-model-writable store** (H3: policy is not model-writable) — a guarded
+  setting, not something a tainted session or model tool can add to. A tainted reviewer session must not
+  be able to add its own exfil-target repo to the allowlist.
+- **Default is empty → fail-closed** (11-09 fail-closed principle): no repo is allowed until the user adds
+  one. The enforcement is in code (Iris's security point — do not rely only on the PAT's GitHub-side
+  scope); the *contents* come from user config (Brian's point).
+
+### 3.3 The `github_approve` file-check gate (Iris findings 1 + 3)
+`github_approve` refuses unless **every changed file is inside the routine allowlist** (`docs/`, `assets/`),
+bound to an exact commit — hardened against three bypasses Iris flagged:
+
+1. **SHA-keyed, no TOCTOU.** `GET /pulls/{n}/files` is not keyed to a SHA. Resolve `head.sha` from
+   `GET /pulls/{n}`, then fetch the changed files via the **SHA-keyed** `GET /compare/{base_sha}...{head_sha}`
+   (or re-verify `head.sha` is unchanged both before and after the files call). Submit the review with
+   `commit_id = head_sha`, so a push after the check cannot ride the approval.
+2. **Pagination fail-closed.** Request `per_page=100` and **refuse if the file count hits 100** (or a
+   `Link: rel="next"` is present) — never miss a 101st `Sources/` file on page 2.
+3. **Renames + path prefixes.** Require **both** `filename` and `previous_filename` (when non-nil) to begin
+   with `docs/` or `assets/` (GitHub API paths have no leading `/`), with no `..` segments — so a
+   `Sources/IrisKit/x.md` → `docs/x.md` rename can't slip a Sources change past the check.
 
 The token value is scrubbed from any tool output as defence in depth; the primary control is that it was
 never reachable.
@@ -70,9 +119,17 @@ never reachable.
 - **One account, minimal:** `iris-main` as a `github` **service** account (owner-class *service*, per
   11-09). Not the full typed registry — a single Keychain item + a lookup the proxy tools use. It is the
   precursor the #966 registry generalizes later; this slice does not build the registry.
-- **Token scope (least privilege, M2 backstop):** `Pull requests: write` + `Issues: write` on
-  `sackheads/iris` only — no admin, settings, secrets, or other repos. `PR: write` is the escalation
-  §3's `github_approve` needs; the §3 code gate is the primary control, this scope is the backstop.
+- **Keychain service naming (Iris finding 4):** name the service constant in `KeychainManager` (or a key
+  in an existing service), and note whether `DevHomeSeeder` copies it when seeding `~/.iris-dev` from
+  `~/.iris` (it copies `legacyService` + `mcpFileService` + `iris.plugin.*` today) so `run-dev.sh`
+  sessions have the token without manual re-entry.
+- **Token scope (least privilege, M2 backstop):** `Pull requests: write` + `Issues: write` — and
+  **not** `Contents: write`, since `git push` stays on the existing SSH remote and the proxy only calls
+  `POST /pulls`, `POST /issues/{n}/comments`, `POST /pulls/{n}/reviews` (so the token can never push code
+  to any branch). Scoped to the **user-configured allowed repos** (§3.2), not a fixed repo — no admin,
+  settings, or secrets. `PR: write` is the escalation `github_approve` needs; the §3.2/§3.3 code gates are
+  the primary control, this scope is the backstop. (The GitHub-side PAT scope and the in-Swift allowlist
+  are two independent layers; the Swift allowlist is authoritative because it's checked before any call.)
 - **Interim token path (Iris's finding 5):** `iris-main`'s token must **not** go into
   `~/.config/gh/hosts.yml` or a global `GH_TOKEN` — that clobbers `@bnaylor`'s `gh` identity or leaks
   the token to every session/subagent. Hold it in the Keychain and have the proxy tools read it
@@ -84,7 +141,11 @@ never reachable.
 - No forge abstraction; GitHub only.
 - No `AccessProfile`/`Binding`/registry/memory-scoping/A2A (11-09's scope).
 - `/Tests/` and `/Sources/` never bot-approvable in this slice.
-- The raw token never reachable by the model (C2); approve is never a blank check (§3 gate).
+- The raw token never reachable by the model (C2); approve is never a blank check (§3.3 gate).
+- **No hardcoded repo list** — the allowed repos are a user-configurable, protected setting (§3.2); Iris
+  is not iris-repo-only. But the enforcement is in code and defaults fail-closed.
+- The `github_*` tools are never reachable by subagent/evaluator/guest/unattended, and never author or
+  approve as `@bnaylor`.
 - Does not claim to close C1 (ambient host auth for non-owner principals) — that is 11-09.
 
 ## 6. How it plugs into 11-09
