@@ -9,37 +9,59 @@ struct CostBreakdownView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Estimated cost").font(.headline)
-            Grid(alignment: .trailing, horizontalSpacing: 14, verticalSpacing: 4) {
-                GridRow {
-                    Text("").gridColumnAlignment(.leading)
-                    Text("Tokens"); Text("Rate"); Text("Cost")
-                }
-                .font(.caption).foregroundStyle(.secondary)
-                ForEach(breakdown.lines, id: \.kind) { line in
-                    GridRow {
-                        Text(line.label).gridColumnAlignment(.leading)
-                        Text(CostBreakdown.tokens(line.tokens)).monospacedDigit()
-                        Text(CostBreakdown.rate(line.ratePerMTok)).monospacedDigit()
-                        Text(CostBreakdown.cost(of: line)).monospacedDigit()
-                    }
-                    if let note = line.note {
-                        GridRow { Text(note).font(.caption).foregroundStyle(.secondary).gridCellColumns(4).gridColumnAlignment(.leading) }
+            if breakdown.sections.isEmpty {
+                lineGrid(lines: breakdown.lines, total: breakdown.total, totalLabel: "Total", bold: true)
+                Text("\(breakdown.model) rates (\(breakdown.rateSourceNote)).")
+                    .font(.caption)
+            } else {
+                ForEach(breakdown.sections, id: \.title) { section in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(section.title).font(.subheadline).bold()
+                        lineGrid(lines: section.lines, total: section.total, totalLabel: "Subtotal", bold: false)
+                        Text("Rates: \(section.rateSourceNote).").font(.caption)
+                        if let note = section.note {
+                            Text(note).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
-                Divider().gridCellColumns(4)
-                GridRow {
-                    Text("Total").bold().gridColumnAlignment(.leading)
-                    Text(""); Text("")
+                HStack {
+                    Text("Total").bold()
+                    Spacer()
                     Text(CostBreakdown.money(breakdown.total)).bold().monospacedDigit()
                 }
             }
-            Text("\(breakdown.model) rates (\(breakdown.rateSourceNote)).")
-                .font(.caption)
             ForEach(breakdown.caveats, id: \.self) { caveat in
                 Text(caveat).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(14)
         .frame(width: 400)
+    }
+
+    private func lineGrid(lines: [CostBreakdown.Line], total: Double, totalLabel: String, bold: Bool) -> some View {
+        Grid(alignment: .trailing, horizontalSpacing: 14, verticalSpacing: 4) {
+            GridRow {
+                Text("").gridColumnAlignment(.leading)
+                Text("Tokens"); Text("Rate"); Text("Cost")
+            }
+            .font(.caption).foregroundStyle(.secondary)
+            ForEach(lines, id: \.kind) { line in
+                GridRow {
+                    Text(line.label).gridColumnAlignment(.leading)
+                    Text(CostBreakdown.tokens(line.tokens)).monospacedDigit()
+                    Text(CostBreakdown.rate(line.ratePerMTok)).monospacedDigit()
+                    Text(CostBreakdown.cost(of: line)).monospacedDigit()
+                }
+                if let note = line.note {
+                    GridRow { Text(note).font(.caption).foregroundStyle(.secondary).gridCellColumns(4).gridColumnAlignment(.leading) }
+                }
+            }
+            Divider().gridCellColumns(4)
+            GridRow {
+                Text(totalLabel).bold(bold).gridColumnAlignment(.leading)
+                Text(""); Text("")
+                Text(CostBreakdown.money(total)).bold(bold).monospacedDigit()
+            }
+        }
     }
 }
