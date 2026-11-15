@@ -119,6 +119,12 @@ public enum IrisMain {
             // mid-seed waits. A no-op when the claim was refused.
             StoreLock.vacate(at: IrisPaths.release.storeLockFile)
             exit(code)
+        } else if CommandLine.arguments.contains("--set-github-token") {
+            // #966 Task 6: no Settings UI this slice; config is set via this headless entry,
+            // reading the token from stdin, never argv (argv leaks into `ps`).
+            exit(GitHubConfigSetterCLI.runSetToken())
+        } else if CommandLine.arguments.contains("--set-github-repos") {
+            exit(GitHubConfigSetterCLI.runSetRepos())
         } else {
             ProcessRole.set(.app)
             // Off the main thread, before the first window: a sidebar row reads it (#1001).
