@@ -112,8 +112,9 @@ JSON columns; transcripts are left alone), pauses every copied job ("copied into
 unpause to run it here"), and writes `.seeded-from-release` at the new home's root. The `.dev`
 Keychain items it creates trust only the binary that made them (the bare `iris`), so Iris Dev.app
 asks for the login password once per copied item, the first time it reads it
-(`com.iris.secrets.dev` at launch, `iris.mcp.dev` and each `iris.plugin.<id>.dev` when first used;
-the seeder's success line lists them): Always Allow with the app still open adds it for good, for
+(`com.iris.secrets.dev` and, when a GitHub token was seeded, `iris.github.dev`, both at launch;
+`iris.mcp.dev` and each `iris.plugin.<id>.dev` when first used; the seeder's success line lists
+them): Always Allow with the app still open adds it for good, for
 every Developer ID–signed rebuild; Deny, or quitting before answering, means that item asks again
 next launch (#578). Creating the items with an access list that also trusts the app was considered and
 rejected: it needs `SecAccessCreate` and `SecTrustedApplicationCreateFromPath`, deprecated since
@@ -231,7 +232,8 @@ hand. If the skill isn't installed, ask the user rather than skipping this.
 the item's access list only while the app that asked is still running; a harness that quits it
 first (a measurement watcher, a timeout) leaves the item untouched, and every later launch asks
 again (#578). The first launch on a freshly seeded dev home asks for `com.iris.secrets.dev`, and
-later reads ask for each other seeded item: wait for each prompt to be answered before measuring
+`iris.github.dev` too if a GitHub token was seeded, and later reads ask for each other seeded
+item: wait for each prompt to be answered before measuring
 or quitting.
 
 ### Worktrees: remove them when their PR merges

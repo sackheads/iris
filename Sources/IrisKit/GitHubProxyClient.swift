@@ -14,6 +14,8 @@ struct GitHubProxyClient {
 
     /// The `iris-main` PAT, or nil if none is stored.
     static func token(keychain: KeychainManager) -> String? {
-        keychain.secrets(service: KeychainManager.githubService)["token"]
+        let trimmed = keychain.secrets(service: KeychainManager.githubService)["token"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.flatMap { $0.isEmpty ? nil : $0 }
     }
 }
