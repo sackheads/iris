@@ -8,7 +8,7 @@ import Foundation
 @MainActor
 @Suite("GitHub tool surface (#966 Task 5)", .timeLimit(.minutes(1)))
 struct GitHubToolSurfaceTests {
-    static let names = ["github_create_pr", "github_comment", "github_approve"]
+    nonisolated static let names = ["github_create_pr", "github_comment", "github_approve"]
 
     // MARK: declaration
 
