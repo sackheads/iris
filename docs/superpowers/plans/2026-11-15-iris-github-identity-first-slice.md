@@ -54,7 +54,7 @@ These are the spec's Part-1 config steps. The code tasks below are buildable and
 - Create the `iris-main` GitHub service account; issue a fine-grained PAT with `Pull requests: write` + `Issues: write` (no `Contents: write`), scoped to the intended repos. Store it into the `iris.github` Keychain service via `iris --set-github-token` (Task 6).
 - Set the allowed repos via `iris --set-github-repos` (Task 6); default empty → the tools refuse everything until set.
 - `CODEOWNERS` split on `sackheads/iris` (§2): `* @bnaylor`, `/docs/` + `/assets/` → `@iris-main @sackheads-bot`, `/.github/CODEOWNERS @bnaylor`.
-- Enable "Dismiss stale PR approvals when new commits are pushed" on the `main` ruleset.
+- Enable BOTH on the `main` ruleset: "Dismiss stale PR approvals when new commits are pushed" and "Require approval of the most recent reviewable push" (dismissal fires at push time, so a push that lands before the review exists is not dismissed; the second setting keeps that older-commit approval from counting toward the newer head).
 
 ---
 
