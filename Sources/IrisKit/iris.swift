@@ -3776,7 +3776,11 @@ actor IrisEngine {
         // 5c §1: a strip always wins over stickiness. The gates above already skip these for an
         // unattended turn or a non-main principal; this pass is what holds when a sticky set says
         // otherwise.
-        toolsList = Self.hardStrip(toolsList, isUnattended: isUnattended, principal: principal)
+        // #966: a turn a guest's message started is attended and `.main`, but it acts for a guest;
+        // the `github_*` tools act as `iris-main` with no approval step, so it is not offered them.
+        let githubOffered = toolsList.contains { ToolExecutor.githubProxyTools.contains($0.name) }
+        let guestOrigin = githubOffered ? await isGuestOriginConversation(conversationId) : false
+        toolsList = Self.hardStrip(toolsList, isUnattended: isUnattended, principal: principal, guestOrigin: guestOrigin)
         if stickyApplies {
             let declared = toolsList.map(\.name)
             await MainActor.run { localState?.stickyTools.record(declared, for: conversationId) }
@@ -5247,8 +5251,9 @@ actor IrisEngine {
     }
 
     nonisolated static func hardStrip(_ tools: [FunctionDeclaration], isUnattended: Bool,
-                                      principal: Principal) -> [FunctionDeclaration] {
+                                      principal: Principal, guestOrigin: Bool = false) -> [FunctionDeclaration] {
         var denied: Set<String> = []
+        if guestOrigin { denied.formUnion(ToolExecutor.githubProxyTools) }
         if isUnattended { denied.formUnion(unattendedNeverDeclared) }
         if principal != .main { denied.formUnion(mainOnlyDeclared) }
         return denied.isEmpty ? tools : tools.filter { !denied.contains($0.name) }
@@ -5428,9 +5433,21 @@ actor IrisEngine {
     static let githubOffPrincipalRefusal =
         "The GitHub tools are available only to the user's own attended conversation, so this call was not run."
 
-    static func githubDispatchRefusal(_ name: String, isUnattended: Bool, principal: Principal) -> String? {
-        guard ToolExecutor.githubProxyTools.contains(name), isUnattended || principal != .main else { return nil }
+    static func githubDispatchRefusal(_ name: String, isUnattended: Bool, principal: Principal,
+                                      guestOrigin: Bool = false) -> String? {
+        guard ToolExecutor.githubProxyTools.contains(name), isUnattended || principal != .main || guestOrigin else { return nil }
         return githubOffPrincipalRefusal
+    }
+
+    /// Whether a guest's message started this conversation's turn, or its delegation root's (#1119,
+    /// the same test the approval ladder uses): that turn is attended and `.main` but its words are a
+    /// guest's, so it must not act as `iris-main`.
+    func isGuestOriginConversation(_ conversationId: UUID) async -> Bool {
+        await MainActor.run {
+            guard let localState else { return false }
+            return localState.isGuestOriginTurn(conversationId)
+                || localState.isGuestOriginTurn(localState.delegationRoot(of: conversationId))
+        }
     }
 
     /// What the dispatcher tells a background run that reached for one anyway.
@@ -5812,7 +5829,10 @@ actor IrisEngine {
         // The epic's standing ruling: no unattended job creation. Neither tool is declared to a
         // background turn (see `buildRequest`), but declaration gating only stops a well-behaved
         // model — the refusal has to live at the point that would actually write the row.
-        if let refusal = Self.githubDispatchRefusal(functionCall.name, isUnattended: isUnattended, principal: principal) {
+        let githubGuestOrigin = ToolExecutor.githubProxyTools.contains(functionCall.name)
+            ? await isGuestOriginConversation(conversationId) : false
+        if let refusal = Self.githubDispatchRefusal(functionCall.name, isUnattended: isUnattended, principal: principal,
+                                                    guestOrigin: githubGuestOrigin) {
             return refusal
         }
         if Self.jobCreationTools.contains(functionCall.name), isUnattended {

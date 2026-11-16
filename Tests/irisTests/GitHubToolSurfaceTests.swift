@@ -88,6 +88,16 @@ struct GitHubToolSurfaceTests {
         for name in Self.names { #expect(!unattended.contains(name), "\(name) for an unattended turn") }
     }
 
+    @Test("a guest-origin turn is attended main, but loses them too")
+    func hardStripDropsThemForAGuestOriginTurn() async {
+        let all = await ToolExecutor.shared.getTools(workspaceToolsEnabled: false, githubToolsEnabled: true)
+        let stripped = Set(IrisEngine.hardStrip(all, isUnattended: false, principal: .main, guestOrigin: true).map(\.name))
+        for name in Self.names { #expect(!stripped.contains(name), Comment(rawValue: name)) }
+        #expect(stripped.contains("run_command"), "only the github tools go")
+        let kept = Set(IrisEngine.hardStrip(all, isUnattended: false, principal: .main, guestOrigin: false).map(\.name))
+        for name in Self.names { #expect(kept.contains(name), Comment(rawValue: name)) }
+    }
+
     @Test("both gating sets name all three, so a sticky or stale declaration cannot offer them")
     func gatingSetsNameThem() {
         for name in Self.names {
@@ -105,15 +115,27 @@ struct GitHubToolSurfaceTests {
             #expect(IrisEngine.githubDispatchRefusal(name, isUnattended: false, principal: principal) == IrisEngine.githubOffPrincipalRefusal)
         }
         #expect(IrisEngine.githubDispatchRefusal(name, isUnattended: true, principal: .main) == IrisEngine.githubOffPrincipalRefusal)
-        #expect(IrisEngine.githubDispatchRefusal("run_command", isUnattended: true, principal: .subagent) == nil)
+        #expect(IrisEngine.githubDispatchRefusal(name, isUnattended: false, principal: .main, guestOrigin: true) == IrisEngine.githubOffPrincipalRefusal)
+        #expect(IrisEngine.githubDispatchRefusal("run_command", isUnattended: true, principal: .subagent, guestOrigin: true) == nil)
     }
 
     /// One turn in a conversation where the model calls `call`, returning what the dispatcher gave it.
-    private func dispatchResult(for call: FunctionCall, principal: Principal, background: Bool) async throws -> String {
+    private func dispatchResult(for call: FunctionCall, principal: Principal, background: Bool,
+                                guestOrigin: GuestOrigin = .none) async throws -> String {
         let app = AppState()
         app.conversations.removeAll()
-        let id = UUID()
+        var id = UUID()
         app.createNewConversation(id: id)
+        switch guestOrigin {
+        case .none: break
+        case .conversation: app.markGuestOriginTurn(id)
+        case .delegationRoot:
+            let root = id
+            app.markGuestOriginTurn(root)
+            id = UUID()
+            app.createNewConversation(id: id)
+            app.linkDelegate(id, of: root)
+        }
         if background, let idx = app.conversations.firstIndex(where: { $0.id == id }) {
             app.conversations[idx].isBackground = true
         }
@@ -137,6 +159,8 @@ struct GitHubToolSurfaceTests {
         return responses.compactMap { $0.response["result"]?.stringValue }.joined(separator: "\n")
     }
 
+    enum GuestOrigin { case none, conversation, delegationRoot }
+
     private func approveCall() -> FunctionCall {
         FunctionCall(name: "github_approve", args: ["repo": .string("sackheads/iris"), "pr": .int(5)])
     }
@@ -152,6 +176,19 @@ struct GitHubToolSurfaceTests {
         let call = FunctionCall(name: "github_comment", args: ["repo": .string("sackheads/iris"), "pr": .int(5), "body": .string("hi")])
         let result = try await dispatchResult(for: call, principal: .main, background: true)
         #expect(result.contains(IrisEngine.githubOffPrincipalRefusal))
+    }
+
+    @Test("an attended main turn a guest's message started is refused, itself or through its delegation root",
+          arguments: [GuestOrigin.conversation, .delegationRoot])
+    func guestOriginTurnRefused(_ origin: GuestOrigin) async throws {
+        let result = try await dispatchResult(for: approveCall(), principal: .main, background: false, guestOrigin: origin)
+        #expect(result.contains(IrisEngine.githubOffPrincipalRefusal))
+    }
+
+    @Test("control: the same call from an unmarked attended main turn is not refused as off-principal")
+    func unmarkedMainTurnIsNotRefusedForPrincipal() async throws {
+        let result = try await dispatchResult(for: approveCall(), principal: .main, background: false)
+        #expect(!result.contains(IrisEngine.githubOffPrincipalRefusal))
     }
 
     // MARK: outbound gate, read-only jobs
