@@ -24,6 +24,45 @@ struct GitHubToolSurfaceTests {
         #expect(Set(Self.names) == ToolExecutor.githubProxyTools)
     }
 
+    /// A manager over its own store and keychain, with the token and allowlist as given.
+    private func config(token: Bool, repos: String?) -> ConfigManager {
+        let name = "iris-966t5-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: name)!
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
+        if token { keychain.replaceSecrets(["token": "ghp_TestToken1234567890abcdef"], service: KeychainManager.githubService) }
+        let seed = ConfigManager(store: store, guardedSecrets: keychain)
+        if let repos { seed.setGuardedBlob(.githubAllowedRepos, repos) }
+        return ConfigManager(store: store, guardedSecrets: keychain)
+    }
+
+    @Test("the tools are configured only when a token AND at least one allowed repo are both set")
+    func configuredNeedsTokenAndRepos() {
+        #expect(config(token: true, repos: "[\"sackheads/iris\"]").githubToolsConfigured)
+        #expect(!config(token: true, repos: nil).githubToolsConfigured, "a token alone: the tools could only refuse")
+        #expect(!config(token: true, repos: "[]").githubToolsConfigured)
+        #expect(!config(token: false, repos: "[\"sackheads/iris\"]").githubToolsConfigured, "repos alone: nothing to act with")
+        #expect(!config(token: false, repos: nil).githubToolsConfigured)
+    }
+
+    @Test("a malformed or wrongly shaped allowlist does not count as configured", arguments: [
+        "not json", "{}", "\"sackheads/iris\"", "[1]", "[\"sackheads/iris\",3]", "null",
+    ])
+    func malformedListIsNotConfigured(_ blob: String) {
+        #expect(!config(token: true, repos: blob).githubToolsConfigured)
+    }
+
+    @Test("both parts are fixed at launch: a list or token written afterwards waits for the next launch")
+    func configuredIsFixedAtLaunch() {
+        let name = "iris-966t5-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: name)!
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
+        let live = ConfigManager(store: store, guardedSecrets: keychain)
+        keychain.replaceSecrets(["token": "ghp_TestToken1234567890abcdef"], service: KeychainManager.githubService)
+        live.setGuardedBlob(.githubAllowedRepos, "[\"sackheads/iris\"]")
+        #expect(!live.githubToolsConfigured, "the running manager does not change under the user")
+        #expect(ConfigManager(store: store, guardedSecrets: keychain).githubToolsConfigured, "the next launch picks both up")
+    }
+
     @Test("a plain turn with no token carries none of them")
     func plainTurnCarriesNone() async {
         let app = AppState()

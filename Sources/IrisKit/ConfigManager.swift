@@ -74,6 +74,13 @@ class ConfigManager: @unchecked Sendable {
     /// already-running app's in-memory flag, so the token it stores takes effect on the app's
     /// next launch, not live.
     @ObservationIgnored let hasGitHubToken: Bool
+    /// Whether the user's allowed-repos list (#966) holds at least one repo, read once at launch
+    /// from the same guarded load as everything else and fixed for this run, like `hasGitHubToken`:
+    /// `iris --set-github-repos` is a separate process, so a new list takes effect on the next launch.
+    @ObservationIgnored let hasGitHubAllowedRepos: Bool
+    /// What declares the `github_*` tools (Invariant 6): a token to act with and a repo to act on.
+    /// With either missing the tools can only refuse, so they are not offered.
+    var githubToolsConfigured: Bool { hasGitHubToken && hasGitHubAllowedRepos }
     /// What this launch found in the secrets item for the guarded settings.
     @ObservationIgnored var guardedState: GuardedSettings.State = .normal
     /// Launch notices about the guarded settings, taken once by `AppState`.
@@ -667,6 +674,9 @@ class ConfigManager: @unchecked Sendable {
         func guardedString(_ key: GuardedKey, _ legacy: String) -> String? {
             guarded.map { $0[key] ?? "" } ?? saved.string(forKey: legacy)
         }
+
+        self.hasGitHubAllowedRepos = !Self.parseGitHubAllowlist(
+            guardedString(.githubAllowedRepos, GuardedKey.githubAllowedRepos.rawValue) ?? "").isEmpty
 
         let savedProvider = saved.string(forKey: "PRIMARY_PROVIDER") ?? "Gemini"
         self.primaryProvider = savedProvider

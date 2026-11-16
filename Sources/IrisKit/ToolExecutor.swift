@@ -103,11 +103,13 @@ struct ToolExecutor {
     /// Google Tasks / Workspace call fails, so the ten declarations were pure prompt weight (#133).
     /// Injectable so tests never mutate `ConfigManager.shared`.
     ///
-    /// `githubToolsEnabled` defaults to "the `iris-main` token is present" (#966, Invariant 6): the three
-    /// `github_*` declarations are prompt weight an unconfigured install must not pay. The default
-    /// reads `ConfigManager.hasGitHubToken`, fixed at launch, never the Keychain per turn (#578).
+    /// `githubToolsEnabled` defaults to "the `iris-main` token is present and the user has allowed at
+    /// least one repo" (#966, Invariant 6): with either missing the three `github_*` tools can only
+    /// refuse, so their declarations are prompt weight an unconfigured install must not pay. The
+    /// default reads `ConfigManager.githubToolsConfigured`, both parts fixed at launch, never the
+    /// Keychain per turn (#578).
     func getTools(workspaceToolsEnabled: Bool = !ConfigManager.shared.googleRefreshToken.isEmpty,
-                  githubToolsEnabled: Bool = ConfigManager.shared.hasGitHubToken) async -> [FunctionDeclaration] {
+                  githubToolsEnabled: Bool = ConfigManager.shared.githubToolsConfigured) async -> [FunctionDeclaration] {
         var tools = [
             FunctionDeclaration(
             name: "run_command",
