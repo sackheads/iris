@@ -95,10 +95,13 @@ control.
 ### 3.1 Harness integration — specify it or it collides (Iris finding 1)
 Adding these tools to `ToolExecutor`/`IrisEngine` must be specified against three existing mechanisms:
 
-- **Declare only when configured (Invariant 6).** Omit the three declarations when no `iris-main` token
-  is present in the Keychain, behind an injectable `githubToolsEnabled: Bool` seam on
-  `ToolExecutor.getTools` (like `workspaceToolsEnabled`). Otherwise an unconfigured install pays prompt
-  tokens every turn and `ToolSurfaceTrimTests.plainTurn` (tool-count ≤ 20) fails.
+- **Declare only when configured (Invariant 6).** Omit the three declarations unless an `iris-main` token
+  is present in the Keychain **and** the user has allowed at least one repo (§3.2): with either missing
+  the tools can only refuse, so declaring them is dead prompt weight. Both are read once at launch
+  (`ConfigManager.githubToolsConfigured`), behind an injectable `githubToolsEnabled` seam on
+  `ToolExecutor.getTools` (like `workspaceToolsEnabled`); a token or list set later takes effect on the
+  next launch. Otherwise an unconfigured install pays prompt tokens every turn and
+  `ToolSurfaceTrimTests.plainTurn` (tool-count ≤ 20) fails.
 - **Attended `.main` only.** None of the three is reachable by `.subagent`, `.evaluator`, `.mcpGuest`, or
   an unattended background job. Add them to `IrisEngine.mainOnlyDeclared` and
   `IrisEngine.unattendedNeverDeclared`, add them to `JobProfile.readOnlyDenies`, and require
