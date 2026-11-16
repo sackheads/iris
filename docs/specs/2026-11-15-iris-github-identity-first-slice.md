@@ -107,10 +107,17 @@ Adding these tools to `ToolExecutor`/`IrisEngine` must be specified against thre
 - **OutboundTools / taint.** A reviewer session reads untrusted content (`gh pr diff`, repo files, a peer
   message) before calling these, setting `hasUntrustedToolOutput`. If the three are in
   `OutboundTools.builtIn`, every review comment/approval raises a `humanOnly` card in a non-YOLO session —
-  trading the GitHub clickhole for an Iris clickhole. **Decision: these three are EXEMPT from
-  `OutboundTools.builtIn`** — the taint-based outbound gate is replaced here by the stronger, specific
-  controls (the §3.2 repo allowlist + routine-file + SHA-bind gate, attended-`.main`-only, and the
-  least-privilege token). State this exemption explicitly and pin it with a test.
+  trading the GitHub clickhole for an Iris clickhole. **Decision (Brian-ratified, 2026-11-15): the
+  `github_*` tools are exempt from the taint/outbound approval gate.** A reviewer always reads the PR
+  diff (untrusted) before acting, so the gate would fire on every review and defeat the clickhole
+  relief. They are bounded instead by the §3.2 allowlist, the §3.3 approve gate and `CODEOWNERS` (worst
+  case: an unwanted routine docs/assets approval, never a code merge). The exemption is pinned by a test
+  (`GitHubToolSurfaceTests`), and `OutboundTools.builtIn` does not list them.
+- **Guest-origin turns (closed separately).** A turn a guest's message started is attended and `.main`,
+  and these tools have no approval step, so the guest-origin guards in the approval ladder never see
+  them. They are therefore neither declared to such a turn nor dispatched for one: the dispatcher refuses
+  a `github_*` call when the conversation, or its delegation root, is guest-origin (#1119's marker),
+  and `hardStrip` drops the declarations. Pinned through the dispatcher and a real turn.
 
 ### 3.2 The repo allowlist — user-configurable, enforced in code (Brian + Iris finding 1)
 Every `github_*` tool refuses, **in Swift before any network call**, a `repo` not on an allowlist. But the
