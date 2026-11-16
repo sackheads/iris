@@ -52,6 +52,10 @@ enum GitCredentialHelperCLI {
     /// anything refuses -- a malformed/lookalike request, a repo not on the allowlist, or no
     /// `iris-main` token configured. Empty means git gets nothing from this helper and falls
     /// through (to another configured helper, or fails outright with `GIT_TERMINAL_PROMPT=0`).
+    /// This refusal path is silent on purpose: it never builds a message naming the repo, the
+    /// request, or anything else, so there is no string a refusal could leak the token into. The
+    /// token appears in exactly one place in this whole type -- `run`'s single `print` of this
+    /// return value on a `get` -- never stderr, never a log, never an error description.
     static func respond(fields: [String: String], keychain: KeychainManager, isRepoAllowed: (String) -> Bool) -> String {
         guard let repo = repoFromFields(fields), isRepoAllowed(repo),
               let token = GitHubProxyClient.token(keychain: keychain) else { return "" }

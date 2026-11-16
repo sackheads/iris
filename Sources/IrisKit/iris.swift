@@ -212,6 +212,13 @@ actor IrisEngine {
         executor.postSandboxNote = { [weak self] conversationId, text in
             await self?.pushToUI(role: .system, text: text, conversationId: conversationId)
         }
+        // #966 Task 8: the same guest-origin signal `githubDispatchRefusal` is built from, so
+        // run_command's iris-main git-identity environment is suppressed on a guest-steered
+        // attended turn too, not only on the github_* tools' own principal-based refusal.
+        executor.isGuestOriginTurn = { [weak state] id in
+            guard let state else { return true }
+            return await MainActor.run { state.isGuestOriginTurn(id) || state.isGuestOriginTurn(state.delegationRoot(of: id)) }
+        }
         return executor
     }
 
