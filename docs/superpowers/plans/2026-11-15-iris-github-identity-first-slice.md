@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Give Iris a second GitHub identity (`iris-main`) she acts as — opening PRs, commenting, and approving *routine* (docs/assets) PRs — through three host-side proxy tools that hold the token in the Keychain so the model never sees it.
+**Goal:** Give Iris a second GitHub identity (`iris-main`) she acts as — opening PRs, commenting, and approving *routine* (docs/assets) PRs — through three host-side tools that read the token from the Keychain. `iris-main` is a full git contributor (spec §3-§4): the credential is Iris's own and the goal is identity separation from `@bnaylor`, not hiding it; the lockdown is on approval authority only.
 
 **Architecture:** Three new tools (`github_create_pr`, `github_comment`, `github_approve`) in `ToolExecutor`, backed by a new `GitHubProxyClient` that reads the token from a dedicated Keychain service and calls the GitHub REST API via `URLSession`. A user-configured, model-unwritable allowed-repos list (guarded-settings `.blob`) is enforced in Swift before any network call; `github_approve` additionally refuses unless every changed file is under `docs/`/`assets/`, bound to an exact commit SHA. The tools are credential-gated in declaration (Invariant 6), attended-`.main`-only, and exempt from the outbound-taint gate (the specific controls replace it).
 
@@ -12,11 +12,11 @@
 
 ## Global Constraints
 
-- **C2 "spend, never possess":** the token value never enters a prompt, tool arg, tool result, error string, `run_command` env, or the sandbox env. The proxy reads the Keychain itself. (Spec §3.)
+- **Identity separation, not secrecy (spec §3-§4):** the credential is Iris's own, stored under its own Keychain service with an isolated git/`gh` config, so `iris-main` never mixes with `@bnaylor`'s ambient identity. The host-side tools still keep the token out of tool results and error strings (Task 3's `sanitize`), as defence in depth.
 - **Invariant 6:** the three tools are declared only when a token is present, behind an injectable `githubToolsEnabled: Bool` seam on `ToolExecutor.getTools`. A plain no-credential turn must not carry them (`ToolSurfaceTrimTests.plainTurn` asserts tool-count ≤ 20).
 - **Attended `.main` only:** never reachable by `.subagent`, `.evaluator`, `.mcpGuest`, or an unattended background job — declaration-stripped AND dispatch-refused (defence in depth).
 - **Allowlist is enforced in code, user-configured, model-unwritable, default empty (fail-closed).** No repo is allowed until the user adds one via `iris --set-github-repos` (Task 6; no Settings UI in this slice). (Spec §3.2.)
-- **Token scope backstop:** `Pull requests: write` + `Issues: write`, never `Contents: write`. The in-Swift allowlist + §3.3 gate are the primary control; the PAT scope is the backstop.
+- **Token scope (contributor model):** `Contents`, `Pull requests` and `Issues`, each read and write, scoped to the allowed repos; no Administration, Secrets, Workflows or Settings. The scope is not what bounds her: branch protection plus `CODEOWNERS` (her approval counts only for `/docs` and `/assets`) does, with the in-Swift allowlist and the §3.3 gate on top.
 - **No warnings** in `Sources/`/`Tests/` (`scripts/check-warnings.sh` exits 0). Swift Testing only (`@Suite`/`@Test`/`#expect`).
 - **Any new persisted field** uses `decodeIfPresent` (Invariant 1). **No `ConfigManager.shared` mutation in tests** (Invariant 7) — inject a `ConfigManager(store:)`.
 - This is credential + approval boundary code → **rule-26** (two dev reviewers) on every PR.
@@ -51,7 +51,7 @@ These are the spec's Part-1 config steps. The code tasks below are buildable and
 
 **No Settings UI in this slice (Brian, 2026-11-15):** the token and allowed-repos are entered via a minimal **headless setter** (Task 6), not a GUI. The real token/repos/profile UI is deferred to the **#961 profile pane**, so this slice doesn't build settings fields #961 will redo. Config-by-command is the dogfood path.
 
-- Create the `iris-main` GitHub service account; issue a fine-grained PAT with `Pull requests: write` + `Issues: write` (no `Contents: write`), scoped to the intended repos. Store it into the `iris.github` Keychain service via `iris --set-github-token` (Task 6).
+- Create the `iris-main` GitHub service account; give it a verified email and issue a fine-grained PAT with `Contents`, `Pull requests` and `Issues`, each read and write (no Administration, Secrets, Workflows or Settings), scoped to the intended repos; Iris commits with `user.name`/`user.email` set to `iris-main`, through an isolated git/`gh` config (spec §4). Store it into the `iris.github` Keychain service via `iris --set-github-token` (Task 6).
 - Set the allowed repos via `iris --set-github-repos` (Task 6); default empty → the tools refuse everything until set.
 - `CODEOWNERS` split on `sackheads/iris` (§2): `* @bnaylor`, `/docs/` + `/assets/` → `@iris-main @sackheads-bot`, `/.github/CODEOWNERS @bnaylor`.
 - Enable BOTH on the `main` ruleset: "Dismiss stale PR approvals when new commits are pushed" and "Require approval of the most recent reviewable push" (dismissal fires at push time, so a push that lands before the review exists is not dismissed; the second setting keeps that older-commit approval from counting toward the newer head).
