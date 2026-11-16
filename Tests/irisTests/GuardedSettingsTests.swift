@@ -177,6 +177,27 @@ struct GuardedSettingsTests {
         #expect(keychain.loadSecrets()["SUBAGENT_PROVIDERS"] == "[\"out-of-band\"]")
     }
 
+    @Test("allowedGitHubRepos lists exactly what isGitHubRepoAllowed checks membership against (iris-main git identity)")
+    func allowedGitHubReposSharesTheAllowlist() {
+        let (store, keychain, suite) = harness()
+        defer { teardown(suite) }
+        let config = ConfigManager(store: store, guardedSecrets: keychain)
+        config.setGuardedBlob(.githubAllowedRepos, "[\"sackheads/iris\",\"bnaylor/notes\"]")
+        #expect(config.allowedGitHubRepos() == ["sackheads/iris", "bnaylor/notes"])
+    }
+
+    @Test("allowedGitHubRepos is empty for every shape that makes isGitHubRepoAllowed refuse everything", arguments: [
+        "", "[]", "not json", "{", "{\"sackheads/iris\":true}", "\"sackheads/iris\"", "null", "42",
+        "[1,2]", "[\"sackheads/iris\",7]", "[[\"sackheads/iris\"]]", "[null]",
+    ])
+    func allowedGitHubReposEmptyForMalformedShapes(_ raw: String) {
+        let (store, keychain, suite) = harness()
+        defer { teardown(suite) }
+        let config = ConfigManager(store: store, guardedSecrets: keychain)
+        config.setGuardedBlob(.githubAllowedRepos, raw)
+        #expect(config.allowedGitHubRepos().isEmpty)
+    }
+
     @Test("an empty, malformed or wrongly shaped list allows nothing", arguments: [
         "", "[]", "not json", "{", "{\"sackheads/iris\":true}", "\"sackheads/iris\"", "null", "42",
         "[1,2]", "[\"sackheads/iris\",7]", "[[\"sackheads/iris\"]]", "[null]",
