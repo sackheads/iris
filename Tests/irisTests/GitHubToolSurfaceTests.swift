@@ -129,12 +129,12 @@ struct GitHubToolSurfaceTests {
         switch guestOrigin {
         case .none: break
         case .conversation: app.markGuestOriginTurn(id)
-        case .delegationRoot:
+        case .delegationRoot, .delegateOnly:
             let root = id
-            app.markGuestOriginTurn(root)
             id = UUID()
             app.createNewConversation(id: id)
             app.linkDelegate(id, of: root)
+            app.markGuestOriginTurn(guestOrigin == .delegationRoot ? root : id)
         }
         if background, let idx = app.conversations.firstIndex(where: { $0.id == id }) {
             app.conversations[idx].isBackground = true
@@ -159,7 +159,7 @@ struct GitHubToolSurfaceTests {
         return responses.compactMap { $0.response["result"]?.stringValue }.joined(separator: "\n")
     }
 
-    enum GuestOrigin { case none, conversation, delegationRoot }
+    enum GuestOrigin { case none, conversation, delegationRoot, delegateOnly }
 
     private func approveCall() -> FunctionCall {
         FunctionCall(name: "github_approve", args: ["repo": .string("sackheads/iris"), "pr": .int(5)])
@@ -179,7 +179,7 @@ struct GitHubToolSurfaceTests {
     }
 
     @Test("an attended main turn a guest's message started is refused, itself or through its delegation root",
-          arguments: [GuestOrigin.conversation, .delegationRoot])
+          arguments: [GuestOrigin.conversation, .delegationRoot, .delegateOnly])
     func guestOriginTurnRefused(_ origin: GuestOrigin) async throws {
         let result = try await dispatchResult(for: approveCall(), principal: .main, background: false, guestOrigin: origin)
         #expect(result.contains(IrisEngine.githubOffPrincipalRefusal))
@@ -189,6 +189,36 @@ struct GitHubToolSurfaceTests {
     func unmarkedMainTurnIsNotRefusedForPrincipal() async throws {
         let result = try await dispatchResult(for: approveCall(), principal: .main, background: false)
         #expect(!result.contains(IrisEngine.githubOffPrincipalRefusal))
+    }
+
+    /// The tool names a real turn declares to the model, with the engine told whether to offer them.
+    private func declared(principal: Principal, guestOrigin: Bool, background: Bool = false) async -> [String] {
+        let app = AppState()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        if guestOrigin { app.markGuestOriginTurn(id) }
+        if background, let idx = app.conversations.firstIndex(where: { $0.id == id }) { app.conversations[idx].isBackground = true }
+        let client = CapturingLLMClient(reply: "ok")
+        let engine = IrisEngine(state: app, tier: .medium, principal: principal, client: client, retryDelays: [],
+                                sessionPeerCount: 0, githubToolsEnabled: true)
+        await engine.processInput("hello", source: "UI", conversationId: id)
+        return client.requests.first?.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? []
+    }
+
+    @Test("a real attended main turn is offered all three when the tools are configured")
+    func attendedMainIsOffered() async {
+        let offered = await declared(principal: .main, guestOrigin: false)
+        for name in Self.names { #expect(offered.contains(name), Comment(rawValue: name)) }
+    }
+
+    @Test("a real guest-origin main turn, a background turn and a subagent are offered none of them")
+    func nobodyElseIsOffered() async {
+        for (label, names) in [("guest-origin", await declared(principal: .main, guestOrigin: true)),
+                               ("background", await declared(principal: .main, guestOrigin: false, background: true)),
+                               ("subagent", await declared(principal: .subagent, guestOrigin: false))] {
+            for name in Self.names { #expect(!names.contains(name), "\(name) offered to \(label)") }
+            #expect(names.contains("run_command"), "\(label): the turn did declare tools")
+        }
     }
 
     // MARK: outbound gate, read-only jobs
