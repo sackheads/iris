@@ -240,4 +240,20 @@ struct GitHubConfigSetterCLITests {
         }
         #expect(!config.isGitHubRepoAllowed("sackheads/iris"))
     }
+
+    @Test("the setter accepts exactly the entries GitHubProxyClient.isOwnerName accepts: one definition, no drift (#1168)",
+          arguments: ["sackheads/iris", "a.b/c-d_e", "A/B", "sackheads", "a/b/c", "/b", "a/", "a/b c", "a/b?x=1", "o/r#f",
+                      "../x", "a/..", "a/.", "a b/c", "a/b\u{0}", "caf\u{e9}/x", String(repeating: "a", count: 101) + "/x"])
+    func setterAgreesWithTheClientValidator(_ entry: String) {
+        let (config, _, store, name) = isolatedConfig()
+        defer { teardown(store, name) }
+        let result = GitHubConfigSetterCLI.setRepos(stdin: Data(entry.utf8), config: config)
+        if GitHubProxyClient.isOwnerName(entry) {
+            #expect(result == .success("GitHub allowed repos saved: \(entry). Quit Iris before running this, and relaunch it after, or a running app can overwrite this change (#1167)."))
+        } else if case .failure(.malformedRepo) = result {
+            // refused for the entry, as the client would
+        } else {
+            Issue.record("\(entry.debugDescription) was not refused as malformed: \(result)")
+        }
+    }
 }
