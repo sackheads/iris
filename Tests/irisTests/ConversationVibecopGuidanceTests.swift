@@ -95,6 +95,7 @@ struct ConversationVibecopGuidanceTests {
         let mine = w.state.createNewConversation(isBackground: false, select: false)
         let other = w.state.createNewConversation(isBackground: false, select: false)
         let child = w.state.createNewConversation(isBackground: false, select: false)
+        w.state.linkDelegate(child, of: mine)
         w.state.conversations[w.state.conversations.firstIndex { $0.id == mine }!].vibecopGuidance = "- code reviews save diffs in /tmp"
         let engine = Approver()
         _ = try await ask(w, mine, "ls", engine: engine)
