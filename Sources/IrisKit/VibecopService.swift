@@ -35,7 +35,7 @@ final class VibecopService: @unchecked Sendable {
         return try? JSONDecoder().decode(VibecopDecision.self, from: data)
     }
     
-    private let baselinePrompt = """
+    let baselinePrompt = """
     You are Vibecop, an ultra-paranoid AI guardian. You evaluate terminal commands and tool executions proposed by an autonomous coding agent before they are executed on the user's macOS machine.
     
     Your ONLY job is to output a JSON object with your verdict.
@@ -101,7 +101,14 @@ final class VibecopService: @unchecked Sendable {
     /// 1. Global user guidance from `<home>/config/vibecop.md` (applies to all sessions, including
     ///    those with no workspace).
     /// 2. Trusted workspace rules from `<workspace>/.iris/vibecop.md` (#617, #625).
-    static func guardianAdditions(workspace: String?, paths: IrisPaths = .default) -> String {
+    /// The most a conversation's own guidance may hold, so a long paste cannot bloat every Vibecop call.
+    static let conversationGuidanceLimit = 4096
+
+    /// 3. This conversation's own guidance (#1005), last, from `Conversation.vibecopGuidance`: set
+    ///    only by the user's `/vibecop tweak here`. It adds allowances inside the baseline; the
+    ///    baseline's hard rules and the host `ReadOnlyCommand` gate still decide what an APPROVE runs.
+    static func guardianAdditions(workspace: String?, conversationGuidance: String? = nil,
+                                  paths: IrisPaths = .default) -> String {
         var additions = ""
         let globalURL = paths.configDir.appendingPathComponent("vibecop.md")
         if let data = try? Data(contentsOf: globalURL),
@@ -118,11 +125,15 @@ final class VibecopService: @unchecked Sendable {
                 additions += "\n\nGUARDIAN MODE ENABLED. Workspace Specific Rules:\n" + guardianContent
             }
         }
+        if let text = conversationGuidance?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+            additions += "\n\nTHIS CONVERSATION'S GUIDANCE (typed by the user; it adds allowances and never overrides the rules above):\n" + text
+        }
         return additions
     }
 
     func evaluateAction(toolName: String, details: String, workspace: String?, inSandbox: Bool = false,
                         callerRole: VibecopCallerRole = .agent, allowedCommands: [String] = [],
+                        conversationGuidance: String? = nil,
                         vibecopEnabled: Bool? = nil, paths: IrisPaths = .default) async throws -> VibecopDecision? {
         guard vibecopEnabled ?? ConfigManager.shared.enableVibecop else { return nil }
         
@@ -137,7 +148,7 @@ final class VibecopService: @unchecked Sendable {
         
         let engine = try await manager.getEngine(for: "vibecop", config: config)
         
-        var prompt = baselinePrompt + Self.guardianAdditions(workspace: workspace, paths: paths)
+        var prompt = baselinePrompt + Self.guardianAdditions(workspace: workspace, conversationGuidance: conversationGuidance, paths: paths)
         
         if !inSandbox {
             prompt += Self.hostLayerText

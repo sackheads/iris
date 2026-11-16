@@ -815,6 +815,12 @@ final class ConversationStore: Sendable {
                 t.add(column: "additionalRoots", .text)
             }
         }
+        // #1005: the conversation's own Vibecop guidance, plain text. NULL/absent is none.
+        m.registerMigration("v40_vibecop_guidance") { db in
+            try db.alter(table: "conversations") { t in
+                t.add(column: "vibecopGuidance", .text)
+            }
+        }
         // #1027: when Brian last looked at an inbox item. Nullable: a row from before this reads
         // as never viewed, so every existing item starts out unread once.
         m.registerMigration("v38_inbox_viewed") { db in
@@ -1074,14 +1080,14 @@ final class ConversationStore: Sendable {
                     isBackground = ?, isPinned = ?, sessionCard = ?, jobProfile = ?, sandboxGrant = ?,
                     hasUnattendedInput = ?, hasUntrustedToolOutput = ?, outboundAllowedTools = ?, jobOutboundExemptions = ?, prefixMismatchBehavior = ?, role = ?, homeWritableOptIn = ?,
                     agentProfile = ?, agentProfileSnapshot = ?,
-                    loop = ?, modelTier = ?, lastTouchedAt = ?, archivedAutomaticallyAt = ?, inSessions = ?, additionalRoots = ?
+                    loop = ?, modelTier = ?, lastTouchedAt = ?, archivedAutomaticallyAt = ?, inSessions = ?, additionalRoots = ?, vibecopGuidance = ?
                 WHERE id = ?
                 """, arguments: [c.title, touched, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
                                  evaluation, report, c.isArchived, c.isBackground, c.isPinned, card,
                                  c.jobProfile?.rawValue, grant, c.hasUnattendedInput, c.hasUntrustedToolOutput, outboundAllowed, jobExemptions, c.prefixMismatchBehavior?.rawValue,
                                  c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue,
-                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, additionalRoots, c.id.uuidString])
+                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, additionalRoots, c.vibecopGuidance, c.id.uuidString])
         } else {
             let position = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(position), 0) FROM conversations") ?? 0) + 1
             try db.execute(sql: """
@@ -1090,14 +1096,14 @@ final class ConversationStore: Sendable {
                     subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived,
                     isBackground, isPinned, sessionCard, jobProfile, sandboxGrant, hasUnattendedInput,
                     hasUntrustedToolOutput, outboundAllowedTools, jobOutboundExemptions, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier,
-                    lastTouchedAt, archivedAutomaticallyAt, inSessions, additionalRoots)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    lastTouchedAt, archivedAutomaticallyAt, inSessions, additionalRoots, vibecopGuidance)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [c.id.uuidString, position, c.title, now, touched, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
                                  tokenUsage, contract, result, history, evaluation, report, c.isArchived,
                                  c.isBackground, c.isPinned, card, c.jobProfile?.rawValue, grant, c.hasUnattendedInput,
                                  c.hasUntrustedToolOutput, outboundAllowed, jobExemptions, c.prefixMismatchBehavior?.rawValue, c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue,
-                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, additionalRoots])
+                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, additionalRoots, c.vibecopGuidance])
         }
     }
 
@@ -1282,6 +1288,8 @@ final class ConversationStore: Sendable {
                 let outboundAllowed = supplementary("outboundAllowedTools")
                 let jobExemptions = supplementary("jobOutboundExemptions")
                 let additionalRoots = supplementary("additionalRoots")
+                // #1005: an unreadable value is none (the supplementary read records the loss).
+                let vibecopGuidance = supplementary("vibecopGuidance")
                 let prefixMismatch = supplementary("prefixMismatchBehavior")
                 let checkpointHistory = supplementary("checkpointHistory")
                 let lastGoalEvaluation = supplementary("lastGoalEvaluation")
@@ -1430,6 +1438,7 @@ final class ConversationStore: Sendable {
                     do { c.outboundAllowedTools = try decoder.decode([String].self, from: Data(s.utf8)) }
                     catch { localSoftLosses.append(("outboundAllowedTools", "\(error)")) }
                 }
+                c.vibecopGuidance = vibecopGuidance
                 // #962: an unreadable list is none, same fail-safe shape as outboundAllowedTools above.
                 if let s = additionalRoots {
                     do { c.additionalRoots = try decoder.decode([String].self, from: Data(s.utf8)) }
