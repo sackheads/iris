@@ -416,7 +416,14 @@ extension ConfigManager {
     /// the iris-main git-identity env injection (`ToolExecutor.hostSpawn`) uses this to compute
     /// its per-repo `includeIf`/`pushInsteadOf` entries fresh on every invocation.
     func allowedGitHubRepos() -> [String] {
-        guard let object = try? JSONSerialization.jsonObject(with: Data(guardedBlob(.githubAllowedRepos).utf8)),
+        Self.parseGitHubAllowlist(guardedBlob(.githubAllowedRepos))
+    }
+
+    /// The repos in an allowed-repos blob: a JSON array of strings. Anything else (empty, not JSON,
+    /// not an array, an element that is not a string) is an empty list, so a bad value allows
+    /// nothing and declares nothing.
+    static func parseGitHubAllowlist(_ blob: String) -> [String] {
+        guard let object = try? JSONSerialization.jsonObject(with: Data(blob.utf8)),
               let list = object as? [Any] else { return [] }
         var allowed: [String] = []
         for element in list {
