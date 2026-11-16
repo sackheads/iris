@@ -399,4 +399,40 @@ struct RealGitEndToEndTests {
         #expect(resolved.trimmingCharacters(in: .whitespacesAndNewlines) == "git@github.com:sackheads/iris.github.io.git",
                 "sackheads/iris.github.io's remote must be untouched by sackheads/iris's rewrite rules")
     }
+
+    @Test("a known residual: a second remote in the SAME checkout that string-extends the allowed repo fails loudly, not silently over the ambient key (planner's ruling, pinned)")
+    func secondRemoteInSameCheckoutMangledNotSilent() throws {
+        guard Self.git != nil else { return }
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("iris-gitid-rg-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let repo = try makeRepo(home: home)
+        let env0 = ["HOME": home.path, "PATH": "/usr/bin:/bin"]
+        // "origin" is the allowed repo; "upstream" is a second, UNRELATED remote in the same
+        // checkout whose name string-extends it ("iris" -> "iris-fork"). Once origin's exact
+        // match loads the routing file, its insteadOf rules apply to every remote resolved in
+        // this repository -- including upstream, which the includeIf gate alone cannot scope out
+        // (that gate is per-repository, not per-remote). This is the one case the fix doesn't
+        // close; see the comment on `remoteSpellings`.
+        _ = try run(["remote", "add", "origin", "https://github.com/sackheads/iris.git"], cwd: repo, env: env0)
+        _ = try run(["remote", "add", "upstream", "git@github.com:sackheads/iris-fork.git"], cwd: repo, env: env0)
+
+        let fragmentPath = home.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
+        GitIdentityEnvironment.ensureFragment(at: fragmentPath, helperExecutable: "/path/to/iris")
+        let routingPath = home.appendingPathComponent(GitIdentityEnvironment.routingFileName).path
+        GitIdentityEnvironment.writeRoutingFile(repos: ["sackheads/iris"], identityFragmentPath: fragmentPath, to: routingPath)
+        var env = env0
+        env = GitIdentityEnvironment.environment(repos: ["sackheads/iris"], routingPath: routingPath, base: env)
+
+        let originResolved = try run(["ls-remote", "--get-url", "origin"], cwd: repo, env: env)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(originResolved == "https://github.com/sackheads/iris.git", "the allowed repo itself still resolves correctly")
+
+        let upstreamResolved = try run(["ls-remote", "--get-url", "upstream"], cwd: repo, env: env)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Confirmed empirically: this mangles to a nonsense URL that would 404 or fail to parse
+        // as a repo -- a loud failure, never a silent fallback to the user's own ambient SSH key.
+        #expect(upstreamResolved != "git@github.com:sackheads/iris-fork.git", "mangled, not untouched")
+        #expect(!upstreamResolved.contains("iris-fork"), "the rewrite breaks the URL rather than reaching the real fork")
+    }
 }
