@@ -294,7 +294,7 @@ struct GitHubProxyClientApproveTests {
     private func posts(_ stub: StubTransport) -> [StubTransport.Sent] { stub.sent.filter { $0.request.httpMethod == "POST" } }
 
     private func approveOK(_ files: [[String: Any]], headers: [Int: [String: String]] = [:]) async -> (String, StubTransport) {
-        let (c, stub) = client([pull(), compare(files), pull(), json(["id": 1])], headers: headers)
+        let (c, stub) = client([pull(), compare(files), pull(), json(["id": 1]), pull()], headers: headers)
         return (await c.approve(repo: "sackheads/iris", pr: 5), stub)
     }
 
@@ -302,7 +302,7 @@ struct GitHubProxyClientApproveTests {
     func approvesRoutinePR() async {
         let (result, stub) = await approveOK([file("docs/a.md"), file("assets/img/b.png"), file("docs/sub/dir/c.md")])
         #expect(result.contains("Approved"))
-        #expect(stub.sent.map { $0.request.httpMethod } == ["GET", "GET", "GET", "POST"])
+        #expect(stub.sent.map { $0.request.httpMethod } == ["GET", "GET", "GET", "POST", "GET"])
         let urls = stub.sent.map { $0.request.url!.absoluteString }
         #expect(urls[0] == "https://api.github.com/repos/sackheads/iris/pulls/5")
         #expect(urls[1] == "https://api.github.com/repos/sackheads/iris/compare/\(Self.base)...\(Self.head)?per_page=100")
@@ -358,7 +358,8 @@ struct GitHubProxyClientApproveTests {
 
     @Test("path tricks are refused: dot segments, leading slash, backslash, empty segment, control character",
           arguments: ["docs/../Sources/x.swift", "docs/./x.md", "/docs/x.md", "docs\\x.md", "docs//x.md",
-                      "assets/../../etc/passwd", "docs/x\n.md", "docs/", ""])
+                      "assets/../../etc/passwd", "docs/x\n.md", "docs/", "",
+                      "docs/a\\..\\..\\Sources\\x.md"])
     func refusesPathTricks(_ path: String) async {
         let (result, stub) = await approveOK([file(path)])
         #expect(result.hasPrefix("Refused"))
@@ -414,10 +415,35 @@ struct GitHubProxyClientApproveTests {
 
     @Test("the review is bound to the head that was checked, not a later one")
     func reviewCarriesTheCheckedHead() async {
-        let (c, stub) = client([pull(), compare([file("docs/a.md")]), pull(), json(["id": 1])])
+        let (c, stub) = client([pull(), compare([file("docs/a.md")]), pull(), json(["id": 1]), pull()])
         _ = await c.approve(repo: "sackheads/iris", pr: 5)
         let review = try? JSONSerialization.jsonObject(with: posts(stub)[0].request.httpBody ?? Data()) as? [String: Any]
         #expect(review?["commit_id"] as? String == Self.head)
+    }
+
+    @Test("a push that lands after the review is reported as NOT approved, not as an approval")
+    func reportsAPushAfterTheReview() async {
+        let (c, stub) = client([pull(), compare([file("docs/a.md")]), pull(), json(["id": 1]), pull(head: Self.otherHead)])
+        let result = await c.approve(repo: "sackheads/iris", pr: 5)
+        #expect(posts(stub).count == 1, "the review was submitted; the report must not hide that")
+        #expect(result.contains("NOT approved"))
+        #expect(!result.hasPrefix("Approved"))
+    }
+
+    @Test("if the head cannot be re-read after the review, the result says it is unconfirmed")
+    func reportsAnUnconfirmableApproval() async {
+        let (c, _) = client([pull(), compare([file("docs/a.md")]), pull(), json(["id": 1]),
+                             .failure(URLError(.timedOut))])
+        let result = await c.approve(repo: "sackheads/iris", pr: 5)
+        #expect(result.contains("unconfirmed"))
+        #expect(!result.hasPrefix("Approved"))
+    }
+
+    @Test("with the head unchanged through the review, the result is a plain approval")
+    func plainApprovalWhenNothingMoved() async {
+        let (c, _) = client([pull(), compare([file("docs/a.md")]), pull(), json(["id": 1]), pull()])
+        let result = await c.approve(repo: "sackheads/iris", pr: 5)
+        #expect(result.hasPrefix("Approved"))
     }
 
     @Test("an empty file list is refused: nothing was verified")
@@ -476,7 +502,7 @@ struct GitHubProxyClientApproveTests {
         for ok in ["docs/a.md", "assets/x/y.png", "docs/a b.md", "docs/..hidden"] {
             #expect(GitHubProxyClient.isRoutinePath(ok), "\(ok) should be routine")
         }
-        for bad in ["", "docs", "docs/", "/docs/a.md", "docs/../a", "docs/a/..", "./docs/a.md", "doc/a.md", "docs\\a.md"] {
+        for bad in ["", "docs", "docs/", "/docs/a.md", "docs/../a", "docs/a/..", "./docs/a.md", "doc/a.md", "docs\\a.md", "docs/a\\..\\..\\Sources\\x.md"] {
             #expect(!GitHubProxyClient.isRoutinePath(bad), "\(bad) should not be routine")
         }
     }
