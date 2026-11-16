@@ -48,8 +48,13 @@ from approving his own PR. That is the actual clickhole on Iris-authored PRs. So
    able to weaken a security test or merge host-executing code. Start with `/docs/` + `/assets/` only.
    `Sources/` stays `@bnaylor` entirely (Iris's finding 3: it is almost all boundary code; a denylist of
    boundary files is fail-open and missed 25+ files — do not go that route).
-   **Ruleset requirement:** the `main` ruleset must have **"Dismiss stale PR approvals when new commits
-   are pushed"** enabled, or an approval rides a later push.
+   **Ruleset requirements (both):** the `main` ruleset must have **"Dismiss stale PR approvals when new
+   commits are pushed"** enabled, or an approval rides a later push; **and "Require approval of the most
+   recent reviewable push"**, because dismissal fires at push time: a push that lands after the code
+   gate's last head check but before the review exists is not dismissed, and without this setting an
+   approval of the older commit could still count toward merging the newer head. `github_approve` also
+   re-reads the head after submitting and reports a moved PR as not approved, but that is observability;
+   the second setting is the control.
 
 ## 3. The proxy tools (C2 — spend, never possess)
 
@@ -169,7 +174,8 @@ never reachable.
 ## 7. Slice contents / sequencing
 
 1. **Config-only (no iris code), ships first:** create/scope `iris-main`'s token; CODEOWNERS split (§2);
-   enable stale-approval dismissal on the ruleset. Lands independent of any build.
+   enable stale-approval dismissal and "Require approval of the most recent reviewable push" on the
+   ruleset. Lands independent of any build.
 2. **The three proxy tools + the account lookup + the approve gate (§3/§4):** the iris-code slice. Small,
    contained, host-side; rule-26 reviewed (it is credential + approval boundary code).
 3. Everything else is 11-09.
@@ -182,6 +188,7 @@ never reachable.
   `headRefOid` is in the routine allowlist, and binds `commit_id`. Reproduce: a PR touching a
   `Sources/`/`Tests/` file is refused; a push after the check does not ride the approval.
 - **CODEOWNERS is fail-safe** (default `@bnaylor`, `/docs`+`/assets` only, `/Tests/` and `/Sources/`
-  excluded, self-protected) and stale-approval dismissal is on.
+  excluded, self-protected) and both ruleset settings (stale-approval dismissal, approval of the most
+  recent reviewable push) are on.
 - **No ambient `@bnaylor` on the proxy path:** `iris-main`'s token does not touch
   `~/.config/gh`/global `GH_TOKEN`.
