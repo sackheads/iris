@@ -50,6 +50,12 @@ Settings → Models → **Subagent providers** lists providers a subagent could 
 
 Scheduled and folder-watching jobs, their profiles, grants, gates, limits and cards: see [docs/jobs.md](jobs.md).
 
+### GitHub Identity (`iris-main`)
+
+Iris can act as her own GitHub contributor identity, `iris-main` — committing, pushing and opening
+pull requests independent of your own account, and approving routine `/docs`/`/assets` PRs under
+a CODEOWNERS-enforced bound: see [docs/github-identity.md](github-identity.md).
+
 ### Menu Bar Status
 
 The menu bar item (a sparkle, or a hammer for a dev build) shows a count while background jobs run, and `!` with a count when something is waiting on you: an approval, a goal draft, checkpoint or judgement to review, a run blocked on a call, or a job paused and needing `/jobs resume`. Its menu lists each one and opens it. Failed runs and jobs you paused yourself are listed but never change the icon.
