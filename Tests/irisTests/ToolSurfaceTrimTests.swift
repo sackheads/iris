@@ -37,7 +37,7 @@ struct ToolSurfaceTrimTests {
     @Test("ToolExecutor omits the Google Workspace tools unless a refresh token is configured")
     func googleToolsGatedOnCredentials() async {
         let without = await ToolExecutor.shared.getTools(workspaceToolsEnabled: false).map(\.name)
-        let with = await ToolExecutor.shared.getTools(workspaceToolsEnabled: true).map(\.name)
+        let with = await ToolExecutor.shared.getTools(workspaceToolsEnabled: true, githubToolsEnabled: true).map(\.name)
         for name in Self.googleTools {
             #expect(!without.contains(name), Comment(rawValue: name))
             #expect(with.contains(name), Comment(rawValue: name))
@@ -356,7 +356,7 @@ struct ToolSurfaceTrimTests {
 
         // Subtract the two OTHER sources of declared tool names — this test is only about the
         // hand-maintained inline set, not the whole declared surface.
-        let executorNames = Set(await ToolExecutor.shared.getTools(workspaceToolsEnabled: true).map(\.name))
+        let executorNames = Set(await ToolExecutor.shared.getTools(workspaceToolsEnabled: true, githubToolsEnabled: true).map(\.name))
         let jobToolNames = Set(IrisEngine.jobToolDeclarations(isPinned: true).map(\.name))
         let inlineObserved = observed.subtracting(executorNames).subtracting(jobToolNames)
 
@@ -412,12 +412,12 @@ struct ToolSurfaceTrimTests {
     /// the test above; this one checks the set takes in that and every other site, with every gate on.
     @Test("allDeclaredToolNames contains every name any site declares")
     func allDeclaredToolNamesCoversEverySite() async {
-        let executor = await ToolExecutor.shared.getTools(workspaceToolsEnabled: true).map(\.name)
+        let executor = await ToolExecutor.shared.getTools(workspaceToolsEnabled: true, githubToolsEnabled: true).map(\.name)
         let sites: [(String, [String])] = [
             ("ToolExecutor.getTools", executor),
             ("jobToolDeclarations", IrisEngine.jobToolDeclarations(isPinned: true).map(\.name)),
             ("EvaluatorToolset", EvaluatorToolset.restrict(await ToolExecutor.shared
-                .getTools(workspaceToolsEnabled: true)).map(\.name)),
+                .getTools(workspaceToolsEnabled: true, githubToolsEnabled: true)).map(\.name)),
             ("SubagentManager", [SubagentManager.toolDeclaration().name,
                                  SubagentManager.milestoneDelegationDeclaration().name]),
             ("inline (buildRequest)", Array(IrisEngine.inlineDeclaredToolNames)),

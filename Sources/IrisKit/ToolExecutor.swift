@@ -98,7 +98,12 @@ struct ToolExecutor {
     /// `workspaceToolsEnabled` defaults to "a Google refresh token is configured". Without one every
     /// Google Tasks / Workspace call fails, so the ten declarations were pure prompt weight (#133).
     /// Injectable so tests never mutate `ConfigManager.shared`.
-    func getTools(workspaceToolsEnabled: Bool = !ConfigManager.shared.googleRefreshToken.isEmpty) async -> [FunctionDeclaration] {
+    ///
+    /// `githubToolsEnabled` defaults to "the `iris-main` token is present" (#966, Invariant 6): the three
+    /// `github_*` declarations are prompt weight an unconfigured install must not pay. The default
+    /// reads `ConfigManager.hasGitHubToken`, fixed at launch, never the Keychain per turn (#578).
+    func getTools(workspaceToolsEnabled: Bool = !ConfigManager.shared.googleRefreshToken.isEmpty,
+                  githubToolsEnabled: Bool = ConfigManager.shared.hasGitHubToken) async -> [FunctionDeclaration] {
         var tools = [
             FunctionDeclaration(
             name: "run_command",
@@ -219,9 +224,80 @@ struct ToolExecutor {
             tools.append(contentsOf: workspaceTools)
         }
         
+        if githubToolsEnabled { tools.append(contentsOf: Self.githubToolDeclarations) }
+
         let mcpTools = await MCPManager.shared.getGeminiTools()
         tools.append(contentsOf: mcpTools)
         return tools
+    }
+
+    /// The three tools that act on GitHub as `iris-main` (#966). Declared to the attended main
+    /// agent only, and only when the token is present: `IrisEngine.mainOnlyDeclared` and
+    /// `unattendedNeverDeclared` strip them for every other principal and turn, and
+    /// `IrisEngine.githubDispatchRefusal` refuses a call that arrives anyway. Every call is bounded
+    /// by the user's allowed-repos list inside `GitHubProxyClient`, whatever the model sends.
+    nonisolated static let githubProxyTools: Set<String> = ["github_create_pr", "github_comment", "github_approve"]
+
+    nonisolated static let githubToolDeclarations: [FunctionDeclaration] = [
+        FunctionDeclaration(
+            name: "github_create_pr",
+            description: "Open a pull request on GitHub as Iris's own account (iris-main), from a branch that is already pushed. Only for repositories the user has put on the allowed list; any other is refused. Pass draft true unless the user asked for a ready PR. Returns the PR number and link.",
+            parameters: Schema(
+                type: "OBJECT",
+                properties: [
+                    "repo": Schema(type: "STRING", description: "owner/name, e.g. sackheads/iris."),
+                    "head": Schema(type: "STRING", description: "The branch the changes are on."),
+                    "base": Schema(type: "STRING", description: "The branch to merge into, usually main."),
+                    "title": Schema(type: "STRING", description: "The PR title."),
+                    "body": Schema(type: "STRING", description: "The PR description."),
+                    "draft": Schema(type: "BOOLEAN", description: "Open it as a draft. Default true.")
+                ],
+                required: ["repo", "head", "base", "title", "body"]
+            )
+        ),
+        FunctionDeclaration(
+            name: "github_comment",
+            description: "Post a comment on a GitHub pull request as Iris's own account (iris-main). Only for repositories the user has put on the allowed list; any other is refused. Returns the comment link.",
+            parameters: Schema(
+                type: "OBJECT",
+                properties: [
+                    "repo": Schema(type: "STRING", description: "owner/name, e.g. sackheads/iris."),
+                    "pr": Schema(type: "INTEGER", description: "The pull request number."),
+                    "body": Schema(type: "STRING", description: "The comment text.")
+                ],
+                required: ["repo", "pr", "body"]
+            )
+        ),
+        FunctionDeclaration(
+            name: "github_approve",
+            description: "Approve a GitHub pull request as Iris's own account (iris-main). It refuses unless the PR is open and every changed file is under docs/ or assets/; anything else needs a human reviewer, so do not try to work around a refusal. The approval is tied to the commit that was checked, and the result says if the PR moved afterwards. Only for repositories the user has put on the allowed list.",
+            parameters: Schema(
+                type: "OBJECT",
+                properties: [
+                    "repo": Schema(type: "STRING", description: "owner/name, e.g. sackheads/iris."),
+                    "pr": Schema(type: "INTEGER", description: "The pull request number.")
+                ],
+                required: ["repo", "pr"]
+            )
+        ),
+    ]
+
+    /// `draft` on `github_create_pr`: true unless the model sent an explicit `false`, so an omitted
+    /// or malformed value opens a draft (the safer shape).
+    static func githubDraftFlag(_ value: JSONValue?) -> Bool {
+        if case .bool(let b)? = value { return b }
+        return true
+    }
+
+    /// A positive integer argument the model may have sent as an int, a whole double or a numeric
+    /// string; anything else is nil.
+    private static func positiveInt(_ value: JSONValue?) -> Int? {
+        switch value {
+        case .int(let i): return i > 0 ? i : nil
+        case .double(let d): return d > 0 && d == d.rounded() && d < 1e9 ? Int(d) : nil
+        case .string(let t): return Int(t.trimmingCharacters(in: .whitespaces)).flatMap { $0 > 0 ? $0 : nil }
+        default: return nil
+        }
     }
     
     /// `grantedMount` is the covering mount the dispatcher decided on for this call (#282 §0.13).
@@ -320,6 +396,24 @@ struct ToolExecutor {
         case "delete_skill":
             guard let name = args["name"]?.stringValue else { return "Error: Missing name for delete_skill" }
             return await deleteSkill(name: name)
+        case "github_create_pr":
+            guard let repo = args["repo"]?.stringValue, let head = args["head"]?.stringValue,
+                  let base = args["base"]?.stringValue, let title = args["title"]?.stringValue,
+                  let body = args["body"]?.stringValue else {
+                return "Error: github_create_pr needs repo, head, base, title and body"
+            }
+            return await GitHubProxyClient().createPR(repo: repo, head: head, base: base, title: title, body: body,
+                                                      draft: Self.githubDraftFlag(args["draft"]))
+        case "github_comment":
+            guard let repo = args["repo"]?.stringValue, let body = args["body"]?.stringValue else {
+                return "Error: github_comment needs repo, pr and body"
+            }
+            guard let pr = Self.positiveInt(args["pr"]) else { return "Error: github_comment needs a positive pr number" }
+            return await GitHubProxyClient().comment(repo: repo, pr: pr, body: body)
+        case "github_approve":
+            guard let repo = args["repo"]?.stringValue else { return "Error: github_approve needs repo and pr" }
+            guard let pr = Self.positiveInt(args["pr"]) else { return "Error: github_approve needs a positive pr number" }
+            return await GitHubProxyClient().approve(repo: repo, pr: pr)
         case let n where n.hasPrefix("google_tasks_"):
             return await GoogleTasksManager.shared.execute(name: name, args: args)
         case let n where n.hasPrefix("google_calendar_") || n.hasPrefix("google_docs_") || n.hasPrefix("google_drive_") || n.hasPrefix("google_sheets_") || n.hasPrefix("gmail_"):

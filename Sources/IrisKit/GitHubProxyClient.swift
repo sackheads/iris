@@ -1,10 +1,12 @@
 import Foundation
 
 /// Talks to GitHub as Iris's own `iris-main` identity (#966): opens PRs, comments, and approves
-/// *routine* (docs/assets) PRs, through three host-side proxy tools. The token lives in the
-/// Keychain and is read only here — it never enters a prompt, tool arg, tool result, or error
-/// string (spec §3, "spend, never possess"). Task 1 is the token lookup `ToolExecutor`'s
-/// credential gate reads, Task 3 the create-PR and comment calls; the approve gate follows.
+/// *routine* (docs/assets) PRs, through three host-side tools. `iris-main` is Iris's own
+/// contributor credential (spec §3-§4): the goal is identity separation from `@bnaylor`, not
+/// hiding the credential. The token is stored under its own Keychain service and this client
+/// still keeps it out of every tool result and error string, as defence in depth. Approval is
+/// the one locked-down axis: `CODEOWNERS` makes her approval count only for docs and assets, and
+/// `approve` refuses anything else before it submits (spec §3.3).
 ///
 /// Every call checks the repo against the user's allowlist first and builds no request, reads no
 /// token and touches no network for one that is not on it (spec §3.2). Everything returned to the

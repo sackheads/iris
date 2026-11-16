@@ -500,7 +500,7 @@ struct JobProfileTests {
         #expect(offered.contains("write_file"), "precondition: the mutating surface was read")
         #expect(offered.subtracting(IrisEngine.jobRunToolNames).isEmpty,
                 "offered to a job but missing from jobRunToolNames: \(offered.subtracting(IrisEngine.jobRunToolNames).sorted())")
-        let workspace = Set(await ToolExecutor.shared.getTools(workspaceToolsEnabled: true).map(\.name))
+        let workspace = Set(await ToolExecutor.shared.getTools(workspaceToolsEnabled: true, githubToolsEnabled: true).map(\.name))
             .subtracting(await ToolExecutor.shared.getTools(workspaceToolsEnabled: false).map(\.name))
         let extra = IrisEngine.jobRunToolNames.subtracting(offered).subtracting(workspace)
         #expect(extra.isEmpty, "in jobRunToolNames but offered to no job: \(extra.sorted())")

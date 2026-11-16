@@ -164,7 +164,7 @@ struct SelfWriteHookTests {
         // they return from `executeFunctionCall` directly and never reach the choke point at all,
         // so calling them "writes no path" would be a claim in the one direction that matters.
         let mcp = Set(await MCPManager.shared.getGeminiTools().map(\.name))
-        let declared = Set(await ToolExecutor.shared.getTools(workspaceToolsEnabled: true).map(\.name))
+        let declared = Set(await ToolExecutor.shared.getTools(workspaceToolsEnabled: true, githubToolsEnabled: true).map(\.name))
             .subtracting(mcp)
             .union(IrisEngine.jobToolDeclarations(isPinned: true).map(\.name))
 
