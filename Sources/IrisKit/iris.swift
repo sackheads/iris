@@ -5174,6 +5174,7 @@ actor IrisEngine {
     nonisolated static let unattendedNeverDeclared: Set<String> =
         jobCreationTools.union(["set_workspace", "list_sessions", "describe_session", "send_to_session",
                                 "set_session_card", "close_request", "inbox_item", setAlarmTool])
+            .union(ToolExecutor.githubProxyTools)
     /// OpenAI's `prompt_cache_key` (5c §0.9). It is a routing hint, so it names the prefix a
     /// request shares with others, not the conversation. An attended chat (Iris included) keeps
     /// its own history warm, so it uses its id. A job run, a subagent or an evaluator starts a
@@ -5207,6 +5208,7 @@ actor IrisEngine {
                                 "amend_goal_contract", "reach_checkpoint", "delegate_milestone",
                                 "waive_criterion", "list_sessions", "describe_session", "send_to_session",
                                 "set_session_card", "close_request", "inbox_item"])
+            .union(ToolExecutor.githubProxyTools)
 
     nonisolated static let listSessionsDeclaration = FunctionDeclaration(
         name: "list_sessions",
@@ -5419,6 +5421,17 @@ actor IrisEngine {
     /// not a second delivery channel.
     static let unattendedSessionMessageRefusal =
         "A background run cannot message sessions; its result is delivered as a card."
+
+    /// #966: the `github_*` tools act as `iris-main` on GitHub, so only an attended main turn may
+    /// call them. Declaration gating (`hardStrip`) only stops a well-behaved model; this is the
+    /// refusal for a call that arrives anyway, and it comes before everything that could act on it.
+    static let githubOffPrincipalRefusal =
+        "The GitHub tools are available only to the user's own attended conversation, so this call was not run."
+
+    static func githubDispatchRefusal(_ name: String, isUnattended: Bool, principal: Principal) -> String? {
+        guard ToolExecutor.githubProxyTools.contains(name), isUnattended || principal != .main else { return nil }
+        return githubOffPrincipalRefusal
+    }
 
     /// What the dispatcher tells a background run that reached for one anyway.
     static let unattendedJobCreationRefusal =
@@ -5799,6 +5812,9 @@ actor IrisEngine {
         // The epic's standing ruling: no unattended job creation. Neither tool is declared to a
         // background turn (see `buildRequest`), but declaration gating only stops a well-behaved
         // model — the refusal has to live at the point that would actually write the row.
+        if let refusal = Self.githubDispatchRefusal(functionCall.name, isUnattended: isUnattended, principal: principal) {
+            return refusal
+        }
         if Self.jobCreationTools.contains(functionCall.name), isUnattended {
             return Self.unattendedJobCreationRefusal
         }
@@ -7370,6 +7386,7 @@ actor IrisEngine {
         "google_docs_get", "google_drive_search", "google_sheets_get",
         "gmail_list_unread", "gmail_send_email",
         "list_jobs", "get_job_run", "search_conversations", "read_conversation",
+        "github_create_pr", "github_comment", "github_approve",
     ]
 
     /// The tools `buildRequest` declares inline (identity, memory, sessions, goals, delegation)
