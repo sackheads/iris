@@ -138,9 +138,10 @@ struct WorkspaceIrisTrustTests {
         state.permissions = PermissionManager(paths: home)
         state.workspaceTrust = WorkspaceIrisTrust(paths: home)
 
-        // 1. Session without workspace -> writes global config/vibecop.md
+        // 1. Session without workspace: `tweak global` writes global config/vibecop.md (a bare
+        // `tweak` is that conversation's own since #1005).
         let cGlobal = state.createNewConversation(isBackground: false, select: true)
-        state.sendMessage("/vibecop tweak Saving diffs to /tmp is routine.")
+        state.sendMessage("/vibecop tweak global Saving diffs to /tmp is routine.")
         let globalMsg = state.conversations.first { $0.id == cGlobal }?.messages.last?.content ?? ""
         #expect(globalMsg.contains("Added global Vibecop guidance"))
         #expect(VibecopService.guardianAdditions(workspace: nil, paths: home).contains("Saving diffs to /tmp is routine."))
