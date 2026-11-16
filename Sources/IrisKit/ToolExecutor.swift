@@ -70,6 +70,17 @@ struct ToolExecutor {
     /// it in the result.
     var postSandboxNote: (@Sendable (UUID, String) async -> Void)?
 
+    /// Whether `conversationId`'s turn is guest-origin (a guest's message started or steered it,
+    /// including via delegation) -- the same signal `githubDispatchRefusal` is built from. A
+    /// guest-origin turn's `principal` can still be `.main` (an attended conversation a guest
+    /// steered), so the iris-main git-identity environment (#966 Task 8) is suppressed on this
+    /// signal explicitly in `runCommand`, not inferred from `principal` alone (planner's ruling,
+    /// 2026-11-15: a guest must never act as iris-main in any form, even though the `github_*`
+    /// tools' own refusal is `principal`-based). nil (no engine wired it, or no `conversationId`)
+    /// fails closed: `runCommand` treats that as guest-origin and suppresses the git identity,
+    /// rather than an unwired seam silently granting it everywhere.
+    var isGuestOriginTurn: (@Sendable (UUID) async -> Bool)?
+
     /// Where the no-conversation sandboxed branch of `run_command` finds the `container` CLI, or
     /// nil for "not installed". Injectable so a test can drive that branch against a stub binary
     /// instead of booting a real VM, whose failures under load have nothing to do with Iris (#374).
@@ -520,15 +531,17 @@ struct ToolExecutor {
     /// How a host command is spawned. A read the gate approved (`restrictedPath`, #612) runs as
     /// judged: `zsh -f` (no user startup files) with that `PATH` and `restrictedEnvironment`.
     /// Anything else runs as it always has, with the user's environment and startup files.
-    /// `gitIdentityRepos`/`gitIdentityFragmentPath` add the iris-main git-identity environment
+    /// `gitIdentityRepos`/`gitIdentityRoutingPath` add the iris-main git-identity environment
     /// (#966 spec §4) to the **unrestricted** branch only -- never the sandboxed git-read path
     /// above, whose overrides are frozen (#658(a): no new keys). Both default to "off" (empty
     /// list / nil), so every existing caller, including every test that doesn't pass them, is
-    /// unaffected. The one production call site gates them on a configured token and a
-    /// non-empty allowlist before passing anything (Invariant 6's pattern, applied here too).
+    /// unaffected. The one production call site gates them on a configured token, a non-empty
+    /// allowlist, and the turn not being guest-origin (Invariant 6's pattern, applied here too),
+    /// and must have already written `gitIdentityRoutingPath`'s file (`writeRoutingFile`) -- this
+    /// function only injects the `includeIf` pointing at it, never writes it itself.
     nonisolated static func hostSpawn(_ command: String, restrictedPath: [String]?, gitRepository: GitRead.Repository? = nil,
                                       base: [String: String], gitIdentityRepos: [String] = [],
-                                      gitIdentityFragmentPath: String? = nil) -> (executable: String, arguments: [String], environment: [String: String]) {
+                                      gitIdentityRoutingPath: String? = nil) -> (executable: String, arguments: [String], environment: [String: String]) {
         if let restrictedPath {
             let restricted = ReadOnlyCommand.restrictedEnvironment(path: restrictedPath, base: base)
             // #607: a git read runs as argv, no shell, with Iris's fixed prefix and overrides.
@@ -544,9 +557,9 @@ struct ToolExecutor {
             return ("/bin/zsh", ["-f", "-c", command], restricted)
         }
         let unrestricted = BinaryResolver.commandEnvironment(base: base)
-        guard let fragmentPath = gitIdentityFragmentPath else { return ("/bin/zsh", ["-c", command], unrestricted) }
+        guard let routingPath = gitIdentityRoutingPath else { return ("/bin/zsh", ["-c", command], unrestricted) }
         return ("/bin/zsh", ["-c", command],
-                GitIdentityEnvironment.environment(repos: gitIdentityRepos, fragmentPath: fragmentPath, base: unrestricted))
+                GitIdentityEnvironment.environment(repos: gitIdentityRepos, routingPath: routingPath, base: unrestricted))
     }
 
     func runCommand(_ command: String, cwd: String?, conversationId: UUID? = nil, useSandbox: Bool = false,
@@ -625,6 +638,12 @@ struct ToolExecutor {
         let directory: String?
         let environment: [String: String]?
         let gitBefore: String?
+        // iris-main git identity (#966 spec §4): a unique per-invocation routing file (never a
+        // shared path -- tool calls run in parallel inside one turn's withTaskGroup, Invariant 3,
+        // so two concurrent run_command calls must never write or read the same one). Removed
+        // when this function returns, by any path, so these never accumulate.
+        var gitIdentityRoutingPath: String?
+        defer { if let gitIdentityRoutingPath { try? FileManager.default.removeItem(atPath: gitIdentityRoutingPath) } }
         // Named, so a timeout or a cancel can delete it: killing the `container run` client does
         // not stop the container, and the command ran on in the VM (#353).
         var ephemeralContainer: (binary: String, name: String)? = nil
@@ -714,25 +733,43 @@ struct ToolExecutor {
                 }
                 gitRepository = repo
             }
-            // iris-main git identity (#966 spec §4): off unless a token is configured AND the
-            // allowlist is non-empty, so an install that hasn't set either up gets no behavior
-            // change at all.
+            // iris-main git identity (#966 spec §4): off unless the cached token-presence flag is
+            // set (never a per-call Keychain read -- dev-2's review) AND the allowlist is
+            // non-empty AND this turn isn't guest-origin (planner's ruling: a guest must never
+            // act as iris-main, even on an attended `.main` turn it steered), so an install that
+            // hasn't set the feature up, or a guest-steered turn, gets no behavior change at all.
             var gitIdentityRepos: [String] = []
-            var gitIdentityFragmentPath: String?
-            if GitHubProxyClient.hasToken(keychain: .shared) {
-                let repos = ConfigManager.shared.allowedGitHubRepos()
-                if !repos.isEmpty, let executablePath = Bundle.main.executablePath {
-                    let fragmentPath = (irisPaths ?? .default).configDir
-                        .appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
+            do {
+                let hasToken = ConfigManager.shared.hasGitHubToken
+                let repos = hasToken ? ConfigManager.shared.allowedGitHubRepos() : []
+                let guestOrigin: Bool
+                if let conversationId, let isGuestOriginTurn {
+                    guestOrigin = await isGuestOriginTurn(conversationId)
+                } else {
+                    // No conversation to check, or no engine wired the seam: fail closed (see the
+                    // property's doc comment) rather than let an unwired caller act as iris-main.
+                    guestOrigin = true
+                }
+                if GitIdentityEnvironment.shouldApply(hasToken: hasToken, repos: repos, guestOrigin: guestOrigin),
+                   let executablePath = Bundle.main.executablePath {
+                    let paths = irisPaths ?? .default
+                    let fragmentPath = paths.configDir.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
                     GitIdentityEnvironment.ensureFragment(at: fragmentPath, helperExecutable: executablePath)
+                    // A unique per-invocation routing file (Invariant 3: tool calls run in
+                    // parallel inside one turn's withTaskGroup, so two concurrent run_command
+                    // calls must never share one) -- removed by the `defer` declared with
+                    // `gitIdentityRoutingPath` above, whichever path this function returns by.
+                    let routingPath = paths.configDir
+                        .appendingPathComponent("\(GitIdentityEnvironment.routingFileName)-\(UUID().uuidString)").path
+                    GitIdentityEnvironment.writeRoutingFile(repos: repos, identityFragmentPath: fragmentPath, to: routingPath)
+                    gitIdentityRoutingPath = routingPath
                     gitIdentityRepos = repos
-                    gitIdentityFragmentPath = fragmentPath
                 }
             }
             (executable, arguments, environment) = Self.hostSpawn(command, restrictedPath: restrictedPath,
                                                                   gitRepository: gitRepository, base: base,
                                                                   gitIdentityRepos: gitIdentityRepos,
-                                                                  gitIdentityFragmentPath: gitIdentityFragmentPath)
+                                                                  gitIdentityRoutingPath: gitIdentityRoutingPath)
         }
 
         // Its own process group, killed whole on timeout and on Stop: SIGTERM, then SIGKILL (#353).

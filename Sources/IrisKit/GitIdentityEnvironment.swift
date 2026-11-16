@@ -2,27 +2,73 @@ import Foundation
 
 /// The environment additions that let `run_command`'s host git act as `iris-main` for a
 /// user-configured allowed repo, without touching `~/.gitconfig` or any process-global state
-/// (#966 spec §4, design confirmed with the planner 2026-11-15).
+/// (#966 spec §4, design confirmed with the planner 2026-11-15; round 2 after dev-2's and dev-3's
+/// real-git reviews surfaced that the string-level design didn't actually work).
 ///
-/// Two pieces:
-/// - **A static, non-secret identity fragment** (`fragmentPath`): `user.name`/`user.email` for
-///   `iris-main`, and `credential.helper` pointing at `iris --git-credential-helper` (#1174's new
-///   headless mode). Written once; never touched when the allowed-repo list changes.
-/// - **Per-repo routing, computed fresh on every call** from the live allowlist: an
-///   `includeIf.hasconfig:remote.*.url:<exact repo URL>` (both the `https://` and `git@` forms)
-///   that includes the static fragment only for a remote matching that exact repo, and a
-///   `pushInsteadOf` rewriting a push to that repo's SSH form onto HTTPS so the credential
-///   helper (HTTPS-only; git credential helpers never apply to SSH) actually engages. Computed
-///   fresh, not baked into the fragment, so adding a repo takes effect on the very next
-///   `run_command` call rather than waiting on a regeneration (planner's correction, 2026-11-15):
-///   removing a repo is already fail-safe (a stale rewrite just makes the push fail at the
-///   helper), but adding one needs to be immediate.
+/// Three pieces:
+/// - **A static, non-secret identity fragment** (`identityFragmentPath`): `user.name`/
+///   `user.email` for `iris-main`, `credential.helper` pointing at `iris
+///   --git-credential-helper`, and `credential.useHttpPath = true` — without it git sends the
+///   helper only `protocol`/`host`, never `path`, so the helper (which needs the repo path to
+///   check the allowlist) could never answer a real request (dev-3's review, verified against a
+///   real git 2.54 invocation: the first round's string-level tests couldn't see this, since they
+///   handed the helper a `path` directly rather than letting git decide whether to). Written
+///   once; rewritten only if its computed contents ever differ from what's on disk (the baked
+///   helper executable path can go stale across a rebuild or reinstall otherwise).
+/// - **A routing file** (`routingPath`), rewritten in full on every `run_command` call from the
+///   live allowlist: for each allowed repo, one `[include] path = <identity fragment>` plus that
+///   repo's own `url.<canonical https>.insteadOf` lines (rewriting every SSH spelling, and each
+///   https spelling onto itself — see below). Rewriting the rewrite rules themselves, not only
+///   baking them into `fragmentPath`, is what keeps "adding a repo takes effect on the very next
+///   call" (planner's correction, 2026-11-15) without the collision this round's `additions`
+///   fixes (next point).
+/// - **Per-repo `includeIf.hasconfig:remote.*.url:<exact URL>` conditions**, injected fresh as
+///   `GIT_CONFIG_KEY`/`VALUE_N` env vars (the same mechanism `GitRead.environment()` already uses
+///   for the sandboxed read-only path), one per URL spelling a remote might legitimately have
+///   (`https://`, `git@host:`, `ssh://git@host/`, each with and without `.git` — six per repo),
+///   all pointing at the one routing file.
 ///
-/// A remote for a repo **not** on the list gets neither: no identity change, no URL rewrite, same
-/// behavior as today. This is deliberate — a blanket `github.com` match would rewrite an
-/// unrelated SSH push (ordinary coding work on some other repo) onto HTTPS with no credential,
-/// breaking a push that works today over the user's own ambient SSH key.
+/// **Why the rewrite rules live in the routing file and not as flat env entries (round 2 fix).**
+/// `url.*.insteadOf`/`pushInsteadOf` match by STRING PREFIX, with no word boundary — confirmed
+/// against real git 2.54 that `git@github.com:owner/iris.git` is a literal string prefix of
+/// `git@github.com:owner/iris.github.io.git` (`"iris.git"` is exactly the first 8 characters of
+/// `"iris.github.io.git"`). Injecting the rewrite directly as an unconditional
+/// `GIT_CONFIG_KEY`/`VALUE` entry (round 1's design) meant it was part of the effective config for
+/// *any* git invocation sharing that process's environment, so an unrelated, unlisted repo
+/// (`owner/iris.github.io`) whose name merely shares a prefix with an allowed one (`owner/iris`)
+/// had its own remote silently rewritten too — confirmed with a real `git ls-remote --get-url`.
+/// `includeIf.hasconfig` has no such hazard: it is evaluated per the *current repository's own*
+/// config being resolved, so a file is included only when that repository's own `remote.*.url`
+/// exactly matches — confirmed with a real git invocation that a shared routing file holding both
+/// an allowed repo's section and an unrelated repo's section leaves the unrelated repo's URL
+/// completely untouched when *it* is the one being resolved. Moving the rewrite rules into that
+/// conditionally-included file, rather than injecting them unconditionally, is what actually
+/// scopes them to the exact repo.
+///
+/// **Why `insteadOf`, not `pushInsteadOf`, and why each https spelling also gets an identity
+/// rule onto itself.** `pushInsteadOf` only rewrites push, and on a Mac with a pre-existing
+/// global rule like `url.ssh://git@github.com/.insteadOf = https://github.com/` (from `gh auth
+/// setup-git` or similar), `insteadOf` resolution picks the LONGEST matching prefix across every
+/// `url.*.insteadOf` rule in the merged config — not the one read last — so that short, generic
+/// global rule intercepts an already-https remote before anything keyed on an SSH source could
+/// apply, and `pushInsteadOf` alone left identity applying while the push still ran over the
+/// user's ambient SSH key (dev-3's review, reproduced live: a silent identity-separation failure,
+/// not a loud one). An identity rule whose own prefix *is* the exact repo URL is longer and more
+/// specific than the generic global one, so it wins the match and the URL never leaves https; it
+/// needs its own entry for every https spelling (with and without `.git`), since a shorter https
+/// spelling doesn't, as a string, contain the longer one.
+///
+/// A remote for a repo **not** on the list gets neither identity nor a rewrite — no
+/// `includeIf` condition names it, so its config resolution never even reaches the routing file.
 enum GitIdentityEnvironment {
+    /// Whether `run_command`'s host path should carry the iris-main git identity at all: a
+    /// configured token, a non-empty allowlist, and -- planner's ruling, 2026-11-15 -- the turn
+    /// not being guest-origin. Pulled out as its own pure function so the decision is directly
+    /// unit-testable without touching `ConfigManager.shared` or a real conversation.
+    static func shouldApply(hasToken: Bool, repos: [String], guestOrigin: Bool) -> Bool {
+        hasToken && !repos.isEmpty && !guestOrigin
+    }
+
     static let identityName = "iris-main"
     /// GitHub's noreply convention: no separate "iris-main's email" setting to configure or
     /// leak. Any GitHub account gets this for free; it attributes commits to the account without
@@ -30,13 +76,15 @@ enum GitIdentityEnvironment {
     static let identityEmail = "iris-main@users.noreply.github.com"
 
     static let fragmentFileName = "git-identity-iris-main"
+    static let routingFileName = "git-identity-iris-main-routing"
 
     /// The static fragment's contents: identity plus the credential helper, no secret. The
     /// leading empty `helper =` clears any `credential.helper` inherited from `~/.gitconfig` or
     /// system config before this point in the read order (it's a multi-valued key; an ambient
-    /// helper already holding Brian's own cached GitHub credential must never be consulted for
+    /// helper already holding the user's own cached GitHub credential must never be consulted for
     /// an `iris-main`-identity remote) — the same empty-then-set pattern `WorkspaceGit.overrides`
-    /// already uses for the same reason.
+    /// already uses for the same reason. `useHttpPath` is required or the helper never receives a
+    /// `path` to check the allowlist against (dev-3's review).
     static func fragmentContents(helperExecutable: String) -> String {
         """
         [user]
@@ -45,33 +93,80 @@ enum GitIdentityEnvironment {
         [credential]
         \thelper =
         \thelper = !\(PluginAuthRunner.shellQuoted(helperExecutable)) --git-credential-helper
+        \tuseHttpPath = true
         """
     }
 
-    /// Writes the fragment if it doesn't already exist. Idempotent, no secret in it, safe to call
-    /// on every launch; never rewritten after (identity and helper path don't change per-repo).
+    /// Writes the fragment if it doesn't exist, or rewrites it if its contents differ from what's
+    /// computed now (dev-2's and dev-3's review: the helper's executable path can change across a
+    /// rebuild, a reinstall, or a dev home shared between worktrees, and the fragment must not
+    /// keep pointing at a now-stale one). No secret in it, safe to call on every launch.
     static func ensureFragment(at path: String, helperExecutable: String) {
-        guard !FileManager.default.fileExists(atPath: path) else { return }
+        let contents = fragmentContents(helperExecutable: helperExecutable)
+        if let existing = try? String(contentsOfFile: path, encoding: .utf8), existing == contents { return }
         try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent,
                                                   withIntermediateDirectories: true)
-        try? fragmentContents(helperExecutable: helperExecutable).write(toFile: path, atomically: true, encoding: .utf8)
+        try? contents.write(toFile: path, atomically: true, encoding: .utf8)
     }
 
-    /// The `GIT_CONFIG_KEY`/`VALUE` pairs for every repo in `repos`, in the order they're added
-    /// (count included separately by `environment`). A stored entry that isn't a strict
-    /// `owner/name` (shouldn't happen -- `setRepos` already refuses one -- but never trusted
-    /// twice) is skipped rather than ever reaching a config key or a shell command.
-    static func additions(repos: [String], fragmentPath: String) -> [(key: String, value: String)] {
+    /// Every URL spelling a `repo` remote might legitimately have: three forms (`https://`,
+    /// `git@host:`, `ssh://git@host/`) each with and without the `.git` suffix -- six total. Git
+    /// clients vary on which one a person or `gh` actually configures, and both need the identity
+    /// (and, for the SSH forms, the push rewrite) to apply.
+    private static func remoteSpellings(_ repo: String) -> (https: [String], ssh: [String]) {
+        let suffixes = ["", ".git"]
+        let https = suffixes.map { "https://github.com/\(repo)\($0)" }
+        let ssh = suffixes.map { "git@github.com:\(repo)\($0)" } + suffixes.map { "ssh://git@github.com/\(repo)\($0)" }
+        return (https, ssh)
+    }
+
+    /// The routing file's content for the live `repos`: one section per valid repo, each starting
+    /// with an `[include]` of the static identity fragment, then that repo's own rewrite rules.
+    /// A stored entry that isn't a strict `owner/name` (shouldn't happen -- `setRepos` already
+    /// refuses one -- but never trusted twice) is skipped entirely.
+    static func routingContents(repos: [String], identityFragmentPath: String) -> String {
+        var sections: [String] = []
+        for repo in repos where GitHubProxyClient.isOwnerName(repo) {
+            let (httpsForms, sshForms) = remoteSpellings(repo)
+            let canonical = httpsForms[1]
+            // The canonical (.git) form's own [url] block: the identity rule (rewritten to
+            // itself) plus every SSH spelling rewritten onto it.
+            var lines = ["[include]", "\tpath = \(identityFragmentPath)",
+                        "[url \"\(canonical)\"]", "\tinsteadOf = \(canonical)"]
+            for sshForm in sshForms { lines.append("\tinsteadOf = \(sshForm)") }
+            // Every OTHER https spelling (just the no-suffix one) needs its own [url] block with
+            // its own identity rule: a shorter spelling isn't itself matched by a longer one's
+            // block above.
+            for httpsForm in httpsForms where httpsForm != canonical {
+                lines.append("[url \"\(httpsForm)\"]")
+                lines.append("\tinsteadOf = \(httpsForm)")
+            }
+            sections.append(lines.joined(separator: "\n"))
+        }
+        return sections.joined(separator: "\n")
+    }
+
+    /// Writes the routing file fresh every time -- unlike the identity fragment, this always
+    /// reflects the live allowlist, so adding a repo takes effect on the very next `run_command`
+    /// call (planner's correction, 2026-11-15). Cheap for any realistic allowlist size.
+    static func writeRoutingFile(repos: [String], identityFragmentPath: String, to path: String) {
+        try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent,
+                                                  withIntermediateDirectories: true)
+        try? routingContents(repos: repos, identityFragmentPath: identityFragmentPath).write(toFile: path, atomically: true, encoding: .utf8)
+    }
+
+    /// The `includeIf` `GIT_CONFIG_KEY`/`VALUE` pairs for every repo in `repos`, all pointing at
+    /// `routingPath` -- the rewrite rules themselves live in that file's content (`routingContents`),
+    /// never injected directly here, so they're reachable only when `hasconfig` finds an exact
+    /// match against the repository actually being resolved (see the type doc on the collision
+    /// this avoids).
+    static func additions(repos: [String], routingPath: String) -> [(key: String, value: String)] {
         var pairs: [(key: String, value: String)] = []
         for repo in repos where GitHubProxyClient.isOwnerName(repo) {
-            let https = "https://github.com/\(repo).git"
-            let sshColon = "git@github.com:\(repo).git"
-            let sshURL = "ssh://git@github.com/\(repo).git"
-            pairs.append((key: "includeIf.hasconfig:remote.*.url:\(https).path", value: fragmentPath))
-            pairs.append((key: "includeIf.hasconfig:remote.*.url:\(sshColon).path", value: fragmentPath))
-            pairs.append((key: "includeIf.hasconfig:remote.*.url:\(sshURL).path", value: fragmentPath))
-            pairs.append((key: "url.\(https).pushInsteadOf", value: sshColon))
-            pairs.append((key: "url.\(https).pushInsteadOf", value: sshURL))
+            let (httpsForms, sshForms) = remoteSpellings(repo)
+            for url in httpsForms + sshForms {
+                pairs.append((key: "includeIf.hasconfig:remote.*.url:\(url).path", value: routingPath))
+            }
         }
         return pairs
     }
@@ -85,8 +180,8 @@ enum GitIdentityEnvironment {
     /// hanging on a terminal prompt that `run_command` has none to answer. `base` is returned
     /// unchanged when `repos` is empty (no token configured, or no allowed repos yet) --
     /// identical behavior to today.
-    static func environment(repos: [String], fragmentPath: String, base: [String: String]) -> [String: String] {
-        let pairs = additions(repos: repos, fragmentPath: fragmentPath)
+    static func environment(repos: [String], routingPath: String, base: [String: String]) -> [String: String] {
+        let pairs = additions(repos: repos, routingPath: routingPath)
         guard !pairs.isEmpty else { return base }
         var env = base
         let existingCount = Int(base["GIT_CONFIG_COUNT"] ?? "") ?? 0
