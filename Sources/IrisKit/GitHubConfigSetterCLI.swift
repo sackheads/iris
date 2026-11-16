@@ -39,21 +39,6 @@ enum GitHubConfigSetterCLI {
         }
     }
 
-    /// `name` is a valid `owner/name`: exactly one `/`, a non-empty segment on each side, each
-    /// part letters/digits/`.`/`_`/`-` and never `.`/`..`. The same shape `GitHubProxyClient`
-    /// enforces before building a request (Task 3) — duplicated here rather than shared because
-    /// Task 3 isn't merged yet; dev-3's review flagged this for unification once it lands, so the
-    /// allowlist can never hold an entry the client would refuse anyway.
-    static func isValidRepoName(_ name: String) -> Bool {
-        let parts = name.split(separator: "/", omittingEmptySubsequences: false)
-        guard parts.count == 2 else { return false }
-        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
-        return parts.allSatisfy { part in
-            !part.isEmpty && part.count <= 100 && part != "." && part != ".."
-                && part.unicodeScalars.allSatisfy { allowed.contains($0) }
-        }
-    }
-
     /// Writes the token read from `stdin` (trimmed) to `keychain`'s `iris.github` service, merging
     /// into whatever else that item holds (`updateSecrets`, #750) rather than replacing the whole
     /// item. Refuses an empty or whitespace-only read, or one with interior whitespace or control
@@ -71,7 +56,8 @@ enum GitHubConfigSetterCLI {
 
     /// Writes a comma- or newline-separated repo list read from `stdin` to the guarded
     /// `githubAllowedRepos` blob, as a JSON array. Empty `stdin` clears the list to empty (allows
-    /// nothing). Any entry that is not a valid `owner/name` refuses the whole write -- not even
+    /// nothing). Any entry `GitHubProxyClient.isOwnerName` refuses (the one definition: the list can
+    /// never hold an entry the client would turn away) refuses the whole write -- not even
     /// the valid entries beside it are saved, so a typo cannot silently narrow (or widen, if the
     /// bad entry were later fixed to match something else) the list to an unintended partial set.
     ///
@@ -93,7 +79,7 @@ enum GitHubConfigSetterCLI {
         let names = raw.split(whereSeparator: { $0 == "," || $0.isNewline })
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-        if let bad = names.first(where: { !isValidRepoName($0) }) {
+        if let bad = names.first(where: { !GitHubProxyClient.isOwnerName($0) }) {
             return .failure(.malformedRepo(bad))
         }
         let json = (try? JSONSerialization.data(withJSONObject: names)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
