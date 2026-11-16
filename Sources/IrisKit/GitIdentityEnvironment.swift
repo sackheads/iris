@@ -113,6 +113,20 @@ enum GitIdentityEnvironment {
     /// `git@host:`, `ssh://git@host/`) each with and without the `.git` suffix -- six total. Git
     /// clients vary on which one a person or `gh` actually configures, and both need the identity
     /// (and, for the SSH forms, the push rewrite) to apply.
+    ///
+    /// **Known residual (planner's ruling, 2026-11-15): a second remote in the SAME checkout
+    /// whose name string-extends the allowed repo.** The `includeIf.hasconfig` gate gives us
+    /// per-REPOSITORY scoping (confirmed in the type doc and `prefixCollisionRepoUnaffected`), but
+    /// once ANY remote in a repo's config matches and the routing file loads, its `insteadOf`
+    /// rules become part of the effective config for every remote resolved in that SAME
+    /// repository -- including one that only coincidentally shares a string prefix. An allowed
+    /// `owner/iris` with a second remote `upstream` pointing at `owner/iris-fork` (unrelated,
+    /// not on the allowlist) resolves to a mangled URL
+    /// (`https://github.com/owner/iris.git-fork.git`), confirmed empirically. This fails loudly
+    /// (a 404/malformed-URL push failure) rather than falling back to the ambient SSH key
+    /// silently, which is the trade the planner accepted: the alternative (not rewriting at all)
+    /// is exactly the silent ambient-identity failure this feature exists to close. Pinned by
+    /// `secondRemoteInSameCheckoutMangledNotSilent`, a real-git test.
     private static func remoteSpellings(_ repo: String) -> (https: [String], ssh: [String]) {
         let suffixes = ["", ".git"]
         let https = suffixes.map { "https://github.com/\(repo)\($0)" }
