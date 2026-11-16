@@ -5443,7 +5443,8 @@ actor IrisEngine {
     /// the same test the approval ladder uses): that turn is attended and `.main` but its words are a
     /// guest's, so it must not act as `iris-main`.
     func isGuestOriginConversation(_ conversationId: UUID) async -> Bool {
-        await MainActor.run {
+        let localState = state
+        return await MainActor.run {
             guard let localState else { return false }
             return localState.isGuestOriginTurn(conversationId)
                 || localState.isGuestOriginTurn(localState.delegationRoot(of: conversationId))
