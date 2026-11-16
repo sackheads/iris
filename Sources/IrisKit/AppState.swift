@@ -339,6 +339,11 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// dialog's call, same as any other path, until #974 turns these into part of the profile's
     /// own FS grant. Empty is no additional roots.
     var additionalRoots: [String] = []
+    /// Vibecop guidance for this conversation only (#1005): what the person typed with
+    /// `/vibecop tweak here`. A stored field, not a file, so no tool can write it; the user's slash
+    /// command is the only setter. Composed after the global and workspace rules and never over the
+    /// baseline's hard rules. nil is none.
+    var vibecopGuidance: String?
     /// This conversation's `/loop`, if one is set (#190). Comes back paused after a relaunch.
     var loop: ConversationLoop?
     /// This conversation's own model tier, set by `/model` (#667). Nil: its agent profile's tier,
@@ -430,7 +435,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, hasUntrustedToolOutput, outboundAllowedTools, jobOutboundExemptions, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier, lastTouchedAt, archivedAutomaticallyAt, inSessions, additionalRoots
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, hasUntrustedToolOutput, outboundAllowedTools, jobOutboundExemptions, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier, lastTouchedAt, archivedAutomaticallyAt, inSessions, additionalRoots, vibecopGuidance
     }
 
     init(from decoder: Decoder) throws {
@@ -471,6 +476,8 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         homeWritableOptIn = try container.decodeIfPresent(String.self, forKey: .homeWritableOptIn)
         // Invariant 1: absent before #962, and absent is no additional roots.
         additionalRoots = try container.decodeIfPresent([String].self, forKey: .additionalRoots) ?? []
+        // Invariant 1: absent before #1005, and absent is no conversation guidance.
+        vibecopGuidance = try container.decodeIfPresent(String.self, forKey: .vibecopGuidance)
         // Invariant 1: absent before #465, and absent is no profile. A snapshot that does not
         // decode drops only itself; the link stays and the file is read again.
         agentProfile = try container.decodeIfPresent(String.self, forKey: .agentProfile)
@@ -4939,7 +4946,8 @@ class AppState {
         }
 
         if let decision = await consultVibecop(toolName: toolName, details: details, workspace: workspace, inSandbox: inSandbox,
-                                               callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: vibecopEnabled) {
+                                               callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: vibecopEnabled,
+                                               conversationGuidance: vibecopGuidance(for: conversationId, guestOrigin: guestOrigin)) {
             // On the host, an APPROVE stands in for the person only on a read (#600), and not at all
             // for a command once the person has denied one in this conversation.
             // #1151: and never on a guest-origin turn: Vibecop may still DENY there, but a read-only
@@ -4971,11 +4979,20 @@ class AppState {
                                          offersAlwaysAllow: offersAlwaysAllow) ? .person : nil
     }
 
+    /// The guidance the person typed for exactly this conversation (#1005). Not the delegation
+    /// root's: a subagent or job run is its own conversation and inherits nothing silently. A
+    /// guest-origin turn gets none, as it gets no Vibecop APPROVE either (#1151).
+    func vibecopGuidance(for conversationId: UUID?, guestOrigin: Bool) -> String? {
+        guard !guestOrigin, let id = conversationId else { return nil }
+        return conversations.first(where: { $0.id == id })?.vibecopGuidance
+    }
+
     /// Vibecop, bounded by a timeout so a wedged local model can't hang the turn. nil means
     /// Vibecop is off, or the evaluation failed or timed out: no verdict, so the user prompt decides.
     /// Uses adaptive timeout: if the Ollama model is cold (unloaded), give it 30s to load.
     private func consultVibecop(toolName: String, details: String, workspace: String?, inSandbox: Bool,
-                                callerRole: VibecopCallerRole, allowedCommands: [String], vibecopEnabled: Bool?) async -> VibecopDecision? {
+                                callerRole: VibecopCallerRole, allowedCommands: [String], vibecopEnabled: Bool?,
+                                conversationGuidance: String? = nil) async -> VibecopDecision? {
         // Off is checked before the Ollama warm-up probe below, which would otherwise build an engine for nothing.
         let enabled = vibecopEnabled ?? vibecopEnabledOverride ?? ConfigManager.shared.enableVibecop
         guard enabled else { return nil }
@@ -4997,7 +5014,8 @@ class AppState {
         let activePaths = permissions.paths
         return await Self.boundedVibecopVerdict(seconds: timeout) {
             try await VibecopService.shared.evaluateAction(toolName: toolName, details: details, workspace: workspace, inSandbox: inSandbox,
-                                                           callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: enabled,
+                                                           callerRole: callerRole, allowedCommands: allowedCommands,
+                                                           conversationGuidance: conversationGuidance, vibecopEnabled: enabled,
                                                            paths: activePaths)
         }
     }
@@ -6931,13 +6949,59 @@ class AppState {
             }
             return
         }
+        if rest == "clear" {
+            guard let idx = conversations.firstIndex(where: { $0.id == convId }) else { return }
+            let had = conversations[idx].vibecopGuidance != nil
+            conversations[idx].vibecopGuidance = nil
+            emitCommandOutput(had ? "Cleared this conversation's Vibecop guidance." : "This conversation has no Vibecop guidance of its own.", format: .markdown, to: convId)
+            return
+        }
         if rest == "tweak" || rest.hasPrefix("tweak ") {
-            let guidance = String(rest.dropFirst("tweak".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            var guidance = String(rest.dropFirst("tweak".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            // #1005: a leading `here` or `global` picks where it goes; anything else is guidance.
+            enum TweakScope { case here, global, byWorkspace }
+            var scope = TweakScope.byWorkspace
+            for (word, value) in [("here", TweakScope.here), ("global", TweakScope.global)] where guidance == word || guidance.hasPrefix(word + " ") {
+                scope = value
+                guidance = String(guidance.dropFirst(word.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                break
+            }
             guard !guidance.isEmpty else {
-                emitCommandOutput("Usage: `/vibecop tweak <guidance>` (or `/vibecop init`, `/vibecop show`)", format: .markdown, to: convId)
+                emitCommandOutput("Usage: `/vibecop tweak [here|global] <guidance>` (or `/vibecop init`, `/vibecop show`, `/vibecop clear`)", format: .markdown, to: convId)
                 return
             }
             let workspace = conversations.first(where: { $0.id == convId })?.workspacePath
+            let hasWorkspace = !(workspace ?? "").isEmpty
+            if scope == .here || (scope == .byWorkspace && !hasWorkspace) {
+                guard let idx = conversations.firstIndex(where: { $0.id == convId }) else { return }
+                let existing = conversations[idx].vibecopGuidance ?? ""
+                let separator = existing.isEmpty ? "" : (existing.hasSuffix("\n") ? "" : "\n")
+                let updated = existing + separator + "- \(guidance)\n"
+                guard updated.utf8.count <= VibecopService.conversationGuidanceLimit else {
+                    emitCommandOutput("This conversation's Vibecop guidance is at its \(VibecopService.conversationGuidanceLimit)-byte limit. Run `/vibecop clear`, or `/vibecop tweak global <guidance>` for something that should apply everywhere.", format: .markdown, to: convId)
+                    return
+                }
+                conversations[idx].vibecopGuidance = updated
+                let hint = scope == .here ? "" : "\n\n(No workspace is bound, so this applies to this conversation only. `/vibecop tweak global <guidance>` applies it to every session.)"
+                emitCommandOutput("Added Vibecop guidance for this conversation:\n- \(guidance)" + hint, format: .markdown, to: convId)
+                return
+            }
+            if scope == .global {
+                let configDir = permissions.paths.configDir
+                try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+                let fileURL = configDir.appendingPathComponent("vibecop.md")
+                let existing = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? ""
+                let separator = existing.isEmpty ? "" : (existing.hasSuffix("\n") ? "" : "\n")
+                let updated = existing + separator + "- \(guidance)\n"
+                do {
+                    try Data(updated.utf8).write(to: fileURL, options: .atomic)
+                    emitCommandOutput("Added global Vibecop guidance (`config/vibecop.md`):\n- \(guidance)", format: .markdown, to: convId)
+                } catch {
+                    emitCommandOutput("Failed to write `config/vibecop.md`: \(error)", format: .markdown, to: convId)
+                }
+                return
+            }
+            // A workspace is bound and no scope was named: the workspace rules, as before (#1017).
             let trust = WorkspaceIrisTrust(paths: permissions.paths)
             if let ws = workspace, !ws.isEmpty {
                 let expandedWS = IrisEngine.expandTilde(ws)
@@ -6963,34 +7027,22 @@ class AppState {
                 } catch {
                     emitCommandOutput("Failed to write `.iris/vibecop.md`: \(error)", format: .markdown, to: convId)
                 }
-            } else {
-                let configDir = permissions.paths.configDir
-                try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-                let fileURL = configDir.appendingPathComponent("vibecop.md")
-                let existing = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? ""
-                let separator = existing.isEmpty ? "" : (existing.hasSuffix("\n") ? "" : "\n")
-                let updated = existing + separator + "- \(guidance)\n"
-                do {
-                    try Data(updated.utf8).write(to: fileURL, options: .atomic)
-                    emitCommandOutput("Added global Vibecop guidance (`config/vibecop.md`):\n- \(guidance)", format: .markdown, to: convId)
-                } catch {
-                    emitCommandOutput("Failed to write `config/vibecop.md`: \(error)", format: .markdown, to: convId)
-                }
             }
             return
         }
         if rest.isEmpty || rest == "show" {
             let workspace = conversations.first(where: { $0.id == convId })?.workspacePath
-            let additions = VibecopService.guardianAdditions(workspace: workspace, paths: permissions.paths)
+            let own = conversations.first(where: { $0.id == convId })?.vibecopGuidance
+            let additions = VibecopService.guardianAdditions(workspace: workspace, conversationGuidance: own, paths: permissions.paths)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if additions.isEmpty {
-                emitCommandOutput("No custom Vibecop guidance configured. Use `/vibecop tweak <guidance>` to add guidance or `/vibecop init` to analyze the workspace.", format: .markdown, to: convId)
+                emitCommandOutput("No custom Vibecop guidance configured. Use `/vibecop tweak <guidance>` to add guidance for this conversation or `/vibecop init` to analyze the workspace.", format: .markdown, to: convId)
             } else {
                 emitCommandOutput(additions, format: .markdown, to: convId)
             }
             return
         }
-        emitCommandOutput("Usage: `/vibecop [init|tweak <guidance>|show]`", format: .markdown, to: convId)
+        emitCommandOutput("Usage: `/vibecop [init|tweak [here|global] <guidance>|show|clear]`", format: .markdown, to: convId)
     }
 
     private func handleYoloCommand(_ trimmed: String, convId: UUID) {
