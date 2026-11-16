@@ -125,6 +125,13 @@ public enum IrisMain {
             exit(GitHubConfigSetterCLI.runSetToken())
         } else if CommandLine.arguments.contains("--set-github-repos") {
             exit(GitHubConfigSetterCLI.runSetRepos())
+        } else if let index = CommandLine.arguments.firstIndex(of: "--git-credential-helper") {
+            // iris-main git identity (#966 spec §4): git itself invokes this as
+            // `<credential.helper> get|store|erase`, appending the operation after the whole
+            // configured helper command -- so it lands one word after this flag, not at a fixed
+            // position in CommandLine.arguments.
+            let operation = CommandLine.arguments.count > index + 1 ? CommandLine.arguments[index + 1] : nil
+            exit(GitCredentialHelperCLI.run(operation: operation))
         } else {
             ProcessRole.set(.app)
             // Off the main thread, before the first window: a sidebar row reads it (#1001).

@@ -185,6 +185,60 @@ These are the spec's Part-1 config steps. The code tasks below are buildable and
 - [ ] **Step 1:** Grep for agent-facing strings and docs the new tools make stale (`oracleText`, tool `description` fields, system prompts, README/`docs/`). Add the feature's doc entry (including the `--set-github-token`/`--set-github-repos` config path and that the real UI is deferred to #961). Fix any sentence the new behavior made untrue. "Nothing was falsified" is a legitimate answer — having looked is the requirement.
 - [ ] **Step 2: Commit** (`docs: document the iris-main GitHub proxy tools + headless config`).
 
+### Task 8: iris-main git-contributor plumbing (added after the contributor-model spec revision)
+
+**Files:**
+- Create: `Sources/IrisKit/GitIdentityEnvironment.swift` — the static identity fragment + the
+  per-invocation `GIT_CONFIG_KEY`/`VALUE` additions.
+- Create: `Sources/IrisKit/GitCredentialHelperCLI.swift` — `iris --git-credential-helper`.
+- Modify: `Sources/IrisKit/ToolExecutor.swift` (`hostSpawn`'s unrestricted branch, and its one
+  production call site).
+- Modify: `Sources/IrisKit/IrisMain.swift` (the new headless mode).
+- Modify: `Sources/IrisKit/GuardedSettings.swift` (`ConfigManager.allowedGitHubRepos()`, sharing
+  parse/validation with `isGitHubRepoAllowed` — one definition).
+- Test: `Tests/irisTests/GitIdentityEnvironmentTests.swift`, `Tests/irisTests/GitCredentialHelperCLITests.swift`.
+
+**Interfaces:**
+- Consumes: Task 1 (`KeychainManager.githubService`, `GitHubProxyClient.token`/`hasToken`), Task 2
+  (`ConfigManager.isGitHubRepoAllowed`), Task 3 (`GitHubProxyClient.isOwnerName`).
+- Produces: `git` run through `run_command`'s unrestricted host path acts as `iris-main` --
+  attribution and push credential -- for exactly the user-configured allowed repos, over HTTPS,
+  with zero behavior change for any other repo or when no token/allowlist is configured.
+
+Design (spec §4; resolved with the planner 2026-11-15, see the design-report thread): a static,
+non-secret identity fragment (`user.name`/`user.email` = `iris-main`/GitHub's noreply address,
+`credential.helper` pointing at the new headless mode) written once; per-repo `includeIf
+hasconfig:remote.*.url:<exact URL>` (https, `git@`, `ssh://` forms) and `pushInsteadOf`
+(SSH -> HTTPS, so the HTTPS-only credential helper engages) computed **fresh on every
+`run_command` call** from the live allowlist, injected as `GIT_CONFIG_KEY`/`VALUE_N` env vars --
+the same mechanism `GitRead.environment()` already uses for the sandboxed read-only path, applied
+here to the unrestricted one. Never touches `~/.gitconfig`, never regenerates a file when the
+allowlist changes (the routing is computed fresh, not cached), never applies to a repo not on the
+allowlist (a blanket `github.com` match would silently break an unrelated SSH push on some other
+repo the model touches for ordinary work). `WorkspaceGit`'s frozen sandboxed-git-read overrides
+(#658(a): no new keys) are untouched -- this only reaches the unrestricted branch.
+
+The credential helper never regexes a raw URL: git's own protocol hands it already-split
+`protocol`/`host`/`path` fields, and it exact-matches `host == "github.com"` (case-insensitive,
+no substring/suffix) before deriving `owner/name` through `GitHubProxyClient.isOwnerName`'s same
+strict two-segment parse -- a lookalike host or malformed path never reaches the allowlist check.
+
+- [ ] **Step 1: Write the failing tests** for `GitIdentityEnvironment.additions`/`environment`
+  (one repo's includeIf/pushInsteadOf shape, an empty allowlist gives no additions, a malformed
+  stored entry is skipped, appends after an existing `GIT_CONFIG_COUNT` rather than overwriting
+  it) and `GitCredentialHelperCLI.repoFromFields`/`respond` (the lookalike-host and lookalike-path
+  must-pin set: `github.com.evil.com`, `evil-github.com`, a `.git@evil`/traversal/query/fragment
+  path, each refused before the allowlist predicate is even consulted; a disallowed repo and a
+  missing token both give an empty response, not an error).
+- [ ] **Step 2: Run tests, verify fail** (quote count).
+- [ ] **Step 3: Implement** `GitIdentityEnvironment`, `GitCredentialHelperCLI`, the `hostSpawn`
+  parameters (default off, so every existing caller is unaffected) and its one production call
+  site's gating (token present AND allowlist non-empty, else zero behavior change), the
+  `--git-credential-helper` headless mode, and `allowedGitHubRepos()`.
+- [ ] **Step 4: Run tests, verify pass.** Also add a `hostSpawn`-level regression test proving the
+  sandboxed git-read branch ignores the new parameters entirely.
+- [ ] **Step 5: Commit** (`feat: iris-main git-contributor identity -- credential helper + per-repo env injection`).
+
 ---
 
 ## Self-Review notes

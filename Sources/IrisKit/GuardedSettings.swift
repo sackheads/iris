@@ -406,15 +406,24 @@ extension ConfigManager {
     /// wrongly shaped list (any element not a string) allows nothing, so a bad value never
     /// widens access.
     func isGitHubRepoAllowed(_ repo: String) -> Bool {
-        guard !repo.isEmpty,
-              let object = try? JSONSerialization.jsonObject(with: Data(guardedBlob(.githubAllowedRepos).utf8)),
-              let list = object as? [Any] else { return false }
+        !repo.isEmpty && allowedGitHubRepos().contains(repo)
+    }
+
+    /// The configured `githubAllowedRepos` list, parsed and validated the same way
+    /// `isGitHubRepoAllowed` checks membership: empty, malformed, or wrongly shaped (any element
+    /// not a string) gives `[]`, never a partial list, so a bad value never widens access. One
+    /// definition shared with `isGitHubRepoAllowed` so the two can't drift (#1172 lesson) --
+    /// the iris-main git-identity env injection (`ToolExecutor.hostSpawn`) uses this to compute
+    /// its per-repo `includeIf`/`pushInsteadOf` entries fresh on every invocation.
+    func allowedGitHubRepos() -> [String] {
+        guard let object = try? JSONSerialization.jsonObject(with: Data(guardedBlob(.githubAllowedRepos).utf8)),
+              let list = object as? [Any] else { return [] }
         var allowed: [String] = []
         for element in list {
-            guard let name = element as? String else { return false }
+            guard let name = element as? String else { return [] }
             allowed.append(name)
         }
-        return allowed.contains(repo)
+        return allowed
     }
 
     /// Saves `key`'s own value, as `persistGuarded` saves every other guarded value (#1167). Over

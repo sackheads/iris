@@ -520,8 +520,15 @@ struct ToolExecutor {
     /// How a host command is spawned. A read the gate approved (`restrictedPath`, #612) runs as
     /// judged: `zsh -f` (no user startup files) with that `PATH` and `restrictedEnvironment`.
     /// Anything else runs as it always has, with the user's environment and startup files.
+    /// `gitIdentityRepos`/`gitIdentityFragmentPath` add the iris-main git-identity environment
+    /// (#966 spec §4) to the **unrestricted** branch only -- never the sandboxed git-read path
+    /// above, whose overrides are frozen (#658(a): no new keys). Both default to "off" (empty
+    /// list / nil), so every existing caller, including every test that doesn't pass them, is
+    /// unaffected. The one production call site gates them on a configured token and a
+    /// non-empty allowlist before passing anything (Invariant 6's pattern, applied here too).
     nonisolated static func hostSpawn(_ command: String, restrictedPath: [String]?, gitRepository: GitRead.Repository? = nil,
-                                      base: [String: String]) -> (executable: String, arguments: [String], environment: [String: String]) {
+                                      base: [String: String], gitIdentityRepos: [String] = [],
+                                      gitIdentityFragmentPath: String? = nil) -> (executable: String, arguments: [String], environment: [String: String]) {
         if let restrictedPath {
             let restricted = ReadOnlyCommand.restrictedEnvironment(path: restrictedPath, base: base)
             // #607: a git read runs as argv, no shell, with Iris's fixed prefix and overrides.
@@ -536,7 +543,10 @@ struct ToolExecutor {
             }
             return ("/bin/zsh", ["-f", "-c", command], restricted)
         }
-        return ("/bin/zsh", ["-c", command], BinaryResolver.commandEnvironment(base: base))
+        let unrestricted = BinaryResolver.commandEnvironment(base: base)
+        guard let fragmentPath = gitIdentityFragmentPath else { return ("/bin/zsh", ["-c", command], unrestricted) }
+        return ("/bin/zsh", ["-c", command],
+                GitIdentityEnvironment.environment(repos: gitIdentityRepos, fragmentPath: fragmentPath, base: unrestricted))
     }
 
     func runCommand(_ command: String, cwd: String?, conversationId: UUID? = nil, useSandbox: Bool = false,
@@ -704,8 +714,25 @@ struct ToolExecutor {
                 }
                 gitRepository = repo
             }
+            // iris-main git identity (#966 spec §4): off unless a token is configured AND the
+            // allowlist is non-empty, so an install that hasn't set either up gets no behavior
+            // change at all.
+            var gitIdentityRepos: [String] = []
+            var gitIdentityFragmentPath: String?
+            if GitHubProxyClient.hasToken(keychain: .shared) {
+                let repos = ConfigManager.shared.allowedGitHubRepos()
+                if !repos.isEmpty, let executablePath = Bundle.main.executablePath {
+                    let fragmentPath = (irisPaths ?? .default).configDir
+                        .appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
+                    GitIdentityEnvironment.ensureFragment(at: fragmentPath, helperExecutable: executablePath)
+                    gitIdentityRepos = repos
+                    gitIdentityFragmentPath = fragmentPath
+                }
+            }
             (executable, arguments, environment) = Self.hostSpawn(command, restrictedPath: restrictedPath,
-                                                                  gitRepository: gitRepository, base: base)
+                                                                  gitRepository: gitRepository, base: base,
+                                                                  gitIdentityRepos: gitIdentityRepos,
+                                                                  gitIdentityFragmentPath: gitIdentityFragmentPath)
         }
 
         // Its own process group, killed whole on timeout and on Stop: SIGTERM, then SIGKILL (#353).
