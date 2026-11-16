@@ -91,6 +91,10 @@ struct ToolExecutor {
     /// Injectable so a test can read only its own names.
     var ephemeralRegistry: EphemeralContainerRegistry = .shared
 
+    /// The client the `github_*` tools call (#966). Nil is the real one over the Keychain and the
+    /// user's allowed repos; a test injects one over a stub transport so no request leaves the process.
+    var githubClient: GitHubProxyClient?
+
     /// Keeps a sandboxed repository's git config from making host git run a program (#623).
     /// Injectable so a test reads only its own watches.
     var gitGuard: GitConfigGuard = .shared
@@ -402,18 +406,18 @@ struct ToolExecutor {
                   let body = args["body"]?.stringValue else {
                 return "Error: github_create_pr needs repo, head, base, title and body"
             }
-            return await GitHubProxyClient().createPR(repo: repo, head: head, base: base, title: title, body: body,
+            return await (githubClient ?? GitHubProxyClient()).createPR(repo: repo, head: head, base: base, title: title, body: body,
                                                       draft: Self.githubDraftFlag(args["draft"]))
         case "github_comment":
             guard let repo = args["repo"]?.stringValue, let body = args["body"]?.stringValue else {
                 return "Error: github_comment needs repo, pr and body"
             }
             guard let pr = Self.positiveInt(args["pr"]) else { return "Error: github_comment needs a positive pr number" }
-            return await GitHubProxyClient().comment(repo: repo, pr: pr, body: body)
+            return await (githubClient ?? GitHubProxyClient()).comment(repo: repo, pr: pr, body: body)
         case "github_approve":
             guard let repo = args["repo"]?.stringValue else { return "Error: github_approve needs repo and pr" }
             guard let pr = Self.positiveInt(args["pr"]) else { return "Error: github_approve needs a positive pr number" }
-            return await GitHubProxyClient().approve(repo: repo, pr: pr)
+            return await (githubClient ?? GitHubProxyClient()).approve(repo: repo, pr: pr)
         case let n where n.hasPrefix("google_tasks_"):
             return await GoogleTasksManager.shared.execute(name: name, args: args)
         case let n where n.hasPrefix("google_calendar_") || n.hasPrefix("google_docs_") || n.hasPrefix("google_drive_") || n.hasPrefix("google_sheets_") || n.hasPrefix("gmail_"):

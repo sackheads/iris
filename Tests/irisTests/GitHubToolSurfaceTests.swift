@@ -174,4 +174,73 @@ struct GitHubToolSurfaceTests {
         let create = ToolExecutor.githubToolDeclarations.first { $0.name == "github_create_pr" }
         #expect(create?.description.contains("draft true") == true)
     }
+
+    // MARK: arguments reach the right place in the request
+
+    private final class Recorder: GitHubTransport, @unchecked Sendable {
+        struct Sent { let method: String; let path: String; let body: [String: Any] }
+        private let lock = NSLock()
+        private var _sent: [Sent] = []
+        var sent: [Sent] { lock.withLock { _sent } }
+        func send(_ request: URLRequest, bearer: String) async throws -> (Data, HTTPURLResponse) {
+            let body = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? [String: Any] ?? [:]
+            lock.withLock { _sent.append(Sent(method: request.httpMethod ?? "", path: request.url?.path ?? "", body: body)) }
+            let reply: [String: Any] = ["number": 9, "html_url": "https://github.com/sackheads/iris/pull/9"]
+            let data = try JSONSerialization.data(withJSONObject: reply)
+            return (data, HTTPURLResponse(url: request.url!, statusCode: 201, httpVersion: nil, headerFields: nil)!)
+        }
+    }
+
+    private func executor(_ recorder: Recorder) -> ToolExecutor {
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)")
+        keychain.replaceSecrets(["token": "ghp_TestToken1234567890abcdef"], service: KeychainManager.githubService)
+        var executor = ToolExecutor.shared
+        executor.githubClient = GitHubProxyClient(keychain: keychain, isRepoAllowed: { $0 == "sackheads/iris" }, transport: recorder)
+        return executor
+    }
+
+    @Test("github_create_pr sends head, base, title and body to their own fields, and drafts by default")
+    func createPRArguments() async {
+        let recorder = Recorder()
+        let result = await executor(recorder).execute(name: "github_create_pr", args: [
+            "repo": .string("sackheads/iris"), "head": .string("feature-x"), "base": .string("main"),
+            "title": .string("The title"), "body": .string("The body")])
+        #expect(result.contains("#9"))
+        let sent = recorder.sent
+        #expect(sent.count == 1)
+        #expect(sent.first?.path == "/repos/sackheads/iris/pulls")
+        #expect(sent.first?.body["head"] as? String == "feature-x")
+        #expect(sent.first?.body["base"] as? String == "main")
+        #expect(sent.first?.body["title"] as? String == "The title")
+        #expect(sent.first?.body["body"] as? String == "The body")
+        #expect(sent.first?.body["draft"] as? Bool == true)
+    }
+
+    @Test("an explicit draft false is honored", arguments: [(JSONValue.bool(false), false), (.bool(true), true)])
+    func createPRDraftIsPassedThrough(_ value: JSONValue, _ expected: Bool) async {
+        let recorder = Recorder()
+        _ = await executor(recorder).execute(name: "github_create_pr", args: [
+            "repo": .string("sackheads/iris"), "head": .string("h"), "base": .string("main"),
+            "title": .string("t"), "body": .string("b"), "draft": value])
+        #expect(recorder.sent.first?.body["draft"] as? Bool == expected)
+    }
+
+    @Test("github_comment posts to the right issue with the body")
+    func commentArguments() async {
+        let recorder = Recorder()
+        _ = await executor(recorder).execute(name: "github_comment", args: [
+            "repo": .string("sackheads/iris"), "pr": .string("12"), "body": .string("looks fine")])
+        #expect(recorder.sent.first?.path == "/repos/sackheads/iris/issues/12/comments")
+        #expect(recorder.sent.first?.body["body"] as? String == "looks fine")
+    }
+
+    @Test("github_approve starts with a read of the named PR, not a write")
+    func approveStartsWithARead() async {
+        let recorder = Recorder()
+        _ = await executor(recorder).execute(name: "github_approve", args: ["repo": .string("sackheads/iris"), "pr": .int(4)])
+        #expect(recorder.sent.first?.method == "GET")
+        #expect(recorder.sent.first?.path == "/repos/sackheads/iris/pulls/4")
+        #expect(recorder.sent.allSatisfy { $0.method != "POST" }, "the stub's PR has no head or files, so nothing is approved")
+    }
 }
+
