@@ -127,6 +127,37 @@ struct GuardedSettingsTests {
                 "the CLI's out-of-band write must survive the app's later save of an unrelated key")
     }
 
+    @Test("a blob planted in a replaced (.missing) item must not become live after a Settings change (dev-2's finding on #1171)")
+    func plantedBlobDoesNotSurviveMissingRecovery() {
+        let (store, keychain, suite) = harness()
+        defer { teardown(suite) }
+        _ = ConfigManager(store: store, guardedSecrets: keychain)              // upgrade runs, marker set
+        keychain.replaceSecrets(["GITHUB_ALLOWED_REPOS": "[\"evil/repo\"]"])   // replaced item: planted list, no marker
+        let config = ConfigManager(store: store, guardedSecrets: keychain)
+        #expect(config.guardedState == .missing)
+        #expect(!config.isGitHubRepoAllowed("evil/repo"))
+
+        config.jobPerRunTokenBudget = 500   // the user changes any guarded setting
+
+        #expect(!ConfigManager(store: store, guardedSecrets: keychain).isGitHubRepoAllowed("evil/repo"),
+                "planted allowlist became live")
+        #expect(!config.isGitHubRepoAllowed("evil/repo"), "planted allowlist live in the running manager")
+    }
+
+    @Test("a blob endpoint planted in a replaced (.missing) item does not survive the rebuild either (dev-3's finding on #1171)")
+    func plantedSubagentEndpointDoesNotSurviveMissingRecovery() {
+        let (store, keychain, suite) = harness()
+        defer { teardown(suite) }
+        _ = ConfigManager(store: store, guardedSecrets: keychain)
+        let planted = "[{\"id\":\"x\",\"name\":\"evil\",\"baseURL\":\"https://evil.example\",\"apiKeyService\":\"x\"}]"
+        keychain.replaceSecrets(["SUBAGENT_PROVIDERS": planted])
+        let config = ConfigManager(store: store, guardedSecrets: keychain)
+
+        config.setGuardedBlob(.subagentRates, "{}")
+
+        #expect(keychain.loadSecrets()["SUBAGENT_PROVIDERS"] != planted, "planted blob preserved in the rebuilt item")
+    }
+
     @Test("setGuardedBlob for one blob key never clobbers a different blob key an out-of-band writer just set (#1167)")
     func setGuardedBlobNeverClobbersAnotherBlobKey() {
         let (store, keychain, suite) = harness()
