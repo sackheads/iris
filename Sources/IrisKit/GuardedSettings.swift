@@ -342,13 +342,27 @@ extension ConfigManager {
         }
     }
 
-    /// A Settings change to a guarded setting. It saves every guarded value, not just `key`, so an
-    /// item rebuilt after it went missing holds the protective values the person was shown, not
-    /// built-ins for the keys they didn't touch. Nothing is written over an unreadable item.
+    /// Every non-blob guarded key's current value, by raw key (#1167). Never includes a blob key:
+    /// `guardedValue` reads those through `secretsSnapshot`'s cache, which only this manager's own
+    /// writes invalidate, so merging them here would overwrite an out-of-band writer's change with
+    /// a stale view. `persistGuarded` and `setGuardedBlob` both merge only this into the fresh dict
+    /// `updateSecrets` reads under its lock, leaving every blob key as that fresh read already has it.
+    func nonBlobGuardedValues() -> [String: String] {
+        Dictionary(uniqueKeysWithValues: GuardedKey.allCases.compactMap { key in
+            if case .blob = key.kind { return nil }
+            return (key.rawValue, guardedValue(key))
+        })
+    }
+
+    /// A Settings change to a guarded setting. It saves every non-blob guarded value, not just
+    /// `key`, so an item rebuilt after it went missing holds the protective values the person was
+    /// shown, not built-ins for the keys they didn't touch. Nothing is written over an unreadable
+    /// item. A blob key is never merged from this manager's own (possibly stale) view: see
+    /// `nonBlobGuardedValues` (#1167).
     func persistGuarded(_ key: GuardedKey, legacy: (UserDefaults) -> Void) {
         guard let keychain = guardedKeychain else { legacy(store); return }
         guard !keychain.areWritesBlocked else { return }
-        let values = Dictionary(uniqueKeysWithValues: GuardedKey.allCases.map { ($0.rawValue, guardedValue($0)) })
+        let values = nonBlobGuardedValues()
         keychain.updateSecrets { dict in
             dict.merge(values) { $1 }
             dict[GuardedSettings.markerKey] = "1"
@@ -395,11 +409,17 @@ extension ConfigManager {
         return allowed.contains(repo)
     }
 
-    /// Saves a blob-kind guarded value with every other guarded value, as `persistGuarded` does.
+    /// Saves `key`'s own value plus every non-blob guarded value, as `persistGuarded` does. Never
+    /// merges another blob key from this manager's own view (#1167): that view is read through
+    /// `secretsCache`, populated once and kept until this manager's own next write, so a long-lived
+    /// manager that cached a blob before an out-of-band writer (the headless CLI setter, a
+    /// different process over the same Keychain item) changed it would otherwise overwrite that
+    /// change here with its stale snapshot. The fresh dict `updateSecrets` reads under its lock
+    /// already holds whatever any other blob key currently is; only `key`'s own slot is set here.
     func setGuardedBlob(_ key: GuardedKey, _ value: String) {
         guard let keychain = guardedKeychain else { store.set(value, forKey: key.rawValue); return }
         guard !keychain.areWritesBlocked else { return }
-        let values = Dictionary(uniqueKeysWithValues: GuardedKey.allCases.map { ($0.rawValue, guardedValue($0)) })
+        let values = nonBlobGuardedValues()
         keychain.updateSecrets { dict in
             dict.merge(values) { $1 }
             dict[key.rawValue] = value

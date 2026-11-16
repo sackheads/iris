@@ -104,6 +104,48 @@ struct GuardedSettingsTests {
         #expect(ConfigManager(store: store, guardedSecrets: keychain).isGitHubRepoAllowed("sackheads/iris"))
     }
 
+    @Test("an out-of-band writer's blob value survives a later guarded-key save by a long-running manager that cached it stale (#1167)")
+    func outOfBandBlobWriteSurvivesAWholeSnapshotSave() {
+        let (store, keychain, suite) = harness()
+        defer { teardown(suite) }
+        let app = ConfigManager(store: store, guardedSecrets: keychain)
+        // The app reads the blob once (as Settings or a tool call would), caching it empty.
+        #expect(!app.isGitHubRepoAllowed("sackheads/iris"))
+
+        // An out-of-band writer (the headless CLI setter, a separate process in reality) sets the
+        // blob through its own manager, sharing only the Keychain item -- never through `app`.
+        let cliStore = UserDefaults(suiteName: "iris-guarded-cli-\(UUID().uuidString)")!
+        let cli = ConfigManager(store: cliStore, guardedSecrets: keychain)
+        cli.setGuardedBlob(.githubAllowedRepos, "[\"sackheads/iris\"]")
+
+        // The app, unaware, later saves an unrelated guarded setting. Before #1167's fix this
+        // merged the app's own (stale, cached-empty) view of every guarded key -- including the
+        // blob the CLI just wrote -- back over the fresh item, clobbering the CLI's write.
+        app.jobPerRunTokenBudget = 999
+
+        #expect(ConfigManager(store: store, guardedSecrets: keychain).isGitHubRepoAllowed("sackheads/iris"),
+                "the CLI's out-of-band write must survive the app's later save of an unrelated key")
+    }
+
+    @Test("setGuardedBlob for one blob key never clobbers a different blob key an out-of-band writer just set (#1167)")
+    func setGuardedBlobNeverClobbersAnotherBlobKey() {
+        let (store, keychain, suite) = harness()
+        defer { teardown(suite) }
+        let app = ConfigManager(store: store, guardedSecrets: keychain)
+        // The app reads subagentProviders once, caching it empty.
+        _ = app.guardedBlob(.subagentProviders)
+
+        let cliStore = UserDefaults(suiteName: "iris-guarded-cli-\(UUID().uuidString)")!
+        let cli = ConfigManager(store: cliStore, guardedSecrets: keychain)
+        cli.setGuardedBlob(.subagentProviders, "[\"out-of-band\"]")
+
+        // The app saves a different blob key. It must not drag its stale cached subagentProviders
+        // view back over the CLI's write.
+        app.setGuardedBlob(.githubAllowedRepos, "[\"sackheads/iris\"]")
+
+        #expect(keychain.loadSecrets()["SUBAGENT_PROVIDERS"] == "[\"out-of-band\"]")
+    }
+
     @Test("an empty, malformed or wrongly shaped list allows nothing", arguments: [
         "", "[]", "not json", "{", "{\"sackheads/iris\":true}", "\"sackheads/iris\"", "null", "42",
         "[1,2]", "[\"sackheads/iris\",7]", "[[\"sackheads/iris\"]]", "[null]",
