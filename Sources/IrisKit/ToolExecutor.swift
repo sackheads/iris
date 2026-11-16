@@ -94,6 +94,10 @@ struct ToolExecutor {
     /// The client the `github_*` tools call (#966). Nil is the real one over the Keychain and the
     /// user's allowed repos; a test injects one over a stub transport so no request leaves the process.
     var githubClient: GitHubProxyClient?
+    /// Decides the `github_*` declarations when `getTools` is not told, ahead of the user's real
+    /// configuration. Nil in production; an engine under test sets it so a turn can offer (or not
+    /// offer) them without touching `ConfigManager.shared`.
+    var githubToolsEnabledOverride: Bool?
 
     /// Keeps a sandboxed repository's git config from making host git run a program (#623).
     /// Injectable so a test reads only its own watches.
@@ -109,7 +113,8 @@ struct ToolExecutor {
     /// default reads `ConfigManager.githubToolsConfigured`, both parts fixed at launch, never the
     /// Keychain per turn (#578).
     func getTools(workspaceToolsEnabled: Bool = !ConfigManager.shared.googleRefreshToken.isEmpty,
-                  githubToolsEnabled: Bool = ConfigManager.shared.githubToolsConfigured) async -> [FunctionDeclaration] {
+                  githubToolsEnabled: Bool? = nil) async -> [FunctionDeclaration] {
+        let githubToolsEnabled = githubToolsEnabled ?? githubToolsEnabledOverride ?? ConfigManager.shared.githubToolsConfigured
         var tools = [
             FunctionDeclaration(
             name: "run_command",

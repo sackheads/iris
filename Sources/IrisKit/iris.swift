@@ -200,6 +200,7 @@ actor IrisEngine {
         var executor = ToolExecutor.shared
         executor.jobToolsProvider = jobToolsProvider()
         executor.mutatingJobsAvailable = mutatingJobsAvailable
+        executor.githubToolsEnabledOverride = githubToolsOverride
         // #489: a skill written through this engine's tools rebuilds this engine's prompt, and
         // the owner's main engine's too (plan note 14): a delegate's skill must reach the main
         // chat, whose engine caches its prompt for the life of the app. Never `AppState.shared`.
@@ -249,6 +250,8 @@ actor IrisEngine {
     /// declared. This flag remains perf's "declared every turn" arm. Only `iris --perf run` sets
     /// it, from `IRIS_PERF_DECLARE_STATE_TOOLS=1`.
     private let declareStateGatedTools: Bool
+    /// A test's say on whether this engine offers the `github_*` tools; nil reads the user's configuration.
+    private let githubToolsOverride: Bool?
     /// 5c §0.1; false only for perf's gated arm (`IRIS_PERF_STICKY_TOOLS=0`, wired in 5c PR D).
     private let stickyToolsEnabled: Bool
     var factStore: FactStoreManager { injectedFactStore ?? .shared }
@@ -612,7 +615,9 @@ actor IrisEngine {
          routedClient: @escaping @Sendable (ProviderRoute) -> any LLMClientProtocol = { LLMClient(route: $0) },
          mutatingJobsAvailable: @escaping @Sendable () -> Bool = { SandboxPolicy.mutatingJobCanRun() },
          skillCheckWillClaim: (@Sendable (UUID) async -> Void)? = nil,
-         guestClientId: String? = nil) {
+         guestClientId: String? = nil,
+         githubToolsEnabled: Bool? = nil) {
+        self.githubToolsOverride = githubToolsEnabled
         self.state = state
         self.guestClientId = guestClientId
         self.mutatingJobsAvailable = mutatingJobsAvailable
