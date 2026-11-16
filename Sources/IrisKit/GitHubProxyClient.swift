@@ -182,6 +182,8 @@ extension GitHubProxyClient {
     ///    `rel="next"` link; refuse an empty list (nothing was verified).
     /// 4. Re-read the head: refuse if it moved during the check.
     /// 5. Submit the review with `commit_id = head`, so a push after step 4 cannot ride it.
+    /// 6. Read the head once more: a push that landed before the review existed is reported, not
+    ///    called an approval.
     ///
     /// `base.sha` can lag the base branch. The three-dot compare starts at the merge base of that
     /// SHA and the head, which can only add files to the list (never hide one), so a stale base
@@ -230,9 +232,24 @@ extension GitHubProxyClient {
 
         switch await post(repo: repo, path: "pulls/\(pr)/reviews", payload: ["event": "APPROVE", "commit_id": head]) {
         case .refused(let message): return message
-        case .done:
-            return sanitize("Approved pull request #\(pr) at \(head.prefix(7)).", token: Self.token(keychain: keychain))
+        case .done: break
         }
+
+        // A push can land between the head re-read above and this review. `commit_id` keeps the
+        // review on the checked commit, but a stale-approval rule fires at push time, before the
+        // review exists, so that approval can still count. Read the head once more and say so.
+        let short = head.prefix(7)
+        switch await perform(method: "GET", repo: repo, path: "pulls/\(pr)") {
+        case .refused:
+            return sanitize("Submitted an approval of pull request #\(pr) at \(short), but could not confirm the head did not move afterwards. Treat it as unconfirmed and check the pull request.",
+                            token: Self.token(keychain: keychain))
+        case .done(let json, _):
+            guard Self.commitSHA(json, side: "head") == head else {
+                return sanitize("Submitted an approval of pull request #\(pr) at \(short), but the pull request moved while I did it. Treat it as NOT approved: the new commits were not checked, and the approval may need dismissing.",
+                                token: Self.token(keychain: keychain))
+            }
+        }
+        return sanitize("Approved pull request #\(pr) at \(short).", token: Self.token(keychain: keychain))
     }
 
     /// `side`'s commit SHA from a pull request object, only if it is 40 lowercase hex digits: it is
