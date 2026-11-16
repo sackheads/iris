@@ -69,6 +69,14 @@ struct TokenUsage: Codable, Equatable, Sendable {
     /// before this existed, or with no model to name (a guard call), sits only in the totals above.
     var byModel: [ModelUsageBucket] = []
     static let maxModelBuckets = 16
+    /// The last `maxTurns` user turns, each charged to one `byModel` bucket and so priced at that
+    /// bucket's stored rate (#1146). Bounded like the ledger, never by conversation length: an older
+    /// turn is dropped, and its spend stays in the totals. Only rounds charged to a bucket appear.
+    var turns: [TurnUsage] = []
+    static let maxTurns = 200
+    /// How many user turns have been numbered, so the next one is `turnCount + 1` and a number is
+    /// never reused after the cap drops the oldest.
+    var turnCount = 0
 
     /// The weighted figure a budget reads: this usage at `provider`/`model`'s weights, plus the
     /// other models' charges, already converted to the primary's weighted tokens.
@@ -78,7 +86,7 @@ struct TokenUsage: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case promptTokenCount, candidatesTokenCount, totalTokenCount, cacheReadTokenCount, cacheWriteTokenCount
-        case cacheWrite1hTokenCount, byModel
+        case cacheWrite1hTokenCount, byModel, turns, turnCount
     }
 
     init(promptTokenCount: Int = 0, candidatesTokenCount: Int = 0, totalTokenCount: Int = 0,
@@ -117,6 +125,23 @@ struct TokenUsage: Codable, Equatable, Sendable {
         cacheWriteTokenCount = try c.decodeIfPresent(Int.self, forKey: .cacheWriteTokenCount)
         cacheWrite1hTokenCount = try c.decodeIfPresent(Int.self, forKey: .cacheWrite1hTokenCount)
         byModel = try c.decodeIfPresent([ModelUsageBucket].self, forKey: .byModel) ?? []
+        turns = try c.decodeIfPresent([TurnUsage].self, forKey: .turns) ?? []
+        turnCount = try c.decodeIfPresent(Int.self, forKey: .turnCount) ?? 0
+    }
+
+    /// Leaves an empty ledger and turn list out, so the entries of both, which hold a `TokenUsage`
+    /// of their own, do not each carry two empty arrays.
+    func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(promptTokenCount, forKey: .promptTokenCount)
+        try c.encode(candidatesTokenCount, forKey: .candidatesTokenCount)
+        try c.encode(totalTokenCount, forKey: .totalTokenCount)
+        try c.encodeIfPresent(cacheReadTokenCount, forKey: .cacheReadTokenCount)
+        try c.encodeIfPresent(cacheWriteTokenCount, forKey: .cacheWriteTokenCount)
+        try c.encodeIfPresent(cacheWrite1hTokenCount, forKey: .cacheWrite1hTokenCount)
+        if !byModel.isEmpty { try c.encode(byModel, forKey: .byModel) }
+        if !turns.isEmpty { try c.encode(turns, forKey: .turns) }
+        if turnCount != 0 { try c.encode(turnCount, forKey: .turnCount) }
     }
 
     /// Adds one call's counts. Unknown is not zero (5a §0.4): a nil cache count leaves the field as it was.
@@ -131,14 +156,32 @@ struct TokenUsage: Codable, Equatable, Sendable {
 
     /// Charges a call to the bucket for `provider`/`model` at `rate`, opening one if there is room.
     /// A call that finds no room is left in the totals alone, which is the unattributed share.
-    mutating func record(_ usage: UsageMetadata, provider: String, model: String, rate: ResolvedRate) {
+    /// `turn`: the user turn's number; the call is then also charged to that turn's entry for the
+    /// bucket (#1146), which rounds of one turn on one model share.
+    mutating func record(_ usage: UsageMetadata, provider: String, model: String, rate: ResolvedRate, turn: Int? = nil) {
+        let index: Int
         if let i = byModel.firstIndex(where: { $0.matches(provider: provider, model: model, rate: rate) }) {
             byModel[i].usage.add(usage)
+            index = i
         } else if byModel.count < Self.maxModelBuckets {
             var bucket = ModelUsageBucket(provider: provider, model: model, rate: rate)
             bucket.usage.add(usage)
             byModel.append(bucket)
+            index = byModel.count - 1
+        } else {
+            return
         }
+        guard let turn else { return }
+        // The buckets only ever append, so an index stays the bucket it named. A turn's entries are
+        // the newest ones, so only the tail is searched.
+        if let i = turns.lastIndex(where: { $0.turn <= turn && $0.bucket == index }), turns[i].turn == turn {
+            turns[i].usage.add(usage)
+            return
+        }
+        var entry = TurnUsage(turn: turn, bucket: index)
+        entry.usage.add(usage)
+        turns.append(entry)
+        if turns.count > Self.maxTurns { turns.removeFirst(turns.count - Self.maxTurns) }
     }
 
     /// The totals less every bucket: what no model was recorded for. Zero when the ledger covers all of it.
@@ -154,6 +197,31 @@ struct TokenUsage: Codable, Equatable, Sendable {
                           cacheReadTokenCount: rest(cacheReadTokenCount, usage.map(\.cacheReadTokenCount)),
                           cacheWriteTokenCount: rest(cacheWriteTokenCount, usage.map(\.cacheWriteTokenCount)),
                           cacheWrite1hTokenCount: rest(cacheWrite1hTokenCount, usage.map(\.cacheWrite1hTokenCount)))
+    }
+}
+
+/// One user turn's spend on one model (#1146): `bucket` indexes `TokenUsage.byModel`, whose stored
+/// rate prices it. Rounds of the turn on that model are summed.
+struct TurnUsage: Codable, Equatable, Sendable {
+    var turn: Int
+    var bucket: Int
+    var at = Date()
+    /// Never itself carries a ledger or a turn list.
+    var usage = TokenUsage()
+
+    init(turn: Int, bucket: Int, at: Date = Date()) {
+        self.turn = turn
+        self.bucket = bucket
+        self.at = at
+    }
+
+    /// Lenient (invariant 1).
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        turn = try c.decodeIfPresent(Int.self, forKey: .turn) ?? 0
+        bucket = try c.decodeIfPresent(Int.self, forKey: .bucket) ?? 0
+        at = try c.decodeIfPresent(Date.self, forKey: .at) ?? Date(timeIntervalSince1970: 0)
+        usage = try c.decodeIfPresent(TokenUsage.self, forKey: .usage) ?? TokenUsage()
     }
 }
 
@@ -4175,18 +4243,31 @@ class AppState {
         }
     }
     
+    /// The user turn each conversation last charged a round to, so the next round of it joins the
+    /// same numbered turn. Transient; one entry per conversation that spent.
+    @ObservationIgnored private var openUsageTurn: [UUID: UUID] = [:]
+
     /// `onPrimary`: the call ran on the primary's provider whatever the conversation's own model,
     /// as a guard call does (#689), so it is never priced at a routed subagent's rate (#705 review).
     /// `model`: the provider and model the call ran on, when the caller knows them; the call is then
     /// also charged to that model's bucket at its rate now (#1057). A call that names none lands in
-    /// the totals only.
+    /// the totals only. `turn`: the user turn the round belongs to, one id per `processInput` (#1146).
     func updateTokenUsage(for conversationId: UUID, usage: UsageMetadata, onPrimary: Bool = false,
-                          model: (provider: String, model: String)? = nil) {
+                          model: (provider: String, model: String)? = nil, turn: UUID? = nil) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].tokenUsage.add(usage)
             if let model {
                 let rate = priceBook.resolve(family: model.provider.lowercased(), model: model.model, side: .primary)
-                conversations[idx].tokenUsage.record(usage, provider: model.provider, model: model.model, rate: rate)
+                var number: Int?
+                if let turn {
+                    // A user turn is numbered when its first round is charged (#1146).
+                    if openUsageTurn[conversationId] != turn {
+                        openUsageTurn[conversationId] = turn
+                        conversations[idx].tokenUsage.turnCount += 1
+                    }
+                    number = conversations[idx].tokenUsage.turnCount
+                }
+                conversations[idx].tokenUsage.record(usage, provider: model.provider, model: model.model, rate: rate, turn: number)
             }
             markChanged(conversationId, .metadata)
         }

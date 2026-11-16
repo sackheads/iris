@@ -3165,6 +3165,8 @@ actor IrisEngine {
     }
 
     private func processInputBody(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil, usageSink: (any TurnUsageSink)? = nil, goalFacts: GoalFacts? = nil, agentProfile: AgentProfile? = nil) async {
+        // #1146: one id per user turn, so the rounds it runs are charged to one numbered turn.
+        let usageTurn = UUID()
         if source == "UI" {
             loopDetectors[conversationId] = nil
             blockedResultTrackers[conversationId] = nil
@@ -4122,7 +4124,7 @@ actor IrisEngine {
                 let usageModel = subagentRoute == nil ? (provider: effectiveProvider, model: turnModel()) : nil
                 let (spentSoFar, runSink) = await MainActor.run { () -> (TokenUsage, (any TurnUsageSink)?) in
                     if let usage = activeResponse.usageMetadata {
-                        localState?.updateTokenUsage(for: conversationId, usage: usage, model: usageModel)
+                        localState?.updateTokenUsage(for: conversationId, usage: usage, model: usageModel, turn: usageTurn)
                     }
                     // A delegated round meters the run it works for (#313), so a quit in the
                     // middle of a delegation still leaves that spend on the run's row.

@@ -50,7 +50,7 @@ struct ConversationCost: Equatable {
 /// The toolbar figure taken apart by token type (#1011): the same four terms `ModelPricing.dollars`
 /// adds, each as tokens x rate, so the lines sum to the figure and a person can set them beside an
 /// invoice. A conversation with a per-model ledger breaks down into one section per model, then
-/// one for what no model was recorded for; per-turn costs are not recorded (#1057).
+/// one for what no model was recorded for; its per-turn costs are `CostByTurn` (#1146).
 struct CostBreakdown: Equatable {
     struct Line: Equatable {
         enum Kind: Equatable { case input, cacheRead, cacheWrite, output }
@@ -181,5 +181,33 @@ extension AppState {
         guard let conv = conversations.first(where: { $0.id == conversationId }), conv.tokenUsage.totalTokenCount > 0 else { return nil }
         let model = config.getModel(for: effectiveTier(for: conversationId).tier)
         return ConversationCost.estimate(usage: conv.tokenUsage, provider: config.primaryProvider, model: model, book: priceBook)
+    }
+}
+
+/// A conversation's cost per user turn (#1146): each turn at the stored rate of the bucket it was
+/// charged to, never today's price list. `notShown` is the rest of the figure: turns the cap
+/// dropped and what no model was recorded for, so `shown + notShown` is `cost.dollars`.
+struct CostByTurn: Equatable {
+    struct Row: Equatable {
+        var turn: Int
+        var at: Date
+        var provider: String
+        var model: String
+        var usage: TokenUsage
+        var dollars: Double
+    }
+    var rows: [Row]
+    var shown: Double
+    var notShown: Double
+
+    static func make(usage: TokenUsage, cost: ConversationCost) -> CostByTurn {
+        let rows = usage.turns.compactMap { entry -> Row? in
+            guard usage.byModel.indices.contains(entry.bucket) else { return nil }
+            let bucket = usage.byModel[entry.bucket]
+            return Row(turn: entry.turn, at: entry.at, provider: bucket.provider, model: bucket.model, usage: entry.usage,
+                       dollars: ModelPricing.dollars(entry.usage.components, bucket.rates))
+        }
+        let shown = rows.reduce(0) { $0 + $1.dollars }
+        return CostByTurn(rows: rows, shown: shown, notShown: max(0, cost.dollars - shown))
     }
 }
