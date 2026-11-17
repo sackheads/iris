@@ -22,12 +22,12 @@ public final class KeychainManager: @unchecked Sendable {
     /// names]`. A second item beside `mcpProviderService`, so a token write never rewrites a grant
     /// and a grant write never rewrites a token; `revokeToken` removes both.
     public static let mcpProviderRolesService = "iris.mcp.provider.roles"
-    /// Iris's own GitHub identity (#966): the `iris-main` account's fine-grained PAT, keyed
+    /// Iris's own GitHub identity (#966): the configured GitHub account's fine-grained PAT, keyed
     /// `["token": <PAT>]`. It is Iris's own contributor credential (identity separation from
     /// `@bnaylor`, not credential-hiding; spec §3-§4); `GitHubProxyClient` keeps it out of tool
     /// results and error strings as defence in depth. Copied by `DevHomeSeeder` deliberately, like
     /// `legacyService` and `mcpFileService` — a dev build needs the same identity to act as
-    /// `iris-main` while developing against it.
+    /// that account while developing against it.
     public static let githubService = "iris.github"
     public static func pluginService(_ id: String) -> String { "iris.plugin.\(id)" }
 

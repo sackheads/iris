@@ -578,6 +578,7 @@ struct GuardedSettingsTests {
         #expect(GuardedSettings.approvalWarning(for: "echo evil/repo | iris --set-github-repos") != nil)
         #expect(GuardedSettings.approvalWarning(for: "pbpaste | iris --set-github-token") != nil)
         #expect(GuardedSettings.approvalWarning(for: "iris --clear-github-token") != nil)
+        #expect(GuardedSettings.approvalWarning(for: "iris --set-github-login") != nil)
     }
 }
 

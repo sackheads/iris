@@ -47,6 +47,11 @@ enum GuardedKey: String, CaseIterable, Sendable {
     /// because it decides where Iris, acting as her own GitHub account, may write. Empty is none:
     /// a fresh install, an unreadable item and a value written outside the app all allow no repo.
     case githubAllowedRepos = "GITHUB_ALLOWED_REPOS"
+    /// #1184: the login of the GitHub account the token belongs to, stored as `{"login":"<name>"}`.
+    /// Guarded for the same reason as the repo list: it names the account Iris acts as and signs
+    /// commits with, so the model must not rewrite it, and anything unreadable or malformed reads
+    /// as unset. Unset is not configured: the `github_*` tools are not declared.
+    case githubLogin = "GITHUB_LOGIN"
 
     enum Kind { case url, cap(Int), flag(protectiveOn: Bool), sandboxPref, blob }
 
@@ -69,7 +74,7 @@ enum GuardedKey: String, CaseIterable, Sendable {
         case .enableSandboxing, .enableVibecop, .enablePromptInjectionProtection: .flag(protectiveOn: true)
         case .mcpProviderEnabled, .mcpGuestSessionsEnabled: .flag(protectiveOn: false)
         case .mainAgentSandboxDefault: .sandboxPref
-        case .subagentProviders, .subagentBuiltIns, .subagentRates, .githubAllowedRepos: .blob
+        case .subagentProviders, .subagentBuiltIns, .subagentRates, .githubAllowedRepos, .githubLogin: .blob
         }
     }
 
@@ -149,7 +154,7 @@ enum GuardedSettings {
     static func approvalWarning(for details: String) -> String? {
         let text = details.lowercased()
         let named = ["com.iris.secrets", "com.bnaylor.iris", markerKey.lowercased(),
-                     "--set-github-token", "--set-github-repos", "--clear-github-token", "--git-credential-helper"].first { text.contains($0) }
+                     "--set-github-token", "--set-github-repos", "--set-github-login", "--clear-github-token", "--git-credential-helper"].first { text.contains($0) }
         guard let named else { return nil }
         return "This names Iris's own settings (`\(named)`). A command that changes them can change Iris's limits, guards or provider addresses. Deny it unless you meant to."
     }
@@ -338,7 +343,7 @@ extension ConfigManager {
         case .enablePromptInjectionProtection: enableAdvancedPromptInjectionProtection ? "true" : "false"
         case .mcpProviderEnabled: mcpProviderEnabled ? "true" : "false"
         case .mcpGuestSessionsEnabled: mcpGuestSessionsEnabled ? "true" : "false"
-        case .subagentProviders, .subagentBuiltIns, .subagentRates, .githubAllowedRepos: guardedBlob(key)
+        case .subagentProviders, .subagentBuiltIns, .subagentRates, .githubAllowedRepos, .githubLogin: guardedBlob(key)
         }
     }
 
@@ -413,10 +418,16 @@ extension ConfigManager {
     /// `isGitHubRepoAllowed` checks membership: empty, malformed, or wrongly shaped (any element
     /// not a string) gives `[]`, never a partial list, so a bad value never widens access. One
     /// definition shared with `isGitHubRepoAllowed` so the two can't drift (#1172 lesson) --
-    /// the iris-main git-identity env injection (`ToolExecutor.hostSpawn`) uses this to compute
+    /// the GitHub git-identity env injection (`ToolExecutor.hostSpawn`) uses this to compute
     /// its per-repo `includeIf`/`pushInsteadOf` entries fresh on every invocation.
     func allowedGitHubRepos() -> [String] {
         Self.parseGitHubAllowlist(guardedBlob(.githubAllowedRepos))
+    }
+
+    /// The configured GitHub login (#1184), or nil: unset, unreadable, malformed and a value that is
+    /// not a valid login all read as unset, so a bad value declares nothing and acts as no one.
+    func githubLogin() -> String? {
+        GitHubProxyClient.parseLogin(guardedBlob(.githubLogin))
     }
 
     /// The repos in an allowed-repos blob: a JSON array of strings. Anything else (empty, not JSON,

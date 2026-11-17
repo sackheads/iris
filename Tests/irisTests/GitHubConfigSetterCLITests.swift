@@ -256,4 +256,37 @@ struct GitHubConfigSetterCLITests {
             Issue.record("\(entry.debugDescription) was not refused as malformed: \(result)")
         }
     }
+
+    // MARK: --set-github-login (#1184)
+
+    @Test("the login is written as the guarded blob, and the configured manager reads it back")
+    func setLoginWritesTheGuardedBlob() {
+        let (config, _, store, name) = isolatedConfig(); defer { teardown(store, name) }
+        config.setGuardedBlob(.githubAllowedRepos, "[]")  // brings the item to .normal, as a first launch does
+        let result = GitHubConfigSetterCLI.setLogin(stdin: Data(" acme-bot\n".utf8), config: config)
+        if case .failure = result { Issue.record("expected success") }
+        #expect(config.githubLogin() == "acme-bot")
+    }
+
+    @Test("an invalid login is refused and writes nothing; empty stdin clears it")
+    func setLoginRefusesAndClears() {
+        let (config, _, store, name) = isolatedConfig(); defer { teardown(store, name) }
+        config.setGuardedBlob(.githubAllowedRepos, "[]")
+        #expect(GitHubConfigSetterCLI.setLogin(stdin: Data("bad name".utf8), config: config) == .failure(.malformedLogin))
+        #expect(config.githubLogin() == nil)
+        _ = GitHubConfigSetterCLI.setLogin(stdin: Data("acme-bot".utf8), config: config)
+        _ = GitHubConfigSetterCLI.setLogin(stdin: Data("\n".utf8), config: config)
+        #expect(config.githubLogin() == nil && config.guardedBlob(.githubLogin).isEmpty)
+    }
+
+    @Test("a never-upgraded item is refused rather than silently upgraded, as for the repo list")
+    func setLoginNeedsANormalItem() {
+        let name = "iris-1184-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: name)!
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)")
+        let config = ConfigManager(store: store, guardedSecrets: keychain, guardedMayChange: false)
+        defer { teardown(store, name) }
+        #expect(config.guardedState == .deferredToApp)
+        #expect(GitHubConfigSetterCLI.setLogin(stdin: Data("acme-bot".utf8), config: config) == .failure(.notYetConfigured))
+    }
 }

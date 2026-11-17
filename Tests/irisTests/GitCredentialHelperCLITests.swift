@@ -2,11 +2,11 @@ import Foundation
 import Testing
 @testable import IrisKit
 
-/// `iris --git-credential-helper` (iris-main git identity): a git credential helper invoked for
+/// `iris --git-credential-helper` (GitHub git identity): a git credential helper invoked for
 /// `get` by git's own protocol over stdin, never argv. Hands out the `iris.github` token only for
 /// an exactly-matched allowed `owner/name` over https; everything else gets nothing, so git falls
 /// through rather than a wrong credential ever being offered.
-@Suite("git credential helper for iris-main (git identity)")
+@Suite("git credential helper for the GitHub account (git identity)")
 struct GitCredentialHelperCLITests {
     // MARK: parseFields
 
@@ -74,13 +74,13 @@ struct GitCredentialHelperCLITests {
 
     // MARK: respond -- the end-to-end decision
 
-    @Test("responds with iris-main's credential for an allowed repo")
+    @Test("responds with the configured login's credential for an allowed repo")
     func respondsForAllowedRepo() {
         let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)")
         keychain.replaceSecrets(["token": "ghp_realtoken123"], service: KeychainManager.githubService)
         let fields = ["protocol": "https", "host": "github.com", "path": "sackheads/iris.git"]
-        let output = GitCredentialHelperCLI.respond(fields: fields, keychain: keychain, isRepoAllowed: { $0 == "sackheads/iris" })
-        #expect(output == "username=iris-main\npassword=ghp_realtoken123\n")
+        let output = GitCredentialHelperCLI.respond(fields: fields, keychain: keychain, login: "acme-bot", isRepoAllowed: { $0 == "sackheads/iris" })
+        #expect(output == "username=acme-bot\npassword=ghp_realtoken123\n")
     }
 
     @Test("responds with nothing for a repo not on the allowlist, even with a valid token configured")
@@ -88,7 +88,7 @@ struct GitCredentialHelperCLITests {
         let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)")
         keychain.replaceSecrets(["token": "ghp_realtoken123"], service: KeychainManager.githubService)
         let fields = ["protocol": "https", "host": "github.com", "path": "evil/repo.git"]
-        let output = GitCredentialHelperCLI.respond(fields: fields, keychain: keychain, isRepoAllowed: { $0 == "sackheads/iris" })
+        let output = GitCredentialHelperCLI.respond(fields: fields, keychain: keychain, login: "acme-bot", isRepoAllowed: { $0 == "sackheads/iris" })
         #expect(output.isEmpty)
     }
 
@@ -96,7 +96,7 @@ struct GitCredentialHelperCLITests {
     func respondsEmptyWithNoToken() {
         let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)")
         let fields = ["protocol": "https", "host": "github.com", "path": "sackheads/iris.git"]
-        let output = GitCredentialHelperCLI.respond(fields: fields, keychain: keychain, isRepoAllowed: { $0 == "sackheads/iris" })
+        let output = GitCredentialHelperCLI.respond(fields: fields, keychain: keychain, login: "acme-bot", isRepoAllowed: { $0 == "sackheads/iris" })
         #expect(output.isEmpty)
     }
 
@@ -105,7 +105,17 @@ struct GitCredentialHelperCLITests {
         let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)")
         keychain.replaceSecrets(["token": "ghp_realtoken123"], service: KeychainManager.githubService)
         let fields = ["protocol": "https", "host": "github.com.evil.com", "path": "sackheads/iris.git"]
-        let output = GitCredentialHelperCLI.respond(fields: fields, keychain: keychain, isRepoAllowed: { _ in true })
+        let output = GitCredentialHelperCLI.respond(fields: fields, keychain: keychain, login: "acme-bot", isRepoAllowed: { _ in true })
+        #expect(output.isEmpty)
+    }
+
+    @Test("responds with nothing when no login is set, or one that is not a valid login, even with a token and an allowed repo",
+          arguments: [nil, "", "bad name", "x\npassword=evil", "-lead"] as [String?])
+    func respondsEmptyWithoutAValidLogin(_ login: String?) {
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)")
+        keychain.replaceSecrets(["token": "ghp_realtoken123"], service: KeychainManager.githubService)
+        let fields = ["protocol": "https", "host": "github.com", "path": "sackheads/iris.git"]
+        let output = GitCredentialHelperCLI.respond(fields: fields, keychain: keychain, login: login, isRepoAllowed: { _ in true })
         #expect(output.isEmpty)
     }
 

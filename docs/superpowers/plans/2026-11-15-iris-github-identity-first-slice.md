@@ -1,5 +1,7 @@
 # Iris GitHub Identity First Slice — Implementation Plan
 
+> **Update (#1184):** the account name is now a setting (`GuardedKey.githubLogin`); `iris-main` below is this repository's own account, read as "the configured account". See `docs/github-identity.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give Iris a second GitHub identity (`iris-main`) she acts as — opening PRs, commenting, and approving *routine* (docs/assets) PRs — through three host-side tools that read the token from the Keychain. `iris-main` is a full git contributor (spec §3-§4): the credential is Iris's own and the goal is identity separation from `@bnaylor`, not hiding it; the lockdown is on approval authority only.

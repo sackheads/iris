@@ -73,9 +73,9 @@ struct ToolExecutor {
     /// Whether `conversationId`'s turn is guest-origin (a guest's message started or steered it,
     /// including via delegation) -- the same signal `githubDispatchRefusal` is built from. A
     /// guest-origin turn's `principal` can still be `.main` (an attended conversation a guest
-    /// steered), so the iris-main git-identity environment (#966 Task 8) is suppressed on this
+    /// steered), so the GitHub git-identity environment (#966 Task 8) is suppressed on this
     /// signal explicitly in `runCommand`, not inferred from `principal` alone (planner's ruling,
-    /// 2026-11-15: a guest must never act as iris-main in any form, even though the `github_*`
+    /// 2026-11-15: a guest must never act as Iris's GitHub account in any form, even though the `github_*`
     /// tools' own refusal is `principal`-based). nil (no engine wired it, or no `conversationId`)
     /// fails closed: `runCommand` treats that as guest-origin and suppresses the git identity,
     /// rather than an unwired seam silently granting it everywhere.
@@ -107,10 +107,10 @@ struct ToolExecutor {
     /// Google Tasks / Workspace call fails, so the ten declarations were pure prompt weight (#133).
     /// Injectable so tests never mutate `ConfigManager.shared`.
     ///
-    /// `githubToolsEnabled` defaults to "the `iris-main` token is present and the user has allowed at
-    /// least one repo" (#966, Invariant 6): with either missing the three `github_*` tools can only
+    /// `githubToolsEnabled` defaults to "the GitHub token is present, the account's login is set and the user
+    /// has allowed at least one repo" (#966, Invariant 6): with any missing the three `github_*` tools can only
     /// refuse, so their declarations are prompt weight an unconfigured install must not pay. The
-    /// default reads `ConfigManager.githubToolsConfigured`, both parts fixed at launch, never the
+    /// default reads `ConfigManager.githubToolsConfigured`, all three parts fixed at launch, never the
     /// Keychain per turn (#578).
     func getTools(workspaceToolsEnabled: Bool = !ConfigManager.shared.googleRefreshToken.isEmpty,
                   githubToolsEnabled: Bool? = nil) async -> [FunctionDeclaration] {
@@ -242,7 +242,7 @@ struct ToolExecutor {
         return tools
     }
 
-    /// The three tools that act on GitHub as `iris-main` (#966). Declared to the attended main
+    /// The three tools that act on GitHub as Iris's own account (#966). Declared to the attended main
     /// agent only, and only when the token is present: `IrisEngine.mainOnlyDeclared` and
     /// `unattendedNeverDeclared` strip them for every other principal and turn, and
     /// `IrisEngine.githubDispatchRefusal` refuses a call that arrives anyway. Every call is bounded
@@ -252,7 +252,7 @@ struct ToolExecutor {
     nonisolated static let githubToolDeclarations: [FunctionDeclaration] = [
         FunctionDeclaration(
             name: "github_create_pr",
-            description: "Open a pull request on GitHub as Iris's own account (iris-main), from a branch that is already pushed. Only for repositories the user has put on the allowed list; any other is refused. Pass draft true unless the user asked for a ready PR. Returns the PR number and link.",
+            description: "Open a pull request on GitHub as Iris's own GitHub account, from a branch that is already pushed. Only for repositories the user has put on the allowed list; any other is refused. Pass draft true unless the user asked for a ready PR. Returns the PR number and link.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -268,7 +268,7 @@ struct ToolExecutor {
         ),
         FunctionDeclaration(
             name: "github_comment",
-            description: "Post a comment on a GitHub pull request as Iris's own account (iris-main). Only for repositories the user has put on the allowed list; any other is refused. Returns the comment link.",
+            description: "Post a comment on a GitHub pull request as Iris's own GitHub account. Only for repositories the user has put on the allowed list; any other is refused. Returns the comment link.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -281,7 +281,7 @@ struct ToolExecutor {
         ),
         FunctionDeclaration(
             name: "github_approve",
-            description: "Approve a GitHub pull request as Iris's own account (iris-main). It refuses unless the PR is open and every changed file is under docs/ or assets/ (not a plans/ or specs/ folder, which are instructions and need a human); anything else needs a human reviewer, so do not try to work around a refusal. The approval is tied to the commit that was checked, and the result says if the PR moved afterwards. Only for repositories the user has put on the allowed list.",
+            description: "Approve a GitHub pull request as Iris's own GitHub account. It refuses unless the PR is open and every changed file is under docs/ or assets/ (not a plans/ or specs/ folder, which are instructions and need a human); anything else needs a human reviewer, so do not try to work around a refusal. The approval is tied to the commit that was checked, and the result says if the PR moved afterwards. Only for repositories the user has put on the allowed list.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -636,7 +636,7 @@ struct ToolExecutor {
     /// How a host command is spawned. A read the gate approved (`restrictedPath`, #612) runs as
     /// judged: `zsh -f` (no user startup files) with that `PATH` and `restrictedEnvironment`.
     /// Anything else runs as it always has, with the user's environment and startup files.
-    /// `gitIdentityRepos`/`gitIdentityRoutingPath` add the iris-main git-identity environment
+    /// `gitIdentityRepos`/`gitIdentityRoutingPath` add the GitHub git-identity environment
     /// (#966 spec §4) to the **unrestricted** branch only -- never the sandboxed git-read path
     /// above, whose overrides are frozen (#658(a): no new keys). Both default to "off" (empty
     /// list / nil), so every existing caller, including every test that doesn't pass them, is
@@ -743,7 +743,7 @@ struct ToolExecutor {
         let directory: String?
         let environment: [String: String]?
         let gitBefore: String?
-        // iris-main git identity (#966 spec §4): a unique per-invocation routing file (never a
+        // GitHub git identity (#966 spec §4): a unique per-invocation routing file (never a
         // shared path -- tool calls run in parallel inside one turn's withTaskGroup, Invariant 3,
         // so two concurrent run_command calls must never write or read the same one). Removed
         // when this function returns, by any path, so these never accumulate.
@@ -838,28 +838,29 @@ struct ToolExecutor {
                 }
                 gitRepository = repo
             }
-            // iris-main git identity (#966 spec §4): off unless the cached token-presence flag is
+            // GitHub git identity (#966 spec §4): off unless the cached token-presence flag is
             // set (never a per-call Keychain read -- dev-2's review) AND the allowlist is
             // non-empty AND this turn isn't guest-origin (planner's ruling: a guest must never
-            // act as iris-main, even on an attended `.main` turn it steered), so an install that
+            // act as Iris's GitHub account, even on an attended `.main` turn it steered), so an install that
             // hasn't set the feature up, or a guest-steered turn, gets no behavior change at all.
             var gitIdentityRepos: [String] = []
             do {
                 let hasToken = ConfigManager.shared.hasGitHubToken
-                let repos = hasToken ? ConfigManager.shared.allowedGitHubRepos() : []
+                let login = hasToken ? ConfigManager.shared.githubLogin() : nil
+                let repos = login != nil ? ConfigManager.shared.allowedGitHubRepos() : []
                 let guestOrigin: Bool
                 if let conversationId, let isGuestOriginTurn {
                     guestOrigin = await isGuestOriginTurn(conversationId)
                 } else {
                     // No conversation to check, or no engine wired the seam: fail closed (see the
-                    // property's doc comment) rather than let an unwired caller act as iris-main.
+                    // property's doc comment) rather than let an unwired caller act as Iris's GitHub account.
                     guestOrigin = true
                 }
-                if GitIdentityEnvironment.shouldApply(hasToken: hasToken, repos: repos, guestOrigin: guestOrigin),
-                   let executablePath = Bundle.main.executablePath {
+                if GitIdentityEnvironment.shouldApply(hasToken: hasToken, login: login, repos: repos, guestOrigin: guestOrigin),
+                   let login, let executablePath = Bundle.main.executablePath {
                     let paths = irisPaths ?? .default
                     let fragmentPath = paths.configDir.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
-                    GitIdentityEnvironment.ensureFragment(at: fragmentPath, helperExecutable: executablePath)
+                    GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: login, helperExecutable: executablePath)
                     // A unique per-invocation routing file (Invariant 3: tool calls run in
                     // parallel inside one turn's withTaskGroup, so two concurrent run_command
                     // calls must never share one) -- removed by the `defer` declared with

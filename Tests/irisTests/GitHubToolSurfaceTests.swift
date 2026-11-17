@@ -24,14 +24,16 @@ struct GitHubToolSurfaceTests {
         #expect(Set(Self.names) == ToolExecutor.githubProxyTools)
     }
 
-    /// A manager over its own store and keychain, with the token and allowlist as given.
-    private func config(token: Bool, repos: String?) -> ConfigManager {
+    /// A manager over its own store and keychain, with the token, allowlist and login as given. The
+    /// login is set unless a test says otherwise (#1184); `login: nil` leaves it unset.
+    private func config(token: Bool, repos: String?, login: String? = "acme-bot") -> ConfigManager {
         let name = "iris-966t5-\(UUID().uuidString)"
         let store = UserDefaults(suiteName: name)!
         let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
         if token { keychain.replaceSecrets(["token": "ghp_TestToken1234567890abcdef"], service: KeychainManager.githubService) }
         let seed = ConfigManager(store: store, guardedSecrets: keychain)
         if let repos { seed.setGuardedBlob(.githubAllowedRepos, repos) }
+        if let login { seed.setGuardedBlob(.githubLogin, GitHubProxyClient.loginBlob(login)) }
         return ConfigManager(store: store, guardedSecrets: keychain)
     }
 
@@ -42,6 +44,22 @@ struct GitHubToolSurfaceTests {
         #expect(!config(token: true, repos: "[]").githubToolsConfigured)
         #expect(!config(token: false, repos: "[\"sackheads/iris\"]").githubToolsConfigured, "repos alone: nothing to act with")
         #expect(!config(token: false, repos: nil).githubToolsConfigured)
+    }
+
+    @Test("an unset or unreadable login keeps the tools undeclared, however much else is configured (#1184)",
+          arguments: [nil, "", "not json", "{}", "\"acme-bot\"", "{\"login\":\"bad name\"}", "{\"login\":\"a\",\"x\":1}",
+                      "{\"login\":3}", "[\"acme-bot\"]"] as [String?])
+    func unsetLoginIsNotConfigured(_ blob: String?) {
+        let name = "iris-1184-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: name)!
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
+        keychain.replaceSecrets(["token": "ghp_TestToken1234567890abcdef"], service: KeychainManager.githubService)
+        let seed = ConfigManager(store: store, guardedSecrets: keychain)
+        seed.setGuardedBlob(.githubAllowedRepos, "[\"sackheads/iris\"]")
+        if let blob { seed.setGuardedBlob(.githubLogin, blob) }
+        let reloaded = ConfigManager(store: store, guardedSecrets: keychain)
+        #expect(!reloaded.githubToolsConfigured)
+        #expect(reloaded.githubLogin() == nil)
     }
 
     @Test("a malformed or wrongly shaped allowlist does not count as configured", arguments: [
@@ -59,6 +77,7 @@ struct GitHubToolSurfaceTests {
         let live = ConfigManager(store: store, guardedSecrets: keychain)
         keychain.replaceSecrets(["token": "ghp_TestToken1234567890abcdef"], service: KeychainManager.githubService)
         live.setGuardedBlob(.githubAllowedRepos, "[\"sackheads/iris\"]")
+        live.setGuardedBlob(.githubLogin, GitHubProxyClient.loginBlob("acme-bot"))
         #expect(!live.githubToolsConfigured, "the running manager does not change under the user")
         #expect(ConfigManager(store: store, guardedSecrets: keychain).githubToolsConfigured, "the next launch picks both up")
     }

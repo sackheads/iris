@@ -1,35 +1,38 @@
-# GitHub Identity (`iris-main`)
+# GitHub Identity
 
-`iris-main` is Iris's own GitHub contributor identity (#966, the first slice of the #974 access
-boundary) — a real account, like `sackheads-bot`, that she commits, pushes and opens pull requests
-as, independent of `@bnaylor`'s own identity. This closes the actual clickhole the feature was
+Iris's own GitHub contributor identity (#966, the first slice of the #974 access
+boundary) is a real account, like `sackheads-bot`, that she commits, pushes and opens pull requests
+as, independent of your own identity. **The account is yours to name** (#1184): create one and give its
+username in Settings (or `iris --set-github-login`). This page calls it `<account>`; in the
+repository this feature was built in, it is `iris-main`. Until a username is set, Iris behaves as if
+no token were configured: the tools are not offered and git is untouched. This closes the actual clickhole the feature was
 built for: a session running under your ambient `gh`/git auth authors its own PRs as `@bnaylor`,
-and with `CODEOWNERS = * @bnaylor` nobody — including you — can approve your own PR. `iris-main`
+and with `CODEOWNERS = * @<you>` nobody — including you — can approve your own PR. The account
 fixes part one (she authors as herself); CODEOWNERS plus an approval gate fix part two for
 *other* routine PRs (yours, or `sackheads-bot`'s): she can clear them without that being a blank
-check. GitHub still blocks an author approving their own PR, so an `iris-main`-authored PR still
+check. GitHub still blocks an author approving their own PR, so an account-authored PR still
 needs a second code owner — see "The one open decision" below.
 
 **The one thing locked down is approval, not contribution.** Iris pushes and opens PRs as
-`iris-main` freely. What stays under `@bnaylor` is approval of anything that matters:
-`CODEOWNERS` makes `iris-main`'s own approval count only for `/docs/` and `/assets/` (not their `plans/` and `specs/` folders) — a structural
+the account freely. What stays under you is approval of anything that matters:
+`CODEOWNERS` makes the account's own approval count only for `/docs/` and `/assets/` (not their `plans/` and `specs/` folders) — a structural
 guarantee, not a request she might ignore — and the `github_approve` tool refuses to even submit an
 approval on anything else, as defence in depth on top of that.
 
 ## The three tools
 
-Three host-side tools, declared to the model only when both a token and a non-empty allowed-repos
-list are configured (see "Setup" below), and only on an attended, non-guest-origin main
+Three host-side tools, declared to the model only when a token, the account's username and a
+non-empty allowed-repos list are all configured (see "Setup" below), and only on an attended, non-guest-origin main
 conversation — a subagent, evaluator, MCP guest, unattended job run, or a turn a guest's message
 started or steered loses them even if one somehow reaches the dispatcher. Every call is bound to
 the user-configured allowed-repos list before anything else happens — a repo not on the list sends
 nothing.
 
 - **`github_create_pr(repo, head, base, title, body, draft?)`** — opens a pull request as
-  `iris-main`, from a branch already pushed. `draft` defaults to `true` unless the model says
+  the account, from a branch already pushed. `draft` defaults to `true` unless the model says
   otherwise.
-- **`github_comment(repo, pr, body)`** — posts a PR comment as `iris-main`.
-- **`github_approve(repo, pr)`** — submits an `APPROVE` review as `iris-main`, but only if the PR
+- **`github_comment(repo, pr, body)`** — posts a PR comment as the account.
+- **`github_approve(repo, pr)`** — submits an `APPROVE` review as the account, but only if the PR
   is open and every changed file (including a rename's source path) is under `docs/` or `assets/`
   and not inside a `plans/` or `specs/` folder of `docs/` at any depth (those are instructions that
   sessions read and execute, so a human approves them); anything else is refused outright, never submitted. The approval is bound to the exact commit
@@ -40,13 +43,13 @@ The token itself is read from the Keychain only inside the client that makes the
 appears in a prompt, a tool argument, a tool result, or an error string (scrubbed as hygiene, not
 as the control — see "What the credential is," below).
 
-## `iris-main` as a git contributor
+## The account as a git contributor
 
-Beyond the three tools, `run_command`'s own host git also acts as `iris-main` when it touches an
+Beyond the three tools, `run_command`'s own host git also acts as the account when it touches an
 allowed repo — this is what lets Iris push the branch `github_create_pr` then opens a PR from.
 
-- **Identity.** Commits attribute to `iris-main` (`user.name`/`user.email`, the latter GitHub's own
-  `iris-main@users.noreply.github.com` noreply address — no separate email to configure).
+- **Identity.** Commits attribute to the account (`user.name` is its username, `user.email` GitHub's
+  `<account>@users.noreply.github.com` noreply address — no separate email to configure).
 - **Credential.** A git credential helper (`iris --git-credential-helper`, invoked by git itself,
   never by the model) hands out the same Keychain token for a push or fetch to an allowed repo,
   checked against the live allowlist on every request.
@@ -56,10 +59,10 @@ allowed repo — this is what lets Iris push the branch `github_create_pr` then 
 
 ### What the credential is
 
-The design goal is **identity separation, not credential-hiding.** `iris-main`'s PAT is Iris's own
+The design goal is **identity separation, not credential-hiding.** The account's PAT is Iris's own
 contributor credential, the same way `sackheads-bot`'s tooling holds its credential — Iris already
 runs from a highly privileged place on your Mac, so hiding this one token from the model buys
-nothing. What actually bounds `iris-main` is **not** a withheld token scope: the PAT has
+nothing. What actually bounds the account is **not** a withheld token scope: the PAT has
 `Contents`, `Pull requests` and `Issues`, each read and write — a real contributor needs to push.
 The bound is branch protection (a PR plus a code-owner review to merge) and CODEOWNERS (her
 approval only counts for `/docs/` and `/assets/`, minus `plans/` and `specs/`), with the in-Swift allowlist and the
@@ -67,12 +70,16 @@ approval only counts for `/docs/` and `/assets/`, minus `plans/` and `specs/`), 
 
 ## Setup
 
-Set the token and the allowed repositories in **Settings → Integrations → GitHub (iris-main)**,
-or by command on a headless machine (step 2). The pane and the commands share one set of checks,
-so each accepts the same tokens and repo lists.
+Set the account's username, its token and the allowed repositories in **Settings → Integrations →
+GitHub**, or by command on a headless machine (step 2). The pane and the commands share one set of
+checks, so each accepts the same usernames, tokens and repo lists. After a token and a username are
+saved the pane asks GitHub whose token it is (`GET /user`) and says so when it belongs to a
+different account than the one named, since commits would be signed as one account while the token
+acts as the other. The check is reported, not enforced: a token that cannot be checked (offline, a
+refusal) is shown as unverified, not as a match.
 
 1. **On GitHub**, once, in the web UI or `gh`:
-   - Ensure the `iris-main` account exists, and make it a **write collaborator** on each repo Iris
+   - Ensure the account exists (you choose its name), and make it a **write collaborator** on each repo Iris
      should act on.
    - Issue it a **fine-grained PAT**, scoped to those repos only, with `Contents`, `Pull requests`
      and `Issues` each set to **read and write** — no Administration, Secrets, Workflows or
@@ -80,8 +87,8 @@ so each accepts the same tokens and repo lists.
    - Commit a `.github/CODEOWNERS` file:
      ```
      * @bnaylor
-     /docs/          @bnaylor @iris-main @sackheads-bot
-     /assets/        @bnaylor @iris-main @sackheads-bot
+     /docs/          @bnaylor @<account> @sackheads-bot
+     /assets/        @bnaylor @<account> @sackheads-bot
      /docs/**/plans/ @bnaylor
      /docs/**/specs/ @bnaylor
      /.github/CODEOWNERS @bnaylor
@@ -102,27 +109,33 @@ so each accepts the same tokens and repo lists.
      approval of the most recent reviewable push." Both matter: stale-dismissal fires at push
      time, so without the second setting a late approval of an older, routine-only commit could
      still count toward merging a newer head that added a `Sources/` change.
-2. **On the Mac**, paste the token and add each repository in the Settings pane, or run, after
-   updating to a build with this feature:
+2. **On the Mac**, enter the account's username, paste its token and add each repository in the
+   Settings pane, or run, after updating to a build with this feature:
    ```sh
-   printf '%s' '<the iris-main PAT>' | iris --set-github-token
+   printf '%s' '<account-username>' | iris --set-github-login
+   printf '%s' '<the account's PAT>' | iris --set-github-token
    printf 'owner/repo\n' | iris --set-github-repos
    ```
-   Both read from stdin, never argv (argv is visible in `ps`). The repos list is one `owner/name`
+   All three read from stdin, never argv (argv is visible in `ps`). The repos list is one `owner/name`
    per line; the allowlist is empty — nothing is allowed — until you set it, and the setter
-   refuses the whole write if any line is malformed. Then **launch Iris once**: both settings are
+   refuses the whole write if any line is malformed. A username is 1 to 39 letters, digits and single hyphens (GitHub's own rule); empty input clears it.
+   Then **launch Iris once**: all three settings are
    read at launch and cached for that run, so a value saved while Iris is already open, in the
    pane or by command, takes effect on the next launch, not live. The pane says so ("Restart Iris
    for the GitHub tools to change") whenever what is stored differs from what this launch offers.
 
+**Upgrading from the first slice** (when the account was fixed as `iris-main`): a token and an allowed
+list alone no longer offer the tools. Enter the account's username once, in Settings or with
+`--set-github-login`, and relaunch; until then Iris behaves as if no token were configured.
+
 Once both the GitHub-side and Mac-side setup are done, Iris can already **approve other people's
-routine PRs** (yours, or `sackheads-bot`'s) as `iris-main` — that's the main clickhole relief, and
+routine PRs** (yours, or `sackheads-bot`'s) as the account — that's the main clickhole relief, and
 it works without anything further.
 
 ### The one open decision: `sackheads-bot`
 
-`CODEOWNERS` names `@bnaylor`, `@iris-main` and `@sackheads-bot` as owners of `/docs/` and `/assets/`.
-`iris-main` approving *other* routine PRs works today. `iris-main`'s *own* authored PRs
+`CODEOWNERS` names `@bnaylor`, `@<account>` and `@sackheads-bot` as owners of `/docs/` and `/assets/`.
+The account approving *other* routine PRs works today. Its *own* authored PRs
 (`github_create_pr`) can't be self-approved — GitHub blocks an author approving their own PR —
 so an Iris-authored routine PR still needs a second code owner's approval: either you approve it
 yourself (you are an owner there), or a second proxy giving `sackheads-bot` the same tooling (tracked as
