@@ -87,8 +87,9 @@ command instead:
      and `/assets/` lines themselves: GitHub takes a file's owners from the last matching
      pattern, not every pattern that matches, so once a line names `/docs/` or `/assets/` the top
      `* @bnaylor` line no longer applies there. Leaving you off those two lines on purpose is what
-     keeps them routine and bot-to-bot: adding yourself back would let your own review satisfy
-     "review from code owners" on them, undoing the point of the split.
+     keeps them routine and bot-to-bot: adding yourself back would let your own review alone
+     satisfy "review from code owners" on them — the bots' approvals would still count either
+     way, but the split is meant to keep docs/assets reviewable without you in the loop.
    - On the `main` ruleset, require a pull request with review from code owners, and enable
      **both** "Dismiss stale pull request approvals when new commits are pushed" **and** "Require
      approval of the most recent reviewable push." Both matter: stale-dismissal fires at push
