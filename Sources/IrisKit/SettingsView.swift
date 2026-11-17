@@ -1010,6 +1010,8 @@ struct SettingsView: View {
                     }
                 }
                 .padding(.bottom)
+
+                GitHubSettingsSection()
             }
             .formStyle(.grouped)
             .padding(20)
