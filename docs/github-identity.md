@@ -124,9 +124,8 @@ refusal) is shown as unverified, not as a match.
    pane or by command, takes effect on the next launch, not live. The pane says so ("Restart Iris
    for the GitHub tools to change") whenever what is stored differs from what this launch offers.
 
-**Upgrading from the first slice** (when the account was fixed as `iris-main`): a token and an allowed
-list alone no longer offer the tools. Enter the account's username once, in Settings or with
-`--set-github-login`, and relaunch; until then Iris behaves as if no token were configured.
+**First-time setup needs all three:** the account's username, its token and at least one allowed
+repository. With any missing, Iris behaves as if no token were configured and the tools are not offered.
 
 Once both the GitHub-side and Mac-side setup are done, Iris can already **approve other people's
 routine PRs** (yours, or `sackheads-bot`'s) as the account — that's the main clickhole relief, and
