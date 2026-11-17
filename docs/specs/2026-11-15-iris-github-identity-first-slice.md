@@ -2,7 +2,7 @@
 
 > **Status:** spec by iris-planner, 2026-11-15; Iris-reviewed (+4 amendments folded), then **REVISED to
 > the contributor model** (Brian, 2026-11-15): `iris-main` is a full git contributor (push/commit/PR as
-> herself), the lockdown is on *approval authority* only (routine `/docs`+`/assets`, `CODEOWNERS`-enforced),
+> herself), the lockdown is on *approval authority* only (routine `/docs`+`/assets`, minus the `plans`/`specs` instruction folders; `CODEOWNERS`-enforced),
 > and the "spend-never-possess / no-`Contents:write`" framing is dropped as over-lock on the wrong axis.
 > The §3.3 approve-gate and the allowlist survive; §4 is rewritten.
 > **This is a FIRST-SLICE consumer-spec, not a design.** The boundary design is
@@ -17,14 +17,14 @@
 
 **Is:** give Iris her own GitHub identity, **`iris-main`**, as a **first-class contributor** — she
 commits, pushes branches, and opens PRs **as `iris-main`** (independent of `@bnaylor`'s identity), and
-she can **approve _routine_ PRs** (`/docs`, `/assets`) as `iris-main`. `iris-main` mirrors
+she can **approve _routine_ PRs** (`/docs`, `/assets`, but not a `plans/` or `specs/` folder) as `iris-main`. `iris-main` mirrors
 `sackheads-bot`'s git privileges: a real bot contributor account. Plus the `CODEOWNERS` split that lets
 her routine approvals satisfy the merge gate.
 
 **The one thing that is locked down is _approval authority_, not contribution** (Brian, 2026-11-15).
 Iris contributes code freely as `iris-main`; what stays under `@bnaylor` is approval of anything that
 matters — `Sources/`, `Tests/`, the ruleset, the `CODEOWNERS` file itself. `iris-main` can only ever
-approve `/docs` + `/assets`, enforced structurally by `CODEOWNERS` (§2) and belt-and-suspendered by the
+approve `/docs` + `/assets` (minus `plans/` and `specs/`), enforced structurally by `CODEOWNERS` (§2) and belt-and-suspendered by the
 approve-gate (§3.3). The design's job is **identity separation** (Iris acts as herself, lands routine
 work without a human click), **not** credential-hiding — Iris already runs from a highly privileged
 place (Brian's email, his git creds), so hiding `iris-main`'s credential from the model buys nothing.
@@ -50,13 +50,15 @@ from approving his own PR. That is the actual clickhole on Iris-authored PRs. So
 2. **CODEOWNERS split (fail-safe, config-only, no iris code):**
    ```
    * @bnaylor                               # default: Brian (floor)
-   /docs/     @iris-main @sackheads-bot      # routine: either bot may approve the other's PR
-   /assets/   @iris-main @sackheads-bot
-   /.github/CODEOWNERS @bnaylor              # the gate protects itself
+   /docs/         @bnaylor @iris-main @sackheads-bot   # routine: any of the three may approve
+   /assets/       @bnaylor @iris-main @sackheads-bot
+   /docs/**/plans/ @bnaylor                            # agent instructions: a human only
+   /docs/**/specs/ @bnaylor
+   /.github/CODEOWNERS @bnaylor                        # the gate protects itself
    ```
    **`/Tests/` is NOT in the routine set** (Iris's finding 2): it is executable host Swift (runs under
    `swift test` outside any sandbox) and holds the security/source-scan gates — a bot pair must not be
-   able to weaken a security test or merge host-executing code. Start with `/docs/` + `/assets/` only.
+   able to weaken a security test or merge host-executing code. Start with `/docs/` + `/assets/` only, minus the folders below.
    `Sources/` stays `@bnaylor` entirely (Iris's finding 3: it is almost all boundary code; a denylist of
    boundary files is fail-open and missed 25+ files — do not go that route).
    **Ruleset requirements:** the `main` ruleset must have **BOTH** of (or an approval rides a later push):
@@ -66,8 +68,17 @@ from approving his own PR. That is the actual clickhole on Iris-authored PRs. So
      stale-SHA approval of an old routine-only commit could count toward merging a newer head with
      `Sources/` changes. The second setting ties the required approval to the current head.
 
+   **`plans/` and `specs/` are NOT routine either** (Brian, 2026-11-16): `docs/plans`, `docs/specs`,
+   `docs/superpowers/plans` and `docs/superpowers/specs` are instructions that sessions read and execute,
+   and a docs-only PR runs no CI (`scripts/ci-changes.sh`), so a poisoned one approved by the bots would
+   merge with no human and steer the next session that reads it. The `/docs/**/plans/` and
+   `/docs/**/specs/` lines (later, more specific, so they win) leave those `@bnaylor`-only; `**` covers
+   the nested `superpowers` folders, which a flat `/docs/plans/` would miss. `@bnaylor` is also listed on
+   `/docs/` and `/assets/`: GitHub takes owners from the last matching pattern, and without him there his
+   own approval would not clear a docs PR (and approval is what arms the merge queue).
+
    **`CODEOWNERS` is the primary approval control.** `iris-main` is a code owner of `/docs`+`/assets`
-   *only*, so its approval structurally cannot satisfy the merge gate for a PR that touches `Sources/`,
+   *only* (not their `plans/` and `specs/` folders), so its approval structurally cannot satisfy the merge gate for a PR that touches `Sources/`,
    `Tests/`, or anything else — those need `@bnaylor`. This is the real "important approvals stay under my
    id" mechanism; the §3.3 approve-gate is defence-in-depth on top of it.
 
@@ -135,7 +146,7 @@ allowlist is **not hardcoded** (Brian, 2026-11-15: Iris will work on many repos,
   scope); the *contents* come from user config (Brian's point).
 
 ### 3.3 The `github_approve` file-check gate (Iris findings 1 + 3)
-`github_approve` refuses unless **every changed file is inside the routine allowlist** (`docs/`, `assets/`),
+`github_approve` refuses unless **every changed file is inside the routine allowlist** (`docs/`, `assets/`, but not under a `plans/` or `specs/` folder of `docs/`, at any depth, compared case-insensitively),
 bound to an exact commit — hardened against three bypasses Iris flagged:
 
 1. **SHA-keyed, no TOCTOU.** `GET /pulls/{n}/files` is not keyed to a SHA. Resolve `head.sha` from
@@ -145,7 +156,7 @@ bound to an exact commit — hardened against three bypasses Iris flagged:
 2. **Pagination fail-closed.** Request `per_page=100` and **refuse if the file count hits 100** (or a
    `Link: rel="next"` is present) — never miss a 101st `Sources/` file on page 2.
 3. **Renames + path prefixes.** Require **both** `filename` and `previous_filename` (when non-nil) to begin
-   with `docs/` or `assets/` (GitHub API paths have no leading `/`), with no `..` segments — so a
+   with `docs/` or `assets/` (GitHub API paths have no leading `/`), with no `..` segments and no `plans`/`specs` directory under `docs/` — so a
    `Sources/IrisKit/x.md` → `docs/x.md` rename can't slip a Sources change past the check.
 
 The token value is still scrubbed from tool output as hygiene, but it is **not** the control — the
@@ -166,7 +177,7 @@ single account, not the registry.
   to the **user-configured allowed repos** (§3.2) — no Administration, Secrets, Workflows, or Settings.
   `Contents: write` is deliberately **included** now: Iris pushes code as a contributor. The thing that
   bounds her is **not** a withheld push scope — it's branch protection (`main` needs a PR + a
-  code-owner approval) plus `CODEOWNERS` (her approval only counts for `/docs`+`/assets`). (The earlier
+  code-owner approval) plus `CODEOWNERS` (her approval only counts for `/docs`+`/assets`, minus `plans/` and `specs/`). (The earlier
   draft's "no `Contents: write` / spend-never-possess" was over-lock on the wrong axis. The credential is Iris's to use, like any contributor's tooling.)
 - **Credential storage + git plumbing.** Store the credential in its own `KeychainManager` service
   (the `iris.github` item from Task 1). For git operations Iris uses it via an **isolated config** —
@@ -200,7 +211,7 @@ single account, not the registry.
 - The CODEOWNERS split and the approve code-gate are independent of the registry and ship now.
 - The "decider is never the requester" hardening (approve in a separate owner-authority session from the
   one reading untrusted diffs — 11-09's broker principle) is a **future tightening**; this slice's
-  approval bound is `CODEOWNERS` + the §3.3 gate, which hold Iris to routine docs/assets PRs.
+  approval bound is `CODEOWNERS` + the §3.3 gate, which hold Iris to routine docs/assets PRs (not plans or specs).
 
 ## 7. Slice contents / sequencing
 
@@ -218,7 +229,7 @@ single account, not the registry.
   Reproduce: a PR touching a `Sources/`/`Tests/` file can't be merged on `iris-main`'s approval; the gate
   refuses to even submit one; a push after the check does not ride the approval (SHA-bind + the second
   ruleset setting).
-- **CODEOWNERS is fail-safe** (default `@bnaylor`, `/docs`+`/assets` only, `/Tests/` and `/Sources/`
+- **CODEOWNERS is fail-safe** (default `@bnaylor`, `/docs`+`/assets` only with `plans/` and `specs/` carved back to `@bnaylor`, `/Tests/` and `/Sources/`
   excluded, self-protected) and **both** ruleset settings are on.
 - **Identity separation:** Iris commits/pushes/PRs as `iris-main` (not `@bnaylor`), via an isolated
   config that never clobbers or reads `@bnaylor`'s ambient `gh`/git.
