@@ -49,7 +49,7 @@ The input/failure classes the spec implies that are most likely to bite, each pi
 
 These are the spec's Part-1 config steps. The code tasks below are buildable and testable without them (tests inject stubs). The feature only does real work once these exist.
 
-**No Settings UI in this slice (Brian, 2026-11-15):** the token and allowed-repos are entered via a minimal **headless setter** (Task 6), not a GUI. The real token/repos/profile UI is deferred to the **#961 profile pane**, so this slice doesn't build settings fields #961 will redo. Config-by-command is the dogfood path.
+**No Settings UI in this slice (Brian, 2026-11-15; since built as Settings → Integrations → GitHub, #966):** the token and allowed-repos are entered via a minimal **headless setter** (Task 6), not a GUI. The real token/repos/profile UI is deferred to the **#961 profile pane**, so this slice doesn't build settings fields #961 will redo. Config-by-command is the dogfood path.
 
 - Create the `iris-main` GitHub service account; give it a verified email and issue a fine-grained PAT with `Contents`, `Pull requests` and `Issues`, each read and write (no Administration, Secrets, Workflows or Settings), scoped to the intended repos; Iris commits with `user.name`/`user.email` set to `iris-main`, through an isolated git/`gh` config (spec §4). Store it into the `iris.github` Keychain service via `iris --set-github-token` (Task 6).
 - Set the allowed repos via `iris --set-github-repos` (Task 6); default empty → the tools refuse everything until set.

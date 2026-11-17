@@ -233,4 +233,15 @@ struct GitHubSettingsModelTests {
         }
         #expect(writers == ["GitHubSettingsModel.swift", "GitHubConfigSetterCLI.swift"], "\(writers.sorted())")
     }
+
+    @Test("the pane is mounted in Integrations and goes through the model, never the stores")
+    func viewIsThinAndMounted() throws {
+        let dir = PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit")
+        let settings = try String(contentsOf: dir.appendingPathComponent("SettingsView.swift"), encoding: .utf8)
+        #expect(settings.contains("GitHubSettingsSection()"))
+        let view = try String(contentsOf: dir.appendingPathComponent("GitHubSettingsSection.swift"), encoding: .utf8)
+        for forbidden in ["KeychainManager", "setGuardedBlob", "updateSecrets", "checkToken", "checkRepoList"] {
+            #expect(!view.contains(forbidden), "the view must not touch \(forbidden) itself")
+        }
+    }
 }

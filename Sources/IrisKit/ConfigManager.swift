@@ -69,14 +69,13 @@ class ConfigManager: @unchecked Sendable {
     /// Whether the `iris-main` GitHub PAT is present (#966), read once here rather than on every
     /// `ToolExecutor.getTools` call: a per-turn Keychain read risked re-triggering the `.dev`
     /// SecurityAgent prompt every turn (#578), the same reasoning `googleRefreshToken`'s one-shot
-    /// read already follows. Fixed for this launch: the token is set by a headless CLI setter
-    /// (#966 Task 6, not yet built), a separate process invocation that cannot update an
-    /// already-running app's in-memory flag, so the token it stores takes effect on the app's
-    /// next launch, not live.
+    /// read already follows. Fixed for this launch: a token saved in Settings or by the headless CLI
+    /// setter does not update this in-memory flag, so it takes effect on the app's next launch, not
+    /// live (Settings says so, `GitHubSettingsModel.needsRestart`).
     @ObservationIgnored let hasGitHubToken: Bool
     /// Whether the user's allowed-repos list (#966) holds at least one repo, read once at launch
     /// from the same guarded load as everything else and fixed for this run, like `hasGitHubToken`:
-    /// `iris --set-github-repos` is a separate process, so a new list takes effect on the next launch.
+    /// a list saved in Settings or by `iris --set-github-repos` takes effect on the next launch.
     @ObservationIgnored let hasGitHubAllowedRepos: Bool
     /// What declares the `github_*` tools (Invariant 6): a token to act with and a repo to act on.
     /// With either missing the tools can only refuse, so they are not offered.
