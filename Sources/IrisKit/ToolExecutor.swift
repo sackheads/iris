@@ -107,13 +107,14 @@ struct ToolExecutor {
     /// Google Tasks / Workspace call fails, so the ten declarations were pure prompt weight (#133).
     /// Injectable so tests never mutate `ConfigManager.shared`.
     ///
-    /// `githubToolsEnabled` defaults to "the GitHub token is present, the account's login is set and the user
-    /// has allowed at least one repo" (#966, Invariant 6): with any missing the three `github_*` tools can only
+    /// `githubToolsEnabled` defaults to "the GitHub token is present, the account's login is set, the user
+    /// has allowed at least one repo and `GET /user` named that login (#1184)" (#966, Invariant 6): with any missing the three `github_*` tools can only
     /// refuse, so their declarations are prompt weight an unconfigured install must not pay. The
-    /// default reads `ConfigManager.githubToolsConfigured`, all three parts fixed at launch, never the
+    /// default reads `ConfigManager.githubToolsConfigured`: three parts fixed at launch, never the
     /// Keychain per turn (#578).
     func getTools(workspaceToolsEnabled: Bool = !ConfigManager.shared.googleRefreshToken.isEmpty,
                   githubToolsEnabled: Bool? = nil) async -> [FunctionDeclaration] {
+        if githubToolsEnabled == nil, githubToolsEnabledOverride == nil { GitHubIdentityMonitor.kickIfNeeded() }
         let githubToolsEnabled = githubToolsEnabled ?? githubToolsEnabledOverride ?? ConfigManager.shared.githubToolsConfigured
         var tools = [
             FunctionDeclaration(
@@ -856,7 +857,9 @@ struct ToolExecutor {
                     // property's doc comment) rather than let an unwired caller act as Iris's GitHub account.
                     guestOrigin = true
                 }
-                if GitIdentityEnvironment.shouldApply(hasToken: hasToken, login: login, repos: repos, guestOrigin: guestOrigin),
+                if GitIdentityEnvironment.shouldApply(hasToken: hasToken, login: login,
+                                                      identityMatches: ConfigManager.shared.githubIdentity == .match,
+                                                      repos: repos, guestOrigin: guestOrigin),
                    let login, let executablePath = Bundle.main.executablePath {
                     let paths = irisPaths ?? .default
                     let fragmentPath = paths.configDir.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path

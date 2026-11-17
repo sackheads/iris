@@ -328,6 +328,32 @@ struct GitHubSettingsModelTests {
         #expect(denied.identity == .unchecked, "changing the login drops a stale result")
     }
 
+    @Test("a change made in the pane turns the tools' gate off at once, before any recheck")
+    func changeDropsTheGate() async {
+        let r = rig(); defer { r.teardown() }
+        _ = r.model().addRepo("a/b")
+        let m = r.model(transport: UserTransport(login: "acme-bot", status: 200))
+        _ = m.saveLogin("acme-bot"); _ = m.saveToken("ghp_x")
+        await m.verifyIdentity()
+        #expect(m.identity == .match && r.config.githubIdentity == .match)
+        _ = m.saveToken("ghp_other")
+        #expect(r.config.githubIdentity == nil && m.identity == .unchecked)
+        await m.verifyIdentity()
+        #expect(m.identity == .match)
+        _ = m.saveLogin("someone-else")
+        #expect(r.config.githubIdentity == nil)
+        _ = m.clearLogin()
+        #expect(r.config.githubIdentity == nil)
+    }
+
+    @Test("the pane shows what the launch check found, without asking again")
+    func paneMirrorsTheGateState() {
+        let r = rig(); defer { r.teardown() }
+        let id = r.config.beginGitHubIdentityCheck()
+        r.config.finishGitHubIdentityCheck(try! #require(id), .mismatch(actual: "someone-else"))
+        #expect(r.model().identity == .mismatch(actual: "someone-else"))
+    }
+
     @Test("no source names the old hardcoded account: it is a setting, not a constant")
     func noHardcodedAccount() throws {
         let dir = PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit")

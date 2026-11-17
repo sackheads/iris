@@ -140,6 +140,9 @@ public enum IrisMain {
             ProcessRole.set(.app)
             // Off the main thread, before the first window: a sidebar row reads it (#1001).
             BinaryResolver.warmUp()
+            // #1184: asks GitHub whose token this is, off the launch path; the GitHub tools stay off until
+            // it says the configured login.
+            GitHubIdentityMonitor.kickIfNeeded()
             IrisApp.main()
         }
     }

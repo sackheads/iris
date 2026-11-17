@@ -39,11 +39,11 @@ struct GitHubToolSurfaceTests {
 
     @Test("the tools are configured only when a token AND at least one allowed repo are both set")
     func configuredNeedsTokenAndRepos() {
-        #expect(config(token: true, repos: "[\"sackheads/iris\"]").githubToolsConfigured)
-        #expect(!config(token: true, repos: nil).githubToolsConfigured, "a token alone: the tools could only refuse")
-        #expect(!config(token: true, repos: "[]").githubToolsConfigured)
-        #expect(!config(token: false, repos: "[\"sackheads/iris\"]").githubToolsConfigured, "repos alone: nothing to act with")
-        #expect(!config(token: false, repos: nil).githubToolsConfigured)
+        #expect(config(token: true, repos: "[\"sackheads/iris\"]").githubConfiguredAtLaunch)
+        #expect(!config(token: true, repos: nil).githubConfiguredAtLaunch, "a token alone: the tools could only refuse")
+        #expect(!config(token: true, repos: "[]").githubConfiguredAtLaunch)
+        #expect(!config(token: false, repos: "[\"sackheads/iris\"]").githubConfiguredAtLaunch, "repos alone: nothing to act with")
+        #expect(!config(token: false, repos: nil).githubConfiguredAtLaunch)
     }
 
     @Test("an unset or unreadable login keeps the tools undeclared, however much else is configured (#1184)",
@@ -58,7 +58,7 @@ struct GitHubToolSurfaceTests {
         seed.setGuardedBlob(.githubAllowedRepos, "[\"sackheads/iris\"]")
         if let blob { seed.setGuardedBlob(.githubLogin, blob) }
         let reloaded = ConfigManager(store: store, guardedSecrets: keychain)
-        #expect(!reloaded.githubToolsConfigured)
+        #expect(!reloaded.githubConfiguredAtLaunch)
         #expect(reloaded.githubLogin() == nil)
     }
 
@@ -78,8 +78,8 @@ struct GitHubToolSurfaceTests {
         keychain.replaceSecrets(["token": "ghp_TestToken1234567890abcdef"], service: KeychainManager.githubService)
         live.setGuardedBlob(.githubAllowedRepos, "[\"sackheads/iris\"]")
         live.setGuardedBlob(.githubLogin, GitHubProxyClient.loginBlob("acme-bot"))
-        #expect(!live.githubToolsConfigured, "the running manager does not change under the user")
-        #expect(ConfigManager(store: store, guardedSecrets: keychain).githubToolsConfigured, "the next launch picks both up")
+        #expect(!live.githubConfiguredAtLaunch, "the running manager does not change under the user")
+        #expect(ConfigManager(store: store, guardedSecrets: keychain).githubConfiguredAtLaunch, "the next launch picks all three up")
     }
 
     @Test("a plain turn with no token carries none of them")

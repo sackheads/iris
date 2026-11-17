@@ -84,6 +84,14 @@ final class GitHubSettingsModel {
         storedListUnreadable = repos.isEmpty && !blob.isEmpty && blob != "[]"
         login = config.githubLogin()
         storedLoginUnreadable = login == nil && !config.guardedBlob(.githubLogin).isEmpty
+        if identity != .checking {
+            switch config.githubIdentity {
+            case .none: identity = .unchecked
+            case .match?: identity = .match
+            case .mismatch(let actual)?: identity = .mismatch(actual: actual)
+            case .unverified(let why)?: identity = .unverified(why)
+            }
+        }
         let token = GitHubProxyClient.token(keychain: keychain)
         storedTokenPresent = token != nil
         tokenHint = KeyHint.text(token)
@@ -118,9 +126,9 @@ final class GitHubSettingsModel {
         case .empty: return .emptyLogin
         case .invalid: return .invalidLogin
         case .ok(let checked):
+            config.invalidateGitHubIdentity()
             config.setGuardedBlob(.githubLogin, GitHubProxyClient.loginBlob(checked))
             refresh()
-            identity = .unchecked
             return login == checked ? nil : .notSaved
         }
     }
@@ -128,23 +136,21 @@ final class GitHubSettingsModel {
     @discardableResult
     func clearLogin() -> Failure? {
         if case .disabled(let reason) = editState { return .disabled(reason) }
+        config.invalidateGitHubIdentity()
         config.setGuardedBlob(.githubLogin, "")
         refresh()
-        identity = .unchecked
         return login == nil && !storedLoginUnreadable ? nil : .notSaved
     }
 
-    /// Asks GitHub whose token this is and compares it with the configured login. Does nothing
-    /// without both. Never throws: a failure to ask is `.unverified`, not a match.
+    /// Asks GitHub whose token this is, compares it with the configured login and records the answer
+    /// where the tools' gate reads it (`ConfigManager.githubIdentity`): only a match offers them.
+    /// Does nothing without both. Never throws: a failure to ask is `.unverified`, not a match.
     func verifyIdentity() async {
-        guard let login, storedTokenPresent else { identity = .unchecked; return }
+        guard login != nil, storedTokenPresent else { identity = .unchecked; return }
         identity = .checking
-        let client = GitHubProxyClient(keychain: keychain, isRepoAllowed: { _ in false }, transport: transport)
-        switch await client.verifyIdentity(expectedLogin: login) {
-        case .match: identity = .match
-        case .mismatch(let actual): identity = .mismatch(actual: actual)
-        case .unverified(let why): identity = .unverified(why)
-        }
+        _ = await GitHubIdentityMonitor.verify(config: config, keychain: keychain, transport: transport)
+        identity = .unchecked
+        refresh()
     }
 
     // MARK: Repos
@@ -187,6 +193,7 @@ final class GitHubSettingsModel {
         case .malformed: return .malformedToken
         case .ok(let checked): token = checked
         }
+        config.invalidateGitHubIdentity()
         do {
             try keychain.updateSecretsOrThrow(service: KeychainManager.githubService) { $0["token"] = token }
         } catch {
@@ -199,6 +206,7 @@ final class GitHubSettingsModel {
     @discardableResult
     func clearToken() -> Failure? {
         if case .disabled(let reason) = editState { return .disabled(reason) }
+        config.invalidateGitHubIdentity()
         do {
             try keychain.updateSecretsOrThrow(service: KeychainManager.githubService) { $0["token"] = nil }
         } catch {
