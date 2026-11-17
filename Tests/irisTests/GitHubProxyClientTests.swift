@@ -580,9 +580,10 @@ struct GitHubLoginTests {
     func matches() async {
         let (client, stub) = client([user("Acme-Bot")])
         #expect(await client.verifyIdentity(expectedLogin: "acme-bot") == .match)
-        let sent = try? #require(stub.sent.first)
-        #expect(sent?.request.httpMethod == "GET" && sent?.request.url?.absoluteString == "https://api.github.com/user")
-        #expect(sent?.request.httpBody == nil && sent?.bearer == Self.token)
+        #expect(stub.sent.count == 1)
+        let sent = stub.sent[0]
+        #expect(sent.request.httpMethod == "GET" && sent.request.url?.absoluteString == "https://api.github.com/user")
+        #expect(sent.request.httpBody == nil && sent.bearer == Self.token)
     }
 
     @Test("GET /user: a token for another account is a mismatch that names the real one")
