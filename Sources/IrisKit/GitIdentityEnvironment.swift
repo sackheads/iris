@@ -62,12 +62,12 @@ import Foundation
 /// `includeIf` condition names it, so its config resolution never even reaches the routing file.
 enum GitIdentityEnvironment {
     /// Whether `run_command`'s host path should carry the GitHub git identity at all: a
-    /// configured token, a configured account login (#1184), a non-empty allowlist, and -- planner's
+    /// configured token, a configured account login whose token `GET /user` confirmed (#1184), a non-empty allowlist, and -- planner's
     /// ruling, 2026-11-15 -- the turn not being guest-origin. Pulled out as its own pure function so
     /// the decision is directly unit-testable without touching `ConfigManager.shared` or a real
     /// conversation. An unset login is the same as no token: no behaviour change at all.
-    static func shouldApply(hasToken: Bool, login: String?, repos: [String], guestOrigin: Bool) -> Bool {
-        hasToken && login != nil && !repos.isEmpty && !guestOrigin
+    static func shouldApply(hasToken: Bool, login: String?, identityMatches: Bool, repos: [String], guestOrigin: Bool) -> Bool {
+        hasToken && login != nil && identityMatches && !repos.isEmpty && !guestOrigin
     }
 
     /// The identity's name and email come from the login (`GitHubProxyClient.commitIdentity`): GitHub's

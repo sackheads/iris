@@ -12,7 +12,7 @@ struct GitHubSettingsSection: View {
 
     init(config: ConfigManager = .shared) {
         _model = State(initialValue: GitHubSettingsModel(
-            config: config, toolsOfferedAtLaunch: config.githubToolsConfigured))
+            config: config, toolsOfferedAtLaunch: config.githubConfiguredAtLaunch))
     }
 
     private var editable: Bool { model.editState == .editable }
@@ -88,7 +88,13 @@ struct GitHubSettingsSection: View {
             Text("The GitHub tools are offered only with an account, a token and at least one repository, and act only on the repositories listed here.")
                 .font(.caption).foregroundColor(.secondary)
         }
-        .onAppear { model.refresh() }
+        .onAppear {
+            model.refresh()
+            switch model.identity {
+            case .unchecked, .unverified: Task { await model.verifyIdentity() }
+            case .checking, .match, .mismatch: break
+            }
+        }
     }
 
     @ViewBuilder private var identityLine: some View {
@@ -97,10 +103,11 @@ struct GitHubSettingsSection: View {
         case .checking: Text("Checking the token with GitHub…").font(.caption).foregroundColor(.secondary)
         case .match: Text("The token belongs to this account.").font(.caption).foregroundColor(.green)
         case .mismatch(let actual):
-            Text("This token belongs to \(actual), not the account above. Commits would be signed as one account while the token acts as the other.")
+            Text("This token belongs to \(actual), expected \(model.login ?? "the account above"). The GitHub tools are off until it matches.")
                 .font(.caption).foregroundColor(.red)
         case .unverified(let why):
-            Text("Could not confirm whose token this is: \(why).").font(.caption).foregroundColor(.orange)
+            Text("Couldn't verify whose token this is (\(why)). The GitHub tools are off until it can be checked.")
+                .font(.caption).foregroundColor(.orange)
         }
     }
 

@@ -6,16 +6,18 @@ import Testing
 struct GitIdentityEnvironmentTests {
     // MARK: shouldApply
 
-    @Test("applies only with a token, a login, a non-empty allowlist, and a non-guest-origin turn", arguments: [
-        (hasToken: true, login: "acme-bot" as String?, repos: ["sackheads/iris"], guestOrigin: false, expected: true),
-        (hasToken: false, login: "acme-bot" as String?, repos: ["sackheads/iris"], guestOrigin: false, expected: false),
-        (hasToken: true, login: nil as String?, repos: ["sackheads/iris"], guestOrigin: false, expected: false),
-        (hasToken: true, login: "acme-bot" as String?, repos: [], guestOrigin: false, expected: false),
-        (hasToken: true, login: "acme-bot" as String?, repos: ["sackheads/iris"], guestOrigin: true, expected: false),
-        (hasToken: false, login: nil as String?, repos: [], guestOrigin: true, expected: false),
+    @Test("applies only with a token, a login, a confirmed identity, a non-empty allowlist, and a non-guest-origin turn", arguments: [
+        (hasToken: true, login: "acme-bot" as String?, matches: true, repos: ["sackheads/iris"], guestOrigin: false, expected: true),
+        (hasToken: false, login: "acme-bot" as String?, matches: true, repos: ["sackheads/iris"], guestOrigin: false, expected: false),
+        (hasToken: true, login: nil as String?, matches: true, repos: ["sackheads/iris"], guestOrigin: false, expected: false),
+        (hasToken: true, login: "acme-bot" as String?, matches: false, repos: ["sackheads/iris"], guestOrigin: false, expected: false),
+        (hasToken: true, login: "acme-bot" as String?, matches: true, repos: [], guestOrigin: false, expected: false),
+        (hasToken: true, login: "acme-bot" as String?, matches: true, repos: ["sackheads/iris"], guestOrigin: true, expected: false),
+        (hasToken: false, login: nil as String?, matches: false, repos: [], guestOrigin: true, expected: false),
     ])
-    func shouldApply(_ c: (hasToken: Bool, login: String?, repos: [String], guestOrigin: Bool, expected: Bool)) {
-        #expect(GitIdentityEnvironment.shouldApply(hasToken: c.hasToken, login: c.login, repos: c.repos, guestOrigin: c.guestOrigin) == c.expected)
+    func shouldApply(_ c: (hasToken: Bool, login: String?, matches: Bool, repos: [String], guestOrigin: Bool, expected: Bool)) {
+        #expect(GitIdentityEnvironment.shouldApply(hasToken: c.hasToken, login: c.login, identityMatches: c.matches,
+                                                   repos: c.repos, guestOrigin: c.guestOrigin) == c.expected)
     }
 
     // MARK: fragmentContents

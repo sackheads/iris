@@ -153,7 +153,7 @@ extension GitHubProxyClient {
         }
     }
 
-    enum IdentityCheck: Equatable {
+    enum IdentityCheck: Equatable, Sendable {
         /// The token belongs to the configured login.
         case match
         /// The token belongs to another account, named here (a login is public, not a secret).

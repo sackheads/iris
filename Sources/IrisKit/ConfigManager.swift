@@ -80,9 +80,58 @@ class ConfigManager: @unchecked Sendable {
     /// Whether a valid GitHub account login is set (#1184), read once from the same guarded load and
     /// fixed for this run, like the two above: it names who the tools act as and sign commits as.
     @ObservationIgnored let hasGitHubLogin: Bool
-    /// What declares the `github_*` tools (Invariant 6): a token to act with, a repo to act on and
-    /// the account's login. With any missing the tools can only refuse, so they are not offered.
-    var githubToolsConfigured: Bool { hasGitHubToken && hasGitHubAllowedRepos && hasGitHubLogin }
+    /// What this launch found configured: a token to act with, a repo to act on and the account's
+    /// login. Fixed for the run. It is what Settings compares the stored values with to say "restart".
+    var githubConfiguredAtLaunch: Bool { hasGitHubToken && hasGitHubAllowedRepos && hasGitHubLogin }
+    /// What declares the `github_*` tools (Invariant 6): the three above AND a `GET /user` that named
+    /// the configured login (#1184). With any missing the tools can only refuse, or would act as the
+    /// wrong account, so they are not offered. The identity part is not fixed at launch: it starts
+    /// unchecked (tools off), is set by `GitHubIdentityMonitor` off the launch path, and is cleared at
+    /// once by any change to the token or login.
+    var githubToolsConfigured: Bool { githubConfiguredAtLaunch && githubIdentity == .match }
+
+    // MARK: GitHub identity check state (#1184)
+
+    /// Not observed: read per turn from any thread, under `identityLock`.
+    @ObservationIgnored private let identityLock = NSLock()
+    @ObservationIgnored private var identityState: GitHubProxyClient.IdentityCheck?
+    @ObservationIgnored private var identityGeneration = 0
+    @ObservationIgnored private var identityInFlight = false
+    @ObservationIgnored private var identityLastAttempt: TimeInterval?
+
+    /// What `GET /user` last said for the current token and login, or nil when it has not been
+    /// checked (or the token or login changed since). Only `.match` offers the tools.
+    var githubIdentity: GitHubProxyClient.IdentityCheck? { identityLock.withLock { identityState } }
+
+    /// Drops what is known and refuses any check already in flight: the token or login it started with
+    /// is no longer the stored pair, so its answer would be about something else.
+    func invalidateGitHubIdentity() {
+        identityLock.withLock {
+            identityGeneration += 1
+            identityState = nil
+            identityInFlight = false
+        }
+    }
+
+    /// Starts a check unless one is running or the last attempt (when `minInterval` is set) was too
+    /// recent. The generation comes back so `finishGitHubIdentityCheck` can drop a stale answer.
+    func beginGitHubIdentityCheck(minInterval: TimeInterval? = nil, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Int? {
+        identityLock.withLock {
+            guard !identityInFlight else { return nil }
+            if let minInterval, let last = identityLastAttempt, now - last < minInterval { return nil }
+            identityInFlight = true
+            identityLastAttempt = now
+            return identityGeneration
+        }
+    }
+
+    func finishGitHubIdentityCheck(_ generation: Int, _ result: GitHubProxyClient.IdentityCheck) {
+        identityLock.withLock {
+            guard generation == identityGeneration else { return }
+            identityState = result
+            identityInFlight = false
+        }
+    }
     /// What this launch found in the secrets item for the guarded settings.
     @ObservationIgnored var guardedState: GuardedSettings.State = .normal
     /// Launch notices about the guarded settings, taken once by `AppState`.
