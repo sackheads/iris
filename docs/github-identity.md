@@ -12,7 +12,7 @@ needs a second code owner — see "The one open decision" below.
 
 **The one thing locked down is approval, not contribution.** Iris pushes and opens PRs as
 `iris-main` freely. What stays under `@bnaylor` is approval of anything that matters:
-`CODEOWNERS` makes `iris-main`'s own approval count only for `/docs/` and `/assets/` — a structural
+`CODEOWNERS` makes `iris-main`'s own approval count only for `/docs/` and `/assets/` (not their `plans/` and `specs/` folders) — a structural
 guarantee, not a request she might ignore — and the `github_approve` tool refuses to even submit an
 approval on anything else, as defence in depth on top of that.
 
@@ -30,8 +30,9 @@ nothing.
   otherwise.
 - **`github_comment(repo, pr, body)`** — posts a PR comment as `iris-main`.
 - **`github_approve(repo, pr)`** — submits an `APPROVE` review as `iris-main`, but only if the PR
-  is open and every changed file (including a rename's source path) is under `docs/` or `assets/`;
-  anything else is refused outright, never submitted. The approval is bound to the exact commit
+  is open and every changed file (including a rename's source path) is under `docs/` or `assets/`
+  and not inside a `plans/` or `specs/` folder of `docs/` at any depth (those are instructions that
+  sessions read and execute, so a human approves them); anything else is refused outright, never submitted. The approval is bound to the exact commit
   checked (so a push after the check can't ride it), and the result says if the PR moved while it
   was being checked.
 
@@ -61,7 +62,7 @@ runs from a highly privileged place on your Mac, so hiding this one token from t
 nothing. What actually bounds `iris-main` is **not** a withheld token scope: the PAT has
 `Contents`, `Pull requests` and `Issues`, each read and write — a real contributor needs to push.
 The bound is branch protection (a PR plus a code-owner review to merge) and CODEOWNERS (her
-approval only counts for `/docs/` and `/assets/`), with the in-Swift allowlist and the
+approval only counts for `/docs/` and `/assets/`, minus `plans/` and `specs/`), with the in-Swift allowlist and the
 `github_approve` gate on top.
 
 ## Setup
@@ -78,18 +79,23 @@ command instead:
    - Commit a `.github/CODEOWNERS` file:
      ```
      * @bnaylor
-     /docs/     @iris-main @sackheads-bot
-     /assets/   @iris-main @sackheads-bot
+     /docs/          @bnaylor @iris-main @sackheads-bot
+     /assets/        @bnaylor @iris-main @sackheads-bot
+     /docs/**/plans/ @bnaylor
+     /docs/**/specs/ @bnaylor
      /.github/CODEOWNERS @bnaylor
      ```
      `Sources/` and `Tests/` are deliberately absent — they fall under `* @bnaylor`, so only you
-     can approve code or test changes. `@bnaylor` is also deliberately absent from the `/docs/`
-     and `/assets/` lines themselves: GitHub takes a file's owners from the last matching
-     pattern, not every pattern that matches, so once a line names `/docs/` or `/assets/` the top
-     `* @bnaylor` line no longer applies there. Leaving you off those two lines on purpose is what
-     keeps them routine and bot-to-bot: adding yourself back would let your own review alone
-     satisfy "review from code owners" on them — the bots' approvals would still count either
-     way, but the split is meant to keep docs/assets reviewable without you in the loop.
+     can approve code or test changes. `@bnaylor` is listed on the `/docs/` and `/assets/` lines too:
+     GitHub takes a file's owners from the last matching pattern, not every pattern that matches, so
+     without you there the top `* @bnaylor` line would not apply and your own approval would not
+     clear a docs PR (approval is what sends a PR to the merge queue). The bots' approvals still
+     count there. The two `**` lines are later and more specific, so they win: they take
+     `docs/plans`, `docs/specs`, `docs/superpowers/plans` and `docs/superpowers/specs` back to you
+     alone, because those hold instructions sessions execute and a docs-only PR runs no CI. `**`
+     matches zero or more folders, which is why one line covers both depths. CODEOWNERS patterns are
+     case-sensitive, so `docs/Plans/` falls to the `/docs/` line; the `github_approve` gate compares
+     case-insensitively and refuses it, and so must any other bot approval path.
    - On the `main` ruleset, require a pull request with review from code owners, and enable
      **both** "Dismiss stale pull request approvals when new commits are pushed" **and** "Require
      approval of the most recent reviewable push." Both matter: stale-dismissal fires at push
@@ -112,11 +118,11 @@ it works without anything further.
 
 ### The one open decision: `sackheads-bot`
 
-`CODEOWNERS` names both `@iris-main` and `@sackheads-bot` as owners of `/docs/` and `/assets/`.
+`CODEOWNERS` names `@bnaylor`, `@iris-main` and `@sackheads-bot` as owners of `/docs/` and `/assets/`.
 `iris-main` approving *other* routine PRs works today. `iris-main`'s *own* authored PRs
 (`github_create_pr`) can't be self-approved — GitHub blocks an author approving their own PR —
 so an Iris-authored routine PR still needs a second code owner's approval: either you approve it
-manually as `sackheads-bot`, or a second proxy giving `sackheads-bot` the same tooling (tracked as
+yourself (you are an owner there), or a second proxy giving `sackheads-bot` the same tooling (tracked as
 a follow-up, #1170, not part of this slice).
 
 ## Known limitations

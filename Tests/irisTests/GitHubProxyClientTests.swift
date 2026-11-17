@@ -511,7 +511,8 @@ struct GitHubProxyClientApproveTests {
     @Test("the path predicate: routine roots only, nothing that climbs out")
     func routinePathPredicate() {
         for ok in ["docs/a.md", "assets/x/y.png", "docs/a b.md", "docs/..hidden",
-                   "docs/plans-old/a.md", "docs/plans.md", "docs/a/specs.md", "docs/planning/a.md", "assets/plans/x.png"] {
+                   "docs/plans-old/a.md", "docs/plans.md", "docs/a/specs.md", "docs/planning/a.md", "assets/plans/x.png",
+                   "docs/plans", "docs/specs"] {
             #expect(GitHubProxyClient.isRoutinePath(ok), "\(ok) should be routine")
         }
         for bad in ["", "docs", "docs/", "/docs/a.md", "docs/../a", "docs/a/..", "./docs/a.md", "doc/a.md", "docs\\a.md", "docs/a\\..\\..\\Sources\\x.md",
