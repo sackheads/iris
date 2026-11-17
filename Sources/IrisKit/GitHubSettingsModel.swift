@@ -1,7 +1,7 @@
 import Foundation
 import Observation
 
-/// The logic behind Settings → Integrations → GitHub (iris-main) (#966): the `iris.github` token
+/// The logic behind Settings → Integrations → GitHub (#966): the `iris.github` token
 /// and the allowed-repos list, with the view left to draw it. It is the one in-process writer of
 /// both outside the headless setters, and shares their validation (`GitHubProxyClient.checkToken`,
 /// `checkRepoList`), so the two entry paths cannot disagree about what is storable. Nothing here
@@ -21,6 +21,8 @@ final class GitHubSettingsModel {
         case duplicateRepo
         case tooManyRepos
         case emptyToken
+        case emptyLogin
+        case invalidLogin
         case malformedToken
         case notSaved
 
@@ -31,6 +33,8 @@ final class GitHubSettingsModel {
             case .duplicateRepo: "That repository is already on the list."
             case .tooManyRepos: "The list is at its limit of \(GitHubSettingsModel.maxRepos) repositories."
             case .emptyToken: "Paste the token first."
+            case .emptyLogin: "Type the account's GitHub username first."
+            case .invalidLogin: "That is not a GitHub username (1 to 39 letters, digits and single hyphens, not starting or ending with one)."
             case .malformedToken: "A token has no spaces or line breaks inside it. Paste just the token."
             case .notSaved: "It could not be saved: Iris's Keychain item would not take the change."
             }
@@ -42,16 +46,33 @@ final class GitHubSettingsModel {
     /// Whether the `github_*` tools were offered when this process launched: that flag is read once
     /// (Invariant 6), so a change made here reaches the tools at the next launch.
     @ObservationIgnored private let toolsOfferedAtLaunch: Bool
+    @ObservationIgnored private let transport: GitHubTransport
+
+    /// What `GET /user` said about the stored token, for the configured login (#1184).
+    enum IdentityState: Equatable {
+        case unchecked
+        case checking
+        case match
+        case mismatch(actual: String)
+        case unverified(String)
+    }
 
     private(set) var repos: [String] = []
     /// A list is stored but does not read as one, so nothing is allowed until an edit replaces it.
     private(set) var storedListUnreadable = false
+    /// The configured account login, or nil when unset or when the stored value does not read as one.
+    private(set) var login: String?
+    /// A login is stored but does not read as one, so the tools stay off until an edit replaces it.
+    private(set) var storedLoginUnreadable = false
+    private(set) var identity: IdentityState = .unchecked
     private(set) var tokenHint = "not set"
     private var storedTokenPresent = false
 
-    init(config: ConfigManager, keychain: KeychainManager = .shared, toolsOfferedAtLaunch: Bool) {
+    init(config: ConfigManager, keychain: KeychainManager = .shared, toolsOfferedAtLaunch: Bool,
+         transport: GitHubTransport = URLSessionGitHubTransport()) {
         self.config = config
         self.keychain = keychain
+        self.transport = transport
         self.toolsOfferedAtLaunch = toolsOfferedAtLaunch
         refresh()
     }
@@ -61,6 +82,8 @@ final class GitHubSettingsModel {
         repos = config.allowedGitHubRepos()
         let blob = config.guardedBlob(.githubAllowedRepos).trimmingCharacters(in: .whitespacesAndNewlines)
         storedListUnreadable = repos.isEmpty && !blob.isEmpty && blob != "[]"
+        login = config.githubLogin()
+        storedLoginUnreadable = login == nil && !config.guardedBlob(.githubLogin).isEmpty
         let token = GitHubProxyClient.token(keychain: keychain)
         storedTokenPresent = token != nil
         tokenHint = KeyHint.text(token)
@@ -79,9 +102,49 @@ final class GitHubSettingsModel {
         return .editable
     }
 
-    /// The stored token and list would offer the tools, and what this launch offered differs.
+    /// The stored token, list and login would offer the tools, and what this launch offered differs.
     var needsRestart: Bool {
-        (storedTokenPresent && !repos.isEmpty) != toolsOfferedAtLaunch
+        (storedTokenPresent && !repos.isEmpty && login != nil) != toolsOfferedAtLaunch
+    }
+
+    // MARK: Login
+
+    /// Saves the account login (checked by `GitHubProxyClient.checkLogin`) as the guarded blob and
+    /// reads it back. Clearing is its own action, so an empty field is a prompt, not a clear.
+    @discardableResult
+    func saveLogin(_ raw: String) -> Failure? {
+        if case .disabled(let reason) = editState { return .disabled(reason) }
+        switch GitHubProxyClient.checkLogin(raw) {
+        case .empty: return .emptyLogin
+        case .invalid: return .invalidLogin
+        case .ok(let checked):
+            config.setGuardedBlob(.githubLogin, GitHubProxyClient.loginBlob(checked))
+            refresh()
+            identity = .unchecked
+            return login == checked ? nil : .notSaved
+        }
+    }
+
+    @discardableResult
+    func clearLogin() -> Failure? {
+        if case .disabled(let reason) = editState { return .disabled(reason) }
+        config.setGuardedBlob(.githubLogin, "")
+        refresh()
+        identity = .unchecked
+        return login == nil && !storedLoginUnreadable ? nil : .notSaved
+    }
+
+    /// Asks GitHub whose token this is and compares it with the configured login. Does nothing
+    /// without both. Never throws: a failure to ask is `.unverified`, not a match.
+    func verifyIdentity() async {
+        guard let login, storedTokenPresent else { identity = .unchecked; return }
+        identity = .checking
+        let client = GitHubProxyClient(keychain: keychain, isRepoAllowed: { _ in false }, transport: transport)
+        switch await client.verifyIdentity(expectedLogin: login) {
+        case .match: identity = .match
+        case .mismatch(let actual): identity = .mismatch(actual: actual)
+        case .unverified(let why): identity = .unverified(why)
+        }
     }
 
     // MARK: Repos

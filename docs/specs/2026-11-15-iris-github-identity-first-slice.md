@@ -1,5 +1,13 @@
 # First slice: Iris reviews routine PRs as herself (`iris-main`) — consumer-spec under #974
 
+> **Update (#1184): the account is a setting, not a constant.** This spec was written around one account,
+> `iris-main`, the account this repository uses. The account's username is now a guarded setting
+> (`GuardedKey.githubLogin`, stored as `{"login":"<name>"}` beside the allowed-repos list, unset by default);
+> read `iris-main` below as "the configured account". Unset means the feature is off: the tools are not
+> declared and git is untouched. The commit name and email derive from it
+> (`<login>@users.noreply.github.com`), and the pane checks the token against it with `GET /user`,
+> reporting a mismatch. `docs/github-identity.md` is the current description.
+
 > **Status:** spec by iris-planner, 2026-11-15; Iris-reviewed (+4 amendments folded), then **REVISED to
 > the contributor model** (Brian, 2026-11-15): `iris-main` is a full git contributor (push/commit/PR as
 > herself), the lockdown is on *approval authority* only (routine `/docs`+`/assets`, minus the `plans`/`specs` instruction folders; `CODEOWNERS`-enforced),
@@ -113,9 +121,9 @@ control.
 ### 3.1 Harness integration — specify it or it collides (Iris finding 1)
 Adding these tools to `ToolExecutor`/`IrisEngine` must be specified against three existing mechanisms:
 
-- **Declare only when configured (Invariant 6).** Omit the three declarations unless an `iris-main` token
-  is present in the Keychain **and** the user has allowed at least one repo (§3.2): with either missing
-  the tools can only refuse, so declaring them is dead prompt weight. Both are read once at launch
+- **Declare only when configured (Invariant 6).** Omit the three declarations unless a token
+  is present in the Keychain, the user has set the account's login (#1184) **and** allowed at least one repo (§3.2): with any missing
+  the tools can only refuse, so declaring them is dead prompt weight. All three are read once at launch
   (`ConfigManager.githubToolsConfigured`), behind an injectable `githubToolsEnabled` seam on
   `ToolExecutor.getTools` (like `workspaceToolsEnabled`); a token or list set later takes effect on the
   next launch. Otherwise an unconfigured install pays prompt tokens every turn and
@@ -176,7 +184,7 @@ controls are `CODEOWNERS` (structural) + the §3.3 gate + the ruleset settings.
 single account, not the registry.
 
 - **Git identity.** `iris-main` has a verified email on its GitHub account; Iris commits with
-  `user.name`/`user.email` set to `iris-main` so GitHub attributes her commits to `iris-main`, not
+  `user.name`/`user.email` set from the configured login (`<login>` and its noreply address, #1184) so GitHub attributes her commits to that account, not
   `@bnaylor`. This is the identity-separation goal.
 - **One credential, full contributor scope.** A single fine-grained PAT (or key) on `iris-main`:
   **`Contents: read and write`** (push branches + read PR diffs for the §3.3 `/compare` check),

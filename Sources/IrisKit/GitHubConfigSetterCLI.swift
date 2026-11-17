@@ -1,7 +1,7 @@
 import Foundation
 
-/// `iris --set-github-token` / `iris --set-github-repos` (#966 Task 6): a headless entry path for
-/// the GitHub identity's config, for a headless machine or a script. The Settings pane's model (`GitHubSettingsModel`) shares its token and repo-list checks, so the two cannot disagree about what is storable.
+/// `iris --set-github-token` / `--set-github-repos` / `--set-github-login` (#966 Task 6, #1184): a headless entry path for
+/// the GitHub identity's config, for a headless machine or a script. The Settings pane's model (`GitHubSettingsModel`) shares its token, repo-list and login checks, so the two cannot disagree about what is storable.
 /// Each reads its value from **stdin**, never argv — argv leaks into process listings (`ps`), so
 /// a token passed as an argument would be visible to every other process on the machine. Pipe it
 /// in rather than typing it at a prompt: `pbpaste | iris --set-github-token`. Each prints a
@@ -23,6 +23,7 @@ enum GitHubConfigSetterCLI {
         case emptyToken
         case malformedToken
         case malformedRepo(String)
+        case malformedLogin
         case tooManyRepos
         case notYetConfigured
         case settingsUnreadable
@@ -33,6 +34,7 @@ enum GitHubConfigSetterCLI {
             case .emptyToken: "no token read from stdin"
             case .malformedToken: "a token may not contain interior whitespace or control characters"
             case .malformedRepo(let name): "not a valid owner/name: \(name.debugDescription)"
+            case .malformedLogin: "not a GitHub username (1 to 39 letters, digits and single hyphens, not starting or ending with one)"
             case .tooManyRepos: "more than \(GitHubProxyClient.maxAllowedRepos) repositories"
             case .notYetConfigured: "launch Iris once first, then re-run this command (its settings have never been read)"
             case .settingsUnreadable: "Iris's protected settings couldn't be read from the Keychain; this command can't change them until it can -- check for a denied Keychain prompt"
@@ -113,6 +115,25 @@ enum GitHubConfigSetterCLI {
             : "GitHub allowed repos saved: \(names.joined(separator: ", ")). Quit Iris before running this, and relaunch it after, or a running app can overwrite this change (#1167).")
     }
 
+    /// Writes the account login read from `stdin` to the guarded `githubLogin` blob. Empty `stdin`
+    /// clears it (the tools are then not offered at the next launch). Refused unless the guarded item
+    /// is at `.normal`, for the same reasons as `setRepos`. Quit Iris first: same cached-snapshot hazard.
+    static func setLogin(stdin: Data, config: ConfigManager) -> Result<String, Failure> {
+        if case .unreadable = config.guardedState { return .failure(.settingsUnreadable) }
+        guard config.guardedState == .normal else { return .failure(.notYetConfigured) }
+        let blob: String
+        let shown: String?
+        switch GitHubProxyClient.checkLogin(String(decoding: stdin, as: UTF8.self)) {
+        case .invalid: return .failure(.malformedLogin)
+        case .empty: blob = ""; shown = nil
+        case .ok(let login): blob = GitHubProxyClient.loginBlob(login); shown = login
+        }
+        config.setGuardedBlob(.githubLogin, blob)
+        if config.guardedKeychain?.areWritesBlocked == true { return .failure(.writesBlocked) }
+        let tail = "Quit Iris before running this, and relaunch it after, or a running app can overwrite this change (#1167)."
+        return .success(shown.map { "GitHub account login saved: \($0). \(tail)" } ?? "GitHub account login cleared (the GitHub tools are not offered). \(tail)")
+    }
+
     // MARK: - Real CLI entry points (IrisMain.swift)
 
     static func runSetToken() -> Int32 {
@@ -146,6 +167,18 @@ enum GitHubConfigSetterCLI {
             return 0
         case .failure(let error):
             FileHandle.standardError.write(Data("iris --set-github-repos: \(error)\n".utf8))
+            return 64
+        }
+    }
+
+    static func runSetLogin() -> Int32 {
+        let stdin = FileHandle.standardInput.readDataToEndOfFile()
+        switch setLogin(stdin: stdin, config: .shared) {
+        case .success(let message):
+            print(message)
+            return 0
+        case .failure(let error):
+            FileHandle.standardError.write(Data("iris --set-github-login: \(error)\n".utf8))
             return 64
         }
     }

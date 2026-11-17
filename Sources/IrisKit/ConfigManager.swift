@@ -66,7 +66,7 @@ class ConfigManager: @unchecked Sendable {
     /// Where the guarded settings (#678) live: the secrets item. Nil only for a test's manager
     /// over its own suite that passes no keychain, which keeps them in that suite as before.
     @ObservationIgnored let guardedKeychain: KeychainManager?
-    /// Whether the `iris-main` GitHub PAT is present (#966), read once here rather than on every
+    /// Whether the GitHub account's PAT is present (#966), read once here rather than on every
     /// `ToolExecutor.getTools` call: a per-turn Keychain read risked re-triggering the `.dev`
     /// SecurityAgent prompt every turn (#578), the same reasoning `googleRefreshToken`'s one-shot
     /// read already follows. Fixed for this launch: a token saved in Settings or by the headless CLI
@@ -77,9 +77,12 @@ class ConfigManager: @unchecked Sendable {
     /// from the same guarded load as everything else and fixed for this run, like `hasGitHubToken`:
     /// a list saved in Settings or by `iris --set-github-repos` takes effect on the next launch.
     @ObservationIgnored let hasGitHubAllowedRepos: Bool
-    /// What declares the `github_*` tools (Invariant 6): a token to act with and a repo to act on.
-    /// With either missing the tools can only refuse, so they are not offered.
-    var githubToolsConfigured: Bool { hasGitHubToken && hasGitHubAllowedRepos }
+    /// Whether a valid GitHub account login is set (#1184), read once from the same guarded load and
+    /// fixed for this run, like the two above: it names who the tools act as and sign commits as.
+    @ObservationIgnored let hasGitHubLogin: Bool
+    /// What declares the `github_*` tools (Invariant 6): a token to act with, a repo to act on and
+    /// the account's login. With any missing the tools can only refuse, so they are not offered.
+    var githubToolsConfigured: Bool { hasGitHubToken && hasGitHubAllowedRepos && hasGitHubLogin }
     /// What this launch found in the secrets item for the guarded settings.
     @ObservationIgnored var guardedState: GuardedSettings.State = .normal
     /// Launch notices about the guarded settings, taken once by `AppState`.
@@ -676,6 +679,8 @@ class ConfigManager: @unchecked Sendable {
 
         self.hasGitHubAllowedRepos = !Self.parseGitHubAllowlist(
             guardedString(.githubAllowedRepos, GuardedKey.githubAllowedRepos.rawValue) ?? "").isEmpty
+        self.hasGitHubLogin = GitHubProxyClient.parseLogin(
+            guardedString(.githubLogin, GuardedKey.githubLogin.rawValue) ?? "") != nil
 
         let savedProvider = saved.string(forKey: "PRIMARY_PROVIDER") ?? "Gemini"
         self.primaryProvider = savedProvider

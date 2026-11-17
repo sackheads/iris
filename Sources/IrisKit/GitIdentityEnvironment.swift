@@ -1,13 +1,13 @@
 import Foundation
 
-/// The environment additions that let `run_command`'s host git act as `iris-main` for a
+/// The environment additions that let `run_command`'s host git act as the user's configured GitHub account (#1184) for a
 /// user-configured allowed repo, without touching `~/.gitconfig` or any process-global state
 /// (#966 spec §4, design confirmed with the planner 2026-11-15; round 2 after dev-2's and dev-3's
 /// real-git reviews surfaced that the string-level design didn't actually work).
 ///
 /// Three pieces:
 /// - **A static, non-secret identity fragment** (`identityFragmentPath`): `user.name`/
-///   `user.email` for `iris-main`, `credential.helper` pointing at `iris
+///   `user.email` for the configured login, `credential.helper` pointing at `iris
 ///   --git-credential-helper`, and `credential.useHttpPath = true` — without it git sends the
 ///   helper only `protocol`/`host`, never `path`, so the helper (which needs the repo path to
 ///   check the allowlist) could never answer a real request (dev-3's review, verified against a
@@ -61,35 +61,33 @@ import Foundation
 /// A remote for a repo **not** on the list gets neither identity nor a rewrite — no
 /// `includeIf` condition names it, so its config resolution never even reaches the routing file.
 enum GitIdentityEnvironment {
-    /// Whether `run_command`'s host path should carry the iris-main git identity at all: a
-    /// configured token, a non-empty allowlist, and -- planner's ruling, 2026-11-15 -- the turn
-    /// not being guest-origin. Pulled out as its own pure function so the decision is directly
-    /// unit-testable without touching `ConfigManager.shared` or a real conversation.
-    static func shouldApply(hasToken: Bool, repos: [String], guestOrigin: Bool) -> Bool {
-        hasToken && !repos.isEmpty && !guestOrigin
+    /// Whether `run_command`'s host path should carry the GitHub git identity at all: a
+    /// configured token, a configured account login (#1184), a non-empty allowlist, and -- planner's
+    /// ruling, 2026-11-15 -- the turn not being guest-origin. Pulled out as its own pure function so
+    /// the decision is directly unit-testable without touching `ConfigManager.shared` or a real
+    /// conversation. An unset login is the same as no token: no behaviour change at all.
+    static func shouldApply(hasToken: Bool, login: String?, repos: [String], guestOrigin: Bool) -> Bool {
+        hasToken && login != nil && !repos.isEmpty && !guestOrigin
     }
 
-    static let identityName = "iris-main"
-    /// GitHub's noreply convention: no separate "iris-main's email" setting to configure or
-    /// leak. Any GitHub account gets this for free; it attributes commits to the account without
-    /// exposing a real address.
-    static let identityEmail = "iris-main@users.noreply.github.com"
-
-    static let fragmentFileName = "git-identity-iris-main"
-    static let routingFileName = "git-identity-iris-main-routing"
+    /// The identity's name and email come from the login (`GitHubProxyClient.commitIdentity`): GitHub's
+    /// noreply convention, so no separate email setting exists to configure or leak.
+    static let fragmentFileName = "git-identity"
+    static let routingFileName = "git-identity-routing"
 
     /// The static fragment's contents: identity plus the credential helper, no secret. The
     /// leading empty `helper =` clears any `credential.helper` inherited from `~/.gitconfig` or
     /// system config before this point in the read order (it's a multi-valued key; an ambient
     /// helper already holding the user's own cached GitHub credential must never be consulted for
-    /// an `iris-main`-identity remote) — the same empty-then-set pattern `WorkspaceGit.overrides`
+    /// a configured-account remote) — the same empty-then-set pattern `WorkspaceGit.overrides`
     /// already uses for the same reason. `useHttpPath` is required or the helper never receives a
     /// `path` to check the allowlist against (dev-3's review).
-    static func fragmentContents(helperExecutable: String) -> String {
-        """
+    static func fragmentContents(login: String, helperExecutable: String) -> String {
+        let identity = GitHubProxyClient.commitIdentity(login: login)
+        return """
         [user]
-        \tname = \(identityName)
-        \temail = \(identityEmail)
+        \tname = \(identity.name)
+        \temail = \(identity.email)
         [credential]
         \thelper =
         \thelper = !\(PluginAuthRunner.shellQuoted(helperExecutable)) --git-credential-helper
@@ -101,8 +99,8 @@ enum GitIdentityEnvironment {
     /// computed now (dev-2's and dev-3's review: the helper's executable path can change across a
     /// rebuild, a reinstall, or a dev home shared between worktrees, and the fragment must not
     /// keep pointing at a now-stale one). No secret in it, safe to call on every launch.
-    static func ensureFragment(at path: String, helperExecutable: String) {
-        let contents = fragmentContents(helperExecutable: helperExecutable)
+    static func ensureFragment(at path: String, login: String, helperExecutable: String) {
+        let contents = fragmentContents(login: login, helperExecutable: helperExecutable)
         if let existing = try? String(contentsOfFile: path, encoding: .utf8), existing == contents { return }
         try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent,
                                                   withIntermediateDirectories: true)

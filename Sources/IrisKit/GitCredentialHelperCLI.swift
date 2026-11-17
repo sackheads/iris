@@ -1,11 +1,11 @@
 import Foundation
 
-/// `iris --git-credential-helper` (iris-main git identity, #966 spec §4): a git credential
+/// `iris --git-credential-helper` (the GitHub account's git identity, #966 spec §4): a git credential
 /// helper, invoked by git itself per its credential protocol
 /// (https://git-scm.com/docs/gitcredentials#_custom_helpers) -- never by the model, never with
 /// argv secrets. git writes a `get`/`store`/`erase` operation as the first argument and a
 /// `key=value\n`-per-line request on stdin; only `get` is answered, with
-/// `username=iris-main\npassword=<token>\n` on stdout, or nothing at all.
+/// `username=<login>\npassword=<token>\n` on stdout, or nothing at all.
 ///
 /// **Exactness is the whole control.** `repoFromFields` only ever returns an `owner/name` it
 /// derived from git's own already-split `protocol`/`host`/`path` fields -- never by regexing a
@@ -50,16 +50,18 @@ enum GitCredentialHelperCLI {
 
     /// The full decision for one `get` request: the credential string for stdout, or empty if
     /// anything refuses -- a malformed/lookalike request, a repo not on the allowlist, or no
-    /// `iris-main` token configured. Empty means git gets nothing from this helper and falls
+    /// token or no account login configured. Empty means git gets nothing from this helper and falls
     /// through (to another configured helper, or fails outright with `GIT_TERMINAL_PROMPT=0`).
     /// This refusal path is silent on purpose: it never builds a message naming the repo, the
     /// request, or anything else, so there is no string a refusal could leak the token into. The
     /// token appears in exactly one place in this whole type -- `run`'s single `print` of this
     /// return value on a `get` -- never stderr, never a log, never an error description.
-    static func respond(fields: [String: String], keychain: KeychainManager, isRepoAllowed: (String) -> Bool) -> String {
+    static func respond(fields: [String: String], keychain: KeychainManager, login: String?,
+                        isRepoAllowed: (String) -> Bool) -> String {
         guard let repo = repoFromFields(fields), isRepoAllowed(repo),
+              let login, case .ok = GitHubProxyClient.checkLogin(login),
               let token = GitHubProxyClient.token(keychain: keychain) else { return "" }
-        return "username=iris-main\npassword=\(token)\n"
+        return "username=\(login)\npassword=\(token)\n"
     }
 
     // MARK: - Real CLI entry point (IrisMain.swift)
@@ -72,7 +74,7 @@ enum GitCredentialHelperCLI {
         guard let operation, isGetOperation(operation) else { return 0 }
         let input = String(decoding: FileHandle.standardInput.readDataToEndOfFile(), as: UTF8.self)
         let fields = parseFields(input)
-        let output = respond(fields: fields, keychain: .shared,
+        let output = respond(fields: fields, keychain: .shared, login: ConfigManager.shared.githubLogin(),
                              isRepoAllowed: { ConfigManager.shared.isGitHubRepoAllowed($0) })
         if !output.isEmpty { print(output, terminator: "") }
         return 0

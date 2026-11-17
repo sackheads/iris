@@ -1,8 +1,8 @@
 import Foundation
 
-/// Talks to GitHub as Iris's own `iris-main` identity (#966): opens PRs, comments, and approves
-/// *routine* (docs/assets) PRs, through three host-side tools. `iris-main` is Iris's own
-/// contributor credential (spec §3-§4): the goal is identity separation from `@bnaylor`, not
+/// Talks to GitHub as Iris's own account (#966; the login is the user's setting, #1184): opens PRs,
+/// comments, and approves *routine* (docs/assets) PRs, through three host-side tools. The account is
+/// Iris's own contributor credential (spec §3-§4): the goal is identity separation from `@bnaylor`, not
 /// hiding the credential. The token is stored under its own Keychain service and this client
 /// still keeps it out of every tool result and error string, as defence in depth. Approval is
 /// the one locked-down axis: `CODEOWNERS` makes her approval count only for docs and assets, and
@@ -24,7 +24,7 @@ struct GitHubProxyClient {
         self.transport = transport
     }
 
-    /// Whether the `iris-main` PAT is present. The credential gate for the three `github_*` tool
+    /// Whether the account's PAT is present. The credential gate for the three `github_*` tool
     /// declarations (Invariant 6): absent, the tools are not offered at all.
     static func hasToken(keychain: KeychainManager) -> Bool {
         token(keychain: keychain) != nil
@@ -53,6 +53,45 @@ struct GitHubProxyClient {
         return list.count > maxAllowedRepos ? .tooMany : .ok(list)
     }
 
+    enum LoginCheck: Equatable {
+        case ok(String)
+        case empty
+        case invalid
+    }
+
+    /// GitHub's rule for a username: 1 to 39 letters, digits and single hyphens, not starting or
+    /// ending with one. The login goes into `git config`, a credential line and a file's contents, so
+    /// the set is held strictly: nothing else can reach any of them. The one definition the pane,
+    /// the headless setter and the stored value's reader share.
+    static func checkLogin(_ raw: String) -> LoginCheck {
+        let login = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !login.isEmpty else { return .empty }
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-")
+        guard login.count <= 39, !login.hasPrefix("-"), !login.hasSuffix("-"), !login.contains("--"),
+              login.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return .invalid }
+        return .ok(login)
+    }
+
+    /// The stored form of a login: a one-key JSON object, so the guarded item's blob rules apply.
+    static func loginBlob(_ login: String) -> String {
+        (try? JSONSerialization.data(withJSONObject: ["login": login], options: [.sortedKeys]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+    }
+
+    /// The login in a stored blob, or nil when it is empty, not that object, or not a valid login.
+    static func parseLogin(_ blob: String) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: Data(blob.utf8)) as? [String: Any],
+              object.count == 1, let raw = object["login"] as? String,
+              case .ok(let login) = checkLogin(raw), login == raw else { return nil }
+        return login
+    }
+
+    /// The commit author name and email for a login: GitHub's noreply address, which attributes a
+    /// commit to the account without exposing a real address.
+    static func commitIdentity(login: String) -> (name: String, email: String) {
+        (login, "\(login)@users.noreply.github.com")
+    }
+
     /// What a typed or piped token is worth saving as. The one definition the headless setter and the
     /// Settings pane share, so they cannot disagree about what a token may hold.
     enum TokenCheck: Equatable {
@@ -72,7 +111,7 @@ struct GitHubProxyClient {
         return bad ? .malformed : .ok(token)
     }
 
-    /// The `iris-main` PAT, or nil if none is stored.
+    /// The account's PAT, or nil if none is stored.
     static func token(keychain: KeychainManager) -> String? {
         let trimmed = keychain.secrets(service: KeychainManager.githubService)["token"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -87,7 +126,7 @@ extension GitHubProxyClient {
     /// Most of what GitHub says back that the model is shown, after cleaning.
     private static let maxShown = 300
 
-    /// `POST /repos/{repo}/pulls`: opens a PR authored by the token's identity (`iris-main`).
+    /// `POST /repos/{repo}/pulls`: opens a PR authored by the token's identity.
     func createPR(repo: String, head: String, base: String, title: String, body: String, draft: Bool) async -> String {
         let payload: [String: Any] = ["title": title, "body": body, "head": head, "base": base, "draft": draft]
         switch await post(repo: repo, path: "pulls", payload: payload) {
@@ -114,6 +153,44 @@ extension GitHubProxyClient {
         }
     }
 
+    enum IdentityCheck: Equatable {
+        /// The token belongs to the configured login.
+        case match
+        /// The token belongs to another account, named here (a login is public, not a secret).
+        case mismatch(actual: String)
+        /// GitHub could not say: no token, a refusal, or the network. Not a match, not a mismatch.
+        case unverified(String)
+    }
+
+    /// `GET /user`: whose token this is, compared with the login the user configured (case-blind, as
+    /// GitHub is). A mismatch is reported rather than trusted: commits would be signed as one account
+    /// while the token acts as another. Sends nothing without a token and reads nothing else.
+    func verifyIdentity(expectedLogin: String) async -> IdentityCheck {
+        guard let token = Self.token(keychain: keychain) else { return .unverified("no token is set") }
+        guard let url = URL(string: "\(Self.apiBase)/user") else { return .unverified("the request could not be built") }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        request.setValue("iris", forHTTPHeaderField: "User-Agent")
+        do {
+            let (data, response) = try await transport.send(request, bearer: token)
+            guard (200..<300).contains(response.statusCode) else {
+                return .unverified("GitHub returned HTTP \(response.statusCode)")
+            }
+            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            guard let actual = json?["login"] as? String, case .ok = Self.checkLogin(actual) else {
+                return .unverified("GitHub did not name the account")
+            }
+            return actual.lowercased() == expectedLogin.lowercased() ? .match : .mismatch(actual: actual)
+        } catch is CancellationError {
+            return .unverified("the check was cancelled")
+        } catch {
+            return .unverified(sanitize("the request failed: \(error.localizedDescription)", token: token))
+        }
+    }
+
     private enum Outcome {
         case refused(String)
         /// The decoded JSON object, and the response's `Link` header (pagination).
@@ -136,7 +213,7 @@ extension GitHubProxyClient {
             return .refused("Refused: \"\(Self.shown(repo))\" is not an owner/name repository.")
         }
         guard let token = Self.token(keychain: keychain) else {
-            return .refused("GitHub is not configured: no iris-main token is set.")
+            return .refused("GitHub is not configured: no token is set.")
         }
         let suffix = query.map { "?\($0)" } ?? ""
         let data = payload.flatMap { try? JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys]) }

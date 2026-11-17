@@ -522,3 +522,95 @@ struct GitHubProxyClientApproveTests {
         }
     }
 }
+
+@Suite("GitHub account login and identity check (#1184)")
+struct GitHubLoginTests {
+    static let token = "ghp_SuperSecretToken1234567890"
+
+    @Test("a valid username is accepted, trimmed", arguments: ["a", "acme-bot", "Iris-Main", "a1-b2", String(repeating: "a", count: 39)])
+    func acceptsValid(_ raw: String) {
+        #expect(GitHubProxyClient.checkLogin("  \(raw)\n") == .ok(raw))
+    }
+
+    @Test("anything that is not a GitHub username is refused, so nothing odd reaches git config or a credential line", arguments: [
+        "bad name", "-lead", "trail-", "dou--ble", "under_score", "dot.name", "a/b", "x\npassword=evil", "x\u{0}y",
+        "émile", "name@host", String(repeating: "a", count: 40), "a b",
+    ])
+    func refusesInvalid(_ raw: String) {
+        #expect(GitHubProxyClient.checkLogin(raw) == .invalid)
+    }
+
+    @Test("empty and blank are their own case")
+    func emptyIsEmpty() {
+        #expect(GitHubProxyClient.checkLogin("") == .empty)
+        #expect(GitHubProxyClient.checkLogin(" \n") == .empty)
+    }
+
+    @Test("the stored form round-trips, and anything but exactly {\"login\": <valid>} reads as unset", arguments: [
+        "", "not json", "{}", "[]", "\"acme-bot\"", "{\"login\":3}", "{\"login\":\"bad name\"}", "{\"login\":\" acme-bot\"}",
+        "{\"login\":\"acme-bot\",\"extra\":1}", "[\"acme-bot\"]", "null",
+    ])
+    func parseIsStrict(_ blob: String) {
+        #expect(GitHubProxyClient.parseLogin(blob) == nil)
+    }
+
+    @Test("loginBlob and parseLogin agree")
+    func roundTrip() {
+        #expect(GitHubProxyClient.parseLogin(GitHubProxyClient.loginBlob("acme-bot")) == "acme-bot")
+    }
+
+    @Test("the commit identity comes from the login, with GitHub's noreply address")
+    func identity() {
+        let id = GitHubProxyClient.commitIdentity(login: "acme-bot")
+        #expect(id.name == "acme-bot" && id.email == "acme-bot@users.noreply.github.com")
+    }
+
+    private func client(_ responses: [Result<(Data, Int), Error>], token: String? = GitHubLoginTests.token) -> (GitHubProxyClient, StubTransport) {
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)")
+        if let token { keychain.replaceSecrets(["token": token], service: KeychainManager.githubService) }
+        let stub = StubTransport(responses)
+        return (GitHubProxyClient(keychain: keychain, isRepoAllowed: { _ in false }, transport: stub), stub)
+    }
+
+    private func user(_ login: String, _ status: Int = 200) -> Result<(Data, Int), Error> {
+        .success((try! JSONSerialization.data(withJSONObject: ["login": login]), status))
+    }
+
+    @Test("GET /user: a token for the configured login matches, case-blind, and nothing else is sent")
+    func matches() async {
+        let (client, stub) = client([user("Acme-Bot")])
+        #expect(await client.verifyIdentity(expectedLogin: "acme-bot") == .match)
+        let sent = try? #require(stub.sent.first)
+        #expect(sent?.request.httpMethod == "GET" && sent?.request.url?.absoluteString == "https://api.github.com/user")
+        #expect(sent?.request.httpBody == nil && sent?.bearer == Self.token)
+    }
+
+    @Test("GET /user: a token for another account is a mismatch that names the real one")
+    func mismatch() async {
+        let (client, _) = client([user("someone-else")])
+        #expect(await client.verifyIdentity(expectedLogin: "acme-bot") == .mismatch(actual: "someone-else"))
+    }
+
+    @Test("GET /user: no token sends nothing; a refusal, a bad body and a network error are unverified, never a match")
+    func unverified() async {
+        let (none, noneStub) = client([user("acme-bot")], token: nil)
+        #expect(await none.verifyIdentity(expectedLogin: "acme-bot") == .unverified("no token is set"))
+        #expect(noneStub.sent.isEmpty)
+
+        let (denied, _) = client([user("acme-bot", 401)])
+        #expect(await denied.verifyIdentity(expectedLogin: "acme-bot") == .unverified("GitHub returned HTTP 401"))
+        let (junk, _) = client([.success((Data("<html>".utf8), 200))])
+        #expect(await junk.verifyIdentity(expectedLogin: "acme-bot") == .unverified("GitHub did not name the account"))
+        let (badLogin, _) = client([user("not a login")])
+        #expect(await badLogin.verifyIdentity(expectedLogin: "acme-bot") == .unverified("GitHub did not name the account"))
+        let (down, _) = client([.failure(URLError(.notConnectedToInternet))])
+        if case .unverified(let why) = await down.verifyIdentity(expectedLogin: "acme-bot") { #expect(!why.contains(Self.token)) } else { Issue.record("expected unverified") }
+    }
+
+    @Test("a transport error that echoes the token does not carry it into the result")
+    func noLeak() async {
+        struct Echo: Error, LocalizedError { var errorDescription: String? { "boom \(GitHubLoginTests.token)" } }
+        let (client, _) = client([.failure(Echo())])
+        if case .unverified(let why) = await client.verifyIdentity(expectedLogin: "acme-bot") { #expect(!why.contains(Self.token)) } else { Issue.record("expected unverified") }
+    }
+}

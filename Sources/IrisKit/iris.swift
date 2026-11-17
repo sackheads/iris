@@ -214,7 +214,7 @@ actor IrisEngine {
             await self?.pushToUI(role: .system, text: text, conversationId: conversationId)
         }
         // #966 Task 8: the same guest-origin signal `githubDispatchRefusal` is built from, so
-        // run_command's iris-main git-identity environment is suppressed on a guest-steered
+        // run_command's GitHub git-identity environment is suppressed on a guest-steered
         // attended turn too, not only on the github_* tools' own principal-based refusal.
         executor.isGuestOriginTurn = { [weak state] id in
             guard let state else { return true }
@@ -3784,7 +3784,7 @@ actor IrisEngine {
         // unattended turn or a non-main principal; this pass is what holds when a sticky set says
         // otherwise.
         // #966: a turn a guest's message started is attended and `.main`, but it acts for a guest;
-        // the `github_*` tools act as `iris-main` with no approval step, so it is not offered them.
+        // the `github_*` tools act as Iris's own account with no approval step, so it is not offered them.
         let githubOffered = toolsList.contains { ToolExecutor.githubProxyTools.contains($0.name) }
         let guestOrigin = githubOffered ? await isGuestOriginConversation(conversationId) : false
         toolsList = Self.hardStrip(toolsList, isUnattended: isUnattended, principal: principal, guestOrigin: guestOrigin)
@@ -5434,7 +5434,7 @@ actor IrisEngine {
     static let unattendedSessionMessageRefusal =
         "A background run cannot message sessions; its result is delivered as a card."
 
-    /// #966: the `github_*` tools act as `iris-main` on GitHub, so only an attended main turn may
+    /// #966: the `github_*` tools act as Iris's own account on GitHub, so only an attended main turn may
     /// call them. Declaration gating (`hardStrip`) only stops a well-behaved model; this is the
     /// refusal for a call that arrives anyway, and it comes before everything that could act on it.
     static let githubOffPrincipalRefusal =
@@ -5448,7 +5448,7 @@ actor IrisEngine {
 
     /// Whether a guest's message started this conversation's turn, or its delegation root's (#1119,
     /// the same test the approval ladder uses): that turn is attended and `.main` but its words are a
-    /// guest's, so it must not act as `iris-main`.
+    /// guest's, so it must not act as Iris's GitHub account.
     func isGuestOriginConversation(_ conversationId: UUID) async -> Bool {
         let localState = state
         return await MainActor.run {

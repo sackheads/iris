@@ -50,9 +50,9 @@ Settings → Models → **Subagent providers** lists providers a subagent could 
 
 Scheduled and folder-watching jobs, their profiles, grants, gates, limits and cards: see [docs/jobs.md](jobs.md).
 
-### GitHub Identity (`iris-main`)
+### GitHub Identity
 
-Iris can act as her own GitHub contributor identity, `iris-main` — committing, pushing and opening
+Iris can act as her own GitHub contributor account, whose username you set in Settings — committing, pushing and opening
 pull requests independent of your own account, and approving routine `/docs`/`/assets` PRs under
 a CODEOWNERS-enforced bound: see [docs/github-identity.md](github-identity.md).
 

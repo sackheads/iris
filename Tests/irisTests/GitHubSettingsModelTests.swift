@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import IrisKit
 
-/// #966: the logic behind Settings → Integrations → GitHub (iris-main). The view is not under test
+/// #966: the logic behind Settings → Integrations → GitHub. The view is not under test
 /// here (it needs a lease); everything it decides is.
 @MainActor
 @Suite("GitHub settings model (#966)", .timeLimit(.minutes(1)))
@@ -12,8 +12,8 @@ struct GitHubSettingsModelTests {
         let keychain: KeychainManager
         let store: UserDefaults
         let name: String
-        @MainActor func model(offered: Bool = false) -> GitHubSettingsModel {
-            GitHubSettingsModel(config: config, keychain: keychain, toolsOfferedAtLaunch: offered)
+        @MainActor func model(offered: Bool = false, transport: GitHubTransport = URLSessionGitHubTransport()) -> GitHubSettingsModel {
+            GitHubSettingsModel(config: config, keychain: keychain, toolsOfferedAtLaunch: offered, transport: transport)
         }
         func teardown() {
             store.removePersistentDomain(forName: name)
@@ -214,11 +214,16 @@ struct GitHubSettingsModelTests {
         _ = m.saveToken("ghp_x")
         #expect(!m.needsRestart, "a token alone offers nothing")
         _ = m.addRepo("a/b")
-        #expect(m.needsRestart, "token and a repo: the tools appear after a relaunch")
+        #expect(!m.needsRestart, "a token and a repo but no account: nothing would be offered")
+        _ = m.saveLogin("acme-bot")
+        #expect(m.needsRestart, "token, a repo and an account: the tools appear after a relaunch")
         let up = r.model(offered: true)
         #expect(!up.needsRestart)
         _ = up.removeRepo("a/b")
         #expect(up.needsRestart, "offered at launch, no longer configured: they go away after a relaunch")
+        _ = up.addRepo("a/b")
+        _ = up.clearLogin()
+        #expect(up.needsRestart, "an account removed: they go away after a relaunch")
     }
 
     // MARK: who writes
@@ -243,5 +248,93 @@ struct GitHubSettingsModelTests {
         for forbidden in ["KeychainManager", "setGuardedBlob", "updateSecrets", "checkToken", "checkRepoList"] {
             #expect(!view.contains(forbidden), "the view must not touch \(forbidden) itself")
         }
+    }
+
+    // MARK: account login (#1184)
+
+    private struct UserTransport: GitHubTransport {
+        let login: String?
+        let status: Int
+        func send(_ request: URLRequest, bearer: String) async throws -> (Data, HTTPURLResponse) {
+            let body = try JSONSerialization.data(withJSONObject: login.map { ["login": $0] } ?? [:])
+            return (body, HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
+        }
+    }
+
+    @Test("saving a login writes the guarded blob the tools' gate reads; removing it unsets it; the pane shows it")
+    func loginLifecycle() {
+        let r = rig(); defer { r.teardown() }
+        let m = r.model()
+        #expect(m.login == nil && !m.storedLoginUnreadable)
+        #expect(m.saveLogin(" acme-bot \n") == nil)
+        #expect(m.login == "acme-bot" && r.config.githubLogin() == "acme-bot")
+        #expect(m.clearLogin() == nil)
+        #expect(m.login == nil && r.config.guardedBlob(.githubLogin).isEmpty)
+    }
+
+    @Test("a bad or empty login is refused and writes nothing")
+    func loginValidation() {
+        let r = rig(); defer { r.teardown() }
+        let m = r.model()
+        #expect(m.saveLogin("") == .emptyLogin)
+        for bad in ["bad name", "-x", "x-", "a--b", "a/b", "x\npassword=1"] { #expect(m.saveLogin(bad) == .invalidLogin, "\(bad.debugDescription)") }
+        #expect(m.login == nil && r.config.guardedBlob(.githubLogin).isEmpty)
+    }
+
+    @Test("a stored login that does not read is shown as unreadable, offers nothing, and the next save replaces it")
+    func loginUnreadable() {
+        let r = rig(); defer { r.teardown() }
+        r.config.setGuardedBlob(.githubLogin, "{\"login\":\"bad name\"}")
+        let m = r.model()
+        #expect(m.login == nil && m.storedLoginUnreadable)
+        #expect(m.saveLogin("acme-bot") == nil)
+        #expect(m.login == "acme-bot" && !m.storedLoginUnreadable)
+    }
+
+    @Test("the login is gated like the other writes: an unreadable, deferred or blocked item refuses it")
+    func loginGated() {
+        let name = "iris-1184m-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: name)!
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)")
+        let config = ConfigManager(store: store, guardedSecrets: keychain, guardedMayChange: false)
+        defer { store.removePersistentDomain(forName: name); IrisDefaults.removeSuiteFile(named: name, in: IrisDefaults.preferencesDirectory) }
+        let m = GitHubSettingsModel(config: config, keychain: keychain, toolsOfferedAtLaunch: false)
+        #expect(config.guardedState == .deferredToApp)
+        #expect(m.saveLogin("acme-bot") != nil, "a deferred item took a login")
+        #expect(m.clearLogin() != nil, "a deferred item cleared a login")
+        #expect(m.login == nil)
+    }
+
+    @Test("checking the token asks GitHub and compares: match, mismatch with the real account, unverified, and nothing to check")
+    func verify() async {
+        let r = rig(); defer { r.teardown() }
+        let none = r.model(transport: UserTransport(login: "acme-bot", status: 200))
+        await none.verifyIdentity()
+        #expect(none.identity == .unchecked, "no login, no token: nothing to compare")
+        _ = none.saveLogin("acme-bot")
+        await none.verifyIdentity()
+        #expect(none.identity == .unchecked, "a login but no token")
+        _ = none.saveToken("ghp_x")
+        let match = r.model(transport: UserTransport(login: "Acme-Bot", status: 200))
+        await match.verifyIdentity()
+        #expect(match.identity == .match)
+        let other = r.model(transport: UserTransport(login: "someone-else", status: 200))
+        await other.verifyIdentity()
+        #expect(other.identity == .mismatch(actual: "someone-else"))
+        let denied = r.model(transport: UserTransport(login: nil, status: 401))
+        await denied.verifyIdentity()
+        #expect(denied.identity == .unverified("GitHub returned HTTP 401"))
+        _ = denied.saveLogin("other-name")
+        #expect(denied.identity == .unchecked, "changing the login drops a stale result")
+    }
+
+    @Test("no source names the old hardcoded account: it is a setting, not a constant")
+    func noHardcodedAccount() throws {
+        let dir = PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit")
+        var found: [String] = []
+        for url in try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) where url.pathExtension == "swift" {
+            if try String(contentsOf: url, encoding: .utf8).contains("iris-main") { found.append(url.lastPathComponent) }
+        }
+        #expect(found.isEmpty, "\(found.sorted())")
     }
 }
