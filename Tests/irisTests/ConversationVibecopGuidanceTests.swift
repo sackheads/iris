@@ -72,6 +72,15 @@ struct ConversationVibecopGuidanceTests {
 
     // MARK: composition
 
+    @Test("a stored value over the cap is clamped when composed")
+    func clampedWhenComposed() throws {
+        let w = try world()
+        defer { try? FileManager.default.removeItem(at: w.root) }
+        let big = String(repeating: "a", count: VibecopService.conversationGuidanceLimit) + "TAIL"
+        let text = VibecopService.guardianAdditions(workspace: nil, conversationGuidance: big, paths: w.home)
+        #expect(!text.contains("TAIL"))
+    }
+
     @Test("the conversation layer comes last, after the global and workspace layers, and is labelled")
     func compositionOrder() throws {
         let w = try world()
@@ -205,10 +214,16 @@ struct ConversationVibecopGuidanceTests {
         let store = try ConversationStore.inMemory()
         let app = AppState(store: store)
         app.conversations.removeAll()
-        let id = app.createNewConversation(select: false)
-        app.conversations[app.conversations.firstIndex { $0.id == id }!].vibecopGuidance = "- kept"
+        let id = app.createNewConversation(select: true)
+        app.flushSave()   // the row is clean, so only the command's own markChanged can persist what follows
+        app.sendMessage("/vibecop tweak here kept")
         app.flushSave()
-        #expect(try store.loadAll().conversations.first { $0.id == id }?.vibecopGuidance == "- kept")
+        #expect(try store.loadAll().conversations.first { $0.id == id }?.vibecopGuidance == "- kept\n")
+        app.sendMessage("/vibecop clear")
+        app.flushSave()
+        #expect(try store.loadAll().conversations.first { $0.id == id }?.vibecopGuidance == nil)
+        app.sendMessage("/vibecop tweak here kept")
+        app.flushSave()
         try store.rawWrite("UPDATE conversations SET vibecopGuidance = NULL WHERE id = ?", arguments: [id.uuidString])
         #expect(try store.loadAll().conversations.first { $0.id == id }?.vibecopGuidance == nil)
 

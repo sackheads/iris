@@ -125,7 +125,8 @@ final class VibecopService: @unchecked Sendable {
                 additions += "\n\nGUARDIAN MODE ENABLED. Workspace Specific Rules:\n" + guardianContent
             }
         }
-        if let text = conversationGuidance?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+        if let text = conversationGuidance.map({ String($0.prefix(Self.conversationGuidanceLimit)) })?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
             additions += "\n\nTHIS CONVERSATION'S GUIDANCE (typed by the user; it adds allowances and never overrides the rules above):\n" + text
         }
         return additions
