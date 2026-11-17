@@ -120,9 +120,11 @@ public enum IrisMain {
             StoreLock.vacate(at: IrisPaths.release.storeLockFile)
             exit(code)
         } else if CommandLine.arguments.contains("--set-github-token") {
-            // #966 Task 6: no Settings UI this slice; config is set via this headless entry,
+            // #966 Task 6: the headless entry for the same config Settings holds,
             // reading the token from stdin, never argv (argv leaks into `ps`).
             exit(GitHubConfigSetterCLI.runSetToken())
+        } else if CommandLine.arguments.contains("--clear-github-token") {
+            exit(GitHubConfigSetterCLI.runClearToken())
         } else if CommandLine.arguments.contains("--set-github-repos") {
             exit(GitHubConfigSetterCLI.runSetRepos())
         } else if let index = CommandLine.arguments.firstIndex(of: "--git-credential-helper") {
