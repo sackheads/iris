@@ -163,8 +163,8 @@ extension GitHubProxyClient {
     }
 
     /// `GET /user`: whose token this is, compared with the login the user configured (case-blind, as
-    /// GitHub is). A mismatch is reported rather than trusted: commits would be signed as one account
-    /// while the token acts as another. Sends nothing without a token and reads nothing else.
+    /// GitHub is). A mismatch keeps the tools off (`GitHubIdentityMonitor`): commits would be signed as one
+    /// account while the token acts as another. A failure to ask is `.unverified`, never a mismatch. Sends nothing without a token and reads nothing else.
     func verifyIdentity(expectedLogin: String) async -> IdentityCheck {
         guard let token = Self.token(keychain: keychain) else { return .unverified("no token is set") }
         guard let url = URL(string: "\(Self.apiBase)/user") else { return .unverified("the request could not be built") }

@@ -5,8 +5,8 @@
 > (`GuardedKey.githubLogin`, stored as `{"login":"<name>"}` beside the allowed-repos list, unset by default);
 > read `iris-main` below as "the configured account". Unset means the feature is off: the tools are not
 > declared and git is untouched. The commit name and email derive from it
-> (`<login>@users.noreply.github.com`), and the pane checks the token against it with `GET /user`,
-> reporting a mismatch. `docs/github-identity.md` is the current description.
+> (`<login>@users.noreply.github.com`), and the tools are offered only while `GET /user` names that login (match: on; mismatch or
+> unverifiable: off, each reported distinctly in the pane). `docs/github-identity.md` is the current description.
 
 > **Status:** spec by iris-planner, 2026-11-15; Iris-reviewed (+4 amendments folded), then **REVISED to
 > the contributor model** (Brian, 2026-11-15): `iris-main` is a full git contributor (push/commit/PR as
@@ -122,8 +122,8 @@ control.
 Adding these tools to `ToolExecutor`/`IrisEngine` must be specified against three existing mechanisms:
 
 - **Declare only when configured (Invariant 6).** Omit the three declarations unless a token
-  is present in the Keychain, the user has set the account's login (#1184) **and** allowed at least one repo (§3.2): with any missing
-  the tools can only refuse, so declaring them is dead prompt weight. All three are read once at launch
+  is present in the Keychain, the user has set the account's login (#1184), `GET /user` confirms the token is that account's, **and** the user allowed at least one repo (§3.2): with any missing
+  the tools can only refuse, so declaring them is dead prompt weight. The token, login and list are read once at launch, the identity check runs after it in the background
   (`ConfigManager.githubToolsConfigured`), behind an injectable `githubToolsEnabled` seam on
   `ToolExecutor.getTools` (like `workspaceToolsEnabled`); a token or list set later takes effect on the
   next launch. Otherwise an unconfigured install pays prompt tokens every turn and
