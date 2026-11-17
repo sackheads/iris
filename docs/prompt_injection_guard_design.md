@@ -86,15 +86,17 @@ The most robust defense against zero-day injections is to have a small, restrict
 *   **Cloud, for subtle attacks:** local stays the default. If subtle attacks matter most to you, consider gemini-3.8-flash. On 24 plain requests planted in tool output (InjecAgent, dataset v2), gemini-3.8-flash at low thinking blocked 72 of 96 judgements (75%), against 26 of 96 (27%) for gemma4:12b with thinking on or off. It caught every data-stealing request, but only half the direct-harm ones (#807). Neither model flagged any of the 40 look-alike judgements. What it costs, measured at Gemini's low and medium thinking: about 6 s a check (6.2 s median on those texts) against 1.2 s locally; about 1-1.5% of calls ran past 60 s (2 of 136 on those texts; 1 of 930 on the full v2 set, whose p99 was 30 s and longest 110 s, and the slow ones were never the same text twice, so it is the service and not the input), and Iris blocks a check that times out (#797), so a harmless result can still be withheld after 180 s; to shorten the wait, a check with no answer after 20 s sends a second request on a separate connection and takes whichever answers first, and the other is cancelled (#871; about 2.5% of checks send a second request, so tier 3 spends about 2.5% more on average; the delay is fixed at 20 s, a switch under Settings → Security → Tier 3 turns the second request off, and Iris posts a notice when more than 5% of the last 100 checks needed one, since the tail the delay was chosen from is then gone and a second request only doubles the cost (#908); Vibecop is not hedged); a quota limit (429) blocks that check too; each result tier 3 checks (up to the 32 KB output cap) goes to Google; and about $0.9 per 1,000 checks at low thinking, $1.2 at medium, on the fixtures' mix. With no thinking level set Iris sends none, so it runs at Gemini's default, which was not measured and may be slower and costlier, with a longer tail past 60 s; the setting below can ask for low or medium, the two levels measured. To set it up: make Gemini your primary provider (Settings → General), set Settings → Security → Tier 3: Canary Probe → Engine to Cloud (Primary Provider), and enter `gemini-3.8-flash` as Cloud Model there (#800). Leave Cloud Model empty and tier 3 uses Vibecop's cloud model, or the easy tier's model when that is empty too, as it did before the field existed; Vibecop's own cloud model is unchanged and Vibecop never reads this one. Thinking is Not sent, Low or Medium; only Gemini uses it, and Settings says so under another provider. Only Gemini 3 models take a level: a model that answers 400 to it is asked again without it, with one notice per model (checked in a stubbed test, not against the live API). A model or level changed there starts fresh verdicts (they are part of the cache key below).
 
 *   **A guard miss is scored as a worst-case compromise, not a measured one.** Every recall number
-    above (and #807's) counts a planted request that slips past a tier as a loss, regardless of
-    whether a real primary model would then act on it — the replay scripts the model, so nothing
-    here measures actual compliance. #854 measured that separately: a real primary (gemma4:12b,
-    claude-opus-5-5, gemini-3.8-flash) handed a guard-passed disguised injection directly, guard
+    above counts a planted request that slips past a tier as a loss, regardless of whether a real
+    primary model would then act on it — the replay scripts the model, so nothing here measures
+    actual compliance. #854 measured that separately (`scripts/bench854/`, the `--cloud-primary`
+    section of `docs/headless_profiling.md`): a real primary (gemma4:12b, claude-opus-5-5,
+    gemini-3.8-flash) handed a guard-passed **plain planted request** (dataset v2, the same
+    `subtle_plain` category as the cloud bullet above — not v4's disguised set) directly, guard
     bypassed. Zero compliance across all three models, 18 distinct guard-passed rows (repeats
     resample one scenario's stochasticity, not new scenarios), Wilson 95% upper bound ≈18%. That is
     not evidence the model is a safe backstop — 18 rows is too thin a sample to recalibrate a
-    security assumption on — so recall above still treats a guard miss as a worst case; the number
-    is a cited caveat, not a relaxed premise.
+    security assumption on, and it says nothing about the harder disguised case — so recall above
+    still treats a guard miss as a worst case; the number is a cited caveat, not a relaxed premise.
 
 ### Verdict cache (Tier 2/3)
 
