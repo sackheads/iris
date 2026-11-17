@@ -30,6 +30,48 @@ struct GitHubProxyClient {
         token(keychain: keychain) != nil
     }
 
+    /// The most repositories the allowed list holds: more than a person lists by hand, and a bound on
+    /// what a stored list costs every call.
+    static let maxAllowedRepos = 50
+
+    enum RepoListCheck: Equatable {
+        case ok([String])
+        case invalid(String)
+        case tooMany
+    }
+
+    /// The list a set of names would be saved as: each trimmed, `isOwnerName`, repeats dropped (first
+    /// kept), at most `maxAllowedRepos`. The one definition the headless setter and the Settings pane
+    /// share, so what can be stored does not depend on which of them stored it.
+    static func checkRepoList(_ names: [String]) -> RepoListCheck {
+        var list: [String] = []
+        for raw in names {
+            let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard isOwnerName(name) else { return .invalid(name) }
+            if !list.contains(name) { list.append(name) }
+        }
+        return list.count > maxAllowedRepos ? .tooMany : .ok(list)
+    }
+
+    /// What a typed or piped token is worth saving as. The one definition the headless setter and the
+    /// Settings pane share, so they cannot disagree about what a token may hold.
+    enum TokenCheck: Equatable {
+        case ok(String)
+        case empty
+        /// Interior whitespace or a control character: two pasted lines would otherwise be stored as
+        /// one token with an embedded newline.
+        case malformed
+    }
+
+    static func checkToken(_ raw: String) -> TokenCheck {
+        let token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { return .empty }
+        let bad = token.unicodeScalars.contains {
+            CharacterSet.whitespacesAndNewlines.contains($0) || CharacterSet.controlCharacters.contains($0)
+        }
+        return bad ? .malformed : .ok(token)
+    }
+
     /// The `iris-main` PAT, or nil if none is stored.
     static func token(keychain: KeychainManager) -> String? {
         let trimmed = keychain.secrets(service: KeychainManager.githubService)["token"]?

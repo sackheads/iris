@@ -1,7 +1,7 @@
 import Foundation
 
 /// `iris --set-github-token` / `iris --set-github-repos` (#966 Task 6): a headless entry path for
-/// the GitHub identity's config, since this slice ships with no Settings UI (deferred to #961).
+/// the GitHub identity's config, for a headless machine or a script; Settings → Integrations holds the same two values.
 /// Each reads its value from **stdin**, never argv — argv leaks into process listings (`ps`), so
 /// a token passed as an argument would be visible to every other process on the machine. Pipe it
 /// in rather than typing it at a prompt: `pbpaste | iris --set-github-token`. Each prints a
@@ -23,6 +23,7 @@ enum GitHubConfigSetterCLI {
         case emptyToken
         case malformedToken
         case malformedRepo(String)
+        case tooManyRepos
         case notYetConfigured
         case settingsUnreadable
         case writesBlocked
@@ -32,6 +33,7 @@ enum GitHubConfigSetterCLI {
             case .emptyToken: "no token read from stdin"
             case .malformedToken: "a token may not contain interior whitespace or control characters"
             case .malformedRepo(let name): "not a valid owner/name: \(name.debugDescription)"
+            case .tooManyRepos: "more than \(GitHubProxyClient.maxAllowedRepos) repositories"
             case .notYetConfigured: "launch Iris once first, then re-run this command (its settings have never been read)"
             case .settingsUnreadable: "Iris's protected settings couldn't be read from the Keychain; this command can't change them until it can -- check for a denied Keychain prompt"
             case .writesBlocked: "Iris's settings could not be saved (the Keychain item is unreadable); nothing was written"
@@ -45,13 +47,26 @@ enum GitHubConfigSetterCLI {
     /// characters (multi-line stdin, e.g. two pasted lines, would otherwise be stored as one
     /// token with an embedded newline) -- either way, writing nothing.
     static func setToken(stdin: Data, keychain: KeychainManager) -> Result<String, Failure> {
-        let token = String(decoding: stdin, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !token.isEmpty else { return .failure(.emptyToken) }
-        guard !token.unicodeScalars.contains(where: { CharacterSet.whitespacesAndNewlines.contains($0) || CharacterSet.controlCharacters.contains($0) }) else {
-            return .failure(.malformedToken)
+        let token: String
+        switch GitHubProxyClient.checkToken(String(decoding: stdin, as: UTF8.self)) {
+        case .empty: return .failure(.emptyToken)
+        case .malformed: return .failure(.malformedToken)
+        case .ok(let checked): token = checked
         }
         keychain.updateSecrets(service: KeychainManager.githubService) { $0["token"] = token }
         return .success("GitHub token saved to the iris.github Keychain item. Iris reads it only at launch, so this takes effect the next time Iris launches.")
+    }
+
+    /// Removes the stored token, leaving anything else in the `iris.github` item. A running app keeps
+    /// offering the tools until it quits (its token flag is read once at launch), but its calls find
+    /// no token and refuse.
+    static func clearToken(keychain: KeychainManager) -> Result<String, Failure> {
+        do {
+            try keychain.updateSecretsOrThrow(service: KeychainManager.githubService) { $0["token"] = nil }
+        } catch {
+            return .failure(.writesBlocked)
+        }
+        return .success("GitHub token removed from the iris.github Keychain item.")
     }
 
     /// Writes a comma- or newline-separated repo list read from `stdin` to the guarded
@@ -76,11 +91,14 @@ enum GitHubConfigSetterCLI {
         guard config.guardedState == .normal else { return .failure(.notYetConfigured) }
 
         let raw = String(decoding: stdin, as: UTF8.self)
-        let names = raw.split(whereSeparator: { $0 == "," || $0.isNewline })
+        let listed = raw.split(whereSeparator: { $0 == "," || $0.isNewline })
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-        if let bad = names.first(where: { !GitHubProxyClient.isOwnerName($0) }) {
-            return .failure(.malformedRepo(bad))
+        let names: [String]
+        switch GitHubProxyClient.checkRepoList(listed) {
+        case .invalid(let bad): return .failure(.malformedRepo(bad))
+        case .tooMany: return .failure(.tooManyRepos)
+        case .ok(let checked): names = checked
         }
         let json = (try? JSONSerialization.data(withJSONObject: names)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
         config.setGuardedBlob(.githubAllowedRepos, json)
@@ -105,6 +123,17 @@ enum GitHubConfigSetterCLI {
             return 0
         case .failure(let error):
             FileHandle.standardError.write(Data("iris --set-github-token: \(error)\n".utf8))
+            return 64
+        }
+    }
+
+    static func runClearToken() -> Int32 {
+        switch clearToken(keychain: .shared) {
+        case .success(let message):
+            print(message)
+            return 0
+        case .failure(let error):
+            FileHandle.standardError.write(Data("iris --clear-github-token: \(error)\n".utf8))
             return 64
         }
     }
