@@ -815,12 +815,6 @@ final class ConversationStore: Sendable {
                 t.add(column: "additionalRoots", .text)
             }
         }
-        // #1005: the conversation's own Vibecop guidance, plain text. NULL/absent is none.
-        m.registerMigration("v40_vibecop_guidance") { db in
-            try db.alter(table: "conversations") { t in
-                t.add(column: "vibecopGuidance", .text)
-            }
-        }
         // #1027: when Brian last looked at an inbox item. Nullable: a row from before this reads
         // as never viewed, so every existing item starts out unread once.
         m.registerMigration("v38_inbox_viewed") { db in
@@ -841,6 +835,12 @@ final class ConversationStore: Sendable {
             try db.create(index: "seen_nonces_peer_envelope", on: "seen_nonces",
                           columns: ["peer", "envelope_id"], unique: true)
             try db.create(index: "seen_nonces_retain_until", on: "seen_nonces", columns: ["retain_until"])
+        }
+        // #1005: the conversation's own Vibecop guidance, plain text. NULL/absent is none.
+        m.registerMigration("v40_vibecop_guidance") { db in
+            try db.alter(table: "conversations") { t in
+                t.add(column: "vibecopGuidance", .text)
+            }
         }
         return m
     }

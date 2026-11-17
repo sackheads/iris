@@ -7034,6 +7034,7 @@ class AppState {
             guard let idx = conversations.firstIndex(where: { $0.id == convId }) else { return }
             let had = conversations[idx].vibecopGuidance != nil
             conversations[idx].vibecopGuidance = nil
+            markChanged(convId, .metadata)
             emitCommandOutput(had ? "Cleared this conversation's Vibecop guidance." : "This conversation has no Vibecop guidance of its own.", format: .markdown, to: convId)
             return
         }
@@ -7063,6 +7064,7 @@ class AppState {
                     return
                 }
                 conversations[idx].vibecopGuidance = updated
+                markChanged(convId, .metadata)
                 let hint = scope == .here ? "" : "\n\n(No workspace is bound, so this applies to this conversation only. `/vibecop tweak global <guidance>` applies it to every session.)"
                 emitCommandOutput("Added Vibecop guidance for this conversation:\n- \(guidance)" + hint, format: .markdown, to: convId)
                 return
