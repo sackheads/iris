@@ -215,6 +215,12 @@ extension GitHubProxyClient {
     static let filePageSize = 100
     /// The only top-level folders whose changes `github_approve` will approve.
     static let routineRoots: Set<String> = ["docs", "assets"]
+    /// Folders under `docs/`, at any depth, that agents read as instructions and execute (plans and
+    /// specs: `docs/plans`, `docs/specs`, `docs/superpowers/plans`). A change there is not routine:
+    /// a poisoned one would merge with no human and no CI run (a docs-only PR skips the build), then
+    /// steer the next session that reads it. They stay `@bnaylor`'s to approve (the CODEOWNERS block
+    /// in `docs/github-identity.md`), and this refuses them too.
+    static let agentInstructionFolders: Set<String> = ["plans", "specs"]
 
     /// `POST /repos/{repo}/pulls/{pr}/reviews` with `APPROVE`, only for an open PR whose every
     /// changed file is routine, and bound to the exact commit that was checked.
@@ -320,13 +326,20 @@ extension GitHubProxyClient {
 
     /// A repo-relative path inside `docs/` or `assets/`: at least one segment below the folder, no
     /// empty, `.` or `..` segment, no backslash or control character. A leading slash is refused
-    /// by the same rules: it makes the first segment empty, which is neither root.
+    /// by the same rules: it makes the first segment empty, which is neither root. Under `docs/`, a
+    /// directory named `plans` or `specs` at any depth is refused, compared case-insensitively
+    /// because the Mac checkout agents read from is (`docs/Plans` is `docs/plans` there).
     static func isRoutinePath(_ path: String) -> Bool {
         guard !path.isEmpty,
               !path.unicodeScalars.contains(where: { $0 == "\\" || CharacterSet.controlCharacters.contains($0) }) else { return false }
         let segments = path.split(separator: "/", omittingEmptySubsequences: false)
         guard segments.count >= 2, routineRoots.contains(String(segments[0])) else { return false }
-        return segments.allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
+        guard segments.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else { return false }
+        if segments[0] == "docs",
+           segments.dropFirst().dropLast().contains(where: { agentInstructionFolders.contains($0.lowercased()) }) {
+            return false
+        }
+        return true
     }
 }
 
