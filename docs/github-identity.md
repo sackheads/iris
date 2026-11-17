@@ -66,8 +66,9 @@ approval only counts for `/docs/` and `/assets/`), with the in-Swift allowlist a
 
 ## Setup
 
-**No Settings UI in this slice** — deferred to the planned profile pane (#961). Configure by
-command instead:
+Set the token and the allowed repositories in **Settings → Integrations → GitHub (iris-main)**,
+or by command on a headless machine (step 2). The pane and the commands share one set of checks,
+so each accepts the same tokens and repo lists.
 
 1. **On GitHub**, once, in the web UI or `gh`:
    - Ensure the `iris-main` account exists, and make it a **write collaborator** on each repo Iris
@@ -95,7 +96,8 @@ command instead:
      approval of the most recent reviewable push." Both matter: stale-dismissal fires at push
      time, so without the second setting a late approval of an older, routine-only commit could
      still count toward merging a newer head that added a `Sources/` change.
-2. **On the Mac**, after updating to a build with this feature:
+2. **On the Mac**, paste the token and add each repository in the Settings pane, or run, after
+   updating to a build with this feature:
    ```sh
    printf '%s' '<the iris-main PAT>' | iris --set-github-token
    printf 'owner/repo\n' | iris --set-github-repos
@@ -103,8 +105,9 @@ command instead:
    Both read from stdin, never argv (argv is visible in `ps`). The repos list is one `owner/name`
    per line; the allowlist is empty — nothing is allowed — until you set it, and the setter
    refuses the whole write if any line is malformed. Then **launch Iris once**: both settings are
-   read at launch and cached for that run, so a value written while Iris is already open takes
-   effect on the next launch, not live.
+   read at launch and cached for that run, so a value saved while Iris is already open, in the
+   pane or by command, takes effect on the next launch, not live. The pane says so ("Restart Iris
+   for the GitHub tools to change") whenever what is stored differs from what this launch offers.
 
 Once both the GitHub-side and Mac-side setup are done, Iris can already **approve other people's
 routine PRs** (yours, or `sackheads-bot`'s) as `iris-main` — that's the main clickhole relief, and
