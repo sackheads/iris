@@ -77,6 +77,13 @@ from approving his own PR. That is the actual clickhole on Iris-authored PRs. So
    `/docs/` and `/assets/`: GitHub takes owners from the last matching pattern, and without him there his
    own approval would not clear a docs PR (and approval is what arms the merge queue).
 
+   **Limit of the structural half:** CODEOWNERS patterns are case-sensitive and take no bracket classes, so
+   `/docs/**/plans/` does not match `docs/Plans/` or `docs/SPECS/`; such a path falls to the `/docs/` line,
+   where the bots' approval counts. On the Mac's case-insensitive checkout it is the same folder as
+   `docs/plans`, so for that spelling only the `github_approve` gate (which compares case-insensitively)
+   and a human reviewer stand between a bot approval and a merge. Any other bot-approval path (the
+   sackheads-bot follow-up, #1170) must run the same gate, not rely on CODEOWNERS alone.
+
    **`CODEOWNERS` is the primary approval control.** `iris-main` is a code owner of `/docs`+`/assets`
    *only* (not their `plans/` and `specs/` folders), so its approval structurally cannot satisfy the merge gate for a PR that touches `Sources/`,
    `Tests/`, or anything else — those need `@bnaylor`. This is the real "important approvals stay under my
