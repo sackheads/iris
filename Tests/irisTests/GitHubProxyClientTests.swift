@@ -332,6 +332,17 @@ struct GitHubProxyClientApproveTests {
         #expect(posts(stub).isEmpty)
     }
 
+    @Test("a plans/ or specs/ file is refused, new or renamed in or out, and no review is posted",
+          arguments: [("docs/plans/x.md", nil), ("docs/specs/x.md", nil), ("docs/superpowers/plans/x.md", nil),
+                      ("docs/Specs/x.md", nil), ("docs/x.md", "docs/plans/old.md"),
+                      ("docs/specs/x.md", "docs/old.md"), ("docs/x.md", "docs/superpowers/specs/old.md")] as [(String, String?)])
+    func refusesAgentInstructionFolders(_ path: String, _ previous: String?) async {
+        let (result, stub) = await approveOK([file("docs/ok.md"), file(path, previous: previous)])
+        #expect(result.hasPrefix("Refused"))
+        #expect(result.contains("not a routine"))
+        #expect(posts(stub).isEmpty)
+    }
+
     @Test("a rename wholly inside docs/ and assets/ is approved")
     func approvesRoutineRename() async {
         let (result, stub) = await approveOK([file("docs/new.md", previous: "docs/old.md"), file("assets/n.png", previous: "docs/o.png")])
@@ -499,10 +510,13 @@ struct GitHubProxyClientApproveTests {
 
     @Test("the path predicate: routine roots only, nothing that climbs out")
     func routinePathPredicate() {
-        for ok in ["docs/a.md", "assets/x/y.png", "docs/a b.md", "docs/..hidden"] {
+        for ok in ["docs/a.md", "assets/x/y.png", "docs/a b.md", "docs/..hidden",
+                   "docs/plans-old/a.md", "docs/plans.md", "docs/a/specs.md", "docs/planning/a.md", "assets/plans/x.png"] {
             #expect(GitHubProxyClient.isRoutinePath(ok), "\(ok) should be routine")
         }
-        for bad in ["", "docs", "docs/", "/docs/a.md", "docs/../a", "docs/a/..", "./docs/a.md", "doc/a.md", "docs\\a.md", "docs/a\\..\\..\\Sources\\x.md"] {
+        for bad in ["", "docs", "docs/", "/docs/a.md", "docs/../a", "docs/a/..", "./docs/a.md", "doc/a.md", "docs\\a.md", "docs/a\\..\\..\\Sources\\x.md",
+                    "docs/plans/a.md", "docs/specs/a.md", "docs/plans/sub/a.md", "docs/superpowers/plans/a.md",
+                    "docs/superpowers/specs/a.md", "docs/x/plans/y/z.md", "docs/Plans/a.md", "docs/SPECS/a.md"] {
             #expect(!GitHubProxyClient.isRoutinePath(bad), "\(bad) should not be routine")
         }
     }

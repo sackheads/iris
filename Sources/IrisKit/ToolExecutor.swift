@@ -281,7 +281,7 @@ struct ToolExecutor {
         ),
         FunctionDeclaration(
             name: "github_approve",
-            description: "Approve a GitHub pull request as Iris's own account (iris-main). It refuses unless the PR is open and every changed file is under docs/ or assets/; anything else needs a human reviewer, so do not try to work around a refusal. The approval is tied to the commit that was checked, and the result says if the PR moved afterwards. Only for repositories the user has put on the allowed list.",
+            description: "Approve a GitHub pull request as Iris's own account (iris-main). It refuses unless the PR is open and every changed file is under docs/ or assets/ (not a plans/ or specs/ folder, which are instructions and need a human); anything else needs a human reviewer, so do not try to work around a refusal. The approval is tied to the commit that was checked, and the result says if the PR moved afterwards. Only for repositories the user has put on the allowed list.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
