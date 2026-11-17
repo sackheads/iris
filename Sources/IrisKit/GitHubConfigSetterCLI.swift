@@ -1,7 +1,7 @@
 import Foundation
 
 /// `iris --set-github-token` / `iris --set-github-repos` (#966 Task 6): a headless entry path for
-/// the GitHub identity's config, for a headless machine or a script; Settings → Integrations holds the same two values.
+/// the GitHub identity's config, for a headless machine or a script. The Settings pane's model (`GitHubSettingsModel`) shares its token and repo-list checks, so the two cannot disagree about what is storable.
 /// Each reads its value from **stdin**, never argv — argv leaks into process listings (`ps`), so
 /// a token passed as an argument would be visible to every other process on the machine. Pipe it
 /// in rather than typing it at a prompt: `pbpaste | iris --set-github-token`. Each prints a
