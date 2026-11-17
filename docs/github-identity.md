@@ -5,8 +5,10 @@ boundary) — a real account, like `sackheads-bot`, that she commits, pushes and
 as, independent of `@bnaylor`'s own identity. This closes the actual clickhole the feature was
 built for: a session running under your ambient `gh`/git auth authors its own PRs as `@bnaylor`,
 and with `CODEOWNERS = * @bnaylor` nobody — including you — can approve your own PR. `iris-main`
-fixes part one (she authors as herself); CODEOWNERS plus an approval gate fix part two (she can
-clear her own routine work without that being a blank check).
+fixes part one (she authors as herself); CODEOWNERS plus an approval gate fix part two for
+*other* routine PRs (yours, or `sackheads-bot`'s): she can clear them without that being a blank
+check. GitHub still blocks an author approving their own PR, so an `iris-main`-authored PR still
+needs a second code owner — see "The one open decision" below.
 
 **The one thing locked down is approval, not contribution.** Iris pushes and opens PRs as
 `iris-main` freely. What stays under `@bnaylor` is approval of anything that matters:
@@ -81,7 +83,12 @@ command instead:
      /.github/CODEOWNERS @bnaylor
      ```
      `Sources/` and `Tests/` are deliberately absent — they fall under `* @bnaylor`, so only you
-     can approve code or test changes.
+     can approve code or test changes. `@bnaylor` is also deliberately absent from the `/docs/`
+     and `/assets/` lines themselves: GitHub takes a file's owners from the last matching
+     pattern, not every pattern that matches, so once a line names `/docs/` or `/assets/` the top
+     `* @bnaylor` line no longer applies there. Leaving you off those two lines on purpose is what
+     keeps them routine and bot-to-bot: adding yourself back would let your own review satisfy
+     "review from code owners" on them, undoing the point of the split.
    - On the `main` ruleset, require a pull request with review from code owners, and enable
      **both** "Dismiss stale pull request approvals when new commits are pushed" **and** "Require
      approval of the most recent reviewable push." Both matter: stale-dismissal fires at push
@@ -98,9 +105,9 @@ command instead:
    read at launch and cached for that run, so a value written while Iris is already open takes
    effect on the next launch, not live.
 
-With just the GitHub-side setup, Iris can already **approve other people's routine PRs** (yours,
-or `sackheads-bot`'s) as `iris-main` as soon as the Mac side is configured — that's the main
-clickhole relief, and it works without anything further.
+Once both the GitHub-side and Mac-side setup are done, Iris can already **approve other people's
+routine PRs** (yours, or `sackheads-bot`'s) as `iris-main` — that's the main clickhole relief, and
+it works without anything further.
 
 ### The one open decision: `sackheads-bot`
 
