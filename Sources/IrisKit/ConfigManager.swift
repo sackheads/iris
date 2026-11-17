@@ -113,6 +113,16 @@ class ConfigManager: @unchecked Sendable {
         }
     }
 
+    /// Runs a write to the stored token or login (#1190). The state is dropped before it, so a match for
+    /// the old pair cannot stand while the new one is being stored, and again after it: a check that
+    /// began in between read the old pair (or the new one half-stored) yet carries the then-current
+    /// generation, so without the second drop its answer would be recorded as the new pair's.
+    func changingGitHubIdentityInputs<T>(_ write: () throws -> T) rethrows -> T {
+        invalidateGitHubIdentity()
+        defer { invalidateGitHubIdentity() }
+        return try write()
+    }
+
     /// Starts a check unless one is running or the last attempt (when `minInterval` is set) was too
     /// recent. The generation comes back so `finishGitHubIdentityCheck` can drop a stale answer.
     func beginGitHubIdentityCheck(minInterval: TimeInterval? = nil, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Int? {
@@ -123,6 +133,11 @@ class ConfigManager: @unchecked Sendable {
             identityLastAttempt = now
             return identityGeneration
         }
+    }
+
+    /// Ends a check that found nothing to ask about, recording nothing.
+    func abandonGitHubIdentityCheck(_ generation: Int) {
+        identityLock.withLock { if generation == identityGeneration { identityInFlight = false } }
     }
 
     func finishGitHubIdentityCheck(_ generation: Int, _ result: GitHubProxyClient.IdentityCheck) {

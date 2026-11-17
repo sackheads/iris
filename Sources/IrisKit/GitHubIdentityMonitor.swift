@@ -19,8 +19,13 @@ enum GitHubIdentityMonitor {
     @discardableResult
     static func verify(config: ConfigManager, keychain: KeychainManager, transport: GitHubTransport,
                        minInterval: TimeInterval? = nil) async -> GitHubProxyClient.IdentityCheck? {
-        guard let login = config.githubLogin(),
-              let generation = config.beginGitHubIdentityCheck(minInterval: minInterval) else { return nil }
+        // Begin first, read the login after: a change completing after `begin` bumps the generation and
+        // drops this answer, and one completing before it is read here (#1190).
+        guard let generation = config.beginGitHubIdentityCheck(minInterval: minInterval) else { return nil }
+        guard let login = config.githubLogin() else {
+            config.abandonGitHubIdentityCheck(generation)
+            return nil
+        }
         let client = GitHubProxyClient(keychain: keychain, isRepoAllowed: { _ in false }, transport: transport)
         let result = await client.verifyIdentity(expectedLogin: login)
         config.finishGitHubIdentityCheck(generation, result)

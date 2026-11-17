@@ -156,3 +156,79 @@ struct GitHubIdentityMonitorTests {
                                                   now: ProcessInfo.processInfo.systemUptime + GitHubIdentityMonitor.retryInterval + 1) != nil)
     }
 }
+
+/// #1190: a check that begins between the invalidate and the write of a new token or login read the old
+/// pair, but carried the then-current generation, so its answer was recorded as the new pair's.
+@Suite("GitHub identity gate: the write window (#1190)", .timeLimit(.minutes(1)))
+struct GitHubIdentityWriteWindowTests {
+    private func configured() -> (ConfigManager, KeychainManager) {
+        let name = "iris-1190-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: name)!
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
+        keychain.replaceSecrets(["token": "ghp_OldToken1234567890abcdef"], service: KeychainManager.githubService)
+        let seed = ConfigManager(store: store, guardedSecrets: keychain)
+        seed.setGuardedBlob(.githubAllowedRepos, "[\"sackheads/iris\"]")
+        seed.setGuardedBlob(.githubLogin, GitHubProxyClient.loginBlob("acme-bot"))
+        return (ConfigManager(store: store, guardedSecrets: keychain), keychain)
+    }
+
+    private final class Held: GitHubTransport, @unchecked Sendable {
+        let started = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        /// Sync, so the blocking wait is not in an async context.
+        private func holdUntilReleased() { release.wait() }
+        func send(_ request: URLRequest, bearer: String) async throws -> (Data, HTTPURLResponse) {
+            started.signal()
+            holdUntilReleased()
+            return (try JSONSerialization.data(withJSONObject: ["login": "acme-bot"]),
+                    HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        }
+    }
+
+    @Test("a check begun inside the write is dropped when the write ends: it must not record a match")
+    func checkInsideTheWriteIsDropped() async throws {
+        let (config, keychain) = configured()
+        let held = Held()
+        var task: Task<Void, Never>?
+        config.changingGitHubIdentityInputs {
+            // A turn starts here: after the first drop, before the new value is stored.
+            task = GitHubIdentityMonitor.kickIfNeeded(config: config, keychain: keychain, transport: held)
+            held.started.wait()
+            keychain.replaceSecrets(["token": "ghp_NewToken1234567890abcdef"], service: KeychainManager.githubService)
+        }
+        held.release.signal()
+        try await value(of: try #require(task), within: 20)
+        #expect(config.githubIdentity == nil, "the answer was for the old token")
+        #expect(!config.githubToolsConfigured)
+    }
+
+    @Test("the match standing before a write is gone while the write runs")
+    func matchDroppedBeforeTheWrite() async {
+        let (config, keychain) = configured()
+        let id = config.beginGitHubIdentityCheck()
+        config.finishGitHubIdentityCheck(try! #require(id), .match)
+        #expect(config.githubToolsConfigured)
+        config.changingGitHubIdentityInputs {
+            #expect(config.githubIdentity == nil && !config.githubToolsConfigured)
+        }
+        _ = keychain
+    }
+
+    @Test("a check begun after the write read the new pair and stands")
+    func checkAfterTheWriteStands() async throws {
+        let (config, keychain) = configured()
+        config.changingGitHubIdentityInputs {
+            keychain.replaceSecrets(["token": "ghp_NewToken1234567890abcdef"], service: KeychainManager.githubService)
+        }
+        let result = await GitHubIdentityMonitor.verify(config: config, keychain: keychain, transport: {
+            struct Ok: GitHubTransport {
+                func send(_ request: URLRequest, bearer: String) async throws -> (Data, HTTPURLResponse) {
+                    (try JSONSerialization.data(withJSONObject: ["login": "acme-bot"]),
+                     HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+                }
+            }
+            return Ok()
+        }())
+        #expect(result == .match && config.githubIdentity == .match)
+    }
+}
