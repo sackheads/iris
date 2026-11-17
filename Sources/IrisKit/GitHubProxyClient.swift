@@ -218,8 +218,8 @@ extension GitHubProxyClient {
     /// Folders under `docs/`, at any depth, that agents read as instructions and execute (plans and
     /// specs: `docs/plans`, `docs/specs`, `docs/superpowers/plans`). A change there is not routine:
     /// a poisoned one would merge with no human and no CI run (a docs-only PR skips the build), then
-    /// steer the next session that reads it. They stay `@bnaylor`'s to approve (the CODEOWNERS block
-    /// in `docs/github-identity.md`), and this refuses them too.
+    /// steer the next session that reads it. They stay `@bnaylor`'s to approve (the `/docs/**/plans/` and
+    /// `/docs/**/specs/` CODEOWNERS lines, spec section 2), and this refuses them too.
     static let agentInstructionFolders: Set<String> = ["plans", "specs"]
 
     /// `POST /repos/{repo}/pulls/{pr}/reviews` with `APPROVE`, only for an open PR whose every
