@@ -1,2 +1,10 @@
 # Every change needs the code owner's approval to merge; the ruleset requires it.
 * @bnaylor
+# Routine docs/assets: Brian or either bot may approve (bot-to-bot clears the merge gate without a human click).
+/docs/          @bnaylor @iris-main @sackheads-bot
+/assets/        @bnaylor @iris-main @sackheads-bot
+# Agent instructions sessions read and execute — a human only (later + more specific = wins; ** covers superpowers/).
+/docs/**/plans/ @bnaylor
+/docs/**/specs/ @bnaylor
+# The gate protects itself.
+/.github/CODEOWNERS @bnaylor
