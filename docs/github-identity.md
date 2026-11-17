@@ -22,7 +22,8 @@ approval on anything else, as defence in depth on top of that.
 ## The three tools
 
 Three host-side tools, declared to the model only when a token, the account's username and a
-non-empty allowed-repos list are all configured (see "Setup" below), and only on an attended, non-guest-origin main
+non-empty allowed-repos list are all configured and GitHub confirms the token is that account's (see
+"Setup" below), and only on an attended, non-guest-origin main
 conversation — a subagent, evaluator, MCP guest, unattended job run, or a turn a guest's message
 started or steered loses them even if one somehow reaches the dispatcher. Every call is bound to
 the user-configured allowed-repos list before anything else happens — a repo not on the list sends
@@ -72,11 +73,16 @@ approval only counts for `/docs/` and `/assets/`, minus `plans/` and `specs/`), 
 
 Set the account's username, its token and the allowed repositories in **Settings → Integrations →
 GitHub**, or by command on a headless machine (step 2). The pane and the commands share one set of
-checks, so each accepts the same usernames, tokens and repo lists. After a token and a username are
-saved the pane asks GitHub whose token it is (`GET /user`) and says so when it belongs to a
-different account than the one named, since commits would be signed as one account while the token
-acts as the other. The check is reported, not enforced: a token that cannot be checked (offline, a
-refusal) is shown as unverified, not as a match.
+checks, so each accepts the same usernames, tokens and repo lists. The tools are offered only
+while GitHub confirms the token belongs to the named account (`GET /user`), since otherwise commits
+would be signed as one account while the token acts as another. Three outcomes, all shown in the pane:
+**match** (tools on); **mismatch**, GitHub answered with a different username (tools off, and the pane
+says "This token belongs to X, expected Y"); and **unverified**, GitHub could not be asked, offline or
+an error (tools off, and the pane says it couldn't verify, never that the token is wrong). The check
+runs in the background after launch, so the tools appear a moment after Iris starts; it never delays
+launch. Saving a token or username in the pane turns the tools off at once and re-checks; an unverified
+result is retried at most once a minute, when a turn next asks whether the tools are on. A mismatch is
+not retried: fix the token or username (or press Check token).
 
 1. **On GitHub**, once, in the web UI or `gh`:
    - Ensure the account exists (you choose its name), and make it a **write collaborator** on each repo Iris
@@ -125,7 +131,8 @@ refusal) is shown as unverified, not as a match.
    for the GitHub tools to change") whenever what is stored differs from what this launch offers.
 
 **First-time setup needs all three:** the account's username, its token and at least one allowed
-repository. With any missing, Iris behaves as if no token were configured and the tools are not offered.
+repository. With any missing, Iris behaves as if no token were configured and the tools are not offered. Even with
+all three, they stay off until the check above confirms the token is the account's.
 
 Once both the GitHub-side and Mac-side setup are done, Iris can already **approve other people's
 routine PRs** (yours, or `sackheads-bot`'s) as the account — that's the main clickhole relief, and

@@ -110,8 +110,9 @@ struct ToolExecutor {
     /// `githubToolsEnabled` defaults to "the GitHub token is present, the account's login is set, the user
     /// has allowed at least one repo and `GET /user` named that login (#1184)" (#966, Invariant 6): with any missing the three `github_*` tools can only
     /// refuse, so their declarations are prompt weight an unconfigured install must not pay. The
-    /// default reads `ConfigManager.githubToolsConfigured`: three parts fixed at launch, never the
-    /// Keychain per turn (#578).
+    /// default reads `ConfigManager.githubToolsConfigured`: three parts fixed at launch and the identity check's cached
+    /// answer, never the Keychain per turn (#578). A turn that finds it unchecked or unverified starts a
+    /// background re-check (`GitHubIdentityMonitor.kickIfNeeded`) and does not wait for it.
     func getTools(workspaceToolsEnabled: Bool = !ConfigManager.shared.googleRefreshToken.isEmpty,
                   githubToolsEnabled: Bool? = nil) async -> [FunctionDeclaration] {
         if githubToolsEnabled == nil, githubToolsEnabledOverride == nil { GitHubIdentityMonitor.kickIfNeeded() }
