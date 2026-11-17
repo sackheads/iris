@@ -126,8 +126,7 @@ final class GitHubSettingsModel {
         case .empty: return .emptyLogin
         case .invalid: return .invalidLogin
         case .ok(let checked):
-            config.invalidateGitHubIdentity()
-            config.setGuardedBlob(.githubLogin, GitHubProxyClient.loginBlob(checked))
+            config.changingGitHubIdentityInputs { config.setGuardedBlob(.githubLogin, GitHubProxyClient.loginBlob(checked)) }
             refresh()
             return login == checked ? nil : .notSaved
         }
@@ -136,8 +135,7 @@ final class GitHubSettingsModel {
     @discardableResult
     func clearLogin() -> Failure? {
         if case .disabled(let reason) = editState { return .disabled(reason) }
-        config.invalidateGitHubIdentity()
-        config.setGuardedBlob(.githubLogin, "")
+        config.changingGitHubIdentityInputs { config.setGuardedBlob(.githubLogin, "") }
         refresh()
         return login == nil && !storedLoginUnreadable ? nil : .notSaved
     }
@@ -193,9 +191,10 @@ final class GitHubSettingsModel {
         case .malformed: return .malformedToken
         case .ok(let checked): token = checked
         }
-        config.invalidateGitHubIdentity()
         do {
-            try keychain.updateSecretsOrThrow(service: KeychainManager.githubService) { $0["token"] = token }
+            try config.changingGitHubIdentityInputs {
+                try keychain.updateSecretsOrThrow(service: KeychainManager.githubService) { $0["token"] = token }
+            }
         } catch {
             return .notSaved
         }
@@ -206,9 +205,10 @@ final class GitHubSettingsModel {
     @discardableResult
     func clearToken() -> Failure? {
         if case .disabled(let reason) = editState { return .disabled(reason) }
-        config.invalidateGitHubIdentity()
         do {
-            try keychain.updateSecretsOrThrow(service: KeychainManager.githubService) { $0["token"] = nil }
+            try config.changingGitHubIdentityInputs {
+                try keychain.updateSecretsOrThrow(service: KeychainManager.githubService) { $0["token"] = nil }
+            }
         } catch {
             return .notSaved
         }
