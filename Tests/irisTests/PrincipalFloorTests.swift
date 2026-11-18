@@ -45,6 +45,42 @@ struct PrincipalFloorTests {
         }
     }
 
+    @Test("broker and mcpGuest floors deny credentials and transports, and deny all memory writes")
+    func brokerAndGuestFloorsDenyCredentialsTransportsAndWrites() {
+        for principal: Principal in [.broker, .mcpGuest] {
+            let floor = PrincipalFloor.floor(for: principal)
+            #expect(floor.credentials == .fixed([]), "\(principal) should deny all credentials")
+            #expect(floor.transports == .fixed([]), "\(principal) should deny all transports")
+            #expect(floor.memoryWrite == .fixed(.none), "\(principal) should deny all memory writes")
+        }
+    }
+
+    @Test("the broker's memory-read floor is the full owner-read ceiling (H2); the guest's is the least tier")
+    func brokerReadsFullGuestReadsLeast() {
+        #expect(PrincipalFloor.floor(for: .broker).memoryRead == .fixed(.full))
+        #expect(PrincipalFloor.floor(for: .mcpGuest).memoryRead == .fixed(.task))
+    }
+
+    @Test("subagent and evaluator floors are fromBinding on every axis, not just tools")
+    func subagentAndEvaluatorFloorsAreFromBindingOnEveryAxis() {
+        for principal: Principal in [.subagent, .evaluator] {
+            let floor = PrincipalFloor.floor(for: principal)
+            #expect(floor.credentials == .fromBinding)
+            #expect(floor.memoryRead == .fromBinding)
+            #expect(floor.memoryWrite == .fromBinding)
+            #expect(floor.transports == .fromBinding)
+        }
+    }
+
+    @Test("main's floor is unbounded on every axis")
+    func mainFloorIsUnboundedOnEveryAxis() {
+        let floor = PrincipalFloor.floor(for: .main)
+        #expect(floor.credentials == .unbounded)
+        #expect(floor.memoryRead == .unbounded)
+        #expect(floor.memoryWrite == .unbounded)
+        #expect(floor.transports == .unbounded)
+    }
+
     // MARK: - Effective-allowlist resolution (Step 4)
 
     @Test("unbounded allows any tool")

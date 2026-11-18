@@ -194,9 +194,11 @@ struct IrisPaths: Sendable {
     var workspacesDir: URL { root.appendingPathComponent("workspaces") }
 
     /// `AccessProfileStore`'s `<id>.json` profiles and its identity→profile mapping file (#974 H3
-    /// Task 3). Top-level, not under `configDir`: the #961 UI is its only writer, and a host
-    /// `run_command` writing here is a protected write with its own warning (#974 Task 9b, not yet
-    /// wired — `protectedWriteDirs` below does not include it until that task lands).
+    /// Task 3). Top-level, not under `configDir`: the #961 UI is its only writer. Included in
+    /// `protectedWriteDirs` below from Group A itself (dev-2's #1201 review, finding 6): Task 5
+    /// makes the store live in production, and the store going live before Task 9b's dedicated
+    /// `approvalWarning` text lands must not mean an ordinary, auto-allowable write in the
+    /// meantime — a `write_file` here always asks regardless, same baseline as `config/`.
     var profilesDir: URL { root.appendingPathComponent("profiles") }
 
     /// The directories a write into is a grant, not a file edit. `PermissionManager` never
@@ -214,7 +216,7 @@ struct IrisPaths: Sendable {
     /// Session artifacts (#469 §7): content-addressed, written only by the harness.
     var exchangeDir: URL { root.appendingPathComponent("exchange") }
 
-    var protectedWriteDirs: [URL] { [configDir, pluginsDir, exchangeDir] }
+    var protectedWriteDirs: [URL] { [configDir, pluginsDir, exchangeDir, profilesDir] }
 
     /// The protected directories as a phrase for a refusal, from `protectedWriteDirs` itself so a text
     /// that names them cannot drift from the check that refuses (#889): "`config/`, `plugins/` or

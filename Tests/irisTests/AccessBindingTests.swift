@@ -10,10 +10,11 @@ struct AccessBindingTests {
         #expect(capped == binding)
     }
 
-    @Test("a full tool grant capped by the broker's fixed floor narrows to the broker's own set")
+    @Test("a full profile capped by the broker's H2 floor narrows every floor axis (planner's ruling, #1201 review finding 4)")
     func fullGrantCappedByBrokerFloorNarrows() {
         let full = AccessProfile(credentials: [AccountRef(type: "github", id: "iris-main")],
                                  memoryRead: .full, memoryWrite: .full,
+                                 transports: ["homelab-peer"],
                                  tools: .set(["run_command", "search_memory", "write_file"]))
         let binding = AccessBinding(profile: full, principal: .broker, isOwner: false)
         let capped = binding.capped(by: PrincipalFloor.floor(for: .broker))
@@ -21,22 +22,36 @@ struct AccessBindingTests {
             Issue.record("expected .set after capping")
             return
         }
-        #expect(allowed.isSubset(of: PrincipalFloor.brokerTools))
         #expect(allowed == ["search_memory"])
-        // Ruling (#974 Task 3): capped(by:) narrows only the axis PrincipalFloor actually carries
-        // (tools) — credentials/memory are not part of PrincipalFloor's shape (Task 1), so they
-        // pass through capped(by:) unchanged. A dedicated H2 broker profile with empty credentials
-        // is the resolver's job (Task 4/5), not a general property of capping by any floor.
-        #expect(!capped.profile.credentials.isEmpty)
+        // H2's full capability floor, not just tools: zero credentials, zero transports, no
+        // writes, owner-read memory (the floor's "fixed(.full)" ceiling, matched here since the
+        // profile was already .full).
+        #expect(capped.profile.credentials.isEmpty)
+        #expect(capped.profile.transports.isEmpty)
+        #expect(capped.profile.memoryWrite == .none)
+        #expect(capped.profile.memoryRead == .full)
     }
 
-    @Test("capping an owner binding by a non-main floor still narrows tools (sandboxOnly is not bypassed by isOwner)")
-    func ownerBindingCappedByNonMainFloorNarrowsTools() {
+    @Test("a profile below the floor's memory ceiling is not raised to it")
+    func memoryTierNeverRisesToTheFloorCeiling() {
+        let narrow = AccessProfile(memoryRead: .task)
+        let binding = AccessBinding(profile: narrow, principal: .broker, isOwner: false)
+        let capped = binding.capped(by: PrincipalFloor.floor(for: .broker))
+        // The broker's floor ceiling is .full, but capping only ever narrows — it must not raise
+        // a profile that already reads less than the ceiling.
+        #expect(capped.profile.memoryRead == .task)
+    }
+
+    @Test("capping an owner binding by a non-main floor still narrows every axis the floor caps (sandboxOnly is not bypassed by isOwner)")
+    func ownerBindingCappedByNonMainFloorNarrowsAxes() {
         let binding = AccessBinding(profile: .owner, principal: .subagent, isOwner: true)
         let capped = binding.capped(by: PrincipalFloor.floor(for: .subagent))
-        // .fromBinding defers to the binding's own grant, so owner's .allTools passes through —
-        // this is Invariant 1: a subagent on the owner binding is owner.
+        // .fromBinding defers to the binding's own grant on every axis for subagent/evaluator, so
+        // owner's full access passes through unchanged — this is Invariant 1: a subagent on the
+        // owner binding is owner.
         #expect(capped.profile.tools == .allTools)
+        #expect(capped.profile.memoryRead == .full)
+        #expect(capped.profile.memoryWrite == .full)
     }
 
     @Test("a fixed floor narrower than the profile's own set intersects, never widens")
@@ -51,5 +66,17 @@ struct AccessBindingTests {
         // search_memory is not in GuestToolset.allowedNames, so the intersection is empty — the
         // grant alone does not restore a tool the floor denies.
         #expect(allowed.isEmpty)
+    }
+
+    @Test("an mcpGuest floor denies credentials and transports and caps memory read to the least tier")
+    func mcpGuestFloorDeniesCredentialsAndTransports() {
+        let wide = AccessProfile(credentials: [AccountRef(type: "github", id: "x")],
+                                 memoryRead: .full, memoryWrite: .full, transports: ["peer-a"])
+        let binding = AccessBinding(profile: wide, principal: .mcpGuest, isOwner: false)
+        let capped = binding.capped(by: PrincipalFloor.floor(for: .mcpGuest))
+        #expect(capped.profile.credentials.isEmpty)
+        #expect(capped.profile.transports.isEmpty)
+        #expect(capped.profile.memoryWrite == .none)
+        #expect(capped.profile.memoryRead == .task)
     }
 }

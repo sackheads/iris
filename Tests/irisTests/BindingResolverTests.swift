@@ -48,6 +48,28 @@ struct BindingResolverTests {
         #expect(binding.profile == .owner)
     }
 
+    @Test("main can drop from owner into a real profile with set-valued axes (#1201 review finding 2)")
+    func mainCanDropFromOwnerIntoARealProfile() throws {
+        let (store, paths) = tempStore()
+        // Every set-valued axis non-empty — exactly the shape the review probe used, and exactly
+        // the shape isSubGrant(target, of: .owner) would previously refuse, since .owner's own
+        // credentials/transports/fsRoots/skills are empty by construction (Task 2), not "all".
+        let reviewer = AccessProfile(credentials: [AccountRef(type: "github", id: "iris-main")],
+                                     memoryRead: .shared, transports: ["homelab-peer"],
+                                     fsRoots: ["/tmp/work"], skills: ["web-researcher"],
+                                     tools: .set(["search_memory"]))
+        try write(reviewer, id: "reviewer", to: paths)
+
+        let result = BindingResolver.resolveBinding(principal: .main, identity: nil,
+                                                     requestedDrop: "reviewer", store: store)
+        guard case .bound(let binding) = result else {
+            Issue.record("expected .bound, got \(result)")
+            return
+        }
+        #expect(binding.profile == reviewer)
+        #expect(!binding.isOwner)
+    }
+
     @Test("a requested drop that is not a sub-grant of the resolved source is refused")
     func requestedDropNotASubGrantIsRefused() throws {
         let (store, paths) = tempStore()
@@ -154,6 +176,33 @@ struct BindingResolverTests {
         #expect(!binding.isOwner)
     }
 
+    @Test("a resolved binding is capped by its own floor immediately, not left to whatever reads it later (#1201 review finding 4)")
+    func resolvedBindingIsCappedByItsFloorAtResolutionTime() throws {
+        let (store, paths) = tempStore()
+        // The exact shape dev-2's probe used: a wide profile with a credential, full memory read
+        // and a tool outside the broker's fixed floor.
+        let wide = AccessProfile(credentials: [AccountRef(type: "github", id: "x")],
+                                 memoryRead: .full, tools: .set(["run_command", "search_memory"]))
+        try write(wide, id: "wide", to: paths)
+
+        let result = BindingResolver.resolveBinding(principal: .broker, persistedProfileId: "wide", store: store)
+        guard case .bound(let binding) = result else {
+            Issue.record("expected .bound, got \(result)")
+            return
+        }
+        guard case .set(let allowed) = binding.profile.tools else {
+            Issue.record("expected .set after capping")
+            return
+        }
+        // Tools narrow immediately to the broker's own floor — run_command is gone.
+        #expect(allowed == ["search_memory"])
+        // Per the planner's ruling (superseding this test's original comment): the floor is the
+        // H2 capability backstop, not just tools — a wide, arbitrary mapped profile's credentials
+        // are denied by the floor itself, regardless of what the mapped profile happens to grant.
+        #expect(binding.profile.credentials.isEmpty)
+        #expect(binding.profile.memoryRead == .full)
+    }
+
     // MARK: - isSubGrant
 
     @Test("isSubGrant is false when the target is narrower on four axes but wider on one (no majority rule)")
@@ -190,6 +239,71 @@ struct BindingResolverTests {
         let source = AccessProfile(fsRoots: [real.path])
         let target = AccessProfile(fsRoots: [link.path])
         #expect(BindingResolver.isSubGrant(target, of: source))
+    }
+
+    @Test("isSubGrant rejects a target whose FS root escapes the source's grant even after symlink resolution")
+    func isSubGrantRejectsAnEscapingFSRoot() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("iris-974-fs-escape-\(UUID().uuidString)")
+        let granted = base.appendingPathComponent("granted", isDirectory: true)
+        let outside = base.appendingPathComponent("outside", isDirectory: true)
+        let escapeLink = base.appendingPathComponent("escape")
+        try FileManager.default.createDirectory(at: granted, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: escapeLink, withDestinationURL: outside)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let source = AccessProfile(fsRoots: [granted.path])
+        // A symlink that LOOKS like it's under the grant but resolves outside it.
+        let target = AccessProfile(fsRoots: [escapeLink.path])
+        #expect(!BindingResolver.isSubGrant(target, of: source))
+    }
+
+    // Each test below holds every axis identical between source and target except the one named,
+    // which is strictly wider in target — pinning the guard mutation-check found unpinned
+    // (#1201 review, dev-2 finding 1: deleting any one of these five guards left all 13 original
+    // tests green).
+
+    private static func baseline(credentials: Set<AccountRef> = [AccountRef(type: "github", id: "a")],
+                                 memoryRead: MemoryTier = .shared, memoryWrite: MemoryTier = .shared,
+                                 transports: TransportGrant = ["peer-a"], fsRoots: FSGrant = ["/a"],
+                                 skills: SkillGrant = ["x"], tools: ToolGrant = .set(["search_memory"])) -> AccessProfile {
+        AccessProfile(credentials: credentials, memoryRead: memoryRead, memoryWrite: memoryWrite,
+                     transports: transports, fsRoots: fsRoots, skills: skills, tools: tools)
+    }
+
+    @Test("isSubGrant rejects a target wider only on credentials")
+    func isSubGrantRejectsWiderCredentials() {
+        let source = Self.baseline()
+        let target = Self.baseline(credentials: [AccountRef(type: "github", id: "a"), AccountRef(type: "google", id: "b")])
+        #expect(!BindingResolver.isSubGrant(target, of: source))
+    }
+
+    @Test("isSubGrant rejects a target wider only on memoryWrite")
+    func isSubGrantRejectsWiderMemoryWrite() {
+        let source = Self.baseline(memoryWrite: .task)
+        let target = Self.baseline(memoryWrite: .full)
+        #expect(!BindingResolver.isSubGrant(target, of: source))
+    }
+
+    @Test("isSubGrant rejects a target wider only on transports")
+    func isSubGrantRejectsWiderTransports() {
+        let source = Self.baseline()
+        let target = Self.baseline(transports: ["peer-a", "peer-b"])
+        #expect(!BindingResolver.isSubGrant(target, of: source))
+    }
+
+    @Test("isSubGrant rejects a target wider only on fsRoots")
+    func isSubGrantRejectsWiderFSRoots() {
+        let source = Self.baseline()
+        let target = Self.baseline(fsRoots: ["/a", "/b"])
+        #expect(!BindingResolver.isSubGrant(target, of: source))
+    }
+
+    @Test("isSubGrant rejects a target wider only on skills")
+    func isSubGrantRejectsWiderSkills() {
+        let source = Self.baseline()
+        let target = Self.baseline(skills: ["x", "y"])
+        #expect(!BindingResolver.isSubGrant(target, of: source))
     }
 
     @Test("isSubGrant: anything is a sub-grant of .allTools, but .allTools is never a sub-grant of a concrete set")
