@@ -114,6 +114,11 @@ struct IrisApp: App {
         // D6 decision 16: the snapshot at launch. Here and not in `AppState.init`, which a test
         // suite runs hundreds of times.
         AppState.shared.refreshLedgerAttention()
+        // #1184, #1191: asks GitHub whose token this is, off the launch path; the GitHub tools stay off
+        // until it names the configured login. Here, with the lock held, because it reads
+        // `ConfigManager.shared` (the guarded Keychain load): `IrisMain.run` runs before the launch
+        // gate decides, and a launch the gate refuses or parks must not touch the store (#463, #578).
+        GitHubIdentityMonitor.kickIfNeeded()
         AppState.shared.raiseMainWindow = { MainWindow.raise() }
         AppState.shared.openRunLogWindow = { RunLogWindow.open() }
         // D6 decision 8: only here, and only in a real `.app` bundle. The sink and will-finish share
