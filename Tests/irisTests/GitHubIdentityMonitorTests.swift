@@ -274,3 +274,116 @@ struct GitHubIdentityWriteWindowTests {
         }
     }
 }
+
+/// #1189: overlapping checks coalesce. `beginGitHubIdentityCheck` is the guard: one check runs at a
+/// time, so a burst of turns reading the gate (each calling `kickIfNeeded`) asks GitHub once.
+@Suite("GitHub identity gate: overlapping checks coalesce (#1189)", .timeLimit(.minutes(1)))
+struct GitHubIdentityInFlightTests {
+    private static let width = 64
+
+    private func configured() -> (ConfigManager, KeychainManager) {
+        let name = "iris-1189-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: name)!
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
+        keychain.replaceSecrets(["token": "ghp_TestToken1234567890abcdef"], service: KeychainManager.githubService)
+        let seed = ConfigManager(store: store, guardedSecrets: keychain)
+        seed.setGuardedBlob(.githubAllowedRepos, "[\"sackheads/iris\"]")
+        seed.setGuardedBlob(.githubLogin, GitHubProxyClient.loginBlob("acme-bot"))
+        return (ConfigManager(store: store, guardedSecrets: keychain), keychain)
+    }
+
+    /// Counts requests and holds each one until released, so every other caller overlaps it.
+    private final class Held: GitHubTransport, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _calls = 0
+        let started = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        var calls: Int { lock.withLock { _calls } }
+        private func hold() { release.wait() }
+        /// Sync, so the blocking wait is not in an async context.
+        func awaitStarted() { started.wait() }
+        func send(_ request: URLRequest, bearer: String) async throws -> (Data, HTTPURLResponse) {
+            lock.withLock { _calls += 1 }
+            started.signal()
+            hold()
+            return (try JSONSerialization.data(withJSONObject: ["login": "acme-bot"]),
+                    HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        }
+    }
+
+    private final class Tally: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _count = 0
+        var count: Int { lock.withLock { _count } }
+        func bump() { lock.withLock { _count += 1 } }
+    }
+
+    @Test("many threads begin at once and exactly one is let through")
+    func oneBeginWins() {
+        let (config, _) = configured()
+        let wins = Tally()
+        DispatchQueue.concurrentPerform(iterations: Self.width) { _ in
+            if config.beginGitHubIdentityCheck() != nil { wins.bump() }
+        }
+        #expect(wins.count == 1, "\(wins.count) checks began while one was in flight")
+    }
+
+    @Test("the slot is released by finishing, abandoning or invalidating, and then the next begin is let through")
+    func slotIsReleased() throws {
+        let (config, _) = configured()
+        let g1 = try #require(config.beginGitHubIdentityCheck())
+        #expect(config.beginGitHubIdentityCheck() == nil)
+        config.finishGitHubIdentityCheck(g1, .match)
+        let g2 = try #require(config.beginGitHubIdentityCheck())
+        #expect(config.beginGitHubIdentityCheck() == nil)
+        config.abandonGitHubIdentityCheck(g2)
+        let g3 = try #require(config.beginGitHubIdentityCheck())
+        #expect(config.beginGitHubIdentityCheck() == nil)
+        config.invalidateGitHubIdentity()
+        #expect(config.beginGitHubIdentityCheck() != nil)
+        _ = g3
+    }
+
+    @Test("a burst of kicks while one check is in flight sends one request, and the tools follow its answer")
+    func burstOfKicksAsksOnce() async throws {
+        let (config, keychain) = configured()
+        let held = Held()
+        let first = try #require(GitHubIdentityMonitor.kickIfNeeded(config: config, keychain: keychain, transport: held))
+        held.awaitStarted()
+        var tasks: [Task<Void, Never>] = []
+        for _ in 0..<Self.width {
+            if let t = GitHubIdentityMonitor.kickIfNeeded(config: config, keychain: keychain, transport: held) { tasks.append(t) }
+        }
+        for t in tasks { try await value(of: t, within: 20) }
+        #expect(held.calls == 1, "\(held.calls) requests overlapped the in-flight check")
+        #expect(!config.githubToolsConfigured, "still waiting on the one request")
+        held.release.signal()
+        try await value(of: first, within: 20)
+        #expect(held.calls == 1 && config.githubToolsConfigured)
+    }
+
+    @Test("concurrent verifies coalesce too: one asks, the rest return nothing")
+    func concurrentVerifiesCoalesce() async throws {
+        let (config, keychain) = configured()
+        let held = Held()
+        let results = await withTaskGroup(of: GitHubProxyClient.IdentityCheck?.self) { group in
+            group.addTask { await GitHubIdentityMonitor.verify(config: config, keychain: keychain, transport: held) }
+            // Wait for the first to reach the transport before the rest start.
+            await Task.detached { held.awaitStarted() }.value
+            for _ in 0..<Self.width {
+                group.addTask { await GitHubIdentityMonitor.verify(config: config, keychain: keychain, transport: held) }
+            }
+            var others: [GitHubProxyClient.IdentityCheck?] = []
+            var seen = 0
+            for await result in group {
+                seen += 1
+                if result == nil { others.append(result) }
+                if seen == Self.width { held.release.signal() }
+            }
+            return others
+        }
+        #expect(held.calls == 1, "\(held.calls) requests")
+        #expect(results.count == Self.width, "every overlapping caller got nothing back")
+        #expect(config.githubIdentity == .match)
+    }
+}
