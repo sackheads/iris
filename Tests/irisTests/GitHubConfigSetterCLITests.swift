@@ -249,7 +249,7 @@ struct GitHubConfigSetterCLITests {
         defer { teardown(store, name) }
         let result = GitHubConfigSetterCLI.setRepos(stdin: Data(entry.utf8), config: config)
         if GitHubProxyClient.isOwnerName(entry) {
-            #expect(result == .success("GitHub allowed repos saved: \(entry). Quit Iris before running this, and relaunch it after, or a running app can overwrite this change (#1167)."))
+            #expect(result == .success("GitHub allowed repos saved: \(entry). Relaunch Iris for it to take effect: a running app keeps what it read at launch."))
         } else if case .failure(.malformedRepo) = result {
             // refused for the entry, as the client would
         } else {
