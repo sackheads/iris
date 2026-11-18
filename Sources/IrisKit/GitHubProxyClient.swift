@@ -93,10 +93,12 @@ struct GitHubProxyClient {
     /// /reference/email-addresses-reference); every account created after that date -- which any
     /// account set up for this feature now is -- gets only the `<id>+<login>@...` form, so a commit
     /// using the bare form is not attributed at all. `accountId` comes from the same `GET /user`
-    /// call `verifyIdentity` already makes (`verifyIdentityWithAccountId`); nil only when there is
-    /// no verified match yet, in which case the bare form is used as a value that is at least
-    /// well-formed, though `shouldApply`/`githubToolsConfigured` keep git identity off until a
-    /// match exists, so this fallback is never actually written to a commit.
+    /// call `verifyIdentity` already makes (`verifyIdentityWithAccountId`); nil whenever there is no
+    /// verified match with a readable id, in which case the bare form is used as a value that is at
+    /// least well-formed. `GitIdentityEnvironment.shouldApply` gates specifically on `accountId !=
+    /// nil` (#1194 review, dev-2's finding), not a separate match flag, so this fallback is never
+    /// actually written to a commit: the one caller that writes a commit identity never calls this
+    /// with a nil id in the first place.
     static func commitIdentity(login: String, accountId: Int?) -> (name: String, email: String) {
         let email = accountId.map { "\($0)+\(login)@users.noreply.github.com" } ?? "\(login)@users.noreply.github.com"
         return (login, email)
@@ -206,9 +208,16 @@ extension GitHubProxyClient {
             }
             guard actual.lowercased() == expectedLogin.lowercased() else { return (.mismatch(actual: actual), nil) }
             // A match with no readable id is a GitHub response shape surprise, not a reason to call
-            // it unverified or a mismatch: the login matched, so the check itself stands; only the
-            // noreply address falls back to the bare form (`commitIdentity`'s own fallback).
-            return (.match, json?["id"] as? Int)
+            // it unverified or a mismatch: the login matched, so the check itself stands; git
+            // identity is simply left off until a real id is seen (`shouldApply`'s own gate on
+            // `accountId != nil`, #1194 review). The `!(idValue is Bool)` check comes first because
+            // `as? Int` on a JSON boolean bridges it through `NSNumber` to `1`/`0` (dev-2's finding)
+            // -- checked before the cast, not after, since a bridged `true` is already `1` and
+            // would pass a bare `> 0` check. `id > 0` on top of that is cheap insurance against a
+            // zero or negative value being mistaken for a real GitHub user id.
+            let idValue = json?["id"]
+            let rawId = (idValue is Bool) ? nil : idValue as? Int
+            return (.match, (rawId.map { $0 > 0 } ?? false) ? rawId : nil)
         } catch is CancellationError {
             return (.unverified("the check was cancelled"), nil)
         } catch {

@@ -66,8 +66,16 @@ enum GitIdentityEnvironment {
     /// ruling, 2026-11-15 -- the turn not being guest-origin. Pulled out as its own pure function so
     /// the decision is directly unit-testable without touching `ConfigManager.shared` or a real
     /// conversation. An unset login is the same as no token: no behaviour change at all.
-    static func shouldApply(hasToken: Bool, login: String?, identityMatches: Bool, repos: [String], guestOrigin: Bool) -> Bool {
-        hasToken && login != nil && identityMatches && !repos.isEmpty && !guestOrigin
+    ///
+    /// Takes `accountId` itself, not a separate `identityMatches` bool (#1194 review, dev-2's
+    /// finding): the caller reads `ConfigManager.shared.githubAccountId` exactly once and passes
+    /// that same value both here and to `ensureFragment`, so the two can never disagree about
+    /// which state they saw across two lock acquisitions. `accountId == nil` already covers "no
+    /// match" (`ConfigManager.githubAccountId`'s own getter is nil whenever `githubIdentity` isn't
+    /// `.match`), so this also means a match GitHub answered with no readable id leaves git
+    /// identity off rather than writing the unattributed bare noreply form.
+    static func shouldApply(hasToken: Bool, login: String?, accountId: Int?, repos: [String], guestOrigin: Bool) -> Bool {
+        hasToken && login != nil && accountId != nil && !repos.isEmpty && !guestOrigin
     }
 
     /// The identity's name and email come from the login (`GitHubProxyClient.commitIdentity`): GitHub's
