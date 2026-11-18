@@ -488,6 +488,16 @@ actor IrisEngine {
     /// conversation's tier, never this).
     nonisolated let modelTier: ModelTier
     let principal: Principal
+    /// #974 R2: this run's resolved access binding, built at the door before the run starts —
+    /// non-optional, since a run with no binding must never exist (H3), not resolved lazily per
+    /// turn. Not yet consulted by any enforcement point (Group B's seam closures do that); Group
+    /// A's job is only that every engine carries one. A caller that does not pass one explicitly
+    /// gets today's unchanged, unenforced shape (owner for `.main`, an unmarked-owner `.owner`
+    /// profile otherwise) — every existing call site keeps its current behavior exactly.
+    /// `SubagentManager`/`GoalEvaluator` are the two production callers that now pass a real,
+    /// capped one (Task 5); any other non-main caller (the shipped, not-yet-authenticated guest
+    /// path above all) is Task 16's retrofit, not this one's.
+    let binding: AccessBinding
     let roleLabel: String?
     /// The external MCP client a `.mcpGuest` engine serves; nil for every other principal (#1066).
     nonisolated let guestClientId: String?
@@ -616,10 +626,12 @@ actor IrisEngine {
          mutatingJobsAvailable: @escaping @Sendable () -> Bool = { SandboxPolicy.mutatingJobCanRun() },
          skillCheckWillClaim: (@Sendable (UUID) async -> Void)? = nil,
          guestClientId: String? = nil,
-         githubToolsEnabled: Bool? = nil) {
+         githubToolsEnabled: Bool? = nil,
+         binding: AccessBinding? = nil) {
         self.githubToolsOverride = githubToolsEnabled
         self.state = state
         self.guestClientId = guestClientId
+        self.binding = binding ?? AccessBinding(profile: .owner, principal: principal, isOwner: principal == .main)
         self.mutatingJobsAvailable = mutatingJobsAvailable
         self.skillCheckWillClaim = skillCheckWillClaim
         self.subagentConfig = subagentConfig
@@ -5257,6 +5269,25 @@ actor IrisEngine {
                    factStore: factStore, protectionEnabled: protectionEnabled, memory: memory, guestClientId: clientId)
     }
 
+    /// #974 Task 5: resolves a binding from an authenticated identity before the engine is even
+    /// constructed, refusing outright (nil) rather than falling back to owner (H3) — there is no
+    /// "refused engine" state `binding`, a non-optional stored property, can represent. This is
+    /// the mechanism Task 16 wires the shipped guest path onto once #965 supplies a real
+    /// `(transport, issuer, id)` identity; `makeGuestEngine` above is untouched because it has no
+    /// identity to resolve against today (the F5 gap Task 16 names), and wiring refusal there now
+    /// would reject every existing, unauthenticated guest connection with nothing to map it to.
+    static func makeBoundEngine(state: AppState, principal: Principal, identity: IdentityKey?,
+                                requestedDrop: String? = nil, store: AccessProfileStore = AccessProfileStore(paths: .default),
+                                tier: ModelTier = .easy, roleLabel: String? = nil,
+                                client: any LLMClientProtocol = LLMClient(), guestClientId: String? = nil) -> IrisEngine? {
+        guard case .bound(let binding) = BindingResolver.resolveBinding(principal: principal, identity: identity,
+                                                                        requestedDrop: requestedDrop, store: store) else {
+            return nil
+        }
+        return IrisEngine(state: state, tier: tier, principal: principal, roleLabel: roleLabel, client: client,
+                          guestClientId: guestClientId, binding: binding)
+    }
+
     /// #1066: the guest's declared tools: exactly its floor.
     nonisolated static func guestToolDeclarations() -> [FunctionDeclaration] {
         [GuestToolset.listSessions, GuestToolset.sendToSession]
@@ -6850,7 +6881,7 @@ actor IrisEngine {
             if let appState = self.state {
                 if isBackground {
                     Task {
-                        let outcome = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, background: true, client: subagentClient, route: route, routedClient: routed, appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig, repromptDelay: self.repromptDelay)
+                        let outcome = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, background: true, client: subagentClient, route: route, routedClient: routed, appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig, repromptDelay: self.repromptDelay, parentBinding: self.binding)
                         let event = "Background subagent result:\n\(outcome.rendered)"
                         // Routed on which Stop the user pressed, not on the status (#236): a Stop
                         // accepted just after goal_complete still reads completed. The parent's own
@@ -6864,7 +6895,7 @@ actor IrisEngine {
                     }
                     result = "Subagent '\(role)' spawned in the background. You will receive a System Event when it finishes. If the user stops this conversation, the subagent is stopped too and its result appears only in the transcript, with no System Event."
                 } else {
-                    result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, route: route, routedClient: routed, appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig, repromptDelay: self.repromptDelay).rendered
+                    result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, route: route, routedClient: routed, appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig, repromptDelay: self.repromptDelay, parentBinding: self.binding).rendered
                 }
             } else {
                 result = "Error: AppState not available for subagent execution."
@@ -7037,7 +7068,7 @@ actor IrisEngine {
                 role: role, task: task, effort: effort, parentConversationId: conversationId,
                 unit: DelegatedUnit(contract: unitContract, grade: false), client: self.client,
                 appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig,
-                repromptDelay: self.repromptDelay)
+                repromptDelay: self.repromptDelay, parentBinding: self.binding)
 
             // Only a `.completed` subagent reaches the checkpoint — it is the run that claimed the
             // milestone is done. Anything else claimed nothing: hand the outcome back to the loop
