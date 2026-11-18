@@ -27,12 +27,36 @@ final class AccessProfileStore: Sendable {
         profilesDir = paths.profilesDir
     }
 
+    /// Collides with this store's own reserved files, not a profile id a UI writer would ever
+    /// pick — `BindingResolver` already bars `owner` itself (H3), but `mappings` is barred here
+    /// too (dev-2's review): `profile(id: "mappings")` would otherwise try to decode the mapping
+    /// array as an `AccessProfile`, which fails harmlessly today only because the shapes differ —
+    /// never rely on a decode mismatch as the reason a reserved name is safe.
+    private static let reservedIds: Set<String> = ["owner", "mappings"]
+
+    /// `requestedDrop` and a persisted `accessProfileId` both reach here, and both are
+    /// model-reachable strings (#1201 review finding 1 / dev-2 finding 2): without this,
+    /// `"../outside"` joined straight into `profilesDir` reads any JSON file on disk the process
+    /// can see, decoding as a profile with every omitted axis defaulting wide open. An id outside
+    /// this allowlist (empty, containing `/`, `\`, any `.`, a NUL, or a reserved name) is simply
+    /// not a profile — `nil`, same as one that does not exist. The charset excludes `.` entirely,
+    /// not just a leading one, so `..` can never appear anywhere in the id.
+    private static func isValidProfileId(_ id: String) -> Bool {
+        !id.isEmpty && !reservedIds.contains(id) && id.allSatisfy { char in
+            char.isASCII && (char.isLetter || char.isNumber || char == "_" || char == "-")
+        }
+    }
+
     func profile(id: String) -> AccessProfile? {
+        guard Self.isValidProfileId(id) else { return nil }
         let url = profilesDir.appendingPathComponent("\(id).json")
         guard let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(AccessProfile.self, from: data)
     }
 
+    /// A duplicate `(transport, issuer, id)` entry is ambiguous, not last-wins (#1201 review,
+    /// non-blocking note taken as a fix): an identity with two conflicting mapped profiles resolves
+    /// to neither, which is the fail-closed answer, consistent with everything else here.
     func allMappings() -> [IdentityKey: String] {
         let url = profilesDir.appendingPathComponent("mappings.json")
         guard let data = try? Data(contentsOf: url),
@@ -40,8 +64,16 @@ final class AccessProfileStore: Sendable {
             return [:]
         }
         var result: [IdentityKey: String] = [:]
+        var ambiguous: Set<IdentityKey> = []
         for entry in entries {
-            result[IdentityKey(transport: entry.transport, issuer: entry.issuer, id: entry.id)] = entry.profileId
+            let key = IdentityKey(transport: entry.transport, issuer: entry.issuer, id: entry.id)
+            guard !ambiguous.contains(key) else { continue }
+            if result[key] != nil {
+                ambiguous.insert(key)
+                result.removeValue(forKey: key)
+                continue
+            }
+            result[key] = entry.profileId
         }
         return result
     }

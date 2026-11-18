@@ -9,7 +9,9 @@ public enum SandboxPref: String, Codable, Sendable {
 /// Who is running: the user-facing main agent, an isolated subagent, a goal-drift evaluator, an
 /// external MCP guest's own confined session (#1066), or the disclosure broker (#974 H2, an
 /// owner-memory-read-only, zero-acting-tools run). A guest runs the two-tool `GuestToolset` floor
-/// and nothing else; it is never `.main`, and no `!= .main` site may treat it as a subagent.
+/// and nothing else; the broker's floor is `PrincipalFloor.brokerTools` and nothing else (today
+/// unreachable — nothing constructs a `.broker` engine yet, #1201 review). Neither is ever `.main`,
+/// and no `!= .main` site may treat either as a subagent.
 public enum Principal: Sendable {
     case main
     case subagent
