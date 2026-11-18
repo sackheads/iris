@@ -135,6 +135,60 @@ struct BindingResolverTests {
         }
     }
 
+    @Test("the no-drop door path for mcpGuest caps the resolved profile by the guest floor (dev-2 RE-REVIEW finding 1)")
+    func doorPathNoDropCapsForMcpGuest() throws {
+        let (store, paths) = tempStore()
+        let identity = IdentityKey(transport: "mcp", issuer: "guest-app", id: "g1")
+        let wide = AccessProfile(credentials: [AccountRef(type: "github", id: "x")],
+                                 memoryRead: .full, memoryWrite: .full, transports: ["peer-a"],
+                                 tools: .set(["run_command", "send_to_session"]))
+        try write(wide, id: "guest-profile", to: paths)
+        try writeMappings([(identity, "guest-profile")], to: paths)
+
+        let result = BindingResolver.resolveBinding(principal: .mcpGuest, identity: identity,
+                                                     requestedDrop: nil, store: store)
+        guard case .bound(let binding) = result else {
+            Issue.record("expected .bound, got \(result)")
+            return
+        }
+        #expect(binding.profile.credentials.isEmpty)
+        #expect(binding.profile.transports.isEmpty)
+        #expect(binding.profile.memoryWrite == .none)
+        #expect(binding.profile.memoryRead == .task)
+        guard case .set(let allowed) = binding.profile.tools else {
+            Issue.record("expected .set after capping")
+            return
+        }
+        #expect(allowed == ["send_to_session"])
+    }
+
+    @Test("the requested-drop door path for broker caps the resolved profile by the broker floor (dev-2 RE-REVIEW finding 1)")
+    func doorPathDropCapsForBroker() throws {
+        let (store, paths) = tempStore()
+        let identity = IdentityKey(transport: "a2a", issuer: "homelab", id: "peer-1")
+        // A wide source that genuinely narrows into "drop" on the isSubGrant axes, so the drop
+        // itself succeeds — the floor cap is what must additionally narrow credentials/transports.
+        let source = AccessProfile(credentials: [AccountRef(type: "github", id: "x")],
+                                   memoryRead: .full, memoryWrite: .full, transports: ["peer-a"],
+                                   tools: .set(["run_command", "search_memory"]))
+        try write(source, id: "homelab-peer", to: paths)
+        let drop = AccessProfile(credentials: [AccountRef(type: "github", id: "x")],
+                                 memoryRead: .full, memoryWrite: .full, transports: ["peer-a"],
+                                 tools: .set(["search_memory"]))
+        try write(drop, id: "broker-drop", to: paths)
+        try writeMappings([(identity, "homelab-peer")], to: paths)
+
+        let result = BindingResolver.resolveBinding(principal: .broker, identity: identity,
+                                                     requestedDrop: "broker-drop", store: store)
+        guard case .bound(let binding) = result else {
+            Issue.record("expected .bound, got \(result)")
+            return
+        }
+        #expect(binding.profile.credentials.isEmpty)
+        #expect(binding.profile.transports.isEmpty)
+        #expect(binding.profile.memoryWrite == .none)
+    }
+
     // MARK: - On-load (persisted) path
 
     @Test("a nil persisted id binds main to owner, refuses every other principal")
