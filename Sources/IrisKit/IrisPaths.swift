@@ -193,6 +193,12 @@ struct IrisPaths: Sendable {
     /// uses to decide what it may ever list or delete.
     var workspacesDir: URL { root.appendingPathComponent("workspaces") }
 
+    /// `AccessProfileStore`'s `<id>.json` profiles and its identity→profile mapping file (#974 H3
+    /// Task 3). Top-level, not under `configDir`: the #961 UI is its only writer, and a host
+    /// `run_command` writing here is a protected write with its own warning (#974 Task 9b, not yet
+    /// wired — `protectedWriteDirs` below does not include it until that task lands).
+    var profilesDir: URL { root.appendingPathComponent("profiles") }
+
     /// The directories a write into is a grant, not a file edit. `PermissionManager` never
     /// auto-allows one (#187):
     ///
