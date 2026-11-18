@@ -12,17 +12,44 @@ struct GuestOriginMemoryTests {
     nonisolated static let reads = ["search_memory", "search_conversations", "read_conversation"]
     nonisolated static let writes = ["save_fact", "manage_fact", "update_memory", "update_user_profile", "update_soul",
                          "create_skill", "update_skill", "delete_skill"]
-    nonisolated static let all = reads + writes
+    nonisolated static let google = ["gmail_list_unread", "gmail_send_email", "google_calendar_list_events",
+                                     "google_calendar_create_event", "google_docs_get", "google_drive_search",
+                                     "google_sheets_get", "google_tasks_list_tasklists", "google_tasks_list_tasks",
+                                     "google_tasks_create_task"]
+    nonisolated static let jobReads = ["list_jobs", "get_job_run"]
+    nonisolated static let memory = reads + writes
+    /// Everything a guest-origin turn is neither offered nor allowed to run.
+    nonisolated static let all = memory + google + jobReads
 
     // MARK: the one list
 
-    @Test("the set is exactly these eleven names: a tool added or dropped fails here and is decided on purpose")
+    @Test("the sets are exactly these names: a tool added or dropped fails here and is decided on purpose")
     func setIsComplete() {
         #expect(ToolExecutor.memoryReadTools == Set(Self.reads))
         #expect(ToolExecutor.memoryWriteTools == Set(Self.writes))
-        #expect(ToolExecutor.memoryTools == Set(Self.all))
-        #expect(!ToolExecutor.memoryTools.isEmpty)
+        #expect(ToolExecutor.memoryTools == Set(Self.memory))
+        #expect(ToolExecutor.googleWorkspaceTools == Set(Self.google))
+        #expect(ToolExecutor.ownerJobReadTools == Set(Self.jobReads))
+        #expect(ToolExecutor.guestOriginDeniedTools == Set(Self.all))
+        #expect(!ToolExecutor.guestOriginDeniedTools.isEmpty)
         #expect(ToolExecutor.memoryReadTools.isDisjoint(with: ToolExecutor.memoryWriteTools))
+    }
+
+    @Test("every Google tool the managers declare is in the set, so a new Google tool cannot be forgotten")
+    func googleToolsAreAllCovered() async {
+        let declared = Set((await GoogleTasksManager.shared.getTools() + GoogleWorkspaceManager.shared.getTools()).map(\.name))
+        #expect(!declared.isEmpty)
+        #expect(declared.isSubset(of: ToolExecutor.googleWorkspaceTools),
+                "\(declared.subtracting(ToolExecutor.googleWorkspaceTools).sorted())")
+        #expect(ToolExecutor.googleWorkspaceTools.isSubset(of: declared),
+                "\(ToolExecutor.googleWorkspaceTools.subtracting(declared).sorted())")
+    }
+
+    @Test("every job read the pinned conversation is offered is in the set")
+    func jobReadsAreAllCovered() {
+        let declared = Set(IrisEngine.jobToolDeclarations(isPinned: true).map(\.name))
+        for name in ["list_jobs", "get_job_run", "search_conversations", "read_conversation"] { #expect(declared.contains(name), Comment(rawValue: name)) }
+        #expect(ToolExecutor.ownerJobReadTools.isSubset(of: declared))
     }
 
     @Test("every standing-context write the hold covers (#813) is in the set, so a new held tool cannot be forgotten")
@@ -36,7 +63,8 @@ struct GuestOriginMemoryTests {
         let declared = IrisEngine.allDeclaredToolNames
             .union(IrisEngine.jobToolDeclarations(isPinned: true).map(\.name))
             .union(["create_skill", "update_skill", "delete_skill"])
-        #expect(ToolExecutor.memoryTools.isSubset(of: declared), "\(ToolExecutor.memoryTools.subtracting(declared).sorted())")
+            .union(ToolExecutor.googleWorkspaceTools)
+        #expect(ToolExecutor.guestOriginDeniedTools.isSubset(of: declared), "\(ToolExecutor.guestOriginDeniedTools.subtracting(declared).sorted())")
     }
 
     @Test("reflect stays out: its handler returns a fixed line and stores nothing")
@@ -52,7 +80,7 @@ struct GuestOriginMemoryTests {
         }
     }
 
-    @Test("hardStrip drops each memory tool on a guest-origin turn, and keeps it on any other", arguments: GuestOriginMemoryTests.all)
+    @Test("hardStrip drops each owner-data tool on a guest-origin turn, and keeps it on any other", arguments: GuestOriginMemoryTests.all)
     func hardStripByTool(_ name: String) {
         let tools = declarations([name])
         let stripped = Set(IrisEngine.hardStrip(tools, isUnattended: false, principal: .main, guestOrigin: true).map(\.name))
@@ -64,9 +92,9 @@ struct GuestOriginMemoryTests {
 
     @Test("hardStrip strips the whole set at once")
     func hardStripWholeSet() {
-        let stripped = Set(IrisEngine.hardStrip(declarations(Array(ToolExecutor.memoryTools)), isUnattended: false,
+        let stripped = Set(IrisEngine.hardStrip(declarations(Array(ToolExecutor.guestOriginDeniedTools)), isUnattended: false,
                                                 principal: .main, guestOrigin: true).map(\.name))
-        #expect(stripped.isDisjoint(with: ToolExecutor.memoryTools))
+        #expect(stripped.isDisjoint(with: ToolExecutor.guestOriginDeniedTools))
     }
 
     /// The tool names a real turn declares to the model.
@@ -83,29 +111,42 @@ struct GuestOriginMemoryTests {
         return Set(client.requests.first?.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? [])
     }
 
-    @Test("a real attended turn offers the memory tools; the same turn a guest started offers none of them",
+    @Test("a real attended turn offers the owner-data tools; the same turn a guest started offers none of them",
           arguments: [false, true])
     func realTurnDeclaration(_ pinned: Bool) async {
         let control = await declared(guestOrigin: false, pinned: pinned)
         let guest = await declared(guestOrigin: true, pinned: pinned)
-        let offered = control.intersection(ToolExecutor.memoryTools)
+        let offered = control.intersection(ToolExecutor.guestOriginDeniedTools)
         // The control must actually offer them, or "none offered" proves nothing.
         // `manage_fact` is declared only once the fact store has something to manage, so a fresh turn does
         // not offer it; it is covered by the pure strip and dispatch tests above and below.
         #expect(offered.isSuperset(of: Set(Self.writes).subtracting(["manage_fact"]).union(["search_memory"])), "\(offered.sorted())")
-        if pinned { #expect(offered.isSuperset(of: ["search_conversations", "read_conversation"]), "\(offered.sorted())") }
-        #expect(guest.intersection(ToolExecutor.memoryTools).isEmpty, "\(guest.intersection(ToolExecutor.memoryTools).sorted())")
+        if pinned {
+            #expect(offered.isSuperset(of: ["search_conversations", "read_conversation", "list_jobs", "get_job_run"]), "\(offered.sorted())")
+        }
+        #expect(guest.intersection(ToolExecutor.guestOriginDeniedTools).isEmpty,
+                "\(guest.intersection(ToolExecutor.guestOriginDeniedTools).sorted())")
         #expect(guest.contains("run_command"), "the guest-origin turn did declare tools")
+    }
+
+    @Test("the Google tools, which a real turn offers only with an account connected, are stripped from a guest-origin turn")
+    func googleToolsAreStripped() async {
+        let all = await ToolExecutor().getTools(workspaceToolsEnabled: true, githubToolsEnabled: false)
+        let kept = Set(IrisEngine.hardStrip(all, isUnattended: false, principal: .main).map(\.name))
+        let stripped = Set(IrisEngine.hardStrip(all, isUnattended: false, principal: .main, guestOrigin: true).map(\.name))
+        #expect(kept.isSuperset(of: ToolExecutor.googleWorkspaceTools), "control: an ordinary turn offers them")
+        #expect(stripped.isDisjoint(with: ToolExecutor.googleWorkspaceTools))
+        #expect(stripped.contains("run_command"))
     }
 
     // MARK: dispatch
 
     @Test("the dispatcher refuses each memory tool on a guest-origin turn, and no other tool", arguments: GuestOriginMemoryTests.all)
     func dispatchRefusalByTool(_ name: String) {
-        #expect(IrisEngine.memoryDispatchRefusal(name, guestOrigin: true) == IrisEngine.memoryGuestOriginRefusal)
-        #expect(IrisEngine.memoryDispatchRefusal(name, guestOrigin: false) == nil)
-        #expect(IrisEngine.memoryDispatchRefusal("run_command", guestOrigin: true) == nil)
-        #expect(IrisEngine.memoryDispatchRefusal("reflect", guestOrigin: true) == nil)
+        #expect(IrisEngine.guestOriginDispatchRefusal(name, guestOrigin: true) == IrisEngine.guestOriginDataRefusal)
+        #expect(IrisEngine.guestOriginDispatchRefusal(name, guestOrigin: false) == nil)
+        #expect(IrisEngine.guestOriginDispatchRefusal("run_command", guestOrigin: true) == nil)
+        #expect(IrisEngine.guestOriginDispatchRefusal("reflect", guestOrigin: true) == nil)
     }
 
     enum Origin { case none, conversation, delegationRoot }
@@ -156,12 +197,12 @@ struct GuestOriginMemoryTests {
           arguments: GuestOriginMemoryTests.all, [Origin.conversation, .delegationRoot])
     func forgedCallRefused(_ name: String, _ origin: Origin) async throws {
         let result = try await dispatchResult(for: name, origin: origin)
-        #expect(result.contains(IrisEngine.memoryGuestOriginRefusal), "\(name): \(result)")
+        #expect(result.contains(IrisEngine.guestOriginDataRefusal), "\(name): \(result)")
     }
 
     @Test("control: the same call from an unmarked attended turn is not refused as guest-origin", arguments: GuestOriginMemoryTests.all)
     func unmarkedTurnIsNotRefused(_ name: String) async throws {
         let result = try await dispatchResult(for: name, origin: .none)
-        #expect(!result.contains(IrisEngine.memoryGuestOriginRefusal), "\(name): \(result)")
+        #expect(!result.contains(IrisEngine.guestOriginDataRefusal), "\(name): \(result)")
     }
 }

@@ -255,7 +255,7 @@ struct ToolExecutor {
     /// started or steered is `.main` and attended, but its words are a guest's: these read the
     /// owner's facts and every other conversation with no approval step, so the turn is not offered
     /// them (`IrisEngine.hardStrip`) and a call that arrives anyway is refused
-    /// (`IrisEngine.memoryDispatchRefusal`). One list for the strip, the refusal and the tests, so a
+    /// (`IrisEngine.guestOriginDispatchRefusal`, over `guestOriginDeniedTools`). One list for the strip, the refusal and the tests, so a
     /// tool added here is covered everywhere and a tool left out fails `GuestOriginMemoryTests`.
     nonisolated static let memoryReadTools: Set<String> = ["search_memory", "search_conversations", "read_conversation"]
 
@@ -270,6 +270,27 @@ struct ToolExecutor {
     ]
 
     nonisolated static let memoryTools: Set<String> = memoryReadTools.union(memoryWriteTools)
+
+    /// Every Google tool (#1195, dev-3's review): the owner's mail, Drive, calendar and tasks. The
+    /// reads reach `GoogleWorkspaceManager`/`GoogleTasksManager` with no approval step; the three
+    /// writes are held only by the outbound gate (#812) once the conversation has read untrusted
+    /// text, and a guest's arrival marks it. A turn a guest started has no business in the owner's
+    /// account, so none is offered or run on it.
+    nonisolated static let googleWorkspaceTools: Set<String> = [
+        "gmail_list_unread", "gmail_send_email", "google_calendar_list_events", "google_calendar_create_event",
+        "google_docs_get", "google_drive_search", "google_sheets_get",
+        "google_tasks_list_tasklists", "google_tasks_list_tasks", "google_tasks_create_task",
+    ]
+
+    /// The pinned Iris conversation's reads of the owner's jobs and their run output (#1195).
+    nonisolated static let ownerJobReadTools: Set<String> = ["list_jobs", "get_job_run"]
+
+    /// What a turn a guest's message started or steered is neither offered nor allowed to run
+    /// (#1195): the owner's memory, Google account and job history. One list for `hardStrip`, the
+    /// dispatcher and the tests. Not here, and still the spine's job (a positive allowlist for the
+    /// recipient turn, #974): MCP tools the user added, and the tools that already ask the person.
+    nonisolated static let guestOriginDeniedTools: Set<String> =
+        memoryTools.union(googleWorkspaceTools).union(ownerJobReadTools)
 
     nonisolated static let githubToolDeclarations: [FunctionDeclaration] = [
         FunctionDeclaration(
