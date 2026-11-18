@@ -842,6 +842,15 @@ final class ConversationStore: Sendable {
                 t.add(column: "vibecopGuidance", .text)
             }
         }
+        // #974 R2: the AccessProfile id this conversation resolved to. NULL/absent is "no
+        // persisted profile" — decoded by `Conversation`'s own Invariant-1 `decodeIfPresent`, but
+        // that alone is not enough: the store is columnar, so the column must exist too, or the
+        // field silently vanishes on load regardless of what the Codable init does.
+        m.registerMigration("v41_access_profile_id") { db in
+            try db.alter(table: "conversations") { t in
+                t.add(column: "accessProfileId", .text)
+            }
+        }
         return m
     }
 
@@ -1080,14 +1089,14 @@ final class ConversationStore: Sendable {
                     isBackground = ?, isPinned = ?, sessionCard = ?, jobProfile = ?, sandboxGrant = ?,
                     hasUnattendedInput = ?, hasUntrustedToolOutput = ?, outboundAllowedTools = ?, jobOutboundExemptions = ?, prefixMismatchBehavior = ?, role = ?, homeWritableOptIn = ?,
                     agentProfile = ?, agentProfileSnapshot = ?,
-                    loop = ?, modelTier = ?, lastTouchedAt = ?, archivedAutomaticallyAt = ?, inSessions = ?, additionalRoots = ?, vibecopGuidance = ?
+                    loop = ?, modelTier = ?, lastTouchedAt = ?, archivedAutomaticallyAt = ?, inSessions = ?, additionalRoots = ?, vibecopGuidance = ?, accessProfileId = ?
                 WHERE id = ?
                 """, arguments: [c.title, touched, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
                                  evaluation, report, c.isArchived, c.isBackground, c.isPinned, card,
                                  c.jobProfile?.rawValue, grant, c.hasUnattendedInput, c.hasUntrustedToolOutput, outboundAllowed, jobExemptions, c.prefixMismatchBehavior?.rawValue,
                                  c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue,
-                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, additionalRoots, c.vibecopGuidance, c.id.uuidString])
+                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, additionalRoots, c.vibecopGuidance, c.accessProfileId, c.id.uuidString])
         } else {
             let position = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(position), 0) FROM conversations") ?? 0) + 1
             try db.execute(sql: """
@@ -1096,14 +1105,14 @@ final class ConversationStore: Sendable {
                     subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived,
                     isBackground, isPinned, sessionCard, jobProfile, sandboxGrant, hasUnattendedInput,
                     hasUntrustedToolOutput, outboundAllowedTools, jobOutboundExemptions, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier,
-                    lastTouchedAt, archivedAutomaticallyAt, inSessions, additionalRoots, vibecopGuidance)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    lastTouchedAt, archivedAutomaticallyAt, inSessions, additionalRoots, vibecopGuidance, accessProfileId)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [c.id.uuidString, position, c.title, now, touched, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
                                  tokenUsage, contract, result, history, evaluation, report, c.isArchived,
                                  c.isBackground, c.isPinned, card, c.jobProfile?.rawValue, grant, c.hasUnattendedInput,
                                  c.hasUntrustedToolOutput, outboundAllowed, jobExemptions, c.prefixMismatchBehavior?.rawValue, c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue,
-                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, additionalRoots, c.vibecopGuidance])
+                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, additionalRoots, c.vibecopGuidance, c.accessProfileId])
         }
     }
 
@@ -1290,6 +1299,10 @@ final class ConversationStore: Sendable {
                 let additionalRoots = supplementary("additionalRoots")
                 // #1005: an unreadable value is none (the supplementary read records the loss).
                 let vibecopGuidance = supplementary("vibecopGuidance")
+                // #974: an unreadable id is none, the same soft-loss shape as above — NOT a
+                // reason to decide anything about owner here; `BindingResolver` is what turns a
+                // nil or a dangling id into an actual refusal or bind.
+                let accessProfileId = supplementary("accessProfileId")
                 let prefixMismatch = supplementary("prefixMismatchBehavior")
                 let checkpointHistory = supplementary("checkpointHistory")
                 let lastGoalEvaluation = supplementary("lastGoalEvaluation")
@@ -1439,6 +1452,7 @@ final class ConversationStore: Sendable {
                     catch { localSoftLosses.append(("outboundAllowedTools", "\(error)")) }
                 }
                 c.vibecopGuidance = vibecopGuidance
+                c.accessProfileId = accessProfileId
                 // #962: an unreadable list is none, same fail-safe shape as outboundAllowedTools above.
                 if let s = additionalRoots {
                     do { c.additionalRoots = try decoder.decode([String].self, from: Data(s.utf8)) }

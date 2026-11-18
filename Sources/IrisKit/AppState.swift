@@ -490,6 +490,13 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// a plain chat is never auto-archived. Never cleared.
     var inSessions: Bool = false
 
+    /// #974 R2: the `AccessProfile` id this conversation resolved to, if any — so a durable/named
+    /// session keeps its identity across a reload. `nil` means "no persisted profile", which is
+    /// owner ONLY for the `.main` principal (`BindingResolver`'s on-load path); it is never a
+    /// shorthand for owner on its own, and a non-nil id naming a profile that no longer exists
+    /// resolves to a refusal, not a silent promotion to owner (H3/C8). Never set by a tool.
+    var accessProfileId: String?
+
     init(id: UUID = UUID(), title: String, messages: [ChatMessage] = [], workspacePath: String? = nil, history: [Content] = [], tokenUsage: TokenUsage = TokenUsage(), activeGoal: String? = nil, messageCountSinceReflection: Int = 0, goalContract: GoalContract? = nil) {
         self.id = id
         self.title = title
@@ -503,7 +510,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, hasUntrustedToolOutput, outboundAllowedTools, jobOutboundExemptions, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier, lastTouchedAt, archivedAutomaticallyAt, inSessions, additionalRoots, vibecopGuidance
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, hasUntrustedToolOutput, outboundAllowedTools, jobOutboundExemptions, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier, lastTouchedAt, archivedAutomaticallyAt, inSessions, additionalRoots, vibecopGuidance, accessProfileId
     }
 
     init(from decoder: Decoder) throws {
@@ -560,6 +567,9 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         lastTouchedAt = try container.decodeIfPresent(Date.self, forKey: .lastTouchedAt)
         archivedAutomaticallyAt = try container.decodeIfPresent(Date.self, forKey: .archivedAutomaticallyAt)
         inSessions = try container.decodeIfPresent(Bool.self, forKey: .inSessions) ?? false
+        // Invariant 1: absent before #974. Absent means "no persisted profile", NOT owner — the
+        // resolver (not this decode) is what turns that into owner, and only for .main.
+        accessProfileId = try container.decodeIfPresent(String.self, forKey: .accessProfileId)
         // Invariant 1: a conversation persisted before this ruling has no such key, and absent
         // means "no turn here ever started without the owner present", the correct default.
         hasUnattendedInput = try container.decodeIfPresent(Bool.self, forKey: .hasUnattendedInput) ?? false

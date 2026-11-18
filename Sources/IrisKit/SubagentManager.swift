@@ -24,6 +24,14 @@ final class SubagentManager: @unchecked Sendable {
 
     private init() {}
 
+    /// #974 Task 5: the exact formula `runSubagent` applies to a delegate's binding — parent ∩
+    /// its Principal floor, never widened (spec: "subagent/evaluator inherit the spawner's full
+    /// binding ∩ their Principal floor"). A free function so a test can pin the formula without
+    /// spinning up a full subagent turn to inspect its engine.
+    static func childBinding(ofParent parentBinding: AccessBinding?, principal: Principal) -> AccessBinding? {
+        parentBinding?.capped(by: PrincipalFloor.floor(for: principal))
+    }
+
     /// The summary of a subagent stopped because the task waiting on it was cancelled (#323).
     static let cancelledReason = "Cancelled: the turn that delegated to this subagent was stopped (its run reached its deadline, or the user pressed Stop), so the subagent was stopped with it — its model call and any running command were cancelled, and it did not finish its task."
 
@@ -98,6 +106,11 @@ final class SubagentManager: @unchecked Sendable {
     /// into the loop cannot deadlock.
     /// `background` is true for `invoke_subagent background: true`, whose caller is an unstructured
     /// task nothing cancels: the parent's Stop reaches it through the registry instead (#236).
+    /// `parentBinding` is the delegating engine's own `binding` (#974 Task 5, spec "subagent
+    /// inherits the spawner's full binding ∩ its Principal floor"): the child's binding is
+    /// `parentBinding.capped(by: PrincipalFloor.floor(for: .subagent))`, never widened. `nil`
+    /// (every production call site not yet threading it, and every existing test) preserves
+    /// today's unchanged, unenforced shape — `IrisEngine`'s own init default.
     func runSubagent(role: String, task: String, effort: String, parentConversationId: UUID,
                      unit: DelegatedUnit? = nil, background: Bool = false, turnTimeout: TimeInterval? = nil,
                      client: (any LLMClientProtocol)? = nil,
@@ -109,6 +122,7 @@ final class SubagentManager: @unchecked Sendable {
                      config: ConfigManager = .shared,
                      hooks: HookManager = .shared,
                      repromptDelay: TimeInterval = 1.5,
+                     parentBinding: AccessBinding? = nil,
                      onTurnEvent: (@Sendable (_ began: Bool, _ seq: Int) -> Void)? = nil,
                      endSandboxSession: @escaping @Sendable (UUID) async -> Void = {
                          await SandboxSessionManager.shared.closeSession($0)
@@ -166,11 +180,13 @@ final class SubagentManager: @unchecked Sendable {
         // 2. Instantiate a fresh IrisEngine linked to this conversation
         // #239: a subagent on a named provider runs on that route; its grader (below) stays on the
         // parent's client, so the work is judged by the parent's model, never by itself.
+        // #974 Task 5: parent ∩ floor, never widened; nil preserves today's unchanged default.
+        let childBinding = Self.childBinding(ofParent: parentBinding, principal: .subagent)
         let engine = IrisEngine(state: appState, tier: tier, principal: .subagent, roleLabel: role,
                                 client: route.map { _ in routedClient ?? LLMClient(route: route) } ?? client ?? LLMClient(),
                                 recentWrites: recentWrites, hooks: hooks, provider: route.map(Self.familyLabel),
                                 subagentConfig: config, repromptDelay: repromptDelay, subagentRoute: route,
-                                primaryClient: client)
+                                primaryClient: client, binding: childBinding)
 
         // 3. Craft the role-specific prompt
         let iterationCap = max(1, config.maxSubagentIterations)
