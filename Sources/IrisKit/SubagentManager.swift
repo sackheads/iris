@@ -28,8 +28,17 @@ final class SubagentManager: @unchecked Sendable {
     /// its Principal floor, never widened (spec: "subagent/evaluator inherit the spawner's full
     /// binding ∩ their Principal floor"). A free function so a test can pin the formula without
     /// spinning up a full subagent turn to inspect its engine.
+    ///
+    /// `capped(by:)` alone is not enough: it rebuilds with the SOURCE binding's own `principal`
+    /// (correct when a `.main`/`.mcpGuest` binding caps itself against its own floor), so a parent
+    /// binding's `principal` would otherwise survive unchanged onto the child — a subagent of
+    /// `.main` carrying `principal == .main` in its binding, even though the engine it runs on is
+    /// `.subagent` (dev-3's #1202 review finding 1). Re-stamp the child's own principal explicitly
+    /// after capping; `isOwner` is inherited unchanged (Invariant 1: a subagent of an owner parent
+    /// is owner).
     static func childBinding(ofParent parentBinding: AccessBinding?, principal: Principal) -> AccessBinding? {
-        parentBinding?.capped(by: PrincipalFloor.floor(for: principal))
+        guard let capped = parentBinding?.capped(by: PrincipalFloor.floor(for: principal)) else { return nil }
+        return AccessBinding(profile: capped.profile, principal: principal, isOwner: capped.isOwner)
     }
 
     /// The summary of a subagent stopped because the task waiting on it was cancelled (#323).

@@ -29,6 +29,27 @@ struct BindingAtDoorTests {
         #expect(back.accessProfileId == nil)
     }
 
+    @Test("accessProfileId persists through the UPDATE path too, not only INSERT (dev-2's #1202 review finding 3)")
+    func accessProfileIdPersistsThroughTheUpdatePath() throws {
+        let store = try ConversationStore.inMemory()
+        var c = ConversationStoreTests.sample()
+        try store.apply([ConversationStoreTests.created(c)])
+
+        // An update that SETS the id, on a row that already exists (the UPDATE branch, not INSERT).
+        c.accessProfileId = "reviewer"
+        var setChange = ChangeSet(); setChange.add(.metadata)
+        try store.apply([ConversationWrite(id: c.id, snapshot: c, changes: setChange)])
+        var loaded = try store.loadAll()
+        #expect(try #require(loaded.conversations.first).accessProfileId == "reviewer")
+
+        // An update that CHANGES the id.
+        c.accessProfileId = "web-researcher"
+        var changeChange = ChangeSet(); changeChange.add(.metadata)
+        try store.apply([ConversationWrite(id: c.id, snapshot: c, changes: changeChange)])
+        loaded = try store.loadAll()
+        #expect(try #require(loaded.conversations.first).accessProfileId == "web-researcher")
+    }
+
     @Test("Conversation decodes accessProfileId absent, per Invariant 1")
     func decodeAbsentAccessProfileId() throws {
         let json = """
@@ -83,6 +104,18 @@ struct BindingAtDoorTests {
         #expect(binding.profile.memoryRead == .task)
     }
 
+    @Test("makeBoundEngine refuses .broker until #1203 wires the dispatch-side enforcement (dev-2's #1202 review finding 4)")
+    func makeBoundEngineRefusesBroker() throws {
+        let (store, paths) = tempStore()
+        let state = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
+        let identity = IdentityKey(transport: "a2a", issuer: "homelab", id: "peer-1")
+        try write(AccessProfile(tools: .set(["search_memory"])), id: "broker-profile", to: paths)
+        try writeMappings([(identity, "broker-profile")], to: paths)
+
+        let engine = IrisEngine.makeBoundEngine(state: state, principal: .broker, identity: identity, store: store)
+        #expect(engine == nil)
+    }
+
     // MARK: - SubagentManager: parent ∩ floor, never widened (Review Focus 2)
 
     @Test("a subagent's binding is the parent's binding capped by the subagent floor")
@@ -93,23 +126,90 @@ struct BindingAtDoorTests {
                                    tools: .set(["run_command", "search_memory"])),
             principal: .subagent, isOwner: false)
         let child = SubagentManager.childBinding(ofParent: wideParent, principal: .subagent)
-        let expected = wideParent.capped(by: PrincipalFloor.floor(for: .subagent))
-        #expect(child == expected)
+        #expect(child?.profile == wideParent.profile)
         // .fromBinding on every axis for subagent: the parent's own grant passes through, since
         // the floor defers to the binding rather than narrowing it further.
-        #expect(child?.profile == wideParent.profile)
+        #expect(child?.principal == .subagent)
     }
 
-    @Test("a subagent of an owner parent is owner (Invariant 1) — never widened, never narrowed by this step")
+    @Test("a subagent of an owner parent is owner in profile, but its binding's principal is the subagent's own, not the parent's (#1202 review finding 1)")
     func subagentOfOwnerParentIsOwner() {
         let ownerParent = AccessBinding(profile: .owner, principal: .main, isOwner: true)
         let child = SubagentManager.childBinding(ofParent: ownerParent, principal: .subagent)
         #expect(child?.profile == .owner)
         #expect(child?.isOwner == true)
+        // The engine running this binding is .subagent, not .main — a Group B consumer reading
+        // binding.principal (rather than engine.principal) must see the real principal.
+        #expect(child?.principal == .subagent)
     }
 
     @Test("a nil parent binding (no caller has threaded one yet) yields no child binding — the engine falls back to its own default")
     func nilParentBindingYieldsNilChildBinding() {
         #expect(SubagentManager.childBinding(ofParent: nil, principal: .subagent) == nil)
+    }
+
+    // MARK: - IrisEngine's default binding: owner for .main only (#1202 review finding 2)
+
+    @Test("an engine built with no explicit binding defaults to deny-all for every non-main principal, never owner")
+    func nonMainEngineDefaultsToDenyAll() async throws {
+        let state = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
+        for principal: Principal in [.subagent, .evaluator, .mcpGuest, .broker] {
+            let engine = IrisEngine(state: state, principal: principal)
+            let binding = await engine.binding
+            #expect(!binding.isOwner, "\(principal) should not default to isOwner")
+            #expect(binding.profile.credentials.isEmpty, "\(principal) should default to deny-all credentials")
+            guard case .set(let tools) = binding.profile.tools else {
+                Issue.record("\(principal) should default to a concrete, capped tool set, not .allTools")
+                continue
+            }
+            // AccessProfile() starts deny-all (empty tools), so capping by any floor (.fixed
+            // intersects, .fromBinding passes through, .unbounded is unreachable here) leaves it
+            // empty — the default is minimal regardless of which Principal it is.
+            #expect(tools.isEmpty, "\(principal) should default to zero tools")
+        }
+    }
+
+    @Test("an engine built with no explicit binding still defaults .main to owner — unchanged")
+    func mainEngineStillDefaultsToOwner() async throws {
+        let state = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
+        let engine = IrisEngine(state: state, principal: .main)
+        let binding = await engine.binding
+        #expect(binding.isOwner)
+        #expect(binding.profile == .owner)
+    }
+
+    @Test("makeGuestEngine stamps an explicit, fail-closed mcpGuest-floor binding — never the owner shape (planner's ruling)")
+    func makeGuestEngineStampsFailClosedBinding() async throws {
+        let state = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
+        let engine = IrisEngine.makeGuestEngine(state: state, clientId: "dev-1")
+        let binding = await engine.binding
+        #expect(!binding.isOwner)
+        #expect(binding.profile.credentials.isEmpty)
+        // Capping a deny-all profile (AccessProfile()'s default .none) by the guest floor's
+        // .task ceiling cannot RAISE it -- min(.none, .task) stays .none, which is even stricter
+        // than the floor allows. That is correct: capping only ever narrows.
+        #expect(binding.profile.memoryRead == .none)
+        guard case .set(let tools) = binding.profile.tools else {
+            Issue.record("expected a concrete tool set, not .allTools")
+            return
+        }
+        #expect(tools.isSubset(of: GuestToolset.allowedNames))
+    }
+}
+
+/// #974 Task 5: `SubagentManager.childBinding` is directly testable (`BindingAtDoorTests` above),
+/// but that only pins the formula — not that `runSubagent`'s real `IrisEngine(...)` construction
+/// actually passes its result in as `binding:`. A source scan pins the wiring line itself (dev-3's
+/// #1202 review non-blocking note), the same pattern as `ToolExecutorGitIdentityWiringSourceScanTests`.
+@Suite("SubagentManager binding wiring source scan (#974 Task 5)")
+struct SubagentManagerBindingWiringSourceScanTests {
+    @Test("the subagent IrisEngine construction passes binding: childBinding, not a literal nil")
+    func bindingParameterIsWired() throws {
+        let url = PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit/SubagentManager.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        #expect(source.contains("let childBinding = Self.childBinding(ofParent: parentBinding, principal: .subagent)"),
+                "the child binding must come from the real formula, not a hardcoded value")
+        #expect(source.contains("binding: childBinding)"),
+                "the engine construction must pass the computed childBinding -- removing it would silently drop the inheritance with every other test still green")
     }
 }

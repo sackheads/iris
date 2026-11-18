@@ -492,11 +492,13 @@ actor IrisEngine {
     /// non-optional, since a run with no binding must never exist (H3), not resolved lazily per
     /// turn. Not yet consulted by any enforcement point (Group B's seam closures do that); Group
     /// A's job is only that every engine carries one. A caller that does not pass one explicitly
-    /// gets today's unchanged, unenforced shape (owner for `.main`, an unmarked-owner `.owner`
-    /// profile otherwise) — every existing call site keeps its current behavior exactly.
-    /// `SubagentManager`/`GoalEvaluator` are the two production callers that now pass a real,
-    /// capped one (Task 5); any other non-main caller (the shipped, not-yet-authenticated guest
-    /// path above all) is Task 16's retrofit, not this one's.
+    /// gets a default: owner for `.main` (today's unchanged behavior), deny-all for every other
+    /// Principal (dev-3's #1202 review finding 2 — never owner, per H3/C8's anti-goal; nothing
+    /// reads `.binding` yet, so this changes no observed behavior, only what Group B's first read
+    /// fails safely toward). `SubagentManager` is the one production caller that now threads a
+    /// real, capped binding through (Task 5); `GoalEvaluator`'s own inheritance is Task 10's
+    /// (Group B), not this one's; the shipped, not-yet-authenticated guest path (`makeGuestEngine`)
+    /// is Task 16's retrofit.
     let binding: AccessBinding
     let roleLabel: String?
     /// The external MCP client a `.mcpGuest` engine serves; nil for every other principal (#1066).
@@ -631,7 +633,10 @@ actor IrisEngine {
         self.githubToolsOverride = githubToolsEnabled
         self.state = state
         self.guestClientId = guestClientId
-        self.binding = binding ?? AccessBinding(profile: .owner, principal: principal, isOwner: principal == .main)
+        self.binding = binding ?? (principal == .main
+            ? AccessBinding(profile: .owner, principal: .main, isOwner: true)
+            : AccessBinding(profile: AccessProfile(), principal: principal, isOwner: false)
+                .capped(by: PrincipalFloor.floor(for: principal)))
         self.mutatingJobsAvailable = mutatingJobsAvailable
         self.skillCheckWillClaim = skillCheckWillClaim
         self.subagentConfig = subagentConfig
@@ -5262,11 +5267,21 @@ actor IrisEngine {
 
     /// #1066: the engine an external MCP client's guest conversation runs on: principal `.mcpGuest`,
     /// the cheapest tier, a role label naming the guest. Its prompt is `GuestPrompt` alone.
+    ///
+    /// #974 R2 (planner's ruling on dev-3's #1202 review finding 2): this call has no real
+    /// `(transport, issuer, id)` identity to resolve yet (#965/Task 16's gap), so it cannot call
+    /// `makeBoundEngine`. It still stamps an explicit fail-closed `.mcpGuest`-floor binding rather
+    /// than relying on `IrisEngine`'s own non-main default — a missing binding on a non-main
+    /// principal must never read as owner (R2), and this is the production call site where that
+    /// default would otherwise be the only thing standing between a guest and the owner shape.
     static func makeGuestEngine(state: AppState, clientId: String, client: any LLMClientProtocol = LLMClient(),
                                 factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil,
                                 memory: MemoryManager? = nil) -> IrisEngine {
-        IrisEngine(state: state, tier: .easy, principal: .mcpGuest, roleLabel: "guest:\(clientId)", client: client,
-                   factStore: factStore, protectionEnabled: protectionEnabled, memory: memory, guestClientId: clientId)
+        let binding = AccessBinding(profile: AccessProfile(), principal: .mcpGuest, isOwner: false)
+            .capped(by: PrincipalFloor.floor(for: .mcpGuest))
+        return IrisEngine(state: state, tier: .easy, principal: .mcpGuest, roleLabel: "guest:\(clientId)", client: client,
+                          factStore: factStore, protectionEnabled: protectionEnabled, memory: memory,
+                          guestClientId: clientId, binding: binding)
     }
 
     /// #974 Task 5: resolves a binding from an authenticated identity before the engine is even
@@ -5280,6 +5295,14 @@ actor IrisEngine {
                                 requestedDrop: String? = nil, store: AccessProfileStore = AccessProfileStore(paths: .default),
                                 tier: ModelTier = .easy, roleLabel: String? = nil,
                                 client: any LLMClientProtocol = LLMClient(), guestClientId: String? = nil) -> IrisEngine? {
+        // #974: .broker is refused here until #1203 wires PrincipalFloor.isAllowed at the
+        // dispatch/declaration sites (dev-2's #1202 review finding 4) — about 17 sites in this
+        // file test `principal == .mcpGuest` directly and know nothing about `.broker`, so an
+        // engine built with it today would declare the full `executor.getTools()` list despite
+        // `binding.profile.tools` being correctly capped to `brokerTools`. The binding's own
+        // shape is already right (Task 1/4); only the engine-side enforcement is missing, and
+        // this refusal keeps that gap unreachable rather than silently wrong.
+        guard principal != .broker else { return nil }
         guard case .bound(let binding) = BindingResolver.resolveBinding(principal: principal, identity: identity,
                                                                         requestedDrop: requestedDrop, store: store) else {
             return nil
