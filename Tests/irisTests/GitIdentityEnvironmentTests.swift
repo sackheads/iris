@@ -22,11 +22,12 @@ struct GitIdentityEnvironmentTests {
 
     // MARK: fragmentContents
 
-    @Test("the fragment sets the configured login's identity and resets credential.helper before re-adding it")
+    @Test("the fragment sets the configured login's identity (id+login noreply form) and resets credential.helper before re-adding it")
     func fragmentContents() {
-        let text = GitIdentityEnvironment.fragmentContents(login: "acme-bot", helperExecutable: "/path/to/iris")
+        let text = GitIdentityEnvironment.fragmentContents(login: "acme-bot", accountId: 12345, helperExecutable: "/path/to/iris")
         #expect(text.contains("name = acme-bot"))
-        #expect(text.contains("email = acme-bot@users.noreply.github.com"))
+        #expect(text.contains("email = 12345+acme-bot@users.noreply.github.com"),
+                "an account made for this feature is always created after GitHub's 2017 cutoff (#1188): only the id+login form attributes")
         #expect(!text.contains("iris-main"))
         #expect(text.contains("helper =\n"), "the empty reset must come before the real helper line")
         #expect(text.contains("--git-credential-helper"))
@@ -34,9 +35,15 @@ struct GitIdentityEnvironmentTests {
         #expect(!text.contains("ghp_"), "no secret in the static fragment")
     }
 
+    @Test("a nil account id falls back to the bare noreply form (#1188): shouldApply never lets this reach a real commit")
+    func fragmentContentsNilIdFallsBack() {
+        let text = GitIdentityEnvironment.fragmentContents(login: "acme-bot", accountId: nil, helperExecutable: "/path/to/iris")
+        #expect(text.contains("email = acme-bot@users.noreply.github.com"))
+    }
+
     @Test("a helper path with a space is shell-quoted so it runs as one word")
     func fragmentContentsQuotesThePath() {
-        let text = GitIdentityEnvironment.fragmentContents(login: "acme-bot", helperExecutable: "/Applications/Iris Dev.app/iris")
+        let text = GitIdentityEnvironment.fragmentContents(login: "acme-bot", accountId: 12345, helperExecutable: "/Applications/Iris Dev.app/iris")
         #expect(text.contains("'/Applications/Iris Dev.app/iris'"))
     }
 
@@ -49,23 +56,29 @@ struct GitIdentityEnvironmentTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let path = dir.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
 
-        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", helperExecutable: "/path/to/iris")
+        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", accountId: 12345, helperExecutable: "/path/to/iris")
         let first = try String(contentsOfFile: path, encoding: .utf8)
-        #expect(first.contains("acme-bot"))
+        #expect(first.contains("12345+acme-bot@users.noreply.github.com"))
 
         // The login changed in Settings: the fragment follows it, nothing of the old one stays.
-        GitIdentityEnvironment.ensureFragment(at: path, login: "other-bot", helperExecutable: "/path/to/iris")
+        GitIdentityEnvironment.ensureFragment(at: path, login: "other-bot", accountId: 12345, helperExecutable: "/path/to/iris")
         let relogin = try String(contentsOfFile: path, encoding: .utf8)
         #expect(relogin.contains("name = other-bot") && !relogin.contains("acme-bot"))
-        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", helperExecutable: "/path/to/iris")
+        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", accountId: 12345, helperExecutable: "/path/to/iris")
 
-        // Same helper path again: the file is left exactly as it was (no gratuitous rewrite).
-        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", helperExecutable: "/path/to/iris")
+        // Same helper path and id again: the file is left exactly as it was (no gratuitous rewrite).
+        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", accountId: 12345, helperExecutable: "/path/to/iris")
         #expect(try String(contentsOfFile: path, encoding: .utf8) == first)
+
+        // The id changed (re-verified under a different account, #1188): the fragment follows it too.
+        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", accountId: 99999, helperExecutable: "/path/to/iris")
+        let reidentified = try String(contentsOfFile: path, encoding: .utf8)
+        #expect(reidentified.contains("99999+acme-bot@users.noreply.github.com") && !reidentified.contains("12345"))
+        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", accountId: 12345, helperExecutable: "/path/to/iris")
 
         // A DIFFERENT helper path (a rebuild or reinstall moved the binary): the fragment must
         // refresh, or the baked `credential.helper` line goes stale (dev-3's review).
-        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", helperExecutable: "/different/path")
+        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", accountId: 12345, helperExecutable: "/different/path")
         let refreshed = try String(contentsOfFile: path, encoding: .utf8)
         #expect(refreshed != first)
         #expect(refreshed.contains("/different/path"))
@@ -319,7 +332,7 @@ struct RealGitEndToEndTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
 
         let fragmentPath = home.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
-        GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: "acme-bot", helperExecutable: stub.path)
+        GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: "acme-bot", accountId: 12345, helperExecutable: stub.path)
         let routingPath = home.appendingPathComponent(GitIdentityEnvironment.routingFileName).path
         GitIdentityEnvironment.writeRoutingFile(repos: ["sackheads/iris"], identityFragmentPath: fragmentPath, to: routingPath)
 
@@ -352,7 +365,7 @@ struct RealGitEndToEndTests {
 
         // With the fix: GitIdentityEnvironment's identity rule outcompetes the global one.
         let fragmentPath = home.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
-        GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: "acme-bot", helperExecutable: "/path/to/iris")
+        GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: "acme-bot", accountId: 12345, helperExecutable: "/path/to/iris")
         let routingPath = home.appendingPathComponent(GitIdentityEnvironment.routingFileName).path
         GitIdentityEnvironment.writeRoutingFile(repos: ["sackheads/iris"], identityFragmentPath: fragmentPath, to: routingPath)
         var env = ["HOME": home.path, "PATH": "/usr/bin:/bin"]
@@ -372,7 +385,7 @@ struct RealGitEndToEndTests {
                     env: ["HOME": home.path, "PATH": "/usr/bin:/bin"])
 
         let fragmentPath = home.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
-        GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: "acme-bot", helperExecutable: "/path/to/iris")
+        GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: "acme-bot", accountId: 12345, helperExecutable: "/path/to/iris")
         let routingPath = home.appendingPathComponent(GitIdentityEnvironment.routingFileName).path
         // "sackheads/iris" is allowed; "other/repo" (this remote) is not.
         GitIdentityEnvironment.writeRoutingFile(repos: ["sackheads/iris"], identityFragmentPath: fragmentPath, to: routingPath)
@@ -399,7 +412,7 @@ struct RealGitEndToEndTests {
                     env: ["HOME": home.path, "PATH": "/usr/bin:/bin"])
 
         let fragmentPath = home.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
-        GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: "acme-bot", helperExecutable: "/path/to/iris")
+        GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: "acme-bot", accountId: 12345, helperExecutable: "/path/to/iris")
         let routingPath = home.appendingPathComponent(GitIdentityEnvironment.routingFileName).path
         GitIdentityEnvironment.writeRoutingFile(repos: ["sackheads/iris"], identityFragmentPath: fragmentPath, to: routingPath)
         var env = ["HOME": home.path, "PATH": "/usr/bin:/bin"]
@@ -428,7 +441,7 @@ struct RealGitEndToEndTests {
         _ = try run(["remote", "add", "upstream", "git@github.com:sackheads/iris-fork.git"], cwd: repo, env: env0)
 
         let fragmentPath = home.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
-        GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: "acme-bot", helperExecutable: "/path/to/iris")
+        GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: "acme-bot", accountId: 12345, helperExecutable: "/path/to/iris")
         let routingPath = home.appendingPathComponent(GitIdentityEnvironment.routingFileName).path
         GitIdentityEnvironment.writeRoutingFile(repos: ["sackheads/iris"], identityFragmentPath: fragmentPath, to: routingPath)
         var env = env0

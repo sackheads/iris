@@ -87,9 +87,19 @@ struct GitHubProxyClient {
     }
 
     /// The commit author name and email for a login: GitHub's noreply address, which attributes a
-    /// commit to the account without exposing a real address.
-    static func commitIdentity(login: String) -> (name: String, email: String) {
-        (login, "\(login)@users.noreply.github.com")
+    /// commit to the account without exposing a real address. The form depends on `accountId`
+    /// (#1188): GitHub only recognizes the bare `<login>@...` form for an account that enabled
+    /// "Keep my email address private" before July 18, 2017 (docs.github.com/en/account-and-profile
+    /// /reference/email-addresses-reference); every account created after that date -- which any
+    /// account set up for this feature now is -- gets only the `<id>+<login>@...` form, so a commit
+    /// using the bare form is not attributed at all. `accountId` comes from the same `GET /user`
+    /// call `verifyIdentity` already makes (`verifyIdentityWithAccountId`); nil only when there is
+    /// no verified match yet, in which case the bare form is used as a value that is at least
+    /// well-formed, though `shouldApply`/`githubToolsConfigured` keep git identity off until a
+    /// match exists, so this fallback is never actually written to a commit.
+    static func commitIdentity(login: String, accountId: Int?) -> (name: String, email: String) {
+        let email = accountId.map { "\($0)+\(login)@users.noreply.github.com" } ?? "\(login)@users.noreply.github.com"
+        return (login, email)
     }
 
     /// What a typed or piped token is worth saving as. The one definition the headless setter and the
@@ -165,9 +175,20 @@ extension GitHubProxyClient {
     /// `GET /user`: whose token this is, compared with the login the user configured (case-blind, as
     /// GitHub is). A mismatch keeps the tools off (`GitHubIdentityMonitor`): commits would be signed as one
     /// account while the token acts as another. A failure to ask is `.unverified`, never a mismatch. Sends nothing without a token and reads nothing else.
+    ///
+    /// Thin wrapper over `verifyIdentityWithAccountId`, dropping the id, for every caller that only
+    /// needs the check itself.
     func verifyIdentity(expectedLogin: String) async -> IdentityCheck {
-        guard let token = Self.token(keychain: keychain) else { return .unverified("no token is set") }
-        guard let url = URL(string: "\(Self.apiBase)/user") else { return .unverified("the request could not be built") }
+        await verifyIdentityWithAccountId(expectedLogin: expectedLogin).check
+    }
+
+    /// `verifyIdentity`, plus the account's numeric id on a match (#1188): `commitIdentity` needs it
+    /// for the noreply address GitHub actually attributes to an account created after July 18, 2017.
+    /// The id comes from the same `GET /user` response already fetched for the login comparison --
+    /// no second request.
+    func verifyIdentityWithAccountId(expectedLogin: String) async -> (check: IdentityCheck, accountId: Int?) {
+        guard let token = Self.token(keychain: keychain) else { return (.unverified("no token is set"), nil) }
+        guard let url = URL(string: "\(Self.apiBase)/user") else { return (.unverified("the request could not be built"), nil) }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 30
@@ -177,17 +198,21 @@ extension GitHubProxyClient {
         do {
             let (data, response) = try await transport.send(request, bearer: token)
             guard (200..<300).contains(response.statusCode) else {
-                return .unverified("GitHub returned HTTP \(response.statusCode)")
+                return (.unverified("GitHub returned HTTP \(response.statusCode)"), nil)
             }
             let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             guard let actual = json?["login"] as? String, case .ok = Self.checkLogin(actual) else {
-                return .unverified("GitHub did not name the account")
+                return (.unverified("GitHub did not name the account"), nil)
             }
-            return actual.lowercased() == expectedLogin.lowercased() ? .match : .mismatch(actual: actual)
+            guard actual.lowercased() == expectedLogin.lowercased() else { return (.mismatch(actual: actual), nil) }
+            // A match with no readable id is a GitHub response shape surprise, not a reason to call
+            // it unverified or a mismatch: the login matched, so the check itself stands; only the
+            // noreply address falls back to the bare form (`commitIdentity`'s own fallback).
+            return (.match, json?["id"] as? Int)
         } catch is CancellationError {
-            return .unverified("the check was cancelled")
+            return (.unverified("the check was cancelled"), nil)
         } catch {
-            return .unverified(sanitize("the request failed: \(error.localizedDescription)", token: token))
+            return (.unverified(sanitize("the request failed: \(error.localizedDescription)", token: token)), nil)
         }
     }
 

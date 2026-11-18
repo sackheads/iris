@@ -5,7 +5,10 @@
 > (`GuardedKey.githubLogin`, stored as `{"login":"<name>"}` beside the allowed-repos list, unset by default);
 > read `iris-main` below as "the configured account". Unset means the feature is off: the tools are not
 > declared and git is untouched. The commit name and email derive from it
-> (`<login>@users.noreply.github.com`), and the tools are offered only while `GET /user` names that login (match: on; mismatch or
+> (`<id>+<login>@users.noreply.github.com` — the id comes from the same `GET /user` call, #1188:
+> GitHub only recognizes the bare `<login>@...` form for an account that enabled "Keep my email
+> address private" before July 18, 2017, and any account set up for this feature now is created
+> after that), and the tools are offered only while `GET /user` names that login (match: on; mismatch or
 > unverifiable: off, each reported distinctly in the pane). `docs/github-identity.md` is the current description.
 
 > **Status:** spec by iris-planner, 2026-11-15; Iris-reviewed (+4 amendments folded), then **REVISED to

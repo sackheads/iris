@@ -864,7 +864,9 @@ struct ToolExecutor {
                    let login, let executablePath = Bundle.main.executablePath {
                     let paths = irisPaths ?? .default
                     let fragmentPath = paths.configDir.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
-                    GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: login, helperExecutable: executablePath)
+                    GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: login,
+                                                          accountId: ConfigManager.shared.githubAccountId,
+                                                          helperExecutable: executablePath)
                     // A unique per-invocation routing file (Invariant 3: tool calls run in
                     // parallel inside one turn's withTaskGroup, so two concurrent run_command
                     // calls must never share one) -- removed by the `defer` declared with

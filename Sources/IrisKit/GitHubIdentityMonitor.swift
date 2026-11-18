@@ -29,8 +29,8 @@ enum GitHubIdentityMonitor {
             return nil
         }
         let client = GitHubProxyClient(keychain: keychain, isRepoAllowed: { _ in false }, transport: transport)
-        let result = await client.verifyIdentity(expectedLogin: login)
-        config.finishGitHubIdentityCheck(generation, result)
+        let (result, accountId) = await client.verifyIdentityWithAccountId(expectedLogin: login)
+        config.finishGitHubIdentityCheck(generation, result, accountId: accountId)
         return result
     }
 

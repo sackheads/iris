@@ -559,9 +559,15 @@ struct GitHubLoginTests {
         #expect(GitHubProxyClient.parseLogin(GitHubProxyClient.loginBlob("acme-bot")) == "acme-bot")
     }
 
-    @Test("the commit identity comes from the login, with GitHub's noreply address")
+    @Test("the commit identity uses the id+login noreply form when an id is given, since any account made for this feature is created after GitHub's 2017 cutoff (#1188)")
     func identity() {
-        let id = GitHubProxyClient.commitIdentity(login: "acme-bot")
+        let id = GitHubProxyClient.commitIdentity(login: "acme-bot", accountId: 12345)
+        #expect(id.name == "acme-bot" && id.email == "12345+acme-bot@users.noreply.github.com")
+    }
+
+    @Test("with no account id, the commit identity falls back to the bare noreply form")
+    func identityNoId() {
+        let id = GitHubProxyClient.commitIdentity(login: "acme-bot", accountId: nil)
         #expect(id.name == "acme-bot" && id.email == "acme-bot@users.noreply.github.com")
     }
 
@@ -572,8 +578,10 @@ struct GitHubLoginTests {
         return (GitHubProxyClient(keychain: keychain, isRepoAllowed: { _ in false }, transport: stub), stub)
     }
 
-    private func user(_ login: String, _ status: Int = 200) -> Result<(Data, Int), Error> {
-        .success((try! JSONSerialization.data(withJSONObject: ["login": login]), status))
+    private func user(_ login: String, _ status: Int = 200, id: Int? = nil) -> Result<(Data, Int), Error> {
+        var body: [String: Any] = ["login": login]
+        if let id { body["id"] = id }
+        return .success((try! JSONSerialization.data(withJSONObject: body), status))
     }
 
     @Test("GET /user: a token for the configured login matches, case-blind, and nothing else is sent")
@@ -590,6 +598,25 @@ struct GitHubLoginTests {
     func mismatch() async {
         let (client, _) = client([user("someone-else")])
         #expect(await client.verifyIdentity(expectedLogin: "acme-bot") == .mismatch(actual: "someone-else"))
+    }
+
+    @Test("verifyIdentityWithAccountId: a match carries the id from the same response; a mismatch or an unverified answer carries none (#1188)")
+    func withAccountId() async {
+        let (matched, _) = client([user("acme-bot", id: 354191490)])
+        let matchResult = await matched.verifyIdentityWithAccountId(expectedLogin: "acme-bot")
+        #expect(matchResult.check == .match && matchResult.accountId == 354191490)
+
+        let (mismatched, _) = client([user("someone-else", id: 1)])
+        let mismatchResult = await mismatched.verifyIdentityWithAccountId(expectedLogin: "acme-bot")
+        #expect(mismatchResult.check == .mismatch(actual: "someone-else") && mismatchResult.accountId == nil)
+
+        let (noId, _) = client([user("acme-bot")])
+        let noIdResult = await noId.verifyIdentityWithAccountId(expectedLogin: "acme-bot")
+        #expect(noIdResult.check == .match && noIdResult.accountId == nil, "a match stands even if the response is missing id")
+
+        let (denied, _) = client([user("acme-bot", 401, id: 354191490)])
+        let deniedResult = await denied.verifyIdentityWithAccountId(expectedLogin: "acme-bot")
+        #expect(deniedResult.accountId == nil)
     }
 
     @Test("GET /user: no token sends nothing; a refusal, a bad body and a network error are unverified, never a match")

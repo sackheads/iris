@@ -82,8 +82,8 @@ enum GitIdentityEnvironment {
     /// a configured-account remote) — the same empty-then-set pattern `WorkspaceGit.overrides`
     /// already uses for the same reason. `useHttpPath` is required or the helper never receives a
     /// `path` to check the allowlist against (dev-3's review).
-    static func fragmentContents(login: String, helperExecutable: String) -> String {
-        let identity = GitHubProxyClient.commitIdentity(login: login)
+    static func fragmentContents(login: String, accountId: Int?, helperExecutable: String) -> String {
+        let identity = GitHubProxyClient.commitIdentity(login: login, accountId: accountId)
         return """
         [user]
         \tname = \(identity.name)
@@ -99,8 +99,8 @@ enum GitIdentityEnvironment {
     /// computed now (dev-2's and dev-3's review: the helper's executable path can change across a
     /// rebuild, a reinstall, or a dev home shared between worktrees, and the fragment must not
     /// keep pointing at a now-stale one). No secret in it, safe to call on every launch.
-    static func ensureFragment(at path: String, login: String, helperExecutable: String) {
-        let contents = fragmentContents(login: login, helperExecutable: helperExecutable)
+    static func ensureFragment(at path: String, login: String, accountId: Int?, helperExecutable: String) {
+        let contents = fragmentContents(login: login, accountId: accountId, helperExecutable: helperExecutable)
         if let existing = try? String(contentsOfFile: path, encoding: .utf8), existing == contents { return }
         try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent,
                                                   withIntermediateDirectories: true)

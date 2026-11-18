@@ -50,7 +50,11 @@ Beyond the three tools, `run_command`'s own host git also acts as the account wh
 allowed repo — this is what lets Iris push the branch `github_create_pr` then opens a PR from.
 
 - **Identity.** Commits attribute to the account (`user.name` is its username, `user.email` GitHub's
-  `<account>@users.noreply.github.com` noreply address — no separate email to configure).
+  `<id>+<account>@users.noreply.github.com` noreply address — no separate email to configure). The
+  id comes from the same `GET /user` call that confirms the token's identity. GitHub only
+  recognizes the bare `<account>@users.noreply.github.com` form for an account that enabled "Keep
+  my email address private" before July 18, 2017; any account set up for this feature now gets
+  only the id-based form, so that's the one used (#1188).
 - **Credential.** A git credential helper (`iris --git-credential-helper`, invoked by git itself,
   never by the model) hands out the same Keychain token for a push or fetch to an allowed repo,
   checked against the live allowlist on every request.
