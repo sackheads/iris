@@ -95,6 +95,7 @@ class ConfigManager: @unchecked Sendable {
     /// Not observed: read per turn from any thread, under `identityLock`.
     @ObservationIgnored private let identityLock = NSLock()
     @ObservationIgnored private var identityState: GitHubProxyClient.IdentityCheck?
+    @ObservationIgnored private var identityAccountId: Int?
     @ObservationIgnored private var identityGeneration = 0
     @ObservationIgnored private var identityInFlight = false
     @ObservationIgnored private var identityLastAttempt: TimeInterval?
@@ -103,12 +104,20 @@ class ConfigManager: @unchecked Sendable {
     /// checked (or the token or login changed since). Only `.match` offers the tools.
     var githubIdentity: GitHubProxyClient.IdentityCheck? { identityLock.withLock { identityState } }
 
+    /// The account's numeric id, as `GET /user` returned it alongside the match (#1188), for
+    /// `commitIdentity`'s noreply address. nil whenever `githubIdentity` isn't `.match` -- never a
+    /// stale id surviving a mismatch or an invalidate.
+    var githubAccountId: Int? {
+        identityLock.withLock { identityState == .match ? identityAccountId : nil }
+    }
+
     /// Drops what is known and refuses any check already in flight: the token or login it started with
     /// is no longer the stored pair, so its answer would be about something else.
     func invalidateGitHubIdentity() {
         identityLock.withLock {
             identityGeneration += 1
             identityState = nil
+            identityAccountId = nil
             identityInFlight = false
         }
     }
@@ -153,10 +162,14 @@ class ConfigManager: @unchecked Sendable {
         identityLock.withLock { if generation == identityGeneration { identityInFlight = false } }
     }
 
-    func finishGitHubIdentityCheck(_ generation: Int, _ result: GitHubProxyClient.IdentityCheck) {
+    /// `githubAccountId` itself refuses to answer unless `identityState == .match`, so a stale or
+    /// mismatched id stored here can never surface through it; this second gate is pure defence in
+    /// depth against a future caller that reads `identityAccountId` directly.
+    func finishGitHubIdentityCheck(_ generation: Int, _ result: GitHubProxyClient.IdentityCheck, accountId: Int? = nil) {
         identityLock.withLock {
             guard generation == identityGeneration else { return }
             identityState = result
+            identityAccountId = result == .match ? accountId : nil
             identityInFlight = false
         }
     }

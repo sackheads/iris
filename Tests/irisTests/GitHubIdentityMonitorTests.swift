@@ -40,8 +40,12 @@ struct GitHubIdentityMonitorTests {
         }
     }
 
-    private func user(_ login: String, _ status: Int = 200) -> Counting {
-        Counting { (try JSONSerialization.data(withJSONObject: ["login": login]), status) }
+    private func user(_ login: String, _ status: Int = 200, id: Int? = nil) -> Counting {
+        Counting {
+            var body: [String: Any] = ["login": login]
+            if let id { body["id"] = id }
+            return (try JSONSerialization.data(withJSONObject: body), status)
+        }
     }
 
     @Test("configured at launch is not enough: the tools are off until GET /user says the login")
@@ -54,12 +58,22 @@ struct GitHubIdentityMonitorTests {
         #expect(r.config.githubToolsConfigured)
     }
 
+    @Test("a match records the account id from the same GET /user response, for commitIdentity's noreply address (#1188)")
+    func matchRecordsAccountId() async {
+        let r = rig()
+        await GitHubIdentityMonitor.verify(config: r.config, keychain: r.keychain, transport: user("acme-bot", id: 354191490))
+        #expect(r.config.githubAccountId == 354191490)
+        r.config.invalidateGitHubIdentity()
+        #expect(r.config.githubAccountId == nil, "an invalidate drops the id along with the match")
+    }
+
     @Test("a token for another account is a mismatch that names it: the tools stay off")
     func mismatchIsOff() async {
         let r = rig()
-        await GitHubIdentityMonitor.verify(config: r.config, keychain: r.keychain, transport: user("someone-else"))
+        await GitHubIdentityMonitor.verify(config: r.config, keychain: r.keychain, transport: user("someone-else", id: 1))
         #expect(r.config.githubIdentity == .mismatch(actual: "someone-else"))
         #expect(!r.config.githubToolsConfigured)
+        #expect(r.config.githubAccountId == nil, "a mismatch carries no id, even though the response had one")
     }
 
     @Test("a check that could not be made is unverified, never a mismatch, and the tools stay off",
@@ -92,6 +106,14 @@ struct GitHubIdentityMonitorTests {
         r.config.invalidateGitHubIdentity()
         r.config.finishGitHubIdentityCheck(try! #require(generation), .match)
         #expect(!r.config.githubToolsConfigured, "a stale match must not turn the tools on")
+    }
+
+    @Test("finishGitHubIdentityCheck never stores an id against a non-match result, even if a caller passed one by mistake")
+    func idOnlyStoredWithMatch() {
+        let r = rig()
+        let generation = try! #require(r.config.beginGitHubIdentityCheck())
+        r.config.finishGitHubIdentityCheck(generation, .mismatch(actual: "someone-else"), accountId: 999)
+        #expect(r.config.githubAccountId == nil)
     }
 
     @Test("nothing is asked without a login or a token")
