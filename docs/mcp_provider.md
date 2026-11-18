@@ -88,10 +88,12 @@ it: a guest never gets an address a role session could message first.
   the person (#1150, #1151).
   Nor is that turn offered the memory tools (#1195): `search_memory`, `search_conversations`,
   `read_conversation`, and the writers `save_fact`, `manage_fact`, `update_memory`, `update_user_profile`,
-  `update_soul`, `create_skill`, `update_skill` and `delete_skill`. A call to one that arrives anyway is
-  refused at dispatch. The reads were not behind any approval step; the writers were already held for the
-  person's approval (#813), and are stripped as well. The role session's own prompt (`SOUL.md`, `USER.md`,
-  `memory.md`, skills) still carries what it carries; only the tools are closed.
+  `update_soul`, `create_skill`, `update_skill` and `delete_skill`, nor the Google tools (mail, Drive, Docs,
+  Sheets, calendar, tasks) nor `list_jobs` and `get_job_run`. A call to one that arrives anyway is refused
+  at dispatch. The reads were not behind any approval step; the memory writers were already held for the
+  person's approval (#813) and the Google writers by the outbound gate, and are stripped as well. The role
+  session's own prompt (`SOUL.md`, `USER.md`, `memory.md`, skills) still carries what it carries, and MCP
+  tools the person added are not stripped; only the tools named here are closed.
 - **The per-client role allowlist.** A guest reaches only the roles its client was granted
   (`ProviderTokenRegistry.setRoles`). The default is empty: a guest with no role can message
   nobody. It cannot name `iris`, a session id, a name, a topic or another guest. A role session
