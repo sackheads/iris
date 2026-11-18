@@ -113,6 +113,19 @@ class ConfigManager: @unchecked Sendable {
         }
     }
 
+    /// Whether a check is running now (#1191), for a caller that was turned away by the guard and wants
+    /// the answer of the one that is.
+    var githubIdentityCheckInFlight: Bool { identityLock.withLock { identityInFlight } }
+
+    /// Returns once no check is running, or after `limit` seconds (a request is bounded at 30 s, so the
+    /// default outlasts it). Polled: it only serves a Settings pane that opened mid-check.
+    func waitForGitHubIdentityCheck(pollNanoseconds: UInt64 = 100_000_000, limit: TimeInterval = 35) async {
+        let deadline = ProcessInfo.processInfo.systemUptime + limit
+        while githubIdentityCheckInFlight, ProcessInfo.processInfo.systemUptime < deadline, !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: pollNanoseconds)
+        }
+    }
+
     /// Runs a write to the stored token or login (#1190). The state is dropped before it, so a match for
     /// the old pair cannot stand while the new one is being stored, and again after it: a check that
     /// began in between read the old pair (or the new one half-stored) yet carries the then-current
