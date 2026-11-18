@@ -347,7 +347,7 @@ struct GitHubIdentityInFlightTests {
         _ = g3
     }
 
-    @Test("a burst of kicks while one check is in flight sends one request, and the tools follow its answer")
+    @Test("a burst of kicks while one check is in flight sends one request, and the tools follow its answer (the retry throttle and the in-flight guard both cover this; concurrentVerifiesCoalesce pins the guard alone)")
     func burstOfKicksAsksOnce() async throws {
         let (config, keychain) = configured()
         let held = Held()
