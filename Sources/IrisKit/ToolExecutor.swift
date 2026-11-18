@@ -251,6 +251,26 @@ struct ToolExecutor {
     /// by the user's allowed-repos list inside `GitHubProxyClient`, whatever the model sends.
     nonisolated static let githubProxyTools: Set<String> = ["github_create_pr", "github_comment", "github_approve"]
 
+    /// Every tool that reads the owner's memory or conversations (#1195). A turn a guest's message
+    /// started or steered is `.main` and attended, but its words are a guest's: these read the
+    /// owner's facts and every other conversation with no approval step, so the turn is not offered
+    /// them (`IrisEngine.hardStrip`) and a call that arrives anyway is refused
+    /// (`IrisEngine.memoryDispatchRefusal`). One list for the strip, the refusal and the tests, so a
+    /// tool added here is covered everywhere and a tool left out fails `GuestOriginMemoryTests`.
+    nonisolated static let memoryReadTools: Set<String> = ["search_memory", "search_conversations", "read_conversation"]
+
+    /// Every tool that writes the owner's facts, profile, soul or skills (#1195). Already held for
+    /// the person's approval on a conversation that has read untrusted text (`ContextHolds.heldTools`,
+    /// #813), and a guest's message marks it so; stripped as well, so a guest-steered turn is never
+    /// asked to judge what to write, and the refusal does not rest on the hold alone. `reflect` is
+    /// not here: its handler returns a fixed line and stores nothing.
+    nonisolated static let memoryWriteTools: Set<String> = [
+        "save_fact", "manage_fact", "update_memory", "update_user_profile", "update_soul",
+        "create_skill", "update_skill", "delete_skill",
+    ]
+
+    nonisolated static let memoryTools: Set<String> = memoryReadTools.union(memoryWriteTools)
+
     nonisolated static let githubToolDeclarations: [FunctionDeclaration] = [
         FunctionDeclaration(
             name: "github_create_pr",
