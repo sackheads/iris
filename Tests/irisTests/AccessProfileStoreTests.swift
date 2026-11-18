@@ -89,7 +89,8 @@ struct AccessProfileStoreTests {
         let paths = tempPaths()
         defer { try? FileManager.default.removeItem(at: paths.root) }
         let store = AccessProfileStore(paths: paths)
-        for bad in ["a/b", "a\\b", "", ".hidden", "..", "/etc/passwd", "a.b", "a\0b", "owner", "mappings"] {
+        for bad in ["a/b", "a\\b", "", ".hidden", "..", "/etc/passwd", "a.b", "a\0b", "owner", "mappings",
+                    "Owner", "MAPPINGS", "Mappings"] {
             #expect(store.profile(id: bad) == nil, "expected '\(bad)' to be rejected")
         }
     }
