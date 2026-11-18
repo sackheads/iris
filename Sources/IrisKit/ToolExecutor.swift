@@ -858,14 +858,18 @@ struct ToolExecutor {
                     // property's doc comment) rather than let an unwired caller act as Iris's GitHub account.
                     guestOrigin = true
                 }
-                if GitIdentityEnvironment.shouldApply(hasToken: hasToken, login: login,
-                                                      identityMatches: ConfigManager.shared.githubIdentity == .match,
+                // Read once (#1194 review, dev-2's finding): `shouldApply`'s gate and the value
+                // `ensureFragment` writes must come from the same snapshot, or a token/login change
+                // landing between two separate `githubAccountId` reads could pass the gate on an
+                // old match and then write a fragment for a since-invalidated one.
+                let accountId = ConfigManager.shared.githubAccountId
+                if GitIdentityEnvironment.shouldApply(hasToken: hasToken, login: login, accountId: accountId,
                                                       repos: repos, guestOrigin: guestOrigin),
                    let login, let executablePath = Bundle.main.executablePath {
                     let paths = irisPaths ?? .default
                     let fragmentPath = paths.configDir.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
                     GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: login,
-                                                          accountId: ConfigManager.shared.githubAccountId,
+                                                          accountId: accountId,
                                                           helperExecutable: executablePath)
                     // A unique per-invocation routing file (Invariant 3: tool calls run in
                     // parallel inside one turn's withTaskGroup, so two concurrent run_command

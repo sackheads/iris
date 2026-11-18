@@ -6,18 +6,24 @@ import Testing
 struct GitIdentityEnvironmentTests {
     // MARK: shouldApply
 
-    @Test("applies only with a token, a login, a confirmed identity, a non-empty allowlist, and a non-guest-origin turn", arguments: [
-        (hasToken: true, login: "acme-bot" as String?, matches: true, repos: ["sackheads/iris"], guestOrigin: false, expected: true),
-        (hasToken: false, login: "acme-bot" as String?, matches: true, repos: ["sackheads/iris"], guestOrigin: false, expected: false),
-        (hasToken: true, login: nil as String?, matches: true, repos: ["sackheads/iris"], guestOrigin: false, expected: false),
-        (hasToken: true, login: "acme-bot" as String?, matches: false, repos: ["sackheads/iris"], guestOrigin: false, expected: false),
-        (hasToken: true, login: "acme-bot" as String?, matches: true, repos: [], guestOrigin: false, expected: false),
-        (hasToken: true, login: "acme-bot" as String?, matches: true, repos: ["sackheads/iris"], guestOrigin: true, expected: false),
-        (hasToken: false, login: nil as String?, matches: false, repos: [], guestOrigin: true, expected: false),
+    @Test("applies only with a token, a login, a readable account id, a non-empty allowlist, and a non-guest-origin turn", arguments: [
+        (hasToken: true, login: "acme-bot" as String?, accountId: 12345 as Int?, repos: ["sackheads/iris"], guestOrigin: false, expected: true),
+        (hasToken: false, login: "acme-bot" as String?, accountId: 12345 as Int?, repos: ["sackheads/iris"], guestOrigin: false, expected: false),
+        (hasToken: true, login: nil as String?, accountId: 12345 as Int?, repos: ["sackheads/iris"], guestOrigin: false, expected: false),
+        (hasToken: true, login: "acme-bot" as String?, accountId: nil as Int?, repos: ["sackheads/iris"], guestOrigin: false, expected: false),
+        (hasToken: true, login: "acme-bot" as String?, accountId: 12345 as Int?, repos: [], guestOrigin: false, expected: false),
+        (hasToken: true, login: "acme-bot" as String?, accountId: 12345 as Int?, repos: ["sackheads/iris"], guestOrigin: true, expected: false),
+        (hasToken: false, login: nil as String?, accountId: nil as Int?, repos: [], guestOrigin: true, expected: false),
     ])
-    func shouldApply(_ c: (hasToken: Bool, login: String?, matches: Bool, repos: [String], guestOrigin: Bool, expected: Bool)) {
-        #expect(GitIdentityEnvironment.shouldApply(hasToken: c.hasToken, login: c.login, identityMatches: c.matches,
+    func shouldApply(_ c: (hasToken: Bool, login: String?, accountId: Int?, repos: [String], guestOrigin: Bool, expected: Bool)) {
+        #expect(GitIdentityEnvironment.shouldApply(hasToken: c.hasToken, login: c.login, accountId: c.accountId,
                                                    repos: c.repos, guestOrigin: c.guestOrigin) == c.expected)
+    }
+
+    @Test("a match with no readable id (dev-2's finding 2) does not apply: the same accountId == nil that stops commitIdentity's bare-form fallback also stops shouldApply")
+    func shouldApplyFalseWithoutIdEvenIfMatched() {
+        #expect(!GitIdentityEnvironment.shouldApply(hasToken: true, login: "acme-bot", accountId: nil,
+                                                     repos: ["sackheads/iris"], guestOrigin: false))
     }
 
     // MARK: fragmentContents
@@ -457,5 +463,24 @@ struct RealGitEndToEndTests {
         // as a repo -- a loud failure, never a silent fallback to the user's own ambient SSH key.
         #expect(upstreamResolved != "git@github.com:sackheads/iris-fork.git", "mangled, not untouched")
         #expect(!upstreamResolved.contains("iris-fork"), "the rewrite breaks the URL rather than reaching the real fork")
+    }
+}
+
+/// #1194 review (dev-2's finding 1): `ToolExecutor.hostSpawn` is the one call that feeds a real
+/// `ConfigManager.shared.githubAccountId` into `ensureFragment` and so is the one place that can
+/// silently revert to the unattributed bare noreply form -- it reads `ConfigManager.shared`
+/// directly, so no test can drive it with an isolated config. A source scan pins the wiring
+/// instead. A suite of its own, not `@MainActor` (#642): a scan held main for a quarter second of
+/// a parallel run's start once, where every `@MainActor` suite waits on it.
+@Suite("ToolExecutor's git-identity wiring (#1194): source scan")
+struct ToolExecutorGitIdentityWiringSourceScanTests {
+    @Test("ensureFragment's accountId comes from a real ConfigManager.shared.githubAccountId read, not a literal nil")
+    func accountIdIsWired() throws {
+        let url = PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit/ToolExecutor.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        #expect(source.contains("let accountId = ConfigManager.shared.githubAccountId"),
+                "ensureFragment's accountId must come from a real read, not a hardcoded value -- changing it to nil would silently revert #1188 with every test still green")
+        let occurrences = source.components(separatedBy: "accountId: accountId").count - 1
+        #expect(occurrences == 2, "the one read must feed both shouldApply's gate and ensureFragment's write -- two uses of the same captured value, not a second independent read (dev-2's finding 2: two reads can straddle an invalidate)")
     }
 }

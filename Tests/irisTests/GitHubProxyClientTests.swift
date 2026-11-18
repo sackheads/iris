@@ -578,6 +578,10 @@ struct GitHubLoginTests {
         return (GitHubProxyClient(keychain: keychain, isRepoAllowed: { _ in false }, transport: stub), stub)
     }
 
+    private func userRawId(_ login: String, _ rawId: Any, _ status: Int = 200) -> Result<(Data, Int), Error> {
+        .success((try! JSONSerialization.data(withJSONObject: ["login": login, "id": rawId]), status))
+    }
+
     private func user(_ login: String, _ status: Int = 200, id: Int? = nil) -> Result<(Data, Int), Error> {
         var body: [String: Any] = ["login": login]
         if let id { body["id"] = id }
@@ -617,6 +621,33 @@ struct GitHubLoginTests {
         let (denied, _) = client([user("acme-bot", 401, id: 354191490)])
         let deniedResult = await denied.verifyIdentityWithAccountId(expectedLogin: "acme-bot")
         #expect(deniedResult.accountId == nil)
+    }
+
+    private enum RawId: CustomStringConvertible, Sendable {
+        case bool(Bool), int(Int), string(String)
+        var jsonValue: Any {
+            switch self {
+            case .bool(let b): b
+            case .int(let i): i
+            case .string(let s): s
+            }
+        }
+        var description: String {
+            switch self {
+            case .bool(let b): "bool(\(b))"
+            case .int(let i): "int(\(i))"
+            case .string(let s): "string(\(s))"
+            }
+        }
+    }
+
+    @Test("a JSON id that isn't a strictly positive Int is dropped, not bridged -- a bool must not become 1 (dev-2's finding)", arguments: [
+        RawId.bool(true), .bool(false), .int(0), .int(-1), .string("354191490"),
+    ])
+    private func rejectsNonPositiveOrWrongTypeId(_ rawId: RawId) async {
+        let (client, _) = client([userRawId("acme-bot", rawId.jsonValue)])
+        let result = await client.verifyIdentityWithAccountId(expectedLogin: "acme-bot")
+        #expect(result.check == .match && result.accountId == nil, "\(rawId)")
     }
 
     @Test("GET /user: no token sends nothing; a refusal, a bad body and a network error are unverified, never a match")
