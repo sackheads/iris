@@ -146,7 +146,11 @@ final class GitHubSettingsModel {
     func verifyIdentity() async {
         guard login != nil, storedTokenPresent else { identity = .unchecked; return }
         identity = .checking
-        _ = await GitHubIdentityMonitor.verify(config: config, keychain: keychain, transport: transport)
+        // nil means another check holds the guard (the launch one, or a turn's): wait for its answer
+        // and show that, instead of leaving the line empty until the pane is reopened (#1191).
+        if await GitHubIdentityMonitor.verify(config: config, keychain: keychain, transport: transport) == nil {
+            await config.waitForGitHubIdentityCheck()
+        }
         identity = .unchecked
         refresh()
     }

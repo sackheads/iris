@@ -364,3 +364,54 @@ struct GitHubSettingsModelTests {
         #expect(found.isEmpty, "\(found.sorted())")
     }
 }
+
+@MainActor
+@Suite("GitHub settings pane: a check already running (#1191)", .timeLimit(.minutes(1)))
+struct GitHubSettingsInFlightTests {
+    private func rig() -> (ConfigManager, KeychainManager, GitHubSettingsModel) {
+        let name = "iris-1191-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: name)!
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
+        keychain.replaceSecrets(["token": "ghp_TestToken1234567890abcdef"], service: KeychainManager.githubService)
+        let seed = ConfigManager(store: store, guardedSecrets: keychain)
+        seed.setGuardedBlob(.githubAllowedRepos, "[\"sackheads/iris\"]")
+        seed.setGuardedBlob(.githubLogin, GitHubProxyClient.loginBlob("acme-bot"))
+        let config = ConfigManager(store: store, guardedSecrets: keychain)
+        return (config, keychain, GitHubSettingsModel(config: config, keychain: keychain, toolsOfferedAtLaunch: true))
+    }
+
+    @Test("a pane opened while a check is running shows that check's answer when it lands, not an empty line")
+    func showsTheRunningChecksAnswer() async throws {
+        let (config, _, model) = rig()
+        let generation = try #require(config.beginGitHubIdentityCheck())   // the launch check, in flight
+        let pane = Task { @MainActor in await model.verifyIdentity() }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        #expect(model.identity == .checking, "waiting on the running check")
+        config.finishGitHubIdentityCheck(generation, .mismatch(actual: "someone-else"))
+        try await value(of: pane, within: 20)
+        #expect(model.identity == .mismatch(actual: "someone-else"))
+    }
+
+    @Test("waiting ends at once when no check is running, and gives up at its limit when one never finishes")
+    func waitIsBounded() async throws {
+        let (config, _, _) = rig()
+        await config.waitForGitHubIdentityCheck()
+        _ = try #require(config.beginGitHubIdentityCheck())
+        let started = ProcessInfo.processInfo.systemUptime
+        await config.waitForGitHubIdentityCheck(pollNanoseconds: 10_000_000, limit: 0.3)
+        #expect(ProcessInfo.processInfo.systemUptime - started < 5, "a check that never finishes does not hold the pane forever")
+    }
+}
+
+@Suite("Identity check start: after the launch gate (#1191)")
+struct GitHubIdentityLaunchPlacementTests {
+    @Test("IrisMain.run does not start the check; openStore, which runs with the lock held, does")
+    func kickIsInOpenStore() throws {
+        let dir = PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit")
+        let main = try String(contentsOf: dir.appendingPathComponent("IrisMain.swift"), encoding: .utf8)
+        #expect(!main.contains("GitHubIdentityMonitor"), "IrisMain.run runs before the launch gate decides; reading ConfigManager.shared there prompts for the Keychain in a launch the gate refuses")
+        let app = try String(contentsOf: dir.appendingPathComponent("IrisApp.swift"), encoding: .utf8)
+        let start = try #require(app.range(of: "static func openStore()"))
+        #expect(app[start.upperBound...].contains("GitHubIdentityMonitor.kickIfNeeded()"))
+    }
+}
