@@ -86,6 +86,12 @@ it: a guest never gets an address a role session could message first.
   message started or steered asks for approvals as usual for that turn (#1119): no saved Always Allow rule, exact or prefix, answers for it either (#1141).
   Neither the `~/.iris` file carve-out nor a Vibecop approval answers for such a turn either: the call asks
   the person (#1150, #1151).
+  Nor is that turn offered the memory tools (#1195): `search_memory`, `search_conversations`,
+  `read_conversation`, and the writers `save_fact`, `manage_fact`, `update_memory`, `update_user_profile`,
+  `update_soul`, `create_skill`, `update_skill` and `delete_skill`. A call to one that arrives anyway is
+  refused at dispatch. The reads were not behind any approval step; the writers were already held for the
+  person's approval (#813), and are stripped as well. The role session's own prompt (`SOUL.md`, `USER.md`,
+  `memory.md`, skills) still carries what it carries; only the tools are closed.
 - **The per-client role allowlist.** A guest reaches only the roles its client was granted
   (`ProviderTokenRegistry.setRoles`). The default is empty: a guest with no role can message
   nobody. It cannot name `iris`, a session id, a name, a topic or another guest. A role session
