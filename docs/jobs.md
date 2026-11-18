@@ -1000,8 +1000,10 @@ it is the run that ends `blocked on approval` and the run's card that names the 
 The allowlist has one carve-out — the agent's own `~/.iris` directory — and it stops short of two
 things. Nothing auto-allows a *write* into a protected directory: `config/`, which holds the file
 that grants permissions along with the hook and plugin settings, `plugins/`, where a plugin
-with an `mcp` component becomes a command spawned at the next launch, and `exchange/`, where
-session attachments are kept and only Iris writes ([Sessions](sessions.md#attachments)). That check is canonical —
+with an `mcp` component becomes a command spawned at the next launch, `exchange/`, where
+session attachments are kept and only Iris writes ([Sessions](sessions.md#attachments)), and
+`profiles/`, the access profiles and identity mappings that decide what a guest or peer may do,
+which only the profile pane writes. That check is canonical —
 case-insensitive, with symlinks resolved — so `~/.iris/CONFIG/permissions.json` or a link planted
 under `memory/` is the same refusal. (`rules/` is not protected: it is prompt text, which the guard
 already treats as untrusted, not a way to make something run.) And a background run gets no write
