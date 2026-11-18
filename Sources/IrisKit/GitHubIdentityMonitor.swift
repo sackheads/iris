@@ -18,11 +18,13 @@ enum GitHubIdentityMonitor {
     /// just made). Returns what GitHub said, nil if nothing was asked.
     @discardableResult
     static func verify(config: ConfigManager, keychain: KeychainManager, transport: GitHubTransport,
-                       minInterval: TimeInterval? = nil) async -> GitHubProxyClient.IdentityCheck? {
+                       minInterval: TimeInterval? = nil,
+                       loginProvider: (@Sendable () -> String?)? = nil) async -> GitHubProxyClient.IdentityCheck? {
         // Begin first, read the login after: a change completing after `begin` bumps the generation and
         // drops this answer, and one completing before it is read here (#1190).
         guard let generation = config.beginGitHubIdentityCheck(minInterval: minInterval) else { return nil }
-        guard let login = config.githubLogin() else {
+        // `loginProvider` is a test seam: it runs where the login is read, after `begin`.
+        guard let login = (loginProvider ?? { config.githubLogin() })() else {
             config.abandonGitHubIdentityCheck(generation)
             return nil
         }

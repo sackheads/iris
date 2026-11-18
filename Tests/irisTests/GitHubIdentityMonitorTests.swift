@@ -231,4 +231,46 @@ struct GitHubIdentityWriteWindowTests {
         }())
         #expect(result == .match && config.githubIdentity == .match)
     }
+
+    private struct AnswersAcmeBot: GitHubTransport {
+        func send(_ request: URLRequest, bearer: String) async throws -> (Data, HTTPURLResponse) {
+            (try JSONSerialization.data(withJSONObject: ["login": "acme-bot"]),
+             HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        }
+    }
+
+    @Test("the login is read after the check begins: a change completing between the two drops the answer")
+    func loginIsReadAfterBegin() async {
+        let (config, keychain) = configured()
+        let result = await GitHubIdentityMonitor.verify(config: config, keychain: keychain, transport: AnswersAcmeBot(), loginProvider: {
+            // The login is being read: a change lands now, and hands back the OLD login.
+            config.changingGitHubIdentityInputs { config.setGuardedBlob(.githubLogin, GitHubProxyClient.loginBlob("new-name")) }
+            return "acme-bot"
+        })
+        #expect(config.githubIdentity == nil, "the answer was for the old login, \(String(describing: result))")
+        #expect(!config.githubToolsConfigured)
+    }
+
+    @Test("a check that finds no login ends cleanly: the next one is not blocked as still running")
+    func noLoginFreesTheSlot() async {
+        let (config, keychain) = configured()
+        config.setGuardedBlob(.githubLogin, "")
+        #expect(config.githubLogin() == nil)
+        #expect(await GitHubIdentityMonitor.verify(config: config, keychain: keychain, transport: AnswersAcmeBot()) == nil)
+        config.setGuardedBlob(.githubLogin, GitHubProxyClient.loginBlob("acme-bot"))
+        #expect(await GitHubIdentityMonitor.verify(config: config, keychain: keychain, transport: AnswersAcmeBot()) == .match)
+    }
+
+    @Test("all four pane writers go through changingGitHubIdentityInputs, and none drops the state by hand")
+    func everyWriterIsWrapped() throws {
+        let url = PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit/GitHubSettingsModel.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        #expect(!source.contains("invalidateGitHubIdentity()"), "a drop-before-only call would leave the window open")
+        for name in ["saveLogin", "clearLogin", "saveToken", "clearToken"] {
+            let start = try #require(source.range(of: "func \(name)("), Comment(rawValue: name))
+            let rest = source[start.upperBound...]
+            let end = rest.range(of: "\n    @discardableResult")?.lowerBound ?? rest.endIndex
+            #expect(rest[..<end].contains("changingGitHubIdentityInputs"), Comment(rawValue: "\(name) must write through the guard"))
+        }
+    }
 }
