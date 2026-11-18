@@ -2823,6 +2823,7 @@ actor IrisEngine {
             return "Subagent (\(roleLabel ?? "subagent"))\(on)"
         case .evaluator: return "Evaluator"
         case .mcpGuest: return "MCP guest"
+        case .broker: return "Disclosure broker"
         }
     }
 
@@ -3060,7 +3061,7 @@ actor IrisEngine {
                 let set = localState?.conversations.first(where: { $0.id == conversationId })?.modelTier
                 return (own, own, set)
             case .subagent: return (nil, localState?.delegatedAgentProfile(for: conversationId), nil)
-            case .evaluator, .mcpGuest: return (nil, nil, nil)
+            case .evaluator, .mcpGuest, .broker: return (nil, nil, nil)
             }
         }
         // A subagent's and the evaluator's tier is their engine's own (its `effort`).
