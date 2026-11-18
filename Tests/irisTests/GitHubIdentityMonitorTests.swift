@@ -279,7 +279,9 @@ struct GitHubIdentityWriteWindowTests {
 /// time, so a burst of turns reading the gate (each calling `kickIfNeeded`) asks GitHub once.
 @Suite("GitHub identity gate: overlapping checks coalesce (#1189)", .timeLimit(.minutes(1)))
 struct GitHubIdentityInFlightTests {
+    /// Overlapping begins are free to fire in bulk; overlapping requests each hold a thread, so fewer.
     private static let width = 64
+    private static let heldWidth = 6
 
     private func configured() -> (ConfigManager, KeychainManager) {
         let name = "iris-1189-\(UUID().uuidString)"
@@ -299,7 +301,8 @@ struct GitHubIdentityInFlightTests {
         let started = DispatchSemaphore(value: 0)
         let release = DispatchSemaphore(value: 0)
         var calls: Int { lock.withLock { _calls } }
-        private func hold() { release.wait() }
+        /// Bounded, so a broken guard fails the test instead of parking every pool thread for good.
+        private func hold() { _ = release.wait(timeout: .now() + 8) }
         /// Sync, so the blocking wait is not in an async context.
         func awaitStarted() { started.wait() }
         func send(_ request: URLRequest, bearer: String) async throws -> (Data, HTTPURLResponse) {
@@ -351,7 +354,7 @@ struct GitHubIdentityInFlightTests {
         let first = try #require(GitHubIdentityMonitor.kickIfNeeded(config: config, keychain: keychain, transport: held))
         held.awaitStarted()
         var tasks: [Task<Void, Never>] = []
-        for _ in 0..<Self.width {
+        for _ in 0..<Self.heldWidth {
             if let t = GitHubIdentityMonitor.kickIfNeeded(config: config, keychain: keychain, transport: held) { tasks.append(t) }
         }
         for t in tasks { try await value(of: t, within: 20) }
@@ -370,7 +373,7 @@ struct GitHubIdentityInFlightTests {
             group.addTask { await GitHubIdentityMonitor.verify(config: config, keychain: keychain, transport: held) }
             // Wait for the first to reach the transport before the rest start.
             await Task.detached { held.awaitStarted() }.value
-            for _ in 0..<Self.width {
+            for _ in 0..<Self.heldWidth {
                 group.addTask { await GitHubIdentityMonitor.verify(config: config, keychain: keychain, transport: held) }
             }
             var others: [GitHubProxyClient.IdentityCheck?] = []
@@ -378,12 +381,12 @@ struct GitHubIdentityInFlightTests {
             for await result in group {
                 seen += 1
                 if result == nil { others.append(result) }
-                if seen == Self.width { held.release.signal() }
+                if seen == Self.heldWidth { held.release.signal() }
             }
             return others
         }
         #expect(held.calls == 1, "\(held.calls) requests")
-        #expect(results.count == Self.width, "every overlapping caller got nothing back")
+        #expect(results.count == Self.heldWidth, "every overlapping caller got nothing back")
         #expect(config.githubIdentity == .match)
     }
 }
