@@ -6,14 +6,16 @@ public enum SandboxPref: String, Codable, Sendable {
     case sandboxed
 }
 
-/// Who is running: the user-facing main agent, an isolated subagent, a goal-drift evaluator, or an
-/// external MCP guest's own confined session (#1066). A guest runs the two-tool `GuestToolset` floor
+/// Who is running: the user-facing main agent, an isolated subagent, a goal-drift evaluator, an
+/// external MCP guest's own confined session (#1066), or the disclosure broker (#974 H2, an
+/// owner-memory-read-only, zero-acting-tools run). A guest runs the two-tool `GuestToolset` floor
 /// and nothing else; it is never `.main`, and no `!= .main` site may treat it as a subagent.
 public enum Principal: Sendable {
     case main
     case subagent
     case evaluator
     case mcpGuest
+    case broker
 }
 
 /// The routing outcome for one command.
@@ -54,7 +56,7 @@ public enum SandboxPolicy {
 
         let intended: SandboxPref
         switch principal {
-        case .subagent, .evaluator, .mcpGuest:
+        case .subagent, .evaluator, .mcpGuest, .broker:
             intended = .sandboxed
         case .main:
             intended = perConversation ?? perWorkspace ?? globalDefault
