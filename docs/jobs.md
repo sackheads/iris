@@ -317,7 +317,7 @@ the Google mutators and MCP tools are neither widened nor narrowed; every other 
 the allowlist and fails closed outside it.
 
 **The gate, in order.** For a call from a granted run: a write into a protected directory
-(`~/.iris/config`, `~/.iris/plugins`) is refused first, before the grant is read, whatever the
+(`~/.iris/config`, `~/.iris/plugins`, `~/.iris/exchange`, `~/.iris/profiles`) is refused first, before the grant is read, whatever the
 grant says. Then the grant. Then, for every tool *except* the two file tools, the allowlist. In a
 granted run `write_file` and `read_file` are the grant's alone — the allowlist is not consulted for
 them, so a `permissions.json` rule for a path outside the grant cannot put them on the host path,
@@ -1119,7 +1119,7 @@ the first, by the ledger) if one is reached another way:
 
 - a call a **read-only** job's profile refused. It was not stopped for want of a human, so no human
   can grant it; the job would have to be created `mutating`.
-- a **write into a protected directory** (`~/.iris/config`, `~/.iris/plugins`, `~/.iris/exchange`). A write there grants
+- a **write into a protected directory** (`~/.iris/config`, `~/.iris/plugins`, `~/.iris/exchange`, `~/.iris/profiles`). A write there grants
   further permission rather than editing a file, and a click says a person vouches for the call —
   it does not change what may be written. Make that change yourself if you want it.
 - a **file-tool call outside the job's grant** (`write_file` or `read_file` from a granted run,
