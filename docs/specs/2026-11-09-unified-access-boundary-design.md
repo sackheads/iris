@@ -1,20 +1,54 @@
 # Unified Access / Credential / Visibility Boundary — Design (#974)
 
-**Status:** **v2 — revised after the PR #999 security audit (2026-11-09).** The three-layer *shape*
-(Principal / AccessProfile / Binding) was validated by the audit; as a *confinement model* the v1 had
-holes, and the audit also found ~8 fail-open seams in the **existing** codebase that this boundary must
-close. Three reviewers (Iris, rune, Clomp) raised 8 CRITICAL, 4 HIGH, 1 warning, 5 medium — **12
-blocking**. This revision folds the blocking findings in as hard invariants and names the existing
-seams to close. **The implementation plan is gated on this v2 plus a *targeted* re-review of the
-changed sections** (not another cold trace — the first audit's full-depth pass, incl. Clomp's 31-minute
-trace, was the one-time cost the spine gets once). No code until that re-review passes.
+**Status:** **v3 — revised after the targeted v2 re-review (2026-11-17, dev-2, verified against
+origin/main).** The v2 three-layer shape (Principal / AccessProfile / Binding) and its audit-folded
+invariants still hold. The targeted re-review the v2 gate required found **nine items (F1–F9) plus
+code-claim corrections** that would have made the core-spine implementation plan wrong if drafted
+straight off v2 — stale symbol names, invariants that overclaim or name no mechanism, and a retrofit
+surface that grew since v2 shipped. This revision folds them in. Two Brian decisions fed it
+(answered 2026-11-17): **2A** (= finding F1) scope invariant 1 to the non-owner binding, owner git path
+a named exception; and **1B** — a *separate* finding from the live-floor safety check (NOT one of
+F1–F9) — ship the #1195 guest-memory stopgap now. **The core-spine implementation plan
+is written from THIS v3, not v2.** No spine code lands before the plan is approved (the epic gate is
+unchanged; the re-review it gated on is now done).
 
-**What changed from v1 (audit map):** credentials are now *spent, never possessed* (C2); every axis of
-"narrower" is enforced in code (C3); tier/FS/memory checks moved to the **data layer**, not prompt
-assembly (C4/C5/H1); every default is **fail-closed** (C1/C5/C8/H3); the disclosure broker gets a
-dedicated zero-acting-tools floor (H2); Iris **verifies peer signatures itself** rather than trusting
-the gateway (H4, Brian's decision); the grant type is renamed `AccessProfile` to avoid colliding with
-the existing `AgentProfile` (M3). Details inline, each tagged with its finding id.
+## v3 changelog (what each finding changed)
+
+- **F1 / 2A (Brian):** Enforcement Invariant 1 scoped to **non-owner** principals; owner `main`'s
+  ambient-env `run_command` and the #966 git-credential-helper path recorded as a **named exception**
+  (Brian 2026-11-15, "identity separation, not credential-hiding"). v2 stated a rule the owner path
+  does not satisfy; v3 states the rule it actually enforces.
+- **#1195-B (Brian):** near-term stopgap noted — strip the memory read/write tools on guest-origin
+  turns now; the spine's C4/H1 data-layer enforcement subsumes it.
+- **F2a:** Invariant 2 now names that `SandboxPolicy.resolve` returns `.host` for every principal
+  when the master switch is off; the spine makes `resolve` ignore the master switch for non-owner and
+  refuse (no host fallback).
+- **F2b + broker:** the non-owner enforcement **template** is a positive allowlist + dispatch refusal
+  (generalize `GuestToolset`), not the subagent/evaluator denylists; added a **`.broker` Principal**
+  for the disclosure broker with a dispatch-enforced positive allowlist.
+- **F3:** data-layer enforcement-point list expanded to the three memory **reads** (`search_memory`
+  incl. the subagent path, `search_conversations`, `read_conversation`) and the **eight writers**, not
+  just `search_memory`/`read_file`/`write_file`.
+- **F4:** no-widen lattice chosen — **coarse ordered memory tiers**; FS-roots subset must define
+  symlink/mount-overlap handling in the plan.
+- **F6:** the new profile/mapping store and `a2a-peers` added to the protected-write set and
+  `GuardedSettings.approvalWarning`.
+- **F7:** the dangling `deniedHomeSubpaths` symbol (does not exist on main) replaced with the real
+  mechanism and the new non-owner host-read denial set.
+- **F8:** the M2 "comments-only" claim corrected — `Issues: write` reaches PR labels/state/title/body;
+  sandbox test widened.
+- **F9:** H4 crypto core recorded as built-but-uncalled (end-to-end untested); wiring is the A2A
+  slice's job, a cross-slice dependency.
+- **Corrections:** C7 cadence (30 not 10), C6 evaluator-not-subagent, C8(b) snapshot fallback,
+  the ~/.iris carve-out is guest-origin not principal, the `promptCacheKey` omission.
+- **Retrofit:** new section capturing that R1's "lands first, nothing to refactor" is now partly
+  false (`.mcpGuest`, `ProviderTokenRegistry` roles, `A2ASeenLedger` already shipped).
+
+**What carried from v2 unchanged:** the three-layer model, the six invariants' intent, the five
+routes, the credential-registry/spend-never-possess shape, memory tiers, the H4 verifier obligations,
+the disclosure-broker floor, and the goals/non-goals.
+
+---
 
 **Intent.** Iris is gaining several features that each need to answer the same question —
 *which identity can reach which credentials, which memory/knowledge, and which transports/peers* —
@@ -25,480 +59,474 @@ consumers of one boundary. This document defines that boundary once, so each con
 single model instead of inventing its own policy. Build this before building any one consumer.
 
 The motivating use case is teamwork: Iris acting as a real teammate — reviewing a PR under *her own*
-GitHub identity when a trusted peer (homelab) asks — not a suggestion box that hands diffs back for a
-human to paste. The boundary has to make that safe, not forbid it. The audit's central lesson is that
-"make it safe" is a *mechanism* claim, not an *intent* claim: a detector (the injection guard) is not
-a boundary, and a default that leaks to owner is not confinement.
+GitHub identity when a trusted peer (homelab) asks. "Make it safe" is a *mechanism* claim, not an
+*intent* claim: a detector (the injection guard) is not a boundary, and a default that leaks to owner
+is not confinement.
 
-## Current state (verified in code, 2026-11-09)
+## Current state (verified in code, re-verified 2026-11-17 on origin/main)
 
-- `Principal` (the enum in `SandboxPolicy.swift`) is `{ main, subagent, evaluator }`. No grant/deny semantics.
-  The A2A plan proposes adding `.a2aRemote`; an MCP service would add a guest case.
+- `Principal` (the enum in `SandboxPolicy.swift`) is `{ main, subagent, evaluator, mcpGuest }`. **v2
+  said three cases; `mcpGuest` landed since (#1066).** It is a payload-free enum with no grant/deny
+  semantics — the per-principal rules are spread across call sites keyed on the case. The A2A plan
+  still proposes `.a2aRemote` (not yet in code). The spine adds `.broker` (F2b).
 - `KeychainManager` scopes secrets by `kSecAttrService` name only — **no** `kSecAttrAccess`, no
-  per-item access lists. There is no credential-identity concept today; secrets are a flat
-  service→blob map.
-- The A2A client plan already proposes `A2AInboundPolicy.decide(tool:path:args:) -> {autoAllow,
-  needsApproval, hardBlock}` as an explicit ordered table, gated by a new `Principal.a2aRemote`. That
-  ordered-policy-table is the closest existing shape to this boundary and is a candidate for the
-  per-route policy below — it should be generalized here, not duplicated per transport.
-- **The existing codebase fails open in several places** (audit, verified in code). These are not
-  design abstractions to add — they are live escapes the boundary must *close*. Enumerated in
-  §Existing fail-open seams. This is why #974 is materially bigger than "revise a spec": the spine
-  plus closing C1/C4/C5/C6/C7/C8.
+  per-item access lists (only generic-password class/service/account attrs). A typed-account registry
+  can be built without the deprecated `SecAccessCreate` APIs. Note: `ProviderTokenRegistry` already
+  keeps **guest role grants** beside the token in a separate Keychain item (`iris.mcp.provider.roles`)
+  — grant data in an item, not an access list on it (retrofit item 2).
+- The A2A client plan proposes `A2AInboundPolicy.decide(...) -> {autoAllow, needsApproval, hardBlock}`
+  as an ordered table gated by `Principal.a2aRemote`. **Neither is in `Sources/` yet.** That ordered
+  table is the closest existing shape to this boundary's per-route policy and should be generalized
+  here, not duplicated per transport.
+- **The existing codebase fails open in several places** (audit, re-verified). These are live escapes
+  the boundary must *close*, enumerated in §Existing fail-open seams.
+- **The GitHub-identity slice (#966 first consumer) shipped** (`GitHubProxyClient`,
+  `GitHubIdentityMonitor`, the `github_*` proxy tools) — a working instance of spend-never-possess on
+  one credential. It uses one token on `.main`; the typed-account registry generalizes it.
 
 So this boundary is **net-new**, not a generalization of an existing grant model.
 
-## Enforcement invariants (the spine — post-audit)
+## Enforcement invariants (the spine — post-audit, re-reviewed)
 
-These are the invariants every consumer and every entry point must satisfy. They are the heart of v2;
-the sections below elaborate each. A design that states a rule it does not mechanically enforce is a
-finding, not a boundary (audit, repeatedly).
+A design that states a rule it does not mechanically enforce is a finding, not a boundary.
 
-1. **Spend, never possess (C2).** No credential secret is ever in model-reachable state (not in a
-   prompt, a tool arg, a tool result, env, or the sandbox env). Credentials are spent only through
-   **host-side proxy tools** (e.g. `github_comment(repo, pr, body)`) that read the Keychain themselves,
-   expose a typed allowlisted op set, and return only non-secret results. The injection guard is a
-   **detector, not a boundary** — #952 measured E2B passing ~96% of peer/inbox injections — so it may
-   raise an alarm but is never the thing standing between an injected instruction and a secret.
-2. **Fail closed, everywhere (C1/C5/C8/H3).** A missing binding, a missing grant key, an unmapped
-   route, an unclassified tool, an unreadable profile file — every one denies, never defaults to owner
-   or to host. Non-owner principals execute **only** in the sandbox; there is no host fallback for them.
-3. **Enforce at the data layer, not at prompt assembly (C4/C5/H1).** Memory tier, FS roots and
-   credential scope are checked inside the tools and the store (`search_memory`, `read_file`,
-   `write_file`, credential selection), keyed on the active binding — not by shaping the prompt. A tool
-   that reads data consults the binding itself; it cannot be fixed by what the prompt does or does not
-   contain.
-4. **Per-axis no-widen, in code (C3).** "Narrower" means every axis — credentials, memory, transports,
-   filesystem, tools — of the target is a subset of the source. A drop into a named profile is refused
-   unless it is provably a sub-grant on every axis. No-widen is a code path, not a convention.
+1. **Spend, never possess — for non-owner bindings (C2; scoped per F1/2A).** No credential secret is
+   ever in **non-owner-reachable** state (not in a non-owner prompt, tool arg, tool result, env, or
+   sandbox env). Non-owner credentials are spent only through **host-side proxy tools** (e.g.
+   `github_comment(repo, pr, body)`) that read the Keychain themselves and return only non-secret
+   results. **The axis is the BINDING, not the Principal:** a subagent running on the owner binding is
+   owner for this purpose (it inherits owner's credentials — see default bindings); a subagent dropped
+   into a named non-owner profile is bound by this invariant. **Named owner exception (Brian
+   2026-11-15):** the owner binding — owner `main`, or a run that inherits it — runs `run_command` from
+   the full process environment (ambient `gh`/`ssh`/etc. via `ToolExecutor.runCommand`/`hostSpawn`), and
+   the #966 git path hands git the token through `GitCredentialHelperCLI.respond` on request. This is
+   intentional — the goal is *identity separation*, not hiding credentials from the owner's own shell,
+   which already holds them. The invariant binds every **non-owner** binding absolutely; it does not
+   bind the owner binding. The injection guard is a **detector, not a boundary** (#952: ~96% of
+   peer/inbox injections pass E2B) — it may alarm but never stands between an injected instruction and
+   a secret.
+2. **Fail closed, everywhere (C1/C5/C8/H3; mechanism named per F2a/F2b).** A missing binding, missing
+   grant key, unmapped route, unclassified tool, or unreadable profile — every one denies, never
+   defaults to owner or host. **Today `SandboxPolicy.resolve` returns `.host` for every principal when
+   the master sandbox switch is off, and `.host(warnNoRuntime:)` when on with no runtime** (refused
+   only under `refusesHostWithoutRuntime`, #678) — the guest is safe today only because it is never
+   given `run_command`. Under the spine, `resolve` **ignores the master switch for non-owner
+   principals and refuses rather than falling back to host.** Non-owner principals execute **only** in
+   the sandbox; there is no host fallback for them. **Unclassified-tool denial has a mechanism, not a
+   hope:** the template for every non-owner principal is `GuestToolset`'s **positive allowlist plus
+   dispatch-side refusal** (F2b), not the subagent/evaluator denylists (`mainOnlyDeclared`,
+   `unattendedNeverDeclared`, `hardStrip`), under which a newly-added tool is allowed to a subagent
+   unless someone remembers to deny it.
+3. **Enforce at the data layer, not at prompt assembly (C4/C5/H1; list completed per F3).** Memory
+   tier, FS roots and credential scope are checked inside the tools and the store, keyed on the active
+   binding. The enforcement points are **the memory READS — `search_memory` (including the subagent
+   path — not in `mainOnlyDeclared` today, so a subagent gets the same unscoped `scope:all`),
+   `search_conversations`, `read_conversation` (ungated today — the #1195 exfiltration surface); the
+   eight memory WRITERS — `save_fact`, `manage_fact`, `update_memory`, `update_user_profile`,
+   `update_soul`, `create_skill`, `update_skill`, `delete_skill` (held by human approval under the #813
+   context holds on a tainted conversation today, but not *scoped by profile tier* — the spine replaces
+   the approval prompt with a mechanical tier check; the H1 no-write-up surface); `read_file`,
+   `write_file`; and credential selection.** A tool that reads or writes data consults the binding
+   itself; it cannot be fixed by what the prompt does or does not contain.
+4. **Per-axis no-widen, in code (C3; lattice chosen per F4).** "Narrower" means every axis —
+   credentials, memory, transports, filesystem, tools — of the target is a subset of the source. The
+   **memory axis uses coarse ordered tiers** as its lattice (namespaces deferred to "if a real case
+   needs finer control"); the **FS axis** is set-subset over roots, and the plan **must define
+   symlink-resolution and mount-overlap handling** for that subset test. A drop into a named profile
+   is refused unless provably a sub-grant on every axis. No-widen is a code path, not a convention.
 5. **Identity is authenticated and never self-asserted (confused-deputy; M4).** The profile is a
    property of the initiating authority, resolved from authenticated identity and stamped before the
    engine runs. The task/message body can never name its own profile. Identity keys on
-   `(transport, issuer, id)`, so an MCP guest naming itself `clomp` cannot resolve to the A2A
-   `homelab-peer`.
-6. **The owner is reachable only by `main`; policy is not model-writable (H3).** Profiles and
-   identity→profile mappings live in a protected directory that only the #961 UI writes; no
-   model-callable tool can modify a grant or a mapping. A run cannot rewrite its own authority.
+   `(transport, issuer, id)`. **The guest door already does this** — bearer token → `clientId`, engine
+   stamped at creation (`makeGuestEngine`), `principalMismatch` checked at the single `processInput`
+   chokepoint (#1124) — that chokepoint is the natural place to enforce the Binding. (Gap F5: the
+   shipped guest identity is only a `clientId`, not `(transport, issuer, id)` — retrofit item 3.)
+6. **The owner is reachable only by `main`; policy is not model-writable (H3; hardened per F6).**
+   Profiles and identity→profile mappings live in a protected directory that only the #961 UI writes;
+   no model-callable tool can modify a grant or a mapping. `write_file` into `~/.iris/config/` is a
+   protected write that always asks (`isProtectedWrite`), and `a2a-peers` sits under it — **but a host
+   `run_command` can still write there, gated only by approval and not flagged the way
+   `GuardedSettings.approvalWarning` flags commands naming Iris's own settings (F6).** The new
+   profile/mapping store must be added to **both** the protected-write set and the `approvalWarning`
+   set; `a2a-peers` is **already** in the protected-write set (`protectedWriteDirs` via `configDir`,
+   verified on origin/main) — only the `approvalWarning` half is new for it.
 
 ## The model: three layers
 
 ### 1. Principal — the fixed code floor
-A `Principal` is the *execution context* the engine already tracks: `main`, `subagent`, `evaluator`,
-plus new `a2aRemote` and `mcpGuest`. It is **not a user-configurable surface.** It carries the
-non-negotiable caps that are true for that context regardless of profile — e.g. `a2aRemote`/`mcpGuest`
+A `Principal` is the *execution context* the engine tracks: `main`, `subagent`, `evaluator`,
+`mcpGuest` (shipped), plus new `a2aRemote` (A2A slice) and **`broker`** (this spine, for the
+disclosure broker — F2b/R4/H2). It is **not a user-configurable surface.** It carries the
+non-negotiable caps true for that context regardless of profile — e.g. `a2aRemote`/`mcpGuest`/`broker`
 never run in the foreground, always hard-strip, run in an isolated lane, and **execute only in the
-sandbox (no host fallback, C1)**.
+sandbox (no host fallback, C1)**. Each non-owner Principal is defined by a **positive allowlist
+enforced at dispatch** (the `GuestToolset` template), never a denylist.
 
-Per-Principal rules are **fixed in code** (Brian: fine until it causes a problem down the road). A
-blanket per-Principal deny ("no subagent ever spends a credential, whatever profile it runs as")
-lives here as a floor, never as a config pane. The floor is a *cap*, never a grant.
+Per-Principal rules are **fixed in code** (Brian: fine until it causes a problem). A blanket
+per-Principal deny lives here as a floor, never as a config pane. The floor is a *cap*, never a grant.
 
 ### 2. AccessProfile — the user-configured grant
 The grant type is named **`AccessProfile`** (M3) to keep it distinct from the existing `AgentProfile`
-(#465, which only narrows *prompts*), `JobProfile`, and the A2A `from.profile` field. Reusing the
-`agentProfile` field for grants would silently turn a prompt-narrowing hint into a grant file — these
-are orthogonal and must not share storage.
+(#465, which only narrows *prompts*), `JobProfile`, and the A2A `from.profile` field. It is a named,
+user-created identity — **the only thing the user configures** (the #961 pane) — granting over:
 
-An `AccessProfile` is a named, user-created identity. It is **the only thing the user configures** (the
-#961 pane). It grants over these axes:
-
-- **Credentials:** a subset of the typed accounts in the registry (§Credential registry). A grant
-  authorizes the *proxy tool* that spends the account; it never exposes the secret.
-- **Memory / knowledge:** which memory tier/namespace it may read, and which it may write
-  (§Memory scoping) — read and write are separate axes (no-write-up, H1).
-- **Transports/peers:** which MCP guests / A2A peers it may reach, inbound and outbound; and whether
-  it may send a disclosure-request to the owner broker (§Disclosure broker).
-- **Filesystem:** read/write roots — reuses the existing grant/workspace model
-  (`PermissionManager`, `WritableRoots`), **de-globalized and consulted per binding** (R3).
+- **Credentials:** a subset of the typed accounts in the registry. A grant authorizes the *proxy
+  tool* that spends the account; it never exposes the secret.
+- **Memory / knowledge:** which memory tier/namespace it may read, and which it may write —
+  separate axes (no-write-up, H1).
+- **Transports/peers:** which MCP guests / A2A peers it may reach, inbound and outbound; whether it
+  may send a disclosure-request to the owner broker.
+- **Filesystem:** read/write roots — reuses the existing grant/workspace model (`PermissionManager`,
+  `WritableRoots`), **de-globalized and consulted per binding** (R3).
 - **Skills / library / tools:** which are available (floor still caps the Principal-forbidden ones).
 
 **Any omitted grant key on a non-owner profile means deny-all for that axis (C8), never all-access.**
-Today `AgentProfile` with `tools:` omitted means *all tools*, and the shipped reviewer/researcher/writer
-profiles omit it — that exact default is a fail-open seam; `AccessProfile` inverts it.
+Today `AgentProfile` with `tools:` omitted means *all tools*, and the shipped reviewer/researcher/
+writer profiles omit it — that exact default is a fail-open seam; `AccessProfile` inverts it.
 
-Examples the user builds: `owner` (full; what `main` runs as), `overseer-team` (no personal memory,
-repo access, no personal creds), `web-researcher` (web + read-only FS, no creds, no write),
-`reviewer` (carries `Iris-github`, not `Brian-github`), `homelab-peer` (what you grant the homelab
-A2A peer), `research-guest` (a confined MCP guest).
+Examples: `owner` (full; what `main` runs as), `overseer-team`, `web-researcher` (web + read-only FS,
+no creds), `reviewer` (carries `Iris-github`, not `Brian-github`), `homelab-peer`, `research-guest`.
 
 ### 3. Binding — a run acts *as* an AccessProfile, capped by its Principal floor
 Rights live on the AccessProfile; the Principal floor sets how low the ceiling is. The binding is
 **non-optional and built at the door (H3)** — a run with no binding is refused, never run as owner.
-Rules:
 
 - **The profile is a property of the initiating authority, never of the task.** Every entry point
-  resolves route → profile from *authenticated identity* and stamps it on the run **before the
-  engine starts.** The task/message body can **never** name its own profile — a payload that asks
-  for a broader profile is ignored text. This is the confused-deputy defense, and it lives at every
+  resolves route → profile from *authenticated identity* and stamps it before the engine starts. The
+  task/message body can never name its own profile. This is the confused-deputy defense, at every
   door, not in the model.
 - **No-widen, per axis, in code (C3).** A run may voluntarily drop to a narrower profile; it can never
-  raise. A drop into a *named* profile is refused unless the target is a subset of the source on
-  **every** axis. An unmapped external route gets nothing — **fail closed.**
-- **Owner only from `main` (H3).** The `owner` profile is reachable only by the `main` Principal. A
-  missing binding on a non-main Principal is a refusal, never a silent promotion to owner.
+  raise. An unmapped external route gets nothing — **fail closed.**
+- **Owner only from `main` (H3).** The `owner` profile is reachable only by the `main` Principal.
 
-Default bindings (so the common cases need zero config):
+Default bindings:
 - `main` → `owner` profile. Unconfigured; behaves like today.
-- `subagent` / `evaluator` → **inherit the spawner's full binding ∩ their Principal floor** — including
-  the sandbox grant and the tool scope (C6: today `GoalEvaluator` drops the parent scope and never
-  copies the sandbox grant, so the evaluator runs unconfined; the evaluator must inherit the parent
-  Binding, not reset it). No per-subagent configuration. A spawner may *explicitly* drop a subagent
-  into a narrower named profile, but never widen it.
-- `a2aRemote` / `mcpGuest` → the named guest profile the route resolves to from the **authenticated,
-  signature-verified** peer identity (§Peer identity).
+- `subagent` → **inherits the spawner's full binding ∩ Principal floor** — `SubagentManager` already
+  copies the sandbox grant + workspace; the spine adds the memory/credential axes. **`evaluator`
+  does NOT inherit today (C6):** `GoalEvaluator.evaluate` sets no sandbox grant, so the evaluator runs
+  grant==nil (RW workspace, full network, unconfined `read_file`) and is containerized only when
+  sandboxing is on — the evaluator must be changed to inherit the parent Binding. (v2 said
+  "subagent/evaluator inherit"; true for the subagent, false for the evaluator — corrected.)
+- `a2aRemote` / `mcpGuest` / `broker` → the named profile the route resolves to from the
+  **authenticated, signature-verified** identity (§Peer identity), capped by floor.
 - **Background conversations and reflection turns keep the owning binding (C7/C8)** — they do not
-  reset to nil/owner. A background conversation whose `agentProfile` goes nil today runs as full owner;
-  under v2 the binding is carried, and a guest/remote binding **never triggers reflection** that writes
-  owner memory.
+  reset to nil/owner. Reflection fires every **30** messages (`AppState.sendMessage`), not 10, and the
+  `!isGuest` check already stops it for guests; the seam is `AppState.reflectionTools` /
+  `AgentToolScope(reflecting:)`, which exempts the five memory writers from a profile's `tools:`
+  narrowing — a reviewer profile on a reflection turn still gets them. A guest/remote binding never
+  triggers owner-memory reflection.
 
 ## The five routes (worked)
 
-The same task ("review this PR") runs under five different profiles depending on who initiated it:
-
 | # | Route | Principal | Profile resolved from | Ceiling |
 |---|-------|-----------|----------------------|---------|
-| 1 | Iris starts it herself | subagent (of her session) | her current profile, drop-to-narrower | her profile |
-| 2 | Overseer session assigned a review | subagent/main of that session | the overseer session's configured profile | that profile |
+| 1 | Iris starts it herself | subagent | her current profile, drop-to-narrower | her profile |
+| 2 | Overseer session assigned a review | subagent/main | the overseer session's configured profile | that profile |
 | 3 | MCP guest asks | mcpGuest | the guest's authenticated `(transport,issuer,id)` → profile | guest profile ∩ mcpGuest floor |
-| 4 | homelab A2A asks | a2aRemote | `homelab-peer`, from the **signature-verified** peer id | `homelab-peer` ∩ a2aRemote floor |
+| 4 | homelab A2A asks | a2aRemote | `homelab-peer`, signature-verified peer id | `homelab-peer` ∩ a2aRemote floor |
 | 5 | GitHub webhook asks | (new) webhook | configured `github-webhook` profile, else **reject** | that profile, or nothing |
 
-Route 5 generalizes: a new route with no established identity must map to a configured profile or be
-refused. No anonymous trigger ever runs as owner.
+**Route-3 recipient gap (F3b — must be in the plan):** route 3 resolves the binding of the *guest's
+own engine*. But a guest's real effect is a `send_to_session` message that runs as a **`.main` turn on
+a role session** — and the table never says what binding *that recipient turn* runs under. Today it is
+only the `isGuestOriginTurn` flag (which gates the approval ladder + github tools, nothing else — the
+#1195 hole). **The Binding stamp must carry the turn's origin** so the recipient turn is bound, not
+just flagged. The #1195-B stopgap (below) closes the immediate memory-tool leak while the spine builds
+the full recipient binding.
 
 ## Credential registry (#966) — spend, never possess
 
-Credentials become **typed accounts** in a registry, replacing the flat service→blob map. The audit's
-central credential finding (C2) reshapes this section: the registry is not only *which account a
-profile may use* but *how an account is spent without the secret ever being reachable*.
+Credentials become **typed accounts** in a registry, replacing the flat service→blob map.
 
 - Each account has a **type** (`github`, `google`, `openai`, …) and an **owner-class**: *owner-personal*
-  (Brian's) or *service* (Iris's own bot identities).
-- **Credentials are spent through host-side proxy tools, never handed to the model (C2).** For each
-  account type, the spend surface is a typed tool with an allowlisted op set — e.g.
-  `github_comment(repo, pr, body)`, `github_approve(repo, pr)` — implemented host-side, reading the
-  Keychain itself. The secret value never enters a prompt, a tool argument, a tool result, the sandbox
-  env, or `GH_TOKEN`. A profile's credential grant authorizes *which proxy ops it may call under which
-  account*, not possession of a token.
-- **Output scrubbing.** Any exact secret value is scrubbed from tool output and args that cross into a
-  guest-bound context, as defence in depth (the primary defence is that the secret was never reachable).
-- An `AccessProfile` is granted a **subset** of accounts. With one account per type per profile, the
-  grant set alone decides which identity a call uses — no separate "active account" selector. (If a
-  profile ever holds two accounts of one type, selection becomes explicit; avoid by default.)
-- **Hard requirement — least privilege at the source (backstop, not the primary control).** The primary
-  control is C2 (the secret is unreachable); the backstop if a proxy op is misused is the account's own
-  scope. `Iris-github` is a scoped bot PAT; owner-personal full-access tokens never go in a profile a
-  guest can hold. Granting a profile an account delegates that account's full op-set power to whoever
-  holds the profile.
-- **The Iris-review GitHub token (M2, Brian's decision).** For the review use case the reviewer profile
-  carries a token scoped **`Issues: write` + `Pull requests: read`**, on the review repos only. Verified
-  in the GitHub docs: that scope can post **PR conversation comments** (the issue-comment endpoint is
-  satisfied by `Issues: write`) but **cannot approve** a PR (approve needs `Pull requests: write`) and
-  **cannot post inline diff comments** (also `Pull requests: write`). So the default reviewer token is
-  *comments-only*; enabling approve or inline comments is a deliberate escalation to `Pull requests:
-  write`. To confirm with a sandbox test before shipping. This stacks with the C2 proxy
-  (`github_comment` spends this token) and does **not** replace it. It also resolves M2's merge-path
-  risk: a comments-only token cannot self-approve an injected PR into a merge.
-- Keychain: accounts need an identity/scope dimension `KeychainManager` lacks today. Builder to
-  design the storage (likely service-name-encodes-account plus a registry index); does not require
-  the deprecated `SecAccessCreate` access-list APIs (zero-warnings rule forbids them). The denied-path
-  set the FS layer enforces must include the credential stores themselves (C5): `~/.iris[-dev]`,
-  `~/.config`, `~/.config/gh`, `~/.netrc`, `~/.git-credentials`, `~/.ssh`.
+  or *service* (Iris's own bot identities).
+- **Credentials are spent through host-side proxy tools, never handed to the model (C2, non-owner).**
+  The spend surface is a typed tool with an allowlisted op set (e.g. `github_comment`, `github_approve`)
+  reading the Keychain itself. The shipped `GitHubProxyClient` is the worked example; its `sanitize`
+  output-scrub is **per-client only — the generalized cross-context scrub is not built** and is spine
+  work.
+- An `AccessProfile` is granted a **subset** of accounts; with one account per type per profile the
+  grant set alone decides identity (no separate selector).
+- **Least privilege at the source (backstop).** `Iris-github` is a scoped bot PAT; owner-personal
+  full-access tokens never go in a guest-holdable profile.
+- **The Iris-review GitHub token (M2 — corrected per F8).** The reviewer profile carries a token
+  scoped **`Issues: write` + `Pull requests: read`** on the review repos. It **can** post PR
+  conversation comments and **cannot** approve (approve needs `Pull requests: write`) or post inline
+  diff comments. **It is likely NOT "comments-only":** `Issues: write` is believed to also reach a PR's
+  **labels, state, title and body** (dev-2's reading of the API — **UNVERIFIED** until the widened
+  sandbox test runs), and labels drive `hold`/the auto-merge arm hook, so a comments-scoped token may be
+  able to toggle a merge gate. The planned sandbox test must be **widened to cover label, close and edit
+  calls**, not just comment-vs-approve. **Backstop (partial):** the `main` ruleset requires code-owner
+  review (count 1, dismiss-stale on), so a token holder cannot manufacture an approval or merge an
+  *un*-approved PR. **But** removing `hold` from an **already-approved** PR re-arms it on the existing
+  approval (the arm workflow reacts to label events) → it merges — so the backstop does NOT cover an
+  approved-then-held PR; that case is exactly what the widened test must probe. The #1186 rename path is
+  the other caveat, tracked separately and gating enablement.
+- **Keychain storage (F7-adjacent):** accounts need an identity/scope dimension `KeychainManager`
+  lacks; builder designs the storage (service-name-encodes-account plus a registry index), no
+  deprecated `SecAccess` APIs. **The denied-path set the FS layer enforces** must include the
+  credential stores — and here the v2 symbol is wrong: **`deniedHomeSubpaths` does not exist on main.**
+  The nearest is `JobGrant.credentialStores` (18 entries on origin/main) which only refuses *mounting* a store into a
+  job grant, lacks `~/.netrc` and `~/.git-credentials`, and **does not restrict host `read_file` at
+  all** (a store is still readable via approval or an allowlist rule). The **non-owner host-read denial
+  set is NEW work** (F7): add `~/.netrc` + `~/.git-credentials` + `~/.iris[-dev]`/`~/.config`/
+  `~/.config/gh`/`~/.ssh`, and make it gate host `read_file` for non-owner bindings.
 
 ## Memory / knowledge scoping (#967) — enforced at the data layer
 
 A Profile sees a **memory tier**, enforced **inside the tools and the store, keyed on the active
-binding** — not at context assembly (H1/C4). v1 said "resolves at context assembly"; the audit showed
-that misses every tool read path (the `search_memory` dispatch in `iris.swift` enforces no tier/`isPinned`
-check; `scope:"all"` dumps every owner chat and background job) and ignores writes entirely.
+binding** (H1/C4) — not at context assembly.
 
-- **Read tiers.** `owner` → full (facts, `USER.md`, all skills, library). internal named profiles
-  (`overseer-team`, `reviewer`, `web-researcher`) → a configured slice; no personal `USER.md`/facts
-  unless the task needs them. guest profiles → least: task context + at most a public "about Iris"
-  blurb; **no** personal memory, facts, or private skills.
-- **Enforcement points (data layer).** `search_memory` gates the facts branch on
-  `binding.memory.contains(.shared)` and the conversations branch on `.contains(.conversations)` **and**
-  `isPinned`. `read_file`/`write_file` consult the binding (see §FS). The `~/.iris` read carve-out in
-  `PermissionManager.match` (auto-allows any read under `~/.iris` for any caller — the `~/.iris` carve-out) is
-  **removed for non-owner** — a first-party read of Iris's own folder is no longer implicitly trusted.
-- **No write-up (H1).** A lower tier writes only to its own namespace, which higher tiers never
-  auto-load. A guest `save_fact`/`create_skill` must not be able to plant text that later injects into
-  owner context. Reflection turns on a narrowed local binding are scoped to `profiles/<id>/memory.md`
-  only — no `SOUL.md`, no `USER.md`, no skill creation, no `EventCard.reflection` into pinned Iris (C7).
-- System-prompt assembly also leaks today (W1): `guardedUserProfileText` appends `USER.md` to every
-  conversation incl. subagent/evaluator; `buildBasePrompt` loads `SOUL.md`/rules/all skills. Strip
-  `USER`/`SOUL`/skills/rules from non-owner prompts; add the profile id and memory tier to
-  `promptCacheKey` (it omits them today, so a cache entry leaks across tiers/peers); isolate durable
-  a2a-remote lane history per `(peerId, contextId)`.
+- **Read tiers.** `owner` → full. internal named profiles → a configured slice; no personal
+  `USER.md`/facts unless the task needs them. guest profiles → least: task context + at most a public
+  "about Iris" blurb.
+- **Enforcement points (data layer, completed per F3).** `search_memory` gates facts on
+  `binding.memory.contains(.shared)` and conversations on `.contains(.conversations)` **and**
+  `isPinned` — **including the subagent path** (today `search_memory` is not in `mainOnlyDeclared`, so
+  a subagent gets unscoped `scope:all`; `search_conversations` and `read_conversation` read the same
+  owner data and are gated the same way). The **eight memory writers** (`save_fact`, `manage_fact`,
+  `update_memory`, `update_user_profile`, `update_soul`, `create_skill`, `update_skill`, `delete_skill`)
+  each consult the binding (none consults a per-profile binding today; the #813 context holds gate them
+  by **human approval** on a tainted conversation — not by profile tier — so the spine replaces an
+  approval prompt with a mechanical tier check; the H1 no-write-up surface). `read_file`/`write_file`
+  consult the binding.
+- **The `~/.iris` read carve-out** in `PermissionManager.match` auto-allows any read under `~/.iris`;
+  it is skipped **only for a guest-origin turn (#1150), NOT by principal.** "Removed for non-owner"
+  requires the **principal passed into `PermissionManager.match`** — that is R3's de-globalization;
+  size it there.
+- **No write-up (H1).** A lower tier writes only to its own namespace. Reflection on a narrowed local
+  binding is scoped to `profiles/<id>/memory.md` only — no `SOUL.md`/`USER.md`/skill creation/pinned
+  reflection (C7).
+- **System-prompt + cache leaks (W1).** All three still hold for non-guest principals (subagents and
+  evaluators included): `guardedUserProfileText` appends `USER.md`, `buildBasePrompt` loads
+  `SOUL.md`/rules/all skills. Strip `USER`/`SOUL`/skills/rules from non-owner prompts. **`promptCacheKey`
+  hashes `principal|jobProfile|toolNames` with NO profile id or tier** — a cache entry leaks across
+  tiers/peers; the fix must add the profile id and tier to the key. Isolate durable a2a-remote lane
+  history per `(peerId, contextId)`.
 
-Builder to define the slice mechanism (namespaces/tags on memory items that a profile is granted, vs.
-a coarse tier enum). Coarse tiers first; namespaces if a real case needs finer control.
+**#1195-B stopgap (shipping now, Brian 2026-11-17; #1199).** Ahead of the full data-layer spine, **23
+tools** — 11 memory (reads `search_memory`/`search_conversations`/`read_conversation` + the 8 writers;
+`reflect` excluded as verified-inert), **10 Google** (`GoogleWorkspaceManager`/`GoogleTasksManager` reads
++ outbound-gated writes — dev-3 found these run with **no approval step**, so a guest-steered role
+session could read owner **mail/Drive/calendar/tasks**, worse than the memory reads), and
+`list_jobs`/`get_job_run` — are **stripped on guest-origin turns** via `hardStrip` **and** a dispatch-side
+refusal, using a single source-of-truth `ToolExecutor.guestOriginDeniedTools` set (mirroring
+`githubProxyTools`), with a test that every tool the Google managers declare is covered.
+**What the strip actually closes (corrected mid-build, verified on origin/main):** the **reads** are the
+real ungated exfiltration path — a granted-role guest steering a role session's
+`search_memory`/`search_conversations`/`read_conversation` to pull owner memory out. The **writes** are
+already held for human approval by the #813 context holds (`ContextHolds.heldTools` +
+`holdContextWriteIfTainted`, on any guest/peer-touched conversation; YOLO the only bypass) — the strip
+covers them for defence-in-depth and to remove the approval-fatigue surface, not because they were
+unguarded. One narrow residual (a YOLO-mode reflection turn skipping the holds) is tracked as **#1197**.
+**What the strip does NOT close:** it removes tool-reachable memory, but the role session's own system
+prompt still carries owner context (`USER.md`, `SOUL.md`, `memory.md`, skills, rules) on any `.main`
+turn, which a guest-steered reply can still recite — closed only by the spine's W1 non-owner prompt
+binding plus the F3b recipient-binding of the role turn. (JIT fact retrieval does *not* run on
+peer/guest messages — `retrievesFacts` requires `source == "UI"` — so no facts are injected there.) The
+spine's C4/H1 data-layer enforcement (which *scopes* by tier rather than blunt-strips) subsumes the
+strip. **The stopgap is a DENYLIST — bounded, not complete (F2b).** It enumerates the known-dangerous
+tools; it does NOT cover MCP tools the user adds, future tools, or the already-asking tools
+(`run_command`/`read_file`/`write_file`/job-creation/`invoke_subagent`). Each new finding adds a name —
+exactly the F2b problem. **Only the spine's positive recipient-turn allowlist (the F3b binding of a
+guest-steered `.main` turn, plan Task 15) closes it completely**; the stopgap buys bounded time until
+the spine lands.
+
+Builder defines the slice mechanism: **coarse tiers first** (the F4 lattice); namespaces only if a
+real case needs finer control; read/write as separate axes.
 
 ## Peer identity (H4 — Iris verifies signatures itself)
 
-**Brian's decision (2026-11-09): Option A.** Iris **verifies each inbound peer's Ed25519 signature
-itself**, rather than trusting the A2A gateway's attestation of peer identity. This **reverses v1's
-non-goal** ("cryptographic peer verification — the gateway does that upstream"), because the multi-user
-trajectory means not every user runs the gateway, so "trust your own gateway" cannot ship. End-to-end
-signature verification is the standard, generalizable answer.
+**Brian's decision (2026-11-09): Option A.** Iris verifies each inbound peer's Ed25519 signature
+itself, rather than trusting the A2A gateway. The gateway becomes a relay holding no peer private key.
 
-- The gateway becomes a **relay**: it can drop, delay or reorder tasks, but holds no peer private key
-  and can no longer impersonate a peer. The blast-radius argument that made H4 a finding (one bearer
-  token → impersonate any mapped peer → inherit the union of their grants) is closed at the root.
+**The contract is committed and shipping — romar#396 (`peer-signature-spec.md`, v2, "sign exact
+bytes, verify-before-parse", no JSON canonicalization); implemented in gateway/client via romar#399,
+refined through romar#407.** This doc records Iris's verifier/signer obligations at the design level
+(unchanged from v2): verify-before-parse over transmitted bytes; key id = sender within the
+principal's keyset; recipient binding split by direction (romar §5.1); kind↔channel binding; replay
+nonce + strict RFC 3339 UTC timestamp; reject duplicate JSON object keys (explicit scan; the macOS
+`JSONSerialization` recheck must cover duplicate keys); deadline-bounded replay with matched
+acceptance/retention windows; full-rejects-rather-than-evicts; fail-closed on missing/invalid
+signature (never coerced to `guest`); bidirectional (Iris enrolls its own keypair and signs outbound);
+out-of-band enrollment keyed `(transport, issuer, id)`; no gateway-key fallback. The four build-plan
+requirements stand (fail-closed seen-set surviving restart; peers pin Iris's key; interrupted →
+terminal `failed: interrupted` status; outbound signing gated on romar#403).
 
-**The contract is committed and shipping — see romar#396 (`peer-signature-spec.md`, v2) for the
-byte-exact wire format; it is implemented in the gateway/client (romar#399) with refinements through
-romar#407.** The earlier open item (canonical-payload shape) is retired: the reviewed design signs the
-**exact transmitted bytes, verify-before-parse**, with no JSON canonicalization (stock encoders do not
-agree across Python/Go/Swift). The wire frame, domain separator and codec live in romar; this doc
-records only **Iris's verifier/signer obligations** at the design level.
-
-- **Verify before parse, parse once.** Iris verifies the Ed25519 signature over the transmitted bytes
-  **before** parsing the envelope, then parses once and acts only on that parsed object — never
-  re-serializing a parsed tree or re-parsing for dispatch. The exact signing input is romar#396's.
-- **Key bound to sender, within the principal's keyset.** The signing key id must equal the envelope's
-  declared sender profile (mismatch ⇒ reject), and a key is resolved **strictly within that principal's
-  registered keyset**, never a flat global key map — otherwise an enrolled peer could sign as another.
-- **Iris-side verifier MUSTs** (the ones that land on our code): recipient binding, which splits by
-  direction (romar §5.1) — a delivered task or cancel (an inbound `message`/`cancel`) must be addressed
-  to `iris`, while a response event (`status-update`/`artifact-update`) carries no recipient and is
-  instead bound to the **outstanding request it answers** (its sender, task id and, when present,
-  correlation id must match a request Iris actually issued, else reject `events_request_mismatch`),
-  enforced **inside the verifier** (the outstanding-request context is a required input for `.events`
-  kinds, never an optional per-caller parameter — romar made it optional and no call site passed it);
-  because a relayed response is forgeable exactly like an inbound task; **kind↔channel binding** — a
-  frame's kind must be one its arrival channel permits (romar pins the table), so a signed event cannot
-  be replayed as a task or vice versa (`channel_kind_mismatch`); a present replay nonce and a strict
-  RFC 3339 UTC timestamp; **reject duplicate
-  JSON object keys** (whether Swift's `JSONSerialization`/`JSONDecoder` silently keep last-wins is
-  **unverified** — the explicit scan is required regardless, and the macOS recheck below must cover
-  duplicate-key behaviour, not just the outer frame); derive tier/permissions from Iris's **local** key/grant registry, never from the
-  envelope's self-claimed authority; **fail closed** — a missing/invalid/unverifiable signature is
-  hard-rejected, **never coerced to `guest`**, and relay-attested (gateway-vouched) traffic is rejected
-  unless the user opted into a separate explicit "the gateway" profile. Every rejection logs a reason code.
-- **Replay: deadline-bounded, not a fixed window.** The nonce goes in a **persisted, per-peer-bounded**
-  seen-set, written **before** the task executes; the timestamp may not be in the future beyond a small
-  skew; a deadline is **required on delivered tasks** (`message` kind) and bounds lifetime, capped at
-  `ts + 24 h`; the other kinds carry no deadline and are bounded by `ts + 24 h` instead. No
-  `abs(now − ts)` window — a
-  queued task can sit in the relay up to its deadline while the laptop sleeps, so a fixed window (correct
-  for always-on peers) would reject every queued task on wake. Each seen-set entry is **retained until
-  that same bound** (the deadline for `message`, `ts + 24 h` otherwise) — the acceptance window and the
-  retention window must match, or a replay reopens in the gap between them (romar shipped a 60 s retention
-  against a 24 h acceptance window for a round before fixing it). A full seen-set rejects rather than
-  evicts; a duplicate is rejected **and acked** (a nack makes the relay redeliver forever).
-- **Bidirectional (new scope).** This is not verify-only: Iris must **enroll its own Ed25519 keypair and
-  sign its outbound** tasks and replies (incl. disclosure answers), because the relay can forge an
-  unsigned reply just as easily. The A2A client plan
-  (`docs/superpowers/plans/2026-11-07-a2a-client.md`, Task 5) must be updated to add inbound verification
-  **and** outbound signing, dropping its "Iris does no cryptography" assumption.
-- **Enrollment.** A peer's public key is registered **out of band** in Iris's per-profile registry at the
-  human-approved first grant (M5); the gateway's key distribution is explicitly **not** Iris's trust
-  source — and Iris keeps **no gateway-key fallback**; if one is ever added it must live in a **separate
-  store that never overrides or persists into the human-pinned registry** (cf. romar#403).
-  `(transport, issuer, id)` (M4) keys the mapping. CryptoKit provides Ed25519
-  (`Curve25519.Signing`); the crypto is cheap — the work is the key/seen-set plumbing and outbound signing.
-- **Iris-specific risks to settle in the plan:** recheck macOS `JSONSerialization` on the outer frame
-  (the audit covered Linux Swift only); **vendor romar's single conformance vector** (incl. its
-  negative-reason cases) by commit/CI fetch rather than hand-maintaining a drift-prone copy — romar's
-  shared fixture has **no `events_request_mismatch` vector yet**, so add that case locally until romar
-  ships it (or gate the verifier's events tests on it); accept
-  **only** the new signed format from day one, no downgrade path.
-- **Build-plan requirements carried from romar#399 (the H4 implementation plan must include these):**
-  (1) **the seen-set fails closed on a bad store** — if the persisted seen-set exists but can't be read or
-  parsed, refuse inbound frames and alert; never start empty (that silently reopens replay for everything
-  still inside its deadline). Write it durably, and the refusal must **survive a restart** — a later start
-  must not quietly begin empty; clearing the store is an explicit operator action, not automatic recovery
-  (cf. romar). (2) **Peers pin Iris's key
-  out of band** — the mirror of Iris's own enrollment rule: a peer must obtain Iris's public key out of band,
-  never from the gateway's key bucket, or the relay can serve its own key as `iris` and forge Iris's replies.
-  Iris's enrollment flow must produce and display its public key for that step. (3) **A duplicate after a
-  crash gets a terminal status, not a re-run** — with write-before-execute, a task interrupted by a crash is
-  redelivered and rejected as a duplicate; on a redelivery that never recorded a start, post
-  `failed: interrupted, resubmit` before acking so the caller isn't left waiting until the deadline
-  (match romar#409's status string so both clients agree). (4) **Outbound signing is not relied on for
-  reply integrity toward a peer until that peer actually pins Iris's key** — tracked on the romar side as
-  romar#403; until it closes (or the affected adapter is declared homelab-only and excluded from consuming
-  Iris's `.events`), Iris's signatures give that path no forgery protection.
-- Because identity is now cryptographically verified, the earlier "Inbox-gate every credentialed action"
-  sub-question becomes **optional defence-in-depth**, not a load-bearing control: forged-peer-via-gateway
-  is no longer a path. Signing is identity + integrity only — a verified peer can still carry injected
-  content (a PR diff), so the content/injection guards and the C2 spend-vs-possess invariant still apply
-  to verified input.
+**F9 — the crypto core is built but has NO caller.** `PeerSignatureVerifier`, `PeerSigner`,
+`PeerKeyRegistry`, `IrisSigningKeyStore` and `A2ASeenLedger` (in `Sources/IrisKit/A2A/Crypto/`, wired
+to `ConversationStore`'s GRDB writer and `IrisPaths`) are **referenced only by tests** — so the
+persisted seen-set is never written in production and H4's end-to-end claim is untested because **no
+inbound path exists.** Absent as the spec's own build-plan predicted: duplicate-ack + `failed:
+interrupted` transport status, peer-pinning of Iris's key, and the enrollment UI/CLI. The
+`A2ASeenLedger` fail-closed-on-bad-store behaviour is correct by reading but has **no restart test** —
+"survives a restart" is inferred; the plan must add that test. **Wiring the verifier into an inbound
+path + the restart test is the A2A slice's (#931) job, not the core spine's** — this is a **cross-slice
+dependency**, not a spine blocker. (Spec wording nit: "key id must equal the sender" is implemented as
+"a key inside the sender's own keyset," which the next sentence already says — align the prose.)
 
 ## The disclosure broker (the proxy / escalation path)
 
-A restricted profile that lacks a piece of information may **ask** for a redacted version over the
-inter-agent bus, rather than being granted the underlying access. Motivating example: homelab (Clomp)
-asks Iris for a flight time on a trip it cannot see; it explains its task, and Iris returns just the
-time.
+A restricted profile that lacks information may **ask** for a redacted version over the inter-agent
+bus. **The invariant that makes this safe: the decider is never the requester** — the decision runs in
+a **separate owner-authority run**, and the requester receives a **vetted string**, never the access.
 
-**The invariant that makes this safe: the decider is never the requester.** The disclosure decision
-runs in a **separate owner-authority Iris session**, not under the requesting profile. The requester
-receives a **vetted string as output** — never the access, never a handle, never a credential.
+**The broker runs under a dedicated floor (H2) — and now a dedicated Principal (F2b).** v2 said "a
+per-request owner-authority engine run with zero acting tools" but named no Principal; running it as
+`.main` stripped by declaration repeats the denylist gap. **Add a `.broker` Principal** whose positive
+allowlist (owner memory READ only, ZERO acting tools) is **enforced at dispatch**, not by declaration
+stripping. Output = string then exact-secret scrub; per-peer disclosure rate/budget limits; a question
+touching a deny class is refused including its yes/no form; log question and answer.
 
-**The broker runs under a dedicated floor (H2).** The audit showed the broker is the most-privileged
-run in the system, fed attacker-controlled task text, so it needs a *capability* floor, not just a
-policy:
-
-- **Owner memory READ only. ZERO acting tools.** The broker can read to answer; it cannot run a command,
-  write a file, spend a credential, or reach a transport. Its only output channel is the returned string.
-- **Output = string, then exact-secret scrub.** Before return, exact known-secret values are filtered
-  from the string (mechanically enforceable). This is defence in depth on top of "no acting tools."
-- **Per-peer disclosure rate/budget limits**, to bound oracle/aggregation attacks (composing many yes/no
-  answers to reconstruct a denied class). A question that touches a deny class is refused **including its
-  yes/no form**.
-- **Log the question and the answer**, not just the answer, so an aggregation attack is auditable.
-
-**The envelope** (honors Brian's ~70/30 functionality lean, but per-class, and *honest about what is
-mechanically enforceable* — H2 flagged v1's "~100/0" as an overclaim, EPISTEMIC_HYGIENE §1):
-
-- **Exact-value secrets are code-filtered (hard, mechanical):** credentials/tokens and other exact known
-  values are removed with certainty.
-- **Semantic classes are best-effort, not ~100/0:** raw `USER.md`, third-party PII, financial / auth /
-  health content cannot be mechanically guaranteed un-disclosable by an LLM, so the spec says
-  *best-effort semantic deny with a human gate for anything sensitive*, not "never crosses." The broker
-  is instructed to refuse these classes, but the control that makes it safe is the zero-acting-tools
-  floor plus the sensitivity dial, not a claim that the LLM is incorruptible.
-- **Sensitivity dial:** low-sensitivity → auto-disclose within the envelope; higher → becomes an
-  **Inbox item Brian approves** before it returns. Every disclosure is logged regardless. "Auto-disclose"
-  means *without Brian in the loop* — it still requires a live owner-authority run to decide and read the
-  source (see **R4**); with no owner context available it stays pending, never answered from a cache by a
-  lesser authority.
+**The envelope** (per-class, honest about mechanical enforceability — H2): exact-value secrets are
+code-filtered (hard); semantic classes (raw `USER.md`, PII, financial/auth/health) are best-effort
+semantic deny with a human gate, *not* "never crosses." Sensitivity dial: low → auto-disclose within
+the envelope (still a live owner-authority run, R4); higher → an Inbox item Brian approves. No
+auto-disclosure from a cache by a lesser authority.
 
 ## How each consumer plugs in
 
-- **Profile pane (#961):** the editor for `AccessProfile`s and their grants across all axes. The one
-  place the user configures the boundary. It is also the **only** writer of the protected profile/mapping
-  store (H3) — no model-callable tool writes there.
-- **Credential registry (#966):** the typed-account store a profile grants over; enforces owner-class,
-  least-privilege, and the C2 proxy-tool spend surface. No tool ever receives a secret.
-- **Memory scoping (#967):** resolves and **enforces** a profile's memory tier at the data layer
-  (search_memory, the store, the file tools), with separate read and write axes.
-- **MCP service (#965):** each connecting guest resolves to an `mcpGuest` Principal + a guest
-  `AccessProfile` from its authenticated `(transport,issuer,id)`; tool/resource exposure is the profile's
-  grant ∩ the floor. This boundary **requires** every guest connection to resolve to an authenticated
-  identity → profile or be refused; it does not itself define MCP's guest-auth mechanism (that is #965's).
-- **A2A inbound (plan Task 5):** `A2AInboundPolicy` becomes the per-route resolver for `a2aRemote` —
-  **signature-verified** peer → profile, capped by floor. Its ordered table is this boundary's
-  enforcement point for that route. Task 5 must add the signature verification (H4).
-- **A2A / MCP outbound:** which peers a profile may *reach* is the transport axis of the grant.
-- **Inbox:** the human-decision surface for disclosure approvals and the **default** first-grant of a
-  new peer's profile + public key (M5).
+- **Profile pane (#961):** the editor for `AccessProfile`s; the **only** writer of the protected
+  profile/mapping store (H3).
+- **Credential registry (#966):** the typed-account store; enforces owner-class, least-privilege, the
+  C2 proxy-tool spend surface. The shipped GitHub slice is its first instance (one token on `.main`
+  today; a per-profile token needs the registry).
+- **Memory scoping (#967):** resolves and enforces a profile's memory tier at the data layer, separate
+  read/write axes.
+- **MCP service (#965):** each guest resolves to `mcpGuest` + a guest `AccessProfile` from its
+  authenticated `(transport,issuer,id)`; exposure is the profile's grant ∩ floor.
+- **A2A inbound (plan Task 5):** `A2AInboundPolicy` becomes the per-route resolver for `a2aRemote`,
+  signature-verified; **it must wire the already-built H4 verifier (F9).**
+- **A2A / MCP outbound:** the transport axis of the grant.
+- **Inbox:** the human-decision surface for disclosure approvals and the default first-grant of a new
+  peer's profile + public key (M5).
+
+## Retrofit — R1's "lands first, nothing to refactor" is now partly false
+
+Since v2, H4-crypto and the MCP provider/guest-session track shipped standalone, *beside* the spine.
+The spine plan must account for:
+
+1. **Principal retrofit is clean.** `.mcpGuest` and its positive floor exist; the spec's guest cases
+   only need to attach a Binding to an existing principal, and `principalMismatch` at the
+   `processInput` chokepoint (#1124) is the door to stamp it.
+2. **Two grant stores would coexist.** Shipped guest reach is `ProviderTokenRegistry.roles(forClientId:)`
+   in a Keychain item (`iris.mcp.provider.roles`); the spec wants `AccessProfile`s in a protected
+   directory only #961 writes. **The plan must say which store wins and how existing roles migrate.**
+3. **Identity key.** Shipped guest identity is just a `clientId`; needs the `(transport, issuer, id)`
+   key and the `AccessProfile` mapping (F5).
+4. **Route-3 recipient binding (F3b).** The guest's real effect is a `.main` turn on a role session,
+   today carried only by the `isGuestOriginTurn` flag; the Binding stamp must carry the turn's origin.
+   The #1195-B stopgap bridges this until the spine lands.
+5. **`A2ASeenLedger` already exists** — R1's a2a half of "nothing to refactor" is false in the other
+   direction too: the library is ready; the missing parts are its caller, `A2AInboundPolicy` and
+   `Principal.a2aRemote` (A2A slice). Not an obstacle.
+6. **`.broker` Principal** (F2b/R4/H2) — new, positive-allowlist at dispatch.
 
 ## Existing fail-open seams this boundary must close
 
-Not design abstractions — live escapes in `Sources/`, verified by the audit. The implementation plan
-must close each, and the targeted re-review must confirm closure. This is the part that makes #974
-larger than a spec revision.
+Live escapes in `Sources/`, re-verified. All still exist (with the corrections below). The plan must
+close each; the spine owns C1/C4/C5/C6/C7/C8.
 
-- **C1 — ambient credentials.** `run_command` uses the process env (`gh` = `bnaylor`);
-  `SandboxPolicy.resolve` returns `.host` for every principal when the sandbox switch is off
-  (`SandboxPolicy.resolve` returns `.host` whenever the master switch is off); Google built-ins use Brian's ADC; MCP spawns the full env. An empty-grant
-  guest still reaches most access. → non-owner executes only in the sandbox; every cred-bearing tool is a
-  declared registry-account spend; an unclassified tool under a non-owner binding is denied.
-- **C4 — `search_memory` bypass.** The `search_memory` dispatch in `iris.swift` enforces no `isPinned`/tier check. → gate at the
-  data layer on the binding.
-- **C5 — file tools never containerized.** `read_file` is always a host read (in `ToolExecutor`'s
-  `read_file` execution); the sandbox grant is checked only `if isBackground` (in `AppState`); `ReadOnlyCommand`
-  auto-approves `read_file` on any path; `JobGrant.resolve(mounts:[])` fails open; `deniedHomeSubpaths`
-  omits the credential stores. → non-optional `FilesystemPolicy` (`.unrestrictedOwner | .confined(JobGrant)`)
-  enforced regardless of `isBackground`; empty grant = confined; add the missing cred stores.
-- **C6 — `GoalEvaluator` escape.** `flowTools` unconditionally allowed; `GoalEvaluator.evaluate` drops
-  the parent tool scope and never copies the sandbox grant, so the evaluator runs grant==nil (RW
-  workspace, full network, unconfined `read_file`), and its evidence flows back to the parent. → the
-  evaluator inherits the parent's full Binding.
-- **C7 — reflection-turn escape.** Every 10 messages `runReflection` grants a reviewer
-  `update_soul`/`update_user_profile`/`update_memory`/`create_skill`, writes owner `~/.iris/memory`, and
-  posts `EventCard.reflection` into pinned Iris (upward injection). → never reflect on a guest/remote
-  binding; a narrowed local reflection is scoped to `profiles/<id>/memory.md` only.
-- **C8 — three fail-open seams in `AgentProfile`/`AppState`.** background conversations drop
-  `agentProfile` → nil (full owner); a missing/unreadable profile file fails open to nil; an omitted
-  `tools:` key means *all tools* (and shipped reviewer/researcher/writer omit it). → any omitted grant
-  key on a non-owner profile = deny-all; profiles enforced on background turns.
+- **C1 — ambient credentials.** `run_command` uses the process env; `SandboxPolicy.resolve` returns
+  `.host` for every principal when the master switch is off (and `.host(warnNoRuntime:)` when on with
+  no runtime); Google built-ins use Brian's ADC; MCP spawns the full env. → non-owner executes only in
+  the sandbox; `resolve` ignores the master switch for non-owner and refuses; every cred-bearing tool
+  is a registry-account spend; an unclassified tool under a non-owner binding is denied by positive
+  allowlist.
+- **C4 — `search_memory` bypass.** No `isPinned`/tier check, and the subagent path is unscoped. → gate
+  at the data layer on the binding, subagent path included.
+- **C5 — file tools never containerized.** `read_file` is always a host read; the sandbox grant is
+  checked only `if isBackground`; `ReadOnlyCommand` auto-approves `read_file` on any path;
+  `JobGrant.resolve(mounts:[])` fails open; the credential stores are not in any host-read denial set
+  (F7). → non-optional `FilesystemPolicy` enforced regardless of `isBackground`; empty grant =
+  confined; the new non-owner host-read denial set (with `~/.netrc`/`~/.git-credentials`).
+- **C6 — `GoalEvaluator` escape.** The evaluator sets no sandbox grant (`GoalEvaluator.evaluate`), so
+  it runs grant==nil, containerized only when sandboxing is on. (Subagents **do** inherit the grant +
+  workspace via `SubagentManager` — corrected.) → the evaluator inherits the parent Binding.
+- **C7 — reflection-turn escape.** Every **30** messages, `AgentToolScope(reflecting:)` exempts the
+  five memory writers from a profile's `tools:` narrowing and can write owner memory / post pinned
+  reflection. (`!isGuest` already stops it for guests.) → never reflect on a guest/remote binding; a
+  narrowed local reflection writes `profiles/<id>/memory.md` only.
+- **C8 — fail-open defaults in `AgentProfile`/`AppState`.** (a) background conversations drop
+  `agentProfile` → nil (full owner), still true. (b) a missing profile file falls back to the **last
+  good snapshot with a notice**, failing open to nil only if no snapshot exists — rare, softened from
+  v2. (c) an omitted `tools:` key means *all tools* (shipped reviewer/researcher/writer omit it), true.
+  → any omitted grant key on a non-owner profile = deny-all; profiles enforced on background turns.
 
 ## Goals / non-goals / anti-goals
 
-- **Goal:** one model every consumer consults; teamwork (credentialed inbound) safe by *construction*
-  (the secret is unreachable, the identity is verified), not by a detector; the user configures only
-  `AccessProfile`s; every default fails closed.
-- **Non-goal:** per-Principal configuration UI; reworking the FS grant model (reuse it, de-globalize and
-  scope it per profile). *(Removed from v1's non-goals: "cryptographic peer verification — the gateway
-  does it." Per H4, Iris now does it.)*
-- **Anti-goal:** a secret value ever reachable by the model; the task/payload influencing which profile
-  it runs as; an anonymous or unmapped route running as owner; owner-personal full-access tokens
-  reachable by a guest profile; a default (missing binding, omitted grant, unreadable profile) that
-  resolves to owner or host; the disclosure broker holding any acting tool; claiming mechanical
-  enforcement of a control that is only best-effort.
+- **Goal:** one model every consumer consults; teamwork safe by construction (the secret is
+  non-owner-unreachable, the identity is verified), not by a detector; the user configures only
+  `AccessProfile`s; every non-owner default fails closed.
+- **Non-goal:** per-Principal configuration UI; reworking the FS grant model (reuse, de-globalize,
+  scope per profile).
+- **Anti-goal:** a secret value reachable by a **non-owner** binding; the task/payload influencing
+  which profile it runs as; an anonymous/unmapped route running as owner; owner-personal full-access
+  tokens reachable by a guest; a non-owner default resolving to owner or host; the disclosure broker
+  holding any acting tool; claiming mechanical enforcement of a best-effort control.
 
-## Resolved after builder-check (2026-11-09)
+## Resolved after builder-check (2026-11-09; R2 clarified per re-review)
 
-A builder-check (fresh engineer reading this cold) raised five architecture questions. None required
-a new decision from Brian; each resolves from decisions already made plus verified project state. **R2
-is revised by the audit (H3).**
+- **R1 — Sequencing vs the A2A plan.** #974 (the spine) lands first on the route→profile resolver and
+  the Principal additions; A2A's Task 5 builds inbound authorization on it, contributes `a2aRemote`,
+  and wires the H4 verifier (F9). **Caveat added:** "nothing to refactor" is now partly false — see
+  §Retrofit (`.mcpGuest`, `ProviderTokenRegistry` roles, `A2ASeenLedger` already shipped).
+- **R2 — Where the binding lives (clarified).** A **non-optional transient per-run context on the
+  engine, built at the door.** The profile id is persisted on `Conversation` (`decodeIfPresent`,
+  Invariant 1) for durable sessions. **A decoded nil means "no persisted profile," NOT "missing =
+  owner"** — `main` gets its owner binding explicitly at the door; a missing/unreadable binding on a
+  non-main principal is a refusal. **Guest conversations are ephemeral** (`isGuest`/`guestClientId` not
+  in `CodingKeys`, dropped from `durableConversations`), so R2 persistence never applies to them —
+  their Binding is always transient. *(planner's call)*
+- **R3 — Per-profile FS vs the `.shared` `PermissionManager`.** In scope, notable-size: FS checks must
+  be consulted **with the run's profile** (Invariant 7), so `PermissionManager` stops answering as a
+  flat process-global; this is where C5 is closed and where the `~/.iris` carve-out is made
+  principal-aware (pass the principal into `match`). Mechanism builder-left; the de-globalization is
+  sized in the plan. *(planner's call; sizing flag)*
+- **R4 — Disclosure-broker execution.** Async; a per-request spawned **`.broker`-Principal**
+  owner-authority run (positive allowlist, zero acting tools), not a standing daemon. No owner context
+  ⇒ pending (fail-closed to "later"). *(planner's call — flagged for Brian's feel-check in v2, stands.)*
+- **R5 — Identity→profile routing.** The mapping lives in the protected profile store #961 owns (H3),
+  keyed `(transport, issuer, id)` (M4). Every guest/peer route must resolve to an authenticated
+  identity → profile or be refused. First-grant is Inbox-gated (M5). *(planner's call / scoping)*
 
-- **R1 — Sequencing vs the A2A plan.** #974 lands **first**. Verified `Principal.a2aRemote` and
-  `A2AInboundPolicy` exist only in the 11-07 plan, not in `Sources/`; #931 is open and gated on the
-  romar server spec. So there is no shipped code to refactor: A2A's Task 5 builds its inbound
-  authorization *on* this boundary's generalized route→profile resolver, contributes the `a2aRemote`
-  Principal case, and **adds signature verification (H4)**. #974 owns the resolver and the Principal
-  additions; A2A owns the transport/SSE and the signed-envelope source. Matches the agreed sequence:
-  inbox → boundary → MCP/A2A.
-- **R2 — Where the binding lives (revised by H3).** The active binding is a **non-optional transient
-  per-run context on the engine, built at the door** before the run starts. The profile id is also
-  persisted on `Conversation` so a durable/named session keeps identity across reload — new field,
-  `decodeIfPresent` (Invariant 1). **The audit correction:** the persisted field must **not** default
-  `owner` for existing/missing rows — that is the fail-open seam H3 named. A missing/unreadable binding
-  resolves **fail-closed** (non-main → refusal; the only thing that runs as owner is `main` with an
-  explicit owner binding). `subagent`/`evaluator` inherit the spawner's live binding ∩ floor through
-  `SubagentManager`. Every consumer reads the active binding at the data layer. *(planner's call)*
-- **R3 — Per-profile FS vs the `.shared` `PermissionManager`.** In scope, and a notable-size item:
-  per-profile roots mean FS checks must be consulted **with the run's profile**, so `PermissionManager`
-  stops answering as a flat process-global (Invariant 7). This is also where C5 is closed (file tools
-  containerized, the `isBackground`-only check removed). Mechanism (inject per-run vs. add a profile
-  parameter) is builder-left, but the de-globalization is in scope and sized in the plan. *(planner's
-  call; sizing flag)*
-- **R4 — Disclosure-broker execution.** **Async, entailed by the sensitivity dial.** A
-  disclosure-request is a bus message answered by a **per-request spawned owner-authority engine run**
-  under the H2 broker floor (owner memory read, zero acting tools) — not a standing privileged daemon:
-  immediately if a live owner context can take it, else it queues as an Inbox item. The requesting task
-  waits within its deadline or gets a pending-ack. **Consequence, not a free choice:** on a single-machine
-  install nothing answers a disclosure needing owner memory without a running owner-authority context, so
-  there is **no auto-disclosure from a cache** — no owner context ⇒ pending (fail-closed to "later").
-  *(planner's call — flagged for Brian's check because it sets the feel.)*
-- **R5 — Identity→profile routing.** The mapping lives in the **protected profile store the #961 UI owns
-  (H3)**, keyed on `(transport, issuer, id)` (M4). Each transport supplies the identity: A2A from the
-  **signature-verified** peer id (H4); MCP guest from #965's own guest-auth design. This boundary
-  **requires** every guest connection to resolve to an authenticated identity → profile or be refused
-  (fail closed), but does not itself define MCP's auth; the GitHub-webhook route is illustrative/future
-  and likewise must map or be rejected. First-grant of a new peer's profile + public key is **Inbox-gated
-  by default** (M5). *(planner's call / scoping)*
+## Open questions / flags for the plan (not resolved in this spec)
 
-## Re-review scope
+- The plan sizes the spine: Principal floor + `.broker`, non-optional Binding built at the door,
+  `AccessProfile` type + protected store, the fail-closed resolver, the C1/C4/C5/C6/C7/C8 closures,
+  R3's `PermissionManager` de-globalization, the generalized output scrub, the non-owner host-read
+  denial set, the `promptCacheKey` fix.
+- The M2 sandbox test (widened per F8: comment/approve/label/close/edit) must run before the reviewer
+  token's scope claim ships.
+- The ProviderTokenRegistry-roles vs AccessProfile-store migration (retrofit 2) needs a decision in
+  the plan.
+- Cross-slice: the A2A slice wires + e2e-tests the H4 verifier (F9); the #1186 CODEOWNERS-rename path
+  gates #966 enablement (tracked separately).
+- **Guest spend limits are not durable:** the guest's daily token cap and hourly bucket are in-memory
+  and reset on restart (`GuestSpendLedger`) — the plan should decide whether the boundary requires
+  durable per-profile budgets (cf. #1135).
+- **MCP listener unverified:** the loopback binding, token compare and idle reap in
+  `IrisMCPProviderServer` were not verified in the re-review — the MCP slice (#965) must verify them.
 
-The implementation plan is gated on a **targeted re-review of the sections this v2 changed** — the
-enforcement invariants, credentials (C2/M2), memory (H1/C4), peer identity (H4), the broker floor (H2),
-the fail-open-seams closures (C1/C5/C6/C7/C8), and the revised R2 — **not** another cold full-codebase
-trace. The first audit's full depth (incl. Clomp's 31-minute trace) is the one-time cost the spine gets
-once; re-review confirms the changed sections close the findings, nothing more.
+## Re-review status
+
+The v2 gate ("no code until a targeted re-review of the v2-changed sections passes") is **satisfied by
+the 2026-11-17 re-review**, which did not clean-pass: it surfaced F1–F9 + corrections, folded here as
+v3. The implementation plan is written from v3. A further cold full-codebase trace is **not** required
+(the one-time audit depth was spent in v2); a builder-check of v3 and the plan is.
 
 ## Left to the builder / to fine-tune later
 
-- Keychain storage shape for typed accounts + owner-class, and the per-type proxy-tool op-sets (C2).
-- Peer-signature verifier + outbound signer (H4) against the **committed** contract (romar#396,
-  peer-signature-spec.md v2 "sign exact bytes"): the sign-exact-bytes codec, the verifier MUSTs, the
-  persisted per-peer seen-set, Iris's own keypair + outbound signing, romar's vendored conformance
-  vector, and the macOS `JSONSerialization` recheck on the outer frame — **plus the four build-plan
-  requirements in §Peer identity** (fail-closed seen-set surviving restart, peers pin Iris's key, interrupted
-  terminal status, outbound signing gated on romar#403), which a builder must not implement from this
-  summary line alone. (The canonical-payload open item
-  is retired — the contract signs exact bytes, no canonicalization.)
-- Memory-slice mechanism (coarse tiers vs. granted namespaces); read/write axis representation (H1).
-- The exact sensitivity-dial classification (which categories auto vs. Inbox); Brian's first cut:
-  deny = creds / third-party PII / secrets; fine-tune as cases arise.
-- Whether `AccessProfile`s are themselves persisted `Codable` (Invariant 1) and where (a new protected
-  store vs. `ConfigManager`), given H3 requires they not be model-writable.
-- The sandbox-test confirmation that `Issues: write` + `Pull requests: read` posts comments but cannot
-  approve or inline-comment (M2).
-- Invariant 9 sweep: new Principals/profiles/lanes must not contradict existing session/subagent docs
-  or agent-facing strings.
+- Keychain storage shape for typed accounts + owner-class, per-type proxy-tool op-sets, the
+  **generalized** output scrub (C2).
+- The non-owner host-read denial set (F7) and the `FilesystemPolicy` (C5).
+- `PermissionManager` de-globalization + principal-aware `match` (R3).
+- Memory-slice mechanism (coarse tiers first, F4); read/write axis representation (H1); the
+  `promptCacheKey` profile-id/tier addition (W1).
+- The ProviderTokenRegistry→AccessProfile migration (retrofit 2); the `(transport,issuer,id)` guest
+  identity key (F5).
+- Whether `AccessProfile`s are persisted `Codable` + where (a protected store, not model-writable, H3).
+- The widened M2 sandbox test (F8).
+- Cross-slice (not spine): the A2A inbound path + H4 wiring + restart test (F9).
+- Invariant 9 sweep: new Principals (`.broker`, later `.a2aRemote`)/profiles/lanes must not contradict
+  session/subagent docs or agent-facing strings.
