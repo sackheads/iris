@@ -3785,8 +3785,12 @@ actor IrisEngine {
         // otherwise.
         // #966: a turn a guest's message started is attended and `.main`, but it acts for a guest;
         // the `github_*` tools act as Iris's own account with no approval step, so it is not offered them.
-        let githubOffered = toolsList.contains { ToolExecutor.githubProxyTools.contains($0.name) }
-        let guestOrigin = githubOffered ? await isGuestOriginConversation(conversationId) : false
+        // #1195: the same turn is not offered the memory tools either, which read the owner's facts and
+        // other conversations with no approval step.
+        let guestSensitiveOffered = toolsList.contains {
+            ToolExecutor.githubProxyTools.contains($0.name) || ToolExecutor.memoryTools.contains($0.name)
+        }
+        let guestOrigin = guestSensitiveOffered ? await isGuestOriginConversation(conversationId) : false
         toolsList = Self.hardStrip(toolsList, isUnattended: isUnattended, principal: principal, guestOrigin: guestOrigin)
         if stickyApplies {
             let declared = toolsList.map(\.name)
@@ -5260,7 +5264,7 @@ actor IrisEngine {
     nonisolated static func hardStrip(_ tools: [FunctionDeclaration], isUnattended: Bool,
                                       principal: Principal, guestOrigin: Bool = false) -> [FunctionDeclaration] {
         var denied: Set<String> = []
-        if guestOrigin { denied.formUnion(ToolExecutor.githubProxyTools) }
+        if guestOrigin { denied.formUnion(ToolExecutor.githubProxyTools.union(ToolExecutor.memoryTools)) }
         if isUnattended { denied.formUnion(unattendedNeverDeclared) }
         if principal != .main { denied.formUnion(mainOnlyDeclared) }
         return denied.isEmpty ? tools : tools.filter { !denied.contains($0.name) }
@@ -5444,6 +5448,17 @@ actor IrisEngine {
                                       guestOrigin: Bool = false) -> String? {
         guard ToolExecutor.githubProxyTools.contains(name), isUnattended || principal != .main || guestOrigin else { return nil }
         return githubOffPrincipalRefusal
+    }
+
+    /// #1195: what a turn a guest's message started or steered is told when it calls a memory tool
+    /// anyway. `hardStrip` only stops a well-behaved model, so this is the half that holds against a
+    /// forged call or a stale declaration, and it comes before anything that could read or write.
+    static let memoryGuestOriginRefusal =
+        "This turn is answering a message from outside the user's own conversation, so the memory tools are not available on it and the call was not run."
+
+    static func memoryDispatchRefusal(_ name: String, guestOrigin: Bool) -> String? {
+        guard guestOrigin, ToolExecutor.memoryTools.contains(name) else { return nil }
+        return memoryGuestOriginRefusal
     }
 
     /// Whether a guest's message started this conversation's turn, or its delegation root's (#1119,
@@ -5838,9 +5853,13 @@ actor IrisEngine {
         // background turn (see `buildRequest`), but declaration gating only stops a well-behaved
         // model — the refusal has to live at the point that would actually write the row.
         let githubGuestOrigin = ToolExecutor.githubProxyTools.contains(functionCall.name)
+            || ToolExecutor.memoryTools.contains(functionCall.name)
             ? await isGuestOriginConversation(conversationId) : false
         if let refusal = Self.githubDispatchRefusal(functionCall.name, isUnattended: isUnattended, principal: principal,
                                                     guestOrigin: githubGuestOrigin) {
+            return refusal
+        }
+        if let refusal = Self.memoryDispatchRefusal(functionCall.name, guestOrigin: githubGuestOrigin) {
             return refusal
         }
         if Self.jobCreationTools.contains(functionCall.name), isUnattended {
