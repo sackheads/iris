@@ -29,9 +29,17 @@ enum DirectoryReadRule {
     /// Whether `directory` (a resolved absolute path) may be the subject of a directory rule at all.
     static func isEligible(_ directory: String, home: String = NSHomeDirectory(), paths: IrisPaths = .default) -> Bool {
         guard directory.hasPrefix("/") else { return false }
-        let components = directory.split(separator: "/", omittingEmptySubsequences: true)
+        var components = directory.split(separator: "/", omittingEmptySubsequences: true)
+        guard !components.contains("..") else { return false }
+        // A read arrives as its real path, where macOS spells `/etc`, `/var` and `/tmp` under `/private`:
+        // that prefix does not make `/private/etc` a deeper folder.
+        if components.first == "private" { components.removeFirst() }
         // `/`, and a top-level folder (`/etc`, `/Users`, `/var`): too broad to be one decision.
-        guard components.count >= 2, !components.contains("..") else { return false }
+        guard components.count >= 2 else { return false }
+        // System folders that hold credentials or the machine's own configuration.
+        let systemRoots = ["/etc", "/private/etc", "/var/db", "/private/var/db", "/Library/Keychains", "/System"]
+        let resolvedSystem = IrisPaths.canonicalPath(directory)
+        if systemRoots.contains(where: { resolvedSystem == $0 || resolvedSystem.hasPrefix($0 + "/") }) { return false }
         let resolved = IrisPaths.canonicalPath(directory)
         let realHome = IrisPaths.canonicalPath(home)
         // The home directory itself and everything above it.

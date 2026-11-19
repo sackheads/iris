@@ -243,11 +243,14 @@ struct DirectoryReadRuleTests {
     func noRuleNoWrite() async throws {
         let f = try fixture(); defer { f.tearDown() }
         let s = try state(f)
-        // A read in a credential store: no folder rule is offered.
-        let asked = try await readTurn(s, path: f.home + "/.ssh/config", answer: .alwaysAllowDirectory)
-        #expect(asked?.directoryRule == nil)
-        #expect(!s.permissions.isAllowed(toolName: "read_file", details: f.real(f.home + "/.ssh/config"), workspace: nil))
-        #expect(!s.permissions.isAllowed(toolName: "read_file", details: f.real(f.home + "/.ssh/other"), workspace: nil))
+        // A read in a credential store of the REAL home (the dialog judges against it): the path need not
+        // exist, the folder is the store. Nothing is read: the answer approves one call that finds no file.
+        let path = NSHomeDirectory() + "/.ssh/iris-1136-test-\(UUID().uuidString)"
+        let asked = try await readTurn(s, path: path, answer: .alwaysAllowDirectory)
+        #expect(asked != nil && asked?.directoryRule == nil, "no folder rule is offered inside a credential store")
+        #expect(!s.permissions.isAllowed(toolName: "read_file", details: IrisPaths.realPath(path), workspace: nil))
+        #expect(!s.permissions.isAllowed(toolName: "read_file", details: IrisPaths.realPath(NSHomeDirectory() + "/.ssh/other"), workspace: nil),
+                "and nothing was saved that covers the store")
     }
 
     /// A request built the way `enqueueUserApproval` builds one: inside the continuation body, which is
