@@ -7609,6 +7609,18 @@ actor IrisEngine {
         return sanitizedResult + "\n[Iris: this read may be incomplete — some content was withheld or truncated. Do not write this back as if it were the complete, original file.]"
     }
 
+    /// #959: a `read_file` result in which some lines are not the file's own (an invisible or
+    /// control character removed, a tag-like sequence neutralized, a role marker deleted) says so,
+    /// for the same reason `noteHoledFidelityRead` does: a model that edits this text and calls
+    /// `write_file` bakes those lines into the file. Only the lines the guard acted on are counted;
+    /// everything else (ligatures, fullwidth CJK punctuation, `…`) is shown as the file has it.
+    /// Outside the wrapper, like the notes above: Iris's own commentary, not tool output.
+    private func noteAlteredFidelityRead(_ sanitizedResult: String, lines: Int) -> String {
+        guard lines > 0 else { return sanitizedResult }
+        let plural = lines == 1 ? "1 line" : "\(lines) lines"
+        return sanitizedResult + "\n[Iris: \(plural) of this read differ from the file on disk (the injection guard removed an invisible or control character, or neutralized a tag-like sequence). Do not write this back whole as if it were the original file.]"
+    }
+
     /// The rule file `path` names when it is directly in a workspace `.iris/`, or nil.
     nonisolated static func workspaceRuleFile(path: String) -> String? {
         let url = URL(fileURLWithPath: path)
@@ -7856,6 +7868,8 @@ actor IrisEngine {
         // for the two channels approved for this notice (search_web below; the generic tool_output
         // path's `read_file`/`run_command` further down). Zero for every other tool.
         var strippedMarkerLineCount = 0
+        // #959: the read_file lines shown differently from the file (see `carriedDisplay`).
+        var alteredFidelityLines = 0
 
         if name == "search_web",
            let outcome = await SearchResultFilter.filter(result, allowed: { text in
@@ -7898,8 +7912,9 @@ actor IrisEngine {
             // the guard strips its own source (`malRolePatterns`) the same way when read through
             // either tool — without this, only `read_file` got the fidelity carve-out #952 built.
             let fidelity: InjectionGuard.FidelityMode = (name == "read_file" || name == "run_command") ? .preserveWhenJudged : .off
-            let judged = await InjectionGuard.sanitizeUntrustedCacheable(result, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled, fidelity: fidelity)
+            let judged = await InjectionGuard.sanitizeUntrustedDisplay(result, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled, fidelity: fidelity)
             sanitizedResult = judged.text
+            alteredFidelityLines = judged.divergedLines
             withheldByVerdict = judged.cacheable && InjectionGuard.isWholeBlock(judged.text)
             // `judged.unjudged` alone is NOT the right signal here: it names only the #723
             // budget-overflow subset of withheld lines ("withheld unjudged"), not every withheld
@@ -7933,7 +7948,8 @@ actor IrisEngine {
         if withheldByVerdict { await recordGuardBlock(conversationId, tool: name, path: execArgs["path"]?.stringValue) }
         let noted = noteBlockedResult(sanitizedResult, name: name, conversationId: conversationId, blocked: blocked)
         let holeNoted = noteHoledFidelityRead(noted, holed: holedFidelityRead)
-        return noteStrippedMarkers(holeNoted, count: strippedMarkerLineCount)
+        let strippedNoted = noteStrippedMarkers(holeNoted, count: strippedMarkerLineCount)
+        return noteAlteredFidelityRead(strippedNoted, lines: alteredFidelityLines)
     }
 
     /// #969 Gap 2: the deletion half, for the two channels where a write-back from a result the

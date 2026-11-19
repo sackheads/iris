@@ -131,7 +131,7 @@ public struct InjectionGuard {
     /// runs unconditionally below to produce the deletion candidate every return point can fall
     /// back to when nothing model-backed ends up judging this one.
     private static func preserveFidelityCandidate(_ rawInput: String, fidelity: FidelityMode) -> String? {
-        fidelity == .preserveWhenJudged ? PromptInjectionGuard.normalize(rawInput) : nil
+        fidelity == .preserveWhenJudged ? rawInput : nil
     }
 
     /// Whether a tier-3 check would actually run now (#330's card marker): protection on, and a
@@ -168,6 +168,10 @@ public struct InjectionGuard {
         /// What tier 2 said for this call (`TierVerdict.logName`); nil when it never ran or the
         /// verdict came from the cache. Carried to the caller, never cached (#830).
         var tier2: String? = nil
+        /// #959: how many lines of a `read_file` display were NOT shown as the file has them (an
+        /// invisible/control character removed, a tag or delimiter neutralized, a marker deleted).
+        /// Zero for every other caller. Cached with the verdict, so a cache hit still says so.
+        var divergedLines: Int = 0
     }
 
     private final class SanitizationCache: @unchecked Sendable {
@@ -184,8 +188,8 @@ public struct InjectionGuard {
             return value
         }
 
-        func set(_ key: String, _ outcome: GuardOutcome, unjudged: [String] = []) {
-            let value = Verdict(outcome: outcome, cacheable: true, unjudged: unjudged)
+        func set(_ key: String, _ outcome: GuardOutcome, unjudged: [String] = [], divergedLines: Int = 0) {
+            let value = Verdict(outcome: outcome, cacheable: true, unjudged: unjudged, divergedLines: divergedLines)
             lock.lock(); defer { lock.unlock() }
             if entries.updateValue(value, forKey: key) == nil {
                 order.append(key)
@@ -479,13 +483,26 @@ public struct InjectionGuard {
                                            maxTier: SanitizationTier = .tier1_structural,
                                            protectionEnabled: Bool? = nil,
                                            fidelity: FidelityMode = .off) async -> (text: String, cacheable: Bool, unjudged: [String], strippedMarkerLines: Int) {
+        let judged = await sanitizeUntrustedDisplay(rawInput, contextTag: contextTag, maxTier: maxTier,
+                                                    protectionEnabled: protectionEnabled, fidelity: fidelity)
+        return (judged.text, judged.cacheable, judged.unjudged, judged.strippedMarkerLines)
+    }
+
+    /// `sanitizeUntrustedCacheable`, plus how many lines of the display are not the file's own for
+    /// a reason other than a deleted role marker (#959, `carriedDisplay`; a deleted marker is
+    /// `strippedMarkerLines`' to report, so a line is never counted by both notices). The
+    /// `read_file` call site uses this entry point.
+    static func sanitizeUntrustedDisplay(_ rawInput: String, contextTag: String = "",
+                                         maxTier: SanitizationTier = .tier1_structural,
+                                         protectionEnabled: Bool? = nil,
+                                         fidelity: FidelityMode = .off) async -> (text: String, cacheable: Bool, unjudged: [String], strippedMarkerLines: Int, divergedLines: Int) {
         let stripped = PromptInjectionGuard.stripRecordingDelimiters(rawInput)
         let verdict = await classifyDetailed(stripped.text, contextTag: contextTag, maxTier: maxTier,
                                              protectionEnabled: protectionEnabled,
                                              delimiterLines: stripped.delimiterLines, fidelity: fidelity,
                                              preserveCandidate: preserveFidelityCandidate(rawInput, fidelity: fidelity))
         let stillStripped = Self.countStillStrippedLines(stripped.delimiterLines, in: verdict.outcome)
-        return (wrapped(verdict.outcome, contextTag: contextTag), verdict.cacheable, verdict.unjudged, stillStripped)
+        return (wrapped(verdict.outcome, contextTag: contextTag), verdict.cacheable, verdict.unjudged, stillStripped, verdict.divergedLines)
     }
 
     /// How many of `delimiterLines` (the lines `stripRecordingDelimiters` touched, keyed by index
@@ -592,6 +609,15 @@ public struct InjectionGuard {
         var unjudged: [String] = []
         let tier1 = measureSpanSync("guard.tier1") { executeTier1(rawInput) }
         var clean = tier1.text
+        // #959: what a `read_file` display shows for `clean` once it has passed — the file's own
+        // lines wherever the security machinery changed nothing on them. `markersMayCarry` is the
+        // #952 gate (a model-backed tier judged `clean`); the fold-only carry needs no such gate,
+        // because the verdict was reached on the normalized form either way. Without a candidate
+        // (every caller but `read_file`) this is `clean` unchanged.
+        func display(_ clean: String, markersMayCarry: Bool) -> (text: String, diverged: Int) {
+            guard fidelity == .preserveWhenJudged, let raw = preserveCandidate else { return (clean, 0) }
+            return carriedDisplay(clean: clean, rawOriginal: raw, markersMayCarry: markersMayCarry)
+        }
         // #727: what the caller's own strip recorded, then tier 1's, as the line read before both.
         let delimiterLines = tier1.delimiterLines.merging(delimiterLines) { _, callers in callers }
 
@@ -600,14 +626,16 @@ public struct InjectionGuard {
             // with no model involved, so it cannot be the kind of transient failure #1 guards
             // against. Reported cacheable so a caller keying its own cache on content+fingerprint
             // (5a Task 7) does not treat a tier-1-only result as if it might be an error.
-            return Verdict(outcome: .passed(clean: clean), cacheable: true, unjudged: unjudged)
+            let shown = display(clean, markersMayCarry: false)
+            return Verdict(outcome: .passed(clean: shown.text), cacheable: true, unjudged: unjudged, divergedLines: shown.diverged)
         }
 
         // Headless `--bench` runs skip the model-backed tiers: the aux models aren't provisioned
         // and would only add nondeterministic latency to a benchmark. Tier 1 structural
         // sanitization still applies. In-process flag by design — see HeadlessMode.
         if HeadlessMode.isEnabled {
-            return Verdict(outcome: .passed(clean: clean), cacheable: true, unjudged: unjudged)
+            let shown = display(clean, markersMayCarry: false)
+            return Verdict(outcome: .passed(clean: shown.text), cacheable: true, unjudged: unjudged, divergedLines: shown.diverged)
         }
 
         // #952 rev 3: `clean` is NEVER swapped to the preserve candidate before or during
@@ -678,12 +706,10 @@ public struct InjectionGuard {
             // never swapped. When a model-backed tier actually judged it, carry the per-line
             // original to the display; otherwise (nothing judged it) show `clean` exactly as
             // production does.
-            let shown = attemptingFidelity && modelTierRan
-                ? carriedDisplay(clean: clean, preserveCandidate: preserveCandidate!)
-                : clean
-            let passed = GuardOutcome.passed(clean: shown)
-            cache?.set(key, passed, unjudged: unjudged)
-            return Verdict(outcome: passed, cacheable: true, unjudged: unjudged, tier2: tier2.logName)
+            let shown = display(clean, markersMayCarry: attemptingFidelity && modelTierRan)
+            let passed = GuardOutcome.passed(clean: shown.text)
+            cache?.set(key, passed, unjudged: unjudged, divergedLines: shown.diverged)
+            return Verdict(outcome: passed, cacheable: true, unjudged: unjudged, tier2: tier2.logName, divergedLines: shown.diverged)
         }
 
         // Tier 3: Behavioral Canary Probe — also evaluates the unwrapped content.
@@ -709,12 +735,10 @@ public struct InjectionGuard {
             // #952 rev 3: as at the tier-2 return above — carry only when a model-backed tier
             // actually judged `clean` (tier 2 skipped, and now tier 3 skipped too means nothing
             // did); otherwise show `clean` exactly as production does.
-            let shown = attemptingFidelity && modelTierRan
-                ? carriedDisplay(clean: clean, preserveCandidate: preserveCandidate!)
-                : clean
-            let passed = GuardOutcome.passed(clean: shown)
-            cache?.set(key, passed, unjudged: unjudged)
-            return Verdict(outcome: passed, cacheable: true, unjudged: unjudged, tier2: tier2.logName)
+            let shown = display(clean, markersMayCarry: attemptingFidelity && modelTierRan)
+            let passed = GuardOutcome.passed(clean: shown.text)
+            cache?.set(key, passed, unjudged: unjudged, divergedLines: shown.diverged)
+            return Verdict(outcome: passed, cacheable: true, unjudged: unjudged, tier2: tier2.logName, divergedLines: shown.diverged)
         }
     }
 
@@ -755,15 +779,39 @@ public struct InjectionGuard {
         return wrapperBreakoutEscape.stringByReplacingMatches(in: text, range: range, withTemplate: "[escaped_tag]")
     }
 
-    /// #952 rev 3 (spec §1, the per-line alignment invariant): the DISPLAY a fidelity read shows,
-    /// once a model-backed tier has judged `clean` and passed it — never a judging input. `clean`
-    /// is the judged text (stripped, possibly already tier-2-redacted); `preserveCandidate` is the
-    /// normalized-but-unstripped original the same raw input produced. Carries a line's original
-    /// only when that line, by itself, strips+escapes to exactly `clean`'s line at the same index —
-    /// i.e. the only difference the strip made on that line was whole marker tokens, so showing the
-    /// original back is safe. Any other line (a tier-2 `.partial` redaction, a real content
-    /// difference, a line count mismatch) is shown exactly as judged: fail-safe by construction,
-    /// with no special-casing for *why* it differs.
+    /// #952 rev 3 (spec §1, the per-line alignment invariant) and #959: the DISPLAY a `read_file`
+    /// shows once `clean` has been judged — never a judging input. `clean` is the judged text
+    /// (normalized, role-stripped, wrapper-escaped, possibly tier-2-redacted); `rawOriginal` is the
+    /// file's own text, as read.
+    ///
+    /// **The invariant (#959): a line is shown exactly as the file has it wherever the security
+    /// machinery changed nothing on it, and as judged wherever it did.** "Changed nothing" is
+    /// four separate checks on the line's own normalization, so fidelity can lose to safety but
+    /// never the other way round:
+    ///   1. an invisible or control character was removed (`normalize`'s strip: ZWSP/ZWJ/bidi/C0/C1
+    ///      — a split trigger word, #241);
+    ///   2. the closing-tag escape matched (a fullwidth or ZWSP-split `</untrusted_context>` is
+    ///      only a breakout once folded);
+    ///   3. it could reassemble a chat-template token, or hides a non-`\n` line break (a trailing
+    ///      `\r` is a line ending, not a hidden break);
+    ///   4. a role delimiter was stripped (a fullwidth `ｓｙｓｔｅｍ：` is an evasion spelling, never
+    ///      a fidelity case: it is shown folded, as #952 has always shown it).
+    /// A line that fails any of the four is shown as `clean` has it, or, for a marker line when
+    /// `markersMayCarry`, folded with its marker and its breakout neutralized (#952). What is left is a fold-only line — ligatures, fullwidth
+    /// CJK punctuation, `…`, `™`, superscripts — which is shown as the file has it: the verdict was
+    /// reached on its folded form, so the model reading the original adds no capability. A
+    /// whole-marker line (`system: x`, `---`) is carried only when `markersMayCarry` (a model-backed
+    /// tier judged `clean`, #952); otherwise it is shown stripped, as today.
+    ///
+    /// `diverged` counts the lines shown differently from the file (one per aligned line shown as
+    /// judged): the caller tells the model, since writing that text back whole would change them.
+    /// A line never aligned (a tier-2 redaction's marker, a truncated tail) is not counted here;
+    /// the holed-read note covers those.
+    ///
+    /// Carries a line only when that line, by itself, normalizes+strips+escapes to exactly
+    /// `clean`'s line at the same index. Any other line (a tier-2 `.partial` redaction, a real
+    /// content difference, a line count mismatch) is shown exactly as judged: fail-safe by
+    /// construction, with no special-casing for *why* it differs.
     ///
     /// Reproduces `clean`'s own derivation deliberately with `PromptInjectionGuard.malRolePatterns`
     /// (the full strip the untrusted-channel pre-strip, `stripRecordingDelimiters`, already ran on
@@ -771,41 +819,33 @@ public struct InjectionGuard {
     /// 5-pattern list: by the time `executeTier1` runs a second, redundant pass inside
     /// `classifyDetailed`, that pre-strip has already removed `model:`/chat-tokens/`Instruction:`/
     /// `System Prompt:` from `clean`, so a check built only from `executeTier1`'s 5 patterns could
-    /// never match a line carrying any of those — losing exactly the markers the spec's marker ×
-    /// path table requires shown (`model: gpt-x`, the motivating case). Matching `clean`'s real
-    /// derivation, patterns and `escapeWrapperBreakout` both, is what makes the invariant hold for
-    /// every marker the table lists, not only the five `executeTier1` happens to repeat.
+    /// never match a line carrying any of those.
     ///
-    /// Line counts between `clean` and `preserveCandidate` are NOT always equal: a tier-2
-    /// `.partial` outcome's withheld-range marker (`Judgement.redacting`) replaces a whole flagged
-    /// *span* — the flagged line plus one line of context either side (#723 review) — with one
-    /// marker line, collapsing the original's line count at that point. A plain index-for-index
-    /// zip would misalign every line after the first redaction in the text, including lines the
-    /// redaction never touched. Walking both line lists with two cursors and resynchronizing the
-    /// original's cursor past whatever a mismatched judged line consumed keeps every later,
-    /// unaffected line aligned and eligible to carry — the resync bound is "the rest of `clean`",
-    /// never a parse of the marker's own text (#728's caution against reparsing a marker applies
-    /// to treating file content that merely quotes one as real; this never reads the marker's
-    /// text at all, only compares surrounding lines).
-    private static func carriedDisplay(clean: String, preserveCandidate: String) -> String {
+    /// Line counts between `clean` and `rawOriginal` are NOT always equal: a tier-2 `.partial`
+    /// outcome's withheld-range marker (`Judgement.redacting`) replaces a whole flagged *span* with
+    /// one marker line. Walking both line lists with two cursors and resynchronizing the original's
+    /// cursor past whatever a mismatched judged line consumed keeps every later, unaffected line
+    /// aligned and eligible to carry; the resync bound is "the rest of `clean`", never a parse of
+    /// the marker's own text.
+    static func carriedDisplay(clean: String, rawOriginal: String, markersMayCarry: Bool) -> (text: String, diverged: Int) {
         let cleanLines = clean.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        let originalLines = preserveCandidate.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let originalLines = rawOriginal.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
 
-        func singleLineJudgedForm(_ line: String) -> String {
-            let stripped = PromptInjectionGuard.stripRecording(line, patterns: PromptInjectionGuard.malRolePatterns).text
-            return escapeWrapperBreakout(stripped)
+        func strippedForm(_ normalized: String) -> String {
+            PromptInjectionGuard.stripRecording(normalized, patterns: PromptInjectionGuard.malRolePatterns).text
+        }
+        func singleLineJudgedForm(_ rawLine: String) -> String {
+            escapeWrapperBreakout(strippedForm(PromptInjectionGuard.normalize(rawLine)))
         }
         // Chat-template tokens have no fidelity case, ever (spec: "always, even in the fidelity
         // channel") — real control tokens for local models. #952 review (dev-2, round 1): the
         // previous version SUBSTITUTED the literal `<|im_start|>`/`<|im_end|>` substrings out of
         // the line, which can REASSEMBLE a real token a single-pass replace cannot see — removing
-        // `<|im_end|>` from `<|im_<|im_end|>start|>` leaves a genuine `<|im_start|>`, because the
-        // earlier `stripRecording` fixed-point strip (#970/#972) judges the fully-reassembled,
-        // fully-stripped text, and the equality check above only compares against THAT already-
-        // stripped judged form — it tells us this line judged safe, not that no reassembly exists
-        // in the original. So: reject the carry, never substitute. A line with any `<|im_`
-        // fragment (any case) or stray `|>` left over after removing `---`/`###` is shown as the
-        // judged line instead of the original, whatever it reassembles to.
+        // `<|im_end|>` from `<|im_<|im_end|>start|>` leaves a genuine `<|im_start|>`. So: reject
+        // the carry, never substitute. A line with any `<|im_` fragment (any case) or stray `|>`
+        // left over after removing `---`/`###` is shown as the judged line instead. Checked on the
+        // line's normalized form AND as the file has it (a fullwidth `＜｜im_start｜＞` folds to a
+        // real token).
         func carriesRealToken(_ line: String) -> Bool {
             var residual = line
             residual = residual.replacingOccurrences(of: "---", with: "")
@@ -813,12 +853,54 @@ public struct InjectionGuard {
             return residual.range(of: "<|im_", options: [.caseInsensitive]) != nil || residual.contains("|>")
         }
         // #952 review (dev-2, round 1): `stripRecording` splits only on `\n`, so a line carrying
-        // `\r`, U+2028 (LINE SEPARATOR), U+2029 (PARAGRAPH SEPARATOR) or U+0085 (NEL) reads as one
-        // line to the guard but several to a model or renderer — a marker could sit at what shows
-        // as a fresh line. Reject the carry for these too; show the judged line instead.
+        // `\r`, U+2028, U+2029 or U+0085 reads as one line to the guard but several to a model or
+        // renderer — a marker could sit at what shows as a fresh line. Reject the carry for these;
+        // show the judged line instead. #959: a single TRAILING `\r` is a CRLF line ending, the
+        // same break as the `\n` the lines were split on, so it is not hidden.
         let hiddenLineBreaks = CharacterSet(charactersIn: "\r\u{2028}\u{2029}\u{0085}")
         func hasHiddenLineBreak(_ line: String) -> Bool {
-            line.unicodeScalars.contains { hiddenLineBreaks.contains($0) }
+            // `\r\n` is one Swift Character, so a CRLF file does not split into lines at all here
+            // (the guard sees it as one line, as it always has): its own CRLF pairs are line
+            // endings, not hidden breaks. A lone `\r`, or any of the others, still is.
+            var body = line.replacingOccurrences(of: "\r\n", with: "")
+            if body.hasSuffix("\r") { body.removeLast() }
+            return body.unicodeScalars.contains { hiddenLineBreaks.contains($0) }
+        }
+
+        var diverged = 0
+        // Lines shown without their role marker and for no other reason: #969's notice reports
+        // those (`strippedMarkerLines`), so they are not counted twice.
+        var markerOnly = 0
+        /// What to show for an aligned line, and whether it differs from the file's own.
+        func shownForAligned(rawLine: String, cleanLine: String) -> String {
+            let folded = rawLine.precomposedStringWithCompatibilityMapping
+            let normalized = PromptInjectionGuard.normalize(rawLine)
+            let stripped = strippedForm(normalized)
+            // Compared by scalars, never Swift's `==`/`!=`: those are canonical equivalence, which
+            // would call `e` + U+0301 and `é` the same line and hide a real change from the count.
+            func sameScalars(_ a: String, _ b: String) -> Bool { a.unicodeScalars.elementsEqual(b.unicodeScalars) }
+            let invisibleRemoved = !sameScalars(normalized, folded)
+            // The breakout escape is checked on the file's own spelling too: NFKC composes `>` +
+            // U+0338 into `≯`, so `</untrusted_context>` + U+0338 matches only as the file has it.
+            let escapeMatched = !sameScalars(escapeWrapperBreakout(stripped), stripped)
+                || !sameScalars(escapeWrapperBreakout(rawLine), rawLine)
+            let markerStripped = !sameScalars(stripped, normalized)
+            let shown: String
+            let tokenOrBreak = carriesRealToken(normalized) || carriesRealToken(rawLine) || hasHiddenLineBreak(rawLine)
+            if tokenOrBreak {
+                shown = cleanLine
+            } else if invisibleRemoved || escapeMatched || markerStripped {
+                // The guard acted on this line: the raw spelling is never shown. #952's carry of a
+                // whole-marker line (only once a model judged `clean`) keeps its marker, shown with
+                // its fold applied and its breakout neutralized, exactly as before #959.
+                shown = markerStripped && markersMayCarry ? escapeWrapperBreakout(normalized) : cleanLine
+            } else {
+                shown = rawLine
+            }
+            if !sameScalars(shown, rawLine) {
+                if markerStripped, !tokenOrBreak, !invisibleRemoved, !escapeMatched { markerOnly += 1 } else { diverged += 1 }
+            }
+            return shown
         }
 
         var carried: [String] = []
@@ -827,8 +909,7 @@ public struct InjectionGuard {
         while ci < cleanLines.count {
             let cleanLine = cleanLines[ci]
             if oi < originalLines.count, singleLineJudgedForm(originalLines[oi]) == cleanLine {
-                let original = originalLines[oi]
-                carried.append(carriesRealToken(original) || hasHiddenLineBreak(original) ? cleanLine : original)
+                carried.append(shownForAligned(rawLine: originalLines[oi], cleanLine: cleanLine))
                 ci += 1
                 oi += 1
                 continue
@@ -853,10 +934,12 @@ public struct InjectionGuard {
             }
         }
         // The wrapper-breakout escape runs on the WHOLE assembled text, once, as the last step —
-        // never per-line — so a carried line's own breakout attempt is still neutralized (#952
-        // Task 3 widens this escape further; this call must exist before Task 3 lands so the
-        // carried text is never returned un-escaped even for one commit).
-        return escapeWrapperBreakout(carried.joined(separator: "\n"))
+        // never per-line — so a carried line's own breakout attempt is still neutralized.
+        let text = escapeWrapperBreakout(carried.joined(separator: "\n"))
+        // A display that is not the file's own text always says so, even where the lines did not
+        // align one for one (a breakout spanning two lines, a redaction): at least one line differs.
+        if diverged == 0, markerOnly == 0, !text.unicodeScalars.elementsEqual(rawOriginal.unicodeScalars) { diverged = 1 }
+        return (text, diverged)
     }
 
     /// The opening wrapper tag, carrying optional provenance as a `source` attribute.
