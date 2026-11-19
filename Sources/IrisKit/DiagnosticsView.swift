@@ -7,8 +7,14 @@ struct DiagnosticsView: View {
     @State private var scoreRows: [Tier2Scores.Summary] = []
     /// The Conversation mode's (#1146): the toolbar cost popover names a conversation and this
     /// window takes it, so a later plain open of Diagnostics does not land on a stale one.
-    let state: AppState
+    /// The shared `AppState` traps until the launch gate is open (#463 decision 14), and the other
+    /// modes touch no store, so the window is not gated as a whole: `state` is read only once the
+    /// gate is open, and a closed gate leaves the Conversation mode saying so.
+    let gate: LaunchGate
+    let stateProvider: () -> AppState
     @State private var conversationId: UUID?
+
+    private var state: AppState? { gate.isOpen ? stateProvider() : nil }
 
     enum Mode: String, CaseIterable, Identifiable {
         case byCommand = "By Command"
@@ -31,16 +37,23 @@ struct DiagnosticsView: View {
             case .byCommand: byCommand
             case .aggregate: aggregate
             case .guardScores: guardScores
-            case .conversation: ConversationCostDiagnosticsView(state: state, conversationId: conversationId)
+            case .conversation:
+                if let state {
+                    ConversationCostDiagnosticsView(state: state, conversationId: conversationId)
+                } else {
+                    Spacer()
+                    Text("Available once Iris has finished starting.").foregroundColor(.secondary)
+                    Spacer()
+                }
             }
         }
         .frame(minWidth: 600, minHeight: 400)
         .onAppear(perform: takeConversationRequest)
-        .onChange(of: state.diagnosticsRequest) { takeConversationRequest() }
+        .onChange(of: state?.diagnosticsRequest) { takeConversationRequest() }
     }
 
     private func takeConversationRequest() {
-        guard let asked = state.diagnosticsConversationId else { return }
+        guard let state, let asked = state.diagnosticsConversationId else { return }
         conversationId = asked
         mode = .conversation
         state.diagnosticsConversationId = nil
