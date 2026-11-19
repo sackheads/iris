@@ -1264,6 +1264,13 @@ class AppState {
         /// #1119: the peer delivery came from an MCP guest, so the turn that reads it runs with
         /// YOLO off (`guestOriginTurnConversations`).
         var isGuestOrigin = false
+        /// #974 Task 15: the `AccessBinding` that turn must carry if this entry starts or joins
+        /// it. nil unless `isGuestOrigin`; when multiple guest entries merge into one turn
+        /// (`drainPendingUserMessages`), the first non-nil one is kept — a known simplification,
+        /// since every merged entry is already guest-origin and the review focus this task was
+        /// built for (a guest-steered `.main` turn cannot read owner memory) does not depend on
+        /// which of several guests' bindings wins.
+        var guestBinding: AccessBinding? = nil
         /// #1064: true when the user chose to queue this entry for after the running turn (`⌘-Enter`
         /// or `⌘`/`⌥`-click send) instead of steering the next model round.
         var queued = false
@@ -1389,6 +1396,8 @@ class AppState {
             topicTurnConversations.remove(conversationId)
             // #1119: likewise for a guest-origin turn; a drain below sets it again.
             guestOriginTurnConversations.remove(conversationId)
+            // #974 Task 15: the binding stamp travels with the bool above.
+            guestSteeredBindings.removeValue(forKey: conversationId)
         }
         // An arrival turn — scheduler, watcher, subagent post-back — never passes through
         // `runThinkingTask`, so without this the message a user typed while one was running is
@@ -1707,12 +1716,13 @@ class AppState {
     }
 
     func enqueuePendingUserMessage(text: String, attachments: [FileAttachment], for conversationId: UUID, isPeer: Bool = false,
-                                   isTopic: Bool = false, isGuestOrigin: Bool = false,
+                                   isTopic: Bool = false, isGuestOrigin: Bool = false, guestBinding: AccessBinding? = nil,
                                    queued: Bool = false, messageId: UUID? = nil) {
         var entry = PendingUserMessage(text: text, attachments: attachments, isPeer: isPeer,
                                        queued: queued, messageId: messageId)
         entry.isTopic = isTopic
         entry.isGuestOrigin = isGuestOrigin
+        entry.guestBinding = guestBinding
         pendingUserMessages[conversationId, default: []].append(entry)
     }
 
@@ -1785,6 +1795,7 @@ class AppState {
         if !taken.isEmpty { markReflectionBoundary(for: conversationId) }
         if taken.contains(where: \.isTopic) { topicTurnConversations.insert(conversationId) }
         if taken.contains(where: \.isGuestOrigin) { guestOriginTurnConversations.insert(conversationId) }
+        if let binding = taken.lazy.compactMap(\.guestBinding).first { guestSteeredBindings[conversationId] = binding }
         return taken
     }
 
@@ -1815,10 +1826,12 @@ class AppState {
         var texts: [String] = []
         var anyTopic = false
         var anyGuest = false
+        var joinedGuestBinding: AccessBinding? = nil
         while let first = queue.first, first.attachments.isEmpty, first.origin == lead {
             texts.append(first.text)
             anyTopic = anyTopic || first.isTopic
             anyGuest = anyGuest || first.isGuestOrigin
+            if joinedGuestBinding == nil { joinedGuestBinding = first.guestBinding }
             queue.removeFirst()
         }
         var next = texts.isEmpty
@@ -1830,6 +1843,9 @@ class AppState {
         // Same stricter reading for a guest part (#1119).
         if anyGuest { next.isGuestOrigin = true }
         if next.isGuestOrigin { guestOriginTurnConversations.insert(conversationId) }
+        // #974 Task 15: carries the binding alongside the bool, same first-one-wins merge as above.
+        if texts.isEmpty { joinedGuestBinding = next.guestBinding }
+        if let joinedGuestBinding { guestSteeredBindings[conversationId] = joinedGuestBinding }
         pendingUserMessages[conversationId] = queue.isEmpty ? nil : queue
         if case .systemEvent(let source) = next.origin {
             // Not `startTurn`: that is the composer's path, which runs as a "UI" turn. Reserved
@@ -3274,8 +3290,18 @@ class AppState {
     /// on the conversation ends. Transient, on no `Codable` type (Invariants 1 and 5).
     @ObservationIgnored private var guestOriginTurnConversations: Set<UUID> = []
 
+    /// #974 Task 15 (F3b): the `AccessBinding` a guest-steered turn carries, keyed by the
+    /// conversation it runs on — the COMPLETE fix the #1119 bool above only bounds (YOLO off is
+    /// not a tool/memory gate). Stamped by `IrisEngine.deliverPeerMessage` alongside
+    /// `guestOriginTurnConversations` and read by `IrisEngine.bindingForCall` in place of the
+    /// engine's own (owner-shaped, for `.main`) binding. Cleared with the bool, when the last
+    /// turn on the conversation ends. Transient, on no `Codable` type (Invariants 1 and 5).
+    @ObservationIgnored private var guestSteeredBindings: [UUID: AccessBinding] = [:]
+
     func markGuestOriginTurn(_ id: UUID) { guestOriginTurnConversations.insert(id) }
     func isGuestOriginTurn(_ id: UUID) -> Bool { guestOriginTurnConversations.contains(id) }
+    func markGuestSteeredBinding(_ binding: AccessBinding, for id: UUID) { guestSteeredBindings[id] = binding }
+    func guestSteeredBinding(for id: UUID) -> AccessBinding? { guestSteeredBindings[id] }
     func isTopicTurn(_ id: UUID) -> Bool { topicTurnConversations.contains(id) }
 
     func notePeerArrival(depth: Int, at id: UUID) {
