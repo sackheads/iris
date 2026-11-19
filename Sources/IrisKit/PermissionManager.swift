@@ -13,6 +13,10 @@ struct PermissionRule: Codable, Equatable, Sendable {
         /// command matches when each of its parts starts with one (`CommandPattern`). Attended
         /// calls only.
         static let prefix = Match(rawValue: "prefix")
+        /// `read_file` only (#1136): `details` is an absolute directory, and a read matches when its
+        /// resolved path is inside it (`DirectoryReadRule`). Attended calls only. An older build
+        /// reads it as an exact rule, which matches only that directory's own spelling, never a file.
+        static let directory = Match(rawValue: "directory")
     }
 
     let toolName: String
@@ -24,6 +28,7 @@ struct PermissionRule: Codable, Equatable, Sendable {
     var match: Match? = nil
 
     var isPrefix: Bool { match == .prefix }
+    var isDirectory: Bool { match == .directory }
     var isExact: Bool { match == nil || match == .exact }
 
     /// The rules an "Always Allow" click on this call saves: a prefix per part of a command that
@@ -118,6 +123,16 @@ struct PermissionManager: Sendable {
         // Check project
         if let workspace, let rule = projectRules.first(where: { Self.rule($0, matches: toolName, details, base: workspace) }) {
             return AllowMatch(scope: .project, rule: rule)
+        }
+
+        // #1136: a directory rule covers a `read_file` under its folder. Attended only, for the same reason
+        // as the prefix rules below (a guest-origin turn returned above).
+        if toolName == "read_file", !isBackground {
+            let directoryRules = (globalRules.map { ($0, AllowMatch.Scope.global) } + projectRules.map { ($0, AllowMatch.Scope.project) })
+                .filter { $0.0.toolName == toolName && $0.0.isDirectory }
+            if let hit = directoryRules.first(where: { DirectoryReadRule.covers(directory: $0.0.details, read: details, paths: paths) }) {
+                return AllowMatch(scope: hit.1, rule: hit.0)
+            }
         }
 
         // #1102: prefix rules, global and project together, since one part of a chain can match a
