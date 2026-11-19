@@ -300,6 +300,12 @@ struct SubagentGoalLoopTests {
         #expect(await eventually { state.liveSubagents(ofRun: run).isEmpty })
     }
 
+    /// The owner's own run, as production threads it to a subagent (#974 Task 5): a command hook runs
+    /// where the owner's policy puts it. A subagent with no binding is deny-all since Task 5, and a
+    /// non-owner's commands (hooks included) go to the sandbox (Task 6), which is not what these
+    /// two tests are about.
+    static let ownerParent = AccessBinding(profile: .owner, principal: .main, isOwner: true)
+
     @Test("a hook-blocked reprompt ends the loop promptly, not at the turn deadline")
     func hookBlockedTurnEndsPromptly() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-subagentloop-hook-\(UUID().uuidString)")
@@ -325,7 +331,7 @@ struct SubagentGoalLoopTests {
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
             turnTimeout: 30, client: client, appState: state, config: config, hooks: hooks, repromptDelay: Self.delay,
-            endSandboxSession: { _ in })
+            parentBinding: Self.ownerParent, endSandboxSession: { _ in })
 
         // Only shows the subagent stopped well before its turn deadline, not how fast; the full parallel suite runs it at ~4 s.
         #expect(TestClock.seconds(since: started) < 10, "seconds, not the 30 s turn deadline")
