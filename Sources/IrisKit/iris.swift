@@ -6006,12 +6006,6 @@ actor IrisEngine {
         if let refusal = Self.guestOriginDispatchRefusal(functionCall.name, guestOrigin: githubGuestOrigin) {
             return refusal
         }
-        // #974 Task 7 (C4): a memory writer below its store's tier on the active binding is refused
-        // before anything is asked or written. The three reads check their own branches below.
-        if let refusal = MemoryBindingGate.writeRefusal(tool: functionCall.name,
-                                                        binding: await bindingForCall(conversationId: conversationId)) {
-            return refusal
-        }
         if Self.jobCreationTools.contains(functionCall.name), isUnattended {
             return Self.unattendedJobCreationRefusal
         }
@@ -6147,6 +6141,14 @@ actor IrisEngine {
         // refusals below stay as defence in depth.
         if !offeredTools.contains(functionCall.name) {
             return await notOffered(functionCall.name, conversationId: conversationId)
+        }
+        // #974 Task 7 (C4): a memory writer below its store's tier on the active binding is refused
+        // before the #813 hold asks the person or anything is written. After the offered-tools
+        // check, which keeps its own wording for a tool the round never declared. The three reads
+        // check their own branches below.
+        if let refusal = MemoryBindingGate.writeRefusal(tool: functionCall.name,
+                                                        binding: await bindingForCall(conversationId: conversationId)) {
+            return refusal
         }
 
         // #813: on a conversation that has read untrusted output, a write that becomes standing
