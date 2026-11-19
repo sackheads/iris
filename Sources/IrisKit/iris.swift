@@ -8485,7 +8485,7 @@ extension IrisEngine {
         let details = "vm:" + path
         let approved = await state?.requestApprovalSource(
             toolName: "read_file", details: details, args: ["path": .string(details)], workspace: workspacePath,
-            conversationId: conversationId, origin: approvalOrigin, inSandbox: true, callerRole: .agent)
+            conversationId: conversationId, origin: approvalOrigin, inSandbox: true, callerRole: .agent, isOwner: self.binding.isOwner)
         guard approved != nil else { return .failure(Refusal(text: "reading \(path) to attach it wasn't approved.")) }
         switch await SandboxArtifacts.readVMFile(path, container: SandboxSessionManager.containerName(for: conversationId), run: run) {
         case .failure(let why): return .failure(why)

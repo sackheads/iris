@@ -50,12 +50,12 @@ struct HostReadOnlyApprovalTests {
     /// a call that does neither within 2 s is denied, so a regression fails rather than hangs.
     private func call(_ state: AppState, _ details: String, tool: String = "run_command", in cid: UUID,
                       inSandbox: Bool = false, answer: AppState.ApprovalResolution = .deny,
-                      engine: Approver) async throws -> Outcome {
+                      isOwner: Bool = true, engine: Approver) async throws -> Outcome {
         let done = Done()
         let task = Task { @MainActor in
             let approved = await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": engine]) {
                 await state.requestApproval(toolName: tool, details: details, workspace: nil, conversationId: cid,
-                                            inSandbox: inSandbox, vibecopEnabled: true)
+                                            inSandbox: inSandbox, vibecopEnabled: true, isOwner: isOwner)
             }
             done.value = true
             return approved
@@ -100,6 +100,24 @@ struct HostReadOnlyApprovalTests {
         #expect(try await call(state, "touch x", in: cid, answer: .approve, engine: vibecop) == .asked)
         #expect(try await call(state, "/tmp/x", tool: "write_file", in: cid, answer: .approve, engine: vibecop) == .asked)
         #expect(try await call(state, "ls", in: cid, engine: vibecop) == .silent(true))
+    }
+
+    /// #974 Task 8 (C5), dev-3 review round 2: the pure `vibecopGate` unit test alone did not pin
+    /// the production call site -- a mutant that dropped `isOwner:` from
+    /// `requestApprovalSource`'s call to `ReadOnlyCommand.vibecopGate` (defaulting it back to
+    /// `true` there) survived every other test in this PR, since none of them drove a non-owner
+    /// binding through the real approval path.
+    @Test("a non-owner binding's host read_file is asked, never auto-run by Vibecop's APPROVE; the owner control is unaffected")
+    func nonOwnerReadFileAsksThroughTheRealApprovalPath() async throws {
+        let (state, home) = try app()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let cid = state.createNewConversation(isBackground: false, select: false)
+        let vibecop = Approver()
+
+        #expect(try await call(state, "/etc/hosts", tool: "read_file", in: cid, isOwner: false, engine: vibecop) == .asked,
+                "a non-owner's read_file must not be silently auto-run")
+        #expect(try await call(state, "/etc/hosts", tool: "read_file", in: cid, isOwner: true, engine: vibecop) == .silent(true),
+                "the owner control: unaffected")
     }
 
     @Test("Vibecop is told its host APPROVE only runs reads, and is not told so in the VM")

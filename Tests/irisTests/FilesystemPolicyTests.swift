@@ -29,6 +29,40 @@ struct FilesystemPolicyTests {
         #expect(FilesystemPolicy.resolve(binding: nonOwner(), grant: grant) == .confined(grant))
     }
 
+    // MARK: grant(fromFsRoots:) -- dev-3 review of #1217, round 2
+
+    /// `grant(fromFsRoots:)` must route each root through `JobGrant.resolve`'s own validation, not
+    /// build a mount from the raw string -- a mutant doing the latter survived every prior test,
+    /// since none of them named a root `resolve` itself would refuse.
+    @Test("a too-broad root (the real home) is dropped from the grant, not mounted as-is")
+    func tooBroadRootIsDropped() {
+        let grant = FilesystemPolicy.grant(fromFsRoots: ["~"])
+        #expect(grant.mounts.isEmpty, "the home directory must never become a confinement mount")
+    }
+
+    @Test("a startup-location root (~/Library/LaunchAgents) is dropped from the grant")
+    func startupLocationRootIsDropped() {
+        let grant = FilesystemPolicy.grant(fromFsRoots: ["~/Library/LaunchAgents"])
+        #expect(grant.mounts.isEmpty)
+    }
+
+    @Test("a credential-store root (~/.ssh) is dropped from the grant too, not only denied at read time")
+    func credentialStoreRootIsDropped() {
+        let grant = FilesystemPolicy.grant(fromFsRoots: ["~/.ssh"])
+        #expect(grant.mounts.isEmpty)
+    }
+
+    @Test("a valid root alongside a too-broad one: the valid one still mounts, the invalid one is dropped")
+    func validRootSurvivesBesideAnInvalidOne() throws {
+        try withHome { home in
+            let ok = home + "/workdir"
+            try FileManager.default.createDirectory(atPath: ok, withIntermediateDirectories: true)
+            let grant = FilesystemPolicy.grant(fromFsRoots: ["~", ok])
+            #expect(grant.mounts.count == 1, "\(grant.mounts)")
+            #expect(grant.mounts.first?.source == ok)
+        }
+    }
+
     // MARK: the non-owner host-read denial set -- Review Focus 4
 
     private func withHome(_ body: (String) throws -> Void) rethrows {
@@ -44,6 +78,18 @@ struct FilesystemPolicyTests {
     func deniedStoresAreRefused(_ suffix: String) {
         withHome { home in
             #expect(FilesystemPolicy.deniesNonOwnerHostRead(home + suffix, home: home))
+        }
+    }
+
+    /// dev-3 review of #1217, round 2: the superset claim pinned against the real list, not a
+    /// hand-picked subset -- a mutant that dropped `JobGrant.isCredentialStore` from the check
+    /// survived every prior test because none of them happened to touch `.aws`/`.gnupg`/`.kube`/
+    /// `.docker`/`.password-store`/Keychains, which only `credentialStores` names.
+    @Test("every entry JobGrant.credentialStores names is also denied here", arguments: JobGrant.credentialStores)
+    func everyJobGrantCredentialStoreIsDenied(_ entry: String) {
+        withHome { home in
+            let suffix = String(entry.dropFirst())   // "~/.aws" -> "/.aws"
+            #expect(FilesystemPolicy.deniesNonOwnerHostRead(home + suffix, home: home), Comment(rawValue: entry))
         }
     }
 
@@ -249,6 +295,23 @@ struct FilesystemPolicyDispatchTests {
         #expect(!result.contains("secret content"), Comment(rawValue: result))
     }
 
+    /// dev-3 review of #1217, round 2: a too-broad fsRoot (the real home) must be dropped by
+    /// `JobGrant.resolve`'s own validation along the real dispatch path too, not just when
+    /// `grant(fromFsRoots:)` is called directly -- this is the "plus a real-turn test" half of
+    /// finding 2.
+    @Test("a non-owner whose fsRoots names a too-broad root (home) cannot read_file through a real turn")
+    func tooBroadRootRefusesThroughRealTurn() async throws {
+        let (base, allowed, _) = try tree()
+        defer { try? FileManager.default.removeItem(at: base) }
+        try "secret content".write(to: allowed.appendingPathComponent("x.txt"), atomically: true, encoding: .utf8)
+        let call = FunctionCall(name: "read_file", args: ["path": .string(allowed.appendingPathComponent("x.txt").path)], id: "c1")
+        let (app, _, id) = session(call, binding: nonOwner(fsRoots: ["~"]))
+        app.sendMessage("go")
+        #expect(await eventually { self.finished(app, id) })
+        let result = try #require(toolResultText(app, id, callId: "c1"))
+        #expect(!result.contains("secret content"), Comment(rawValue: result))
+    }
+
     @Test("a non-owner with an fsRoots grant elsewhere cannot read_file outside it through a real turn")
     func grantElsewhereRefusesThroughRealTurn() async throws {
         let (base, allowed, outside) = try tree()
@@ -300,5 +363,48 @@ struct FilesystemPolicyDispatchTests {
         #expect(await eventually { self.finished(app, id) })
         let result = try #require(toolResultText(app, id, callId: "c1"))
         #expect(result.contains("owner content"), Comment(rawValue: result))
+    }
+}
+
+/// #974 Task 8 (C5), dev-3 review round 2: `requestApprovalSource`'s `isOwner` parameter still
+/// defaults to `true`, so a new production call site that forgets to pass it would silently read
+/// as owner rather than failing to build. This scan is the backstop until that default is removed
+/// (tracked separately): every `requestApprovalSource(` call in `Sources/` must itself pass
+/// `isOwner:` explicitly, one way or another.
+@Suite("Every production call of requestApprovalSource passes isOwner explicitly (#974 Task 8)")
+struct RequestApprovalSourceIsOwnerScanTests {
+    /// Finds each balanced `requestApprovalSource(...)` call (not its definition) and checks
+    /// `isOwner:` appears somewhere inside it. Call-site text, not line-by-line: the argument list
+    /// spans several lines at every site in `iris.swift` today.
+    @Test("every call of requestApprovalSource in Sources/ names isOwner:")
+    func everyCallPassesIsOwnerExplicitly() throws {
+        let sourcesDir = PerfPaths.repoRoot().appendingPathComponent("Sources")
+        let files = FileManager.default.enumerator(at: sourcesDir, includingPropertiesForKeys: nil)?.compactMap { $0 as? URL } ?? []
+        var missing: [String] = []
+        var total = 0
+        for url in files where url.pathExtension == "swift" {
+            let text = try String(contentsOf: url, encoding: .utf8)
+            var searchFrom = text.startIndex
+            while let callRange = text.range(of: "requestApprovalSource(", range: searchFrom..<text.endIndex) {
+                // Skip the function's own definition (`func requestApprovalSource(`).
+                let precedingText = text[text.startIndex..<callRange.lowerBound]
+                if precedingText.hasSuffix("func ") { searchFrom = callRange.upperBound; continue }
+                total += 1
+                var depth = 1
+                var i = callRange.upperBound
+                while depth > 0, i < text.endIndex {
+                    if text[i] == "(" { depth += 1 } else if text[i] == ")" { depth -= 1 }
+                    i = text.index(after: i)
+                }
+                let call = text[callRange.lowerBound..<i]
+                if !call.contains("isOwner:") {
+                    let line = text[text.startIndex..<callRange.lowerBound].components(separatedBy: "\n").count
+                    missing.append("\(url.lastPathComponent):\(line)")
+                }
+                searchFrom = i
+            }
+        }
+        #expect(total > 0, "the scan must find the real call sites, not run over nothing")
+        #expect(missing.isEmpty, Comment(rawValue: missing.joined(separator: ", ")))
     }
 }
