@@ -88,6 +88,20 @@ struct PolicyStoreNamesTests {
         #expect(!writes("ls", workspace: dir))
     }
 
+    @Test("from the Iris home or its config/, a bare store name is the store (relative spellings, dev-2's probes)")
+    func relativeFromTheIrisHome() {
+        let irisHome = "\(home)/.iris"
+        #expect(writes("echo x > profiles/y", workspace: irisHome))
+        #expect(writes("cd profiles && tee y", workspace: irisHome))
+        #expect(writes("echo x > ../profiles/y", workspace: "\(irisHome)/config"))
+        #expect(writes("cp k a2a-peers/k.json", workspace: "\(irisHome)/config"))
+        // Near-misses stay unflagged, and so does a read-only command and a workspace elsewhere.
+        #expect(!writes("echo x > profiles-old/y", workspace: irisHome))
+        #expect(!writes("echo x > memory/memory.md", workspace: irisHome))
+        #expect(!writes("cat profiles/y", workspace: irisHome))
+        #expect(!writes("echo x > profiles/y", workspace: "\(home)/work"))
+    }
+
     @Test("an unrelated host command is not flagged")
     func unrelatedNotFlagged() {
         for c in ["echo hi > ~/notes.txt", "swift build", "git commit -m x", "echo x > ~/.iris/memory/memory.md", "mkdir ~/profiles"] {
