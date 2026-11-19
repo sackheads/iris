@@ -183,19 +183,6 @@ enum SubagentRouteRefusal: Error, Equatable {
     }
 }
 
-/// Removes a secret from text that may be shown or logged: a provider can echo the key it was
-/// sent in an error body.
-enum SecretScrub {
-    static func scrub(_ text: String, _ secrets: [String]) -> String {
-        secrets.filter { $0.count >= 8 }.reduce(text) { $0.replacingOccurrences(of: $1, with: "[redacted]") }
-    }
-
-    static func scrub(_ data: Data, _ secrets: [String]) -> Data {
-        guard secrets.contains(where: { $0.count >= 8 }), let text = String(data: data, encoding: .utf8) else { return data }
-        return Data(scrub(text, secrets).utf8)
-    }
-}
-
 extension ConfigManager {
     static let subagentEndpointsKey = "SUBAGENT_PROVIDERS"
     static let subagentBuiltInsKey = "SUBAGENT_BUILTINS"
