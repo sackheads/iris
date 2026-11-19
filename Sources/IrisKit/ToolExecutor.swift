@@ -368,7 +368,8 @@ struct ToolExecutor {
                  approvedWorkspaceRoot: String? = nil, decidedPath: String? = nil,
                  restrictedPath: [String]? = nil, homeWritableOptIn: String? = nil,
                  additionalRoots: [String] = [],
-                 decidedJobProfile: JobProfile? = nil) async -> String {
+                 decidedJobProfile: JobProfile? = nil,
+                 filesystemPolicy: FilesystemPolicy = .unrestrictedOwner, home: String = NSHomeDirectory()) async -> String {
         // A NUL ends the C string the kernel is handed, so the file opened is not the one named
         // (#256). The dispatcher refuses it before approval; this covers a hook's rewrite.
         if ["read_file", "write_file", "register_directory_watcher"].contains(name),
@@ -395,12 +396,30 @@ struct ToolExecutor {
             case .success(let parsed): range = parsed
             }
             switch await readFileWhole(path: path, cwd: cwd, grant: grant, grantedMount: grantedMount,
-                                       approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath) {
+                                       approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath,
+                                       filesystemPolicy: filesystemPolicy, home: home) {
             case .failure(let why): return why
             case .content(let text): return LineRange.apply(range, to: text)
             }
         case "write_file":
             guard let path = args["path"]?.stringValue, let content = args["content"]?.stringValue else { return "Error: Missing path or content" }
+            // #974 Task 8 (C5): the denial set applies to a non-owner's write too, and a non-owner
+            // with none of the three existing routes falls to the FS-roots grant, never the plain
+            // (unrestricted) write below.
+            if case .confined(let fsGrant) = filesystemPolicy {
+                if FilesystemPolicy.deniesNonOwnerHostRead(path, cwd: cwd, home: home) {
+                    return Self.nonOwnerDeniedStoreRefusal("write_file")
+                }
+                if grant == nil, decidedPath == nil {
+                    guard let mount = fsGrant.allowedMount(toolName: "write_file", details: path, cwd: cwd) else {
+                        return Self.notUnderGrantedDirectory(fsGrant.workspaceMount?.source ?? "(no granted directory)")
+                    }
+                    guard let relative = Self.grantedComponents(of: path, cwd: cwd, grant: fsGrant, decided: mount) else {
+                        return Self.notUnderGrantedDirectory(mount.source)
+                    }
+                    return await writeFile(grantRoot: mount.source, relative: relative, content: content)
+                }
+            }
             if let grant {
                 guard let grantedMount else { return Self.notDecidedInsideGrant("write_file") }
                 guard let relative = Self.grantedComponents(of: path, cwd: cwd, grant: grant, decided: grantedMount) else {
@@ -1097,7 +1116,12 @@ struct ToolExecutor {
     /// `read_file`'s four routes, unchanged by #709's range: a grant's walk, an approved
     /// workspace's walk, the decided path's walk, or the plain read.
     private func readFileWhole(path: String, cwd: String?, grant: JobGrant?, grantedMount: ContainerMount?,
-                               approvedWorkspaceRoot: String?, decidedPath: String?) async -> ReadResult {
+                               approvedWorkspaceRoot: String?, decidedPath: String?,
+                               filesystemPolicy: FilesystemPolicy = .unrestrictedOwner, home: String = NSHomeDirectory()) async -> ReadResult {
+        // #974 Task 8 (C5): the denial set applies before any route below, confined or not.
+        if case .confined = filesystemPolicy, FilesystemPolicy.deniesNonOwnerHostRead(path, cwd: cwd, home: home) {
+            return .failure(Self.nonOwnerDeniedStoreRefusal("read_file"))
+        }
         if let grant {
             // §0.13: under a grant there is no Foundation branch. A nil decision is a refusal,
             // because it may have been made while a component was a link.
@@ -1119,6 +1143,18 @@ struct ToolExecutor {
         if let decidedPath {
             if let refusal = Self.decidedPathRefusal("read_file", path: path, cwd: cwd, decided: decidedPath) { return .failure(refusal) }
             return await readFileResult(decided: decidedPath)
+        }
+        // #974 Task 8 (C5): a non-owner with none of the three routes above falls to its FS-roots
+        // grant, never the plain (unrestricted) read below — "today it is host-always" is exactly
+        // the fail-open this closes, and it applies whether or not the conversation is background.
+        if case .confined(let fsGrant) = filesystemPolicy {
+            guard let mount = fsGrant.allowedMount(toolName: "read_file", details: path, cwd: cwd) else {
+                return .failure(Self.notUnderGrantedDirectory(fsGrant.workspaceMount?.source ?? "(no granted directory)"))
+            }
+            guard let relative = Self.grantedComponents(of: path, cwd: cwd, grant: fsGrant, decided: mount) else {
+                return .failure(Self.notUnderGrantedDirectory(mount.source))
+            }
+            return await readFileResult(grantRoot: mount.source, relative: relative)
         }
         return await readFile(path, cwd: cwd)
     }
@@ -1383,7 +1419,15 @@ struct ToolExecutor {
     static func notDecidedInsideGrant(_ tool: String) -> String {
         "Error: `\(tool)` was not inside this run's grant when it was decided; nothing was done — widen the grant (re-schedule) if it should be."
     }
-    
+
+    /// #974 Task 8 (C5): a non-owner binding's host read/write of a denied credential or config
+    /// store (`FilesystemPolicy.nonOwnerDeniedHostReads`). No path or store name: the refusal
+    /// itself must not confirm what is there.
+    static func nonOwnerDeniedStoreRefusal(_ tool: String) -> String {
+        "Error: `\(tool)` refused — this run is not the owner's, and the path reaches a store it may never read; nothing was done."
+    }
+
+
     private func searchWeb(query: String) async -> String {
         await Self.runSearchWeb(query: query)
     }

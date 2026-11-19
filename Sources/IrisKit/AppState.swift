@@ -5054,9 +5054,13 @@ class AppState {
             // #1151: and never on a guest-origin turn: Vibecop may still DENY there, but a read-only
             // call is not harmless (cat takes any path), so a guest-steered one asks the person.
             if decision.decision == "APPROVE", !guestOrigin, !(toolName == "run_command" && commandDenied(in: conversationId)) {
+                // #974 Task 8 (C5): a persisted `accessProfileId` names a non-owner binding
+                // (`BindingResolver`'s on-load path; absent is owner for `.main`) — `read_file`'s
+                // APPROVE-stands-in-for-the-person carve-out does not extend to one.
+                let isOwner = conversationId.flatMap { id in conversations.first { $0.id == id } }?.accessProfileId == nil
                 switch ReadOnlyCommand.vibecopGate(toolName: toolName, details: details, inSandbox: inSandbox,
                                                    homeWritable: homeWritable(conversationId, workspace: workspace),
-                                                   cwd: workspace, lookup: hostLookup()) {
+                                                   isOwner: isOwner, cwd: workspace, lookup: hostLookup()) {
                 case .run: return .vibecop(reason: decision.reason)
                 case .runRestricted(let path):
                     // #616: a damaged record may have lost a root, so a silent restricted read can't

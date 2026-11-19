@@ -7760,10 +7760,17 @@ actor IrisEngine {
             return Self.cancelledToolResult(name)
         }
 
+        // #974 Task 8 (C5): consulted regardless of `isBackground` — a non-owner binding's own
+        // `fsRoots` grant the host file tools fall back to once the existing grant/approved-
+        // workspace/decided-path routes above are all absent, so a non-owner foreground
+        // conversation (today host-always) is confined too, not only a background job's.
+        let fsGrant = JobGrant(mounts: self.binding.profile.fsRoots.map { ContainerMount(source: IrisEngine.expandTilde($0)) })
+        let filesystemPolicy = FilesystemPolicy.resolve(binding: self.binding, grant: fsGrant)
         var result = await executor.execute(name: name, args: execArgs, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox, grant: grant, grantedMount: grantedMount,
                                               approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath, restrictedPath: restrictedPath,
                                               homeWritableOptIn: await homeWritableOptIn(for: conversationId),
-                                              additionalRoots: await additionalRoots(for: conversationId), decidedJobProfile: decidedJobProfile)
+                                              additionalRoots: await additionalRoots(for: conversationId), decidedJobProfile: decidedJobProfile,
+                                              filesystemPolicy: filesystemPolicy)
 
         if name == "write_file", result.hasPrefix("Successfully wrote to "),
            let cid = conversationId, let path = execArgs["path"]?.stringValue {

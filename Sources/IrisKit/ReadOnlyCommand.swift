@@ -214,8 +214,13 @@ enum ReadOnlyCommand {
     /// `homeWritable` (#611, the owner's "1: a"): the conversation let the sandbox write a home
     /// folder or above it, so the VM is no safe box, and in it too only a read-only command runs
     /// on an APPROVE. The VM has its own `PATH`, so the host lookup does not apply there.
+    ///
+    /// `isOwner` (#974 Task 8, C5): a non-owner binding's host `read_file` is confined
+    /// (`FilesystemPolicy`), so Vibecop's APPROVE standing in for the person on "any file read"
+    /// (#600) no longer holds for one — a read gated by the FS-roots grant, or refused outright by
+    /// the denial set, must go through the attended path like anything else that isn't unconditionally safe.
     static func vibecopGate(toolName: String, details: String, inSandbox: Bool, homeWritable: Bool = false,
-                            cwd: String? = nil, lookup: @autoclosure () -> HostLookup) -> VibecopGate {
+                            isOwner: Bool = true, cwd: String? = nil, lookup: @autoclosure () -> HostLookup) -> VibecopGate {
         switch toolName {
         case "run_command":
             if inSandbox { return !homeWritable || isReadOnly(details) ? .run : .ask }
@@ -227,7 +232,7 @@ enum ReadOnlyCommand {
                 return .ask
             }
             return .runRestricted(path: path)
-        case "read_file": return .run
+        case "read_file": return isOwner ? .run : .ask
         default: return .ask
         }
     }
