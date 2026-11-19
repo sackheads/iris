@@ -7960,15 +7960,15 @@ actor IrisEngine {
     /// outside the untrusted wrapper exactly like `noteBlockedResult`/`noteHoledFidelityRead` —
     /// Iris's own commentary, not tool output, and the two notes stack rather than replace each
     /// other since they describe different incompleteness (withheld/truncated vs. deleted markers).
-    /// **Known limit (dev-3 review, #969):** `count` is `strippedMarkerLines`, which only counts
-    /// what `PromptInjectionGuard.stripRecording` records as a role-marker strip (`counts`, gated
-    /// on a non-markdown-only pattern or a delimiter directly before a role word). A bare `---` or
-    /// `###` line — Markdown frontmatter fences, a heading — is stripped the same way but never
-    /// recorded, so it is never counted here: a model reading a skill file through `read_file` or
-    /// `run_command` still cannot tell "this file never had frontmatter" from "the guard deleted
-    /// it". Counting every Markdown heading would be noisy for the common, benign case; this
-    /// notice stays silent on that specific gap rather than widen `stripRecording`'s recording
-    /// (shared with #952/#959's carry mechanism) to fix it. See
+    /// **Scope (dev-3 review, #969; narrowed by #959):** `count` is `strippedMarkerLines`, which
+    /// only counts what `PromptInjectionGuard.stripRecording` records as a role-marker strip
+    /// (`counts`, gated on a non-markdown-only pattern or a delimiter directly before a role word).
+    /// A bare `---` or `###` line — Markdown frontmatter fences, a heading — is stripped the same
+    /// way but never recorded, so this note does not count it. For `read_file`/`run_command` the
+    /// other trailing note (`noteAlteredFidelityRead`, #959) counts every line shown differently
+    /// from the file, fences included, so a model reading a skill file can still tell "no
+    /// frontmatter" from "the guard deleted it"; only `search_web` relies on this count alone.
+    /// Counting every Markdown heading here would be noisy for the common, benign case. See
     /// `Tests/irisTests/InjectionGuardFidelityTests.swift`'s frontmatter case.
     private func noteStrippedMarkers(_ sanitizedResult: String, count: Int) -> String {
         guard count > 0 else { return sanitizedResult }
