@@ -49,9 +49,15 @@ struct MemoryWriterPathScanTests {
         var found: Set<String> = []
         for (i, line) in lines.enumerated() {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("//") || trimmed.hasPrefix("func ") || trimmed.contains(" func ") { continue }
+            if trimmed.hasPrefix("//") { continue }
             let range = NSRange(line.startIndex..., in: line)
-            guard let m = regex.firstMatch(in: line, range: range), let pr = Range(m.range(at: 1), in: line) else { continue }
+            // Every match on the line, minus a primitive's own definition (`func saveFact(`): a one-line
+            // function body that calls one is still a call.
+            let calls = regex.matches(in: line, range: range).compactMap { m -> Range<String.Index>? in
+                guard let pr = Range(m.range(at: 1), in: line) else { return nil }
+                return line[..<pr.lowerBound].hasSuffix("func ") ? nil : pr
+            }
+            for pr in calls {
             var enclosing = "?"
             var j = i
             while j >= 0 {
@@ -62,6 +68,7 @@ struct MemoryWriterPathScanTests {
                 j -= 1
             }
             found.insert("\(file):\(enclosing):\(line[pr])")
+            }
         }
         return found
     }
@@ -86,9 +93,10 @@ struct MemoryWriterPathScanTests {
             func caller() {
                 try? store.saveFact(content: "x")
             }
+            func oneLine() { _ = try? store.updateSoul(content: "y") }
         }
         """
-        #expect(Self.callSites(in: text, file: "T.swift") == ["T.swift:caller:saveFact"])
+        #expect(Self.callSites(in: text, file: "T.swift") == ["T.swift:caller:saveFact", "T.swift:oneLine:updateSoul"])
     }
 
     @Test("the dispatcher gate and the two direct gates are really on the paths the table claims")
