@@ -67,6 +67,16 @@ enum PolicyStores {
                     if here == lowered || here.hasPrefix(lowered + "/") { return true }
                 }
             }
+            // A command run from the Iris home or anywhere under it (its `config/` too) can name a
+            // store by a bare component, `profiles/y` or `../profiles/y`, with no `.iris` in its text
+            // and the workspace a PARENT of the store, not inside it (dev-2's review of #1221).
+            for root in [paths, release] {
+                for spelled in Set([root.root.path, IrisPaths.realPath(root.root.path)]) {
+                    let lowered = spelled.lowercased()
+                    guard here == lowered || here.hasPrefix(lowered + "/") else { continue }
+                    if directoryNames.contains(where: { hasWord($0, in: plainCommand) }) { return true }
+                }
+            }
         }
         return false
     }
