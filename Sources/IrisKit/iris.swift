@@ -4898,7 +4898,10 @@ actor IrisEngine {
                 // time to reach the same escalation. `schedule_job` is never offered to a
                 // background run, so there is always someone to answer this.
                 guard let state else { return false }
-                if await MainActor.run(body: { state.isYoloMode(conversationId) }) { return true }
+                // #1115: no YOLO shortcut here -- the gate-script escalation is one of Brian's
+                // reserved humanOnly approvals (`requestApprovalSource`'s reorder), and this
+                // closure bypasses that ladder entirely (`enqueueUserApproval`, not
+                // `requestApprovalSource`), so YOLO must be refused its own say here too.
                 // No Always Allow (#648): its rule would match the composed gate text as a host
                 // command, where the person is approving it for the sandbox. Human-only (#687):
                 // Vibecop has already given its view, and nothing may stand in for this click.
@@ -5142,6 +5145,9 @@ actor IrisEngine {
         guard let localState = state else { return ContextHolds.uncheckedResult(call.name) }
         let held = await MainActor.run { () -> Bool in
             // #1099: YOLO mode bypasses context holds for attended sessions and their delegates.
+            // #1115 review: left as status quo, same as #812 -- a tainted-content-adjacent check,
+            // not one of Brian's reserved humanOnly/irisWrite approvals, and whether YOLO should
+            // also respect it is the same pending-Brian question as #812's, not decided here.
             if localState.isYoloMode(conversationId) { return false }
             guard localState.readUntrustedThroughDelegation(conversationId) else { return false }
             let root = localState.delegationRoot(of: conversationId)
