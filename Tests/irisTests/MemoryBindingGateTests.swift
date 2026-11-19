@@ -225,6 +225,37 @@ struct MemoryBindingGateTests {
         #expect(result.contains("No relevant facts found."))
     }
 
+    // MARK: a save_fact that never passes through the dispatcher
+
+    /// `writeGoalLearnings` builds a synthetic `save_fact` and stores it directly when a goal passes.
+    private func storedAfterGoalLearnings(binding: AccessBinding?) async throws -> Bool {
+        let app = AppState()
+        app.conversations.removeAll()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        let facts = try FactStoreManager(inMemory: true)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("iris-974-t7-gl-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: FakeLLMClient(responses: []),
+                                retryDelays: [], factStore: facts, protectionEnabled: false, sessionPeerCount: 0,
+                                memory: MemoryManager(paths: IrisPaths(root: root)), binding: binding)
+        let marker = "goal-learning-\(UUID().uuidString)"
+        await engine.writeGoalLearnings(marker, conversationId: id)
+        return !((try? facts.search(query: marker)) ?? []).isEmpty
+    }
+
+    @Test("a goal's learnings note is not stored under a binding below the fact-write tier")
+    func goalLearningsRefusedBelowTier() async throws {
+        #expect(try await storedAfterGoalLearnings(binding: binding(read: .full, write: .none)) == false)
+        #expect(try await storedAfterGoalLearnings(binding: binding(write: .task)) == false)
+    }
+
+    @Test("a goal's learnings note is stored at .shared and for an owner")
+    func goalLearningsStoredAtTier() async throws {
+        #expect(try await storedAfterGoalLearnings(binding: binding(write: .shared)) == true)
+        #expect(try await storedAfterGoalLearnings(binding: nil) == true)
+    }
+
     // MARK: the seam
 
     @Test("bindingForCall is the engine's binding until a turn carries its own")
