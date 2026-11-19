@@ -7534,6 +7534,14 @@ actor IrisEngine {
             case .unchanged: break
             }
         }
+        // #974 Task 7 (C4): an approved card reaches the executor without passing the dispatcher, so
+        // a memory writer on it meets the same gate here (the dispatcher refuses one before a card
+        // is ever recorded, but the binding a card is clicked under is not necessarily the one it
+        // was recorded under).
+        if let refusal = MemoryBindingGate.writeRefusal(tool: call.toolName,
+                                                        binding: await bindingForCall(conversationId: conversationId)) {
+            return refusal
+        }
         let result = await executeToolWithHooks(name: call.toolName, args: call.args, cwd: call.cwd,
                                                 conversationId: conversationId, useSandbox: useSandbox,
                                                 origin: .approvedCall, grant: grant, grantedMount: grantedMount,
