@@ -403,22 +403,23 @@ struct ToolExecutor {
             }
         case "write_file":
             guard let path = args["path"]?.stringValue, let content = args["content"]?.stringValue else { return "Error: Missing path or content" }
-            // #974 Task 8 (C5): the denial set applies to a non-owner's write too, and a non-owner
-            // with none of the three existing routes falls to the FS-roots grant, never the plain
-            // (unrestricted) write below.
-            if case .confined(let fsGrant) = filesystemPolicy {
+            // #974 Task 8 (C5), dev-2/dev-3 review finding 1: a non-owner with no background job
+            // grant is contained HERE, unconditionally, before `decidedPath` or the plain write —
+            // same reasoning as `readFileWhole`.
+            if case .confined(let fsGrant) = filesystemPolicy, grant == nil {
                 if FilesystemPolicy.deniesNonOwnerHostRead(path, cwd: cwd, home: home) {
                     return Self.nonOwnerDeniedStoreRefusal("write_file")
                 }
-                if grant == nil, decidedPath == nil {
-                    guard let mount = fsGrant.allowedMount(toolName: "write_file", details: path, cwd: cwd) else {
-                        return Self.notUnderGrantedDirectory(fsGrant.workspaceMount?.source ?? "(no granted directory)")
-                    }
-                    guard let relative = Self.grantedComponents(of: path, cwd: cwd, grant: fsGrant, decided: mount) else {
-                        return Self.notUnderGrantedDirectory(mount.source)
-                    }
-                    return await writeFile(grantRoot: mount.source, relative: relative, content: content)
+                guard let mount = fsGrant.allowedMount(toolName: "write_file", details: path, cwd: cwd) else {
+                    return Self.notUnderGrantedDirectory(fsGrant.workspaceMount?.source ?? "(no granted directory)")
                 }
+                guard let relative = Self.grantedComponents(of: path, cwd: cwd, grant: fsGrant, decided: mount) else {
+                    return Self.notUnderGrantedDirectory(mount.source)
+                }
+                return await writeFile(grantRoot: mount.source, relative: relative, content: content)
+            }
+            if case .confined = filesystemPolicy, FilesystemPolicy.deniesNonOwnerHostRead(path, cwd: cwd, home: home) {
+                return Self.nonOwnerDeniedStoreRefusal("write_file")
             }
             if let grant {
                 guard let grantedMount else { return Self.notDecidedInsideGrant("write_file") }
@@ -1140,13 +1141,16 @@ struct ToolExecutor {
             }
             return await readFileResult(approvedWorkspace: approvedWorkspaceRoot, relative: relative)
         }
-        if let decidedPath {
-            if let refusal = Self.decidedPathRefusal("read_file", path: path, cwd: cwd, decided: decidedPath) { return .failure(refusal) }
-            return await readFileResult(decided: decidedPath)
-        }
-        // #974 Task 8 (C5): a non-owner with none of the three routes above falls to its FS-roots
-        // grant, never the plain (unrestricted) read below — "today it is host-always" is exactly
-        // the fail-open this closes, and it applies whether or not the conversation is background.
+        // #974 Task 8 (C5), dev-2/dev-3 review finding 1: `grant` and `approvedWorkspaceRoot`
+        // above are already-correct, self-contained routes (a background job's own sandbox grant,
+        // a grader's approved workspace) — a `.confined` binding using either keeps using it,
+        // unchanged. What must never run for a non-owner is `decidedPath` or the plain read below:
+        // `decidedPath` is the dispatcher's own "this is the path I decided for you" trust,
+        // derived with no notion of `fsRoots` at all, so letting it win here (as the
+        // fallback-after-`decidedPath` version of this check did) bypassed containment for every
+        // ordinary host read a real engine turn makes. So a `.confined` binding with neither
+        // `grant` nor `approvedWorkspaceRoot` is contained by its own FS-roots grant HERE,
+        // pre-empting `decidedPath` and the plain read both.
         if case .confined(let fsGrant) = filesystemPolicy {
             guard let mount = fsGrant.allowedMount(toolName: "read_file", details: path, cwd: cwd) else {
                 return .failure(Self.notUnderGrantedDirectory(fsGrant.workspaceMount?.source ?? "(no granted directory)"))
@@ -1156,6 +1160,11 @@ struct ToolExecutor {
             }
             return await readFileResult(grantRoot: mount.source, relative: relative)
         }
+        if let decidedPath {
+            if let refusal = Self.decidedPathRefusal("read_file", path: path, cwd: cwd, decided: decidedPath) { return .failure(refusal) }
+            return await readFileResult(decided: decidedPath)
+        }
+        // Only `.unrestrictedOwner` ever reaches here.
         return await readFile(path, cwd: cwd)
     }
 

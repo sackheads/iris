@@ -1604,7 +1604,7 @@ struct JobToolsTests {
                                             vibecopEnabled: Bool? = nil, grantedMount: ContainerMount? = nil,
                                             humanOnly: Bool = false, graderReadWalked: Bool = false,
                                             offersAlwaysAllow: Bool = true, offersConversationAllow: Bool = false,
-                                            beforeToolFired: Bool = false) async -> ApprovalSource? {
+                                            beforeToolFired: Bool = false, isOwner: Bool = true) async -> ApprovalSource? {
             approvalCount += 1
             lastHumanOnly = humanOnly
             lastDetails = details

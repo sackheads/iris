@@ -412,8 +412,12 @@ final class SubagentManagerTests: XCTestCase {
         // The relative `ledger_probe.txt` resolves against the workspace, so binding one sends the
         // write under the fixture's own directory instead of wherever the test process happens to be.
         state.setWorkspace(for: parentId, path: probeDir.path)
+        // #974 Task 8 (C5): the subagent's binding now gates write_file for real (FilesystemPolicy);
+        // an owner parent, as every real production caller threads, keeps this test's own subject
+        // (where the write lands) isolated from that.
         let summary = await SubagentManager.shared.runSubagent(
-            role: "engineer", task: "write a file", effort: "easy", parentConversationId: parentId, client: IsolatedAnthropicClient(config: config), appState: state).rendered
+            role: "engineer", task: "write a file", effort: "easy", parentConversationId: parentId, client: IsolatedAnthropicClient(config: config), appState: state,
+            parentBinding: AccessBinding(profile: .owner, principal: .main, isOwner: true)).rendered
 
         XCTAssertTrue(summary.contains("Files written (1)"))
         XCTAssertTrue(summary.contains("ledger_probe.txt"))

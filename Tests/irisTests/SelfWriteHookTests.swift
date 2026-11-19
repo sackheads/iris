@@ -200,10 +200,14 @@ struct SelfWriteHookTests {
             callResponse("goal_complete", ["summary": .string("wrote it")]),
         ])
 
+        // #974 Task 8 (C5): the subagent's binding now gates write_file for real (FilesystemPolicy),
+        // so an unowned parent binding (the default when none is threaded) would confine the write
+        // to nothing. An owner parent, as every real production caller threads, keeps this test's
+        // actual subject (the registry sharing) isolated from that.
         _ = await SubagentManager.shared.runSubagent(
             role: "worker", task: "write the file", effort: "easy",
             parentConversationId: parent, client: client, appState: app,
-            recentWrites: registry)
+            recentWrites: registry, parentBinding: AccessBinding(profile: .owner, principal: .main, isOwner: true))
 
         #expect(FileManager.default.fileExists(atPath: target), "precondition: the subagent wrote it")
         #expect(await registry.count == 1,

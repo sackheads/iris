@@ -4971,7 +4971,8 @@ class AppState {
                          grantedMount: ContainerMount? = nil, humanOnly: Bool = false,
                          graderReadWalked: Bool = false, offersAlwaysAllow: Bool = true,
                          offersConversationAllow: Bool = false,
-                         beforeToolFired: Bool = false) async -> ApprovalSource? {
+                         beforeToolFired: Bool = false,
+                         isOwner: Bool = true) async -> ApprovalSource? {
         // #1066: a guest's session is invisible to the person, so a dialog for it would be
         // unattributable. Nothing in its two-tool floor needs an approval; if the floor ever grows,
         // this keeps the answer no, with no UI and no recorded blocked call.
@@ -5097,10 +5098,12 @@ class AppState {
             // #1151: and never on a guest-origin turn: Vibecop may still DENY there, but a read-only
             // call is not harmless (cat takes any path), so a guest-steered one asks the person.
             if decision.decision == "APPROVE", !guestOrigin, !(toolName == "run_command" && commandDenied(in: conversationId)) {
-                // #974 Task 8 (C5): a persisted `accessProfileId` names a non-owner binding
-                // (`BindingResolver`'s on-load path; absent is owner for `.main`) — `read_file`'s
-                // APPROVE-stands-in-for-the-person carve-out does not extend to one.
-                let isOwner = conversationId.flatMap { id in conversations.first { $0.id == id } }?.accessProfileId == nil
+                // #974 Task 8 (C5): `read_file`'s APPROVE-stands-in-for-the-person carve-out does
+                // not extend to a non-owner binding. dev-2/planner review: the caller's own
+                // resolved binding is the source of truth, not a persisted `accessProfileId` read
+                // here — that field is not yet live in production and, worse, `== nil` would read
+                // as "owner" for every Principal, not only `.main` (BindingResolver's on-load
+                // semantics apply the "absent means owner" rule to `.main` alone).
                 switch ReadOnlyCommand.vibecopGate(toolName: toolName, details: details, inSandbox: inSandbox,
                                                    homeWritable: homeWritable(conversationId, workspace: workspace),
                                                    isOwner: isOwner, cwd: workspace, lookup: hostLookup()) {
