@@ -26,6 +26,9 @@ public enum SandboxDecision: Equatable, Sendable {
     /// Runs on the host. `warnNoRuntime` is true when a sandbox was intended but the runtime
     /// was unavailable (the caller should surface a one-time notice).
     case host(warnNoRuntime: Bool)
+    /// #974 C1: a non-owner binding needs the sandbox and there is no container runtime to give it.
+    /// It is never `.host`: the caller refuses the command with this reason.
+    case refused(reason: String)
 }
 
 public enum SandboxPolicy {
@@ -47,13 +50,27 @@ public enum SandboxPolicy {
         config.enableSandboxing && runtimeAvailable
     }
 
+    /// Why a non-owner command is refused when there is no container runtime (#974 C1).
+    public static let nonOwnerNoRuntimeReason = "this run is not the owner's, so a command runs only in the sandbox, and no container runtime is available"
+
     /// Pure resolution — no I/O. See the plan's Global Constraints for the cascade.
+    ///
+    /// `isOwner` is the run's binding (#974 Task 5), never the Principal alone: a subagent on the
+    /// owner's binding is the owner (Invariant 1), and a `.main` dropped to a named profile is not.
+    /// A non-owner executes only in the sandbox (C1): the master switch and every per-conversation,
+    /// per-workspace and global preference are ignored, and with no container runtime the result is
+    /// `.refused`, never `.host`. The owner keeps the cascade below, unchanged. No default for
+    /// `isOwner`: a caller must say which it is.
     public static func resolve(masterEnabled: Bool,
                                principal: Principal,
+                               isOwner: Bool,
                                perConversation: SandboxPref?,
                                perWorkspace: SandboxPref?,
                                globalDefault: SandboxPref,
                                runtimeAvailable: Bool) -> SandboxDecision {
+        guard isOwner else {
+            return runtimeAvailable ? .sandboxed : .refused(reason: nonOwnerNoRuntimeReason)
+        }
         guard masterEnabled else { return .host(warnNoRuntime: false) }
 
         let intended: SandboxPref

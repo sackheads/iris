@@ -2939,6 +2939,7 @@ actor IrisEngine {
         return SandboxPolicy.resolve(
             masterEnabled: ConfigManager.shared.enableSandboxing,
             principal: principal,
+            isOwner: binding.isOwner,
             perConversation: perConv,
             perWorkspace: SandboxPolicy.perWorkspaceOverride(workspace: workspacePath),
             globalDefault: ConfigManager.shared.mainAgentSandboxDefault,
@@ -2951,6 +2952,9 @@ actor IrisEngine {
         switch decision {
         case .sandboxed:
             return true
+        case .refused:
+            // A non-owner with no runtime (#974 C1): the caller refuses the command, never the host.
+            return false
         case .host(let warn):
             // Refused below rather than run on the host, so no "running on the host" notice (#678).
             if warn, ConfigManager.shared.refusesHostWithoutRuntime { return false }
@@ -7382,6 +7386,11 @@ actor IrisEngine {
                await sandboxDecision(conversationId: conversationId, workspacePath: workspacePath) == .host(warnNoRuntime: true) {
                 return Self.protectedSettingsHostRefusal
             }
+            // #974 C1: a non-owner run's command is run in the sandbox or not at all.
+            if functionCall.name == "run_command", !useSandbox,
+               case .refused = await sandboxDecision(conversationId: conversationId, workspacePath: workspacePath) {
+                return Self.nonOwnerNoSandboxRefusal
+            }
             // #282 §0.13: the covering mount for a granted file-tool call is decided ONCE, here,
             // before approval, and both the gate and the executor consume this value — neither
             // recomputes it: a command the run left running in the container can swap a component
@@ -7577,6 +7586,9 @@ actor IrisEngine {
     /// #678: the sandbox is on because Iris couldn't read its protected settings, and there's no
     /// container runtime, so the command isn't run on the host instead.
     static let protectedSettingsHostRefusal = "Not run: Iris couldn't read its protected settings, so the sandbox is on, and there is no container runtime to run this command in. It isn't run on the host instead. See the notice at launch; changing a setting in Settings → Sandboxing saves the settings again."
+
+    /// #974 C1: a run that is not the owner's runs a command in the container or not at all.
+    static let nonOwnerNoSandboxRefusal = "Not run: this run is not the owner's, so a command runs only in the sandbox, and there is no container runtime to run it in. It is not run on the host instead."
 
     static func sandboxUnavailableRefusal(tool: String) -> String {
         "Not run: `\(tool)` from a background job runs in the container or not at all (sandbox unavailable)."

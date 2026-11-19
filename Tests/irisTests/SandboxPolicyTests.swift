@@ -7,7 +7,9 @@ struct SandboxPolicyResolveTests {
     private func r(master: Bool = true, principal: Principal = .main,
                    conv: SandboxPref? = nil, ws: SandboxPref? = nil,
                    def: SandboxPref = .host, runtime: Bool = true) -> SandboxDecision {
-        SandboxPolicy.resolve(masterEnabled: master, principal: principal,
+        // The owner cascade (#974 C1 keeps it for the owner binding); the non-owner rule is in
+        // `SandboxPolicyNonOwnerTests`.
+        SandboxPolicy.resolve(masterEnabled: master, principal: principal, isOwner: true,
                               perConversation: conv, perWorkspace: ws,
                               globalDefault: def, runtimeAvailable: runtime)
     }
