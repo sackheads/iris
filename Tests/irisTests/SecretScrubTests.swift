@@ -42,18 +42,25 @@ struct SecretScrubTests {
 
     @Test("the encodings real tool output contains are removed: base64 (standard, URL-safe, padded, unpadded) and hex (both cases)")
     func commonEncodings() {
-        let secret = "sk-ant-api03-AB/CD+EF1234567890zz"   // contains / and + so the URL-safe form differs
-        let bytes = Data(secret.utf8)
-        let std = bytes.base64EncodedString()
-        let url = std.replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
-        let trim = { (t: String) in t.trimmingCharacters(in: CharacterSet(charactersIn: "=")) }
-        let hex = bytes.map { String(format: "%02x", $0) }.joined()
-        let spelled: [(String, String)] = [("base64", std), ("base64url", url), ("base64 unpadded", trim(std)),
-                                           ("base64url unpadded", trim(url)), ("hex lower", hex), ("hex upper", hex.uppercased())]
-        for (name, form) in spelled {
-            let out = SecretScrub.scrubSecrets("dump: \(form) end", known: [secret])
-            #expect(out == "dump: [redacted] end", Comment(rawValue: "\(name): \(out)"))
+        var sawPadding = false, sawUrlSafeDiffer = false
+        // Byte lengths of every remainder mod 3 (so "=", "==" and none), and bytes whose base64 uses + and /.
+        for extra in 0..<3 {
+            let secret = "sk-~~~??>" + String(repeating: "Zq~?", count: 8) + String(repeating: "x", count: extra)
+            let bytes = Data(secret.utf8)
+            let std = bytes.base64EncodedString()
+            let url = std.replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            let trim = { (t: String) in t.trimmingCharacters(in: CharacterSet(charactersIn: "=")) }
+            sawPadding = sawPadding || std.hasSuffix("=")
+            sawUrlSafeDiffer = sawUrlSafeDiffer || std != url
+            let hex = bytes.map { String(format: "%02x", $0) }.joined()
+            let spelled: [(String, String)] = [("base64", std), ("base64url", url), ("base64 unpadded", trim(std)),
+                                               ("base64url unpadded", trim(url)), ("hex lower", hex), ("hex upper", hex.uppercased())]
+            for (name, form) in spelled {
+                let out = SecretScrub.scrubSecrets("dump: \(form) end", known: [secret])
+                #expect(out == "dump: [redacted] end", Comment(rawValue: "extra \(extra) \(name): \(out)"))
+            }
         }
+        #expect(sawPadding && sawUrlSafeDiffer, "the fixtures must exercise padding and the URL-safe alphabet")
     }
 
     @Test("a secret inside a longer base64 value (Basic auth, any alignment) is removed down to the edge characters")
