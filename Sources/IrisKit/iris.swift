@@ -339,7 +339,7 @@ actor IrisEngine {
             return cached
         }
         let userProfile = manager.getUserProfile()
-        let (safeUserProfile, cacheable, unjudged) = await measureSpan("assembly.userProfile") {
+        let (safeUserProfile, cacheable, unjudged, _) = await measureSpan("assembly.userProfile") {
             await InjectionGuard.sanitizeUntrustedCacheable(userProfile, contextTag: "user_profile", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
         }
         // A transient guard error (fix round 1) is shown for THIS turn but never cached: caching it
@@ -419,7 +419,7 @@ actor IrisEngine {
             cachedAgentsText.removeValue(forKey: wp)
             return nil
         }
-        let (safeAgentsMd, cacheable, unjudged) = await measureSpan("assembly.agentsMd") {
+        let (safeAgentsMd, cacheable, unjudged, _) = await measureSpan("assembly.agentsMd") {
             await InjectionGuard.sanitizeUntrustedCacheable(agentsMdContent, contextTag: "workspace_rules", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
         }
         // Same rule as `guardedUserProfileText`: a transient error is shown this turn but never
@@ -7852,6 +7852,10 @@ actor IrisEngine {
         // comment at the assignment below for why this is detected from the redaction marker text,
         // not `judged.unjudged`.
         var holedFidelityRead = false
+        // #969 Gap 2: how many lines still lack the role marker `stripRecordingDelimiters` removed,
+        // for the two channels approved for this notice (search_web below; the generic tool_output
+        // path's `read_file`/`run_command` further down). Zero for every other tool.
+        var strippedMarkerLineCount = 0
 
         if name == "search_web",
            let outcome = await SearchResultFilter.filter(result, allowed: { text in
@@ -7872,8 +7876,12 @@ actor IrisEngine {
             // re-scoring it would reintroduce exactly the aggregate false positive this split
             // exists to remove.
             fullyBlockedSearch = outcome.withheld > 0 && outcome.kept == 0
-            let structuralSafeJSON = PromptInjectionGuard.sanitizeUntrustedInput(outcome.json)
-            sanitizedResult = await InjectionGuard.sanitize(structuralSafeJSON, contextTag: "tool_output_search_web",
+            let structuralStripped = PromptInjectionGuard.stripRecordingDelimiters(outcome.json)
+            // This pass never attempts a fidelity carry (no model-backed tier re-judges the
+            // reassembled JSON, per the comment above), so every touched line stays stripped —
+            // the full count, not a "still stripped after carry" subset.
+            strippedMarkerLineCount = structuralStripped.delimiterLines.count
+            sanitizedResult = await InjectionGuard.sanitize(structuralStripped.text, contextTag: "tool_output_search_web",
                                                             maxTier: .tier1_structural, protectionEnabled: protectionEnabled)
         } else {
             // Structural isolation, then tiers 2 and 3 (skipped for trusted tools), with the lines a
@@ -7904,6 +7912,10 @@ actor IrisEngine {
             // would under-warn on the ordinary flagged-and-withheld case.
             holedFidelityRead = fidelity == .preserveWhenJudged
                 && (sanitizedResult.contains("withheld by the injection guard") || sanitizedResult.contains("[output truncated:"))
+            // Scoped to read_file/run_command only (planner's ruling on #969 Gap 2) — every other
+            // tool through this branch runs at fidelity .off same as always, and #969 did not
+            // extend the notice to the other ~16 untrusted channels; only this pair + search_web.
+            if fidelity == .preserveWhenJudged { strippedMarkerLineCount = judged.strippedMarkerLines }
         }
         if name == "search_web" { sanitizedResult = OutputCap.cap(sanitizedResult) }
 
@@ -7914,7 +7926,22 @@ actor IrisEngine {
         let blocked = fullyBlockedSearch || sanitizedResult.contains("[CONTENT BLOCKED BY TIER")
         if withheldByVerdict { await recordGuardBlock(conversationId, tool: name, path: execArgs["path"]?.stringValue) }
         let noted = noteBlockedResult(sanitizedResult, name: name, conversationId: conversationId, blocked: blocked)
-        return noteHoledFidelityRead(noted, holed: holedFidelityRead)
+        let holeNoted = noteHoledFidelityRead(noted, holed: holedFidelityRead)
+        return noteStrippedMarkers(holeNoted, count: strippedMarkerLineCount)
+    }
+
+    /// #969 Gap 2: the deletion half, for the two channels where a write-back from a result the
+    /// model can't tell was altered is a real risk (`read_file`/`run_command`'s shared path above,
+    /// and `search_web`) — `noteHoledFidelityRead`'s sibling for the plain-strip case rather than
+    /// the fidelity-channel's own holes. Fixed text plus a count, no attacker-controlled content
+    /// (dev-2 confirmed on the #969 issue this does not weaken the turn-forge defense), appended
+    /// outside the untrusted wrapper exactly like `noteBlockedResult`/`noteHoledFidelityRead` —
+    /// Iris's own commentary, not tool output, and the two notes stack rather than replace each
+    /// other since they describe different incompleteness (withheld/truncated vs. deleted markers).
+    private func noteStrippedMarkers(_ sanitizedResult: String, count: Int) -> String {
+        guard count > 0 else { return sanitizedResult }
+        let line = count == 1 ? "1 line" : "\(count) lines"
+        return sanitizedResult + "\n[Iris: the injection guard removed a role-marker token from \(line) of this view; do not write it back as if it were the original.]"
     }
     
     /// One model round's assembled result plus when its first token arrived (spec §4).
