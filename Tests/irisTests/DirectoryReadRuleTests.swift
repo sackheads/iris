@@ -99,7 +99,7 @@ struct DirectoryReadRuleTests {
                       ".htpasswd", "terraform.tfstate", "prod.tfvars", ".vault-token", "kubeconfig", "work.ovpn", "app.jks",
                       "keystore.p12", "backup.gpg", "client_secret_123.json", "service-account-prod.json", "Login Data", "Cookies",
                       "key4.db", "logins.json", "passwords.txt", "wallet.dat", "ssh_host_rsa_key", ".zsh_history", ".bash_history",
-                      "credentials", "aws_credentials.csv", "private.txt", "my-secret-notes.md", "OAuth.json", "authorized_keys"])
+                      "key.ppk", "serviceaccount.json", "credentials", "aws_credentials.csv", "private.txt", "my-secret-notes.md", "OAuth.json", "authorized_keys"])
     func secretNames(_ name: String) {
         #expect(DirectoryReadRule.isSensitiveName(name), Comment(rawValue: name))
     }
@@ -112,7 +112,7 @@ struct DirectoryReadRuleTests {
     @Test("below a folder rule, a sensitive folder on the way or a .git config still asks")
     func sensitivePathBelow() {
         for components in [["sub", ".ssh", "config"], [".aws", "x"], ["secrets", "a.txt"], [".git", "config"], ["repo", ".git", "credentials"],
-                           [".config", "gh", "hosts.yml"], ["private", "a.txt"], ["sub", ".gnupg", "x"]] {
+                           [".config", "gh", "hosts.yml"], [".cache", "x"], [".local", "share", "x"], [".zsh_sessions", "s"], ["private", "a.txt"], ["sub", ".gnupg", "x"]] {
             #expect(DirectoryReadRule.isSensitivePath(below: components), Comment(rawValue: "\(components)"))
         }
         for components in [["a.txt"], ["sub", "b.txt"], [".git", "HEAD"], [".github", "workflows", "ci.yml"], ["src", "main.swift"]] {
