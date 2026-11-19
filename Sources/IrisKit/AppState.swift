@@ -3214,6 +3214,7 @@ class AppState {
         let decision = SandboxPolicy.resolve(
             masterEnabled: ConfigManager.shared.enableSandboxing,
             principal: .main,
+            isOwner: true,
             perConversation: conv.mainAgentSandbox,
             perWorkspace: SandboxPolicy.perWorkspaceOverride(workspace: conv.workspacePath),
             globalDefault: ConfigManager.shared.mainAgentSandboxDefault,

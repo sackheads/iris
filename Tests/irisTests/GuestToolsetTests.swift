@@ -218,7 +218,7 @@ struct GuestToolsetTests {
     func sandboxAlwaysSandboxed() {
         for pref in [nil, SandboxPref.host, .sandboxed] {
             for global in [SandboxPref.host, .sandboxed] {
-                let d = SandboxPolicy.resolve(masterEnabled: true, principal: .mcpGuest, perConversation: pref,
+                let d = SandboxPolicy.resolve(masterEnabled: true, principal: .mcpGuest, isOwner: false, perConversation: pref,
                                               perWorkspace: pref, globalDefault: global, runtimeAvailable: true)
                 #expect(d == .sandboxed)
             }
