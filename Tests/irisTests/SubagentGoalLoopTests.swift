@@ -268,7 +268,7 @@ struct SubagentGoalLoopTests {
 
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
-            turnTimeout: 30, client: client, appState: state, config: config, repromptDelay: Self.delay, endSandboxSession: { _ in })
+            turnTimeout: 30, client: client, appState: state, config: config, repromptDelay: Self.delay, parentBinding: Self.ownerParent, endSandboxSession: { _ in })
         #expect(outcome.status == .completed)
         let sub = try #require(state.conversations.first { $0.isSubagent }?.id)
 

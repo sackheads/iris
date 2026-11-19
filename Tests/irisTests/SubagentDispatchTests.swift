@@ -206,7 +206,8 @@ struct SubagentDispatchTests {
         let run = Task {
             await SubagentManager.shared.runSubagent(role: "worker", task: "t", effort: "easy", parentConversationId: parent,
                                                      client: FakeLLMClient(responses: []), route: route,
-                                                     routedClient: routedClient, appState: app)
+                                                     routedClient: routedClient, appState: app,
+                                                     parentBinding: SubagentGoalLoopTests.ownerParent)
         }
         let end = TestClock.deadline(20)
         while app.pendingApprovals.isEmpty, TestClock.now() < end { try await Task.sleep(nanoseconds: 20_000_000) }
