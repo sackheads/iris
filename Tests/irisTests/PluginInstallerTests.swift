@@ -171,6 +171,29 @@ struct PluginInstallerTests {
         #expect(KeychainManager.shared.secrets(service: "iris.plugin.neat-plug").isEmpty)
     }
 
+    @Test("#1120: a confirmed replace with its own new secret still clears an orphaned key, not just when empty")
+    func replaceWithNewSecretStillClearsOrphan() throws {
+        let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
+        let installer = PluginInstaller(paths: paths)
+        defer { KeychainManager.shared.deleteSecrets(service: "iris.plugin.neat-plug") }
+
+        let src1 = try sourceDir(manifest: manifest)
+        defer { try? FileManager.default.removeItem(at: src1.deletingLastPathComponent()) }
+        var draft1 = try installer.stage(directory: src1, source: "local")
+        draft1.secretValues["API_KEY"] = "sk-old"
+        draft1.secretValues["OTHER"] = "sk-old-other"   // an orphan the new manifest won't redeclare
+        try installer.commit(draft1)
+
+        let src2 = try sourceDir(manifest: manifest)
+        defer { try? FileManager.default.removeItem(at: src2.deletingLastPathComponent()) }
+        var draft2 = try installer.stage(directory: src2, source: "local")
+        draft2.secretValues["API_KEY"] = "sk-new"   // redeclares API_KEY with a new value, not OTHER
+        try installer.commit(draft2, confirmedReplace: true)
+
+        #expect(KeychainManager.shared.secrets(service: "iris.plugin.neat-plug") == ["API_KEY": "sk-new"])
+    }
+
     @Test("#1120: a fresh (not-moved-aside) commit clears a stale pre-existing Keychain item")
     func freshInstallClearsStaleKeychainItem() throws {
         let paths = try tempPaths()
