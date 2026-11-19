@@ -93,14 +93,69 @@ struct DirectoryReadRuleTests {
         #expect(DirectoryReadRule.directory(forReadOf: f.real(f.project + "/a.txt"), home: f.home, paths: f.iris) != nil, "the same folder is offered for an ordinary file")
     }
 
-    @Test("a file named like a secret is not offered a folder rule", arguments: [".env", ".env.local", "server.pem", "id_rsa", "id_ed25519", ".netrc", "token", "prod.key", "a.kdbx"])
+    @Test("a file named like a secret is not offered a folder rule, and the list errs toward asking",
+          arguments: [".env", ".env.local", "server.pem", "id_rsa", "id_ed25519", ".netrc", "token", "prod.key", "a.kdbx",
+                      // dev-3's probe table: shapes an exact-name list misses
+                      ".htpasswd", "terraform.tfstate", "prod.tfvars", ".vault-token", "kubeconfig", "work.ovpn", "app.jks",
+                      "keystore.p12", "backup.gpg", "client_secret_123.json", "service-account-prod.json", "Login Data", "Cookies",
+                      "key4.db", "logins.json", "passwords.txt", "wallet.dat", "ssh_host_rsa_key", ".zsh_history", ".bash_history",
+                      "credentials", "aws_credentials.csv", "private.txt", "my-secret-notes.md", "OAuth.json", "authorized_keys"])
     func secretNames(_ name: String) {
-        #expect(DirectoryReadRule.isSecretFileName(name), Comment(rawValue: name))
+        #expect(DirectoryReadRule.isSensitiveName(name), Comment(rawValue: name))
     }
 
-    @Test("ordinary names are not secret names", arguments: ["a.txt", "environment.md", "keyboard.md", "notes.pem.md", "README"])
+    @Test("ordinary names are not sensitive", arguments: ["a.txt", "environment.md", "keyboard.md", "notes.pem.md", "README", "main.swift", "Package.swift", "index.html", "report-2026.pdf"])
     func ordinaryNames(_ name: String) {
-        #expect(!DirectoryReadRule.isSecretFileName(name), Comment(rawValue: name))
+        #expect(!DirectoryReadRule.isSensitiveName(name), Comment(rawValue: name))
+    }
+
+    @Test("below a folder rule, a sensitive folder on the way or a .git config still asks")
+    func sensitivePathBelow() {
+        for components in [["sub", ".ssh", "config"], [".aws", "x"], ["secrets", "a.txt"], [".git", "config"], ["repo", ".git", "credentials"],
+                           [".config", "gh", "hosts.yml"], ["private", "a.txt"], ["sub", ".gnupg", "x"]] {
+            #expect(DirectoryReadRule.isSensitivePath(below: components), Comment(rawValue: "\(components)"))
+        }
+        for components in [["a.txt"], ["sub", "b.txt"], [".git", "HEAD"], [".github", "workflows", "ci.yml"], ["src", "main.swift"]] {
+            #expect(!DirectoryReadRule.isSensitivePath(below: components), Comment(rawValue: "\(components)"))
+        }
+    }
+
+    @Test("app data, system folders and a volume root are not offered", arguments: [
+        "/Library/Application Support/x/a.txt", "/var/log/system/a.txt", "/private/var/root/a.txt", "/Volumes/Backup/a.txt",
+        "/usr/local/share/a.txt", "/opt/homebrew/etc/a.txt",
+    ])
+    func appDataAndSystem(_ file: String) throws {
+        let f = try fixture(); defer { f.tearDown() }
+        #expect(DirectoryReadRule.directory(forReadOf: file, home: f.home, paths: f.iris) == nil, Comment(rawValue: file))
+    }
+
+    @Test("the home's Library (browser profiles, Mail, Messages, iCloud) is not offered, and a folder named sensitive is not either")
+    func homeLibraryAndSensitiveFolders() throws {
+        let f = try fixture(); defer { f.tearDown() }
+        for dir in ["/Library/Mail/V10", "/Library/Application Support/Google/Chrome/Default", "/Library/Mobile Documents/x",
+                    "/Library/Messages", "/Library/Safari", "/work/secrets", "/work/.config/tool", "/work/private"] {
+            let full = f.home + dir
+            try FileManager.default.createDirectory(atPath: full, withIntermediateDirectories: true)
+            try "x".write(toFile: full + "/a.txt", atomically: true, encoding: .utf8)
+            #expect(DirectoryReadRule.directory(forReadOf: f.real(full + "/a.txt"), home: f.home, paths: f.iris) == nil, Comment(rawValue: dir))
+        }
+        #expect(DirectoryReadRule.directory(forReadOf: f.real(f.project + "/a.txt"), home: f.home, paths: f.iris) != nil, "an ordinary project folder still is")
+    }
+
+    @Test("under a covered folder a sensitive file, folder or .git config still asks, through the matcher")
+    func coversBelow() throws {
+        let f = try fixture(); defer { f.tearDown() }
+        let dir = f.real(f.project)
+        for rel in ["/.git/config", "/secrets/a.txt", "/sub/.aws/credentials", "/terraform.tfstate", "/prod.tfvars", "/.vault-token", "/passwords.txt"] {
+            let full = f.project + rel
+            try FileManager.default.createDirectory(atPath: (full as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            try "x".write(toFile: full, atomically: true, encoding: .utf8)
+            #expect(!covers(f, rule: dir, read: full), Comment(rawValue: rel))
+        }
+        let ok = f.project + "/.git/HEAD"
+        try FileManager.default.createDirectory(atPath: (ok as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        try "x".write(toFile: ok, atomically: true, encoding: .utf8)
+        #expect(covers(f, rule: dir, read: ok), "an ordinary file under a .git folder is still covered")
     }
 
     @Test("a folder whose path looks like a credential is not offered")
