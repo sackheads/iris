@@ -515,7 +515,8 @@ struct ExecuteToolSessionActivityTests {
         // run_command in this repo (ApprovalQueueTests, ScenarioTests, ScenarioRunnerTests, ...).
         let call = FunctionCall(name: "run_command", args: ["command": .string("echo hi")])
         let client = FakeLLMClient(responses: [Self.response(call), Self.response(nil)])
-        let engine = IrisEngine(state: app, tier: .medium, principal: .subagent, client: client)
+        let engine = IrisEngine(state: app, tier: .medium, principal: .subagent, client: client,
+                                binding: AccessBinding(profile: .owner, principal: .subagent, isOwner: true))
         await engine.processInput("go", source: "System", conversationId: id)
 
         let session = app.stripRuns.first { $0.id == id }
