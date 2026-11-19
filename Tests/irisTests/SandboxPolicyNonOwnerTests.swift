@@ -131,3 +131,31 @@ struct EvaluatorBindingWiringTests {
         #expect(sites == 3)
     }
 }
+
+@Suite("The dispatcher refuses a non-owner's command that has no sandbox (#974 Task 6)")
+struct NonOwnerDispatchRefusalTests {
+    @Test("only a refused decision is refused; sandboxed and host decisions are not")
+    func onlyRefused() {
+        #expect(IrisEngine.refusesNonOwnerCommand(.refused(reason: SandboxPolicy.nonOwnerNoRuntimeReason)))
+        #expect(!IrisEngine.refusesNonOwnerCommand(.sandboxed))
+        #expect(!IrisEngine.refusesNonOwnerCommand(.host(warnNoRuntime: false)))
+        #expect(!IrisEngine.refusesNonOwnerCommand(.host(warnNoRuntime: true)))
+    }
+
+    @Test("the refusal text says why and that nothing ran on the host")
+    func refusalText() {
+        #expect(IrisEngine.nonOwnerNoSandboxRefusal.hasPrefix("Not run:"))
+        #expect(IrisEngine.nonOwnerNoSandboxRefusal.contains("not run on the host"))
+    }
+
+    @Test("the model-turn dispatcher refuses before approval, and the engine routes by its own binding")
+    func dispatcherWiring() throws {
+        let src = try String(contentsOf: PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit/iris.swift"), encoding: .utf8)
+        let at = try #require(src.range(of: "#974 C1: a non-owner run's command is run in the sandbox or not at all."))
+        let block = String(src[at.lowerBound...].prefix(400))
+        #expect(block.contains("Self.refusesNonOwnerCommand("))
+        #expect(block.contains("return Self.nonOwnerNoSandboxRefusal"))
+        let decision = try #require(src.range(of: "private func sandboxDecision("))
+        #expect(String(src[decision.lowerBound...].prefix(900)).contains("isOwner: binding.isOwner"))
+    }
+}

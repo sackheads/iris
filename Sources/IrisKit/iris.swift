@@ -7388,7 +7388,7 @@ actor IrisEngine {
             }
             // #974 C1: a non-owner run's command is run in the sandbox or not at all.
             if functionCall.name == "run_command", !useSandbox,
-               case .refused = await sandboxDecision(conversationId: conversationId, workspacePath: workspacePath) {
+               Self.refusesNonOwnerCommand(await sandboxDecision(conversationId: conversationId, workspacePath: workspacePath)) {
                 return Self.nonOwnerNoSandboxRefusal
             }
             // #282 §0.13: the covering mount for a granted file-tool call is decided ONCE, here,
@@ -7586,6 +7586,12 @@ actor IrisEngine {
     /// #678: the sandbox is on because Iris couldn't read its protected settings, and there's no
     /// container runtime, so the command isn't run on the host instead.
     static let protectedSettingsHostRefusal = "Not run: Iris couldn't read its protected settings, so the sandbox is on, and there is no container runtime to run this command in. It isn't run on the host instead. See the notice at launch; changing a setting in Settings → Sandboxing saves the settings again."
+
+    /// #974 C1: whether the decision says the command is not run at all (a non-owner with no runtime).
+    nonisolated static func refusesNonOwnerCommand(_ decision: SandboxDecision) -> Bool {
+        if case .refused = decision { return true }
+        return false
+    }
 
     /// #974 C1: a run that is not the owner's runs a command in the container or not at all.
     static let nonOwnerNoSandboxRefusal = "Not run: this run is not the owner's, so a command runs only in the sandbox, and there is no container runtime to run it in. It is not run on the host instead."
