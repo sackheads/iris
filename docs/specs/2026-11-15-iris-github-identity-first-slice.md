@@ -36,7 +36,9 @@ her routine approvals satisfy the merge gate.
 Iris contributes code freely as `iris-main`; what stays under `@bnaylor` is approval of anything that
 matters — `Sources/`, `Tests/`, the ruleset, the `CODEOWNERS` file itself. `iris-main` can only ever
 approve `/docs` + `/assets` (minus `plans/` and `specs/`), enforced structurally by `CODEOWNERS` (§2) and belt-and-suspendered by the
-approve-gate (§3.3). The design's job is **identity separation** (Iris acts as herself, lands routine
+approve-gate (§3.3) — for `Sources/`/`Tests/`. For a rename *out of* `plans/`/`specs/` specifically,
+`CODEOWNERS` is not that structural guarantee (§3.3, verified #1186): the approve-gate is the only
+control. The design's job is **identity separation** (Iris acts as herself, lands routine
 work without a human click), **not** credential-hiding — Iris already runs from a highly privileged
 place (Brian's email, his git creds), so hiding `iris-main`'s credential from the model buys nothing.
 
@@ -93,9 +95,16 @@ from approving his own PR. That is the actual clickhole on Iris-authored PRs. So
    where the bots' approval counts. On the Mac's case-insensitive checkout it is the same folder as
    `docs/plans`, so for that spelling only the `github_approve` gate (which compares case-insensitively)
    and a human reviewer stand between a bot approval and a merge. Any other bot-approval path (the
-   sackheads-bot follow-up, #1170) must run the same gate, not rely on CODEOWNERS alone.
+   sackheads-bot follow-up, #1170) must run the same gate, not rely on CODEOWNERS alone. **A second,
+   separate limit (#1186, verified empirically):** GitHub's CODEOWNERS ownership resolution does not
+   consult a renamed file's previous path at all, only its current one — a real test PR renaming a
+   `docs/plans/` file to a plain `docs/` path had GitHub request the broader `/docs/` owner set, not
+   `@bnaylor` alone, for the reviewer request GitHub computed (the merge gate's own code-owner check
+   was not separately probed, but resolves ownership the same way and is expected to agree). For this
+   case `github_approve`'s own `previous_filename` check (§3.3) is not a second layer on top of
+   CODEOWNERS — it is the only one.
 
-   **`CODEOWNERS` is the primary approval control.** `iris-main` is a code owner of `/docs`+`/assets`
+   **`CODEOWNERS` is the primary approval control for `Sources/`/`Tests/`.** `iris-main` is a code owner of `/docs`+`/assets`
    *only* (not their `plans/` and `specs/` folders), so its approval structurally cannot satisfy the merge gate for a PR that touches `Sources/`,
    `Tests/`, or anything else — those need `@bnaylor`. This is the real "important approvals stay under my
    id" mechanism; the §3.3 approve-gate is defence-in-depth on top of it.
@@ -178,12 +187,15 @@ bound to an exact commit — hardened against three bypasses Iris flagged:
    `Sources/IrisKit/x.md` → `docs/x.md` rename can't slip a Sources change past the check.
 
 **This check is not redundant with CODEOWNERS — it is the only place a `plans/`/`specs/` rename is
-caught (#1186, verified empirically).** GitHub's native CODEOWNERS ownership resolution is computed
-from a PR's current diff only: a real test (two draft PRs, closed without merging) renamed a
-pre-existing `docs/plans/` file to a plain `docs/` path, and GitHub requested `@bnaylor` + `iris-main`
-as reviewers — the broader `/docs/` owner set — not `@bnaylor` alone. CODEOWNERS never consults a
-renamed file's previous path; that is a platform limit, not a bug to fix here. So point 3 above is
-the *entire* defence for a rename out of `plans/`/`specs/`, and a raw, credential-direct
+caught (#1186, verified empirically).** GitHub's native CODEOWNERS feature computes the *reviewer
+request* it auto-populates from a PR's current diff only: a real test (two draft PRs, closed
+without merging) renamed a pre-existing `docs/plans/` file to a plain `docs/` path, and GitHub
+requested `@bnaylor` + `iris-main` as reviewers — the broader `/docs/` owner set — not `@bnaylor`
+alone. The probe observed the reviewer request, not the ruleset's own required-code-owner-review
+check directly, but both resolve ownership from the same CODEOWNERS file against the same diff, so
+we expect the merge gate to agree; it was not separately probed. Either way, CODEOWNERS does not
+consult a renamed file's previous path — that is a platform limit, not a bug to fix here. So point
+3 above is the *entire* defence for a rename out of `plans/`/`specs/`, and a raw, credential-direct
 `gh pr review --approve` run as `iris-main` or `sackheads-bot` (bypassing `github_approve` entirely)
 has no equivalent check. **That path is out of policy**: `github_approve` is the only sanctioned way
 to spend either bot's approval on anything CODEOWNERS alone would route to them. (Optional further
@@ -254,9 +266,11 @@ single account, not the registry.
 
 ## 8. Review focus (rule-26, for this spec then the slice)
 
-- **Approval bound is real:** `iris-main` cannot land non-routine code. Primary = `CODEOWNERS` (its
-  approval doesn't count for `Sources/`/`Tests/`); defence-in-depth = the §3.3 gate (`github_approve`
-  refuses unless every changed file at the bound `headRefOid` is routine, and binds `commit_id`).
+- **Approval bound is real:** `iris-main` cannot land non-routine code. Primary = `CODEOWNERS` for
+  `Sources/`/`Tests/` (its approval doesn't count there); defence-in-depth = the §3.3 gate (`github_approve`
+  refuses unless every changed file at the bound `headRefOid` is routine, and binds `commit_id`). For
+  a rename out of `plans/`/`specs/`, the roles invert: the §3.3 gate is the only control, `CODEOWNERS`
+  is not a second layer (#1186, verified — see the "Limit of the structural half" paragraph in §2).
   Reproduce: a PR touching a `Sources/`/`Tests/` file can't be merged on `iris-main`'s approval; the gate
   refuses to even submit one; a push after the check does not ride the approval (SHA-bind + the second
   ruleset setting).

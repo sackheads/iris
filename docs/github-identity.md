@@ -16,8 +16,10 @@ needs a second code owner — see "The one open decision" below.
 **The one thing locked down is approval, not contribution.** Iris pushes and opens PRs as
 the account freely. What stays under you is approval of anything that matters:
 `CODEOWNERS` makes the account's own approval count only for `/docs/` and `/assets/` (not their `plans/` and `specs/` folders) — a structural
-guarantee, not a request she might ignore — and the `github_approve` tool refuses to even submit an
-approval on anything else, as defence in depth on top of that.
+guarantee for `Sources/`/`Tests/`, not a request she might ignore — and the `github_approve` tool
+refuses to even submit an approval on anything else, as defence in depth on top of that. For a
+rename *out of* `plans/`/`specs/` specifically, CODEOWNERS is not that guarantee (see "The three
+tools" below) — `github_approve`'s own check is the only thing standing there, not a second layer.
 
 ## The three tools
 
@@ -78,7 +80,8 @@ nothing. What actually bounds the account is **not** a withheld token scope: the
 `Contents`, `Pull requests` and `Issues`, each read and write — a real contributor needs to push.
 The bound is branch protection (a PR plus a code-owner review to merge) and CODEOWNERS (her
 approval only counts for `/docs/` and `/assets/`, minus `plans/` and `specs/`), with the in-Swift allowlist and the
-`github_approve` gate on top.
+`github_approve` gate on top — except a rename out of `plans/`/`specs/`, where CODEOWNERS does not
+see the old path and only the `github_approve` check stands (see "The three tools" above).
 
 ## Setup
 
