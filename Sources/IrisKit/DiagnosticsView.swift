@@ -7,7 +7,7 @@ struct DiagnosticsView: View {
     @State private var scoreRows: [Tier2Scores.Summary] = []
     /// The Conversation mode's (#1146): the toolbar cost popover names a conversation and this
     /// window takes it, so a later plain open of Diagnostics does not land on a stale one.
-    private let state = AppState.shared
+    let state: AppState
     @State private var conversationId: UUID?
 
     enum Mode: String, CaseIterable, Identifiable {

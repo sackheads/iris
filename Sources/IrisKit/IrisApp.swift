@@ -167,7 +167,7 @@ struct IrisApp: App {
 
         // Touches no store (MetricsManager and PerformanceProfiler only), so it is not gated.
         Window("Diagnostics", id: "diagnostics") {
-            DiagnosticsView()
+            DiagnosticsView(state: AppState.shared)
         }
 
         Window("Run Log", id: RunLogWindow.sceneId) {
