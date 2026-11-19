@@ -22,17 +22,17 @@ enum DirectoryReadRule {
     private static let sensitiveFragments = [
         "secret", "password", "passwd", "credential", "token", "private", "tfstate", "tfvars", "kubeconfig",
         "keystore", "wallet", "ssh_host", "history", "cookies", "login data", "key4.db", "cert9.db", "logins.json",
-        "service-account", "service_account", "vault", "apikey", "api_key", "api-key", "oauth", "bearer",
+        "service-account", "service_account", "serviceaccount", "vault", "apikey", "api_key", "api-key", "oauth", "bearer",
     ]
     /// Extensions and exact names that are credentials by shape.
-    private static let sensitiveSuffixes = [".pem", ".key", ".p12", ".pfx", ".keychain", ".keychain-db", ".kdbx", ".ovpn", ".jks", ".gpg", ".pgp"]
+    private static let sensitiveSuffixes = [".pem", ".key", ".p12", ".pfx", ".keychain", ".keychain-db", ".kdbx", ".ovpn", ".jks", ".gpg", ".pgp", ".ppk"]
     private static let sensitiveNames: Set<String> = [
         ".netrc", ".npmrc", ".pypirc", ".pgpass", ".dockercfg", ".s3cfg", ".boto", ".htpasswd", "authorized_keys", "known_hosts",
     ]
     /// Folders whose contents are credentials or credential config, wherever they sit under a rule's folder.
     private static let sensitiveFolders: Set<String> = [
         ".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".docker", ".azure", ".password-store", ".terraform.d", ".config",
-        ".secrets", "secrets", ".git-credentials",
+        ".secrets", "secrets", ".git-credentials", ".cache", ".local", ".zsh_sessions",
     ]
 
     /// Whether one path component (a file or a folder name) says it holds something sensitive.
