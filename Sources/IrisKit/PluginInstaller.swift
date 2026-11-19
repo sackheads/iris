@@ -224,7 +224,6 @@ extension PluginInstaller {
             throw IPFError.invalidJSON(refusal)
         }
 
-        let legacySecrets = KeychainManager.shared.secrets(service: KeychainManager.mcpFileService)
         var headerTemplates: [String: String] = [:]
         var secretValues: [String: String] = [:]
         var configValues: [String: String] = [:]
@@ -234,8 +233,13 @@ extension PluginInstaller {
             let existingConfigRefs = PluginReferences.configKeys(in: rawValue)
             if !existingKeychainRefs.isEmpty || !existingConfigRefs.isEmpty {
                 headerTemplates[headerName] = rawValue
+                // #1116: never lift a value out of the shared `iris.mcp` item for a
+                // ${keychain:KEY} template found literally in pasted/imported text -- leave it
+                // empty like any other declared-but-unfilled secret, so the wizard's SecureField
+                // is genuinely empty rather than a masked, silently-reused credential bound to
+                // whatever host this snippet names. The user re-enters it for this new host.
                 for key in existingKeychainRefs {
-                    secretValues[key] = legacySecrets[key] ?? ""
+                    secretValues[key] = ""
                 }
                 for key in existingConfigRefs {
                     configValues[key] = ""

