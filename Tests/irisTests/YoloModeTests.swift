@@ -251,6 +251,9 @@ struct YoloModeTests {
         let root = try home(); defer { try? FileManager.default.removeItem(at: root) }
         let state = try makeState(root)
         let cid = state.createNewConversation(isBackground: false, select: true)
+        let guestCid = state.createNewConversation(isSubagent: true, isBackground: false, select: false)
+        state.linkDelegate(guestCid, of: cid)
+        state.markGuestOriginTurn(guestCid)
 
         let ordinaryTask = Task { @MainActor in
             await state.enqueueUserApproval(toolName: "run_command", details: "echo 1", workspace: nil,
@@ -260,18 +263,37 @@ struct YoloModeTests {
             await state.enqueueUserApproval(toolName: "schedule_job", details: "name: test", workspace: nil,
                                             conversationId: cid, origin: "Main agent", humanOnly: true)
         }
-        for _ in 0..<200 where state.pendingApprovals.count < 2 {
+        // #1115 review (dev-3 minor note): a queued #812 tainted-send request is ALSO humanOnly,
+        // but carries offersConversationAllow, so it must flush unlike the plain humanOnly one
+        // above -- pins the exception's own condition, not just `!req.humanOnly`.
+        let taintedSendTask = Task { @MainActor in
+            await state.enqueueUserApproval(toolName: "gmail_send_email", details: "to: a@b.com", workspace: nil,
+                                            conversationId: cid, origin: "Main agent", humanOnly: true,
+                                            offersConversationAllow: true)
+        }
+        // #1115 review (dev-2 non-blocking note): a queued request on a guest-origin turn is an
+        // ordinary (not humanOnly) call, so only `isYoloMode(id)`'s own guest-origin check -- not
+        // the humanOnly filter -- keeps it queued; without that check, this would flush like the
+        // plain `cid` request above.
+        let guestTask = Task { @MainActor in
+            await state.enqueueUserApproval(toolName: "run_command", details: "echo 2", workspace: nil,
+                                            conversationId: guestCid, origin: "Main agent")
+        }
+        for _ in 0..<200 where state.pendingApprovals.count < 4 {
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
-        #expect(state.pendingApprovals.count == 2)
+        #expect(state.pendingApprovals.count == 4)
 
         state.sendMessage("/yolo on")
         #expect(try await value(of: ordinaryTask) == true, "the ordinary request still flushes")
-        #expect(state.pendingApprovals.count == 1, "the humanOnly request stays queued")
-        #expect(state.pendingApprovals.first?.humanOnly == true)
+        #expect(try await value(of: taintedSendTask) == true, "the #812 tainted-send exception still flushes")
+        #expect(state.pendingApprovals.count == 2, "the humanOnly and guest-origin requests stay queued")
+        #expect(state.pendingApprovals.contains { $0.humanOnly })
+        #expect(state.pendingApprovals.contains { $0.conversationId == guestCid })
 
-        state.resolveApproval(id: state.pendingApprovals[0].id, .approve)
+        for p in state.pendingApprovals { state.resolveApproval(id: p.id, .approve) }
         #expect(try await value(of: humanOnlyTask) == true)
+        #expect(try await value(of: guestTask) == true)
     }
 
     @Test("YOLO mode bypasses outboundGate and ContextHolds in tainted attended conversations")
