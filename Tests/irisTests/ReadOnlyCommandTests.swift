@@ -314,6 +314,20 @@ struct ReadOnlyCommandTests {
         #expect(ReadOnlyCommand.vibecopGate(toolName: "schedule_job", details: "x", inSandbox: false, lookup: host) == .ask)
     }
 
+    /// #974 Task 8 (C5): APPROVE standing in for the person on "any file read" (#600) does not
+    /// extend to a non-owner binding, whose `read_file` is confined/denied by `FilesystemPolicy`.
+    @Test("a non-owner binding's read_file is never auto-approved by Vibecop, on any path")
+    func nonOwnerReadFileAsksThePerson() {
+        let host = Self.lookup()
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "read_file", details: "/etc/hosts", inSandbox: false,
+                                            isOwner: false, lookup: host) == .ask)
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "read_file", details: "/tmp/anything.txt", inSandbox: false,
+                                            isOwner: false, lookup: host) == .ask)
+        // The owner default is unchanged.
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "read_file", details: "/etc/hosts", inSandbox: false,
+                                            isOwner: true, lookup: host) == .run)
+    }
+
     @Test("only the gate's own approval runs restricted; a person's, the allowlist's or the VM's runs as usual")
     func onlyTheGateRestricts() {
         #expect(IrisEngine.restrictedPath(for: .vibecopRestricted(path: ["/bin"], reason: "r"), tool: "run_command") == ["/bin"])
