@@ -468,16 +468,38 @@ public struct InjectionGuard {
     /// `sanitizeUntrusted`, plus `sanitizeCacheable`'s bit and the line ranges tier 2 withheld
     /// unjudged (#728), which the person's own files' notice names. The one real call site this
     /// task threads fidelity from — `iris.swift`'s `read_file` guard call — uses this entry point.
+    ///
+    /// `strippedMarkerLines` (#969 Gap 2) counts lines that had a role marker removed by
+    /// `stripRecordingDelimiters` and still lack it in the final text — 0 under `.preserveWhenJudged`
+    /// when every touched line's strip survived the alignment check and got carried back; equal to
+    /// the full touched-line count under `.off`, where nothing ever attempts to restore one. A
+    /// caller uses this to decide whether to append a "this view was altered" notice outside the
+    /// wrapper, mirroring `noteHoledFidelityRead`'s pattern for the fidelity channel's own holes.
     static func sanitizeUntrustedCacheable(_ rawInput: String, contextTag: String = "",
                                            maxTier: SanitizationTier = .tier1_structural,
                                            protectionEnabled: Bool? = nil,
-                                           fidelity: FidelityMode = .off) async -> (text: String, cacheable: Bool, unjudged: [String]) {
+                                           fidelity: FidelityMode = .off) async -> (text: String, cacheable: Bool, unjudged: [String], strippedMarkerLines: Int) {
         let stripped = PromptInjectionGuard.stripRecordingDelimiters(rawInput)
         let verdict = await classifyDetailed(stripped.text, contextTag: contextTag, maxTier: maxTier,
                                              protectionEnabled: protectionEnabled,
                                              delimiterLines: stripped.delimiterLines, fidelity: fidelity,
                                              preserveCandidate: preserveFidelityCandidate(rawInput, fidelity: fidelity))
-        return (wrapped(verdict.outcome, contextTag: contextTag), verdict.cacheable, verdict.unjudged)
+        let stillStripped = Self.countStillStrippedLines(stripped.delimiterLines, in: verdict.outcome)
+        return (wrapped(verdict.outcome, contextTag: contextTag), verdict.cacheable, verdict.unjudged, stillStripped)
+    }
+
+    /// How many of `delimiterLines` (the lines `stripRecordingDelimiters` touched, keyed by index
+    /// with the ORIGINAL marker-bearing line) are not restored verbatim in the final `.passed` text
+    /// — i.e. still missing their marker after whatever fidelity carry was attempted. A `.blocked`
+    /// outcome has no "clean" text to compare (the whole thing was withheld, with its own marker),
+    /// so it counts as zero here; that path's own messaging already says content was withheld.
+    private static func countStillStrippedLines(_ delimiterLines: [Int: String], in outcome: GuardOutcome) -> Int {
+        guard !delimiterLines.isEmpty, case .passed(let clean) = outcome else { return 0 }
+        let finalLines = clean.components(separatedBy: "\n")
+        return delimiterLines.reduce(into: 0) { count, entry in
+            let (index, original) = entry
+            if index >= finalLines.count || finalLines[index] != original { count += 1 }
+        }
     }
 
     /// `classifyUntrusted`, plus whether the verdict may be kept: false only when a tier errored
