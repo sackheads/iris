@@ -500,6 +500,20 @@ actor IrisEngine {
     /// (Group B), not this one's; the shipped, not-yet-authenticated guest path (`makeGuestEngine`)
     /// is Task 16's retrofit.
     let binding: AccessBinding
+
+    /// #974 Task 15 / Task 7's seam: the binding that gates a specific TURN's tool and memory
+    /// access, as opposed to `binding` above (the engine's own, fixed at construction). A `.main`
+    /// engine serves every role session from one instance, so a guest-steered turn on one of them
+    /// needs a binding narrower than the engine's owner-shaped default even though the engine
+    /// itself never changes. Reads the stamp `deliverPeerMessage` writes on `AppState` when the
+    /// sender's turn was guest-origin; absent that stamp (the ordinary case, and every non-`.main`
+    /// principal, which already carries its own binding), `binding` applies unchanged. Consulted
+    /// by the memory gate (Task 7) and should be consulted by any future per-turn tool gate too.
+    func bindingForCall(conversationId: UUID) async -> AccessBinding {
+        guard let state else { return binding }
+        return await MainActor.run { state.guestSteeredBinding(for: conversationId) } ?? binding
+    }
+
     let roleLabel: String?
     /// The external MCP client a `.mcpGuest` engine serves; nil for every other principal (#1066).
     nonisolated let guestClientId: String?
@@ -1026,11 +1040,27 @@ actor IrisEngine {
         // guest's message started (or its delegation root's), marks the receiving turn. Otherwise
         // guest text could launder through a granted role into a user-facing YOLO session. The
         // framing still names the actual sender; this decides the marker only.
-        let senderTurnIsGuestOrigin = await MainActor.run { () -> Bool in
-            guard let localState else { return false }
-            return localState.isGuestOriginTurn(senderId) || localState.isGuestOriginTurn(localState.delegationRoot(of: senderId))
+        // #974 Task 15 (F3b): the COMPLETE fix the #1119 bool above only bounds — the recipient
+        // turn's own `AccessBinding`, not just a YOLO-off marker, so every tool and memory read
+        // that turn makes is gated by the sender's floor, not an enumerated denylist (#1199's
+        // stopgap). Direct guest send: `self` is the guest's own engine (`makeGuestEngine`), so
+        // `self.binding` IS the sender's binding. A relay (the sender's own turn was itself
+        // guest-steered): inherit whatever was stamped on the sender's conversation, or its
+        // delegation root's — chained the same way the bool is. If `guestOrigin` turns out true
+        // from the bool but no binding was ever stamped (a guest path that predates Task 16's
+        // identity-resolved retrofit), fail closed to the `.mcpGuest` floor rather than leaving
+        // the recipient turn at the engine's own (owner-shaped, for `.main`) binding.
+        let (senderTurnIsGuestOrigin, inheritedGuestBinding) = await MainActor.run { () -> (Bool, AccessBinding?) in
+            guard let localState else { return (false, nil) }
+            let root = localState.delegationRoot(of: senderId)
+            let isOrigin = localState.isGuestOriginTurn(senderId) || localState.isGuestOriginTurn(root)
+            let inherited = localState.guestSteeredBinding(for: senderId) ?? localState.guestSteeredBinding(for: root)
+            return (isOrigin, inherited)
         }
         let guestOrigin = guestClientId != nil || senderTurnIsGuestOrigin
+        let guestBinding: AccessBinding? = guestOrigin ? (guestClientId != nil ? self.binding
+            : (inheritedGuestBinding ?? AccessBinding(profile: AccessProfile(), principal: .mcpGuest, isOwner: false)
+                .capped(by: PrincipalFloor.floor(for: .mcpGuest)))) : nil
         let claim: Claim = await MainActor.run {
             guard let localState else { return .busy }
             if let reason = localState.peerTargetGoneReason(targetId) {
@@ -1047,13 +1077,16 @@ actor IrisEngine {
             if envelope.topic != nil { localState.markTopicTurn(targetId) }
             // #1119: the turn this starts was started by a guest's message, so YOLO is off for it.
             if guestOrigin { localState.markGuestOriginTurn(targetId) }
+            // #974 Task 15: the actual binding, alongside the bool.
+            if let guestBinding { localState.markGuestSteeredBinding(guestBinding, for: targetId) }
             return .claimed
         }
         switch claim {
         case .gone(let reason):
             return .refused(reason)
         case .busy:
-            await queuePeerArrival(safe, to: targetId, isTopic: envelope.topic != nil, isGuestOrigin: guestOrigin)
+            await queuePeerArrival(safe, to: targetId, isTopic: envelope.topic != nil, isGuestOrigin: guestOrigin,
+                                    guestBinding: guestBinding)
             return .queued
         case .claimed:
             break
@@ -1081,11 +1114,13 @@ actor IrisEngine {
     /// did not get from the composer. So a peer message that happened to land behind a running
     /// turn reached the model and never reached the user, which is precisely the case where a
     /// person most wants to know another session steered this one (whole-branch review).
-    private func queuePeerArrival(_ safe: String, to targetId: UUID, isTopic: Bool = false, isGuestOrigin: Bool = false) async {
+    private func queuePeerArrival(_ safe: String, to targetId: UUID, isTopic: Bool = false, isGuestOrigin: Bool = false,
+                                   guestBinding: AccessBinding? = nil) async {
         let localState = state
         await MainActor.run {
             localState?.appendMessage(role: .system, content: safe, to: targetId)
-            localState?.enqueuePendingUserMessage(text: safe, attachments: [], for: targetId, isPeer: true, isTopic: isTopic, isGuestOrigin: isGuestOrigin)
+            localState?.enqueuePendingUserMessage(text: safe, attachments: [], for: targetId, isPeer: true, isTopic: isTopic,
+                                                   isGuestOrigin: isGuestOrigin, guestBinding: guestBinding)
             // #187 §0.5 structural ruling: marked here, at enqueue time, covers both of this
             // entry's eventual consumers — drained into its own turn once the busy turn ends
             // (`AppState.startTurn`'s drain path) or consumed as a mid-turn steer
