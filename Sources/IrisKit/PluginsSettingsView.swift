@@ -378,7 +378,9 @@ struct PluginsSettingsView: View {
                 return
             }
             let snippet = HarnessConfigImporter.snippetJSON(serverName: name, raw: entry)
-            var draft = try PluginInstaller.draft(fromSnippet: snippet)
+            // #1116: this converts the owner's own already-configured legacy entry -- carry its
+            // credential forward, unlike a pasted or another-harness-imported snippet.
+            var draft = try PluginInstaller.draft(fromSnippet: snippet, liftFromLegacyStore: true)
             draft.source = "convert"
             draft = try PluginInstaller.regenerate(draft)
             try PluginInstaller(paths: .default).commit(draft)
