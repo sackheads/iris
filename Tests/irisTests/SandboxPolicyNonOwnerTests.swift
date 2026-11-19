@@ -87,3 +87,47 @@ struct SandboxPolicyNonOwnerTests {
         #expect(r(principal: .main, owner: true, conv: .sandboxed, ws: .host, def: .host) == .sandboxed)
     }
 }
+
+/// The minimal wiring Task 6 needs so the rule above does not regress goal grading: the grader's
+/// engine carries a copy of the binding of the run it grades (the full C6 semantics are Task 10).
+@Suite("The grader is routed by the binding of the run it grades (#974 Task 6)")
+struct EvaluatorBindingWiringTests {
+    private let nonOwner = AccessBinding(profile: AccessProfile(memoryRead: .task), principal: .subagent, isOwner: false)
+    private let owner = AccessBinding(profile: .owner, principal: .main, isOwner: true)
+
+    @Test("an owner run's grader is the owner, with the grader's own principal")
+    func ownerCopied() {
+        let b = GoalEvaluator.evaluatorBinding(ofParent: owner)
+        #expect(b?.isOwner == true && b?.profile == .owner && b?.principal == .evaluator)
+    }
+
+    @Test("a non-owner run's grader is a copy of its profile and stays a non-owner: never widened")
+    func nonOwnerCopied() {
+        let b = GoalEvaluator.evaluatorBinding(ofParent: nonOwner)
+        #expect(b?.isOwner == false && b?.profile == nonOwner.profile && b?.principal == .evaluator)
+    }
+
+    @Test("no parent binding gives none, so the engine falls back to its deny-all default, never the owner")
+    func noneStaysNone() {
+        #expect(GoalEvaluator.evaluatorBinding(ofParent: nil) == nil)
+    }
+
+    @Test("every production grader call threads its run's binding")
+    func callersThreadTheBinding() throws {
+        let dir = PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit")
+        var sites = 0
+        for name in ["iris.swift", "SubagentManager.swift"] {
+            let text = try String(contentsOf: dir.appendingPathComponent(name), encoding: .utf8)
+            var rest = Substring(text)
+            while let r = rest.range(of: "GoalEvaluator.shared.evaluate(") {
+                let call = String(rest[r.lowerBound...].prefix(700))
+                let end = call.range(of: "recentWrites")
+                let tail = String(call[(end?.lowerBound ?? call.startIndex)...].prefix(120))
+                #expect(tail.contains("parentBinding:"), "\(name): \(tail)")
+                sites += 1
+                rest = rest[r.upperBound...]
+            }
+        }
+        #expect(sites == 3)
+    }
+}

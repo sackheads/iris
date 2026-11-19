@@ -61,9 +61,19 @@ final class GoalEvaluator: Sendable {
     /// reason `isBackground` is inherited a few lines below: a grader run for an unattended run is
     /// itself unattended, so anything it writes through a file tool is the run's own output, and
     /// one registry per process only holds if every engine is handed the same one.
+    /// #974 Task 6: the grader's binding is a COPY of the run's it grades, not `parent ∩ floor` as
+    /// a subagent's is (`SubagentManager.childBinding`): a grader is the run's own agent in
+    /// authority, so an owner run's grader is the owner and a non-owner run's is not. Only the
+    /// principal is its own, so nothing reads the parent's off the grader's binding. The formal
+    /// invariant and its tests are Task 10 (C6).
+    static func evaluatorBinding(ofParent parent: AccessBinding?) -> AccessBinding? {
+        parent.map { AccessBinding(profile: $0.profile, principal: .evaluator, isOwner: $0.isOwner) }
+    }
+
     func evaluate(contract: GoalContract, workspace: String?, originatingConversationId originId: UUID,
                   app: AppState, client: any LLMClientProtocol = LLMClient(),
-                  recentWrites: RecentWrites = .shared) async -> GoalEvaluation {
+                  recentWrites: RecentWrites = .shared,
+                  parentBinding: AccessBinding? = nil) async -> GoalEvaluation {
 
         // The directory the grader inspects: the graded conversation's bound workspace, or with
         // none, the process cwd its host commands ran in. Only a bound workspace becomes the
@@ -76,7 +86,11 @@ final class GoalEvaluator: Sendable {
         // Fresh engine, evaluator principal. It never sees the working transcript. Built before
         // the registration below, which needs it to halt the loop.
         let checks = contract.criteria.compactMap { $0.kind == .executable ? $0.check : nil }
-        let engine = IrisEngine(state: app, tier: .hard, principal: .evaluator, roleLabel: "evaluator", client: client, evaluatorChecks: checks, recentWrites: recentWrites)
+        // #974 Task 6: the grader acts with the authority of the run it grades, so its command is
+        // routed by the parent's binding: an owner parent keeps today's routing, a non-owner parent
+        // gets the sandbox or a refusal. nil (a caller that threads none) is the engine's deny-all.
+        let engine = IrisEngine(state: app, tier: .hard, principal: .evaluator, roleLabel: "evaluator", client: client, evaluatorChecks: checks, recentWrites: recentWrites,
+                                binding: Self.evaluatorBinding(ofParent: parentBinding))
 
         // Halt the loop first, as a subagent's stop does: after its first turn the grader's live
         // turn is a reprompt task, which cancelling the grading task does not reach.

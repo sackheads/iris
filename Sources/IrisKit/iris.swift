@@ -2570,7 +2570,7 @@ actor IrisEngine {
             evaluation = await GoalEvaluator.shared.evaluate(
                 contract: projected, workspace: gradeWorkspace,
                 originatingConversationId: conversationId, app: graderApp, client: self.client,
-                recentWrites: self.recentWrites)
+                recentWrites: self.recentWrites, parentBinding: self.binding)
         }
 
         let ladderPos = "\(contract.currentMilestone + 1) of \(contract.milestones.count)"
@@ -7090,7 +7090,7 @@ actor IrisEngine {
                 let evaluation = await GoalEvaluator.shared.evaluate(
                     contract: c, workspace: gradeWorkspace,
                     originatingConversationId: conversationId, app: graderApp, client: self.client,
-                    recentWrites: self.recentWrites)
+                    recentWrites: self.recentWrites, parentBinding: self.binding)
                 // Stopped before a verdict (#464): the turn is being stopped with it. Not a pass,
                 // and not a grader fault to let through ungated either, so the goal stays open.
                 if evaluation.status == .stopped {

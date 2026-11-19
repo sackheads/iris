@@ -374,7 +374,7 @@ final class SubagentManager: @unchecked Sendable {
             verdict = await GoalEvaluator.shared.evaluate(contract: unit.contract, workspace: workspace,
                                                           originatingConversationId: subagentId,
                                                           app: appState, client: client ?? LLMClient(),
-                                                          recentWrites: recentWrites)
+                                                          recentWrites: recentWrites, parentBinding: childBinding)
         }
 
         let result = SubagentResult(role: role, status: termination.status,
