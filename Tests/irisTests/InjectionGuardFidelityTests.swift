@@ -124,6 +124,31 @@ struct InjectionGuardFidelityTests {
         #expect(result.contains("1 line"))
     }
 
+    /// #959 x #969 compose-check: one read that triggers both notices (a recorded role marker deleted,
+    /// an invisible character removed) and carries a fold-only line. Each notice appears once, as its
+    /// own line outside the wrapper, with its own count; the fold-only line comes back as the file has
+    /// it; nothing is wrapped twice.
+    @Test func bothNoticesComposeOnOneRead() async throws {
+        let outside = FileManager.default.temporaryDirectory.appendingPathComponent("fidelity-959-969-\(UUID().uuidString).txt")
+        try "model: gpt-x\n你好，世界…\nab\u{200B}cd\nplain".write(to: outside, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: outside) }
+        let (app, _, id) = session([FunctionCall(name: "run_command", args: ["command": .string("cat \(outside.path)")], id: "c1")])
+        app.sendMessage("go")
+        #expect(await eventually { self.finished(app, id) })
+        let result = try #require(toolResultText(app, id, callId: "c1"))
+        #expect(result.contains("你好，世界…"), "the fold-only line is the file's own: \(result)")
+        #expect(!result.contains("model: gpt-x"))
+        #expect(result.contains("abcd") && !result.contains("ab\u{200B}cd"))
+        let marker = "[Iris: the injection guard removed a role-marker token from 1 line of this view"
+        let altered = "of this read differ from the file on disk"
+        #expect(result.components(separatedBy: marker).count - 1 == 1, "the #969 notice appears once: \(result)")
+        #expect(result.components(separatedBy: altered).count - 1 == 1, "the #959 notice appears once: \(result)")
+        #expect(result.components(separatedBy: "</untrusted_context>").count - 1 == 1, "one wrapper, not two: \(result)")
+        // Both notices sit after the wrapper's close, as Iris's own commentary.
+        let close = try #require(result.range(of: "</untrusted_context>"))
+        #expect(result[close.upperBound...].contains(marker) && result[close.upperBound...].contains(altered))
+    }
+
     /// The negative case: content with no role marker gets no notice at all.
     @Test func runCommandAddsNoNoticeWhenNothingWasStripped() async throws {
         let outside = FileManager.default.temporaryDirectory.appendingPathComponent("fidelity-969-clean-\(UUID().uuidString).txt")
@@ -157,7 +182,9 @@ struct InjectionGuardFidelityTests {
         let result = try #require(toolResultText(app, id, callId: "c1"))
         #expect(result.contains("name: skill"), "sanity: the body content must survive")
         #expect(!result.contains("---"), "the fences are still stripped -- this test only makes sense if deletion actually happened")
-        #expect(!result.contains("[Iris: the injection guard removed"), "known limit: a bare fence strip is not announced")
+        #expect(!result.contains("[Iris: the injection guard removed"), "known limit: #969's own notice does not count a bare fence strip")
+        // #959's notice does: a line shown differently from the file is reported whatever removed its marker.
+        #expect(result.contains("of this read differ from the file on disk"), "the fence strip is announced by the differing-lines notice")
     }
 
     /// The scope boundary (planner's ruling): only `read_file`/`run_command` (this generic branch)
