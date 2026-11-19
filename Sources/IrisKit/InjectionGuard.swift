@@ -565,8 +565,9 @@ public struct InjectionGuard {
     /// (spec "narrowed A"), and judged text must equal shown text (#709) in either case. The plain
     /// `sanitize`/`sanitizeCacheable`/`classify` path never passes `fidelity` or
     /// `preserveCandidate`, so this is a no-op for those callers — the untrusted-entry wrappers
-    /// above are the only ones that can ask for anything else, and today only one real call site
-    /// (`iris.swift`'s `read_file` guard call) does.
+    /// above are the only ones that can ask for anything else, and today two call sites in
+    /// `iris.swift` do: the `read_file`/`run_command` guard call (#969 Gap 1 joined `run_command`
+    /// to `read_file`'s original #952 carve-out).
     private static func classifyDetailed(_ rawInput: String, contextTag: String = "",
                          maxTier: SanitizationTier = .tier1_structural,
                          protectionEnabled: Bool? = nil,

@@ -7910,7 +7910,13 @@ actor IrisEngine {
             // (`CoreMLEvaluator.Judgement.redacting`) names any withheld range, judged or
             // unjudged, so it is the complete "tier 2 held something back" signal; `judged.unjudged`
             // would under-warn on the ordinary flagged-and-withheld case.
-            holedFidelityRead = fidelity == .preserveWhenJudged
+            // dev-3 review of #1210: `noteHoledFidelityRead`'s wording ("this read", "the
+            // complete, original file") is written for read_file. run_command's own OutputCap
+            // truncation marker ("[output truncated:") tripped it for every capped command
+            // output, which is not a file read. Scoped to read_file only; run_command's Gap 1
+            // carve-out still gets the strippedMarkerLineCount notice below, which is channel-
+            // neutral.
+            holedFidelityRead = name == "read_file" && fidelity == .preserveWhenJudged
                 && (sanitizedResult.contains("withheld by the injection guard") || sanitizedResult.contains("[output truncated:"))
             // Scoped to read_file/run_command only (planner's ruling on #969 Gap 2) — every other
             // tool through this branch runs at fidelity .off same as always, and #969 did not
@@ -7938,6 +7944,16 @@ actor IrisEngine {
     /// outside the untrusted wrapper exactly like `noteBlockedResult`/`noteHoledFidelityRead` —
     /// Iris's own commentary, not tool output, and the two notes stack rather than replace each
     /// other since they describe different incompleteness (withheld/truncated vs. deleted markers).
+    /// **Known limit (dev-3 review, #969):** `count` is `strippedMarkerLines`, which only counts
+    /// what `PromptInjectionGuard.stripRecording` records as a role-marker strip (`counts`, gated
+    /// on a non-markdown-only pattern or a delimiter directly before a role word). A bare `---` or
+    /// `###` line — Markdown frontmatter fences, a heading — is stripped the same way but never
+    /// recorded, so it is never counted here: a model reading a skill file through `read_file` or
+    /// `run_command` still cannot tell "this file never had frontmatter" from "the guard deleted
+    /// it". Counting every Markdown heading would be noisy for the common, benign case; this
+    /// notice stays silent on that specific gap rather than widen `stripRecording`'s recording
+    /// (shared with #952/#959's carry mechanism) to fix it. See
+    /// `Tests/irisTests/InjectionGuardFidelityTests.swift`'s frontmatter case.
     private func noteStrippedMarkers(_ sanitizedResult: String, count: Int) -> String {
         guard count > 0 else { return sanitizedResult }
         let line = count == 1 ? "1 line" : "\(count) lines"
