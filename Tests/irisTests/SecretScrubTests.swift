@@ -143,6 +143,39 @@ struct SecretScrubTests {
         #expect(result.contains(Self.secret), "with no known secrets nothing is removed")
     }
 
+    // MARK: an approved card, which reaches the model without the dispatch loop
+
+    private func approvedCardRead(binding: AccessBinding?, dir: String, path: String, known: Set<String>) async -> String {
+        let app = AppState()
+        app.conversations.removeAll()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: FakeLLMClient(responses: []),
+                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0,
+                                binding: binding, knownSecrets: { known })
+        let call = BlockedCall(toolName: "read_file", args: ["path": .string(path)], cwd: nil, reason: .approval)
+        return await engine.executeApprovedCall(call, conversationId: id)
+    }
+
+    @Test("an approved card's result on a non-owner turn has the owner's secret removed")
+    func approvedCardResultIsScrubbed() async throws {
+        let (dir, path) = try fileWithSecret()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let nonOwner = AccessBinding(profile: AccessProfile(fsRoots: [dir]), principal: .main, isOwner: false)
+        let result = await approvedCardRead(binding: nonOwner, dir: dir, path: path, known: [Self.secret])
+        #expect(result.contains("the rest is ordinary text"), Comment(rawValue: result))
+        #expect(!result.contains(Self.secret), Comment(rawValue: result))
+        #expect(result.contains("[redacted]"))
+    }
+
+    @Test("the control: an approved card on the owner's own engine is not scrubbed")
+    func approvedCardOwnerNotScrubbed() async throws {
+        let (dir, path) = try fileWithSecret()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let result = await approvedCardRead(binding: nil, dir: dir, path: path, known: [Self.secret])
+        #expect(result.contains(Self.secret), Comment(rawValue: result))
+    }
+
     // MARK: a message addressed to a guest session
 
     private func deliver(_ message: String, toGuest: Bool, known: Set<String>) async -> String {

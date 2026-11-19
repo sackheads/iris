@@ -5218,16 +5218,18 @@ actor IrisEngine {
             }
             var args = item.args
             args["path"] = .string(decidedPath)
-            return await executeToolWithHooks(name: "write_file", args: args, cwd: item.workspacePath,
-                                              conversationId: item.conversationId, useSandbox: false,
-                                              origin: .approvedCall, decidedPath: decidedPath)
+            let written = await executeToolWithHooks(name: "write_file", args: args, cwd: item.workspacePath,
+                                                     conversationId: item.conversationId, useSandbox: false,
+                                                     origin: .approvedCall, decidedPath: decidedPath)
+            return await scrubbedForBinding(written, conversationId: item.conversationId)   // #974 Task 14
         }
         let call = FunctionCall(name: item.toolName, args: item.args)
-        return await ContextHolds.$applying.withValue(true) {
+        let applied = await ContextHolds.$applying.withValue(true) {
             // #811: the approved call is the only tool this dispatch offers.
             await executeFunctionCall(call, conversationId: item.conversationId, workspacePath: item.workspacePath,
                                       offeredTools: [item.toolName])
         }
+        return await scrubbedForBinding(applied, conversationId: item.conversationId)   // #974 Task 14
     }
 
     enum OutboundGateDecision: Equatable { case notGated, approved(ToolApproval), refused(String) }
@@ -7513,7 +7515,9 @@ actor IrisEngine {
         if Self.approvedCallResultCarriesOutsideContent(call.toolName, args: call.args, decidedPath: decidedPath) {
             await markReadUntrusted(conversationId)
         }
-        return result
+        // #974 Task 14: an approved card reaches the model without passing the dispatch loop, so its
+        // result meets the same scrub there (dev-1's review of #1219).
+        return await scrubbedForBinding(result, conversationId: conversationId)
     }
 
     /// What an approved call that turns out to target a protected directory returns instead of
