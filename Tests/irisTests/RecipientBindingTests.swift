@@ -166,6 +166,72 @@ struct RecipientBindingTests {
         #expect(w.app.guestSteeredBinding(for: w.reviewer)?.principal == .mcpGuest)
     }
 
+    // MARK: dev-2 review of #1212 round 1
+
+    private func wideAndNarrow() -> (wide: AccessBinding, narrow: AccessBinding) {
+        (AccessBinding(profile: AccessProfile(memoryRead: .conversations), principal: .mcpGuest, isOwner: false),
+         AccessBinding(profile: AccessProfile(memoryRead: .task), principal: .mcpGuest, isOwner: false))
+    }
+
+    private func incomparablePair() -> (AccessBinding, AccessBinding) {
+        (AccessBinding(profile: AccessProfile(memoryRead: .shared, transports: []), principal: .mcpGuest, isOwner: false),
+         AccessBinding(profile: AccessProfile(memoryRead: .none, transports: ["slack"]), principal: .mcpGuest, isOwner: false))
+    }
+
+    private func incomparableFloor() -> AccessBinding {
+        AccessBinding(profile: AccessProfile(), principal: .mcpGuest, isOwner: false).capped(by: PrincipalFloor.floor(for: .mcpGuest))
+    }
+
+    /// dev-2 review of #1212, round 1: the fold inside `takePendingSteers` was untested -- reverting
+    /// it to first-wins left every prior test green. Pins wide-then-narrow, narrow-then-wide, and an
+    /// incomparable pair failing closed, all through the real queue, not the pure helper directly.
+    @Test("takePendingSteers folds every queued guest binding through the meet, in both orders")
+    func takePendingSteersFoldsTheMeet() {
+        let w = world()
+        let (wide, narrow) = wideAndNarrow()
+
+        w.app.enqueuePendingUserMessage(text: "a", attachments: [], for: w.reviewer, isPeer: true, isGuestOrigin: true, guestBinding: wide)
+        w.app.enqueuePendingUserMessage(text: "b", attachments: [], for: w.reviewer, isPeer: true, isGuestOrigin: true, guestBinding: narrow)
+        _ = w.app.takePendingSteers(for: w.reviewer)
+        #expect(w.app.guestSteeredBinding(for: w.reviewer) == narrow, "wide-then-narrow must end up narrow")
+
+        w.app.enqueuePendingUserMessage(text: "c", attachments: [], for: w.builder, isPeer: true, isGuestOrigin: true, guestBinding: narrow)
+        w.app.enqueuePendingUserMessage(text: "d", attachments: [], for: w.builder, isPeer: true, isGuestOrigin: true, guestBinding: wide)
+        _ = w.app.takePendingSteers(for: w.builder)
+        #expect(w.app.guestSteeredBinding(for: w.builder) == narrow, "narrow-then-wide must still end up narrow")
+
+        let (a, b) = incomparablePair()
+        let third = w.app.createNewConversation(isBackground: false, select: false)
+        w.app.enqueuePendingUserMessage(text: "e", attachments: [], for: third, isPeer: true, isGuestOrigin: true, guestBinding: a)
+        w.app.enqueuePendingUserMessage(text: "f", attachments: [], for: third, isPeer: true, isGuestOrigin: true, guestBinding: b)
+        _ = w.app.takePendingSteers(for: third)
+        #expect(w.app.guestSteeredBinding(for: third) == incomparableFloor(), "an incomparable pair must fail closed, not pick a side")
+    }
+
+    /// Same risk, the drain path (`drainPendingUserMessages`, which starts a NEW turn rather than
+    /// steering a running one).
+    @Test("drainPendingUserMessages folds every merged guest binding through the meet, in both orders")
+    func drainPendingUserMessagesFoldsTheMeet() {
+        let w = world()
+        let main = IrisEngine(state: w.app, tier: .medium, principal: .main,
+                              client: FakeLLMClient(responses: [GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil)]),
+                              retryDelays: [], protectionEnabled: false)
+        w.app.installEngine(main)
+        let (wide, narrow) = wideAndNarrow()
+
+        w.app.enqueuePendingUserMessage(text: "a", attachments: [], for: w.reviewer, isPeer: true, isGuestOrigin: true, guestBinding: wide)
+        w.app.enqueuePendingUserMessage(text: "b", attachments: [], for: w.reviewer, isPeer: true, isGuestOrigin: true, guestBinding: narrow)
+        w.app.drainPendingUserMessages(for: w.reviewer)
+        #expect(w.app.guestSteeredBinding(for: w.reviewer) == narrow, "wide-then-narrow must end up narrow")
+
+        let (a, b) = incomparablePair()
+        let third = w.app.createNewConversation(isBackground: false, select: false)
+        w.app.enqueuePendingUserMessage(text: "e", attachments: [], for: third, isPeer: true, isGuestOrigin: true, guestBinding: a)
+        w.app.enqueuePendingUserMessage(text: "f", attachments: [], for: third, isPeer: true, isGuestOrigin: true, guestBinding: b)
+        w.app.drainPendingUserMessages(for: third)
+        #expect(w.app.guestSteeredBinding(for: third) == incomparableFloor(), "an incomparable pair must fail closed, not pick a side")
+    }
+
     // MARK: dev-3 review of #1212
 
     /// Finding 1: the meet never widens. A narrower binding already on the conversation must
@@ -209,6 +275,52 @@ struct RecipientBindingTests {
         let effective = await main.bindingForCall(conversationId: w.reviewer)
         #expect(effective.principal == .mcpGuest, "must fail closed to the guest floor, never the engine's own owner binding")
         #expect(effective.isOwner == false)
+    }
+
+    /// dev-3 review of #1212, round 2: when a delegate was itself a `send_to_session` target and
+    /// also carries a root stamp, `bindingForCall` must meet the two, not pick either by
+    /// first-non-nil -- which could pick the wider one.
+    @Test("bindingForCall meets the delegate's own stamp with the root's when both exist")
+    func bindingForCallMeetsDelegateAndRootStamps() async {
+        let w = world()
+        let main = IrisEngine(state: w.app, tier: .medium, principal: .main,
+                              client: FakeLLMClient(responses: []), retryDelays: [], protectionEnabled: false)
+        w.app.installEngine(main)
+        let (wide, narrow) = wideAndNarrow()
+        let delegate = w.app.createNewConversation(isBackground: true, select: false)
+        w.app.linkDelegate(delegate, of: w.builder)
+
+        w.app.markGuestSteeredBinding(wide, for: w.builder)
+        w.app.markGuestSteeredBinding(narrow, for: delegate)
+        let effective = await main.bindingForCall(conversationId: delegate)
+        #expect(effective == narrow, "root wide, delegate narrow -- must end up narrow")
+    }
+
+    /// dev-3 review of #1212, round 2: the relay computation in `deliverPeerMessage` has the same
+    /// shape (`stamp(sender) ?? stamp(root)`) and needs the same fix.
+    @Test("a relay meets the sender's own stamp with its root's when both exist")
+    func relayMeetsSenderAndRootStamps() async {
+        let w = world()
+        let (wide, narrow) = wideAndNarrow()
+        let delegateSender = w.app.createNewConversation(isBackground: false, select: false)
+        w.app.linkDelegate(delegateSender, of: w.builder)
+        w.app.markGuestSteeredBinding(wide, for: w.builder)
+        w.app.markGuestSteeredBinding(narrow, for: delegateSender)
+        w.app.markGuestOriginTurn(delegateSender)
+
+        let call = sendCall(to: "role:reviewer", message: "relay from a doubly-stamped delegate")
+        let main = IrisEngine(state: w.app, tier: .medium, principal: .main,
+                              client: FakeLLMClient(responses: [
+                                GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: call)]))], usageMetadata: nil),
+                                GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil),
+                                GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "noted")]))], usageMetadata: nil),
+                              ]),
+                              retryDelays: [], protectionEnabled: false)
+        w.app.installEngine(main)
+        await main.processInput("go", source: "UI", conversationId: delegateSender)
+        #expect(await eventually { self.text(w.app, w.reviewer).contains("relay from a doubly-stamped delegate") })
+
+        #expect(w.app.guestSteeredBinding(for: w.reviewer) == narrow, "root wide, sender narrow -- the relay must end up narrow")
     }
 
     /// dev-2 review of #1212: `bindingForCall` must check the delegation root too, mirroring

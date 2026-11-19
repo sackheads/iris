@@ -518,8 +518,13 @@ actor IrisEngine {
             // check — a delegate conversation under a guest-steered root was never itself the
             // target `deliverPeerMessage` stamped, only the root was.
             let root = state.delegationRoot(of: conversationId)
-            if let stamp = state.guestSteeredBinding(for: conversationId) ?? state.guestSteeredBinding(for: root) {
-                return stamp
+            // dev-3 review of #1212, round 2: meet both when both exist -- a delegate that was
+            // itself a `send_to_session` target could carry its own stamp distinct from its
+            // root's, and first-non-nil could pick the wider of the two.
+            switch (state.guestSteeredBinding(for: conversationId), state.guestSteeredBinding(for: root)) {
+            case (let a?, let b?): return AccessBinding.meetGuestBindings(a, b)
+            case (let a?, nil), (nil, let a?): return a
+            case (nil, nil): break
             }
             // dev-3 review of #1212, finding 2: `isGuestOriginTurn` true with no stamp (a caller
             // that marks the bool directly, or a guest-origin turn from before Task 16's
@@ -1074,7 +1079,13 @@ actor IrisEngine {
             guard let localState else { return (false, nil) }
             let root = localState.delegationRoot(of: senderId)
             let isOrigin = localState.isGuestOriginTurn(senderId) || localState.isGuestOriginTurn(root)
-            let inherited = localState.guestSteeredBinding(for: senderId) ?? localState.guestSteeredBinding(for: root)
+            // dev-3 review of #1212, round 2: meet both when both exist, same as `bindingForCall`.
+            let inherited: AccessBinding?
+            switch (localState.guestSteeredBinding(for: senderId), localState.guestSteeredBinding(for: root)) {
+            case (let a?, let b?): inherited = AccessBinding.meetGuestBindings(a, b)
+            case (let a?, nil), (nil, let a?): inherited = a
+            case (nil, nil): inherited = nil
+            }
             return (isOrigin, inherited)
         }
         let guestOrigin = guestClientId != nil || senderTurnIsGuestOrigin
