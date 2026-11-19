@@ -60,6 +60,10 @@ struct DirectoryReadRuleTests {
 
     @Test("too broad or too sensitive a folder is never offered", arguments: [
         "/etc/hosts", "/Users/x", "/tmp/a.txt", "/private/etc/passwd",
+        // `/private` is not an extra level: these are top-level folders as the real path spells them.
+        "/private/tmp/a.txt", "/private/var/x.txt",
+        // System folders with two components that still hold credentials or machine configuration.
+        "/System/Library/a.txt", "/Library/Keychains/x.txt", "/var/db/x.txt", "/private/var/db/x.txt",
     ])
     func tooBroad(_ file: String) throws {
         let f = try fixture(); defer { f.tearDown() }
@@ -74,6 +78,19 @@ struct DirectoryReadRuleTests {
         #expect(DirectoryReadRule.directory(forReadOf: f.real(f.root.path + "/x.txt"), home: f.home, paths: f.iris) == nil, "above the home")
         #expect(DirectoryReadRule.directory(forReadOf: f.real(f.home + "/.ssh/config"), home: f.home, paths: f.iris) == nil, ".ssh")
         #expect(DirectoryReadRule.directory(forReadOf: f.real(f.home + "/.aws/credentials"), home: f.home, paths: f.iris) == nil, ".aws")
+    }
+
+    @Test("Iris's own folder is not offered a rule, and a secret-named file is not offered a folder at all")
+    func irisAndSecretNames() throws {
+        let f = try fixture(); defer { f.tearDown() }
+        let inIris = f.root.appendingPathComponent("iris-home/memory")
+        try FileManager.default.createDirectory(at: inIris, withIntermediateDirectories: true)
+        try "x".write(to: inIris.appendingPathComponent("m.md"), atomically: true, encoding: .utf8)
+        #expect(DirectoryReadRule.directory(forReadOf: f.real(inIris.path + "/m.md"), home: f.home, paths: f.iris) == nil)
+        for name in [".env", "server.pem", "id_rsa"] {
+            #expect(DirectoryReadRule.directory(forReadOf: f.real(f.project + "/" + name), home: f.home, paths: f.iris) == nil, Comment(rawValue: name))
+        }
+        #expect(DirectoryReadRule.directory(forReadOf: f.real(f.project + "/a.txt"), home: f.home, paths: f.iris) != nil, "the same folder is offered for an ordinary file")
     }
 
     @Test("a file named like a secret is not offered a folder rule", arguments: [".env", ".env.local", "server.pem", "id_rsa", "id_ed25519", ".netrc", "token", "prod.key", "a.kdbx"])
