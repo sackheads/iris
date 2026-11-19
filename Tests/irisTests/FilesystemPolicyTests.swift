@@ -312,6 +312,24 @@ struct FilesystemPolicyDispatchTests {
         #expect(!result.contains("secret content"), Comment(rawValue: result))
     }
 
+    /// dev-3 review of #1217, round 3: `tooBroadRootRefusesThroughRealTurn` above cannot
+    /// distinguish "the too-broad root was validated and dropped" from "it was kept raw, but the
+    /// probe file happened to be outside it anyway" -- both produce a refusal, for different
+    /// reasons, over the same test fixture. A nonexistent path UNDER the too-broad root itself
+    /// (no real file touched) tells the two apart: validated-and-dropped has NO mount at all, so
+    /// the read fails with `notUnderGrantedDirectory`; raw-and-kept has a real mount covering the
+    /// path, so the read reaches the filesystem and fails with a missing-file error instead.
+    @Test("the engine's own wiring validates fsRoots, not just grant(fromFsRoots:) called directly")
+    func engineWiringValidatesFsRootsNotJustTheHelper() async throws {
+        let nonexistent = NSHomeDirectory() + "/iris-974-task8-probe-\(UUID().uuidString).txt"
+        let call = FunctionCall(name: "read_file", args: ["path": .string(nonexistent)], id: "c1")
+        let (app, _, id) = session(call, binding: nonOwner(fsRoots: ["~"]))
+        app.sendMessage("go")
+        #expect(await eventually { self.finished(app, id) })
+        let result = try #require(toolResultText(app, id, callId: "c1"))
+        #expect(result.contains("not under the granted directory"), Comment(rawValue: result))
+    }
+
     @Test("a non-owner with an fsRoots grant elsewhere cannot read_file outside it through a real turn")
     func grantElsewhereRefusesThroughRealTurn() async throws {
         let (base, allowed, outside) = try tree()
