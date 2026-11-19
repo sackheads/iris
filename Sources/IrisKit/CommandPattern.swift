@@ -408,6 +408,50 @@ enum CommandPattern {
         return [program, words[1]]
     }
 
+    /// Why an edited Always Allow rule was refused (#1137), each with the sentence the dialog shows.
+    enum EditRefusal: Error, Equatable {
+        case empty
+        case notPlainWords
+        case mustStartWithProposed(String)
+        case notFromTheCommand
+        case wholeProgramCannotNarrow
+
+        var message: String {
+            switch self {
+            case .empty: return "The rule can't be empty."
+            case .notPlainWords: return "Use plain words separated by single spaces: letters, digits and _ . / : @ + - only (no quotes, '=', shell characters or hidden characters)."
+            case .mustStartWithProposed(let proposed): return "The rule must start with `\(proposed)`: it can only be narrowed, never widened."
+            case .notFromTheCommand: return "Each added word must be the next word of this command, in order."
+            case .wholeProgramCannotNarrow: return "A rule for this program can't be narrowed; use the proposed rule or the exact command."
+            }
+        }
+    }
+
+    /// The words of an edited Always Allow rule, or why it was refused (#1137). An edit can only
+    /// NARROW what the derivation already deemed safe (`prefix(for:)`: `neverGeneralized`, the
+    /// subcommand tables), by construction: it is plain words (`isRuleWord`, which also refuses
+    /// hidden and invisible characters), separated by single spaces, it extends `derived`, and it is
+    /// a word-prefix of the words a match compares (`canonicalWords`) for the part of `command`
+    /// that `derived` was made for. So it can never be broader than `derived`, never name another
+    /// program or subcommand, and never hold a word the command did not.
+    /// A one-word prefix (a read-only whole program: `ls`, `cat`, `grep`) is not narrowed: its
+    /// match-time read-only and workspace checks (`matchedPrefixes`) key on the prefix being one
+    /// word, so a longer one would skip them.
+    static func validatedEdit(_ text: String, derived: [String], command: String) -> Result<[String], EditRefusal> {
+        guard !text.isEmpty else { return .failure(.empty) }
+        let words = text.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+        guard words.allSatisfy(isRuleWord) else { return .failure(.notPlainWords) }
+        if words == derived { return .success(derived) }
+        guard derived.count >= 2 else { return .failure(.wholeProgramCannotNarrow) }
+        guard words.starts(with: derived) else { return .failure(.mustStartWithProposed(derived.joined(separator: " "))) }
+        guard let parts = segments(command),
+              parts.contains(where: { part in
+                  guard !isRideAlong(part), prefix(for: part) == derived, let canonical = canonicalWords(part) else { return false }
+                  return canonical.starts(with: words)
+              }) else { return .failure(.notFromTheCommand) }
+        return .success(words)
+    }
+
     /// The prefixes an Always Allow on `command` saves, one per part that is not a ride-along, or
     /// nil when any such part gets none (then the exact command is saved, as before) or there is
     /// no such part.

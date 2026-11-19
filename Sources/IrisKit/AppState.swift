@@ -4900,6 +4900,15 @@ class AppState {
         }
     }
     
+    /// What an Always Allow click saves (#1137): the rules proposed when the ask was raised, the
+    /// person's narrowed text for each prefix rule, or the exact command. Validated again in
+    /// `resolveApproval` (`ToolApprovalRequest.alwaysAllowRules(for:)`), never trusted from the dialog.
+    enum AlwaysAllowChoice: Equatable, Sendable {
+        case proposed
+        case edited([String])
+        case exactCommand
+    }
+
     enum ApprovalResolution {
         case approve
         case deny
@@ -5666,7 +5675,22 @@ class AppState {
     /// Resolves the request the click was shown, by id: Stop removes requests from anywhere in the
     /// queue (#334), so the head is not necessarily what the banner showed. A click on a request
     /// that is gone resolves nothing.
-    func resolveApproval(id: UUID, _ resolution: ApprovalResolution) {
+    /// The rules an Always Allow click saves for `choice` (#1137), or nil, with a note in the
+    /// conversation, when the choice is refused: nothing is saved then, and never the broader proposed
+    /// rule in its place. The call itself is still approved, once, by the caller.
+    private func alwaysAllowRulesToSave(_ pending: ToolApprovalRequest, _ choice: AlwaysAllowChoice) -> [PermissionRule]? {
+        switch pending.alwaysAllowRules(for: choice) {
+        case .success(let rules):
+            return rules
+        case .failure(let refusal):
+            if let id = pending.conversationId {
+                appendMessage(role: .system, content: "Always Allow wasn't saved: \(refusal.message) This call was approved once.", to: id)
+            }
+            return nil
+        }
+    }
+
+    func resolveApproval(id: UUID, _ resolution: ApprovalResolution, choice: AlwaysAllowChoice = .proposed) {
         guard let index = pendingApprovals.firstIndex(where: { $0.id == id }) else { return }
         let pending = pendingApprovals.remove(at: index)
         var approved = false
@@ -5686,16 +5710,16 @@ class AppState {
             // exact thing `humanOnly` was built to prevent. This call is still honored — the human
             // did approve it — only the standing rule is refused. The same for a gate script
             // (#648): `offersAlwaysAllow` is off for both.
-            if pending.offersAlwaysAllow {
-                permissions.allowGlobally(pending.alwaysAllowRules)
+            if pending.offersAlwaysAllow, let rules = alwaysAllowRulesToSave(pending, choice) {
+                permissions.allowGlobally(rules)
             }
             approved = true
         case .alwaysAllowProject:
-            if pending.offersAlwaysAllow {
+            if pending.offersAlwaysAllow, let rules = alwaysAllowRulesToSave(pending, choice) {
                 if let workspace = pending.workspace {
-                    permissions.allowInProject(pending.alwaysAllowRules, workspace: workspace)
+                    permissions.allowInProject(rules, workspace: workspace)
                 } else {
-                    permissions.allowGlobally(pending.alwaysAllowRules)
+                    permissions.allowGlobally(rules)
                 }
             }
             approved = true
