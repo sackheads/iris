@@ -30,7 +30,7 @@ struct ConversationCostReport: Equatable {
         } else if byTurn.rows.isEmpty {
             notes.append("This usage was not recorded per turn, so no turn can be shown; the model rows above hold all of it.")
         } else if byTurn.notShown >= 0.00005 {
-            notes.append("Not on a listed turn: \(CostBreakdown.money(byTurn.notShown)), from turns older than the last \(TokenUsage.maxTurns) and usage not attributed to a model. The model rows hold it.")
+            notes.append("Not on a listed turn: \(CostBreakdown.money(byTurn.notShown)), from usage not attributed to a model, or from turns older than the last \(TokenUsage.maxTurns). The model rows hold it.")
         }
         return ConversationCostReport(models: models, turns: byTurn.rows, total: cost.dollars, notShown: byTurn.notShown, notes: notes)
     }
