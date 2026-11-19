@@ -108,7 +108,7 @@ struct MemoryBindingGateTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let engine = IrisEngine(state: app, tier: .medium, principal: principal, client: client,
                                 retryDelays: [], factStore: try FactStoreManager(inMemory: true), protectionEnabled: false,
-                                sessionPeerCount: 0, memory: MemoryManager(paths: IrisPaths(root: root)), binding: binding)
+                                sessionPeerCount: 0, memory: MemoryManager(paths: IrisPaths(root: root)), declareStateGatedTools: true, binding: binding)
         let turnTask = Task { await engine.processInput("go", source: "UI", conversationId: id) }
         let denyTask = Task {
             while !Task.isCancelled {
@@ -202,12 +202,13 @@ struct MemoryBindingGateTests {
         #expect(result == MemoryBindingGate.refusal, Comment(rawValue: "\(name) at \(tier): \(result)"))
     }
 
-    @Test("at .conversations the pinned rule still applies: an unpinned caller gets the pinned refusal, not the binding's",
+    @Test("at .conversations the pinned rule still applies: an unpinned caller is refused (not offered, or the pinned refusal), never run",
           arguments: ["search_conversations", "read_conversation"])
     func pinnedRuleStillApplies(_ name: String) async throws {
         let result = try await dispatchResult(for: name, binding: binding(read: .conversations), pinned: false)
-        #expect(result.contains("only available in a pinned conversation"), Comment(rawValue: result))
-        #expect(!result.contains(MemoryBindingGate.refusal))
+        #expect(result.contains("only available in a pinned conversation") || result.contains("not one of the tools offered"),
+                Comment(rawValue: result))
+        #expect(!result.contains(MemoryBindingGate.refusal), "the binding was not the reason")
     }
 
     @Test("at .conversations in a pinned conversation the call passes the gate",
