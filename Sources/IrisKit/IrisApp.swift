@@ -165,9 +165,12 @@ struct IrisApp: App {
             }
         }
 
-        // Touches no store (MetricsManager and PerformanceProfiler only), so it is not gated.
+        // Not gated as a whole: By Command, Aggregate and Guard Scores touch no store (MetricsManager,
+        // PerformanceProfiler and the score log only). Its Conversation mode reads the shared
+        // AppState, which traps while the gate is closed, so the view reads it only once `gate` is
+        // open: the closure is not called before then (#1146).
         Window("Diagnostics", id: "diagnostics") {
-            DiagnosticsView(state: AppState.shared)
+            DiagnosticsView(gate: LaunchGate.shared, stateProvider: { AppState.shared })
         }
 
         Window("Run Log", id: RunLogWindow.sceneId) {

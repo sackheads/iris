@@ -117,12 +117,26 @@ struct ConversationCostWiringTests {
     func windowTakesTheRequest() throws {
         let view = try source("DiagnosticsView.swift")
         #expect(view.contains("case conversation = \"Conversation\""))
-        #expect(view.contains("case .conversation: ConversationCostDiagnosticsView("))
+        #expect(view.contains("ConversationCostDiagnosticsView(state: state, conversationId: conversationId)"))
         #expect(view.contains(".onAppear(perform: takeConversationRequest)"))
-        #expect(view.contains(".onChange(of: state.diagnosticsRequest)"))
+        #expect(view.contains(".onChange(of: state?.diagnosticsRequest)"))
         let take = try #require(view.range(of: "private func takeConversationRequest()"))
         let body = String(view[take.lowerBound...].prefix(300))
         #expect(body.contains("state.diagnosticsConversationId = nil"), "a later plain open must not land on a stale conversation")
+    }
+
+    @Test("the shared AppState is read only once the launch gate is open, so the ungated window cannot trap (#463 decision 14)")
+    func sharedStateIsReadOnlyBehindTheGate() throws {
+        let view = try source("DiagnosticsView.swift")
+        #expect(view.contains("private var state: AppState? { gate.isOpen ? stateProvider() : nil }"))
+        // Spelled in two pieces: the trap suite scans test files for the literal too.
+        let shared = "AppState" + ".shared"
+        #expect(!view.contains(shared), "the view must not name the shared state itself")
+        let app = try source("IrisApp.swift")
+        let at = try #require(app.range(of: "Window(\"Diagnostics\", id: \"diagnostics\")"))
+        let block = String(app[at.lowerBound...].prefix(250))
+        #expect(block.contains("DiagnosticsView(gate: LaunchGate.shared, stateProvider: { \(shared) })"),
+                "a closure: evaluated only when the gate is open, never while the scene is built")
     }
 
     @Test("the request fields are transient: AppState is not Codable and they are not on a persisted type")
