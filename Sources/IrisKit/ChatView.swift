@@ -1921,6 +1921,14 @@ struct ApprovalBannerView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            // #1136: the folder rule offered beside the exact one, for a read.
+            if request.offersAlwaysAllow, let folder = request.directoryRule {
+                Text("Or Always Allow reads under `\(folder.details)` (every file in it and below, except ones named like secrets; attended chats only).")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             // #1140: why there is no Always Allow button this time.
             if let note = request.secretDetectedNote {
                 Label(note, systemImage: "key.fill")
@@ -1944,6 +1952,11 @@ struct ApprovalBannerView: View {
                             Text("Always Allow (Project)")
                         }
                         .disabled(alwaysAllowRefusal != nil)
+                    }
+                    if request.directoryRule != nil {
+                        Button(action: { onResolve(.alwaysAllowDirectory, .proposed) }) {
+                            Text("Always Allow Reads in Folder")
+                        }
                     }
                 }
                 // #812: a tainted send's card only. Per conversation and per tool; never global.

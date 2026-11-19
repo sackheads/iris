@@ -662,6 +662,10 @@ struct ToolApprovalRequest: Identifiable {
     /// #1102: what an Always Allow click saves, decided once when the ask is raised so the dialog
     /// shows exactly what `resolveApproval` writes. Empty when `offersAlwaysAllow` is off.
     let alwaysAllowRules: [PermissionRule]
+    /// #1136: for a `read_file`, the "reads under this folder" rule the dialog may offer beside the
+    /// exact one (nil when none may be: not a read, a path too broad or sensitive, or no Always Allow
+    /// at all). Decided once, when the ask is raised, so the dialog shows what `resolveApproval` writes.
+    let directoryRule: PermissionRule?
     /// #812: whether the dialog offers "Allow in this conversation", which adds the tool to the
     /// conversation's `outboundAllowedTools`. On only for a tainted outbound send's card.
     let offersConversationAllow: Bool
@@ -696,6 +700,7 @@ struct ToolApprovalRequest: Identifiable {
         self.secretDetectedNote = looksLikeSecret ? Self.secretDetectedMessage : nil
         self.offersAlwaysAllow = offersAlwaysAllow && !humanOnly && !looksLikeSecret
         self.alwaysAllowRules = self.offersAlwaysAllow ? candidateRules : []
+        self.directoryRule = self.offersAlwaysAllow ? PermissionRule.forAlwaysAllowDirectory(toolName: toolName, details: details) : nil
         self.offersConversationAllow = offersConversationAllow
         self.continuation = continuation
     }
@@ -4914,6 +4919,9 @@ class AppState {
         case deny
         case alwaysAllowGlobal
         case alwaysAllowProject
+        /// #1136: approve, and save a "reads under this folder" rule (`ToolApprovalRequest.directoryRule`)
+        /// in the global allowlist. Offered for a `read_file` only.
+        case alwaysAllowDirectory
         /// #812: approve, and let this outbound tool run without asking for the rest of the
         /// conversation. Offered only on the tainted-send card.
         case allowInConversation
@@ -5721,6 +5729,13 @@ class AppState {
                 } else {
                     permissions.allowGlobally(rules)
                 }
+            }
+            approved = true
+        case .alwaysAllowDirectory:
+            // Like the Always-Allow cases: a click on a card that offered no directory rule approves
+            // this call and writes nothing standing.
+            if pending.offersAlwaysAllow, let rule = pending.directoryRule {
+                permissions.allowGlobally([rule])
             }
             approved = true
         case .allowInConversation:
