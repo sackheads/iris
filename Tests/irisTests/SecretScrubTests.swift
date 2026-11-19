@@ -40,6 +40,37 @@ struct SecretScrubTests {
         }
     }
 
+    @Test("the encodings real tool output contains are removed: base64 (standard, URL-safe, padded, unpadded) and hex (both cases)")
+    func commonEncodings() {
+        let secret = "sk-ant-api03-AB/CD+EF1234567890zz"   // contains / and + so the URL-safe form differs
+        let bytes = Data(secret.utf8)
+        let std = bytes.base64EncodedString()
+        let url = std.replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+        let trim = { (t: String) in t.trimmingCharacters(in: CharacterSet(charactersIn: "=")) }
+        let hex = bytes.map { String(format: "%02x", $0) }.joined()
+        let spelled: [(String, String)] = [("base64", std), ("base64url", url), ("base64 unpadded", trim(std)),
+                                           ("base64url unpadded", trim(url)), ("hex lower", hex), ("hex upper", hex.uppercased())]
+        for (name, form) in spelled {
+            let out = SecretScrub.scrubSecrets("dump: \(form) end", known: [secret])
+            #expect(out == "dump: [redacted] end", Comment(rawValue: "\(name): \(out)"))
+        }
+    }
+
+    @Test("a secret inside a longer base64 value (Basic auth, any alignment) is removed down to the edge characters")
+    func basicAuthShape() {
+        let secret = "sk-ant-api03-ABCDEFGH1234567890zzzz"
+        for prefix in ["user:", "ab:", "a:", "", "longer-user-name:"] {
+            let encoded = Data((prefix + secret).utf8).base64EncodedString()
+            let out = SecretScrub.scrubSecrets("Authorization: Basic \(encoded)", known: [secret])
+            let leftover = out.replacingOccurrences(of: "Authorization: Basic ", with: "").replacingOccurrences(of: "[redacted]", with: "")
+            #expect(out.contains("[redacted]"), Comment(rawValue: "\(prefix.debugDescription): \(out)"))
+            // Only the edge characters that mix in the neighbours' bytes remain: the prefix's own
+            // encoding plus at most a few characters at each seam.
+            let allowed = Data(prefix.utf8).base64EncodedString().count + 8
+            #expect(leftover.count <= allowed, Comment(rawValue: "\(prefix.debugDescription): \(out)"))
+        }
+    }
+
     @Test("a secret that contains another is removed whole, never leaving the longer one's tail")
     func longestFirst() {
         // Several pairs at once: a set has no order, so one pair could pass by luck with the sort removed.
