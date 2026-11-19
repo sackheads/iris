@@ -70,6 +70,28 @@ struct InjectionGuardFidelityTests {
         #expect(calls.last == .preserveWhenJudged)
     }
 
+    /// #969 Gap 1: the real `run_command` call site, reading a file via `cat` the same way an
+    /// agent reads code with `grep -n`, requests `.preserveWhenJudged` too — not just `read_file`.
+    /// Without this, after #952, `cat`-ing a file preserves no role markers while `read_file` on
+    /// the identical content does, and the guard strips its own source (`malRolePatterns`) when
+    /// read this way, so an agent auditing the guard through the guard sees an empty list.
+    @Test func realRunCommandCallSiteRequestsPreserveWhenJudged() async throws {
+        let outside = FileManager.default.temporaryDirectory.appendingPathComponent("fidelity-969-\(UUID().uuidString).txt")
+        try "model: gpt-x\nhello".write(to: outside, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: outside) }
+        let tag = "tool_output_run_command"
+
+        let before = InjectionGuard.recordedFidelityCalls(contextTag: tag).count
+
+        let (app, _, id) = session([FunctionCall(name: "run_command", args: ["command": .string("cat \(outside.path)")], id: "c1")])
+        app.sendMessage("go")
+        #expect(await eventually { self.finished(app, id) })
+
+        let calls = InjectionGuard.recordedFidelityCalls(contextTag: tag)
+        #expect(calls.count > before, "the real run_command call site must reach classifyDetailed with this contextTag")
+        #expect(calls.last == .preserveWhenJudged)
+    }
+
     /// (b) the brief's documented fallback: a direct call to `sanitizeUntrustedCacheable` with the
     /// identical contextTag the real site uses, but NOT through the real call site (no `fidelity:`
     /// argument, exactly as every other of the ~10 untrusted callers in the codebase calls it),
