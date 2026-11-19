@@ -326,7 +326,8 @@ struct SubagentTurnDeadlineTests {
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
             client: client, appState: state, deadlineClock: clock.uptime, config: config, hooks: hooks,
-            repromptDelay: 0.01, onTurnEvent: events.record, endSandboxSession: { _ in })
+            repromptDelay: 0.01, parentBinding: SubagentGoalLoopTests.ownerParent,
+            onTurnEvent: events.record, endSandboxSession: { _ in })
 
         #expect(events.all.contains(.init(began: false, seq: 2)), "the limit passed after the blocked turn")
         #expect(state.conversations.first { $0.isSubagent }?.messages.contains { $0.content.contains("Hook blocked turn") } == true)
