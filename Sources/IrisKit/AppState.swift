@@ -1135,6 +1135,12 @@ class AppState {
     @ObservationIgnored private var backgroundRunOtherModels: [UUID: [String: (DelegatedPricing, UsageComponents)]] = [:]
     /// Where a routed subagent's tokens are priced. Injectable for tests.
     @ObservationIgnored var priceBook: PriceBook = .shared
+    /// #1146: the conversation the Diagnostics window's Conversation mode shows, set by the toolbar
+    /// cost popover just before it opens the window. `diagnosticsRequest` counts those asks, so asking
+    /// again for the same conversation still switches the open window to that mode. Transient: never
+    /// persisted, never on a `Codable` type.
+    var diagnosticsConversationId: UUID?
+    var diagnosticsRequest = 0
     /// What a job run in flight is held to and where its spend is written (#313), registered by
     /// `JobRunner` for the run's conversation and dropped at the drain. Every engine working for
     /// the run — the run's own and any subagent or evaluator linked to it — checks this budget and
