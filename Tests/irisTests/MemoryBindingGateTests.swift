@@ -225,6 +225,43 @@ struct MemoryBindingGateTests {
         #expect(result.contains("No relevant facts found."))
     }
 
+    // MARK: the approved-card path, driven for real
+
+    /// A recorded call approved by a click reaches the executor through `executeApprovedCall`, not the
+    /// dispatcher, so its gate is tested there: a memory writer on a non-owner binding is refused with
+    /// the tier sentence and nothing is written.
+    private func approvedCardResult(tool: String, binding: AccessBinding?) async throws -> (result: String, facts: [Fact]) {
+        let app = AppState()
+        app.conversations.removeAll()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        let facts = try FactStoreManager(inMemory: true)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("iris-974-t7-card-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: FakeLLMClient(responses: []),
+                                retryDelays: [], factStore: facts, protectionEnabled: false, sessionPeerCount: 0,
+                                memory: MemoryManager(paths: IrisPaths(root: root)), declareStateGatedTools: true, binding: binding)
+        let marker = "card-\(UUID().uuidString)"
+        let call = BlockedCall(toolName: tool, args: ["content": .string(marker), "category": .string("general")],
+                               cwd: nil, reason: .approval)
+        let result = await engine.executeApprovedCall(call, conversationId: id)
+        return (result, (try? facts.search(query: marker)) ?? [])
+    }
+
+    @Test("an approved card for a memory writer under a below-tier binding is refused and writes nothing",
+          arguments: ["save_fact", "update_memory", "update_soul", "update_user_profile"])
+    func approvedCardRefused(_ tool: String) async throws {
+        let (result, stored) = try await approvedCardResult(tool: tool, binding: binding(read: .full, write: .task))
+        #expect(result == MemoryBindingGate.refusal, Comment(rawValue: "\(tool): \(result)"))
+        #expect(stored.isEmpty)
+    }
+
+    @Test("the control: the same approved card on an owner engine is not refused by the gate")
+    func approvedCardOwnerNotRefused() async throws {
+        let (result, _) = try await approvedCardResult(tool: "save_fact", binding: nil)
+        #expect(!result.contains(MemoryBindingGate.refusal), Comment(rawValue: result))
+    }
+
     // MARK: a save_fact that never passes through the dispatcher
 
     /// `writeGoalLearnings` builds a synthetic `save_fact` and stores it directly when a goal passes.
