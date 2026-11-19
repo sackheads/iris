@@ -4999,11 +4999,14 @@ class AppState {
         // #867: and a write into a `.git` (hooks, the config git runs programs from), granted or not.
         // Unattended only: an attended turn keeps its approval flow.
         let gitWrite = permissions.writesGitDir(toolName: toolName, details: details, workspace: workspace)
+        // #974 Task 9b (F6 / Invariant 6): and a host command that writes an access-policy store.
+        let policyWrite = permissions.writesPolicyStore(toolName: toolName, details: details, workspace: workspace,
+                                                        inSandbox: inSandbox)
         if let id = conversationId, let conversation = conversations.first(where: { $0.id == id }), conversation.isBackground {
             // A call that only a person may approve has nobody to ask here, and the allowlist
             // below must not stand in for them (#599). Its one caller refuses unattended
             // conversations before it asks; this keeps the ladder right without relying on that.
-            if irisWrite || gitWrite || humanOnly {
+            if irisWrite || gitWrite || policyWrite || humanOnly {
                 recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval, hooksFired: beforeToolFired), in: id)
                 return nil
             }
@@ -5062,7 +5065,7 @@ class AppState {
         // from some earlier, different call). Vibecop needs no bypass of its own any more — `#336`
         // made its disabled state "no verdict" rather than an outright APPROVE, so it already falls
         // through to this same prompt for an ordinary call too.
-        if humanOnly || irisWrite {
+        if humanOnly || irisWrite || policyWrite {
             return await enqueueUserApproval(toolName: toolName, details: details, workspace: workspace,
                                              conversationId: conversationId, origin: origin, humanOnly: true,
                                              offersConversationAllow: offersConversationAllow) ? .person : nil

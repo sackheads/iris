@@ -192,6 +192,20 @@ struct PermissionManager: Sendable {
         }
     }
 
+    /// Whether a host command would write one of the access-policy stores (#974 Task 9b, F6 /
+    /// Invariant 6): `profiles/` and `config/a2a-peers/`. Task 3 gives the model no API for them, but
+    /// a host command can still write the files, so such a command is a person's call alone (never an
+    /// allowlist rule's or Vibecop's APPROVE), as a write to a workspace `.iris/` is. `write_file`
+    /// is not this rule's: it is already a protected write (`isProtectedWrite`). In the VM a command
+    /// needs no such check (`~/.iris` is not mounted there). A read-only command is not flagged:
+    /// reading a profile is not the hazard. Best effort, like `commandNamesWorkspaceIris`: a command
+    /// that builds the path at run time is not seen.
+    func writesPolicyStore(toolName: String, details: String, workspace: String?, inSandbox: Bool) -> Bool {
+        guard toolName == "run_command", !inSandbox else { return false }
+        guard !ReadOnlyCommand.isReadOnly(details) else { return false }
+        return PolicyStores.commandNamesStore(details, paths: paths, release: release, workspace: workspace)
+    }
+
     /// Whether a call writes into a `.git` (#867). `write_file` is the host-side file writer under a
     /// grant; a command's VM writes are the mount's business (#623). An unattended run never gets
     /// this from the grant or the allowlist: the next `git` command a person runs would run it.

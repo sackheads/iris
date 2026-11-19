@@ -76,10 +76,12 @@ Nothing in this core stops a key from reaching `config/a2a-peers/` by some path 
 `enroll()` — the registry's integrity rests entirely on `config/`'s existing write boundary, the
 same one every other file under `config/` relies on, not on anything specific to this registry
 (peer review, PR #1036 Finding 2). Concretely: a `write_file` call into `config/a2a-peers/` always
-asks and can never be covered by a standing grant (`PermissionManager.isProtectedWrite`), but that
-check only covers the `write_file` tool — a `run_command` shell call that writes into the
-directory by redirection is judged exactly like any other shell command (asked, unless an
-allowlist, grant or auto-approve already covers it). A key planted by either path is the one
-failure this core cannot detect: `resolve()` trusts whatever `[RegisteredKey]` it finds on disk. If
+asks and can never be covered by a standing grant (`PermissionManager.isProtectedWrite`). That
+check only covers the `write_file` tool; a `run_command` shell call that writes into the directory
+by redirection is a person's call alone too (#974 Task 9b, `PermissionManager.writesPolicyStore`):
+a command that names the directory (a text match, so one that builds the path at run time is not
+seen) is never approved by an allowlist rule or Vibecop, and its dialog names the directory as
+Iris's own access policy; only the owner's own YOLO mode and a headless driver's auto-approve skip
+the prompt. A key planted by a path the match misses is the one failure this core cannot detect: `resolve()` trusts whatever `[RegisteredKey]` it finds on disk. If
 this boundary is ever loosened for `config/` in general, this registry's "only a person enrolls a
 key" guarantee goes with it.

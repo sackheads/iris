@@ -63,8 +63,10 @@ struct PeerKeyRegistry: Sendable {
     /// same boundary as the rest of `config/` — no stronger a guarantee for this registry
     /// specifically (peer review, PR #1036 Finding 2). That boundary: a `write_file` call into
     /// this directory always asks and can never be covered by a standing grant; a shell command
-    /// writing here (e.g. `echo '[...]' > ~/.iris/config/a2a-peers/x.json`) is judged exactly like
-    /// any other shell command — asked unless an allowlist, grant or auto-approve covers it. A
+    /// writing here (e.g. `echo '[...]' > ~/.iris/config/a2a-peers/x.json`) is a person's call
+    /// alone too (#974 Task 9b, `PermissionManager.writesPolicyStore`): never an allowlist rule's or
+    /// Vibecop's APPROVE, and its dialog names the directory as Iris's own access policy — only the
+    /// owner's own YOLO mode and a headless driver's auto-approve skip the prompt. A
     /// planted key here would be the one thing that breaks this whole core's trust model, so this
     /// boundary matters even though it is not specific to this file.
     var directory: URL { paths.a2aPeersDir }
