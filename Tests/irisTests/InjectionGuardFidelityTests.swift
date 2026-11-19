@@ -138,6 +138,28 @@ struct InjectionGuardFidelityTests {
         #expect(!result.contains("[Iris: the injection guard removed"))
     }
 
+    /// dev-3 review of #1210: a bare `---`/`###` fence is stripped by `stripRecording` the same
+    /// way a role marker is, but is never recorded (`counts` is gated on a non-markdown-only
+    /// pattern, or a delimiter directly before a role word) — so the notice is silent on exactly
+    /// the motivating case for Gap 2 (a model reading a skill file cannot tell "no frontmatter"
+    /// from "the guard removed it"). This test pins the KNOWN limit, not the desired behavior:
+    /// it would have been red against the code this PR landed, and should go red again if a
+    /// future change starts counting bare fence strips (update this test's expectation then).
+    @Test func frontmatterFencesAreStrippedButNotAnnounced() async throws {
+        let outside = FileManager.default.temporaryDirectory.appendingPathComponent("fidelity-969-frontmatter-\(UUID().uuidString).txt")
+        try "---\nname: skill\n---\nbody text".write(to: outside, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: outside) }
+
+        let (app, _, id) = session([FunctionCall(name: "run_command", args: ["command": .string("cat \(outside.path)")], id: "c1")])
+        app.sendMessage("go")
+        #expect(await eventually { self.finished(app, id) })
+
+        let result = try #require(toolResultText(app, id, callId: "c1"))
+        #expect(result.contains("name: skill"), "sanity: the body content must survive")
+        #expect(!result.contains("---"), "the fences are still stripped -- this test only makes sense if deletion actually happened")
+        #expect(!result.contains("[Iris: the injection guard removed"), "known limit: a bare fence strip is not announced")
+    }
+
     /// The scope boundary (planner's ruling): only `read_file`/`run_command` (this generic branch)
     /// and `search_web` (its own branch, checked separately) get the Gap 2 notice. A source scan
     /// pins that `strippedMarkerLineCount` is set only inside the `fidelity == .preserveWhenJudged`
@@ -743,6 +765,25 @@ struct HoledFidelityReadWarningTests {
         #expect(result.contains("[output truncated:"), "\(result.prefix(400))...\(result.suffix(400))")
         #expect(!result.contains("withheld by the injection guard"), "capped, not tier-2-partial — a different mechanism")
         #expect(result.contains(Self.warningSnippet), "\(result.suffix(600))")
+    }
+
+    /// dev-3 review of #1210, finding 2: `holedFidelityRead`'s note ("this read may be incomplete
+    /// ... the complete, original file") is written for `read_file`. `run_command`'s output goes
+    /// through the identical `OutputCap.cap` truncation marker (`[output truncated:`), which used
+    /// to trip the same file-shaped note for every capped command output -- a build log is not a
+    /// file read. Scoped to `read_file` only; this pins that `run_command` no longer gets it.
+    @Test func runCommandOutputCapTruncationDoesNotGetTheFileWarning() async {
+        let filler = (0..<3000).map { "filler line \($0) of a long command output, padding it well past the output cap" }.joined(separator: "\n")
+        let (app, _, id) = session([FunctionCall(name: "run_command", args: ["command": .string("printf '%s' \"\(filler)\"")], id: "c1")])
+        await CoreMLEvaluator.$scopedModel.withValue(.init(RealisticTokenCountPassModel())) {
+            await AuxiliaryModelManager.$scopedEngines.withValue([:]) {
+                app.sendMessage("go")
+                #expect(await eventually { self.finished(app, id) })
+            }
+        }
+        let result = lastToolResult(app, id)
+        #expect(result.contains("[output truncated:"), "\(result.prefix(400))...\(result.suffix(400))")
+        #expect(!result.contains(Self.warningSnippet), "run_command's capped output must not get read_file's warning: \(result.suffix(600))")
     }
 
     /// (b) The compensating control (dev-2 findings 2, 3): #813's taint still fires on the
