@@ -7885,9 +7885,11 @@ actor IrisEngine {
             // `"<server>___read_file"` (`JobProfile.mcpNameSeparator`), never bare `"read_file"`,
             // so this equality can't be satisfied from there. `.preserveWhenJudged` here means a
             // judged-safe read can show role markers the destructive strip would otherwise delete
-            // (see `InjectionGuard.FidelityMode`/`carriedDisplay`) — the only call site that can
-            // ask for anything but `.off`.
-            let fidelity: InjectionGuard.FidelityMode = name == "read_file" ? .preserveWhenJudged : .off
+            // (see `InjectionGuard.FidelityMode`/`carriedDisplay`). `run_command` joins it (#969
+            // Gap 1): agents read code via `cat`/`grep -n` at least as often as `read_file`, and
+            // the guard strips its own source (`malRolePatterns`) the same way when read through
+            // either tool — without this, only `read_file` got the fidelity carve-out #952 built.
+            let fidelity: InjectionGuard.FidelityMode = (name == "read_file" || name == "run_command") ? .preserveWhenJudged : .off
             let judged = await InjectionGuard.sanitizeUntrustedCacheable(result, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled, fidelity: fidelity)
             sanitizedResult = judged.text
             withheldByVerdict = judged.cacheable && InjectionGuard.isWholeBlock(judged.text)
