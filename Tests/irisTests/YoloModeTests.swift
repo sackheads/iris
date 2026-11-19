@@ -93,7 +93,7 @@ struct YoloModeTests {
         #expect(!state.isYoloMode(c2))
     }
 
-    @Test("YOLO mode approves commands, writes, .iris/ writes, and humanOnly calls without Vibecop or user prompt")
+    @Test("YOLO mode approves an ordinary command without Vibecop or user prompt")
     func approvesAllAttendedCallsWithoutVibecop() async throws {
         let root = try home(); defer { try? FileManager.default.removeItem(at: root) }
         let state = try makeState(root)
@@ -110,17 +110,47 @@ struct YoloModeTests {
         #expect(vibecop.calls == 0)
         #expect(state.pendingApprovals.isEmpty)
         #expect(ToolApproval(try #require(cmdSource)).line == "Approved (YOLO mode).")
+    }
 
-        // Workspace .iris/ write (normally humanOnly)
+    /// #1115: `humanOnly` and `irisWrite` (a workspace `.iris/` write, #617) are critical
+    /// approvals Brian reserved for himself -- a standing session convenience like YOLO must
+    /// never auto-approve either, even though YOLO does auto-approve an ordinary command above.
+    @Test("YOLO mode never bypasses a .iris/ write or an explicit humanOnly call; both still prompt")
+    func yoloNeverBypassesHumanOnlyOrIrisWrite() async throws {
+        let root = try home(); defer { try? FileManager.default.removeItem(at: root) }
+        let state = try makeState(root)
+        let cid = state.createNewConversation(isBackground: false, select: true)
+        state.setWorkspace(for: cid, path: root.path)
+        state.sendMessage("/yolo on")
+
+        // Workspace .iris/ write (irisWrite, #617): still asks under YOLO.
         let irisFile = root.appendingPathComponent(".iris/vibecop.md").path
-        let irisWriteSource = await state.requestApprovalSource(toolName: "write_file", details: irisFile,
-                                                                workspace: root.path, conversationId: cid, vibecopEnabled: false)
-        #expect(irisWriteSource == .yolo)
+        async let irisWriteSource = state.requestApprovalSource(toolName: "write_file", details: irisFile,
+                                                                 workspace: root.path, conversationId: cid, vibecopEnabled: false)
+        for _ in 0..<40 where state.pendingApprovals.isEmpty {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        #expect(state.pendingApprovals.count == 1, "an .iris/ write must reach the queue despite YOLO")
+        if state.pendingApprovals.isEmpty {
+            state.denyPendingApprovals(for: cid)
+        } else {
+            state.resolveApproval(id: state.pendingApprovals[0].id, .approve)
+        }
+        #expect(await irisWriteSource == .person)
 
-        // Explicit humanOnly (e.g. job creation, outbound tool)
-        let humanOnlySource = await state.requestApprovalSource(toolName: "schedule_job", details: "name: test",
-                                                                workspace: root.path, conversationId: cid, humanOnly: true)
-        #expect(humanOnlySource == .yolo)
+        // Explicit humanOnly (e.g. job creation, outbound tool): still asks under YOLO.
+        async let humanOnlySource = state.requestApprovalSource(toolName: "schedule_job", details: "name: test",
+                                                                  workspace: root.path, conversationId: cid, humanOnly: true)
+        for _ in 0..<40 where state.pendingApprovals.isEmpty {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        #expect(state.pendingApprovals.count == 1, "a humanOnly call must reach the queue despite YOLO")
+        if state.pendingApprovals.isEmpty {
+            state.denyPendingApprovals(for: cid)
+        } else {
+            state.resolveApproval(id: state.pendingApprovals[0].id, .approve)
+        }
+        #expect(await humanOnlySource == .person)
     }
 
     @Test("Background job runs and MCP guests never get YOLO mode")
