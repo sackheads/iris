@@ -315,3 +315,25 @@ struct SnippetLiftTests {
         #expect(env == ["DB_TOKEN": "${keychain:DB_TOKEN}", "LOG_LEVEL": "${config:LOG_LEVEL}"])
     }
 }
+
+/// #1116 (dev-3 review): a source scan pinning that `liftFromLegacyStore: true` is passed from
+/// exactly the two legacy-conversion call sites, one per file, and nowhere else -- a future paste
+/// or import path passing `true` would re-lift a shared secret into untrusted text, and a
+/// conversion site silently dropped to `false` (or omitted, taking the `false` default) would
+/// reintroduce the credential-loss regression 606d9341 fixed. Own suite, not `@MainActor` (#642).
+@Suite("#1116: liftFromLegacyStore call sites: source scan")
+struct LiftFromLegacyStoreCallSiteScanTests {
+    @Test("exactly one `liftFromLegacyStore: true` in PluginsSettingsView.swift and one in PluginInstallWizardView.swift")
+    func exactlyTwoTrueSites() throws {
+        let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Sources/IrisKit")
+        var trueSites: [String: Int] = [:]
+        for file in try FileManager.default.contentsOfDirectory(atPath: sources.path) where file.hasSuffix(".swift") {
+            let text = try String(contentsOf: sources.appendingPathComponent(file), encoding: .utf8)
+            for line in text.split(separator: "\n") where line.contains("liftFromLegacyStore: true") {
+                trueSites[file, default: 0] += 1
+            }
+        }
+        #expect(trueSites == ["PluginsSettingsView.swift": 1, "PluginInstallWizardView.swift": 1], "\(trueSites)")
+    }
+}
