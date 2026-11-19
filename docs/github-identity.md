@@ -40,6 +40,13 @@ nothing.
   checked (so a push after the check can't ride it), and the result says if the PR moved while it
   was being checked.
 
+  **This is the only place a rename out of `plans/`/`specs/` is actually caught.** GitHub's own
+  CODEOWNERS feature resolves ownership from the PR's current diff only — verified empirically
+  (#1186): renaming a real `docs/plans/` file to a plain `docs/` path requested the broader `/docs/`
+  owner set, not `@bnaylor` alone. A raw `gh pr review --approve` run directly with the account's
+  or `sackheads-bot`'s credential, bypassing this tool, has no equivalent check and is **out of
+  policy** for approving anything that CODEOWNERS alone would route to a bot.
+
 The token itself is read from the Keychain only inside the client that makes these calls; it never
 appears in a prompt, a tool argument, a tool result, or an error string (scrubbed as hygiene, not
 as the control — see "What the credential is," below).

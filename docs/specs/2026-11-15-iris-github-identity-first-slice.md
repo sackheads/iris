@@ -177,6 +177,19 @@ bound to an exact commit — hardened against three bypasses Iris flagged:
    with `docs/` or `assets/` (GitHub API paths have no leading `/`), with no `..` segments and no `plans`/`specs` directory under `docs/` — so a
    `Sources/IrisKit/x.md` → `docs/x.md` rename can't slip a Sources change past the check.
 
+**This check is not redundant with CODEOWNERS — it is the only place a `plans/`/`specs/` rename is
+caught (#1186, verified empirically).** GitHub's native CODEOWNERS ownership resolution is computed
+from a PR's current diff only: a real test (two draft PRs, closed without merging) renamed a
+pre-existing `docs/plans/` file to a plain `docs/` path, and GitHub requested `@bnaylor` + `iris-main`
+as reviewers — the broader `/docs/` owner set — not `@bnaylor` alone. CODEOWNERS never consults a
+renamed file's previous path; that is a platform limit, not a bug to fix here. So point 3 above is
+the *entire* defence for a rename out of `plans/`/`specs/`, and a raw, credential-direct
+`gh pr review --approve` run as `iris-main` or `sackheads-bot` (bypassing `github_approve` entirely)
+has no equivalent check. **That path is out of policy**: `github_approve` is the only sanctioned way
+to spend either bot's approval on anything CODEOWNERS alone would route to them. (Optional further
+hardening — a CI check that platform-enforces this regardless of which path approved — is tracked
+separately, #1206, deferred to #966 enablement.)
+
 The token value is still scrubbed from tool output as hygiene, but it is **not** the control — the
 controls are `CODEOWNERS` (structural) + the §3.3 gate + the ruleset settings.
 
