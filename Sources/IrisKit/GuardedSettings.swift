@@ -149,13 +149,18 @@ enum GuardedSettings {
     static let upgradeNotice = "Iris moved its protected settings into the Keychain (first launch of this version). If you didn't just update Iris, something reset them: check Settings → Advanced (Sandboxing, Job Limits, Agent Limits) and Settings → Vibecop."
 
     /// The approval dialog's warning when a call's text names Iris's own keychain service or
-    /// defaults domain. A string match on the text: a hint to the person, never a gate. A command
-    /// that builds the name at run time gets no warning.
+    /// defaults domain, or (#974 Task 9b) one of its access-policy stores. A string match on the
+    /// text: a hint to the person, never a gate (`PermissionManager.writesPolicyStore` is the gate
+    /// for a host command). A command that builds the name at run time gets no warning.
     static func approvalWarning(for details: String) -> String? {
         let text = details.lowercased()
         let named = ["com.iris.secrets", "com.bnaylor.iris", markerKey.lowercased(),
                      "--set-github-token", "--set-github-repos", "--set-github-login", "--clear-github-token", "--git-credential-helper"].first { text.contains($0) }
-        guard let named else { return nil }
+        guard let named else {
+            // #974 Task 9b: a policy store is Iris's own access policy, not a setting.
+            guard let store = PolicyStores.named(in: details) else { return nil }
+            return "This names Iris's own access policy (`\(store)`). A command or file that changes it can widen what a guest, a peer or a profile may do. Deny it unless you meant to."
+        }
         return "This names Iris's own settings (`\(named)`). A command that changes them can change Iris's limits, guards or provider addresses. Deny it unless you meant to."
     }
 
