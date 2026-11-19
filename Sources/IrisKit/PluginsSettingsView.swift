@@ -381,6 +381,10 @@ struct PluginsSettingsView: View {
             var draft = try PluginInstaller.draft(fromSnippet: snippet)
             draft.source = "convert"
             draft = try PluginInstaller.regenerate(draft)
+            // #1120: no confirmedReplace here on purpose -- a same-id collision throws
+            // .alreadyInstalled, which the catch below sends to the install wizard, and the
+            // wizard's own install() step shows the replace-confirmation dialog for this exact
+            // id. Never silently replace from this inline path.
             try PluginInstaller(paths: .default).commit(draft)
 
             await PluginManager.shared.loadAll()
@@ -475,8 +479,10 @@ private struct AddMCPServerWorkspaceView: View {
     @State private var isSaving = false
     // #1120: an install that collides with an already-installed plugin of the same (often
     // auto-derived, #1107) id asks before replacing it — the replace clears every Keychain key
-    // under that id the new manifest doesn't redeclare.
+    // under that id the new manifest doesn't redeclare. `pendingReplaceExisting` is the manifest
+    // of the plugin already on disk, read when the collision is found, so the dialog can name it.
     @State private var pendingReplaceDraft: PluginDraft?
+    @State private var pendingReplaceExisting: IPFManifest?
 
     var body: some View {
         ScrollView {
@@ -544,10 +550,20 @@ private struct AddMCPServerWorkspaceView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .confirmationDialog(
-            pendingReplaceDraft.map { "A plugin with id `\($0.manifest.id)` is already installed. Replacing it deletes its stored Keychain secrets that this install doesn't redeclare." } ?? "",
+            pendingReplaceDraft.map { draft -> String in
+                if let existing = pendingReplaceExisting {
+                    return "\"\(existing.name)\" version \(existing.version) (id `\(existing.id)`) is already installed. Replacing it clears its stored Keychain secrets, keeping only what this install provides."
+                }
+                return "A plugin with id `\(draft.manifest.id)` is already installed. Replacing it clears its stored Keychain secrets, keeping only what this install provides."
+            } ?? "",
             isPresented: Binding(get: { pendingReplaceDraft != nil }, set: { if !$0 { pendingReplaceDraft = nil } })) {
-            Button("Replace", role: .destructive) { confirmReplace() }
-            Button("Cancel", role: .cancel) { pendingReplaceDraft = nil }
+            // #1120: capture the draft as a local now, at body-compute time -- the dialog's own
+            // dismiss can clear `pendingReplaceDraft` (via the isPresented binding above) before
+            // this button's action runs, so the action must not re-read the @State property.
+            if let draft = pendingReplaceDraft {
+                Button("Replace", role: .destructive) { confirmReplace(draft) }
+            }
+            Button("Cancel", role: .cancel) { pendingReplaceDraft = nil; pendingReplaceExisting = nil }
         }
     }
 
@@ -980,10 +996,12 @@ private struct AddMCPServerWorkspaceView: View {
     }
 
     private func commitAndStart(_ draft: PluginDraft, confirmedReplace: Bool = false) async throws {
+        let installer = PluginInstaller(paths: .default)
         do {
-            try PluginInstaller(paths: .default).commit(draft, confirmedReplace: confirmedReplace)
+            try installer.commit(draft, confirmedReplace: confirmedReplace)
         } catch IPFError.alreadyInstalled {
             // #1120: not an error to show -- the confirmation dialog takes over from here.
+            pendingReplaceExisting = installer.installedManifest(id: draft.manifest.id)
             pendingReplaceDraft = draft
             return
         }
@@ -993,9 +1011,11 @@ private struct AddMCPServerWorkspaceView: View {
     }
 
     /// #1120: the person confirmed replacing the already-installed plugin named in the dialog.
-    private func confirmReplace() {
-        guard let draft = pendingReplaceDraft else { return }
+    /// `draft` is passed in rather than re-read from `pendingReplaceDraft`: the dialog's own
+    /// dismiss can already have cleared that @State property by the time this runs.
+    private func confirmReplace(_ draft: PluginDraft) {
         pendingReplaceDraft = nil
+        pendingReplaceExisting = nil
         isSaving = true
         Task {
             defer { isSaving = false }
