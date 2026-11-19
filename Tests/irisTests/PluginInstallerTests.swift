@@ -118,6 +118,7 @@ struct PluginInstallerTests {
         let paths = try tempPaths()
         defer { try? FileManager.default.removeItem(at: paths.root) }
         let installer = PluginInstaller(paths: paths)
+        defer { KeychainManager.shared.deleteSecrets(service: "iris.plugin.neat-plug") }
 
         let src1 = try sourceDir(manifest: manifest)
         defer { try? FileManager.default.removeItem(at: src1.deletingLastPathComponent()) }
@@ -133,7 +134,6 @@ struct PluginInstallerTests {
         }
         // Original install is untouched by the refused attempt.
         #expect(KeychainManager.shared.secrets(service: "iris.plugin.neat-plug")["API_KEY"] == "sk-123")
-        KeychainManager.shared.deleteSecrets(service: "iris.plugin.neat-plug")
     }
 
     @Test("#1120: a confirmed replace clears a Keychain key the new manifest doesn't redeclare")
@@ -141,6 +141,7 @@ struct PluginInstallerTests {
         let paths = try tempPaths()
         defer { try? FileManager.default.removeItem(at: paths.root) }
         let installer = PluginInstaller(paths: paths)
+        defer { KeychainManager.shared.deleteSecrets(service: "iris.plugin.neat-plug") }
 
         let src1 = try sourceDir(manifest: manifest)
         defer { try? FileManager.default.removeItem(at: src1.deletingLastPathComponent()) }
@@ -168,7 +169,28 @@ struct PluginInstallerTests {
 
         #expect(KeychainManager.shared.secrets(service: "iris.plugin.neat-plug")["API_KEY"] == nil)
         #expect(KeychainManager.shared.secrets(service: "iris.plugin.neat-plug").isEmpty)
-        KeychainManager.shared.deleteSecrets(service: "iris.plugin.neat-plug")
+    }
+
+    @Test("#1120: a fresh (not-moved-aside) commit clears a stale pre-existing Keychain item")
+    func freshInstallClearsStaleKeychainItem() throws {
+        let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
+        let installer = PluginInstaller(paths: paths)
+        defer { KeychainManager.shared.deleteSecrets(service: "iris.plugin.neat-plug") }
+
+        // Simulate a stale item left behind by, e.g., an uninstall whose deleteSecrets failed,
+        // or a plugin directory removed by hand outside Iris: the Keychain item exists even
+        // though the plugin directory does not, so `commit` sees a fresh install (nothing to
+        // move aside) but must still not let the old secret survive under this id.
+        KeychainManager.shared.replaceSecrets(["API_KEY": "sk-stale"], service: "iris.plugin.neat-plug")
+
+        let src = try sourceDir(manifest: manifest)
+        defer { try? FileManager.default.removeItem(at: src.deletingLastPathComponent()) }
+        let draft = try installer.stage(directory: src, source: "local")   // declares no secrets
+        try installer.commit(draft)
+
+        #expect(KeychainManager.shared.secrets(service: "iris.plugin.neat-plug")["API_KEY"] == nil)
+        #expect(KeychainManager.shared.secrets(service: "iris.plugin.neat-plug").isEmpty)
     }
 
     @Test("commit skips empty-string secret values (no empty Keychain entries)")
@@ -208,5 +230,35 @@ struct PluginInstallerTests {
         }
         #expect(!FileManager.default.fileExists(atPath: paths.pluginsDir.appendingPathComponent("neat-plug").path))
         #expect(PluginStateStore(paths: paths).load()["neat-plug"] == nil)
+    }
+}
+
+/// #1120 (dev-2 review): a source scan pinning that every `PluginInstaller.commit` call site in
+/// production code either handles a same-id collision itself or sits in a file that also handles
+/// `IPFError.alreadyInstalled` (PluginsSettingsView's inline convert falls back to the install
+/// wizard's own handling in a different file, so it is checked for the fallback, not the catch).
+/// A future caller added without either is a silent replace reintroduced (#642: own suite, not
+/// `@MainActor`, so the scan never holds the main thread a parallel run's other suites wait on).
+@Suite("Plugin Installer commit call sites (#1120): source scan")
+struct PluginInstallerCommitCallSiteScanTests {
+    @Test("every production commit(...) call site handles .alreadyInstalled, or falls back to one that does")
+    func everyCallerHandlesCollision() throws {
+        let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Sources/IrisKit")
+        var callers: Set<String> = [], handlers: Set<String> = []
+        for file in try FileManager.default.contentsOfDirectory(atPath: sources.path) where file.hasSuffix(".swift") {
+            let text = try String(contentsOf: sources.appendingPathComponent(file), encoding: .utf8)
+            for line in text.split(separator: "\n") {
+                if line.contains(".commit(") && !line.contains("func commit") && !line.contains("CATransaction") {
+                    callers.insert(file)
+                }
+                if line.contains("catch IPFError.alreadyInstalled") { handlers.insert(file) }
+            }
+        }
+        #expect(callers == ["PluginsSettingsView.swift", "PluginInstallWizardView.swift"], "\(callers)")
+        // PluginsSettingsView.swift calls commit from both commitAndStart (handles it directly)
+        // and convertLegacyInline (falls back to the install wizard's dialog in the other file);
+        // PluginInstallWizardView.swift is the file that actually shows that dialog.
+        #expect(handlers == ["PluginsSettingsView.swift", "PluginInstallWizardView.swift"], "\(handlers)")
     }
 }

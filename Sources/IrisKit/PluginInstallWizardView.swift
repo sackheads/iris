@@ -41,7 +41,7 @@ struct PluginInstallWizardView: View {
         .frame(height: 400)
         .task { await prepare() }
         .confirmationDialog(
-            confirmingReplaceID.map { "A plugin with id `\($0)` is already installed. Replacing it deletes its stored Keychain secrets that this install doesn't redeclare." } ?? "",
+            confirmingReplaceID.map { "A plugin with id `\($0)` is already installed. Replacing it clears its stored Keychain secrets, keeping only what this install provides." } ?? "",
             isPresented: Binding(get: { confirmingReplaceID != nil }, set: { if !$0 { confirmingReplaceID = nil } })) {
             Button("Replace", role: .destructive) { install(confirmedReplace: true) }
             Button("Cancel", role: .cancel) { confirmingReplaceID = nil }

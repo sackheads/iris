@@ -90,15 +90,17 @@ struct PluginInstaller: Sendable {
 
         // Only after the directory landed: secrets to Keychain, state to plugins.json.
         // Empty-string values are placeholders the wizard seeded for declared-but-unfilled
-        // secrets — skip them so no empty Keychain entries are created.
+        // secrets -- skip them so they never land in the Keychain.
+        // #1120: the Keychain item under this id is always made to match exactly what this
+        // manifest declares, never merged with whatever was there before -- a stale entry (an
+        // uninstall whose deleteSecrets failed, a directory removed by hand outside Iris) is a
+        // leak across plugin identities exactly like an unconfirmed replace's orphaned key, so
+        // "nothing moved aside" is not a reason to leave an existing item alone.
         let secretsToStore = draft.secretValues.filter { !$0.value.isEmpty }
-        // #1120: a replace (an existing install moved aside above) REPLACES the whole Keychain
-        // item with exactly the new manifest's secrets, even when that set is empty — a key the
-        // old plugin held that this manifest doesn't redeclare must never survive under this id.
-        // A fresh install (nothing moved aside) still skips the Keychain entirely when there is
-        // nothing to store, preserving the no-empty-entries behavior for a plugin with no secrets.
-        if movedAside || !secretsToStore.isEmpty {
-            let service = KeychainManager.pluginService(id)
+        let service = KeychainManager.pluginService(id)
+        if secretsToStore.isEmpty {
+            KeychainManager.shared.deleteSecrets(service: service)
+        } else {
             KeychainManager.shared.replaceSecrets(secretsToStore, service: service)
         }
         let store = PluginStateStore(paths: paths)
@@ -109,6 +111,16 @@ struct PluginInstaller: Sendable {
         state.configValues.merge(draft.configValues) { _, new in new }
         states[id] = state
         store.save(states)
+    }
+
+    /// #1120: the manifest currently installed under `id`, if any -- read directly off disk so a
+    /// replace-confirmation dialog can name what it's about to replace, without needing
+    /// `PluginManager`'s loaded state.
+    func installedManifest(id: String) -> IPFManifest? {
+        let dir = paths.pluginsDir.appendingPathComponent(id)
+        guard let content = try? String(contentsOf: dir.appendingPathComponent("plugin.md"), encoding: .utf8)
+        else { return nil }
+        return try? IPFManifest.parse(markdown: content, directoryName: id)
     }
 
     /// Stop the plugin's servers, delete its directory, Keychain service, and state entry.
