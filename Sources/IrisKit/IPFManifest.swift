@@ -11,6 +11,10 @@ enum IPFError: Error, Equatable, CustomStringConvertible {
     case idMismatch(manifest: String, directory: String)
     case unknownReference(String)
     case undeclaredSecret(String)
+    /// #1120: an install would replace an already-installed plugin of this id, and the caller has
+    /// not confirmed that yet — `PluginInstaller.commit`'s `confirmedReplace` guard. An auto-derived
+    /// id (#1107) can collide between two distinct, unrelated plugins, so this is never silent.
+    case alreadyInstalled(String)
 
     var description: String {
         switch self {
@@ -22,6 +26,7 @@ enum IPFError: Error, Equatable, CustomStringConvertible {
         case .idMismatch(let m, let d): return "Manifest id '\(m)' does not match directory name '\(d)'"
         case .unknownReference(let r): return "Unresolvable reference \(r)"
         case .undeclaredSecret(let k): return "mcp.json references ${keychain:\(k)} but the manifest does not declare it"
+        case .alreadyInstalled(let id): return "A plugin with id '\(id)' is already installed; replacing it needs confirmation"
         }
     }
 }

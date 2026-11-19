@@ -473,6 +473,10 @@ private struct AddMCPServerWorkspaceView: View {
 
     @State private var errorMessage: String?
     @State private var isSaving = false
+    // #1120: an install that collides with an already-installed plugin of the same (often
+    // auto-derived, #1107) id asks before replacing it — the replace clears every Keychain key
+    // under that id the new manifest doesn't redeclare.
+    @State private var pendingReplaceDraft: PluginDraft?
 
     var body: some View {
         ScrollView {
@@ -538,6 +542,12 @@ private struct AddMCPServerWorkspaceView: View {
             }
             .padding(18)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .confirmationDialog(
+            pendingReplaceDraft.map { "A plugin with id `\($0.manifest.id)` is already installed. Replacing it deletes its stored Keychain secrets that this install doesn't redeclare." } ?? "",
+            isPresented: Binding(get: { pendingReplaceDraft != nil }, set: { if !$0 { pendingReplaceDraft = nil } })) {
+            Button("Replace", role: .destructive) { confirmReplace() }
+            Button("Cancel", role: .cancel) { pendingReplaceDraft = nil }
         }
     }
 
@@ -969,11 +979,32 @@ private struct AddMCPServerWorkspaceView: View {
         }
     }
 
-    private func commitAndStart(_ draft: PluginDraft) async throws {
-        try PluginInstaller(paths: .default).commit(draft)
+    private func commitAndStart(_ draft: PluginDraft, confirmedReplace: Bool = false) async throws {
+        do {
+            try PluginInstaller(paths: .default).commit(draft, confirmedReplace: confirmedReplace)
+        } catch IPFError.alreadyInstalled {
+            // #1120: not an error to show -- the confirmation dialog takes over from here.
+            pendingReplaceDraft = draft
+            return
+        }
         await PluginManager.shared.loadAll()
         await PluginsSettingsView.restartMCP(forPlugin: draft.manifest.id)
         await onInstalled(draft.manifest.id)
+    }
+
+    /// #1120: the person confirmed replacing the already-installed plugin named in the dialog.
+    private func confirmReplace() {
+        guard let draft = pendingReplaceDraft else { return }
+        pendingReplaceDraft = nil
+        isSaving = true
+        Task {
+            defer { isSaving = false }
+            do {
+                try await commitAndStart(draft, confirmedReplace: true)
+            } catch {
+                errorMessage = String(describing: error)
+            }
+        }
     }
 
     private func loadDetectedHarnesses() {

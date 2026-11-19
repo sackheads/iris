@@ -18,6 +18,11 @@ struct PluginInstallWizardView: View {
     @State private var selectedServer: String?
     @State private var secretKeys: Set<String> = []      // wizard-adjustable classification
     @State private var installing = false
+    // #1120: a collision with an already-installed plugin of the same (often auto-derived,
+    // #1107) id asks before replacing it, rather than failing (or, before this fix, replacing
+    // silently) -- the replace clears every Keychain key under that id the new manifest doesn't
+    // redeclare.
+    @State private var confirmingReplaceID: String?
 
     private let steps = ["Source", "Binaries", "Configuration", "Confirm"]
 
@@ -35,6 +40,12 @@ struct PluginInstallWizardView: View {
         }
         .frame(height: 400)
         .task { await prepare() }
+        .confirmationDialog(
+            confirmingReplaceID.map { "A plugin with id `\($0)` is already installed. Replacing it deletes its stored Keychain secrets that this install doesn't redeclare." } ?? "",
+            isPresented: Binding(get: { confirmingReplaceID != nil }, set: { if !$0 { confirmingReplaceID = nil } })) {
+            Button("Replace", role: .destructive) { install(confirmedReplace: true) }
+            Button("Cancel", role: .cancel) { confirmingReplaceID = nil }
+        }
     }
 
     private var stepRail: some View {
@@ -328,7 +339,7 @@ struct PluginInstallWizardView: View {
         }
     }
 
-    private func install() {
+    private func install(confirmedReplace: Bool = false) {
         guard var draft else { return }
         loadError = nil
         installing = true
@@ -340,7 +351,14 @@ struct PluginInstallWizardView: View {
                 if case .folder = source {} else {
                     draft = try PluginInstaller.regenerate(draft)
                 }
-                try PluginInstaller(paths: .default).commit(draft)
+                do {
+                    try PluginInstaller(paths: .default).commit(draft, confirmedReplace: confirmedReplace)
+                } catch IPFError.alreadyInstalled(let id) {
+                    // #1120: not an error to show -- the confirmation dialog takes over.
+                    confirmingReplaceID = id
+                    installing = false
+                    return
+                }
                 await PluginManager.shared.loadAll()
                 let configs = await PluginManager.shared.mcpConfigs()
                 await MCPManager.shared.setPluginConfigs(configs)

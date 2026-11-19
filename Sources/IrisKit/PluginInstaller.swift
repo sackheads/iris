@@ -43,9 +43,19 @@ struct PluginInstaller: Sendable {
         return PluginDraft(manifest: manifest, files: files, source: source)
     }
 
-    func commit(_ draft: PluginDraft) throws {
+    /// #1120: `confirmedReplace` must be true to replace an already-installed plugin of this id —
+    /// an auto-derived id (#1107) can collide between two distinct, unrelated plugins, so the
+    /// caller must have shown the person a confirmation naming the id first (never silent).
+    /// On a confirmed or fresh install, every Keychain key under this id's own service is
+    /// REPLACED with exactly the new manifest's secrets, never merged: a key the old plugin held
+    /// that the new manifest doesn't redeclare is a leak across plugin identities (#1120), not a
+    /// value to keep "just in case".
+    func commit(_ draft: PluginDraft, confirmedReplace: Bool = false) throws {
         let fm = FileManager.default
         let id = draft.manifest.id
+        if fm.fileExists(atPath: paths.pluginsDir.appendingPathComponent(id).path), !confirmedReplace {
+            throw IPFError.alreadyInstalled(id)
+        }
 
         // Stage into a temp dir and re-validate what will actually land on disk.
         let staging = fm.temporaryDirectory.appendingPathComponent("iris-staging-\(UUID().uuidString)/\(id)")
@@ -82,9 +92,14 @@ struct PluginInstaller: Sendable {
         // Empty-string values are placeholders the wizard seeded for declared-but-unfilled
         // secrets — skip them so no empty Keychain entries are created.
         let secretsToStore = draft.secretValues.filter { !$0.value.isEmpty }
-        if !secretsToStore.isEmpty {
+        // #1120: a replace (an existing install moved aside above) REPLACES the whole Keychain
+        // item with exactly the new manifest's secrets, even when that set is empty — a key the
+        // old plugin held that this manifest doesn't redeclare must never survive under this id.
+        // A fresh install (nothing moved aside) still skips the Keychain entirely when there is
+        // nothing to store, preserving the no-empty-entries behavior for a plugin with no secrets.
+        if movedAside || !secretsToStore.isEmpty {
             let service = KeychainManager.pluginService(id)
-            KeychainManager.shared.updateSecrets(service: service) { $0.merge(secretsToStore) { _, new in new } }
+            KeychainManager.shared.replaceSecrets(secretsToStore, service: service)
         }
         let store = PluginStateStore(paths: paths)
         var states = store.load()
