@@ -101,7 +101,7 @@ struct PluginInstallerTests {
         defer { try? FileManager.default.removeItem(at: src2.deletingLastPathComponent()) }
         var draft2 = try installer.stage(directory: src2, source: "local")
         draft2.secretValues["API_KEY"] = "sk-123"
-        try installer.commit(draft2)
+        try installer.commit(draft2, confirmedReplace: true)
 
         let installed = paths.pluginsDir.appendingPathComponent("neat-plug")
         let installedManifest = try String(
@@ -110,6 +110,64 @@ struct PluginInstallerTests {
         #expect(installedManifest.contains("version: 3.0.0"))
         let state = PluginStateStore(paths: paths).load()["neat-plug"]
         #expect(state?.installedVersion == "3.0.0")
+        KeychainManager.shared.deleteSecrets(service: "iris.plugin.neat-plug")
+    }
+
+    @Test("#1120: commit over an existing install refuses without confirmedReplace")
+    func replaceWithoutConfirmationRefuses() throws {
+        let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
+        let installer = PluginInstaller(paths: paths)
+
+        let src1 = try sourceDir(manifest: manifest)
+        defer { try? FileManager.default.removeItem(at: src1.deletingLastPathComponent()) }
+        var draft1 = try installer.stage(directory: src1, source: "local")
+        draft1.secretValues["API_KEY"] = "sk-123"
+        try installer.commit(draft1)
+
+        let src2 = try sourceDir(manifest: manifest)
+        defer { try? FileManager.default.removeItem(at: src2.deletingLastPathComponent()) }
+        let draft2 = try installer.stage(directory: src2, source: "local")
+        #expect(throws: IPFError.alreadyInstalled("neat-plug")) {
+            try installer.commit(draft2)
+        }
+        // Original install is untouched by the refused attempt.
+        #expect(KeychainManager.shared.secrets(service: "iris.plugin.neat-plug")["API_KEY"] == "sk-123")
+        KeychainManager.shared.deleteSecrets(service: "iris.plugin.neat-plug")
+    }
+
+    @Test("#1120: a confirmed replace clears a Keychain key the new manifest doesn't redeclare")
+    func replaceClearsOrphanedSecret() throws {
+        let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
+        let installer = PluginInstaller(paths: paths)
+
+        let src1 = try sourceDir(manifest: manifest)
+        defer { try? FileManager.default.removeItem(at: src1.deletingLastPathComponent()) }
+        var draft1 = try installer.stage(directory: src1, source: "local")
+        draft1.secretValues["API_KEY"] = "sk-old-secret"
+        try installer.commit(draft1)
+
+        // The new manifest for this same id declares no secrets at all -- simulating an
+        // unrelated plugin that happens to collide on id (#1107's auto-derived ids).
+        let manifestNoSecrets = """
+        ---
+        ipf: "1.0"
+        id: neat-plug
+        name: Neat Plug
+        version: 2.0.0
+        components:
+          mcp: mcp.json
+        ---
+        Docs.
+        """
+        let src2 = try sourceDir(manifest: manifestNoSecrets)
+        defer { try? FileManager.default.removeItem(at: src2.deletingLastPathComponent()) }
+        let draft2 = try installer.stage(directory: src2, source: "local")
+        try installer.commit(draft2, confirmedReplace: true)
+
+        #expect(KeychainManager.shared.secrets(service: "iris.plugin.neat-plug")["API_KEY"] == nil)
+        #expect(KeychainManager.shared.secrets(service: "iris.plugin.neat-plug").isEmpty)
         KeychainManager.shared.deleteSecrets(service: "iris.plugin.neat-plug")
     }
 
