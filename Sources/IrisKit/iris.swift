@@ -510,8 +510,28 @@ actor IrisEngine {
     /// principal, which already carries its own binding), `binding` applies unchanged. Consulted
     /// by the memory gate (Task 7) and should be consulted by any future per-turn tool gate too.
     func bindingForCall(conversationId: UUID) async -> AccessBinding {
-        guard let state else { return binding }
-        return await MainActor.run { state.guestSteeredBinding(for: conversationId) } ?? binding
+        let ownBinding = binding
+        guard let state else { return ownBinding }
+        return await MainActor.run { () -> AccessBinding in
+            // dev-2 review of #1212: checked at the delegation root too, mirroring
+            // `deliverPeerMessage`'s own `isGuestOriginTurn(senderId) || isGuestOriginTurn(root)`
+            // check — a delegate conversation under a guest-steered root was never itself the
+            // target `deliverPeerMessage` stamped, only the root was.
+            let root = state.delegationRoot(of: conversationId)
+            if let stamp = state.guestSteeredBinding(for: conversationId) ?? state.guestSteeredBinding(for: root) {
+                return stamp
+            }
+            // dev-3 review of #1212, finding 2: `isGuestOriginTurn` true with no stamp (a caller
+            // that marks the bool directly, or a guest-origin turn from before Task 16's
+            // identity-resolved retrofit ever gets this far) must never fall through to the
+            // engine's own, owner-shaped binding — that is exactly the fail-open the stamp exists
+            // to close.
+            if state.isGuestOriginTurn(conversationId) || state.isGuestOriginTurn(root) {
+                return AccessBinding(profile: AccessProfile(), principal: .mcpGuest, isOwner: false)
+                    .capped(by: PrincipalFloor.floor(for: .mcpGuest))
+            }
+            return ownBinding
+        }
     }
 
     let roleLabel: String?
@@ -6939,7 +6959,7 @@ actor IrisEngine {
             if let appState = self.state {
                 if isBackground {
                     Task {
-                        let outcome = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, background: true, client: subagentClient, route: route, routedClient: routed, appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig, repromptDelay: self.repromptDelay, parentBinding: self.binding)
+                        let outcome = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, background: true, client: subagentClient, route: route, routedClient: routed, appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig, repromptDelay: self.repromptDelay, parentBinding: await self.bindingForCall(conversationId: conversationId))
                         let event = "Background subagent result:\n\(outcome.rendered)"
                         // Routed on which Stop the user pressed, not on the status (#236): a Stop
                         // accepted just after goal_complete still reads completed. The parent's own
@@ -6953,7 +6973,7 @@ actor IrisEngine {
                     }
                     result = "Subagent '\(role)' spawned in the background. You will receive a System Event when it finishes. If the user stops this conversation, the subagent is stopped too and its result appears only in the transcript, with no System Event."
                 } else {
-                    result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, route: route, routedClient: routed, appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig, repromptDelay: self.repromptDelay, parentBinding: self.binding).rendered
+                    result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, route: route, routedClient: routed, appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig, repromptDelay: self.repromptDelay, parentBinding: await self.bindingForCall(conversationId: conversationId)).rendered
                 }
             } else {
                 result = "Error: AppState not available for subagent execution."
@@ -7126,7 +7146,7 @@ actor IrisEngine {
                 role: role, task: task, effort: effort, parentConversationId: conversationId,
                 unit: DelegatedUnit(contract: unitContract, grade: false), client: self.client,
                 appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig,
-                repromptDelay: self.repromptDelay, parentBinding: self.binding)
+                repromptDelay: self.repromptDelay, parentBinding: await self.bindingForCall(conversationId: conversationId))
 
             // Only a `.completed` subagent reaches the checkpoint — it is the run that claimed the
             // milestone is done. Anything else claimed nothing: hand the outcome back to the loop
