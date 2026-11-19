@@ -243,6 +243,37 @@ struct YoloModeTests {
         _ = try await value(of: otherTask)
     }
 
+    /// #1115 review: a humanOnly request already queued when `/yolo on` is clicked must stay
+    /// queued, not be swept into the unfiltered `.approve` the flush used to apply to everything
+    /// for the conversation and its delegates.
+    @Test("Turning /yolo on does not flush a queued humanOnly request; an ordinary one still flushes")
+    func turningOnDoesNotFlushHumanOnlyRequests() async throws {
+        let root = try home(); defer { try? FileManager.default.removeItem(at: root) }
+        let state = try makeState(root)
+        let cid = state.createNewConversation(isBackground: false, select: true)
+
+        let ordinaryTask = Task { @MainActor in
+            await state.enqueueUserApproval(toolName: "run_command", details: "echo 1", workspace: nil,
+                                            conversationId: cid, origin: "Main agent")
+        }
+        let humanOnlyTask = Task { @MainActor in
+            await state.enqueueUserApproval(toolName: "schedule_job", details: "name: test", workspace: nil,
+                                            conversationId: cid, origin: "Main agent", humanOnly: true)
+        }
+        for _ in 0..<200 where state.pendingApprovals.count < 2 {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(state.pendingApprovals.count == 2)
+
+        state.sendMessage("/yolo on")
+        #expect(try await value(of: ordinaryTask) == true, "the ordinary request still flushes")
+        #expect(state.pendingApprovals.count == 1, "the humanOnly request stays queued")
+        #expect(state.pendingApprovals.first?.humanOnly == true)
+
+        state.resolveApproval(id: state.pendingApprovals[0].id, .approve)
+        #expect(try await value(of: humanOnlyTask) == true)
+    }
+
     @Test("YOLO mode bypasses outboundGate and ContextHolds in tainted attended conversations")
     func bypassesOutboundGateAndContextHolds() async throws {
         let root = try home(); defer { try? FileManager.default.removeItem(at: root) }
@@ -272,20 +303,30 @@ struct YoloModeTests {
         #expect(saved.count == 1)
     }
 
-    @Test("GateScriptReview auto-approves in YOLO mode")
-    func gateScriptReviewAutoApprovesInYolo() async throws {
+    /// #1115 review: the gate-script escalation is one of Brian's reserved humanOnly approvals,
+    /// same class as `schedule_job` and a workspace `.iris/` write -- YOLO must still ask for it,
+    /// not auto-approve it the way it auto-approves an ordinary command.
+    @Test("GateScriptReview still asks in YOLO mode; approving the click still lets it through")
+    func gateScriptReviewStillAsksInYolo() async throws {
         let root = try home(); defer { try? FileManager.default.removeItem(at: root) }
         let state = try makeState(root)
         let cid = state.createNewConversation(isBackground: false, select: true)
         state.sendMessage("/yolo on")
 
         let reviewer = IrisEngine.gateScriptReview(state: state, conversationId: cid, vibecopEnabled: false)
-        let outcome = await reviewer.review(script: "echo CHANGED", mounts: [], timeoutSeconds: 10, network: false)
-        switch outcome {
-        case .success:
-            #expect(state.pendingApprovals.isEmpty)
-        case .failure(let msg):
-            Issue.record("Expected gate script review to auto-approve in YOLO mode, got: \(msg.text)")
+        async let outcome = reviewer.review(script: "echo CHANGED", mounts: [], timeoutSeconds: 10, network: false)
+        for _ in 0..<40 where state.pendingApprovals.isEmpty {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        #expect(state.pendingApprovals.count == 1, "the gate-script escalation must reach the queue despite YOLO")
+        if state.pendingApprovals.isEmpty {
+            state.denyPendingApprovals(for: cid)
+        } else {
+            state.resolveApproval(id: state.pendingApprovals[0].id, .approve)
+        }
+        switch await outcome {
+        case .success: break
+        case .failure(let msg): Issue.record("Expected the approved click to let the review through, got: \(msg.text)")
         }
     }
 

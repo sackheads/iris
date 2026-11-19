@@ -7141,9 +7141,17 @@ class AppState {
               conv.isUserFacing else { return }
         if enabled {
             yoloConversations.insert(root)
+            // #1115 review: a queued request flushes only if the ladder YOLO now joins would
+            // itself approve it unasked -- a humanOnly request that is not the #812
+            // tainted-send exception (`offersConversationAllow`) stays queued, exactly as a new
+            // one of the same shape would. Reading `isYoloMode` per request (not just inserting
+            // into `yoloConversations` first) also keeps a guest-origin request queued: YOLO
+            // never applies to one regardless of this flush.
             let matching = pendingApprovals.filter { req in
                 guard let id = req.conversationId else { return false }
-                return delegationRoot(of: id) == root
+                guard delegationRoot(of: id) == root else { return false }
+                guard isYoloMode(id) else { return false }
+                return !(req.humanOnly && !req.offersConversationAllow)
             }
             for req in matching {
                 resolveApproval(id: req.id, .approve)
