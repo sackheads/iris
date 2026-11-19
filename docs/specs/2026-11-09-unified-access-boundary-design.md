@@ -12,6 +12,16 @@ F1–F9) — ship the #1195 guest-memory stopgap now. **The core-spine implement
 is written from THIS v3, not v2.** No spine code lands before the plan is approved (the epic gate is
 unchanged; the re-review it gated on is now done).
 
+**Execution state (2026-11-19):** the plan was approved and **Group A (the foundation — Tasks 1–5) is
+MERGED** (#1201 + #1202). **Group B (the seam closures) is APPROVED** (Brian, option b: full Group B,
+the memory-exfil tasks first; #1199 retires once they land) and in progress; **Group C (retrofit)
+is not yet authorized.** Two implementation names differ from this spec's prose: the `Binding` type
+shipped as **`AccessBinding`** (a `SwiftUI.Binding` collision), and the `Principal` floor shipped
+**per-axis** — `AxisCap<Value> { unbounded / fixed(Value) / fromBinding }` with a cap per grant axis
+(tools, credentials, memoryRead, memoryWrite, transports) rather than tools-only. Read `Binding`
+below as `AccessBinding`; the per-axis floor is the shipped realization of this spec's "fail closed on
+every non-owner axis" invariant.
+
 ## v3 changelog (what each finding changed)
 
 - **F1 / 2A (Brian):** Enforcement Invariant 1 scoped to **non-owner** principals; owner `main`'s
