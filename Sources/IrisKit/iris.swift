@@ -5171,6 +5171,9 @@ actor IrisEngine {
             }
             if already { return }
         }
+        // #974 Task 7 (C4): this is a `save_fact` that never passes through the dispatcher, so it is
+        // gated here, on the same table, before the hold asks the person or the store is touched.
+        if MemoryBindingGate.writeRefusal(tool: "save_fact", binding: await bindingForCall(conversationId: conversationId)) != nil { return }
         if await holdContextWriteIfTainted(call, conversationId: conversationId, workspacePath: workspacePath) != nil { return }
         do {
             _ = try factStore.saveFact(content: note, category: GoalLearnings.category, entity: nil, supersedes: nil)
