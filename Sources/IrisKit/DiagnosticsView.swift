@@ -5,11 +5,16 @@ struct DiagnosticsView: View {
     @ObservedObject private var profiler = PerformanceProfiler.shared
     @State private var mode: Mode = .byCommand
     @State private var scoreRows: [Tier2Scores.Summary] = []
+    /// The Conversation mode's (#1146): the toolbar cost popover names a conversation and this
+    /// window takes it, so a later plain open of Diagnostics does not land on a stale one.
+    private let state = AppState.shared
+    @State private var conversationId: UUID?
 
     enum Mode: String, CaseIterable, Identifiable {
         case byCommand = "By Command"
         case aggregate = "Aggregate"
         case guardScores = "Guard Scores"
+        case conversation = "Conversation"
         var id: String { rawValue }
     }
 
@@ -26,9 +31,19 @@ struct DiagnosticsView: View {
             case .byCommand: byCommand
             case .aggregate: aggregate
             case .guardScores: guardScores
+            case .conversation: ConversationCostDiagnosticsView(state: state, conversationId: conversationId)
             }
         }
         .frame(minWidth: 600, minHeight: 400)
+        .onAppear(perform: takeConversationRequest)
+        .onChange(of: state.diagnosticsRequest) { takeConversationRequest() }
+    }
+
+    private func takeConversationRequest() {
+        guard let asked = state.diagnosticsConversationId else { return }
+        conversationId = asked
+        mode = .conversation
+        state.diagnosticsConversationId = nil
     }
 
     // MARK: - Guard Scores (#238)

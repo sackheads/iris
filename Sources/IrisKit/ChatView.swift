@@ -540,7 +540,19 @@ struct ChatView: View {
                                     .help(cost.help + " Click for the breakdown.")
                                     .accessibilityLabel("Estimated cost \(cost.label). Show the breakdown.")
                                     .popover(isPresented: $showCostBreakdown, arrowEdge: .bottom) {
-                                        CostBreakdownView(breakdown: CostBreakdown.make(usage: conv.tokenUsage, cost: cost))
+                                        VStack(spacing: 0) {
+                                            CostBreakdownView(breakdown: CostBreakdown.make(usage: conv.tokenUsage, cost: cost))
+                                            Divider()
+                                            // #1146: the same figure by turn and by model, in Diagnostics.
+                                            Button("Per-turn view in Diagnostics") {
+                                                state.diagnosticsConversationId = conv.id
+                                                state.diagnosticsRequest += 1
+                                                showCostBreakdown = false
+                                                openWindow(id: "diagnostics")
+                                            }
+                                            .buttonStyle(.link)
+                                            .padding(10)
+                                        }
                                     }
                                 }
                             }
