@@ -203,7 +203,14 @@ extension PluginInstaller {
     /// bare `{name: {...}}` object), supporting both stdio (`command`) and remote HTTP
     /// (`url` / `serverUrl` / `httpUrl`) servers (#1105). Literal secrets are lifted into
     /// Keychain declarations; the generated `mcp.json` carries only `${...}` references.
-    static func draft(fromSnippet json: String) throws -> PluginDraft {
+    ///
+    /// `liftFromLegacyStore` (#1116): when a `${keychain:KEY}` template is already present in the
+    /// input text, `false` (the default) leaves that key's value empty -- a pasted or
+    /// another-harness-imported snippet is not trusted to name a key it's entitled to. The two
+    /// call sites that convert the owner's own already-configured legacy `mcp_servers.json` entry
+    /// pass `true`, since that entry's credential is the owner's own and carrying it forward is
+    /// the conversion's whole point -- losing it silently breaks a working server.
+    static func draft(fromSnippet json: String, liftFromLegacyStore: Bool = false) throws -> PluginDraft {
         guard let data = json.data(using: .utf8),
               let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw IPFError.invalidJSON("Snippet is not valid JSON")
@@ -260,13 +267,16 @@ extension PluginInstaller {
             let existingConfigRefs = PluginReferences.configKeys(in: rawValue)
             if !existingKeychainRefs.isEmpty || !existingConfigRefs.isEmpty {
                 headerTemplates[headerName] = rawValue
-                // #1116: never lift a value out of the shared `iris.mcp` item for a
-                // ${keychain:KEY} template found literally in pasted/imported text -- leave it
-                // empty like any other declared-but-unfilled secret, so the wizard's SecureField
-                // is genuinely empty rather than a masked, silently-reused credential bound to
-                // whatever host this snippet names. The user re-enters it for this new host.
+                // #1116: only a trusted conversion of the owner's own legacy entry
+                // (liftFromLegacyStore) carries a ${keychain:KEY} template's value forward from
+                // the shared `iris.mcp` item. A pasted or another-harness-imported snippet leaves
+                // it empty like any other declared-but-unfilled secret, so the wizard's
+                // SecureField is genuinely empty rather than a masked, silently-reused credential
+                // bound to whatever host the untrusted text names.
                 for key in existingKeychainRefs {
-                    secretValues[key] = ""
+                    secretValues[key] = liftFromLegacyStore
+                        ? (KeychainManager.shared.secrets(service: KeychainManager.mcpFileService)[key] ?? "")
+                        : ""
                 }
                 for key in existingConfigRefs {
                     configValues[key] = ""

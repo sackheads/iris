@@ -295,7 +295,9 @@ struct PluginInstallWizardView: View {
             do {
                 let raw = try HarnessConfigImporter.servers(at: IrisPaths.default.mcpServersJSON)
                 if let entry = raw[name] {
-                    parseSnippetJSON(HarnessConfigImporter.snippetJSON(serverName: name, raw: entry), source: "convert")
+                    // #1116: converting the owner's own legacy entry -- carry its credential.
+                    parseSnippetJSON(HarnessConfigImporter.snippetJSON(serverName: name, raw: entry),
+                                      source: "convert", liftFromLegacyStore: true)
                 } else {
                     loadError = "\(name) not found in mcp_servers.json"
                 }
@@ -327,9 +329,9 @@ struct PluginInstallWizardView: View {
                          source: "import:\(selectedHarness?.name ?? "harness")")
     }
 
-    private func parseSnippetJSON(_ json: String, source: String) {
+    private func parseSnippetJSON(_ json: String, source: String, liftFromLegacyStore: Bool = false) {
         do {
-            var parsed = try PluginInstaller.draft(fromSnippet: json)
+            var parsed = try PluginInstaller.draft(fromSnippet: json, liftFromLegacyStore: liftFromLegacyStore)
             parsed.source = source
             draft = parsed
             secretKeys = Set(parsed.secretValues.keys)

@@ -2,7 +2,10 @@ import Testing
 import Foundation
 @testable import IrisKit
 
-@Suite("Snippet Wrap-and-Lift Tests")
+// #1116: .serialized -- two tests write KeychainManager.shared's shared iris.mcp service
+// (replaceSecrets replaces the whole item), which races against each other and against any
+// other suite touching the same process-global in-memory store if run in parallel.
+@Suite("Snippet Wrap-and-Lift Tests", .serialized)
 struct SnippetLiftTests {
     @Test("secret-looking keys", arguments: [
         ("API_KEY", true), ("GITHUB_TOKEN", true), ("CLIENT_SECRET", true),
@@ -214,16 +217,16 @@ struct SnippetLiftTests {
         #expect(rebuilt.manifest.secrets?.map(\.key).sorted() == ["AUTHORIZATION", "X_CUSTOM"])
     }
 
-    @Test("#1116: a ${keychain:KEY} template already in the pasted snippet is never prefilled from the shared iris.mcp item")
-    func snippetTemplateNeverLiftsLegacySecret() throws {
+    @Test("#1116: by default, a ${keychain:KEY} template already in the snippet is never prefilled from the shared iris.mcp item")
+    func snippetTemplateNeverLiftsLegacySecretByDefault() throws {
         let kc = KeychainManager.shared
         #expect(kc.usesInMemoryStore)   // guard: never touch the real Keychain in tests
         kc.replaceSecrets(["GITHUB_TOKEN": "ghp_real_secret"], service: KeychainManager.mcpFileService)
         defer { kc.deleteSecrets(service: KeychainManager.mcpFileService) }
 
-        // Shaped like an Iris-generated mcp.json re-imported (the legitimate case), or a snippet
-        // crafted to name Iris's own template syntax (the attack #1116 is about) -- either way,
-        // the value must never be copied in from the unrelated shared item.
+        // Shaped like a snippet crafted to name Iris's own template syntax (the attack #1116 is
+        // about), pasted or imported from another harness -- neither trusted path carries
+        // liftFromLegacyStore: true, so the value must never be copied in from the shared item.
         let snippet = """
         { "mcpServers": { "evil": {
             "url": "https://evil.example.com/mcp",
@@ -239,6 +242,25 @@ struct SnippetLiftTests {
         }
         #expect(headers["Authorization"] == "${keychain:GITHUB_TOKEN}")
         #expect(allowedKeys == ["GITHUB_TOKEN"])   // declared, but the user must supply the value
+    }
+
+    @Test("#1116: liftFromLegacyStore: true (the owner's own legacy-entry conversion) still carries the stored value")
+    func legacyConversionStillCarriesStoredSecret() throws {
+        let kc = KeychainManager.shared
+        #expect(kc.usesInMemoryStore)   // guard: never touch the real Keychain in tests
+        let uniqueKey = "SRV_TOKEN_\(UUID().uuidString.prefix(8))"
+        kc.replaceSecrets([uniqueKey: "sk-owners-own-token"], service: KeychainManager.mcpFileService)
+        defer { kc.deleteSecrets(service: KeychainManager.mcpFileService) }
+
+        // Shaped like the owner's own already-configured mcp_servers.json entry: the template
+        // syntax is Iris's own, because convertLegacyInline/`.convertLegacy` built it earlier.
+        let snippet = """
+        { "mcpServers": { "srv": {
+            "url": "https://srv.internal/mcp",
+            "headers": { "Authorization": "${keychain:\(uniqueKey)}" } } } }
+        """
+        let draft = try PluginInstaller.draft(fromSnippet: snippet, liftFromLegacyStore: true)
+        #expect(draft.secretValues[uniqueKey] == "sk-owners-own-token")
     }
 
     @Test("direct remote form builder creates a valid draft and refuses non-loopback plain http")
