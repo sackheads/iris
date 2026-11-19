@@ -5172,7 +5172,7 @@ actor IrisEngine {
         let source = await localState.requestApprovalSource(
             toolName: call.name, details: OutboundTools.approvalDetails(tool: call.name, args: call.args), args: call.args,
             workspace: workspacePath, conversationId: conversationId, origin: approvalOrigin,
-            humanOnly: true, offersConversationAllow: true)
+            humanOnly: true, offersConversationAllow: true, isOwner: self.binding.isOwner)
         guard let source else { return .refused(Self.deniedToolResult) }
         return .approved(ToolApproval(source))
     }
@@ -6014,7 +6014,7 @@ actor IrisEngine {
                 let source = await localState?.requestApprovalSource(
                     toolName: functionCall.name, details: details, args: functionCall.args,
                     workspace: workspacePath, conversationId: conversationId, origin: approvalOrigin,
-                    humanOnly: true, beforeToolFired: jobHooksFired)
+                    humanOnly: true, beforeToolFired: jobHooksFired, isOwner: self.binding.isOwner)
                 guard let source else { return Self.jobCreationDeclined }
                 var approval = ToolApproval(source)
                 approval.hookRewrite = jobRewrittenByHook
@@ -7287,7 +7287,7 @@ actor IrisEngine {
                     // #239 (Brian, "1: a"): a subagent on a custom endpoint asks Allow Once only.
                     offersAlwaysAllow: !(subagentRoute?.isEndpoint ?? false),
                     // #653: a call recorded for a card here already went through its hooks.
-                    beforeToolFired: Self.isGatedFileOrCommand(functionCall))
+                    beforeToolFired: Self.isGatedFileOrCommand(functionCall), isOwner: self.binding.isOwner)
                 if let source {
                     var approval = ToolApproval(source)
                     approval.hookRewrite = rewrittenByHook
@@ -7764,8 +7764,15 @@ actor IrisEngine {
         // `fsRoots` grant the host file tools fall back to once the existing grant/approved-
         // workspace/decided-path routes above are all absent, so a non-owner foreground
         // conversation (today host-always) is confined too, not only a background job's.
-        let fsGrant = JobGrant(mounts: self.binding.profile.fsRoots.map { ContainerMount(source: IrisEngine.expandTilde($0)) })
-        let filesystemPolicy = FilesystemPolicy.resolve(binding: self.binding, grant: fsGrant)
+        // dev-2 review finding 1: routed through `FilesystemPolicy.grant(fromFsRoots:)`, which
+        // validates each root through `JobGrant.resolve`'s own refusals (too broad, protected, a
+        // credential store, a startup location, a login-PATH entry) — building the grant directly
+        // from `fsRoots` bypassed every one of those.
+        // dev-2/planner review finding 2: this reads `self.binding`, not `bindingForCall`, so a
+        // guest-steered `.main` turn is still routed as owner here until #1212 lands. Tracked with
+        // #1216 (not fixed inline: #1212 is not yet in this branch's base).
+        let filesystemPolicy = FilesystemPolicy.resolve(binding: self.binding,
+                                                         grant: FilesystemPolicy.grant(fromFsRoots: self.binding.profile.fsRoots))
         var result = await executor.execute(name: name, args: execArgs, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox, grant: grant, grantedMount: grantedMount,
                                               approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath, restrictedPath: restrictedPath,
                                               homeWritableOptIn: await homeWritableOptIn(for: conversationId),
@@ -8439,7 +8446,7 @@ extension IrisEngine {
         }
         let approved = await localState?.requestApprovalSource(
             toolName: "read_file", details: details, args: ["path": .string(details)], workspace: workspacePath,
-            conversationId: conversationId, origin: approvalOrigin, inSandbox: false, callerRole: .agent)
+            conversationId: conversationId, origin: approvalOrigin, inSandbox: false, callerRole: .agent, isOwner: self.binding.isOwner)
         guard approved != nil else { return .failure(Refusal(text: "reading \(path) to attach it wasn't approved.")) }
         let read = await OffPool.run(cancelled: Result<Data, GrantedFileError>.failure(.io(call: "read", errno: ECANCELED))) { _ -> Result<Data, GrantedFileError> in
             do { return .success(try GrantedFileAccess(root: root).readData(relative: relative, maxBytes: ArtifactLimits.fileBytes)) }

@@ -175,3 +175,130 @@ struct FilesystemPolicyTests {
         #expect(!FileManager.default.fileExists(atPath: outside.appendingPathComponent("y.txt").path))
     }
 }
+
+/// #974 Task 8 (C5), dev-2/dev-3 review finding 1: the real dispatcher (`executeFunctionCall` ->
+/// `executeToolWithHooks`) sets `decidedPath` for every ordinary host read/write, which served
+/// BEFORE `FilesystemPolicy`'s `.confined` fallback ever ran -- a test calling
+/// `ToolExecutor.execute` directly with `decidedPath` nil (as `FilesystemPolicyTests` above does)
+/// cannot see that, because production never takes that path. These tests drive a real engine
+/// turn instead, the path a non-owner binding's call actually takes.
+@MainActor
+@Suite("FilesystemPolicy is enforced on the real dispatch path, not only ToolExecutor.execute directly (#974 Task 8)", .timeLimit(.minutes(1)))
+struct FilesystemPolicyDispatchTests {
+    private func nonOwner(fsRoots: Set<String> = []) -> AccessBinding {
+        AccessBinding(profile: AccessProfile(fsRoots: fsRoots), principal: .main, isOwner: false)
+    }
+
+    private func session(_ call: FunctionCall, binding: AccessBinding) -> (AppState, IrisEngine, UUID) {
+        let script: [[ScriptedStreamClient.Step]] = [
+            [.event(.functionCall(call)), .event(.done(finishReason: "tool_use"))],
+            [.event(.textDelta("done")), .event(.done(finishReason: nil))],
+        ]
+        let app = AppState()
+        app.autoApproveTools = true
+        let id = UUID()
+        app.createNewConversation(id: id)
+        app.selectedConversationId = id
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: ScriptedStreamClient(script),
+                                retryDelays: [], streamResponses: true, protectionEnabled: false, sessionPeerCount: 0,
+                                binding: binding)
+        app.installEngine(engine)
+        return (app, engine, id)
+    }
+
+    private func finished(_ app: AppState, _ id: UUID) -> Bool {
+        (app.conversations.first { $0.id == id }?.history ?? []).contains { $0.role == "model" && $0.parts.contains { $0.text == "done" } }
+    }
+
+    private func toolResultText(_ app: AppState, _ id: UUID, callId: String) -> String? {
+        for content in app.conversations.first(where: { $0.id == id })?.history ?? [] {
+            for part in content.parts {
+                if part.functionResponse?.id == callId { return part.functionResponse?.response["result"]?.stringValue }
+            }
+        }
+        return nil
+    }
+
+    private func eventually(_ ms: Int = 5000, _ condition: @MainActor () -> Bool) async -> Bool {
+        for _ in 0..<(ms / 25) {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        return condition()
+    }
+
+    private func tree() throws -> (base: URL, allowed: URL, outside: URL) {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("iris-fs-policy-dispatch-\(UUID().uuidString)")
+        let allowed = base.appendingPathComponent("allowed")
+        let outside = base.appendingPathComponent("outside")
+        try FileManager.default.createDirectory(at: allowed, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        return (base, allowed, outside)
+    }
+
+    @Test("a non-owner with an empty fsRoots grant cannot read_file through a real turn")
+    func emptyGrantRefusesThroughRealTurn() async throws {
+        let (base, allowed, _) = try tree()
+        defer { try? FileManager.default.removeItem(at: base) }
+        try "secret content".write(to: allowed.appendingPathComponent("x.txt"), atomically: true, encoding: .utf8)
+        let call = FunctionCall(name: "read_file", args: ["path": .string(allowed.appendingPathComponent("x.txt").path)], id: "c1")
+        let (app, _, id) = session(call, binding: nonOwner())
+        app.sendMessage("go")
+        #expect(await eventually { self.finished(app, id) })
+        let result = try #require(toolResultText(app, id, callId: "c1"))
+        #expect(!result.contains("secret content"), Comment(rawValue: result))
+    }
+
+    @Test("a non-owner with an fsRoots grant elsewhere cannot read_file outside it through a real turn")
+    func grantElsewhereRefusesThroughRealTurn() async throws {
+        let (base, allowed, outside) = try tree()
+        defer { try? FileManager.default.removeItem(at: base) }
+        try "secret content".write(to: outside.appendingPathComponent("y.txt"), atomically: true, encoding: .utf8)
+        let call = FunctionCall(name: "read_file", args: ["path": .string(outside.appendingPathComponent("y.txt").path)], id: "c1")
+        let (app, _, id) = session(call, binding: nonOwner(fsRoots: [allowed.path]))
+        app.sendMessage("go")
+        #expect(await eventually { self.finished(app, id) })
+        let result = try #require(toolResultText(app, id, callId: "c1"))
+        #expect(!result.contains("secret content"), Comment(rawValue: result))
+    }
+
+    @Test("a non-owner CAN read_file inside its own fsRoots grant through a real turn")
+    func insideTheGrantWorksThroughRealTurn() async throws {
+        let (base, allowed, _) = try tree()
+        defer { try? FileManager.default.removeItem(at: base) }
+        try "readable content".write(to: allowed.appendingPathComponent("x.txt"), atomically: true, encoding: .utf8)
+        let call = FunctionCall(name: "read_file", args: ["path": .string(allowed.appendingPathComponent("x.txt").path)], id: "c1")
+        let (app, _, id) = session(call, binding: nonOwner(fsRoots: [allowed.path]))
+        app.sendMessage("go")
+        #expect(await eventually { self.finished(app, id) })
+        let result = try #require(toolResultText(app, id, callId: "c1"))
+        #expect(result.contains("readable content"), Comment(rawValue: result))
+    }
+
+    @Test("a non-owner cannot write_file outside its fsRoots grant through a real turn")
+    func writeOutsideGrantRefusedThroughRealTurn() async throws {
+        let (base, allowed, outside) = try tree()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let target = outside.appendingPathComponent("y.txt")
+        let call = FunctionCall(name: "write_file", args: ["path": .string(target.path), "content": .string("hi")], id: "c1")
+        let (app, _, id) = session(call, binding: nonOwner(fsRoots: [allowed.path]))
+        app.sendMessage("go")
+        #expect(await eventually { self.finished(app, id) })
+        let result = try #require(toolResultText(app, id, callId: "c1"))
+        #expect(!result.contains("Successfully wrote"), Comment(rawValue: result))
+        #expect(!FileManager.default.fileExists(atPath: target.path))
+    }
+
+    @Test("an owner's read_file through a real turn is unaffected -- reads anywhere, as today")
+    func ownerUnaffectedThroughRealTurn() async throws {
+        let (base, _, outside) = try tree()
+        defer { try? FileManager.default.removeItem(at: base) }
+        try "owner content".write(to: outside.appendingPathComponent("y.txt"), atomically: true, encoding: .utf8)
+        let call = FunctionCall(name: "read_file", args: ["path": .string(outside.appendingPathComponent("y.txt").path)], id: "c1")
+        let (app, _, id) = session(call, binding: AccessBinding(profile: .owner, principal: .main, isOwner: true))
+        app.sendMessage("go")
+        #expect(await eventually { self.finished(app, id) })
+        let result = try #require(toolResultText(app, id, callId: "c1"))
+        #expect(result.contains("owner content"), Comment(rawValue: result))
+    }
+}
