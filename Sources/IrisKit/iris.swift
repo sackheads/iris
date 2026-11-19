@@ -5983,6 +5983,12 @@ actor IrisEngine {
         if let refusal = Self.guestOriginDispatchRefusal(functionCall.name, guestOrigin: githubGuestOrigin) {
             return refusal
         }
+        // #974 Task 7 (C4): a memory writer below its store's tier on the active binding is refused
+        // before anything is asked or written. The three reads check their own branches below.
+        if let refusal = MemoryBindingGate.writeRefusal(tool: functionCall.name,
+                                                        binding: await bindingForCall(conversationId: conversationId)) {
+            return refusal
+        }
         if Self.jobCreationTools.contains(functionCall.name), isUnattended {
             return Self.unattendedJobCreationRefusal
         }
@@ -6655,6 +6661,10 @@ actor IrisEngine {
                 }
             }
         } else if functionCall.name == "search_conversations" {
+            // #974 Task 7: the binding's memory tier, before the pinned rule or the argument.
+            guard MemoryBindingGate.mayReadConversations(await bindingForCall(conversationId: conversationId)) else {
+                return MemoryBindingGate.refusal
+            }
             guard let query = functionCall.args["query"]?.stringValue, !query.isEmpty else {
                 // Falling through to the unknown-tool fallback here would read as "no such tool"
                 // rather than "you forgot an argument" — `manage_fact needs a fact_id.` is the same
@@ -6741,6 +6751,9 @@ actor IrisEngine {
             if case .blocked = searchOutcome { searchBlocked = true } else { searchBlocked = false }
             result = noteBlockedResult(guardedSearch, name: functionCall.name, conversationId: conversationId, blocked: searchBlocked)
         } else if functionCall.name == "read_conversation" {
+            guard MemoryBindingGate.mayReadConversations(await bindingForCall(conversationId: conversationId)) else {
+                return MemoryBindingGate.refusal   // #974 Task 7, ahead of every other check
+            }
             // Same defense in depth as search_conversations just above: declaration gating stops a
             // well-behaved model, dispatch reads the function name alone, so the invariant is
             // enforced again here, where a forged or stale call would otherwise have its effect.
@@ -6884,14 +6897,24 @@ actor IrisEngine {
             let requested = (functionCall.args["scope"]?.stringValue ?? "facts").lowercased()
             let scope = ["facts", "conversations", "all"].contains(requested) ? requested : "facts"
             var blocks: [String] = []
+            // #974 Task 7: each half is gated on the active binding's memory tier; a half it may
+            // not read is refused in place, never silently empty.
+            let memoryBinding = await bindingForCall(conversationId: conversationId)
             if scope != "conversations" {
-                let facts = (try? factStore.search(query: query)) ?? []
-                let body = facts.isEmpty
-                    ? "No relevant facts found."
-                    : Self.renderFactLines(facts)
+                let body: String
+                if MemoryBindingGate.mayReadFacts(memoryBinding) {
+                    let facts = (try? factStore.search(query: query)) ?? []
+                    body = facts.isEmpty
+                        ? "No relevant facts found."
+                        : Self.renderFactLines(facts)
+                } else {
+                    body = MemoryBindingGate.refusal
+                }
                 blocks.append(scope == "all" ? "Facts:\n\(body)" : body)
             }
-            if scope != "facts" {
+            if scope != "facts", !MemoryBindingGate.mayReadConversations(memoryBinding) {
+                blocks.append(scope == "all" ? "Conversations:\n\(MemoryBindingGate.refusal)" : MemoryBindingGate.refusal)
+            } else if scope != "facts" {
                 // Through AppState's store, not a global: the engine already holds the one the
                 // app is actually persisting to, and tests inject their own.
                 let store = await MainActor.run { localState?.store }
