@@ -42,8 +42,16 @@ struct SecretScrubTests {
 
     @Test("a secret that contains another is removed whole, never leaving the longer one's tail")
     func longestFirst() {
-        let short = "abcdefgh", long = "abcdefghIJKLMNOP"
-        #expect(SecretScrub.scrubSecrets("v \(long) w", known: [short, long]) == "v [redacted] w")
+        // Several pairs at once: a set has no order, so one pair could pass by luck with the sort removed.
+        var known: Set<String> = []
+        var text = "", expected = ""
+        for i in 0..<12 {
+            let short = "secret\(i)abcd", long = "secret\(i)abcdLONGTAIL\(i)"
+            known.formUnion([short, long])
+            text += "v \(long) w "
+            expected += "v [redacted] w "
+        }
+        #expect(SecretScrub.scrubSecrets(text, known: known) == expected)
     }
 
     @Test("the existing two-argument scrub keeps its behaviour for its callers")
