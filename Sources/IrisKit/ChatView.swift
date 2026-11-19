@@ -625,11 +625,12 @@ struct ChatView: View {
             if let request = state.pendingApprovals.first {
                 ApprovalBannerView(request: request,
                                    queueDepth: state.pendingApprovals.count,
-                                   onResolve: { resolution in
+                                   onResolve: { resolution, choice in
                     Motion.withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                        state.resolveApproval(id: request.id, resolution)
+                        state.resolveApproval(id: request.id, resolution, choice: choice)
                     }
                 })
+                .id(request.id)
                 .padding()
                 .transition(Motion.slide())
             }
@@ -1788,7 +1789,39 @@ struct SystemMessageContent: View {
 struct ApprovalBannerView: View {
     let request: ToolApprovalRequest
     let queueDepth: Int
-    let onResolve: (AppState.ApprovalResolution) -> Void
+    let onResolve: (AppState.ApprovalResolution, AppState.AlwaysAllowChoice) -> Void
+
+    /// #1137: the person's text for each prefix rule an Always Allow would save, starting at what was
+    /// proposed. Only ever narrowed: `ToolApprovalRequest.alwaysAllowRules(for:)` decides what is
+    /// accepted, here to say why a typed rule is refused and again in `resolveApproval`.
+    @State private var editedPrefixes: [String]
+    @State private var exactOnly = false
+
+    init(request: ToolApprovalRequest, queueDepth: Int,
+         onResolve: @escaping (AppState.ApprovalResolution, AppState.AlwaysAllowChoice) -> Void) {
+        self.request = request
+        self.queueDepth = queueDepth
+        self.onResolve = onResolve
+        _editedPrefixes = State(initialValue: request.alwaysAllowRules.map(\.details))
+    }
+
+    /// Whether the dialog offers the rule editor: a command whose Always Allow saves prefix rules.
+    static func offersRuleEditor(_ request: ToolApprovalRequest) -> Bool {
+        request.toolName == "run_command" && request.offersAlwaysAllow
+            && !request.alwaysAllowRules.isEmpty && request.alwaysAllowRules.allSatisfy(\.isPrefix)
+    }
+
+    private var alwaysAllowChoice: AppState.AlwaysAllowChoice {
+        guard Self.offersRuleEditor(request) else { return .proposed }
+        if exactOnly { return .exactCommand }
+        return editedPrefixes == request.alwaysAllowRules.map(\.details) ? .proposed : .edited(editedPrefixes)
+    }
+
+    /// Why the current choice would save nothing, or nil when it is fine.
+    private var alwaysAllowRefusal: String? {
+        if case .failure(let refusal) = request.alwaysAllowRules(for: alwaysAllowChoice) { return refusal.message }
+        return nil
+    }
 
     /// What the banner says Always Allow saves (#1102): the prefixes, or that it is the exact
     /// command. nil for a non-command rule, whose text is the call shown above.
@@ -1848,8 +1881,40 @@ struct ApprovalBannerView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            // #1102: the rule Always Allow would save, before it is clicked.
-            if request.offersAlwaysAllow, let summary = Self.alwaysAllowSummary(request.alwaysAllowRules) {
+            // #1102: the rule Always Allow would save, before it is clicked. #1137: for a command
+            // whose rule is a prefix, editable: narrower only, or the exact command.
+            if Self.offersRuleEditor(request) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Always Allow saves (any arguments after it; attended chats only):")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    ForEach(editedPrefixes.indices, id: \.self) { index in
+                        TextField("rule", text: $editedPrefixes[index])
+                            .font(.caption.monospaced())
+                            .textFieldStyle(.roundedBorder)
+                            // A one-word rule (a read-only whole program) is not narrowed: see `CommandPattern.validatedEdit`.
+                            .disabled(exactOnly || request.alwaysAllowRules[index].details.split(separator: " ").count < 2)
+                            .accessibilityLabel("Always Allow rule \(index + 1)")
+                    }
+                    HStack {
+                        Toggle("Exact command only", isOn: $exactOnly)
+                            .toggleStyle(.checkbox)
+                            .font(.caption)
+                        Spacer()
+                        if editedPrefixes != request.alwaysAllowRules.map(\.details) {
+                            Button("Reset") { editedPrefixes = request.alwaysAllowRules.map(\.details) }
+                                .buttonStyle(.link)
+                                .font(.caption)
+                        }
+                    }
+                    if let refusal = alwaysAllowRefusal {
+                        Label(refusal, systemImage: "exclamationmark.circle")
+                            .font(.caption)
+                            .foregroundColor(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            } else if request.offersAlwaysAllow, let summary = Self.alwaysAllowSummary(request.alwaysAllowRules) {
                 Text((try? AttributedString(markdown: summary)) ?? AttributedString(summary))
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -1869,19 +1934,21 @@ struct ApprovalBannerView: View {
                 // request never reads the allowlist (#187), and a gate script's rule would let its
                 // text run on the host unasked (#648). See `ToolApprovalRequest.offersAlwaysAllow`.
                 if request.offersAlwaysAllow {
-                    Button(action: { onResolve(.alwaysAllowGlobal) }) {
+                    Button(action: { onResolve(.alwaysAllowGlobal, alwaysAllowChoice) }) {
                         Text("Always Allow (Global)")
                     }
+                    .disabled(alwaysAllowRefusal != nil)
 
                     if request.workspace != nil {
-                        Button(action: { onResolve(.alwaysAllowProject) }) {
+                        Button(action: { onResolve(.alwaysAllowProject, alwaysAllowChoice) }) {
                             Text("Always Allow (Project)")
                         }
+                        .disabled(alwaysAllowRefusal != nil)
                     }
                 }
                 // #812: a tainted send's card only. Per conversation and per tool; never global.
                 if request.offersConversationAllow {
-                    Button(action: { onResolve(.allowInConversation) }) {
+                    Button(action: { onResolve(.allowInConversation, .proposed) }) {
                         Text("Allow in This Conversation")
                     }
                     .help("Approve, and let \(request.toolName) run without asking for the rest of this conversation.")
@@ -1889,12 +1956,12 @@ struct ApprovalBannerView: View {
 
                 Spacer()
                 
-                Button(role: .cancel, action: { onResolve(.deny) }) {
+                Button(role: .cancel, action: { onResolve(.deny, .proposed) }) {
                     Text("Deny")
                 }
                 .keyboardShortcut(.cancelAction)
                 
-                Button(action: { onResolve(.approve) }) {
+                Button(action: { onResolve(.approve, .proposed) }) {
                     Text("Approve Once")
                 }
                 .buttonStyle(.borderedProminent)
