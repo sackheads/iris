@@ -173,8 +173,12 @@ struct AlwaysAllowEditResolveTests {
         let (state, root) = try rig()
         defer { try? FileManager.default.removeItem(at: root) }
         let cid = state.createNewConversation(isBackground: false, select: false)
-        _ = try await resolve(state, "swift build && swift test", .alwaysAllowGlobal, choice: .edited(["swift test"]), in: cid)
-        #expect(!allowed(state, "swift test") && !allowed(state, "swift build"))
+        // Each is a valid edit of one rule, so only the count check refuses them (a pairing that
+        // truncated would save the first rule alone).
+        for texts in [["swift build"], ["swift build", "swift test", "swift test"], []] {
+            _ = try await resolve(state, "swift build && swift test", .alwaysAllowGlobal, choice: .edited(texts), in: cid)
+            #expect(!allowed(state, "swift build") && !allowed(state, "swift test"), Comment(rawValue: "\(texts)"))
+        }
     }
 
     @Test("a narrowed rule that would hold a credential-shaped word is refused, like the proposed one")
@@ -203,9 +207,13 @@ struct AlwaysAllowEditResolveTests {
         let (state, root) = try rig()
         defer { try? FileManager.default.removeItem(at: root) }
         let cid = state.createNewConversation(isBackground: false, select: false)
-        let command = "echo ghp_AbCdEf0123456789AbCdEf0123456789AbCd"
-        _ = try await resolve(state, command, .alwaysAllowGlobal, choice: .exactCommand, in: cid)
+        // The proposed rule (`npm run deploy`) is clean, so the button is offered; only the exact
+        // rule would carry the token, and must be refused.
+        let command = "npm run deploy ghp_AbCdEf0123456789AbCdEf0123456789AbCd"
+        let pending = try await resolve(state, command, .alwaysAllowGlobal, choice: .exactCommand, in: cid)
+        #expect(pending.offersAlwaysAllow, "the case under test: the proposed prefix is fine, the whole command is not")
         #expect(!allowed(state, command))
+        #expect(!allowed(state, "npm run deploy other"))
     }
 
     @Test("a request that offers no Always Allow saves nothing whatever the choice")
