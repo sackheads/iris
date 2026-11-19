@@ -488,10 +488,12 @@ public struct InjectionGuard {
         return (judged.text, judged.cacheable, judged.unjudged, judged.strippedMarkerLines)
     }
 
-    /// `sanitizeUntrustedCacheable`, plus how many lines of the display are not the file's own for
-    /// a reason other than a deleted role marker (#959, `carriedDisplay`; a deleted marker is
-    /// `strippedMarkerLines`' to report, so a line is never counted by both notices). The
-    /// `read_file` call site uses this entry point.
+    /// `sanitizeUntrustedCacheable`, plus how many lines of the display are not the file's own
+    /// (#959, `carriedDisplay`). A line whose role marker was deleted is counted here too, and by
+    /// `strippedMarkerLines` when #969 recorded it: the two notices are separate sentences about
+    /// different causes, and between them every difference is reported (a bare `---`/`###` line is
+    /// stripped but never recorded by #969, so only this count sees it). The `read_file` call site
+    /// uses this entry point.
     static func sanitizeUntrustedDisplay(_ rawInput: String, contextTag: String = "",
                                          maxTier: SanitizationTier = .tier1_structural,
                                          protectionEnabled: Bool? = nil,
@@ -868,9 +870,6 @@ public struct InjectionGuard {
         }
 
         var diverged = 0
-        // Lines shown without their role marker and for no other reason: #969's notice reports
-        // those (`strippedMarkerLines`), so they are not counted twice.
-        var markerOnly = 0
         /// What to show for an aligned line, and whether it differs from the file's own.
         func shownForAligned(rawLine: String, cleanLine: String) -> String {
             let folded = rawLine.precomposedStringWithCompatibilityMapping
@@ -897,9 +896,7 @@ public struct InjectionGuard {
             } else {
                 shown = rawLine
             }
-            if !sameScalars(shown, rawLine) {
-                if markerStripped, !tokenOrBreak, !invisibleRemoved, !escapeMatched { markerOnly += 1 } else { diverged += 1 }
-            }
+            if !sameScalars(shown, rawLine) { diverged += 1 }
             return shown
         }
 
@@ -938,7 +935,7 @@ public struct InjectionGuard {
         let text = escapeWrapperBreakout(carried.joined(separator: "\n"))
         // A display that is not the file's own text always says so, even where the lines did not
         // align one for one (a breakout spanning two lines, a redaction): at least one line differs.
-        if diverged == 0, markerOnly == 0, !text.unicodeScalars.elementsEqual(rawOriginal.unicodeScalars) { diverged = 1 }
+        if diverged == 0, !text.unicodeScalars.elementsEqual(rawOriginal.unicodeScalars) { diverged = 1 }
         return (text, diverged)
     }
 

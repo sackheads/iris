@@ -74,7 +74,7 @@ struct ReadFileFidelityPropertyTests {
 
     private func displayCounted(_ raw: String, modelJudges: Bool) async -> (text: String, diverged: Int) {
         let tag = "fidelity-959-prop-count-\(UUID().uuidString)"
-        let result: (text: String, cacheable: Bool, unjudged: [String], divergedLines: Int)
+        let result: (text: String, cacheable: Bool, unjudged: [String], strippedMarkerLines: Int, divergedLines: Int)
         if modelJudges {
             result = await CoreMLEvaluator.$scopedModel.withValue(.init(MockCoreMLModel(probability: 0.1))) {
                 await InjectionGuard.sanitizeUntrustedDisplay(raw, contextTag: tag, maxTier: .tier2_coreML,
@@ -89,7 +89,7 @@ struct ReadFileFidelityPropertyTests {
 
     private func display(_ raw: String, fidelity: InjectionGuard.FidelityMode, modelJudges: Bool) async -> String {
         let tag = "fidelity-959-prop-\(UUID().uuidString)"
-        let result: (text: String, cacheable: Bool, unjudged: [String], divergedLines: Int)
+        let result: (text: String, cacheable: Bool, unjudged: [String], strippedMarkerLines: Int, divergedLines: Int)
         if modelJudges {
             result = await CoreMLEvaluator.$scopedModel.withValue(.init(MockCoreMLModel(probability: 0.1))) {
                 await InjectionGuard.sanitizeUntrustedDisplay(raw, contextTag: tag, maxTier: .tier2_coreML,

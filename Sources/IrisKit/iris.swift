@@ -7618,7 +7618,7 @@ actor IrisEngine {
     private func noteAlteredFidelityRead(_ sanitizedResult: String, lines: Int) -> String {
         guard lines > 0 else { return sanitizedResult }
         let plural = lines == 1 ? "1 line" : "\(lines) lines"
-        return sanitizedResult + "\n[Iris: \(plural) of this read differ from the file on disk (the injection guard removed an invisible or control character, or neutralized a tag-like sequence). Do not write this back whole as if it were the original file.]"
+        return sanitizedResult + "\n[Iris: \(plural) of this read differ from the file on disk (the injection guard removed an invisible or control character, neutralized a tag-like sequence, or deleted a role marker or a markdown fence or heading marker). Do not write this back whole as if it were the original file.]"
     }
 
     /// The rule file `path` names when it is directly in a workspace `.iris/`, or nil.
