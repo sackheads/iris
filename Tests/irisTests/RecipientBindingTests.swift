@@ -294,6 +294,16 @@ struct RecipientBindingTests {
         w.app.markGuestSteeredBinding(narrow, for: delegate)
         let effective = await main.bindingForCall(conversationId: delegate)
         #expect(effective == narrow, "root wide, delegate narrow -- must end up narrow")
+
+        // dev-3 review round 3: the opposite order, so a mutant that always returns the
+        // delegate's own stamp (ignoring the root) cannot hide behind this test alone.
+        let delegate2 = w.app.createNewConversation(isBackground: true, select: false)
+        let root2 = w.app.createNewConversation(isBackground: false, select: false)
+        w.app.linkDelegate(delegate2, of: root2)
+        w.app.markGuestSteeredBinding(narrow, for: root2)
+        w.app.markGuestSteeredBinding(wide, for: delegate2)
+        let effective2 = await main.bindingForCall(conversationId: delegate2)
+        #expect(effective2 == narrow, "delegate wide, root narrow -- must still end up narrow")
     }
 
     /// dev-3 review of #1212, round 2: the relay computation in `deliverPeerMessage` has the same
@@ -323,6 +333,34 @@ struct RecipientBindingTests {
         #expect(w.app.guestSteeredBinding(for: w.reviewer) == narrow, "root wide, sender narrow -- the relay must end up narrow")
     }
 
+    /// dev-3 review round 3: the opposite order of the test above, in a fresh world (reusing the
+    /// same target would meet the new stamp with the one already left there, masking a mutant
+    /// that always takes the sender's own stamp while ignoring the root).
+    @Test("a relay meets the sender's own stamp with its root's, opposite order")
+    func relayMeetsSenderAndRootStampsOppositeOrder() async {
+        let w = world()
+        let (wide, narrow) = wideAndNarrow()
+        let delegateSender = w.app.createNewConversation(isBackground: false, select: false)
+        w.app.linkDelegate(delegateSender, of: w.builder)
+        w.app.markGuestSteeredBinding(narrow, for: w.builder)
+        w.app.markGuestSteeredBinding(wide, for: delegateSender)
+        w.app.markGuestOriginTurn(delegateSender)
+
+        let call = sendCall(to: "role:reviewer", message: "relay from the opposite order")
+        let main = IrisEngine(state: w.app, tier: .medium, principal: .main,
+                              client: FakeLLMClient(responses: [
+                                GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: call)]))], usageMetadata: nil),
+                                GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil),
+                                GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "noted")]))], usageMetadata: nil),
+                              ]),
+                              retryDelays: [], protectionEnabled: false)
+        w.app.installEngine(main)
+        await main.processInput("go", source: "UI", conversationId: delegateSender)
+        #expect(await eventually { self.text(w.app, w.reviewer).contains("relay from the opposite order") })
+
+        #expect(w.app.guestSteeredBinding(for: w.reviewer) == narrow, "sender wide, root narrow -- must still end up narrow")
+    }
+
     /// dev-2 review of #1212: `bindingForCall` must check the delegation root too, mirroring
     /// `deliverPeerMessage`'s own `isGuestOriginTurn(senderId) || isGuestOriginTurn(root)` check.
     /// A delegate conversation under a guest-steered root was never itself the target
@@ -333,15 +371,18 @@ struct RecipientBindingTests {
         let main = IrisEngine(state: w.app, tier: .medium, principal: .main,
                               client: FakeLLMClient(responses: []), retryDelays: [], protectionEnabled: false)
         w.app.installEngine(main)
-        let binding = AccessBinding(profile: AccessProfile(), principal: .mcpGuest, isOwner: false)
-            .capped(by: PrincipalFloor.floor(for: .mcpGuest))
+        // dev-3 review round 3: NOT the deny-all floor shape -- that is exactly what the
+        // fail-closed branch below would also return for a guest-origin root with no stamp, so a
+        // mutant that skips the root-stamp read entirely and falls through to fail-closed could
+        // hide behind this assertion. A distinguishable (wide) binding exposes that mutant.
+        let (wide, _) = wideAndNarrow()
         w.app.markGuestOriginTurn(w.builder)
-        w.app.markGuestSteeredBinding(binding, for: w.builder)
+        w.app.markGuestSteeredBinding(wide, for: w.builder)
         let delegate = w.app.createNewConversation(isBackground: true, select: false)
         w.app.linkDelegate(delegate, of: w.builder)
 
         let effective = await main.bindingForCall(conversationId: delegate)
-        #expect(effective == binding, "the delegate inherits the root's stamp, not the engine's own binding")
+        #expect(effective == wide, "the delegate inherits the root's stamp, not the engine's own binding")
     }
 
     /// Finding 3: a subagent spawned from a guest-steered `.main` turn must not inherit the
