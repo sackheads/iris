@@ -539,6 +539,18 @@ actor IrisEngine {
         }
     }
 
+    /// #974 Task 14 (C2, defence in depth): the owner's secret values, read when a result or a message
+    /// is about to cross into a guest-bound context. The app's own secrets by default (`ConfigManager`'s
+    /// cached secrets item, no Keychain read of its own); a test injects its own set (Invariant 7).
+    let knownSecrets: @Sendable () async -> Set<String>
+
+    /// Whether a turn's output crosses into a guest-bound context: its binding is not the owner's.
+    /// Reads the per-turn binding, so a guest-steered `.main` turn counts.
+    private func scrubbedForBinding(_ text: String, conversationId: UUID) async -> String {
+        guard !(await bindingForCall(conversationId: conversationId)).isOwner else { return text }
+        return SecretScrub.scrubSecrets(text, known: await knownSecrets())
+    }
+
     let roleLabel: String?
     /// The external MCP client a `.mcpGuest` engine serves; nil for every other principal (#1066).
     nonisolated let guestClientId: String?
@@ -668,10 +680,12 @@ actor IrisEngine {
          skillCheckWillClaim: (@Sendable (UUID) async -> Void)? = nil,
          guestClientId: String? = nil,
          githubToolsEnabled: Bool? = nil,
-         binding: AccessBinding? = nil) {
+         binding: AccessBinding? = nil,
+         knownSecrets: (@Sendable () async -> Set<String>)? = nil) {
         self.githubToolsOverride = githubToolsEnabled
         self.state = state
         self.guestClientId = guestClientId
+        self.knownSecrets = knownSecrets ?? { await MainActor.run { ConfigManager.shared.knownSecretValues } }
         self.binding = binding ?? (principal == .main
             ? AccessBinding(profile: .owner, principal: .main, isOwner: true)
             : AccessBinding(profile: AccessProfile(), principal: principal, isOwner: false)
@@ -1028,6 +1042,11 @@ actor IrisEngine {
                              envelope: PeerEnvelope, bodyAlreadyGuarded: Bool = false,
                              guestClientId: String? = nil) async -> PeerDeliveryOutcome {
         let localState = state
+        // #974 Task 14 (C2, defence in depth): text addressed to a guest session carries none of the
+        // owner's secret values, whatever the sending turn read. The sender is typically an
+        // owner-capable role session, so this is the boundary a secret would cross.
+        let targetIsGuest = await MainActor.run { localState?.conversations.first(where: { $0.id == targetId })?.isGuest == true }
+        let message = targetIsGuest ? SecretScrub.scrubSecrets(message, known: await knownSecrets()) : message
         let attributed = Self.framePeerMessage(message, senderName: senderName, senderId: senderId, senderRole: senderRole,
                                                envelope: envelope, guestClientId: guestClientId)
         // Sanitise before deciding where it goes, because both destinations need it sanitised and
@@ -4327,7 +4346,9 @@ actor IrisEngine {
                                     }
 
                                     let cmdStart = UptimeClock.live.now()   // uptime: a sleep is not time spent (#608)
-                                    let result = await self.executeFunctionCall(call, conversationId: conversationId, workspacePath: workspacePath, restrictToGoalComplete: restrictToGoalComplete, offeredTools: offeredTools, pillId: pillId)
+                                    let rawResult = await self.executeFunctionCall(call, conversationId: conversationId, workspacePath: workspacePath, restrictToGoalComplete: restrictToGoalComplete, offeredTools: offeredTools, pillId: pillId)
+                                    // #974 Task 14: a result on a turn that is not the owner's has the owner's secret values removed before the model reads it.
+                                    let result = await self.scrubbedForBinding(rawResult, conversationId: conversationId)
                                     // #813: before the model reads it, so a write later in this turn sees the taint.
                                     if Self.resultCarriesOutsideContent(call.name, args: call.args) {
                                         await self.markReadUntrusted(conversationId)
