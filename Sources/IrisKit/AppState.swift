@@ -5074,16 +5074,36 @@ class AppState {
             }
             return .autoApprove(vibecop: verdict)
         }
-        // #1099: YOLO mode approves every attended call in this session (and its delegates),
-        // skipping `humanOnly`, `irisWrite`, the allowlist, Vibecop, and the user prompt.
+        // #1115: a `humanOnly` call Brian reserved for himself (job creation, the gate-script
+        // escalation), a write to a workspace's `.iris/` (`irisWrite`, #617), and a host command
+        // that writes an access-policy store (`policyWrite`, #974 Task 9b F6) are critical
+        // approvals a standing session convenience like YOLO must never bypass -- checked before
+        // YOLO, not after. The one exception is `offersConversationAllow`, which is only ever set
+        // for the #812 tainted-outbound-send gate: that gate is itself a per-conversation,
+        // non-durable attended-session check (never global, never standing), exactly the kind of
+        // thing YOLO already exists to skip for the session -- so it keeps its pre-existing YOLO
+        // escape (below) rather than being folded into Brian's own reserved approvals.
+        let yoloMayBypass = humanOnly && offersConversationAllow
+        if irisWrite || policyWrite || (humanOnly && !yoloMayBypass) {
+            return await enqueueUserApproval(toolName: toolName, details: details, workspace: workspace,
+                                             conversationId: conversationId, origin: origin, humanOnly: true,
+                                             offersConversationAllow: offersConversationAllow) ? .person : nil
+        }
+        // #1099: YOLO mode approves every other attended call (including a tainted outbound send,
+        // which may reach here per the exception above) in this session and its delegates,
+        // skipping the allowlist, Vibecop, and the user prompt -- never irisWrite or a
+        // Brian-reserved humanOnly call (#1115).
         if isYoloMode(conversationId) {
             return .yolo
         }
         // `humanOnly`: straight to the prompt, bypassing the allowlist below (a standing "yes"
-        // from some earlier, different call). Vibecop needs no bypass of its own any more — `#336`
-        // made its disabled state "no verdict" rather than an outright APPROVE, so it already falls
-        // through to this same prompt for an ordinary call too.
-        if humanOnly || irisWrite || policyWrite {
+        // from some earlier, different call). Vibecop needs no bypass of its own any more --
+        // `#336` made its disabled state "no verdict" rather than an outright APPROVE, so it
+        // already falls through to this same prompt for an ordinary call too. Reached here only
+        // for the tainted-outbound-send exception above, with YOLO off -- `policyWrite` is not
+        // reachable here: it is folded into the pre-YOLO check above (#1115/#1221), so a
+        // policy-store write never even reaches the YOLO check.
+        if humanOnly || irisWrite {
             return await enqueueUserApproval(toolName: toolName, details: details, workspace: workspace,
                                              conversationId: conversationId, origin: origin, humanOnly: true,
                                              offersConversationAllow: offersConversationAllow) ? .person : nil

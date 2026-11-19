@@ -296,33 +296,37 @@ struct GuestProvenanceTests {
         }
     }
 
-    /// A YOLO role session; a guest's message starts its turn; the turn calls `schedule_job`
-    /// (human-only). YOLO would approve it unasked, so a pending approval is the proof it is off.
-    private func scheduleJobTurn(guestOrigin: Bool) async -> (pending: Int, jobs: Int) {
+    /// A YOLO role session; a guest's message starts its turn; the turn calls `run_command` (an
+    /// ordinary call, not `humanOnly` or `irisWrite`, so #1115's reorder does not touch it). YOLO
+    /// would approve it unasked when the turn is not guest-origin, so a pending approval is the
+    /// proof guest-origin turned YOLO off for this one. (Before #1115, this used `schedule_job`,
+    /// a `humanOnly` call YOLO approved unasked by the bug #1115 fixed -- not a safe probe for
+    /// guest-origin specifically once `humanOnly` always asks regardless of guest-origin.)
+    private func runCommandTurn(guestOrigin: Bool) async -> Int {
         let w = world()
         w.app.autoApproveTools = false
         yoloReviewer(w)
-        let call = FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1")
+        let call = FunctionCall(name: "run_command", args: ["command": .string("echo sweep")], id: "c1")
         let client = FakeLLMClient(responses: [
             GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: call)]))], usageMetadata: nil),
             GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil),
         ])
         let engine = IrisEngine(state: w.app, tier: .medium, client: client, retryDelays: [], protectionEnabled: false)
         w.app.installEngine(engine)
-        _ = await engine.deliverPeerMessage("schedule a sweep", from: w.guest, senderName: nil, to: w.reviewer,
+        _ = await engine.deliverPeerMessage("run a sweep", from: w.guest, senderName: nil, to: w.reviewer,
                                             envelope: envelope(), guestClientId: guestOrigin ? "dev-1" : nil)
-        let settled = await eventually(3000) { !w.app.pendingApprovals.isEmpty || ((try? w.app.store.ledger.jobs().count) ?? 0) == 1 }
-        #expect(settled, "the turn reached schedule_job")
+        let settled = await eventually(3000) { !w.app.pendingApprovals.isEmpty || !w.app.hasTurnInFlight(for: w.reviewer) }
+        #expect(settled, "the turn reached run_command")
         let pending = w.app.pendingApprovals.count
         for p in w.app.pendingApprovals { w.app.resolveApproval(id: p.id, .deny) }
-        return (pending, (try? w.app.store.ledger.jobs().count) ?? 0)
+        return pending
     }
 
     @Test("a YOLO role session whose turn a guest's message started asks for approval, where the same turn from a peer does not")
     func guestStartedTurnIsNotYolo() async {
-        let control = await scheduleJobTurn(guestOrigin: false)
-        #expect(control.pending == 0 && control.jobs == 1, "control: YOLO approves a peer-started turn unasked (\(control))")
-        let guest = await scheduleJobTurn(guestOrigin: true)
-        #expect(guest.pending == 1 && guest.jobs == 0, "a guest-started turn must ask (\(guest))")
+        let control = await runCommandTurn(guestOrigin: false)
+        #expect(control == 0, "control: YOLO approves a peer-started turn unasked (\(control))")
+        let guest = await runCommandTurn(guestOrigin: true)
+        #expect(guest == 1, "a guest-started turn must ask (\(guest))")
     }
 }
