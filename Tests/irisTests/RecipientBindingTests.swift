@@ -165,4 +165,87 @@ struct RecipientBindingTests {
         #expect(await eventually { w.app.guestSteeredBinding(for: w.reviewer) != nil })
         #expect(w.app.guestSteeredBinding(for: w.reviewer)?.principal == .mcpGuest)
     }
+
+    // MARK: dev-3 review of #1212
+
+    /// Finding 1: the meet never widens. A narrower binding already on the conversation must
+    /// survive a wider one arriving, in every order, and an incomparable pair fails closed.
+    @Test("markGuestSteeredBinding meets with any existing stamp -- it never widens")
+    func markGuestSteeredBindingNeverWidens() {
+        let w = world()
+        let narrow = AccessBinding(profile: AccessProfile(memoryRead: .task), principal: .mcpGuest, isOwner: false)
+        let wide = AccessBinding(profile: AccessProfile(memoryRead: .conversations), principal: .mcpGuest, isOwner: false)
+
+        w.app.markGuestSteeredBinding(narrow, for: w.reviewer)
+        w.app.markGuestSteeredBinding(wide, for: w.reviewer)
+        #expect(w.app.guestSteeredBinding(for: w.reviewer) == narrow, "a wider stamp arriving after must not widen the conversation")
+
+        w.app.markGuestSteeredBinding(wide, for: w.builder)
+        w.app.markGuestSteeredBinding(narrow, for: w.builder)
+        #expect(w.app.guestSteeredBinding(for: w.builder) == narrow, "order must not matter -- the meet is commutative")
+
+        // Incomparable on two different axes: neither is a subgrant of the other, so the meet
+        // fails closed to the `.mcpGuest` floor rather than guessing which axis wins.
+        let readsMore = AccessBinding(profile: AccessProfile(memoryRead: .shared, transports: []), principal: .mcpGuest, isOwner: false)
+        let transportsMore = AccessBinding(profile: AccessProfile(memoryRead: .none, transports: ["slack"]), principal: .mcpGuest, isOwner: false)
+        let floor = AccessBinding(profile: AccessProfile(), principal: .mcpGuest, isOwner: false)
+            .capped(by: PrincipalFloor.floor(for: .mcpGuest))
+        let meet = AccessBinding.meetGuestBindings(readsMore, transportsMore)
+        #expect(meet == floor, "incomparable pair must fail closed, not pick a side")
+    }
+
+    /// Finding 2: `bindingForCall` must not fall through to the engine's own (owner-shaped, for
+    /// `.main`) binding when `isGuestOriginTurn` is true but no stamp was ever written -- a path
+    /// that marks only the bool (directly, or a pre-Task-16 guest turn) must still fail closed.
+    @Test("bindingForCall fails closed when guestOrigin is true with no stamp yet")
+    func bindingForCallFailsClosedWithNoStamp() async {
+        let w = world()
+        let main = IrisEngine(state: w.app, tier: .medium, principal: .main,
+                              client: FakeLLMClient(responses: []), retryDelays: [], protectionEnabled: false)
+        w.app.installEngine(main)
+        w.app.markGuestOriginTurn(w.reviewer)
+        #expect(w.app.guestSteeredBinding(for: w.reviewer) == nil, "sanity: no stamp written")
+
+        let effective = await main.bindingForCall(conversationId: w.reviewer)
+        #expect(effective.principal == .mcpGuest, "must fail closed to the guest floor, never the engine's own owner binding")
+        #expect(effective.isOwner == false)
+    }
+
+    /// dev-2 review of #1212: `bindingForCall` must check the delegation root too, mirroring
+    /// `deliverPeerMessage`'s own `isGuestOriginTurn(senderId) || isGuestOriginTurn(root)` check.
+    /// A delegate conversation under a guest-steered root was never itself the target
+    /// `deliverPeerMessage` stamped -- only the root was.
+    @Test("bindingForCall reads the delegation root's stamp when the delegate itself has none")
+    func bindingForCallChecksDelegationRoot() async {
+        let w = world()
+        let main = IrisEngine(state: w.app, tier: .medium, principal: .main,
+                              client: FakeLLMClient(responses: []), retryDelays: [], protectionEnabled: false)
+        w.app.installEngine(main)
+        let binding = AccessBinding(profile: AccessProfile(), principal: .mcpGuest, isOwner: false)
+            .capped(by: PrincipalFloor.floor(for: .mcpGuest))
+        w.app.markGuestOriginTurn(w.builder)
+        w.app.markGuestSteeredBinding(binding, for: w.builder)
+        let delegate = w.app.createNewConversation(isBackground: true, select: false)
+        w.app.linkDelegate(delegate, of: w.builder)
+
+        let effective = await main.bindingForCall(conversationId: delegate)
+        #expect(effective == binding, "the delegate inherits the root's stamp, not the engine's own binding")
+    }
+
+    /// Finding 3: a subagent spawned from a guest-steered `.main` turn must not inherit the
+    /// engine's own owner binding -- all three `runSubagent` call sites must read the per-turn
+    /// `bindingForCall`, not `self.binding`. A source scan (not an end-to-end spawn, which would
+    /// need a real provider round trip for each site): pins that none of the three regressed to
+    /// the old, turn-blind form this task replaced.
+    @Test("every runSubagent call site reads bindingForCall, not the engine's own binding")
+    func subagentSpawnSitesReadPerTurnBinding() throws {
+        let url = PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit/iris.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        let occurrences = source.components(separatedBy: "parentBinding:").count - 1
+        #expect(occurrences == 3, "expected exactly the 3 known runSubagent call sites")
+        #expect(!source.contains("parentBinding: self.binding"),
+                "a call site reading the engine's own binding directly would ignore a guest-steered turn's stamp")
+        #expect(source.contains("parentBinding: await self.bindingForCall(conversationId: conversationId))"),
+                "every site must resolve the per-turn binding before spawning")
+    }
 }

@@ -1801,7 +1801,14 @@ class AppState {
         if !taken.isEmpty { markReflectionBoundary(for: conversationId) }
         if taken.contains(where: \.isTopic) { topicTurnConversations.insert(conversationId) }
         if taken.contains(where: \.isGuestOrigin) { guestOriginTurnConversations.insert(conversationId) }
-        if let binding = taken.lazy.compactMap(\.guestBinding).first { guestSteeredBindings[conversationId] = binding }
+        // dev-3 review of #1212, finding 1: fold ALL guest bindings in this batch via the meet,
+        // not just the first one — a narrower guest's entry ahead of a wider guest's in the same
+        // steer must still end up narrower, never whichever happened to be first.
+        let folded = taken.compactMap(\.guestBinding).reduce(nil as AccessBinding?, { accumulated, next in
+            guard let accumulated else { return next }
+            return AccessBinding.meetGuestBindings(accumulated, next)
+        })
+        if let folded { markGuestSteeredBinding(folded, for: conversationId) }
         return taken
     }
 
@@ -1837,7 +1844,11 @@ class AppState {
             texts.append(first.text)
             anyTopic = anyTopic || first.isTopic
             anyGuest = anyGuest || first.isGuestOrigin
-            if joinedGuestBinding == nil { joinedGuestBinding = first.guestBinding }
+            // dev-3 review of #1212, finding 1: meet across every joined entry, not first-wins —
+            // a narrower guest's entry anywhere in the batch must still end up narrower.
+            if let binding = first.guestBinding {
+                joinedGuestBinding = joinedGuestBinding.map { AccessBinding.meetGuestBindings($0, binding) } ?? binding
+            }
             queue.removeFirst()
         }
         var next = texts.isEmpty
@@ -1849,9 +1860,9 @@ class AppState {
         // Same stricter reading for a guest part (#1119).
         if anyGuest { next.isGuestOrigin = true }
         if next.isGuestOrigin { guestOriginTurnConversations.insert(conversationId) }
-        // #974 Task 15: carries the binding alongside the bool, same first-one-wins merge as above.
+        // #974 Task 15: carries the binding alongside the bool, folded via the meet above.
         if texts.isEmpty { joinedGuestBinding = next.guestBinding }
-        if let joinedGuestBinding { guestSteeredBindings[conversationId] = joinedGuestBinding }
+        if let joinedGuestBinding { markGuestSteeredBinding(joinedGuestBinding, for: conversationId) }
         pendingUserMessages[conversationId] = queue.isEmpty ? nil : queue
         if case .systemEvent(let source) = next.origin {
             // Not `startTurn`: that is the composer's path, which runs as a "UI" turn. Reserved
@@ -3306,7 +3317,13 @@ class AppState {
 
     func markGuestOriginTurn(_ id: UUID) { guestOriginTurnConversations.insert(id) }
     func isGuestOriginTurn(_ id: UUID) -> Bool { guestOriginTurnConversations.contains(id) }
-    func markGuestSteeredBinding(_ binding: AccessBinding, for id: UUID) { guestSteeredBindings[id] = binding }
+    /// dev-3 review of #1212, finding 1: meets with any existing stamp rather than overwriting —
+    /// a wider guest's send arriving while a narrower guest's turn is still running (or a relay
+    /// that inherits a narrower binding than whatever this conversation already carries) must
+    /// never widen what the conversation is gated by. See `AccessBinding.meetGuestBindings`.
+    func markGuestSteeredBinding(_ binding: AccessBinding, for id: UUID) {
+        guestSteeredBindings[id] = guestSteeredBindings[id].map { AccessBinding.meetGuestBindings($0, binding) } ?? binding
+    }
     func guestSteeredBinding(for id: UUID) -> AccessBinding? { guestSteeredBindings[id] }
     func isTopicTurn(_ id: UUID) -> Bool { topicTurnConversations.contains(id) }
 
