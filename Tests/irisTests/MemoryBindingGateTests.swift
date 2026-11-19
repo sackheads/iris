@@ -40,8 +40,8 @@ struct MemoryBindingGateTests {
     // MARK: the pure gate
 
     @Test("a writer refuses below its tier and runs at it, tier by tier", arguments: MemoryBindingGateTests.writers)
-    func writerBoundary(_ name: String) {
-        let required = MemoryBindingGate.writerTiers[name]!
+    func writerBoundary(_ name: String) throws {
+        let required = try #require(MemoryBindingGate.writerTiers[name], "a writer with no table row")
         for tier in [MemoryTier.none, .task, .shared, .conversations, .full] {
             let refusal = MemoryBindingGate.writeRefusal(tool: name, binding: binding(write: tier))
             if tier >= required {
