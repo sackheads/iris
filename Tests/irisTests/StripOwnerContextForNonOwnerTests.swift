@@ -152,9 +152,10 @@ struct StripOwnerContextForNonOwnerTests {
     @Test("the non-owner stripped base is invalidated alongside systemPrompt, not stale after a rules edit")
     func nonOwnerBaseInvalidatesWithSystemPrompt() async throws {
         let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
-        let ruleFile = IrisPaths.default.rulesDir.appendingPathComponent("iris-974-task13-\(UUID().uuidString).md")
-        try FileManager.default.createDirectory(at: IrisPaths.default.rulesDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: ruleFile) }
+        // #1241: the engine reads rules from its `memory.paths`, so the fixture's own root holds them, not
+        // the process-global home.
+        let ruleFile = f.memory.paths.rulesDir.appendingPathComponent("iris-974-task13-\(UUID().uuidString).md")
+        try FileManager.default.createDirectory(at: f.memory.paths.rulesDir, withIntermediateDirectories: true)
         let ruleV1 = "SENTINEL-RULE-V1-\(UUID().uuidString)"
         let ruleV2 = "SENTINEL-RULE-V2-\(UUID().uuidString)"
         try Data(ruleV1.utf8).write(to: ruleFile)
@@ -239,8 +240,8 @@ struct StripOwnerContextForNonOwnerTests {
         try Data("owner soul \(canaries.soulMd)".utf8).write(to: f.memory.paths.soulMd)
         let facts = try FactStoreManager(inMemory: true)
         _ = try facts.addFact(content: "the vault code is \(canaries.fact)")
-        let ruleFile = IrisPaths.default.rulesDir.appendingPathComponent("iris-974-task13-canary-\(UUID().uuidString).md")
-        try FileManager.default.createDirectory(at: IrisPaths.default.rulesDir, withIntermediateDirectories: true)
+        let ruleFile = f.memory.paths.rulesDir.appendingPathComponent("iris-974-task13-canary-\(UUID().uuidString).md")
+        try FileManager.default.createDirectory(at: f.memory.paths.rulesDir, withIntermediateDirectories: true)
         try Data(canaries.rule.utf8).write(to: ruleFile)
         return (f, facts, ruleFile)
     }
@@ -263,7 +264,7 @@ struct StripOwnerContextForNonOwnerTests {
         #expect(all.contains("# Available Skills"), "owner turn must still carry the skills catalogue heading")
     }
 
-    @Test("canary sweep: a stamped non-owner turn's request carries NONE of the owner-data canaries (rules excepted -- #1241)")
+    @Test("canary sweep: a stamped non-owner turn's request carries NONE of the owner-data canaries (unmarked rules follow #1241's held default)")
     func stampedNonOwnerTurnCarriesNoCanaries() async throws {
         let canaries = Canaries()
         let (f, facts, ruleFile) = try canaryFixture(canaries)
@@ -279,9 +280,9 @@ struct StripOwnerContextForNonOwnerTests {
         #expect(!all.contains(canaries.soulMd), "SOUL.md")
         #expect(!all.contains(canaries.fact), "the owner's fact")
         #expect(!all.contains("# Available Skills"), "the skills catalogue")
-        // Rules: expected PRESENT for now -- #1241 owns the owner-personal-vs-security split.
-        // If this starts failing, #1241 shipped and this line should flip to !all.contains(...).
-        #expect(all.contains(canaries.rule), "rules are not yet stripped -- #1241")
+        // Rules: an UNMARKED rule still applies on a non-owner turn (#1241: only `audience: owner` strips;
+        // `RuleAudienceTests` owns the marked cases).
+        #expect(all.contains(canaries.rule) == SkillManager.unmarkedAppliesToNonOwner, "an unmarked rule follows the held default")
     }
 
     /// dev-2 review of #1243 round 2: the test above only probes `memoryRead: .none`, which is

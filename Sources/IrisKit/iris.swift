@@ -917,14 +917,19 @@ actor IrisEngine {
     /// the skills catalogue is the owner's custom tooling, the same class of owner context as
     /// USER.md -- `update_soul` and `create_skill` both require the full memory tier to WRITE
     /// (`MemoryBindingGate.writerTiers`), same as `update_user_profile`, so a binding below it does
-    /// not read them either. Steering and custom rules stay in both -- rules are a separate,
-    /// scoped follow-up (some are owner-personal, some are protections that must still apply).
+    /// not read them either. Steering stays in both. Custom rules stay in both unless their
+    /// author marked them `audience: owner` (#1241, W1b), the one marking that keeps a rule off a turn
+    /// that is not the owner's; `SkillManager.ruleAppliesToNonOwner` is the decision.
     private func buildBasePrompt(bundle: SkillBundle?, includeSoulAndSkills: Bool = true) async -> Content {
         // `paths: memory.paths` (5a Task 7 fix round 1): a test that injects an isolated
         // `MemoryManager(paths:)` to pin USER.md must get SOUL.md from the same root too,
         // not from the process-global `IrisPaths.default` `loadSOUL` defaults to.
         let steering = SystemSteering.shipped()
-        let customRules = await manager.loadCustomRules()
+        // #1241 (W1b): `includeSoulAndSkills` IS composedSystemPrompt's one owner-context decision
+        // (`includesOwnerProfile`), so the rules strip hangs off it, not off a predicate of its own: the
+        // rules a non-owner turn may carry are the ones `ruleAppliesToNonOwner` allows. Rules come from
+        // `memory.paths`, like SOUL, so a test can inject its own.
+        let customRules = await manager.loadCustomRules(paths: memory.paths, scope: includeSoulAndSkills ? .everything : .nonOwner)
         guard includeSoulAndSkills else {
             let combined = "\(steering)\(customRules)"
             return Content(role: "system", parts: [Part(text: combined, functionCall: nil, functionResponse: nil)])

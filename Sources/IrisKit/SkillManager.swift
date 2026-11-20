@@ -17,14 +17,75 @@ struct SkillManager {
         return "You are Iris, a native macOS agent running on the local machine."
     }
 
+    /// Who a custom rule is written for (#1241, W1b). The author narrows or confirms a rule's audience
+    /// with a leading front-matter block:
+    ///
+    ///     ---
+    ///     audience: owner
+    ///     ---
+    ///
+    /// `owner` keeps the rule out of every turn that is not the owner's; `all` says what no marking says
+    /// (see `unmarkedAppliesToNonOwner`). A block that tries to say something and does not manage to
+    /// (an unclosed block, an unknown value) restricts the rule: a marking that cannot be read must not
+    /// widen anything.
+    enum RuleAudience: Sendable, Equatable {
+        case owner
+        case all
+
+        /// The audience a rule's text declares, or nil when it does not declare one (no front matter,
+        /// or a block with no `audience:` key).
+        static func declared(by content: String) -> RuleAudience? {
+            let lines = content.split(separator: "\n", omittingEmptySubsequences: false)
+            guard let first = lines.first, first.trimmingCharacters(in: .whitespaces) == "---" else { return nil }
+            var audienceValue: String?
+            var closed = false
+            for line in lines.dropFirst() {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed == "---" { closed = true; break }
+                if audienceValue == nil, trimmed.lowercased().hasPrefix("audience:") {
+                    audienceValue = trimmed.dropFirst("audience:".count).trimmingCharacters(in: .whitespaces).lowercased()
+                }
+            }
+            guard let audienceValue else { return closed ? nil : .owner }   // an unclosed block is a failed attempt
+            guard closed else { return .owner }
+            switch audienceValue {
+            case "all": return .all
+            default: return .owner   // `owner`, or a value that is not one of the two
+            }
+        }
+    }
+
+    /// What a rule with NO audience marking does on a turn that is not the owner's. Held pending the
+    /// owner's ruling (#1241): `true` keeps every unmarked rule (security rules keep applying everywhere
+    /// until the owner marks the personal ones `audience: owner`); `false` is the opposite default. This is
+    /// the only place the default lives.
+    static let unmarkedAppliesToNonOwner = true
+
+    /// The one decision: whether a rule's text may be carried by a prompt that is not the owner's.
+    static func ruleAppliesToNonOwner(_ content: String) -> Bool {
+        switch RuleAudience.declared(by: content) {
+        case .owner?: return false
+        case .all?: return true
+        case nil: return unmarkedAppliesToNonOwner
+        }
+    }
+
+    /// Which rules a prompt may carry: every rule (the owner's turn) or only those that apply to a non-owner.
+    enum RuleScope: Sendable {
+        case everything
+        case nonOwner
+    }
+
     /// Auto-loads any custom, user-defined rules from `~/.iris/rules/` and returns them
     /// as a combined Markdown block to be appended directly to the system prompt.
     /// `extraRuleFiles: nil` pulls enabled plugins' rule files from PluginManager; tests
     /// pass explicit rule file URLs.
     /// `protectionEnabled` is injectable so tests can pin guard gating without mutating the shared
     /// config singleton (#109); production leaves it nil and the config decides.
+    /// `scope` (#1241) is `.everything` for the owner's turn and `.nonOwner` for any other:
+    /// a rule file, user or plugin, whose front matter does not say `audience: all` is left out of the latter.
     func loadCustomRules(paths: IrisPaths = .default, extraRuleFiles: [URL]? = nil,
-                         protectionEnabled: Bool? = nil) async -> String {
+                         protectionEnabled: Bool? = nil, scope: RuleScope = .everything) async -> String {
         let rulesDir = paths.rulesDir.path
         let fileManager = FileManager.default
 
@@ -36,7 +97,8 @@ struct SkillManager {
                 var isDir: ObjCBool = false
                 if fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDir), !isDir.boolValue {
                     if let content = try? String(contentsOfFile: fileURL.path, encoding: .utf8),
-                       !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                       !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                       scope == .everything || Self.ruleAppliesToNonOwner(content) {
                         rulesContent += "\n\n# Rule: \(item)\n\(content)\n"
                     }
                 }
@@ -53,7 +115,8 @@ struct SkillManager {
         // the same InjectionGuard path as workspace AGENTS.md before reaching the system prompt.
         for fileURL in pluginRules {
             if let content = try? String(contentsOf: fileURL, encoding: .utf8),
-               !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+               !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               scope == .everything || Self.ruleAppliesToNonOwner(content) {
                 let safe = await InjectionGuard.sanitizeUntrusted(
                     content, contextTag: "plugin_rule_\(fileURL.lastPathComponent)",
                     maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
