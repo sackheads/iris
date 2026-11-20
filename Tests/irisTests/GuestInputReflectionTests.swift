@@ -112,6 +112,49 @@ struct GuestInputReflectionTests {
         #expect(app.conversations.first { $0.id == guestTarget }?.hasGuestInput == true, "the guest's text reached this history")
     }
 
+    private func peerWorld() throws -> (app: AppState, engine: IrisEngine, guest: UUID, peer: UUID, target: UUID) {
+        let app = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
+        let guest = app.createNewConversation(isGuest: true, guestClientId: "dev-1", title: "guest")
+        let target = app.createNewConversation(title: "reviewer", select: false)
+        let peer = app.createNewConversation(title: "builder", select: false)
+        for (id, role) in [(target, "reviewer"), (peer, "builder")] {
+            app.conversations[app.conversations.firstIndex { $0.id == id }!].role = role
+        }
+        app.guestRoleAllowlist = { $0 == "dev-1" ? ["reviewer"] : [] }
+        let engine = IrisEngine(state: app, tier: .medium, client: FakeLLMClient(responses: [Self.reply("ok"), Self.reply("ok")]),
+                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
+        app.installEngine(engine)
+        return (app, engine, guest, peer, target)
+    }
+
+    @Test("a guest message queued while the target is mid-turn flags it on arrival, not only when it drains")
+    func queuedGuestMessageFlagsTheTarget() async throws {
+        let w = try peerWorld()
+        // The target already has a turn in flight, so the delivery takes the busy path and is queued.
+        #expect(w.app.claimPeerDelivery(for: w.target))
+        _ = await w.engine.deliverPeerMessage("run a sweep", from: w.guest, senderName: nil, to: w.target, envelope: envelope(),
+                                              guestClientId: "dev-1")
+        #expect(w.app.conversations.first { $0.id == w.target }?.hasGuestInput == true, "the queued guest message already counts")
+        w.app.releasePeerDelivery(for: w.target)
+    }
+
+    @Test("a relay: a session whose own turn a guest steered passes it on, and the recipient is flagged; a plain peer's message is not")
+    func relayedGuestMessageFlagsTheTarget() async throws {
+        let w = try peerWorld()
+        let relayTarget = w.app.createNewConversation(title: "relay target", select: false)
+        let plainTarget = w.app.createNewConversation(title: "plain target", select: false)
+        // `w.peer`'s current turn was started by a guest's message (the stamp and the guest-origin bool).
+        w.app.markGuestOriginTurn(w.peer)
+        w.app.markGuestSteeredBinding(AccessBinding(profile: AccessProfile(), principal: .mcpGuest, isOwner: false), for: w.peer)
+        _ = await w.engine.deliverPeerMessage("passing it on", from: w.peer, senderName: nil, to: relayTarget, envelope: envelope())
+        #expect(w.app.conversations.first { $0.id == relayTarget }?.hasGuestInput == true, "a relay of guest text is guest input")
+
+        // Control: a session whose turn no guest steered, sending to another.
+        let clean = w.app.createNewConversation(title: "clean sender", select: false)
+        _ = await w.engine.deliverPeerMessage("hello", from: clean, senderName: nil, to: plainTarget, envelope: envelope())
+        #expect(w.app.conversations.first { $0.id == plainTarget }?.hasGuestInput == false, "a plain peer message is not guest input")
+    }
+
     @Test("hasGuestInput round-trips through the real store on INSERT and UPDATE, and an absent key reads false")
     func flagPersists() throws {
         let store = try ConversationStore.inMemory()
