@@ -403,6 +403,25 @@ struct FilesystemPolicyDispatchTests {
         let result = try #require(toolResultText(app, id, callId: "c1"))
         #expect(!result.contains("secret content"), Comment(rawValue: result))
     }
+
+    /// dev-3 review: `guestSteeredTurnUsesStampedBindingNotEnginesOwn` above proves the stamp
+    /// refuses a read outside its grant, but not that the stamp is actually consulted at all --
+    /// a blanket refusal (the stamp wired to nothing, or `fsBinding` always confined) would pass
+    /// it too. A read INSIDE the stamped grant, through the same owner-shaped engine, must still
+    /// succeed.
+    @Test("guest-steered .main turn's read_file inside the stamped binding's fsRoots still succeeds")
+    func guestSteeredTurnInsideTheStampStillSucceeds() async throws {
+        let (base, allowed, _) = try tree()
+        defer { try? FileManager.default.removeItem(at: base) }
+        try "readable content".write(to: allowed.appendingPathComponent("x.txt"), atomically: true, encoding: .utf8)
+        let call = FunctionCall(name: "read_file", args: ["path": .string(allowed.appendingPathComponent("x.txt").path)], id: "c1")
+        let (app, _, id) = session(call, binding: AccessBinding(profile: .owner, principal: .main, isOwner: true))
+        app.markGuestSteeredBinding(nonOwner(fsRoots: [allowed.path]), for: id)
+        app.sendMessage("go")
+        #expect(await eventually { self.finished(app, id) })
+        let result = try #require(toolResultText(app, id, callId: "c1"))
+        #expect(result.contains("readable content"), Comment(rawValue: result))
+    }
 }
 
 /// #974 Task 8 (C5), dev-3 review round 2: `requestApprovalSource`'s `isOwner` parameter still
