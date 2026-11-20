@@ -122,10 +122,11 @@ struct GuestPromptTests {
     func cacheKeysDiffer() {
         let id = UUID()
         let names = ["send_to_session", "list_sessions"]
+        let owner = AccessBinding(profile: .owner, principal: .main, isOwner: true)
         let guest = IrisEngine.promptCacheKey(conversationId: id, isUnattended: false, principal: .mcpGuest,
-                                              jobProfile: nil, toolNames: names)
+                                              jobProfile: nil, toolNames: names, binding: owner)
         let main = IrisEngine.promptCacheKey(conversationId: id, isUnattended: false, principal: .main,
-                                             jobProfile: nil, toolNames: names)
+                                             jobProfile: nil, toolNames: names, binding: owner)
         #expect(guest != main)
         #expect(!guest.contains(id.uuidString), "a guest's key is not its owner-visible conversation id")
     }

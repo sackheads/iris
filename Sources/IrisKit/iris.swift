@@ -267,7 +267,7 @@ actor IrisEngine {
     /// The default base prompt (SOUL, skills, steering, rules). Every invalidation sets it to nil,
     /// which also drops the bases built for a profile's skills list.
     var systemPrompt: Content! {
-        didSet { if systemPrompt == nil { profileSkillPrompts = [:] } }
+        didSet { if systemPrompt == nil { profileSkillPrompts = [:]; nonOwnerSystemPrompt = nil } }
     }
     /// The base prompt for each agent profile's `skills:` selection (#465 part 3), keyed by the
     /// sorted list: the same base with its own `# Available Skills` block.
@@ -322,7 +322,7 @@ actor IrisEngine {
     /// Keyed on the three already-deduplicated inputs rather than re-deriving a stamp of its own:
     /// concatenation is pure, so equal inputs guarantee an equal result, and this layer can never
     /// drift from what `guardedUserProfileText`/`guardedAgentsMdText` already decided was unchanged.
-    private var composedPromptCache: [String: (base: String, profile: String, agents: String?, agentProfile: String?, content: Content)] = [:]
+    private var composedPromptCache: [String: (base: String, profile: String?, agents: String?, agentProfile: String?, content: Content)] = [:]
 
     /// Sentinel key for `composedPromptCache`/`agentsStamp` when a conversation has no bound
     /// workspace — distinct from any real path, including the empty string.
@@ -440,8 +440,14 @@ actor IrisEngine {
     /// `Content` value — what keeps the provider's prompt cache hitting (5a §0.2).
     /// `agentProfile` (#465) is a layer after AGENTS.md. Keyed into the cache by name, so two
     /// conversations in one workspace with different profiles keep a cache entry each.
-    private func assembledSystemPrompt(workspacePath: String?, additionalRoots: [String] = [], agentProfile: AgentProfile? = nil) async -> Content {
-        var composed = await composedSystemPrompt(workspacePath: workspacePath, additionalRoots: additionalRoots, agentProfile: agentProfile)
+    /// `binding` (#974 Task 13, W1) is the TURN's binding (`bindingForCall`, not the engine's own):
+    /// USER.md is owner context, included only for an owner binding or one whose `memoryRead` is at
+    /// least `.full` -- the same tier `MemoryBindingGate.writerTiers` already requires to WRITE it
+    /// (`update_user_profile`), so reading it costs no less than writing it.
+    private func assembledSystemPrompt(workspacePath: String?, additionalRoots: [String] = [], agentProfile: AgentProfile? = nil,
+                                       binding: AccessBinding) async -> Content {
+        var composed = await composedSystemPrompt(workspacePath: workspacePath, additionalRoots: additionalRoots, agentProfile: agentProfile,
+                                                   binding: binding)
         // After the cached composition, never inside it: the date must not freeze in a cache entry.
         // Not for a guest: the line carries the owner's IANA time zone (#1066).
         if principal != .mcpGuest, let text = composed.parts.first?.text {
@@ -456,25 +462,37 @@ actor IrisEngine {
     private var wallClock: @Sendable () -> Date = { Date() }
     func setWallClockForTesting(_ clock: @escaping @Sendable () -> Date) { wallClock = clock }
 
-    private func composedSystemPrompt(workspacePath: String?, additionalRoots: [String] = [], agentProfile: AgentProfile? = nil) async -> Content {
+    private func composedSystemPrompt(workspacePath: String?, additionalRoots: [String] = [], agentProfile: AgentProfile? = nil,
+                                      binding: AccessBinding) async -> Content {
         // #1066: a guest gets its own text and nothing of the owner's. First, ahead of every read of
         // SOUL.md, USER.md, AGENTS.md, the skills catalogue and the profile below.
         if principal == .mcpGuest {
             return Content(role: "system", parts: [Part(text: GuestPrompt.text(clientId: guestClientId ?? "unknown"), functionCall: nil, functionResponse: nil)])
         }
-        let base = await ensureSystemPrompt(skills: agentProfile?.skills)
+        // #974 Task 13 (W1): USER.md is owner context; a non-owner binding below the full memory
+        // tier (the same tier its own write requires, `MemoryBindingGate.writerTiers["update_user_profile"]`)
+        // never sees it. Fail closed: an unresolvable binding does not special-case through here --
+        // `bindingForCall`'s own refusal already resolves to a deny-all non-owner binding.
+        let includesOwnerProfile = binding.isOwner || binding.profile.memoryRead >= .full
+        let base = includesOwnerProfile ? await ensureSystemPrompt(skills: agentProfile?.skills) : await ensureNonOwnerSystemPrompt()
         guard let baseText = base.parts.first?.text else { return base }
-        let profileText = await guardedUserProfileText()
+        let profileText = includesOwnerProfile ? await guardedUserProfileText() : nil
         let agentsText = await guardedAgentsMdText(workspacePath: workspacePath, additionalRoots: additionalRoots)
         let agentText = agentProfile.map { "# Agent Profile: \($0.name)\n" + $0.prompt }
+        // #974 Task 13: `includesOwnerProfile` is part of the key -- an owner's and a non-owner's
+        // composed prompt must never share a cache entry, even for the same workspace/agentProfile.
         let key = (workspacePath ?? Self.noWorkspaceCacheKey) + "\u{0}" + (agentProfile?.name ?? "")
+            + "\u{0}" + (includesOwnerProfile ? "owner" : "non-owner")
 
         if let cached = composedPromptCache[key], cached.base == baseText,
            cached.profile == profileText, cached.agents == agentsText, cached.agentProfile == agentText {
             return cached.content
         }
 
-        var text = baseText + "\n\n# User Profile (USER.md)\n" + profileText
+        var text = baseText
+        if let profileText {
+            text += "\n\n# User Profile (USER.md)\n" + profileText
+        }
         if let agentsText {
             text += "\n\n# Project Workspace Rules (AGENTS.md)\n" + agentsText
         }
@@ -880,17 +898,43 @@ actor IrisEngine {
     }
 
     /// SOUL, the skills `bundle` selects (nil: every skill), the shipped steering and the custom
-    /// rules: the base every conversation's prompt is built on.
-    private func buildBasePrompt(bundle: SkillBundle?) async -> Content {
+    /// rules: the base every conversation's prompt is built on. `includeSoulAndSkills` (#974 Task
+    /// 13, W1) is false only for a non-owner binding's base: SOUL.md is the owner's own persona and
+    /// the skills catalogue is the owner's custom tooling, the same class of owner context as
+    /// USER.md -- `update_soul` and `create_skill` both require the full memory tier to WRITE
+    /// (`MemoryBindingGate.writerTiers`), same as `update_user_profile`, so a binding below it does
+    /// not read them either. Steering and custom rules stay in both -- rules are a separate,
+    /// scoped follow-up (some are owner-personal, some are protections that must still apply).
+    private func buildBasePrompt(bundle: SkillBundle?, includeSoulAndSkills: Bool = true) async -> Content {
         // `paths: memory.paths` (5a Task 7 fix round 1): a test that injects an isolated
         // `MemoryManager(paths:)` to pin USER.md must get SOUL.md from the same root too,
         // not from the process-global `IrisPaths.default` `loadSOUL` defaults to.
-        let soul = await manager.loadSOUL(paths: memory.paths)
-        let skills = await manager.discoverSkills(activeBundle: bundle)
         let steering = SystemSteering.shipped()
         let customRules = await manager.loadCustomRules()
+        guard includeSoulAndSkills else {
+            let combined = "\(steering)\(customRules)"
+            return Content(role: "system", parts: [Part(text: combined, functionCall: nil, functionResponse: nil)])
+        }
+        let soul = await manager.loadSOUL(paths: memory.paths)
+        let skills = await manager.discoverSkills(activeBundle: bundle)
         let combined = "\(soul)\n\n\(skills)\n\n\(steering)\(customRules)"
         return Content(role: "system", parts: [Part(text: combined, functionCall: nil, functionResponse: nil)])
+    }
+
+    /// The non-owner counterpart to `systemPrompt`/`profileSkillPrompts` (#974 Task 13): SOUL.md and
+    /// the skills catalogue stripped, steering and custom rules kept. A custom base prompt (a
+    /// subagent's own role prompt, set via `setSystemPrompt`) is never SOUL/skills-derived, so it is
+    /// returned unchanged for a non-owner binding too -- stripping would remove the role itself, not
+    /// owner context.
+    private var nonOwnerSystemPrompt: Content?
+    private func ensureNonOwnerSystemPrompt() async -> Content {
+        if let customBasePrompt {
+            return Content(role: "system", parts: [Part(text: customBasePrompt, functionCall: nil, functionResponse: nil)])
+        }
+        if let existing = nonOwnerSystemPrompt { return existing }
+        let prompt = await buildBasePrompt(bundle: nil, includeSoulAndSkills: false)
+        nonOwnerSystemPrompt = prompt
+        return prompt
     }
 
     @discardableResult
@@ -3377,13 +3421,18 @@ actor IrisEngine {
         var history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
         let workspacePath = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.workspacePath }
         let additionalRoots = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.additionalRoots ?? [] }
+        // #974 Task 13: this turn's resolved binding, not the engine's own -- a guest-steered
+        // stamp or a profile-bound job run narrows what the assembled prompt and the cache key may
+        // carry (below).
+        let turnBinding = await bindingForCall(conversationId: conversationId)
 
         // USER.md and AGENTS.md are re-read and re-guarded only when they actually change — by
         // content (via modification date, following symlinks), by the protection setting, or by a
         // guard tier's provisioning state (5a Task 7). An unchanged turn gets back the identical
         // `Content` it got last time, keeping the system prompt byte-stable for the provider's
         // prompt cache (5a §0.2). #962's additionalRoots feed in the same way workspacePath does.
-        let currentSystemPrompt = await assembledSystemPrompt(workspacePath: workspacePath, additionalRoots: additionalRoots, agentProfile: agentProfile)
+        let currentSystemPrompt = await assembledSystemPrompt(workspacePath: workspacePath, additionalRoots: additionalRoots, agentProfile: agentProfile,
+                                                               binding: turnBinding)
         for notice in pendingGuardNotices {
             await pushToUI(role: .system, text: notice, conversationId: conversationId)
         }
@@ -4042,7 +4091,7 @@ actor IrisEngine {
                                                             principal: principal, backgroundFiresHourly: firesHourly),
             promptCacheKey: Self.promptCacheKey(conversationId: conversationId, isUnattended: isUnattended,
                                                 principal: principal, jobProfile: jobProfile,
-                                                toolNames: toolsList.map(\.name)))
+                                                toolNames: toolsList.map(\.name), binding: turnBinding))
         // #314 decision 6: a conversation whose binding retry once succeeded sends drop_block from
         // then on. The client sends it only where `AnthropicCapabilities.takesBindingBeta` holds.
         request.prefixMismatchBehavior = await MainActor.run {
@@ -5351,10 +5400,21 @@ actor IrisEngine {
     /// its own history warm, so it uses its id. A job run, a subagent or an evaluator starts a
     /// fresh conversation every time, and what it shares with its siblings is the system prompt
     /// and tools, so it uses a short hash of who is asking, the job profile and the declared tools.
+    /// `binding` (#974 Task 13, W1) is the TURN's resolved binding (`bindingForCall`), not the
+    /// engine's own: a `.main` conversation keeps one id for its whole life, but a Task 15
+    /// guest-steered turn on it can carry a non-owner stamp distinct from the owner's own turns on
+    /// that SAME id -- without the binding in the key, those two turns' prompts (one with USER.md,
+    /// one without, per `composedSystemPrompt`'s gate) would collide under one cache key and the
+    /// provider could serve either's cached prefix to the other. The owner case keeps the bare id
+    /// unchanged (every existing attended key, and every test pinning it) -- only a non-owner
+    /// binding appends a tag, since that is the one case the bare id used to collide on.
     nonisolated static func promptCacheKey(conversationId: UUID, isUnattended: Bool, principal: Principal,
-                                           jobProfile: JobProfile?, toolNames: [String]) -> String {
-        if principal == .main && !isUnattended { return conversationId.uuidString }
-        let identity = "\(principal)|\(jobProfile?.rawValue ?? "none")|" + toolNames.sorted().joined(separator: ",")
+                                           jobProfile: JobProfile?, toolNames: [String], binding: AccessBinding) -> String {
+        let bindingTag = binding.isOwner ? "owner" : "profile-\(binding.profile.memoryRead.rawValue)"
+        if principal == .main && !isUnattended {
+            return binding.isOwner ? conversationId.uuidString : conversationId.uuidString + "\u{0}" + bindingTag
+        }
+        let identity = "\(principal)|\(jobProfile?.rawValue ?? "none")|\(bindingTag)|" + toolNames.sorted().joined(separator: ",")
         let digest = SHA256.hash(data: Data(identity.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
         return "iris-prefix-\(digest)"
     }

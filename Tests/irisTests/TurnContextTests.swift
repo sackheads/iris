@@ -1136,7 +1136,8 @@ struct CacheHintsEngineTests {
     @Test("the key fits OpenAI's 64-byte limit")
     func keyFits() {
         let key = IrisEngine.promptCacheKey(conversationId: UUID(), isUnattended: true, principal: .main,
-                                            jobProfile: .mutating, toolNames: (0..<200).map { "tool_\($0)" })
+                                            jobProfile: .mutating, toolNames: (0..<200).map { "tool_\($0)" },
+                                            binding: AccessBinding(profile: .owner, principal: .main, isOwner: true))
         #expect(key.utf8.count <= 64)
     }
 
