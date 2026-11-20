@@ -320,6 +320,43 @@ struct YoloModeTests {
         #expect(try await value(of: guestTask) == true)
     }
 
+    /// #1232: #1228's reserved-gate tests (`yoloNeverBypassesHumanOnlyOrIrisWrite`) are all
+    /// gate-function level -- a direct `state.requestApprovalSource(...)` call. This is the
+    /// real-engine version: a YOLO-mode model turn whose tool call is a reserved write (a
+    /// workspace `.iris/` write, #617) must still resolve through the person end to end -- the
+    /// MODEL's call never auto-runs, the same way #1217's lesson says a direct-call test can pass
+    /// while production serves the decision through a route the test never drove.
+    @Test("a YOLO model turn's reserved write (.iris/) resolves through the person end to end, not auto-approved")
+    func reservedWriteInAYoloModelTurnResolvesThroughThePerson() async throws {
+        let root = try home(); defer { try? FileManager.default.removeItem(at: root) }
+        let state = try makeState(root)
+        let cid = state.createNewConversation(isBackground: false, select: true)
+        state.setWorkspace(for: cid, path: root.path)
+        state.sendMessage("/yolo on")
+
+        let irisFile = root.appendingPathComponent(".iris/vibecop.md").path
+        let callWrite = GeminiResponse(candidates: [Candidate(content: Content(
+            role: "model", parts: [Part(functionCall: FunctionCall(
+                name: "write_file", args: ["path": .string(irisFile), "content": .string("yolo write")], id: "c1"))]))], usageMetadata: nil)
+        let doneText = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "done")]))], usageMetadata: nil)
+        let engine = IrisEngine(state: state, tier: .medium,
+                                client: FakeLLMClient(responses: [callWrite, doneText]),
+                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
+
+        async let turn: Void = engine.processInput("update your vibecop notes", source: "UI", conversationId: cid)
+        for _ in 0..<80 where state.pendingApprovals.isEmpty {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        #expect(state.pendingApprovals.count == 1, "the model's .iris/ write must reach the queue despite YOLO")
+        #expect(!FileManager.default.fileExists(atPath: irisFile), "must not run before the person decides")
+        if let request = state.pendingApprovals.first {
+            state.resolveApproval(id: request.id, .approve)
+        }
+        _ = await turn
+        #expect(FileManager.default.fileExists(atPath: irisFile), "the approved click lets the write through")
+        #expect((try? String(contentsOfFile: irisFile, encoding: .utf8)) == "yolo write")
+    }
+
     @Test("YOLO mode bypasses outboundGate and ContextHolds in tainted attended conversations")
     func bypassesOutboundGateAndContextHolds() async throws {
         let root = try home(); defer { try? FileManager.default.removeItem(at: root) }
