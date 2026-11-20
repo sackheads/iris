@@ -84,13 +84,19 @@ struct PermissionManager: Sendable {
     /// `isBackground` is the unattended caller: a job run, or any subagent descended from one.
     /// It narrows the `~/.iris` carve-out to reads, because nobody is watching what it writes.
     /// `isGuestOrigin` (#1141) is a turn a guest's message started or steered: no saved rule, exact or
-    /// prefix, applies to it.
-    func isAllowed(toolName: String, details: String, workspace: String?, isBackground: Bool = false, isGuestOrigin: Bool = false) -> Bool {
-        match(toolName: toolName, details: details, workspace: workspace, isBackground: isBackground, isGuestOrigin: isGuestOrigin) != nil
+    /// prefix, applies to it. `isOwner` (#974 Task 9, R3) defaults true so every existing caller that
+    /// does not yet resolve a binding keeps today's behavior; a non-owner binding (a scoped subagent
+    /// or guest-steered profile, #1216's class — distinct from `isGuestOrigin`, which is about
+    /// provenance, not identity) loses the `~/.iris` carve-out below even when it is not guest-origin.
+    func isAllowed(toolName: String, details: String, workspace: String?, isBackground: Bool = false, isGuestOrigin: Bool = false,
+                   isOwner: Bool = true) -> Bool {
+        match(toolName: toolName, details: details, workspace: workspace, isBackground: isBackground, isGuestOrigin: isGuestOrigin,
+              isOwner: isOwner) != nil
     }
 
     /// `isAllowed`, saying which part of the allowlist let the call run (#599).
-    func match(toolName: String, details: String, workspace: String?, isBackground: Bool = false, isGuestOrigin: Bool = false) -> AllowMatch? {
+    func match(toolName: String, details: String, workspace: String?, isBackground: Bool = false, isGuestOrigin: Bool = false,
+               isOwner: Bool = true) -> AllowMatch? {
         let isWrite = (toolName == "write_file")
         // A write that grants permissions must not come from an auto-allow. `IrisPaths`
         // enumerates the directories that qualify (`config/`, `plugins/`) and resolves case and
@@ -100,11 +106,14 @@ struct PermissionManager: Sendable {
         let targetsProtected = isProtectedWrite(toolName: toolName, path: details)
         if targetsProtected && isBackground { return nil }
 
-        // Automatically allow access to agent's own ~/.iris directory — reads for anyone, writes
-        // only for an attended caller and only outside the protected directories. Not on a
+        // Automatically allow access to agent's own ~/.iris directory — reads and writes for the
+        // OWNER only (#974 Task 9, R3: removed the open-to-anyone read carve-out -- a non-owner
+        // binding, guest-origin or not, must not read memory/skills/config just because nobody
+        // steered it; #1216 is the same class of non-owner, non-guest-origin binding this closes).
+        // Writes stay gated as before, attended and outside the protected directories. Not on a
         // guest-origin turn (#1150): a guest-steered write there could plant memory or a skill.
         if toolName == "read_file" || (isWrite && !isBackground && !targetsProtected) {
-            if !isGuestOrigin, paths.isUnderIrisDir(details) { return AllowMatch(scope: .irisHome, rule: nil) }
+            if isOwner, !isGuestOrigin, paths.isUnderIrisDir(details) { return AllowMatch(scope: .irisHome, rule: nil) }
         }
 
         // #1141: a turn a guest's message started or steered re-asks for every call a saved rule
