@@ -85,6 +85,18 @@ struct RuleAudienceTests {
         #expect(A.declared(by: "---\naudience: all\nbody never closes") == .owner, "an unclosed block is a failed marking: restricts")
         #expect(A.declared(by: "---\naudience: everyone\n---\n") == .owner, "an unknown value restricts, it does not widen")
         #expect(A.declared(by: "") == nil)
+        // The ways an author's editor writes the same marking (dev-2 review of #1258): each must still read as owner.
+        #expect(A.declared(by: "---\r\naudience: owner\r\n---\r\nbody") == .owner, "CRLF line endings")
+        #expect(A.declared(by: "---\raudience: owner\r---\rbody") == .owner, "CR line endings")
+        #expect(A.declared(by: "\u{FEFF}---\naudience: owner\n---\nbody") == .owner, "a leading BOM")
+        #expect(A.declared(by: "\n\n  \n---\naudience: owner\n---\nbody") == .owner, "blank lines before the opening ---")
+        #expect(A.declared(by: "---\naudience : owner\n---\nbody") == .owner, "a space before the colon")
+        #expect(A.declared(by: "---\nAudience:\tOwner\n---\nbody") == .owner, "case and a tab")
+        #expect(A.declared(by: "---\r\naudience: all\r\n---\r\nbody") == .all, "CRLF does not break the opt-out either")
+        #expect(A.declared(by: "---\naudience: all\naudience: owner\n---\nbody") == .owner, "the most restrictive of two keys wins (all first)")
+        #expect(A.declared(by: "---\naudience: owner\naudience: all\n---\nbody") == .owner, "the most restrictive of two keys wins (owner first)")
+        #expect(A.declared(by: "---\naudience: all\naudience: all\n---\nbody") == .all)
+        #expect(A.declared(by: "---\naudiences: owner\n---\nbody") == nil, "a different key is not the marking")
         #expect(SkillManager.ruleAppliesToNonOwner("---\naudience: owner\n---\nx") == false)
         #expect(SkillManager.ruleAppliesToNonOwner("---\naudience: all\n---\nx") == true)
         #expect(SkillManager.ruleAppliesToNonOwner("plain") == SkillManager.unmarkedAppliesToNonOwner)
@@ -104,9 +116,11 @@ struct RuleAudienceTests {
                                                             protectionEnabled: false, scope: .everything)
         for marker in [unmarked, everyone, ownerOnly, "PLUGIN-OWNER-1241", "PLUGIN-ALL-1241"] { #expect(all.contains(marker), "\(marker)") }
 
+        try "---\r\naudience: owner\r\n---\r\nCRLF habit CRLF-OWNER-1241".write(to: f.paths.rulesDir.appendingPathComponent("04_crlf.md"), atomically: true, encoding: .utf8)
         let wide = await SkillManager.shared.loadCustomRules(paths: f.paths, extraRuleFiles: [pluginOwner, pluginAll],
                                                              protectionEnabled: false, scope: .nonOwner)
         #expect(wide.contains(everyone) && wide.contains("PLUGIN-ALL-1241"))
         #expect(!wide.contains(ownerOnly) && !wide.contains("PLUGIN-OWNER-1241"), "owner-marked rules, plugin ones included, are dropped")
+        #expect(!wide.contains("CRLF-OWNER-1241"), "an owner-marked rule saved with CRLF line endings is dropped too")
     }
 }
