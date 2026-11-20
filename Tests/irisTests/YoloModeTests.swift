@@ -151,6 +151,30 @@ struct YoloModeTests {
             state.resolveApproval(id: state.pendingApprovals[0].id, .approve)
         }
         #expect(await humanOnlySource == .person)
+
+        // #1115 rebase-conflict fold: a host command writing an access-policy store (#974 Task
+        // 9b F6, policyWrite) is the same class of Brian-reserved approval -- #1221 added it to
+        // the single post-YOLO check that existed then; the #1115 rebase had to fold it into the
+        // new pre-YOLO check too, or YOLO would bypass it exactly like it used to bypass
+        // humanOnly/irisWrite.
+        // The real Iris home (`makeState`'s `paths.root`), not `root` itself -- a path spelled
+        // under `root` directly would also contain a literal ".iris"-looking component and get
+        // caught by `irisWrite` too, making the probe ambiguous about which check is doing the
+        // work.
+        let profilePath = root.appendingPathComponent("iris-home/profiles/evil.json").path
+        async let policyWriteSource = state.requestApprovalSource(toolName: "run_command",
+                                                                    details: "echo x > \(profilePath)",
+                                                                    workspace: root.path, conversationId: cid)
+        for _ in 0..<40 where state.pendingApprovals.isEmpty {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        #expect(state.pendingApprovals.count == 1, "a policy-store write must reach the queue despite YOLO")
+        if state.pendingApprovals.isEmpty {
+            state.denyPendingApprovals(for: cid)
+        } else {
+            state.resolveApproval(id: state.pendingApprovals[0].id, .approve)
+        }
+        #expect(await policyWriteSource == .person)
     }
 
     @Test("Background job runs and MCP guests never get YOLO mode")
