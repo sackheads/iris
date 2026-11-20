@@ -501,6 +501,15 @@ actor IrisEngine {
     /// is Task 16's retrofit.
     let binding: AccessBinding
 
+    /// #974 / #1236: whether THIS turn is the owner's, for the approval ladder's `isOwner:`. The turn's binding
+    /// (`bindingForCall`), not the engine's own: a `.main` engine is owner-shaped, but a turn bound to a narrower
+    /// profile (a guest-steered recipient turn, a stamped job run) is not, and Vibecop's APPROVE must not stand in
+    /// for the person on its host reads (#600, #974 Task 8 C5). No conversation keeps the engine's own binding.
+    func callIsOwner(_ conversationId: UUID?) async -> Bool {
+        guard let conversationId else { return binding.isOwner }
+        return await bindingForCall(conversationId: conversationId).isOwner
+    }
+
     /// #974 Task 15 / Task 7's seam: the binding that gates a specific TURN's tool and memory
     /// access, as opposed to `binding` above (the engine's own, fixed at construction). A `.main`
     /// engine serves every role session from one instance, so a guest-steered turn on one of them
@@ -5277,7 +5286,7 @@ actor IrisEngine {
         let source = await localState.requestApprovalSource(
             toolName: call.name, details: OutboundTools.approvalDetails(tool: call.name, args: call.args), args: call.args,
             workspace: workspacePath, conversationId: conversationId, origin: approvalOrigin,
-            humanOnly: true, offersConversationAllow: true, isOwner: self.binding.isOwner)
+            humanOnly: true, offersConversationAllow: true, isOwner: await callIsOwner(conversationId))
         guard let source else { return .refused(Self.deniedToolResult) }
         return .approved(ToolApproval(source))
     }
@@ -6119,7 +6128,7 @@ actor IrisEngine {
                 let source = await localState?.requestApprovalSource(
                     toolName: functionCall.name, details: details, args: functionCall.args,
                     workspace: workspacePath, conversationId: conversationId, origin: approvalOrigin,
-                    humanOnly: true, beforeToolFired: jobHooksFired, isOwner: self.binding.isOwner)
+                    humanOnly: true, beforeToolFired: jobHooksFired, isOwner: await callIsOwner(conversationId))
                 guard let source else { return Self.jobCreationDeclined }
                 var approval = ToolApproval(source)
                 approval.hookRewrite = jobRewrittenByHook
@@ -7423,7 +7432,7 @@ actor IrisEngine {
                     // #239 (Brian, "1: a"): a subagent on a custom endpoint asks Allow Once only.
                     offersAlwaysAllow: !(subagentRoute?.isEndpoint ?? false),
                     // #653: a call recorded for a card here already went through its hooks.
-                    beforeToolFired: Self.isGatedFileOrCommand(functionCall), isOwner: self.binding.isOwner)
+                    beforeToolFired: Self.isGatedFileOrCommand(functionCall), isOwner: await callIsOwner(conversationId))
                 if let source {
                     var approval = ToolApproval(source)
                     approval.hookRewrite = rewrittenByHook
@@ -8617,7 +8626,7 @@ extension IrisEngine {
         }
         let approved = await localState?.requestApprovalSource(
             toolName: "read_file", details: details, args: ["path": .string(details)], workspace: workspacePath,
-            conversationId: conversationId, origin: approvalOrigin, inSandbox: false, callerRole: .agent, isOwner: self.binding.isOwner)
+            conversationId: conversationId, origin: approvalOrigin, inSandbox: false, callerRole: .agent, isOwner: await callIsOwner(conversationId))
         guard approved != nil else { return .failure(Refusal(text: "reading \(path) to attach it wasn't approved.")) }
         let read = await OffPool.run(cancelled: Result<Data, GrantedFileError>.failure(.io(call: "read", errno: ECANCELED))) { _ -> Result<Data, GrantedFileError> in
             do { return .success(try GrantedFileAccess(root: root).readData(relative: relative, maxBytes: ArtifactLimits.fileBytes)) }
@@ -8656,7 +8665,7 @@ extension IrisEngine {
         let details = "vm:" + path
         let approved = await state?.requestApprovalSource(
             toolName: "read_file", details: details, args: ["path": .string(details)], workspace: workspacePath,
-            conversationId: conversationId, origin: approvalOrigin, inSandbox: true, callerRole: .agent, isOwner: self.binding.isOwner)
+            conversationId: conversationId, origin: approvalOrigin, inSandbox: true, callerRole: .agent, isOwner: await callIsOwner(conversationId))
         guard approved != nil else { return .failure(Refusal(text: "reading \(path) to attach it wasn't approved.")) }
         switch await SandboxArtifacts.readVMFile(path, container: SandboxSessionManager.containerName(for: conversationId), run: run) {
         case .failure(let why): return .failure(why)
