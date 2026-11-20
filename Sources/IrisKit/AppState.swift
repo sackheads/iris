@@ -5055,7 +5055,8 @@ class AppState {
                 return .grant(mount: nil)   // the file tools are the branch above: this is a sandboxed command
             }
             if !isGrantedFileTool,
-               let match = permissions.match(toolName: toolName, details: details, workspace: workspace, isBackground: true) {
+               let match = permissions.match(toolName: toolName, details: details, workspace: workspace, isBackground: true,
+                                             isOwner: isOwner) {
                 return .allowlist(match)
             }
             recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval,
@@ -5110,7 +5111,8 @@ class AppState {
         }
         // Fast path: deterministic permissions.
         let guestOrigin = conversationId.map { isGuestOriginTurn($0) || isGuestOriginTurn(delegationRoot(of: $0)) } ?? false
-        if let match = permissions.match(toolName: toolName, details: details, workspace: workspace, isGuestOrigin: guestOrigin) {
+        if let match = permissions.match(toolName: toolName, details: details, workspace: workspace, isGuestOrigin: guestOrigin,
+                                         isOwner: isOwner) {
             return .allowlist(match)
         }
         // Deterministic too, and only for the grader, never the agent or subagents: exactly a check
