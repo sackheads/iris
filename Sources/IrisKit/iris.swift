@@ -235,6 +235,8 @@ actor IrisEngine {
             else { return nil }
             return JobTools(ledger: ledger, announceURLTriggerCleared: { [weak state] id, name in
                 await MainActor.run { state?.announceURLTriggerCleared(jobId: id, jobName: name) }
+            }, accessProfileId: { [weak state] conversationId in
+                await MainActor.run { state?.persistedAccessProfileId(for: conversationId) }
             })
         }
     }
@@ -500,6 +502,9 @@ actor IrisEngine {
     /// binding (Task 6) and is not run without one (Task 10); the shipped, not-yet-authenticated guest path (`makeGuestEngine`)
     /// is Task 16's retrofit.
     let binding: AccessBinding
+    /// #974 Task 12: where `bindingForCall` resolves a conversation's persisted `accessProfileId`.
+    /// The Iris home's `profiles/` by default (under test, the per-process temp home); a test injects its own.
+    let accessProfileStore: AccessProfileStore
 
     /// #974 Task 15 / Task 7's seam: the binding that gates a specific TURN's tool and memory
     /// access, as opposed to `binding` above (the engine's own, fixed at construction). A `.main`
@@ -511,6 +516,7 @@ actor IrisEngine {
     /// by the memory gate (Task 7) and should be consulted by any future per-turn tool gate too.
     func bindingForCall(conversationId: UUID) async -> AccessBinding {
         let ownBinding = binding
+        let store = accessProfileStore
         guard let state else { return ownBinding }
         return await MainActor.run { () -> AccessBinding in
             // dev-2 review of #1212: checked at the delegation root too, mirroring
@@ -518,12 +524,32 @@ actor IrisEngine {
             // check — a delegate conversation under a guest-steered root was never itself the
             // target `deliverPeerMessage` stamped, only the root was.
             let root = state.delegationRoot(of: conversationId)
+            // #974 Task 12 (C8): a conversation carries the profile it was bound to, not only a
+            // guest-steered stamp. Only a `.main` engine reads it (every other principal already
+            // carries its own binding); a non-nil id naming no live profile is a refusal, which
+            // is a deny-all non-owner binding here, never the engine's owner default; nil is the
+            // owner default for `.main`, so an ordinary conversation is unchanged.
+            var persisted: AccessBinding?
+            if ownBinding.principal == .main {
+                let id = state.persistedAccessProfileId(for: conversationId)
+                if id != nil {
+                    switch BindingResolver.resolveBinding(principal: .main, persistedProfileId: id, store: store) {
+                    case .bound(let bound): persisted = bound
+                    case .refused:
+                        persisted = AccessBinding(profile: AccessProfile(), principal: .main, isOwner: false)
+                            .capped(by: PrincipalFloor.floor(for: .main))
+                    }
+                }
+            }
             // dev-3 review of #1212, round 2: meet both when both exist -- a delegate that was
             // itself a `send_to_session` target could carry its own stamp distinct from its
             // root's, and first-non-nil could pick the wider of the two.
             switch (state.guestSteeredBinding(for: conversationId), state.guestSteeredBinding(for: root)) {
-            case (let a?, let b?): return AccessBinding.meetGuestBindings(a, b)
-            case (let a?, nil), (nil, let a?): return a
+            case (let a?, let b?):
+                let met = AccessBinding.meetGuestBindings(a, b)
+                return persisted.map { AccessBinding.meetGuestBindings(met, $0) } ?? met
+            case (let a?, nil), (nil, let a?):
+                return persisted.map { AccessBinding.meetGuestBindings(a, $0) } ?? a
             case (nil, nil): break
             }
             // dev-3 review of #1212, finding 2: `isGuestOriginTurn` true with no stamp (a caller
@@ -535,7 +561,7 @@ actor IrisEngine {
                 return AccessBinding(profile: AccessProfile(), principal: .mcpGuest, isOwner: false)
                     .capped(by: PrincipalFloor.floor(for: .mcpGuest))
             }
-            return ownBinding
+            return persisted ?? ownBinding
         }
     }
 
@@ -681,10 +707,12 @@ actor IrisEngine {
          guestClientId: String? = nil,
          githubToolsEnabled: Bool? = nil,
          binding: AccessBinding? = nil,
+         accessProfileStore: AccessProfileStore? = nil,
          knownSecrets: (@Sendable () async -> Set<String>)? = nil) {
         self.githubToolsOverride = githubToolsEnabled
         self.state = state
         self.guestClientId = guestClientId
+        self.accessProfileStore = accessProfileStore ?? AccessProfileStore(paths: .default)
         self.knownSecrets = knownSecrets ?? { await MainActor.run { ConfigManager.shared.knownSecretValues } }
         self.binding = binding ?? (principal == .main
             ? AccessBinding(profile: .owner, principal: .main, isOwner: true)
@@ -4859,11 +4887,16 @@ actor IrisEngine {
                 var job = job
                 // #650: who approved the script, and Vibecop's advice, for its run cards.
                 if let scriptReview { job.policy.scriptReview = scriptReview }
+                // #974 Task 12 (C8): the job carries the binding of the turn that made it, so its
+                // run is confined the same way. An update never changes a stamped job's profile.
+                let stamp = await MainActor.run { localState?.persistedAccessProfileId(for: conversationId) }
+                job.accessProfileId = stamp
                 if let replacing {
                     job = Job(id: replacing.id, name: job.name, prompt: job.prompt, trigger: job.trigger,
                               profile: job.profile, destinationConversationId: replacing.destinationConversationId,
                               createdInConversationId: replacing.createdInConversationId,
-                              createdAt: replacing.createdAt, policy: job.policy, action: job.action)
+                              createdAt: replacing.createdAt, policy: job.policy, action: job.action,
+                              accessProfileId: replacing.accessProfileId ?? stamp)
                 }
                 // #330: what was just reviewed is fingerprinted before the row exists, in the secrets
                 // item a shell can't write; a fire whose stored script doesn't match is refused.

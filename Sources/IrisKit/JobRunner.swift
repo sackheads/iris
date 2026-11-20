@@ -1942,6 +1942,11 @@ actor JobRunner {
             // for (§4). Stamped for both profiles — nil means "not a job run at all", which is
             // the unnarrowed surface.
             state.setJobProfile(for: id, job.profile)
+            // #974 Task 12 (C8): the run keeps the binding its job was created under, so the turn
+            // is confined the way the creating session was and never reset to the owner.
+            if let idx = state.conversations.firstIndex(where: { $0.id == id }) {
+                state.conversations[idx].accessProfileId = job.accessProfileId
+            }
             // §0.6, §2: the first read-write mount is the run's working directory — it feeds `-w`,
             // relative paths in `write_file`, the AGENTS.md loader and the per-workspace sandbox
             // file — and the grant itself is what the approval gate and the executor read.

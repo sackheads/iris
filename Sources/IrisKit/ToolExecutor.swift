@@ -13,6 +13,9 @@ struct JobTools: Sendable {
     /// A test's hook between a watch registration's read and its write (#713), where a concurrent
     /// call could change the watch. nil everywhere else.
     var beforeWatchWrite: (@Sendable () async -> Void)? = nil
+    /// #974 Task 12 (C8): the access-profile id the calling conversation is bound to (nil: the
+    /// owner's), stamped onto a watch the call creates. nil where there is no app: no stamp.
+    var accessProfileId: (@Sendable (UUID?) async -> String?)? = nil
 }
 
 struct ToolExecutor {
@@ -550,6 +553,8 @@ struct ToolExecutor {
     private func registerWatcher(_ parsed: RegisterWatcherArguments, resolved: String, conversationId: UUID?,
                                  decidedProfile: JobProfile? = nil) async -> String {
         guard let tools = await jobToolsProvider?() else { return "Jobs are not available yet." }
+        // #974 Task 12 (C8): the binding the calling conversation carries, stamped on a watch this call creates.
+        let accessProfileStamp = await tools.accessProfileId?(conversationId)
         // The canonical spelling is what is stored and what event paths are matched against
         // (`WatchRoot`); a path that is not a directory has no canonical form worth storing.
         var isDirectory: ObjCBool = false
@@ -613,6 +618,7 @@ struct ToolExecutor {
                 // before #283 keeps its old breaker until someone names one.
                 if let runs = parsed.maxRunsPerHour { existing.policy.maxRunsPerHour = runs }
                 existing.profile = profile
+                existing.accessProfileId = existing.accessProfileId ?? accessProfileStamp   // never changed once stamped
                 existing.policy.grants = grant
                 existing.policy.outboundExemptions = parsed.outboundExemptions
                 existing.enabled = true
@@ -639,7 +645,8 @@ struct ToolExecutor {
                                                maxRunsPerHour: parsed.maxRunsPerHour, grants: grant)
                         policy.outboundExemptions = parsed.outboundExemptions
                         return policy
-                    }())
+                    }(),
+                    accessProfileId: accessProfileStamp)
                 let others = watching.map { "`\($0.name)`" }
                 let named = others.count <= 2 ? others.joined(separator: " and ")
                     : others.dropLast().joined(separator: ", ") + " and " + others[others.count - 1]

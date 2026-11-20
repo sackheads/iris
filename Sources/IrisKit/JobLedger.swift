@@ -108,8 +108,8 @@ final class JobLedger: JobUsageReading, Sendable {
                 INSERT INTO jobs (
                     id, name, prompt, triggerKind, trigger, profile, destinationConversationId,
                     createdInConversationId, createdAt, enabled, nextFireAt, lastRunAt, pausedReason,
-                    policy, retryAttempt, queuedFire, action)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    policy, retryAttempt, queuedFire, action, accessProfileId)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     prompt = excluded.prompt,
@@ -126,13 +126,14 @@ final class JobLedger: JobUsageReading, Sendable {
                     policy = excluded.policy,
                     retryAttempt = excluded.retryAttempt,
                     queuedFire = excluded.queuedFire,
-                    action = excluded.action
+                    action = excluded.action,
+                    accessProfileId = excluded.accessProfileId
                 """, arguments: [
                     job.id.uuidString, job.name, job.prompt, job.trigger.kind, triggerJSON,
                     job.profile.rawValue, job.destinationConversationId?.uuidString,
                     job.createdInConversationId?.uuidString, job.createdAt, job.enabled,
                     job.nextFireAt, job.lastRunAt, job.pausedReason,
-                    policyJSON, job.retryAttempt, job.queuedFire, job.action.stored,
+                    policyJSON, job.retryAttempt, job.queuedFire, job.action.stored, job.accessProfileId,
                 ])
             guard let stored else { return false }
             if let storedTrigger = String.fromDatabaseValue(stored["trigger"] as DatabaseValue),
@@ -407,7 +408,9 @@ final class JobLedger: JobUsageReading, Sendable {
             queuedFire: try r.read("queuedFire", Date.self),
             action: action,
             // NULL on every row written before D6 (invariant 1): off.
-            urlTrigger: try r.read("urlTrigger", Bool.self) ?? false)
+            urlTrigger: try r.read("urlTrigger", Bool.self) ?? false,
+            // NULL on every row written before #974 Task 12 (invariant 1): the owner's.
+            accessProfileId: try r.read("accessProfileId", String.self))
     }
 
     /// A NULL column, a value that is not even text, and text that will not parse all read as the

@@ -482,6 +482,10 @@ struct Job: Identifiable, Codable, Equatable, Sendable {
     /// only by `/jobs url` through `JobLedger.setURLTrigger`. `upsert` never writes it, so a stale
     /// copy written back cannot turn it on, and setting it on a value does nothing.
     var urlTrigger: Bool
+    /// #974 Task 12 (C8): the `AccessProfile` id the creating turn was bound to; nil for an owner
+    /// turn. The run's background conversation carries it, so a job made by a confined session does
+    /// not fire as the owner. Stamped once at creation and never changed by an update.
+    var accessProfileId: String?
 
     init(
         id: UUID = UUID(),
@@ -500,7 +504,8 @@ struct Job: Identifiable, Codable, Equatable, Sendable {
         retryAttempt: Int = 0,
         queuedFire: Date? = nil,
         action: JobAction = .prompt,
-        urlTrigger: Bool = false
+        urlTrigger: Bool = false,
+        accessProfileId: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -519,13 +524,14 @@ struct Job: Identifiable, Codable, Equatable, Sendable {
         self.queuedFire = queuedFire
         self.action = action
         self.urlTrigger = urlTrigger
+        self.accessProfileId = accessProfileId
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, prompt, trigger, profile
         case destinationConversationId, createdInConversationId, createdAt
         case enabled, nextFireAt, lastRunAt, pausedReason
-        case policy, retryAttempt, queuedFire, action, urlTrigger
+        case policy, retryAttempt, queuedFire, action, urlTrigger, accessProfileId
     }
 
     init(from decoder: Decoder) throws {
@@ -550,6 +556,8 @@ struct Job: Identifiable, Codable, Equatable, Sendable {
         action = try container.decodeIfPresent(JobAction.self, forKey: .action) ?? .prompt
         // Invariant 1: every job written before D6 lacks it.
         urlTrigger = try container.decodeIfPresent(Bool.self, forKey: .urlTrigger) ?? false
+        // Invariant 1: every job written before #974 Task 12 lacks it (nil: the owner's).
+        accessProfileId = try container.decodeIfPresent(String.self, forKey: .accessProfileId)
     }
 
     /// Derives a short identifier from a job's prompt for use where a display name is needed but
