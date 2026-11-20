@@ -357,6 +357,81 @@ struct YoloModeTests {
         #expect((try? String(contentsOfFile: irisFile, encoding: .utf8)) == "yolo write")
     }
 
+    /// dev-3 review of #1232/#1252: the `.iris/` case above only drives `irisWrite`. `policyWrite`
+    /// and `humanOnly` are the OTHER two reserved classes in the same pre-YOLO check
+    /// (`AppState.requestApprovalSource`), and dropping either from it is caught only by the old
+    /// direct-gate test (#1228), not by the new engine-turn one -- each needs its own end-to-end
+    /// drive, through the tool a model would actually call.
+    @Test("a YOLO model turn's policy-store write (run_command) resolves through the person end to end")
+    func policyWriteInAYoloModelTurnResolvesThroughThePerson() async throws {
+        let root = try home(); defer { try? FileManager.default.removeItem(at: root) }
+        let state = try makeState(root)
+        let cid = state.createNewConversation(isBackground: false, select: true)
+        state.setWorkspace(for: cid, path: root.path)
+        state.sendMessage("/yolo on")
+
+        // The real Iris home (`makeState`'s `paths.root`), not `root` itself -- a path spelled
+        // under `root` directly also contains a literal ".iris"-looking component and would be
+        // caught by `irisWrite` too, making the probe ambiguous about which check is doing the work.
+        let profilePath = root.appendingPathComponent("iris-home/profiles/evil.json").path
+        let callWrite = GeminiResponse(candidates: [Candidate(content: Content(
+            role: "model", parts: [Part(functionCall: FunctionCall(
+                name: "run_command", args: ["command": .string("echo x > \(profilePath)")], id: "c1"))]))], usageMetadata: nil)
+        let doneText = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "done")]))], usageMetadata: nil)
+        let engine = IrisEngine(state: state, tier: .medium,
+                                client: FakeLLMClient(responses: [callWrite, doneText]),
+                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
+
+        async let turn: Void = engine.processInput("plant a profile", source: "UI", conversationId: cid)
+        for _ in 0..<80 where state.pendingApprovals.isEmpty {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        #expect(state.pendingApprovals.count == 1, "the model's policy-store write must reach the queue despite YOLO")
+        #expect(!FileManager.default.fileExists(atPath: profilePath), "must not run before the person decides")
+        if let request = state.pendingApprovals.first {
+            state.resolveApproval(id: request.id, .deny)
+        }
+        _ = await turn
+        #expect(!FileManager.default.fileExists(atPath: profilePath), "a denied click never runs the write")
+    }
+
+    @Test("a YOLO model turn's job creation from Iris itself (schedule_job) resolves through the person end to end")
+    func humanOnlyJobCreationInAYoloModelTurnResolvesThroughThePerson() async throws {
+        let root = try home(); defer { try? FileManager.default.removeItem(at: root) }
+        let state = try makeState(root)
+        // #187 §7: an ordinary readOnly job from an ordinary conversation is NOT humanOnly at all
+        // (JobToolsTests' own pinned/peer-touched/mutating conditions) -- the pinned "Iris"
+        // conversation is the simplest of the three that makes schedule_job humanOnly.
+        let cid = state.activityConversationId()
+        state.setWorkspace(for: cid, path: root.path)
+        // `sendMessage("/yolo on")` with no explicit target hits `selectedConversationId`, which
+        // the pinned conversation is NOT by default -- turning YOLO on for the wrong conversation
+        // made this test pass vacuously (the post-YOLO humanOnly check caught it regardless of
+        // whether the pre-YOLO one did, since YOLO was never active for `cid` at all).
+        state.selectedConversationId = cid
+        state.sendMessage("/yolo on")
+
+        let callSchedule = GeminiResponse(candidates: [Candidate(content: Content(
+            role: "model", parts: [Part(functionCall: FunctionCall(
+                name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1"))]))], usageMetadata: nil)
+        let doneText = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "done")]))], usageMetadata: nil)
+        let engine = IrisEngine(state: state, tier: .medium,
+                                client: FakeLLMClient(responses: [callSchedule, doneText]),
+                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
+
+        async let turn: Void = engine.processInput("schedule a sweep", source: "UI", conversationId: cid)
+        for _ in 0..<80 where state.pendingApprovals.isEmpty {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        #expect(state.pendingApprovals.count == 1, "the model's job creation must reach the queue despite YOLO")
+        #expect(try state.store.ledger.jobs().isEmpty, "must not run before the person decides")
+        if let request = state.pendingApprovals.first {
+            state.resolveApproval(id: request.id, .approve)
+        }
+        _ = await turn
+        #expect(try state.store.ledger.jobs().count == 1, "the approved click lets job creation through")
+    }
+
     @Test("YOLO mode bypasses outboundGate and ContextHolds in tainted attended conversations")
     func bypassesOutboundGateAndContextHolds() async throws {
         let root = try home(); defer { try? FileManager.default.removeItem(at: root) }
