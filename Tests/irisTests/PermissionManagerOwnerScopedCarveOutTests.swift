@@ -107,4 +107,29 @@ struct PermissionManagerOwnerScopedCarveOutTests {
         let result = try #require(toolResultText(w.state, id, callId: callId))
         #expect(result.contains("owner's own memory"), Comment(rawValue: result))
     }
+
+    /// dev-3 review of #1237: the ATTENDED fast path above does not exercise `requestApprovalSource`'s
+    /// OTHER `permissions.match` call, the `isBackground: true` one -- the route a profile-bound job
+    /// run (#974 Task 12) actually takes. Direct call, not an engine turn: this isolates exactly that
+    /// one branch, which `requestApprovalSource` is small and self-contained enough to test directly
+    /// (the planner's own call, since the full job/engine path is #1240's separate concern). No
+    /// sandbox grant on either conversation, so the carve-out -- not a grant -- decides the read.
+    @Test("a background conversation's read of ~/.iris: owner is allowed, non-owner reaches the recorded denial")
+    func backgroundConversationCarveOutIsOwnerOnly() async throws {
+        let w = try world()
+        defer { try? FileManager.default.removeItem(at: w.root) }
+        let path = w.state.permissions.paths.memoryMd.path
+
+        let ownerId = w.state.createNewConversation(isBackground: true, select: false)
+        let ownerSource = await w.state.requestApprovalSource(toolName: "read_file", details: path,
+                                                               conversationId: ownerId, isOwner: true)
+        #expect(ownerSource == .allowlist(AllowMatch(scope: .irisHome, rule: nil)), "owner background read still waved through")
+        #expect(w.state.backgroundDenials[ownerId] == nil)
+
+        let nonOwnerId = w.state.createNewConversation(isBackground: true, select: false)
+        let nonOwnerSource = await w.state.requestApprovalSource(toolName: "read_file", details: path,
+                                                                 conversationId: nonOwnerId, isOwner: false)
+        #expect(nonOwnerSource == nil, "a non-owner background read must not be waved through by the carve-out")
+        #expect(w.state.backgroundDenials[nonOwnerId]?.count == 1, "the refused read is recorded, not silently dropped")
+    }
 }
