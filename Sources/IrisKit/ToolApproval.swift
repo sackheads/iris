@@ -8,7 +8,9 @@ import Foundation
 struct ToolApproval: Codable, Equatable, Sendable {
     enum Layer: String, Codable, Sendable {
         case person, autoApprove, allowlist, grant, graderCheck, vibecop, vibecopRestricted
-        /// #1099: YOLO mode is on for this session, so all tool calls run without asking.
+        /// #1099: YOLO mode is on for this session, so an ordinary tool call runs without asking.
+        /// A reserved approval (#1115/#1229: `humanOnly`, `irisWrite`, `policyWrite`) still resolves
+        /// through the person -- YOLO never covers those, whatever this case's name suggests.
         case yolo
         /// #812: an outbound tool the person exempted, for the conversation or for the job.
         case exemption
