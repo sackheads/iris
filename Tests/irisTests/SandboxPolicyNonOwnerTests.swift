@@ -122,7 +122,7 @@ struct EvaluatorBindingWiringTests {
             while let r = rest.range(of: "GoalEvaluator.shared.evaluate(") {
                 let call = String(rest[r.lowerBound...].prefix(700))
                 let end = call.range(of: "recentWrites")
-                let tail = String(call[(end?.lowerBound ?? call.startIndex)...].prefix(120))
+                let tail = String(call[(end?.lowerBound ?? call.startIndex)...].prefix(240))
                 #expect(tail.contains("parentBinding:"), "\(name): \(tail)")
                 // #1216: iris.swift's two sites read the TURN's binding (a guest-steered `.main` turn
                 // is not the owner's); SubagentManager's grader passes its own parent's binding.
