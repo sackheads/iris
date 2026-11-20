@@ -44,6 +44,19 @@ final class GoalEvaluator: Sendable {
     static let shared = GoalEvaluator()
     private init() {}
 
+    /// Said to the person when `evaluate` gets no parent binding to inherit (#974 Task 10).
+    static let noParentBindingRefusal = "Goal evaluation not run: the grader inherits the authority of the run it grades, and no binding for that run was available. The goal stays open."
+
+    /// #974 Task 6: the grader's binding is a COPY of the run's it grades, not `parent ∩ floor` as
+    /// a subagent's is (`SubagentManager.childBinding`): a grader is the run's own agent in
+    /// authority, so an owner run's grader is the owner and a non-owner run's is not. Only the
+    /// principal is its own, so nothing reads the parent's off the grader's binding. The grader
+    /// never gets more than the run's own grant, and is not run without one (#974 Task 10, C6;
+    /// `EvaluatorInheritsBindingTests`).
+    static func evaluatorBinding(ofParent parent: AccessBinding?) -> AccessBinding? {
+        parent.map { AccessBinding(profile: $0.profile, principal: .evaluator, isOwner: $0.isOwner) }
+    }
+
     /// Runs a fresh-context grader against `contract`, writes the `GoalEvaluation` onto
     /// `originatingConversationId` for the UI to observe, and **returns it**.
     ///
@@ -55,25 +68,32 @@ final class GoalEvaluator: Sendable {
     ///
     /// `client` is injectable so tests can drive the grader with a `FakeLLMClient` instead of
     /// hitting the network.
-    @discardableResult
     ///
     /// `recentWrites` is the graded run's self-write registry (#187 §4), threaded for the same
     /// reason `isBackground` is inherited a few lines below: a grader run for an unattended run is
     /// itself unattended, so anything it writes through a file tool is the run's own output, and
     /// one registry per process only holds if every engine is handed the same one.
-    /// #974 Task 6: the grader's binding is a COPY of the run's it grades, not `parent ∩ floor` as
-    /// a subagent's is (`SubagentManager.childBinding`): a grader is the run's own agent in
-    /// authority, so an owner run's grader is the owner and a non-owner run's is not. Only the
-    /// principal is its own, so nothing reads the parent's off the grader's binding. The formal
-    /// invariant and its tests are Task 10 (C6).
-    static func evaluatorBinding(ofParent parent: AccessBinding?) -> AccessBinding? {
-        parent.map { AccessBinding(profile: $0.profile, principal: .evaluator, isOwner: $0.isOwner) }
-    }
-
+    @discardableResult
     func evaluate(contract: GoalContract, workspace: String?, originatingConversationId originId: UUID,
                   app: AppState, client: any LLMClientProtocol = LLMClient(),
                   recentWrites: RecentWrites = .shared,
                   parentBinding: AccessBinding? = nil) async -> GoalEvaluation {
+
+        // #974 Task 10 (C6): a grader acts with the authority of the run it grades, so with no
+        // binding to inherit there is no authority to give it, and it is not run: a grader built
+        // on the engine's deny-all default would run and fail every tool, which reads as a grader
+        // fault rather than a refusal. `.failed` keeps the goal open exactly as a grader fault
+        // does (the gate never passes on it), and the person is told why.
+        guard let parentBinding else {
+            let placeholders = GoalEvaluationParsing.verdicts(from: [:], criteria: contract.criteria,
+                                                              judgements: contract.judgements)
+            let refused = GoalEvaluation(status: .failed, criteria: placeholders, startedAt: Date(), completedAt: Date())
+            await MainActor.run {
+                app.recordEvaluation(for: originId, refused)
+                app.appendMessage(role: .system, content: Self.noParentBindingRefusal, to: originId)
+            }
+            return refused
+        }
 
         // The directory the grader inspects: the graded conversation's bound workspace, or with
         // none, the process cwd its host commands ran in. Only a bound workspace becomes the
