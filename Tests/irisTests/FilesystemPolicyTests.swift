@@ -382,6 +382,27 @@ struct FilesystemPolicyDispatchTests {
         let result = try #require(toolResultText(app, id, callId: "c1"))
         #expect(result.contains("owner content"), Comment(rawValue: result))
     }
+
+    /// #1216 (folded into #1217 after #1212 landed): the engine itself is owner-shaped (a shared
+    /// `.main` engine serving every role session), but THIS conversation's turn was guest-steered
+    /// and stamped with a narrower binding -- `executeToolWithHooks` must route the read through
+    /// that stamped binding (`bindingForCall`), not the engine's own unrestricted `self.binding`.
+    @Test("a guest-steered .main turn's read_file is confined to the stamped binding's fsRoots, not the engine's own")
+    func guestSteeredTurnUsesStampedBindingNotEnginesOwn() async throws {
+        let (base, allowed, outside) = try tree()
+        defer { try? FileManager.default.removeItem(at: base) }
+        try "secret content".write(to: outside.appendingPathComponent("y.txt"), atomically: true, encoding: .utf8)
+        let call = FunctionCall(name: "read_file", args: ["path": .string(outside.appendingPathComponent("y.txt").path)], id: "c1")
+        // The engine is owner-shaped (as `.main` always is), but the conversation carries a
+        // guest-steered stamp confined to `allowed` -- the stamp, not the engine's own binding,
+        // must decide this read.
+        let (app, _, id) = session(call, binding: AccessBinding(profile: .owner, principal: .main, isOwner: true))
+        app.markGuestSteeredBinding(nonOwner(fsRoots: [allowed.path]), for: id)
+        app.sendMessage("go")
+        #expect(await eventually { self.finished(app, id) })
+        let result = try #require(toolResultText(app, id, callId: "c1"))
+        #expect(!result.contains("secret content"), Comment(rawValue: result))
+    }
 }
 
 /// #974 Task 8 (C5), dev-3 review round 2: `requestApprovalSource`'s `isOwner` parameter still
