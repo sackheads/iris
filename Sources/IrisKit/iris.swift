@@ -496,8 +496,8 @@ actor IrisEngine {
     /// Principal (dev-3's #1202 review finding 2 — never owner, per H3/C8's anti-goal; nothing
     /// reads `.binding` yet, so this changes no observed behavior, only what Group B's first read
     /// fails safely toward). `SubagentManager` is the one production caller that now threads a
-    /// real, capped binding through (Task 5); `GoalEvaluator`'s own inheritance is Task 10's
-    /// (Group B), not this one's; the shipped, not-yet-authenticated guest path (`makeGuestEngine`)
+    /// real, capped binding through (Task 5); `GoalEvaluator` threads a copy of the graded run's
+    /// binding (Task 6) and is not run without one (Task 10); the shipped, not-yet-authenticated guest path (`makeGuestEngine`)
     /// is Task 16's retrofit.
     let binding: AccessBinding
 
