@@ -7935,11 +7935,12 @@ actor IrisEngine {
         // validates each root through `JobGrant.resolve`'s own refusals (too broad, protected, a
         // credential store, a startup location, a login-PATH entry) — building the grant directly
         // from `fsRoots` bypassed every one of those.
-        // dev-2/planner review finding 2: this reads `self.binding`, not `bindingForCall`, so a
-        // guest-steered `.main` turn is still routed as owner here until #1212 lands. Tracked with
-        // #1216 (not fixed inline: #1212 is not yet in this branch's base).
-        let filesystemPolicy = FilesystemPolicy.resolve(binding: self.binding,
-                                                         grant: FilesystemPolicy.grant(fromFsRoots: self.binding.profile.fsRoots))
+        // #1216 (folded in now that #1212 is on main): `bindingForCall`, not `self.binding` --
+        // a guest-steered `.main` turn's host file access is routed by the narrower binding
+        // `deliverPeerMessage` stamped for it, not the engine's own owner-shaped default.
+        let fsBinding = conversationId == nil ? self.binding : await bindingForCall(conversationId: conversationId!)
+        let filesystemPolicy = FilesystemPolicy.resolve(binding: fsBinding,
+                                                         grant: FilesystemPolicy.grant(fromFsRoots: fsBinding.profile.fsRoots))
         var result = await executor.execute(name: name, args: execArgs, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox, grant: grant, grantedMount: grantedMount,
                                               approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath, restrictedPath: restrictedPath,
                                               homeWritableOptIn: await homeWritableOptIn(for: conversationId),
