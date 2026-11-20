@@ -484,7 +484,8 @@ struct Job: Identifiable, Codable, Equatable, Sendable {
     var urlTrigger: Bool
     /// #974 Task 12 (C8): the `AccessProfile` id the creating turn was bound to; nil for an owner
     /// turn. The run's background conversation carries it, so a job made by a confined session does
-    /// not fire as the owner. Stamped once at creation and never changed by an update.
+    /// not fire as the owner. Stamped once at creation and never changed by an update. The id is
+    /// resolved when the run fires, not when the job is made: a profile deleted since fails closed.
     var accessProfileId: String?
 
     init(

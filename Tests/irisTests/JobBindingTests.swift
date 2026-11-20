@@ -118,6 +118,33 @@ struct JobBindingTests {
         #expect(jobs.first { $0.prompt == "other" }?.accessProfileId == nil)
     }
 
+    @Test("an update (a re-schedule under the same name) never changes a stamped job's profile, even if the conversation's has since changed")
+    func updateKeepsTheStamp() async throws {
+        let w = try world(); defer { try? FileManager.default.removeItem(at: w.root) }
+        let conversation = UUID()
+        w.state.createNewConversation(id: conversation)
+        let idx = try #require(w.state.conversations.firstIndex { $0.id == conversation })
+        w.state.conversations[idx].accessProfileId = "reader"
+        let engine = IrisEngine(state: w.state, tier: .medium, client: FakeLLMClient(responses: []),
+                                protectionEnabled: false, sessionPeerCount: 0)
+        func schedule(_ prompt: String) async {
+            let args = ScheduleJobArguments.parse(["prompt": .string(prompt), "name": .string("tidy"), "intervalSeconds": .int(600)])
+            _ = await engine.scheduleJob(args, conversationId: conversation, sandboxAvailable: true)
+        }
+        await schedule("first")
+        #expect(try w.store.ledger.jobs().first?.accessProfileId == "reader")
+        // The conversation is now the owner's (or another profile): the replace must not adopt that.
+        w.state.conversations[idx].accessProfileId = nil
+        await schedule("second")
+        var jobs = try w.store.ledger.jobs()
+        #expect(jobs.count == 1 && jobs.first?.prompt == "second", "the second call replaced the first")
+        #expect(jobs.first?.accessProfileId == "reader", "an update of a confined job must not fire as owner")
+        w.state.conversations[idx].accessProfileId = "other"
+        await schedule("third")
+        jobs = try w.store.ledger.jobs()
+        #expect(jobs.count == 1 && jobs.first?.accessProfileId == "reader", "nor switch to a different profile")
+    }
+
     @Test("a stamp saved to the ledger reloads intact (the column persists it, not only the Codable init)")
     func stampRoundTripsThroughTheLedger() throws {
         let store = try ConversationStore.inMemory()
