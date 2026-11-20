@@ -174,13 +174,16 @@ maintenance sleep mid-run failed tests with walls they could not have spent (#60
 `seconds(since:)` for a bound, `deadline(_:)` for a polling loop, and `NSCondition.wait(until:)` for a
 stub's hang. `Date()` is for what means wall time: a timestamp, a calendar date, a schedule.
 
-**A test that compares a rendered date/time string must pin the time zone, not read `TimeZone.current`
-on both sides.** A test asserting "X's zone differs from Y's" by comparing rendered labels passed on a
-dev machine (a real local zone) and failed on CI's runner (GMT) the moment both sides happened to render
-the same label — not because the behavior was wrong, because the comparison assumed two different
-zones where the two could legitimately coincide (#1243). Pass an explicit `TimeZone` to whatever
-produces the string on each side, and assert each against its own expected zone, never compare the two
-renderings' real identifiers to each other.
+**A test that compares a rendered date/time string must not read `TimeZone.current` on both sides.**
+A test asserting "X's zone differs from Y's" by comparing rendered labels passed on a dev machine (a
+real local zone) and failed on CI's runner (GMT) the moment both sides happened to render the same
+label — not because the behavior was wrong, because the comparison assumed two different zones where
+the two could legitimately coincide (#1243). Where the call takes a `TimeZone` parameter, pass an
+explicit non-UTC one in the test rather than `.current`. Where it does not — the owner's own date line
+always reads `.current`, by design, and cannot be redirected — assert each side against its own
+expected rendering (computed separately, with the zone that side should show) rather than
+cross-comparing the two renderings' real identifiers to each other, and mutant-check the gate on a
+non-UTC host if you can; on a UTC host that specific mutant cannot be caught at all.
 
 **Opt-in tests.** Two kinds of test are skipped unless an environment variable asks for them,
 because they need something the default suite must not depend on:
