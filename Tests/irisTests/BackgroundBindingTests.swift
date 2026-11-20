@@ -107,14 +107,18 @@ struct BackgroundBindingTests {
         let w = try world(); defer { try? FileManager.default.removeItem(at: w.root) }
         try writeProfile(w, id: "blind", json: Self.blindJSON)
         // The guest stamp alone WOULD allow the read (memoryRead full); the persisted profile omits it.
-        let result = try await backgroundResult(tool: "search_memory", args: Self.search, profileId: "blind", in: w) { app, id in
+        // The stamp sits on the conversation only; its root (a linked, unstamped one) is not stamped, so
+        // this is the single-stamp branch of `bindingForCall`, not the pair branch below.
+        func stampOnlyTheDelegate(_ app: AppState, _ id: UUID) {
+            let root = UUID()
+            app.createNewConversation(id: root, isBackground: true)
+            app.linkDelegate(id, of: root)
             app.markGuestSteeredBinding(self.guestStamp(), for: id)
         }
+        let result = try await backgroundResult(tool: "search_memory", args: Self.search, profileId: "blind", in: w, prepare: stampOnlyTheDelegate)
         #expect(result.contains(MemoryBindingGate.refusal), Comment(rawValue: result))
         // Control: the stamp alone (no persisted profile) lets the read through, so the refusal above is the meet.
-        let alone = try await backgroundResult(tool: "search_memory", args: Self.search, profileId: nil, in: w) { app, id in
-            app.markGuestSteeredBinding(self.guestStamp(), for: id)
-        }
+        let alone = try await backgroundResult(tool: "search_memory", args: Self.search, profileId: nil, in: w, prepare: stampOnlyTheDelegate)
         #expect(!alone.contains(MemoryBindingGate.refusal), Comment(rawValue: alone))
     }
 
