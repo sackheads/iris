@@ -284,6 +284,62 @@ struct StripOwnerContextForNonOwnerTests {
         #expect(all.contains(canaries.rule), "rules are not yet stripped -- #1241")
     }
 
+    /// dev-2 review of #1243 round 2: the test above only probes `memoryRead: .none`, which is
+    /// below the facts tier (`.shared`) regardless of whether the gate checks the real tier or
+    /// collapses to `isOwner` alone -- both would refuse it, so the test cannot tell them apart.
+    /// A non-owner at EXACTLY the facts tier (`.shared`, below `.full`) must still receive the fact
+    /// (same cost as `search_memory`'s facts scope) while USER.md/SOUL/skills stay stripped (those
+    /// need `.full`) -- proving the gate reads `MemoryBindingGate.mayReadFacts`'s real tier logic,
+    /// not a simpler `isOwner` check that happens to also refuse `.none`.
+    @Test("a non-owner at exactly the facts tier (.shared) still gets the fact, but not USER.md/SOUL/skills (those need .full)")
+    func nonOwnerAtFactsTierGetsFactButNotOwnerProfile() async throws {
+        let canaries = Canaries()
+        let (f, facts, ruleFile) = try canaryFixture(canaries)
+        defer { try? FileManager.default.removeItem(at: f.root); try? FileManager.default.removeItem(at: ruleFile) }
+        let id = f.app.createNewConversation(select: false)
+        f.app.markGuestSteeredBinding(nonOwner(memoryRead: .shared), for: id)
+        let client = CapturingLLMClient(reply: "ok")
+        let engine = IrisEngine(state: f.app, client: client, retryDelays: [], factStore: facts, protectionEnabled: false,
+                                sessionPeerCount: 0, memory: f.memory)
+        await engine.processInput("what is the vault code", source: "UI", conversationId: id)
+        let all = everything(client.requests.first)
+        #expect(all.contains(canaries.fact), "a .shared-tier non-owner must still get the fact, same cost as search_memory")
+        #expect(!all.contains(canaries.userMd), "USER.md still needs .full")
+        #expect(!all.contains(canaries.soulMd), "SOUL.md still needs .full")
+        #expect(!all.contains("# Available Skills"), "skills still need .full")
+    }
+
+    /// dev-2 review of #1243 round 2: `facts` has TWO producers -- `retrievesFacts` (an ordinary
+    /// UI turn) and `goalRunFacts` (a /goal run's kickoff/steer/carry) -- and the earlier canary
+    /// tests only drove the first. Gating only `retrievesFacts` and leaving `goalRunFacts`
+    /// ungated would survive every test above, since none of them ever set `source: "System"` with
+    /// a `goalFacts` argument.
+    @Test("a goal run's kickoff on a stamped non-owner turn gets no fact; the owner's kickoff still does")
+    func goalRunFactsIsGatedToo() async throws {
+        let canaries = Canaries()
+        let (ownerFixture, ownerFacts, ownerRuleFile) = try canaryFixture(canaries)
+        defer { try? FileManager.default.removeItem(at: ownerFixture.root); try? FileManager.default.removeItem(at: ownerRuleFile) }
+        let ownerId = ownerFixture.app.createNewConversation(select: false)
+        let ownerClient = CapturingLLMClient(reply: "ok")
+        let ownerEngine = IrisEngine(state: ownerFixture.app, client: ownerClient, retryDelays: [], factStore: ownerFacts,
+                                     protectionEnabled: false, sessionPeerCount: 0, memory: ownerFixture.memory)
+        await ownerEngine.processInput("GOAL MODE ACTIVATED. Your goal is: find the vault code.", source: "System",
+                                       conversationId: ownerId, goalFacts: .start(objective: "the vault code"))
+        #expect(everything(ownerClient.requests.first).contains(canaries.fact), "the owner's goal-run kickoff must still carry the matching fact")
+
+        let otherCanaries = Canaries()
+        let (f, facts, ruleFile) = try canaryFixture(otherCanaries)
+        defer { try? FileManager.default.removeItem(at: f.root); try? FileManager.default.removeItem(at: ruleFile) }
+        let id = f.app.createNewConversation(select: false)
+        f.app.markGuestSteeredBinding(nonOwner(), for: id)
+        let client = CapturingLLMClient(reply: "ok")
+        let engine = IrisEngine(state: f.app, client: client, retryDelays: [], factStore: facts, protectionEnabled: false,
+                                sessionPeerCount: 0, memory: f.memory)
+        await engine.processInput("GOAL MODE ACTIVATED. Your goal is: find the vault code.", source: "System",
+                                  conversationId: id, goalFacts: .start(objective: "the vault code"))
+        #expect(!everything(client.requests.first).contains(otherCanaries.fact), "a stamped non-owner's goal-run kickoff must not carry the owner's fact")
+    }
+
     /// #974 Task 13 W1 sweep: the date line's time zone is `.current` (the owner's machine), a
     /// location fingerprint -- the same class of owner-personal data as the rest, even though the
     /// date itself stays useful for a non-owner turn (unlike a guest's, which gets no date line at
