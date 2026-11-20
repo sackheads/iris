@@ -31,6 +31,21 @@ extension AppState {
         Content(role: "user", parts: [Part(text: line)])
     }
 
+    /// #1250: whether the conversation a card's text came from has had a guest's message delivered to it
+    /// (`Conversation.hasGuestInput`). A reflection card's source is the conversation that reflected; a
+    /// job-run card's is the run's own conversation or the conversation that created the job (the model
+    /// that wrote the job's prompt read the guest's text there).
+    func cardSourceHasGuestInput(_ card: EventCard) -> Bool {
+        func flagged(_ id: UUID?) -> Bool {
+            guard let id else { return false }
+            return conversations.first { $0.id == id }?.hasGuestInput == true
+        }
+        if card.isReflection { return flagged(card.sourceConversationId) }
+        if flagged(card.transcriptConversationId) { return true }
+        let creator = (try? store.ledger.jobs())?.first { $0.id == card.jobId }?.createdInConversationId
+        return flagged(creator)
+    }
+
     /// Appends the card to `destinationId`'s transcript now and routes its history line per the
     /// in-flight rule. Starts no turn, in either branch.
     ///
@@ -56,6 +71,11 @@ extension AppState {
                                                      maxTier: .tier1_structural)
         // Re-checked after the await: the destination could have been deleted while the guard ran.
         guard conversations.contains(where: { $0.id == destinationId }) else { return }
+        // #1250: a card whose source a guest wrote into carries that taint with it. Without this the
+        // destination (usually pinned Iris) reads as CLEAN to #813's holds and #812's outbound gate right
+        // after it has read text derived from a guest-touched conversation. Only the guest-input flag
+        // (#1246) marks it: #813's own taint is set by any untrusted read and would taint Iris constantly.
+        if cardSourceHasGuestInput(card) { markConversationReadUntrusted(destinationId) }
         appendMessage(role: .event, content: card.encodedContent(), to: destinationId)
         markUnread(destinationId)   // #592: a card is a reply too, e.g. a job's in the pinned Iris
         notifyForCard(card, destination: destinationId)
