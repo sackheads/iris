@@ -859,6 +859,13 @@ final class ConversationStore: Sendable {
                 t.add(column: "accessProfileId", .text)
             }
         }
+        // #1246: a guest's text has entered this conversation's history. NULL (every earlier row) reads
+        // as false. Paired with `Conversation`'s own `decodeIfPresent`: the store is columnar.
+        m.registerMigration("v43_has_guest_input") { db in
+            try db.alter(table: "conversations") { t in
+                t.add(column: "hasGuestInput", .boolean)
+            }
+        }
         return m
     }
 
@@ -1097,14 +1104,14 @@ final class ConversationStore: Sendable {
                     isBackground = ?, isPinned = ?, sessionCard = ?, jobProfile = ?, sandboxGrant = ?,
                     hasUnattendedInput = ?, hasUntrustedToolOutput = ?, outboundAllowedTools = ?, jobOutboundExemptions = ?, prefixMismatchBehavior = ?, role = ?, homeWritableOptIn = ?,
                     agentProfile = ?, agentProfileSnapshot = ?,
-                    loop = ?, modelTier = ?, lastTouchedAt = ?, archivedAutomaticallyAt = ?, inSessions = ?, additionalRoots = ?, vibecopGuidance = ?, accessProfileId = ?
+                    loop = ?, modelTier = ?, lastTouchedAt = ?, archivedAutomaticallyAt = ?, inSessions = ?, additionalRoots = ?, vibecopGuidance = ?, accessProfileId = ?, hasGuestInput = ?
                 WHERE id = ?
                 """, arguments: [c.title, touched, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
                                  evaluation, report, c.isArchived, c.isBackground, c.isPinned, card,
                                  c.jobProfile?.rawValue, grant, c.hasUnattendedInput, c.hasUntrustedToolOutput, outboundAllowed, jobExemptions, c.prefixMismatchBehavior?.rawValue,
                                  c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue,
-                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, additionalRoots, c.vibecopGuidance, c.accessProfileId, c.id.uuidString])
+                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, additionalRoots, c.vibecopGuidance, c.accessProfileId, c.hasGuestInput, c.id.uuidString])
         } else {
             let position = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(position), 0) FROM conversations") ?? 0) + 1
             try db.execute(sql: """
@@ -1113,14 +1120,14 @@ final class ConversationStore: Sendable {
                     subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived,
                     isBackground, isPinned, sessionCard, jobProfile, sandboxGrant, hasUnattendedInput,
                     hasUntrustedToolOutput, outboundAllowedTools, jobOutboundExemptions, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier,
-                    lastTouchedAt, archivedAutomaticallyAt, inSessions, additionalRoots, vibecopGuidance, accessProfileId)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    lastTouchedAt, archivedAutomaticallyAt, inSessions, additionalRoots, vibecopGuidance, accessProfileId, hasGuestInput)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [c.id.uuidString, position, c.title, now, touched, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
                                  tokenUsage, contract, result, history, evaluation, report, c.isArchived,
                                  c.isBackground, c.isPinned, card, c.jobProfile?.rawValue, grant, c.hasUnattendedInput,
                                  c.hasUntrustedToolOutput, outboundAllowed, jobExemptions, c.prefixMismatchBehavior?.rawValue, c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue,
-                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, additionalRoots, c.vibecopGuidance, c.accessProfileId])
+                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, additionalRoots, c.vibecopGuidance, c.accessProfileId, c.hasGuestInput])
         }
     }
 
@@ -1444,6 +1451,14 @@ final class ConversationStore: Sendable {
                 case .unconvertible:
                     print("WARNING: unreadable hasUnattendedInput for conversation \(id); defaulting to untainted")
                     c.hasUnattendedInput = false
+                }
+                // #1246: false for a NULL or garbled value, the status-quo default (no guest message known).
+                switch Self.readBool(row, "hasGuestInput") {
+                case .null: c.hasGuestInput = false
+                case .value(let v): c.hasGuestInput = v
+                case .unconvertible:
+                    print("WARNING: unreadable hasGuestInput for conversation \(id); defaulting to false")
+                    c.hasGuestInput = false
                 }
                 // #813: the opposite default. True is the cautious side of this flag, so a row that
                 // predates it (NULL) or whose value is garbled reads as tainted.

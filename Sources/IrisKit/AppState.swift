@@ -449,6 +449,14 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// because the taint lived in transient state instead of being derived from what persists.
     var hasUnattendedInput: Bool = false
 
+    /// #1246 (C7): true once a guest's message (or a relay of one) has been delivered to this
+    /// conversation, so the model's history holds text a guest wrote. Sticky and never cleared: the
+    /// text stays in the history `/clear` leaves alone, so the automatic reflection, which consolidates
+    /// that history into the owner's memory, does not run here (`sendMessage`); `/reflect`, which the
+    /// owner asks for, still does. Not `hasUntrustedToolOutput`, which any untrusted read sets and so
+    /// holds for most sessions. Set only by `noteGuestInput`.
+    var hasGuestInput: Bool = false
+
     /// #813: true once a tool result, an arrival or an approved call's output that did not come
     /// from the person or from Iris's own files has been put in front of the model here. It is not
     /// `hasUnattendedInput`, which says a turn started without the owner present; this one says the
@@ -515,7 +523,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, hasUntrustedToolOutput, outboundAllowedTools, jobOutboundExemptions, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier, lastTouchedAt, archivedAutomaticallyAt, inSessions, additionalRoots, vibecopGuidance, accessProfileId
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, hasUntrustedToolOutput, outboundAllowedTools, jobOutboundExemptions, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier, lastTouchedAt, archivedAutomaticallyAt, inSessions, additionalRoots, vibecopGuidance, accessProfileId, hasGuestInput
     }
 
     init(from decoder: Decoder) throws {
@@ -578,6 +586,8 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         // Invariant 1: a conversation persisted before this ruling has no such key, and absent
         // means "no turn here ever started without the owner present", the correct default.
         hasUnattendedInput = try container.decodeIfPresent(Bool.self, forKey: .hasUnattendedInput) ?? false
+        // Invariant 1: absent before #1246; absent means no guest message is known to have arrived.
+        hasGuestInput = try container.decodeIfPresent(Bool.self, forKey: .hasGuestInput) ?? false
         // Invariant 1, and #813's narrow direction: absent means persisted before the flag, with
         // nothing to say what the model read, so it reads as tainted.
         hasUntrustedToolOutput = try container.decodeIfPresent(Bool.self, forKey: .hasUntrustedToolOutput) ?? true
@@ -3337,6 +3347,13 @@ class AppState {
     @ObservationIgnored private var guestSteeredBindings: [UUID: AccessBinding] = [:]
 
     func markGuestOriginTurn(_ id: UUID) { guestOriginTurnConversations.insert(id) }
+
+    /// #1246: a guest's text has entered `id`'s history; see `Conversation.hasGuestInput`.
+    func noteGuestInput(_ id: UUID) {
+        guard let idx = conversations.firstIndex(where: { $0.id == id }), !conversations[idx].hasGuestInput else { return }
+        conversations[idx].hasGuestInput = true
+        markChanged(id, .metadata)
+    }
     func isGuestOriginTurn(_ id: UUID) -> Bool { guestOriginTurnConversations.contains(id) }
     /// dev-3 review of #1212, finding 1: meets with any existing stamp rather than overwriting —
     /// a wider guest's send arriving while a narrower guest's turn is still running (or a relay
@@ -3992,7 +4009,10 @@ class AppState {
             // 5b: the pinned conversation is exempt from the 3-message auto-rename trigger
             // (spec §0.2) — it keeps the name "Iris".
             let shouldRename = !conversations[idx].isPinned && !conversations[idx].isGuest && userMessagesCount == 3 && conversations[idx].messageCountSinceReflection == 3
-            let shouldReflect = !conversations[idx].isGuest && conversations[idx].messageCountSinceReflection >= 30
+            // #1246: not after a guest's text has entered this history (`hasGuestInput`): the automatic reflection
+            // would consolidate it into the owner's memory. `/reflect` is the owner's own ask and still runs.
+            let shouldReflect = !conversations[idx].isGuest && !conversations[idx].hasGuestInput
+                && conversations[idx].messageCountSinceReflection >= 30
             if shouldReflect {
                 conversations[idx].messageCountSinceReflection = 0
                 markChanged(convId, .metadata)
