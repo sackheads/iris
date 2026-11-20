@@ -81,7 +81,9 @@ check only covers the `write_file` tool; a `run_command` shell call that writes 
 by redirection is a person's call alone too (#974 Task 9b, `PermissionManager.writesPolicyStore`):
 a command that names the directory (a text match, so one that builds the path at run time is not
 seen) is never approved by an allowlist rule or Vibecop, and its dialog names the directory as
-Iris's own access policy; only the owner's own YOLO mode and a headless driver's auto-approve skip
-the prompt. A key planted by a path the match misses is the one failure this core cannot detect: `resolve()` trusts whatever `[RegisteredKey]` it finds on disk. If
+Iris's own access policy; only a headless driver's auto-approve skips the prompt (#1115/#1229: YOLO
+no longer does -- it is a reserved approval, same class as a workspace `.iris/` write). A key
+planted by a path the match misses is the one failure this core cannot detect: `resolve()` trusts
+whatever `[RegisteredKey]` it finds on disk. If
 this boundary is ever loosened for `config/` in general, this registry's "only a person enrolls a
 key" guarantee goes with it.

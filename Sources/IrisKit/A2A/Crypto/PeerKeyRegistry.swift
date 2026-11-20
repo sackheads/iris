@@ -65,8 +65,8 @@ struct PeerKeyRegistry: Sendable {
     /// this directory always asks and can never be covered by a standing grant; a shell command
     /// writing here (e.g. `echo '[...]' > ~/.iris/config/a2a-peers/x.json`) is a person's call
     /// alone too (#974 Task 9b, `PermissionManager.writesPolicyStore`): never an allowlist rule's or
-    /// Vibecop's APPROVE, and its dialog names the directory as Iris's own access policy — only the
-    /// owner's own YOLO mode and a headless driver's auto-approve skip the prompt. A
+    /// Vibecop's APPROVE, and its dialog names the directory as Iris's own access policy — only a
+    /// headless driver's auto-approve skips the prompt (#1115/#1229: YOLO no longer does). A
     /// planted key here would be the one thing that breaks this whole core's trust model, so this
     /// boundary matters even though it is not specific to this file.
     var directory: URL { paths.a2aPeersDir }
