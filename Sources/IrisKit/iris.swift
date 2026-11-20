@@ -449,11 +449,16 @@ actor IrisEngine {
         var composed = await composedSystemPrompt(workspacePath: workspacePath, additionalRoots: additionalRoots, agentProfile: agentProfile,
                                                    binding: binding)
         // After the cached composition, never inside it: the date must not freeze in a cache entry.
-        // Not for a guest: the line carries the owner's IANA time zone (#1066).
+        // Not for a guest: the line carries the owner's IANA time zone (#1066). #974 Task 13 (W1
+        // review, dev-2/the planner): a non-owner binding gets the date in UTC instead -- the
+        // owner's local zone is a location fingerprint, the same class of owner-personal data as
+        // USER.md, even though the date itself is still useful to a non-owner turn (unlike a
+        // guest's, which carries no date line at all).
         if principal != .mcpGuest, let text = composed.parts.first?.text {
             let hasCurrentTime = principal != .evaluator && principal != .mcpGuest
                 && (Self.agentToolScope?.allows(Self.currentTimeTool) ?? true)
-            composed.parts[0].text = text + "\n\n" + Self.currentDateLine(now: wallClock(), hasCurrentTimeTool: hasCurrentTime)
+            let zone = binding.isOwner ? TimeZone.current : TimeZone(identifier: "UTC")!
+            composed.parts[0].text = text + "\n\n" + Self.currentDateLine(now: wallClock(), timeZone: zone, hasCurrentTimeTool: hasCurrentTime)
         }
         return composed
     }
@@ -3461,8 +3466,14 @@ actor IrisEngine {
         // #415: only a turn that carries something the user typed gets facts searched for it, plus
         // a /goal run's turns, which carry the facts found for the objective and the user's steers.
         // Retrieval counts as usage and nothing else: trust moves only on manage_fact feedback.
+        // #974 Task 13 (W1 review, dev-2): JIT facts are the owner's saved memory, the same class
+        // `search_memory`'s facts scope already gates on `MemoryBindingGate.mayReadFacts` (#974
+        // Task 7, C4) -- this turn-context path must not hand a non-owner binding what the tool
+        // call would refuse it.
         let facts: [Fact]
-        if Self.retrievesFacts(source: source, principal: principal, input: input) {
+        if !MemoryBindingGate.mayReadFacts(turnBinding) {
+            facts = []
+        } else if Self.retrievesFacts(source: source, principal: principal, input: input) {
             facts = measureSpanSync("assembly.factSearch") {
                 (try? factStore.search(query: input, limit: Self.jitFactLimit, applyRelevanceFloor: true)) ?? []
             }
@@ -3534,7 +3545,9 @@ actor IrisEngine {
 
         // 5b §0.3: the pinned conversation only, built fresh from the ledger every turn.
         // Best-effort — a ledger read that throws omits the section, never fails the turn.
-        if isPinned, let ledger {
+        // #974 Task 13 (W1 sweep): job failures/paused/recent runs are the owner's own
+        // infrastructure state, withheld from a non-owner binding same as everything else here.
+        if isPinned, turnBinding.isOwner, let ledger {
             if let failures = try? ledger.unacknowledgedFailures(),
                let jobs = try? ledger.jobs(),
                let recent = try? ledger.recentRuns(limit: Briefing.recentCap + failures.count),

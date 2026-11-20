@@ -209,4 +209,134 @@ struct StripOwnerContextForNonOwnerTests {
         #expect(system.contains(roleSentinel), "a custom base prompt is the engine's own role, not SOUL-derived -- kept for a non-owner binding too")
         #expect(!system.contains(userSentinel), "USER.md is still stripped on top of the custom base")
     }
+
+    /// #974 Task 13 W1 sweep (the planner/Overseer, after dev-2 and dev-3 independently found the
+    /// facts/JIT route this file's earlier tests missed): a canary in EVERY owner-data store the
+    /// prompt can read, scanned over the WHOLE request (system instruction + per-turn contents --
+    /// facts ride the turn's own content entry, not the system prompt), not one route at a time.
+    /// This is the net that catches a FUTURE owner-injection route this PR's authors never thought
+    /// to probe, not just the ones found so far. Rules are NOT stripped in this PR (#1241's own
+    /// decision, pending the owner-personal-vs-security split) -- marked expected-present here, on
+    /// purpose, so this test does not silently start failing the day #1241 ships and someone forgets
+    /// to update it; it should be edited to expected-absent together with #1241's own strip.
+    private struct Canaries {
+        let userMd = "CANARY-USERMD-\(UUID().uuidString)"
+        let soulMd = "CANARY-SOULMD-\(UUID().uuidString)"
+        let fact = "CANARY-FACT-\(UUID().uuidString)"
+        let rule = "CANARY-RULE-\(UUID().uuidString)"
+    }
+
+    private func everything(_ request: GeminiRequest?) -> String {
+        guard let request else { return "" }
+        let system = request.systemInstruction?.parts.compactMap(\.text).joined(separator: "\n") ?? ""
+        let rest = request.contents.flatMap(\.parts).compactMap(\.text).joined(separator: "\n")
+        return system + "\n" + rest
+    }
+
+    private func canaryFixture(_ canaries: Canaries) throws -> (Fixture, FactStoreManager, URL) {
+        let f = try fixture()
+        try Data("owner profile \(canaries.userMd)".utf8).write(to: f.memory.paths.userMd)
+        try Data("owner soul \(canaries.soulMd)".utf8).write(to: f.memory.paths.soulMd)
+        let facts = try FactStoreManager(inMemory: true)
+        _ = try facts.addFact(content: "the vault code is \(canaries.fact)")
+        let ruleFile = IrisPaths.default.rulesDir.appendingPathComponent("iris-974-task13-canary-\(UUID().uuidString).md")
+        try FileManager.default.createDirectory(at: IrisPaths.default.rulesDir, withIntermediateDirectories: true)
+        try Data(canaries.rule.utf8).write(to: ruleFile)
+        return (f, facts, ruleFile)
+    }
+
+    @Test("canary sweep: an owner turn's request carries every owner-data canary (so the non-owner test below cannot pass vacuously)")
+    func ownerTurnCarriesEveryCanary() async throws {
+        let canaries = Canaries()
+        let (f, facts, ruleFile) = try canaryFixture(canaries)
+        defer { try? FileManager.default.removeItem(at: f.root); try? FileManager.default.removeItem(at: ruleFile) }
+        let id = f.app.createNewConversation(select: false)
+        let client = CapturingLLMClient(reply: "ok")
+        let engine = IrisEngine(state: f.app, client: client, retryDelays: [], factStore: facts, protectionEnabled: false,
+                                sessionPeerCount: 0, memory: f.memory)
+        await engine.processInput("what is the vault code", source: "UI", conversationId: id)
+        let all = everything(client.requests.first)
+        #expect(all.contains(canaries.userMd), "owner turn must still carry USER.md")
+        #expect(all.contains(canaries.soulMd), "owner turn must still carry SOUL.md")
+        #expect(all.contains(canaries.fact), "owner turn must still carry the matching fact")
+        #expect(all.contains(canaries.rule), "owner turn must still carry custom rules")
+        #expect(all.contains("# Available Skills"), "owner turn must still carry the skills catalogue heading")
+    }
+
+    @Test("canary sweep: a stamped non-owner turn's request carries NONE of the owner-data canaries (rules excepted -- #1241)")
+    func stampedNonOwnerTurnCarriesNoCanaries() async throws {
+        let canaries = Canaries()
+        let (f, facts, ruleFile) = try canaryFixture(canaries)
+        defer { try? FileManager.default.removeItem(at: f.root); try? FileManager.default.removeItem(at: ruleFile) }
+        let id = f.app.createNewConversation(select: false)
+        f.app.markGuestSteeredBinding(nonOwner(), for: id)
+        let client = CapturingLLMClient(reply: "ok")
+        let engine = IrisEngine(state: f.app, client: client, retryDelays: [], factStore: facts, protectionEnabled: false,
+                                sessionPeerCount: 0, memory: f.memory)
+        await engine.processInput("what is the vault code", source: "UI", conversationId: id)
+        let all = everything(client.requests.first)
+        #expect(!all.contains(canaries.userMd), "USER.md")
+        #expect(!all.contains(canaries.soulMd), "SOUL.md")
+        #expect(!all.contains(canaries.fact), "the owner's fact")
+        #expect(!all.contains("# Available Skills"), "the skills catalogue")
+        // Rules: expected PRESENT for now -- #1241 owns the owner-personal-vs-security split.
+        // If this starts failing, #1241 shipped and this line should flip to !all.contains(...).
+        #expect(all.contains(canaries.rule), "rules are not yet stripped -- #1241")
+    }
+
+    /// #974 Task 13 W1 sweep: the date line's time zone is `.current` (the owner's machine), a
+    /// location fingerprint -- the same class of owner-personal data as the rest, even though the
+    /// date itself stays useful for a non-owner turn (unlike a guest's, which gets no date line at
+    /// all). Not covered by the canary sweep above (there's no "canary string" for a time zone).
+    @Test("the date line uses the owner's local zone for an owner turn, UTC for a stamped non-owner turn")
+    func dateLineTimeZoneIsOwnerScoped() async throws {
+        let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
+        let ownerId = f.app.createNewConversation(select: false)
+        let nonOwnerId = f.app.createNewConversation(select: false)
+        f.app.markGuestSteeredBinding(nonOwner(), for: nonOwnerId)
+        let client = CapturingLLMClient(reply: "ok")
+        let engine = IrisEngine(state: f.app, client: client, retryDelays: [], protectionEnabled: false,
+                                sessionPeerCount: 0, memory: f.memory)
+
+        await engine.processInput("hi", source: "UI", conversationId: ownerId)
+        let ownerSystem = client.requests.first?.systemInstruction?.parts.compactMap(\.text).joined() ?? ""
+        #expect(ownerSystem.contains("(\(TimeZone.current.identifier))"), Comment(rawValue: ownerSystem))
+
+        await engine.processInput("hi", source: "UI", conversationId: nonOwnerId)
+        let nonOwnerSystem = client.requests.last?.systemInstruction?.parts.compactMap(\.text).joined() ?? ""
+        // Derived from the production formatter itself, not a hardcoded "(UTC)"/"(GMT)" string --
+        // the `VV` specifier's rendering of the UTC zone is an ICU/CLDR detail, not this test's to pin.
+        let utcLine = IrisEngine.currentDateLine(now: Date(), timeZone: TimeZone(identifier: "UTC")!, hasCurrentTimeTool: false)
+        let utcLabel = try #require(utcLine.firstMatch(of: /\(([^)]+)\)/)?.1)
+        #expect(nonOwnerSystem.contains("(\(utcLabel))"), Comment(rawValue: nonOwnerSystem))
+        #expect(!nonOwnerSystem.contains(TimeZone.current.identifier) || TimeZone.current.identifier == "UTC",
+                "a non-owner turn must not see the owner's real zone")
+    }
+
+    /// #974 Task 13 W1 sweep: the pinned conversation's job-failure/paused/recent-runs briefing is
+    /// the owner's own infrastructure state, the same class as everything else here. A stamped
+    /// non-owner turn on the pinned conversation (reachable via a peer message to Iris, #974 Task
+    /// 15) must not see it.
+    @Test("the pinned conversation's job briefing is owner-only; a stamped non-owner turn on it sees none")
+    func pinnedBriefingIsOwnerOnly() async throws {
+        let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
+        let pausedJobName = "CANARY-PAUSEDJOB-\(UUID().uuidString)"
+        try f.app.store.ledger.upsert(Job(name: pausedJobName, prompt: "do a thing", trigger: .schedule(.interval(seconds: 3600)),
+                                          enabled: false, pausedReason: "manual"))
+        let iris = f.app.activityConversationId()
+        let client = CapturingLLMClient(reply: "ok")
+        let engine = IrisEngine(state: f.app, client: client, retryDelays: [], protectionEnabled: false,
+                                sessionPeerCount: 0, memory: f.memory)
+
+        await engine.processInput("hi", source: "UI", conversationId: iris)
+        let ownerSystem = client.requests.first?.systemInstruction?.parts.compactMap(\.text).joined() ?? ""
+        let ownerRest = client.requests.first?.contents.flatMap(\.parts).compactMap(\.text).joined() ?? ""
+        #expect((ownerSystem + ownerRest).contains(pausedJobName), "owner turn on the pinned conversation sees the paused job")
+
+        f.app.markGuestSteeredBinding(nonOwner(), for: iris)
+        await engine.processInput("hi again", source: "UI", conversationId: iris)
+        let nonOwnerSystem = client.requests.last?.systemInstruction?.parts.compactMap(\.text).joined() ?? ""
+        let nonOwnerRest = client.requests.last?.contents.flatMap(\.parts).compactMap(\.text).joined() ?? ""
+        #expect(!(nonOwnerSystem + nonOwnerRest).contains(pausedJobName), "a stamped non-owner turn on the pinned conversation must not see the paused job")
+    }
 }
