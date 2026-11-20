@@ -179,7 +179,7 @@ struct SubagentGradingTests {
         let rendered = await SubagentManager.shared.runSubagent(
             role: "engineer", task: "build a widget", effort: "easy",
             parentConversationId: parentId, unit: gradedUnit("the widget exists"),
-            client: client, appState: state).rendered
+            client: client, appState: state, parentBinding: SubagentGoalLoopTests.ownerParent).rendered
 
         #expect(client.graderCalls > 0, "the evaluator should have been invoked")
         #expect(rendered.contains("Independent grader verdict (fresh context): 1/1 met"))
@@ -204,7 +204,7 @@ struct SubagentGradingTests {
             await SubagentManager.shared.runSubagent(
                 role: "engineer", task: "build a widget", effort: "easy",
                 parentConversationId: parentId, unit: gradedUnit("the widget exists"),
-                turnTimeout: 1, client: client, appState: state, deadlineClock: clock.uptime)
+                turnTimeout: 1, client: client, appState: state, deadlineClock: clock.uptime, parentBinding: SubagentGoalLoopTests.ownerParent)
         }
 
         // Hold the precondition: the deadline cannot be allowed to arrive until the subagent's own
@@ -272,7 +272,7 @@ struct SubagentGradingTests {
 
         let rendered = await SubagentManager.shared.runSubagent(
             role: "engineer", task: "build a widget", effort: "easy",
-            parentConversationId: parentId, client: client, appState: state).rendered
+            parentConversationId: parentId, client: client, appState: state, parentBinding: SubagentGoalLoopTests.ownerParent).rendered
 
         #expect(client.graderCalls == 0, "no contract means no grade")
         #expect(!rendered.contains("Independent grader verdict"))
@@ -294,7 +294,7 @@ struct SubagentGradingTests {
         _ = await SubagentManager.shared.runSubagent(
             role: "engineer", task: "build a widget", effort: "easy",
             parentConversationId: parentId, unit: gradedUnit("the widget exists"),
-            client: client, appState: state).rendered
+            client: client, appState: state, parentBinding: SubagentGoalLoopTests.ownerParent).rendered
 
         #expect(client.graderCalls > 0)
         #expect(client.graderPrompt.contains(workspace),
@@ -313,7 +313,7 @@ struct SubagentGradingTests {
             role: "engineer", task: "build a widget", effort: "easy",
             parentConversationId: parentId,
             unit: DelegatedUnit(contract: contract, grade: false),
-            client: client, appState: state).rendered
+            client: client, appState: state, parentBinding: SubagentGoalLoopTests.ownerParent).rendered
 
         // The unit was bound (the parent is told what it was held to) but nothing graded it.
         #expect(client.graderCalls == 0, "grade: false must not spin up an evaluator")

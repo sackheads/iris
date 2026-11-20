@@ -92,7 +92,7 @@ struct EvaluatorStopTests {
             await SubagentManager.shared.runSubagent(
                 role: "engineer", task: "build a widget", effort: "easy", parentConversationId: parent,
                 unit: unit, background: background, turnTimeout: 600, client: client, appState: state,
-                endSandboxSession: { _ in })
+                parentBinding: SubagentGoalLoopTests.ownerParent, endSandboxSession: { _ in })
         }
     }
 
