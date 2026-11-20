@@ -381,10 +381,12 @@ struct SubagentGoalLoopTests {
         let parent = UUID(); state.createNewConversation(id: parent)
         let (config, teardown) = config(cap: 5); defer { teardown() }
 
+        // An owner parent (#1253): without one the subagent is a deny-all non-owner, its command is
+        // refused on a host with no container runtime (CI), and "still running" below is a race.
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
             turnTimeout: 30, client: client, appState: state, config: config,
-            repromptDelay: Self.delay, endSandboxSession: { _ in })
+            repromptDelay: Self.delay, parentBinding: Self.ownerParent, endSandboxSession: { _ in })
         #expect(outcome.status == .completed)
         let sub = try #require(state.conversations.first { $0.isSubagent }?.id)
         #expect(state.liveSubagents(ofRun: sub).count == 1, "still running its command")
