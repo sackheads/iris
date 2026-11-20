@@ -53,7 +53,7 @@ struct EvaluatorTurnLoopTests {
         let returned = await GoalEvaluator.shared.evaluate(
             contract: GoalContract(objective: "obj", criteria: [c]),
             workspace: FileManager.default.currentDirectoryPath,
-            originatingConversationId: originId, app: app, client: client)
+            originatingConversationId: originId, app: app, client: client, parentBinding: SubagentGoalLoopTests.ownerParent)
 
         return (returned, app.conversations.first { $0.id == originId }?.lastGoalEvaluation, client.callCount)
     }
@@ -109,7 +109,7 @@ struct EvaluatorTurnLoopTests {
         _ = await GoalEvaluator.shared.evaluate(
             contract: GoalContract(objective: "obj", criteria: [c]),
             workspace: FileManager.default.currentDirectoryPath,
-            originatingConversationId: originId, app: app, client: client)
+            originatingConversationId: originId, app: app, client: client, parentBinding: SubagentGoalLoopTests.ownerParent)
 
         #expect(app.conversations.first { $0.id == originId }?.lastGoalEvaluation?.status == .graded)
         // Assert the evaluator's own throwaway conversation is gone, by identity rather than by
@@ -165,7 +165,7 @@ struct EvaluatorTurnLoopTests {
         let verdict = await GoalEvaluator.shared.evaluate(
             contract: GoalContract(objective: "obj", criteria: [c]),
             workspace: FileManager.default.currentDirectoryPath,
-            originatingConversationId: originId, app: app, client: client)
+            originatingConversationId: originId, app: app, client: client, parentBinding: SubagentGoalLoopTests.ownerParent)
 
         #expect(client.wasAskedToGoalComplete == false,
                 "the evaluator was asked for a tool it cannot call")

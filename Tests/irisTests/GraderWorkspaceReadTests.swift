@@ -311,7 +311,7 @@ struct GraderWorkspaceReadTests {
         let told = try #require(contract.approvedWorkspace)
         let grader = ReadingGrader(paths: [".", "notes.txt", told + "/sub/inner.txt"], criterionId: qualitative.id)
         _ = await GoalEvaluator.shared.evaluate(contract: contract, workspace: spelled,
-                                                originatingConversationId: originId, app: state, client: grader)
+                                                originatingConversationId: originId, app: state, client: grader, parentBinding: SubagentGoalLoopTests.ownerParent)
         done.mutate { $0 = true }
         try await value(of: watcher)
         #expect(asked.value == 0, "a read of the approved workspace asked")
@@ -340,7 +340,7 @@ struct GraderWorkspaceReadTests {
         contract.criteria.append(qualitative)
         let grader = ReadingGrader(paths: [".", "notes.txt", "sub/inner.txt"], criterionId: qualitative.id)
         _ = await GoalEvaluator.shared.evaluate(contract: contract, workspace: f.proj.path,
-                                                originatingConversationId: originId, app: state, client: grader)
+                                                originatingConversationId: originId, app: state, client: grader, parentBinding: SubagentGoalLoopTests.ownerParent)
         let results = grader.results
         try #require(results.count >= 3, "\(results)")
         #expect(results.count == 3, "\(results)")

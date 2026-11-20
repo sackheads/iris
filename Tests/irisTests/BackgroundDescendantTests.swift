@@ -101,7 +101,7 @@ struct BackgroundDescendantTests {
         _ = await GoalEvaluator.shared.evaluate(
             contract: GoalContract(objective: "obj", criteria: [criterion]),
             workspace: FileManager.default.currentDirectoryPath,
-            originatingConversationId: origin, app: app, client: client)
+            originatingConversationId: origin, app: app, client: client, parentBinding: SubagentGoalLoopTests.ownerParent)
 
         #expect(client.evaluatorWasBackground == true)
     }

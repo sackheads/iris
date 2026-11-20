@@ -42,7 +42,7 @@ struct GraderNoMountTests {
         let client = Recorder(app: app, criterionId: criterion.id)
         _ = await GoalEvaluator.shared.evaluate(contract: GoalContract(objective: "obj", criteria: [criterion]),
                                                 workspace: workspace, originatingConversationId: originId,
-                                                app: app, client: client)
+                                                app: app, client: client, parentBinding: SubagentGoalLoopTests.ownerParent)
         return try #require(client.observed)
     }
 
