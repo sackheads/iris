@@ -365,8 +365,12 @@ struct StripOwnerContextForNonOwnerTests {
         let utcLine = IrisEngine.currentDateLine(now: Date(), timeZone: TimeZone(identifier: "UTC")!, hasCurrentTimeTool: false)
         let utcLabel = try #require(utcLine.firstMatch(of: /\(([^)]+)\)/)?.1)
         #expect(nonOwnerSystem.contains("(\(utcLabel))"), Comment(rawValue: nonOwnerSystem))
-        #expect(!nonOwnerSystem.contains(TimeZone.current.identifier) || TimeZone.current.identifier == "UTC",
-                "a non-owner turn must not see the owner's real zone")
+        // No further check needed: the owner assertion above pins the owner's line to
+        // TimeZone.current's own rendering, and this one pins the non-owner's line to UTC's --
+        // together they fully specify the behavior. A THIRD assertion comparing the two labels as
+        // strings is redundant and was actually wrong: on a host whose local zone IS GMT/UTC (true
+        // of CI runners, not of every dev machine), the two labels coincide by construction, not
+        // because the non-owner saw the owner's real zone -- that false failure is what CI caught.
     }
 
     /// #974 Task 13 W1 sweep: the pinned conversation's job-failure/paused/recent-runs briefing is
