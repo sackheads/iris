@@ -105,6 +105,36 @@ struct GuestDerivedCardTaintTests {
         #expect(try await sendFrom(iris, s, e).decision == .notGated)
     }
 
+    // MARK: the whole chain, with the flag set by a real guest delivery rather than by hand
+
+    @Test("end to end: a guest's message delivered to a role session, then the owner's /reflect there, taints Iris and holds a send")
+    func liveChainFromAGuestMessageToAHeldSend() async throws {
+        let s = try state()
+        let iris = s.activityConversationId()
+        let guest = s.createNewConversation(isGuest: true, guestClientId: "dev-1", title: "guest")
+        let target = s.createNewConversation(title: "reviewer", select: true)
+        s.conversations[s.conversations.firstIndex { $0.id == target }!].role = "reviewer"
+        s.guestRoleAllowlist = { $0 == "dev-1" ? ["reviewer"] : [] }
+        let e = engine(s, replies: ["Looked at it.", "Updated USER.md: prefers short answers."])
+
+        #expect(s.conversations.first { $0.id == target }?.hasGuestInput == false, "no guest has written here yet")
+        #expect(s.conversations.first { $0.id == iris }?.hasUntrustedToolOutput == false)
+        _ = await e.deliverPeerMessage("please review", from: guest, senderName: nil, to: target,
+                                       envelope: PeerEnvelope(msgId: "aaaa0001", contextId: "ctx", depth: 1, expectsReply: false, replyTo: nil),
+                                       guestClientId: "dev-1")
+        try await waitForTurn(s, target)
+        #expect(s.conversations.first { $0.id == target }?.hasGuestInput == true, "the real delivery set the flag")
+
+        s.selectedConversationId = target
+        s.sendMessage("/reflect")
+        try await waitForTurn(s, target)
+        let cards = (s.conversations.first { $0.id == iris }?.messages ?? []).filter { $0.role == .event }.compactMap { EventCard.decode($0.content) }
+        #expect(cards.count == 1, "the reflection card reached Iris")
+        #expect(s.conversations.first { $0.id == iris }?.hasUntrustedToolOutput == true)
+        let send = try await sendFrom(iris, s, e)
+        #expect(send.gated && send.decision != .notGated, "a send from Iris now reaches the person")
+    }
+
     // MARK: job-run cards
 
     private func fireJob(createdIn creator: UUID, _ s: AppState, _ e: IrisEngine) async throws {
