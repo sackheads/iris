@@ -9,8 +9,10 @@ struct ToolApproval: Codable, Equatable, Sendable {
     enum Layer: String, Codable, Sendable {
         case person, autoApprove, allowlist, grant, graderCheck, vibecop, vibecopRestricted
         /// #1099: YOLO mode is on for this session, so an ordinary tool call runs without asking.
-        /// A reserved approval (#1115/#1229: `humanOnly`, `irisWrite`, `policyWrite`) still resolves
-        /// through the person -- YOLO never covers those, whatever this case's name suggests.
+        /// `irisWrite` and `policyWrite` (#1115/#1229) still resolve through the person, and so does
+        /// `humanOnly` -- except the #812 tainted-outbound-send gate, which is also `humanOnly` but
+        /// keeps its own YOLO bypass (`offersConversationAllow`), same status-quo-by-design as #813's
+        /// context-hold (Brian's ruling, #1230).
         case yolo
         /// #812: an outbound tool the person exempted, for the conversation or for the job.
         case exemption
