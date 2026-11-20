@@ -851,6 +851,14 @@ final class ConversationStore: Sendable {
                 t.add(column: "accessProfileId", .text)
             }
         }
+        // #974 Task 12 (C8): the profile id a job was created under, copied onto its run's
+        // conversation. NULL (every earlier row) is the owner's. Paired with `Job`'s own
+        // `decodeIfPresent`: the ledger is columnar, so the column must exist or the stamp vanishes.
+        m.registerMigration("v42_job_access_profile_id") { db in
+            try db.alter(table: "jobs") { t in
+                t.add(column: "accessProfileId", .text)
+            }
+        }
         return m
     }
 

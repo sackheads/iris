@@ -495,10 +495,11 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// reload. `nil` means "no persisted profile", which is owner ONLY for the `.main` principal
     /// (`BindingResolver`'s on-load path); it is never a shorthand for owner on its own, and a
     /// non-nil id naming a profile that no longer exists resolves to a refusal, not a silent
-    /// promotion to owner (H3/C8). Never set by a tool. **Not yet live** (#1202 review, dev-2
-    /// finding 6): nothing in production writes this field or calls `resolveBinding(
-    /// persistedProfileId:)` on load today — the plumbing exists so a later caller can use it,
-    /// not because one does yet.
+    /// promotion to owner (H3/C8). Never set by a tool. Read by `IrisEngine.bindingForCall` on every turn of a `.main` engine
+    /// (#974 Task 12, C8): a non-nil id is resolved through `BindingResolver`'s on-load path, and a refusal is a
+    /// deny-all binding, never the owner. A job run's conversation carries its job's stamp (`Job.accessProfileId`).
+    /// Nothing in production yet writes a non-nil id for an interactive conversation (the drop flow is #961/Task 5's),
+    /// so every existing conversation resolves as before.
     var accessProfileId: String?
 
     init(id: UUID = UUID(), title: String, messages: [ChatMessage] = [], workspacePath: String? = nil, history: [Content] = [], tokenUsage: TokenUsage = TokenUsage(), activeGoal: String? = nil, messageCountSinceReflection: Int = 0, goalContract: GoalContract? = nil) {
@@ -3331,6 +3332,16 @@ class AppState {
         guestSteeredBindings[id] = guestSteeredBindings[id].map { AccessBinding.meetGuestBindings($0, binding) } ?? binding
     }
     func guestSteeredBinding(for id: UUID) -> AccessBinding? { guestSteeredBindings[id] }
+
+    /// #974 Task 12 (C8): the access-profile id a conversation was bound to: its own, else its
+    /// delegation root's (a subagent or grader under a bound run inherits it). nil is "no persisted
+    /// profile", which is the owner for the `.main` principal only (`BindingResolver`).
+    func persistedAccessProfileId(for id: UUID?) -> String? {
+        guard let id else { return nil }
+        if let own = conversations.first(where: { $0.id == id })?.accessProfileId { return own }
+        let root = delegationRoot(of: id)
+        return root == id ? nil : conversations.first(where: { $0.id == root })?.accessProfileId
+    }
     func isTopicTurn(_ id: UUID) -> Bool { topicTurnConversations.contains(id) }
 
     func notePeerArrival(depth: Int, at id: UUID) {
@@ -5142,7 +5153,7 @@ class AppState {
                 // #974 Task 8 (C5): `read_file`'s APPROVE-stands-in-for-the-person carve-out does
                 // not extend to a non-owner binding. dev-2/planner review: the caller's own
                 // resolved binding is the source of truth, not a persisted `accessProfileId` read
-                // here — that field is not yet live in production and, worse, `== nil` would read
+                // here — `== nil` would read
                 // as "owner" for every Principal, not only `.main` (BindingResolver's on-load
                 // semantics apply the "absent means owner" rule to `.main` alone).
                 switch ReadOnlyCommand.vibecopGate(toolName: toolName, details: details, inSandbox: inSandbox,
