@@ -395,10 +395,14 @@ struct RecipientBindingTests {
         let url = PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit/iris.swift")
         let source = try String(contentsOf: url, encoding: .utf8)
         let occurrences = source.components(separatedBy: "parentBinding:").count - 1
-        #expect(occurrences == 3, "expected exactly the 3 known runSubagent call sites")
+        // 3 runSubagent sites + the 2 `GoalEvaluator.evaluate` sites that #974 Task 6 routes by the
+        // turn's binding (#1216): every one of the 5 must read `bindingForCall`.
+        #expect(occurrences == 5, "expected exactly the 5 known parentBinding: call sites")
         #expect(!source.contains("parentBinding: self.binding"),
                 "a call site reading the engine's own binding directly would ignore a guest-steered turn's stamp")
         #expect(source.contains("parentBinding: await self.bindingForCall(conversationId: conversationId))"),
                 "every site must resolve the per-turn binding before spawning")
+        let perTurn = source.components(separatedBy: "parentBinding: await self.bindingForCall(conversationId: conversationId)").count - 1
+        #expect(perTurn == occurrences, "all \(occurrences) sites must read the per-turn binding, found \(perTurn)")
     }
 }

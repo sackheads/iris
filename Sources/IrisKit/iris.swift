@@ -2551,7 +2551,8 @@ actor IrisEngine {
             evaluation = await GoalEvaluator.shared.evaluate(
                 contract: projected, workspace: gradeWorkspace,
                 originatingConversationId: conversationId, app: graderApp, client: self.client,
-                recentWrites: self.recentWrites, parentBinding: self.binding)
+                recentWrites: self.recentWrites,
+                parentBinding: await self.bindingForCall(conversationId: conversationId))
         }
 
         let ladderPos = "\(contract.currentMilestone + 1) of \(contract.milestones.count)"
@@ -2914,13 +2915,15 @@ actor IrisEngine {
     /// run_command routing and command-hook routing so both honor the same dual-layer policy.
     private func sandboxDecision(conversationId: UUID, workspacePath: String?) async -> SandboxDecision {
         let localState = state
+        // #1216: the turn's binding, not the engine's own: a guest-steered `.main` turn is not the owner's.
+        let callBinding = await bindingForCall(conversationId: conversationId)
         let perConv = await MainActor.run {
             localState?.conversations.first(where: { $0.id == conversationId })?.mainAgentSandbox
         }
         return SandboxPolicy.resolve(
             masterEnabled: ConfigManager.shared.enableSandboxing,
             principal: principal,
-            isOwner: binding.isOwner,
+            isOwner: callBinding.isOwner,
             perConversation: perConv,
             perWorkspace: SandboxPolicy.perWorkspaceOverride(workspace: workspacePath),
             globalDefault: ConfigManager.shared.mainAgentSandboxDefault,
@@ -7039,7 +7042,8 @@ actor IrisEngine {
                 let evaluation = await GoalEvaluator.shared.evaluate(
                     contract: c, workspace: gradeWorkspace,
                     originatingConversationId: conversationId, app: graderApp, client: self.client,
-                    recentWrites: self.recentWrites, parentBinding: self.binding)
+                    recentWrites: self.recentWrites,
+                parentBinding: await self.bindingForCall(conversationId: conversationId))
                 // Stopped before a verdict (#464): the turn is being stopped with it. Not a pass,
                 // and not a grader fault to let through ungated either, so the goal stays open.
                 if evaluation.status == .stopped {
