@@ -124,6 +124,11 @@ struct EvaluatorBindingWiringTests {
                 let end = call.range(of: "recentWrites")
                 let tail = String(call[(end?.lowerBound ?? call.startIndex)...].prefix(120))
                 #expect(tail.contains("parentBinding:"), "\(name): \(tail)")
+                // #1216: iris.swift's two sites read the TURN's binding (a guest-steered `.main` turn
+                // is not the owner's); SubagentManager's grader passes its own parent's binding.
+                if name == "iris.swift" {
+                    #expect(tail.contains("parentBinding: await self.bindingForCall(conversationId: conversationId)"), "\(name): \(tail)")
+                }
                 sites += 1
                 rest = rest[r.upperBound...]
             }
@@ -148,7 +153,7 @@ struct NonOwnerDispatchRefusalTests {
         #expect(IrisEngine.nonOwnerNoSandboxRefusal.contains("not run on the host"))
     }
 
-    @Test("the model-turn dispatcher refuses before approval, and the engine routes by its own binding")
+    @Test("the model-turn dispatcher refuses before approval, and the sandbox decision routes by the turn's binding")
     func dispatcherWiring() throws {
         let src = try String(contentsOf: PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit/iris.swift"), encoding: .utf8)
         let at = try #require(src.range(of: "#974 C1: a non-owner run's command is run in the sandbox or not at all."))
@@ -156,6 +161,10 @@ struct NonOwnerDispatchRefusalTests {
         #expect(block.contains("Self.refusesNonOwnerCommand("))
         #expect(block.contains("return Self.nonOwnerNoSandboxRefusal"))
         let decision = try #require(src.range(of: "private func sandboxDecision("))
-        #expect(String(src[decision.lowerBound...].prefix(900)).contains("isOwner: binding.isOwner"))
+        let body = String(src[decision.lowerBound...].prefix(1300))
+        // #1216: the owner bit is the TURN's binding, not the engine's own.
+        #expect(body.contains("let callBinding = await bindingForCall(conversationId: conversationId)"))
+        #expect(body.contains("isOwner: callBinding.isOwner"))
+        #expect(!body.contains("isOwner: binding.isOwner"))
     }
 }
