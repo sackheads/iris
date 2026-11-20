@@ -28,12 +28,14 @@ struct BackgroundBindingTests {
 
     /// One scripted tool call on a hidden background conversation whose persisted profile id is
     /// `profileId`, on the one `.main` engine: what a job run is. Returns the tool result text.
-    private func backgroundResult(tool: String, args: [String: JSONValue], profileId: String?, in w: World) async throws -> String {
+    private func backgroundResult(tool: String, args: [String: JSONValue], profileId: String?, in w: World,
+                                  prepare: ((AppState, UUID) -> Void)? = nil) async throws -> String {
         let app = AppState()
         app.conversations.removeAll()
         let id = UUID()
         app.createNewConversation(id: id, isBackground: true)
         if let idx = app.conversations.firstIndex(where: { $0.id == id }) { app.conversations[idx].accessProfileId = profileId }
+        prepare?(app, id)
         let call = FunctionCall(name: tool, args: args)
         let part = Part(text: nil, functionCall: call, functionResponse: nil, thought_signature: nil, thoughtSignature: nil)
         let client = FakeLLMClient(responses: [
@@ -90,6 +92,56 @@ struct BackgroundBindingTests {
     func missingProfileFailsClosed() async throws {
         let w = try world(); defer { try? FileManager.default.removeItem(at: w.root) }
         let result = try await backgroundResult(tool: "save_fact", args: Self.saveFact, profileId: "deleted-profile", in: w)
+        #expect(result.contains(MemoryBindingGate.refusal), Comment(rawValue: result))
+    }
+
+    private static let search: [String: JSONValue] = ["query": .string("sky"), "scope": .string("facts")]
+    private static let blindJSON = #"{"memoryWrite":4}"#   // memoryRead OMITTED: denied
+    /// A guest stamp that reads facts but writes nothing, wider than `blind` on the read axis and narrower on the write axis.
+    private func guestStamp() -> AccessBinding {
+        AccessBinding(profile: AccessProfile(memoryRead: .full), principal: .mcpGuest, isOwner: false)
+    }
+
+    @Test("a guest-steered stamp does not drop the persisted profile's narrowing: the two meet, so an axis either denies is denied")
+    func guestStampAndPersistedProfileMeet() async throws {
+        let w = try world(); defer { try? FileManager.default.removeItem(at: w.root) }
+        try writeProfile(w, id: "blind", json: Self.blindJSON)
+        // The guest stamp alone WOULD allow the read (memoryRead full); the persisted profile omits it.
+        let result = try await backgroundResult(tool: "search_memory", args: Self.search, profileId: "blind", in: w) { app, id in
+            app.markGuestSteeredBinding(self.guestStamp(), for: id)
+        }
+        #expect(result.contains(MemoryBindingGate.refusal), Comment(rawValue: result))
+        // Control: the stamp alone (no persisted profile) lets the read through, so the refusal above is the meet.
+        let alone = try await backgroundResult(tool: "search_memory", args: Self.search, profileId: nil, in: w) { app, id in
+            app.markGuestSteeredBinding(self.guestStamp(), for: id)
+        }
+        #expect(!alone.contains(MemoryBindingGate.refusal), Comment(rawValue: alone))
+    }
+
+    @Test("two guest stamps (the conversation's and its root's) and a persisted profile all meet")
+    func twoStampsAndPersistedProfileMeet() async throws {
+        let w = try world(); defer { try? FileManager.default.removeItem(at: w.root) }
+        try writeProfile(w, id: "blind", json: Self.blindJSON)
+        let result = try await backgroundResult(tool: "search_memory", args: Self.search, profileId: "blind", in: w) { app, id in
+            let root = UUID()
+            app.createNewConversation(id: root, isBackground: true)
+            app.linkDelegate(id, of: root)
+            app.markGuestSteeredBinding(self.guestStamp(), for: id)
+            app.markGuestSteeredBinding(self.guestStamp(), for: root)
+        }
+        #expect(result.contains(MemoryBindingGate.refusal), Comment(rawValue: result))
+    }
+
+    @Test("a delegate conversation on the .main engine under a stamped root inherits the root's profile: fail closed, not owner")
+    func delegateInheritsTheRootsProfile() async throws {
+        let w = try world(); defer { try? FileManager.default.removeItem(at: w.root) }
+        try writeProfile(w, id: "blind", json: Self.blindJSON)
+        let result = try await backgroundResult(tool: "search_memory", args: Self.search, profileId: nil, in: w) { app, id in
+            let root = UUID()
+            app.createNewConversation(id: root, isBackground: true)
+            if let i = app.conversations.firstIndex(where: { $0.id == root }) { app.conversations[i].accessProfileId = "blind" }
+            app.linkDelegate(id, of: root)
+        }
         #expect(result.contains(MemoryBindingGate.refusal), Comment(rawValue: result))
     }
 
