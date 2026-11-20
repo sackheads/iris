@@ -33,25 +33,31 @@ struct SkillManager {
         case all
 
         /// The audience a rule's text declares, or nil when it does not declare one (no front matter,
-        /// or a block with no `audience:` key).
+        /// or a block with no `audience` key). Read the way an author actually writes it: a leading BOM,
+        /// CRLF or CR line endings, blank lines before the opening `---` and a space before the colon
+        /// all still count, because a marking that fails to parse must not widen a rule. Every
+        /// `audience` key in the block is read and the most restrictive wins (`all` only when every one
+        /// says `all`).
         static func declared(by content: String) -> RuleAudience? {
-            let lines = content.split(separator: "\n", omittingEmptySubsequences: false)
-            guard let first = lines.first, first.trimmingCharacters(in: .whitespaces) == "---" else { return nil }
-            var audienceValue: String?
+            var text = content
+            if text.hasPrefix("\u{FEFF}") { text.removeFirst() }
+            text = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+            var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) }
+            while let first = lines.first, first.isEmpty { lines.removeFirst() }
+            guard lines.first == "---" else { return nil }
+            var values: [String] = []
             var closed = false
             for line in lines.dropFirst() {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed == "---" { closed = true; break }
-                if audienceValue == nil, trimmed.lowercased().hasPrefix("audience:") {
-                    audienceValue = trimmed.dropFirst("audience:".count).trimmingCharacters(in: .whitespaces).lowercased()
-                }
+                if line == "---" { closed = true; break }
+                let lowered = line.lowercased()
+                guard lowered.hasPrefix("audience") else { continue }
+                let rest = lowered.dropFirst("audience".count).drop { $0 == " " || $0 == "\t" }
+                guard rest.first == ":" else { continue }
+                values.append(rest.dropFirst().trimmingCharacters(in: .whitespaces))
             }
-            guard let audienceValue else { return closed ? nil : .owner }   // an unclosed block is a failed attempt
-            guard closed else { return .owner }
-            switch audienceValue {
-            case "all": return .all
-            default: return .owner   // `owner`, or a value that is not one of the two
-            }
+            guard !values.isEmpty else { return nil }
+            guard closed else { return .owner }   // an unclosed block with a marking is a failed attempt
+            return values.allSatisfy { $0 == "all" } ? .all : .owner
         }
     }
 
