@@ -2532,6 +2532,8 @@ class AppState {
     /// If either happened, the card is built from the part before it and the source chat is left
     /// exactly as it is, so the answer stays visible.
     func runReflection(_ prompt: String, in convId: UUID, moveReplyToIris: Bool) async {
+        // #974 Task 11 (C7): checked here too, so no caller can reach the turn or the upward card.
+        guard await reflectionMayRun(in: convId) else { return }
         let before = conversations.first { $0.id == convId }?.messages.count ?? 0
         reflectionSteerPoints[convId] = .some(nil)
         // #465 part 2: marks this turn alone as a reflection, for a profile's tool narrowing.
@@ -2563,6 +2565,18 @@ class AppState {
                                         sourceTitle: conversations[idx].title, at: Date())
         await deliverEvent(card, to: irisId)
     }
+
+    /// #974 Task 11 (C7): a reflection writes the OWNER's memory (SOUL, USER, memory, skills) and reports
+    /// into pinned Iris, so only a turn whose binding is the owner's runs one. The binding that decides is
+    /// the turn's (`bindingForCall`), which already fails closed: a conversation bound to a profile, or one
+    /// whose persisted profile no longer resolves, is not the owner. The narrowed local form the spec allows
+    /// (a bound session reflecting into its own `profiles/<id>/memory.md`) needs a per-profile memory store
+    /// that does not exist yet; until then a bound session does not reflect at all.
+    func reflectionMayRun(in convId: UUID) async -> Bool {
+        await engine.bindingForCall(conversationId: convId).isOwner
+    }
+
+    static let reflectionNotRunForBoundSession = "Memory reflection was not run: this session is bound to an access profile, and a reflection writes the owner's memory and reports into Iris."
 
     /// Swaps the `.agent` messages at or after `before` for one `reflectionReportedNotice` line,
     /// placed where the first of them was. `messages` only; history is untouched.
@@ -3858,9 +3872,14 @@ class AppState {
             handleSandboxCommand(trimmed, convId: convId)
             return
         } else if trimmed.hasPrefix("/reflect") {
-            appendMessage(role: .system, content: "Triggering manual memory reflection...", to: convId)
             // Asked for here, so the reply stays here; outside Iris a card goes to Iris too (5b §0.6).
+            // #974 Task 11 (C7): a session not bound to the owner is told why nothing ran, not "Triggering".
             runThinkingTask(conversationId: convId) { [self] in
+                guard await reflectionMayRun(in: convId) else {
+                    appendMessage(role: .system, content: Self.reflectionNotRunForBoundSession, to: convId)
+                    return
+                }
+                appendMessage(role: .system, content: "Triggering manual memory reflection...", to: convId)
                 await runReflection(Self.manualReflectionPrompt, in: convId, moveReplyToIris: false)
             }
             return
@@ -4029,8 +4048,11 @@ class AppState {
                         conversations[idx].messageCountSinceReflection = 0
                         markChanged(convId, .metadata)
                     }
-                    appendMessage(role: .system, content: "Triggering automatic memory reflection...", to: convId)
-                    await runReflection(Self.reflectionPrompt, in: convId, moveReplyToIris: true)
+                    // #974 Task 11 (C7): silent for a session bound to a profile (the counter is already reset).
+                    if await reflectionMayRun(in: convId) {
+                        appendMessage(role: .system, content: "Triggering automatic memory reflection...", to: convId)
+                        await runReflection(Self.reflectionPrompt, in: convId, moveReplyToIris: true)
+                    }
                 } else if shouldRename {
                     let renamePrompt = "System Event [Rename Trigger]: Evaluate the conversation history and use the `rename_conversation` tool to assign a short, descriptive title (1-4 words) that captures the true gist of this conversation."
                     appendMessage(role: .system, content: "Triggering automatic conversation rename...", to: convId)
