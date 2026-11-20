@@ -43,7 +43,7 @@ A plugin is a directory. Iris looks for it under `~/.iris/plugins/<id>/`.
 | `plugin.md` | The manifest. YAML frontmatter declares identity, components, and configuration needs. The Markdown body is human-readable documentation, rendered in the Settings detail pane. |
 | `mcp.json` | Standard `mcpServers` JSON. Declares the plugin's MCP server(s), stdio transport only. |
 | `skills/` | One directory per skill, each a full Agent Skills bundle (see "Components" below). |
-| `rules/` | Plain Markdown files. Each file is appended to the base system prompt, in filename order, after injection-guard sanitization. |
+| `rules/` | Plain Markdown files. Each file is appended to the base system prompt, in filename order, after injection-guard sanitization. A file whose front matter says `audience: owner` is left out of any turn that is not the owner's (#1241). |
 
 A plugin directory is a pure, shareable artifact. It carries no machine-local
 state. Enable/disable flags, install source, installed version, and
