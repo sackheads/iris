@@ -164,6 +164,24 @@ struct GuestDerivedCardTaintTests {
         #expect(send.gated && send.decision != .notGated)
     }
 
+    @Test("a job created in a DELEGATE of a guest-touched session taints Iris too; under an untouched root it does not")
+    func delegateCreatorUsesItsRootsFlag() async throws {
+        for rootFlagged in [true, false] {
+            let s = try state()
+            let iris = s.activityConversationId()
+            let root = s.createNewConversation(title: "Role session", select: false)
+            let child = s.createNewConversation(title: "Delegate", select: false)
+            s.linkDelegate(child, of: root)
+            s.conversations[s.conversations.firstIndex { $0.id == root }!].hasGuestInput = rootFlagged
+            let e = engine(s, replies: ["tick"])
+            try await fireJob(createdIn: child, s, e)
+            #expect(s.conversations.first { $0.id == iris }?.hasUntrustedToolOutput == rootFlagged,
+                    "root flagged: \(rootFlagged)")
+            let send = try await sendFrom(iris, s, e)
+            #expect(send.gated == rootFlagged)
+        }
+    }
+
     @Test("control: a job-run card for a job created in an untouched session leaves Iris clean")
     func untouchedJobRunCardLeavesTheDestinationClean() async throws {
         let s = try state()

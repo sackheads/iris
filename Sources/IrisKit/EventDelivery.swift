@@ -32,16 +32,18 @@ extension AppState {
     }
 
     /// #1250: whether the conversation a card's text came from has had a guest's message delivered to it
-    /// (`Conversation.hasGuestInput`). A reflection card's source is the conversation that reflected; a
-    /// job-run card's is the run's own conversation or the conversation that created the job (the model
-    /// that wrote the job's prompt read the guest's text there).
+    /// (`Conversation.hasGuestInput`), directly or through the session it was delegated from (the same
+    /// pair `isGuestOriginTurn` reads). A reflection card's source is the conversation that reflected; a
+    /// job-run card's is the conversation that CREATED the job: the model that wrote the job's prompt read
+    /// the guest's text there. The run's own conversation is a fresh hidden one no guest message can reach
+    /// (only role sessions take them), so it is not consulted.
     func cardSourceHasGuestInput(_ card: EventCard) -> Bool {
         func flagged(_ id: UUID?) -> Bool {
             guard let id else { return false }
-            return conversations.first { $0.id == id }?.hasGuestInput == true
+            let root = delegationRoot(of: id)
+            return [id, root].contains { candidate in conversations.first { $0.id == candidate }?.hasGuestInput == true }
         }
         if card.isReflection { return flagged(card.sourceConversationId) }
-        if flagged(card.transcriptConversationId) { return true }
         let creator = (try? store.ledger.jobs())?.first { $0.id == card.jobId }?.createdInConversationId
         return flagged(creator)
     }
