@@ -263,7 +263,8 @@ struct DirectoryReadRuleTests {
 
     /// One attended `read_file` turn on a fresh engine over `state`: the prompt is answered with
     /// `answer` (nil = not asked, fail if it is), and what the dialog carried is returned.
-    private func readTurn(_ state: AppState, path: String, answer: AppState.ApprovalResolution?) async throws -> ToolApprovalRequest? {
+    private func readTurn(_ state: AppState, path: String, answer: AppState.ApprovalResolution?,
+                          choice: AppState.AlwaysAllowChoice = .proposed) async throws -> ToolApprovalRequest? {
         let engine = IrisEngine(state: state, tier: .medium,
                                 client: FakeLLMClient(responses: [callResponse(["path": .string(path)]), textResponse("done.")]),
                                 retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
@@ -277,7 +278,7 @@ struct DirectoryReadRuleTests {
         for _ in 0..<1000 where !finished.value {
             if let request = state.pendingApprovals.first(where: { $0.conversationId == id }) {
                 asked = request
-                state.resolveApproval(id: request.id, answer ?? .deny)
+                state.resolveApproval(id: request.id, answer ?? .deny, choice: choice)
                 break
             }
             try? await Task.sleep(nanoseconds: 5_000_000)
@@ -309,6 +310,22 @@ struct DirectoryReadRuleTests {
         #expect(secret != nil, "a secret-named file in the folder still asks")
         let sibling = try await readTurn(s, path: f.project + "bc/c.txt", answer: .deny)
         #expect(sibling != nil, "a sibling folder that shares the prefix still asks")
+    }
+
+    @Test("a folder-rule click saves only the folder rule, whatever Always Allow choice (#1137) rides along")
+    func folderClickIgnoresTheEditChoice() async throws {
+        // #1137's rule editor sends a choice with every resolution; the `.alwaysAllowDirectory` case must
+        // never read it, or an edited or exact-command choice could widen, narrow or replace the folder rule.
+        for choice in [AppState.AlwaysAllowChoice.proposed, .edited(["x"]), .edited(["read_file"]), .exactCommand] {
+            let f = try fixture(); defer { f.tearDown() }
+            let s = try state(f)
+            let asked = try await readTurn(s, path: f.project + "/a.txt", answer: .alwaysAllowDirectory, choice: choice)
+            let folder = PermissionRule(toolName: "read_file", details: f.real(f.project), match: .directory)
+            #expect(asked?.directoryRule == folder, "the card offered the folder rule (\(choice))")
+            let data = try Data(contentsOf: f.iris.permissionsJSON)
+            let saved = try JSONDecoder().decode([PermissionRule].self, from: data)
+            #expect(saved == [folder], "the only rule saved is the folder rule under \(choice): \(saved)")
+        }
     }
 
     @Test("a card with no folder rule writes nothing when the folder button is forced")
