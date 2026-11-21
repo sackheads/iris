@@ -185,6 +185,12 @@ expected rendering (computed separately, with the zone that side should show) ra
 cross-comparing the two renderings' real identifiers to each other, and mutant-check the gate on a
 non-UTC host if you can; on a UTC host that specific mutant cannot be caught at all.
 
+**A view that must re-render when `@Observable` state changes is tested with `ViewHost`.** It hosts the view
+offscreen and reports whether the pixels changed after a mutation (`Tests/irisTests/LiveTrackingHarness.swift`,
+#1277). A view that reads its data inside `body` repaints; one that took it as a captured value freezes
+(#223/#224/#988). Pair every "repaints" test with a control that must not, so a blank or ticking view cannot pass
+it, and narrow `region:` past any clock the view runs itself. Mutate the view to the frozen shape and watch the test fail.
+
 **Opt-in tests.** Two kinds of test are skipped unless an environment variable asks for them,
 because they need something the default suite must not depend on:
 
