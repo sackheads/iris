@@ -357,6 +357,41 @@ struct GuestRolesActivationTests {
         #expect(!text(w.app, w.builder).contains("second to builder"))
     }
 
+    // MARK: composition with #1289 (guest-origin turns read no profile memory) and #1285 (deny-all floor)
+
+    @Test("a guest's granted send reaches a PROFILE-BOUND role session, and that guest-steered turn is not handed the profile's memory")
+    func grantedSendToProfileBoundSessionCarriesNoProfileMemory() async throws {
+        let r = try rig(); defer { r.tearDown() }
+        try r.registry.setRoles(["reviewer"], forClientId: "dev-1")
+        try FileManager.default.createDirectory(at: r.paths.memoryDir, withIntermediateDirectories: true)
+        for f in [r.paths.userMd, r.paths.soulMd, r.paths.memoryMd] { try "owner text".write(to: f, atomically: true, encoding: .utf8) }
+        try put(r, profile: "p1", json: #"{"memoryRead":1}"#)
+        let notes = try #require(ProfileMemoryStore(paths: r.paths, profileId: "p1"))
+        #expect(notes.replace(content: "PROFILE-NOTE-SECRET") == "Profile memory updated.")
+        let w = world(r)
+        w.app.conversations[w.app.conversations.firstIndex { $0.id == w.reviewer }!].accessProfileId = "p1"
+        let capture = CapturingLLMClient(reply: "noted")
+        w.app.installEngine(IrisEngine(state: w.app, tier: .medium, principal: .main, client: capture, retryDelays: [],
+                                       streamResponses: false, protectionEnabled: false, sessionPeerCount: 0,
+                                       memory: MemoryManager(paths: r.paths), accessProfileStore: r.store))
+        let engine = guestEngine(w, r, sends: [("role:reviewer", "hello reviewer")])
+        await engine.processInput("go", source: "UI", conversationId: w.guest)
+        #expect(await eventually { self.text(w.app, w.reviewer).contains("hello reviewer") }, "the granted send reached the profile-bound session")
+        #expect(await eventually { !capture.requests.isEmpty })
+        let system = capture.requests.first?.systemInstruction?.parts.compactMap(\.text).joined() ?? ""
+        #expect(!system.contains("PROFILE-NOTE-SECRET"), "a turn a guest steered must not read the bound profile's memory back")
+    }
+
+    @Test("the owner engine asking about a provider guest's own conversation still gets the deny-all floor, with a role grant in place")
+    func denyAllFloorHoldsWithAGrant() async throws {
+        let r = try rig(); defer { r.tearDown() }
+        try r.registry.setRoles(["reviewer"], forClientId: "dev-1")
+        let w = world(r)
+        let owner = IrisEngine(state: w.app, tier: .medium, principal: .main, client: FakeLLMClient(responses: []), retryDelays: [], protectionEnabled: false)
+        let b = await owner.bindingForCall(conversationId: w.guest)
+        #expect(!b.isOwner && b.principal == .mcpGuest && b.profile.peerRoles.isEmpty, "a foreign engine never gets the guest's roles or the owner's binding")
+    }
+
     // MARK: an owner-bound session never consults peerRoles
 
     @Test("guestRoleAllowlist is read only by the guest paths: guestTarget and the guest's list_sessions")
