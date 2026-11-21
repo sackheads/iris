@@ -24,6 +24,9 @@ final class ProviderTokenRegistry: @unchecked Sendable {
         case notRegistered
         /// The access-profile store (`profiles/`) cannot be read, so a grant cannot be recorded in it.
         case accessStoreUnreadable
+        /// The guest is mapped to a profile the provider did not write, and the store wins, so a grant made
+        /// here would have no effect on its reach. Change that profile instead.
+        case storeOwnsGrant
     }
 
     private let keychain: KeychainManager
@@ -211,15 +214,26 @@ final class ProviderTokenRegistry: @unchecked Sendable {
         }
         try writeLock.withLock {
             guard isRegistered(clientId: clientId) else { throw RegistryError.notRegistered }
-            // The store first: if it cannot be written, nothing changes anywhere.
+            // The store first (it wins over the Keychain item). If the Keychain write then fails the call
+            // reports failure, so the store is put back as it was: a failed call must not change reach.
+            var restore: (() -> Void)?
             if let accessStore, let accessWriter {
-                if try ProviderGuestGrants.grant(normalised, clientId: clientId, store: accessStore, writer: accessWriter) == .unreadable {
-                    throw RegistryError.accessStoreUnreadable
+                let prior = ProviderGuestGrants.registryGrant(clientId: clientId, store: accessStore)
+                switch try ProviderGuestGrants.grant(normalised, clientId: clientId, store: accessStore, writer: accessWriter) {
+                case .unreadable: throw RegistryError.accessStoreUnreadable
+                case .operatorOwned: throw RegistryError.storeOwnsGrant
+                case .written: break
                 }
+                restore = { _ = try? ProviderGuestGrants.grant(prior, clientId: clientId, store: accessStore, writer: accessWriter) }
             }
             let encoded = String(data: try JSONEncoder().encode(normalised.sorted()), encoding: .utf8) ?? "[]"
-            try keychain.updateSecretsOrThrow(service: KeychainManager.mcpProviderRolesService) { dict in
-                dict[clientId] = normalised.isEmpty ? nil : encoded
+            do {
+                try keychain.updateSecretsOrThrow(service: KeychainManager.mcpProviderRolesService) { dict in
+                    dict[clientId] = normalised.isEmpty ? nil : encoded
+                }
+            } catch {
+                restore?()
+                throw error
             }
             lock.withLock { roleCache[clientId] = normalised.isEmpty ? nil : normalised }
         }
