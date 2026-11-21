@@ -239,6 +239,22 @@ struct GuestRolesActivationTests {
         if case .found = store.lookupMapping(for: identity) { Issue.record("a mapping was left behind by a failed call") }
     }
 
+    @Test("a setRoles that clears a grant, and whose Keychain write fails, puts the grant back")
+    func failedClearRestoresTheGrant() throws {
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("iris-t16s3-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = IrisPaths(root: root)
+        let registry = ProviderTokenRegistry(keychain: keychain, accessPaths: paths)
+        let store = AccessProfileStore(paths: paths)
+        _ = try registry.issueToken(forClientId: "dev-1")
+        try registry.setRoles(["reviewer"], forClientId: "dev-1")
+        keychain.simulateReadFailure(errSecIO)
+        #expect(throws: (any Error).self) { try registry.setRoles([], forClientId: "dev-1") }
+        keychain.simulateReadFailure(nil)
+        #expect(ProviderGuestGrants.allowedRoles(clientId: "dev-1", registry: registry, store: store) == ["reviewer"], "the failed clear did not take reach away")
+    }
+
     @Test("setRoles for a guest mapped to an operator's profile throws instead of reporting a success that changes nothing")
     func setRolesOnOperatorMappingThrows() throws {
         let r = try rig(); defer { r.tearDown() }
