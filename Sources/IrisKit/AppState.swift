@@ -6273,7 +6273,14 @@ class AppState {
         do {
             let result = try store.loadAll()
             pendingContextWrites = (try? store.loadPendingWrites()) ?? []
-            sidebarGroups = (try? store.loadSidebarGroups()) ?? []
+            // #1281 review (dev-2, round 2): a groups read that throws as a WHOLE (a locked database,
+            // a damaged table) must not be treated as "no groups" below — that would ungroup and
+            // persist-ungroup every member on a transient failure. `canReconcileGroups` is true only
+            // when the read itself succeeded; a row the read skipped internally and returned a
+            // partial list for is still a real "this group is gone", and reconciles.
+            var canReconcileGroups = true
+            do { sidebarGroups = try store.loadSidebarGroups() }
+            catch { sidebarGroups = []; canReconcileGroups = false }
             loadedSkippedRows = result.skipped
             loadedRepairFailed = result.repairFailed
             let (sanitized, roleNormalizationChanged) = Self.sanitizeLoaded(result.conversations)
@@ -6285,7 +6292,7 @@ class AppState {
             let groupIds = Set(sidebarGroups.map(\.id))
             var danglingGroupCleared: Set<UUID> = []
             let loaded = sanitized.map { conv -> Conversation in
-                guard let gid = conv.sidebarGroupId, !groupIds.contains(gid) else { return conv }
+                guard canReconcileGroups, let gid = conv.sidebarGroupId, !groupIds.contains(gid) else { return conv }
                 var fixed = conv
                 fixed.sidebarGroupId = nil
                 danglingGroupCleared.insert(conv.id)
