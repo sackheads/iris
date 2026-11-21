@@ -536,8 +536,8 @@ actor IrisEngine {
     /// reads `.binding` yet, so this changes no observed behavior, only what Group B's first read
     /// fails safely toward). `SubagentManager` is the one production caller that now threads a
     /// real, capped binding through (Task 5); `GoalEvaluator` threads a copy of the graded run's
-    /// binding (Task 6) and is not run without one (Task 10); the shipped, not-yet-authenticated guest path (`makeGuestEngine`)
-    /// is Task 16's retrofit.
+    /// binding (Task 6) and is not run without one (Task 10); the shipped guest path (`makeGuestEngine`)
+    /// resolves its own from the guest's provider identity (Task 16, `providerGuestBinding`).
     let binding: AccessBinding
     /// #974 Task 12: where `bindingForCall` resolves a conversation's persisted `accessProfileId`.
     /// The Iris home's `profiles/` by default (under test, the per-process temp home); a test injects its own.
@@ -1196,8 +1196,7 @@ actor IrisEngine {
         // `self.binding` IS the sender's binding. A relay (the sender's own turn was itself
         // guest-steered): inherit whatever was stamped on the sender's conversation, or its
         // delegation root's — chained the same way the bool is. If `guestOrigin` turns out true
-        // from the bool but no binding was ever stamped (a guest path that predates Task 16's
-        // identity-resolved retrofit), fail closed to the `.mcpGuest` floor rather than leaving
+        // from the bool but no binding was ever stamped (a path that never stamped one), fail closed to the `.mcpGuest` floor rather than leaving
         // the recipient turn at the engine's own (owner-shaped, for `.main`) binding.
         let (senderTurnIsGuestOrigin, inheritedGuestBinding) = await MainActor.run { () -> (Bool, AccessBinding?) in
             guard let localState else { return (false, nil) }
@@ -5578,10 +5577,9 @@ actor IrisEngine {
     /// #974 Task 5: resolves a binding from an authenticated identity before the engine is even
     /// constructed, refusing outright (nil) rather than falling back to owner (H3) — there is no
     /// "refused engine" state `binding`, a non-optional stored property, can represent. This is
-    /// the mechanism Task 16 wires the shipped guest path onto once #965 supplies a real
-    /// `(transport, issuer, id)` identity; `makeGuestEngine` above is untouched because it has no
-    /// identity to resolve against today (the F5 gap Task 16 names), and wiring refusal there now
-    /// would reject every existing, unauthenticated guest connection with nothing to map it to.
+    /// the mechanism for a principal with a real `(transport, issuer, id)` identity. The shipped
+    /// guest path does not use it: `makeGuestEngine` never refuses a guest, since an unmapped one keeps the
+    /// deny-all floor binding (`providerGuestBinding`), and refusing would reject every existing connection.
     static func makeBoundEngine(state: AppState, principal: Principal, identity: IdentityKey?,
                                 requestedDrop: String? = nil, store: AccessProfileStore = AccessProfileStore(paths: .default),
                                 tier: ModelTier = .easy, roleLabel: String? = nil,

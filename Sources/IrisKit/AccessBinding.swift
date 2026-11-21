@@ -47,9 +47,8 @@ public struct AccessBinding: Equatable, Sendable {
     /// for a stamp that must combine rather than pick a side (a merged steer batch from several
     /// guests, or a fresh queued guest arriving while a narrower one's turn is still running).
     /// First-wins or last-wins both let a wider guest's binding leak onto a narrower guest's turn
-    /// once per-guest profiles exist (#965/Task 16's retrofit) — today every guest shares one
-    /// floor, so this is latent rather than exploitable, but the stamp exists for the day it
-    /// isn't. Comparable via `BindingResolver.isSubGrant` (every axis narrower-or-equal); when
+    /// once per-guest profiles exist (Task 16: a mapped guest carries its own) — until a guest is mapped
+    /// every guest shares one floor, so this is latent rather than exploitable. Comparable via `BindingResolver.isSubGrant` (every axis narrower-or-equal); when
     /// neither is a subgrant of the other, fails closed to the `.mcpGuest` floor rather than
     /// guessing which axis matters more.
     public static func meetGuestBindings(_ a: AccessBinding, _ b: AccessBinding) -> AccessBinding {
