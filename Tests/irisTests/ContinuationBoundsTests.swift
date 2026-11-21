@@ -113,6 +113,33 @@ struct ContinuationBoundsTests {
         #expect(try await value(of: enable, within: 15) == false)
     }
 
+    /// Whether a process is still alive (signal 0 reaches it).
+    private func alive(_ pid: pid_t) -> Bool { kill(pid, 0) == 0 }
+
+    private func pids(in file: URL) -> [pid_t] {
+        ((try? String(contentsOf: file, encoding: .utf8)) ?? "").split(whereSeparator: \.isWhitespace).compactMap { pid_t($0) }
+    }
+
+    @Test("the deadline kills the gcloud process group, a grandchild included, at each of the three sites")
+    func deadlineKillsTheGroup() async throws {
+        for site in ["ADC", "read", "enable"] {
+            let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("iris-1272-pids-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: pidFile) }
+            // The leader and a background child both record their pids, then both sleep.
+            let (path, cleanup) = try script("echo $$ >> '\(pidFile.path)'\nsleep 60 &\necho $! >> '\(pidFile.path)'\nwait")
+            defer { cleanup() }
+            switch site {
+            case "ADC": _ = try await value(of: Task { try await ADCCredentialManager.shared.runGCloud(path: path, args: ["x"], timeoutSeconds: 0.5) }, within: 15)
+            case "read": _ = try await value(of: Task { await GCloudHelper.runAsync(gcloudPath: path, timeoutSeconds: 0.5, "x") }, within: 15)
+            default: _ = try await value(of: Task { await GCloudHelper.enableAPI("x.googleapis.com", gcloudPath: path, timeoutSeconds: 0.5) }, within: 15)
+            }
+            let recorded = pids(in: pidFile)
+            #expect(recorded.count == 2, "\(site): the script recorded its leader and child: \(recorded)")
+            #expect(await waitFor(10) { recorded.allSatisfy { !self.alive($0) } }, "\(site): the leader and its child are gone after the deadline: \(recorded)")
+            for pid in recorded where alive(pid) { kill(pid, SIGKILL) }
+        }
+    }
+
     @Test("a cancelled gcloud call ends at once, not at its deadline")
     func cancelledGcloudEnds() async throws {
         let (path, cleanup) = try script("sleep 60")
