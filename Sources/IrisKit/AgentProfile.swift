@@ -4,7 +4,8 @@ import Foundation
 /// An agent profile (#465): a named starting point for a conversation, read from
 /// `config/agent-profiles/<name>.md`. The Markdown body is a system-prompt addition; the
 /// frontmatter names a role, a tier, skills and tools. A profile only ever narrows or adds
-/// prompt text: it approves, allowlists and grants nothing.
+/// prompt text: it approves, allowlists and grants nothing. Its one input to a guard is `vibecop`, text
+/// Vibecop reads when it judges this profile's own conversations (#1005).
 struct AgentProfile: Equatable, Sendable {
     var name: String
     var role: String?

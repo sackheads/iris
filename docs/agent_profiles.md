@@ -12,12 +12,14 @@ role: reviewer            # optional; becomes the conversation's session role
 tier: hard                # optional; easy | medium | hard
 skills: [code-review]     # optional; omitted = your usual skills
 tools: [read_file, run_command]   # optional; omitted = the usual tools
+vibecop: allow swift build and swift test   # optional; guidance for Vibecop in this profile's conversations
 ---
 You review pull requests for this repository. Read the whole diff first, ...
 ```
 
 - **The name** is the file name, with lowercase letters, digits and dashes. A `name:` line, if present, must match it.
 - **The body** below the frontmatter is added to the system prompt, under `# Agent Profile: <name>`.
+- **`vibecop:`** is guidance for Vibecop, the guardian that pre-screens this conversation's commands (#1005): one line, or a `|` block of indented lines (a folded `>` block or a list does not read, and the profile shows as unusable). It is added to the prompt Vibecop judges with, after the global and workspace rules and before anything the conversation's own `/vibecop tweak` added, 4 KB at most. It only adds allowances inside Vibecop's built-in rules: the host read-only gate still decides what an approval may run, a guest-origin turn is not given it and still asks you, and a subagent of the conversation does not inherit it. It applies only while the file reads; if the file is missing or broken the guidance is dropped, not kept from the last good read. See [Vibecop](vibecop.md).
 - **Lists** can be written inline (`[a, b]`) or one `- a` per line.
 - **Errors:** a file that doesn't parse shows in the menu as unusable, with the reason.
 - **Names that match nothing:** a name in `tools:` or `skills:` that isn't one of Iris's tools, one of your MCP servers (`mcp:<name>`) or tools, or one of your skills is ignored. The menu marks such a profile "(unknown names)" and lists them on hover, and a conversation started on it, or given it later, says so once, so a typo doesn't quietly leave a conversation with fewer tools than you meant.
@@ -44,7 +46,7 @@ With a `tools:` list, a conversation is offered only those tools, and a call to 
 
 ## A profile only adds and narrows
 
-A profile adds prompt text, picks a role, narrows the tools and skills offered, and picks a tier. **It never approves, allowlists, grants or unlocks anything**. A profile's tool list is for focus and token cost, not security. What runs without asking is decided only by your allowlist, Vibecop, your approvals, and a job's profile.
+A profile adds prompt text, picks a role, narrows the tools and skills offered, and picks a tier. **It never approves, allowlists, grants or unlocks anything** itself; the one thing it can add is `vibecop:` guidance, which Vibecop reads when it judges a call, and Vibecop's own rules and the host read-only gate still bound what an approval may run. A profile's tool list is for focus and token cost, not security. What runs without asking is decided only by your allowlist, Vibecop, your approvals, and a job's profile.
 
 Profiles don't apply to the pinned Iris conversation, to a subagent's own conversation, or to a job run.
 
