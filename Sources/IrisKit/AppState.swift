@@ -2581,12 +2581,39 @@ class AppState {
     /// the turn's (`bindingForCall`), which already fails closed: a conversation bound to a profile, or one
     /// whose persisted profile no longer resolves, is not the owner. The narrowed local form the spec allows
     /// (a bound session reflecting into its own `profiles/<id>/memory.md`) needs a per-profile memory store
-    /// that does not exist yet; until then a bound session does not reflect at all.
+    /// that did not exist yet; #1245 adds it, as `ReflectionRoute.profile`.
     func reflectionMayRun(in convId: UUID) async -> Bool {
         await engine.bindingForCall(conversationId: convId).isOwner
     }
 
-    static let reflectionNotRunForBoundSession = "Memory reflection was not run: this session is bound to an access profile, and a reflection writes the owner's memory and reports into Iris."
+    /// Where a conversation's reflection may write (#1245). `.owner`: the owner's stores, as always.
+    /// `.profile(id)`: a session bound to a live profile whose `memoryWrite` reaches
+    /// `ProfileMemoryStore.minimumWriteTier` reflects into that profile's own memory file and nothing else.
+    /// `.none`: everything else, including a binding with no persisted profile id (a guest-steered stamp)
+    /// and a profile too narrow to write.
+    enum ReflectionRoute: Equatable { case owner, profile(String), none }
+
+    func reflectionRoute(in convId: UUID) async -> ReflectionRoute {
+        let binding = await engine.bindingForCall(conversationId: convId)
+        if binding.isOwner { return .owner }
+        guard let id = persistedAccessProfileId(for: convId),
+              binding.profile.memoryWrite >= ProfileMemoryStore.minimumWriteTier,
+              AccessProfileStore.isValidProfileId(id) else { return .none }
+        return .profile(id)
+    }
+
+    /// #1245: a bound session's reflection turn. Its tool list is the profile-memory writer alone, and no
+    /// card goes to Iris: whatever the reply says stays in this conversation.
+    static let profileReflectionPrompt = "System Event [Reflection Trigger]: It's time to consolidate what is worth keeping from this conversation. If you learned something durable, rewrite your profile memory file with `update_profile_memory` (the complete, condensed notes). If nothing needs updating, just reply 'No memory consolidation needed at this time.'"
+
+    func runProfileReflection(profileId: String, in convId: UUID) async {
+        guard await reflectionRoute(in: convId) == .profile(profileId) else { return }
+        await IrisEngine.$profileReflectionId.withValue(profileId) {
+            await engine.processInput(Self.profileReflectionPrompt, source: "System", conversationId: convId)
+        }
+    }
+
+    static let reflectionNotRunForBoundSession = "Memory reflection was not run: this session is bound to an access profile that may not write memory, and a reflection writes the owner's memory and reports into Iris."
 
     /// Swaps the `.agent` messages at or after `before` for one `reflectionReportedNotice` line,
     /// placed where the first of them was. `messages` only; history is untouched.
@@ -3892,6 +3919,11 @@ class AppState {
             // Asked for here, so the reply stays here; outside Iris a card goes to Iris too (5b §0.6).
             // #974 Task 11 (C7): a session not bound to the owner is told why nothing ran, not "Triggering".
             runThinkingTask(conversationId: convId) { [self] in
+                if case .profile(let profileId) = await reflectionRoute(in: convId) {
+                    appendMessage(role: .system, content: "Triggering manual memory reflection into this profile's own memory...", to: convId)
+                    await runProfileReflection(profileId: profileId, in: convId)
+                    return
+                }
                 guard await reflectionMayRun(in: convId) else {
                     appendMessage(role: .system, content: Self.reflectionNotRunForBoundSession, to: convId)
                     return
@@ -4069,9 +4101,15 @@ class AppState {
                         markChanged(convId, .metadata)
                     }
                     // #974 Task 11 (C7): silent for a session bound to a profile (the counter is already reset).
-                    if await reflectionMayRun(in: convId) {
+                    switch await reflectionRoute(in: convId) {
+                    case .owner:
                         appendMessage(role: .system, content: "Triggering automatic memory reflection...", to: convId)
                         await runReflection(Self.reflectionPrompt, in: convId, moveReplyToIris: true)
+                    case .profile(let profileId):
+                        appendMessage(role: .system, content: "Triggering automatic memory reflection into this profile's own memory...", to: convId)
+                        await runProfileReflection(profileId: profileId, in: convId)
+                    case .none:
+                        break
                     }
                 } else if shouldRename {
                     let renamePrompt = "System Event [Rename Trigger]: Evaluate the conversation history and use the `rename_conversation` tool to assign a short, descriptive title (1-4 words) that captures the true gist of this conversation."

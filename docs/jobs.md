@@ -1003,7 +1003,7 @@ that grants permissions along with the hook and plugin settings, `plugins/`, whe
 with an `mcp` component becomes a command spawned at the next launch, `exchange/`, where
 session attachments are kept and only Iris writes ([Sessions](sessions.md#attachments)), and
 `profiles/`, the access profiles and identity mappings that decide what a guest or peer may do,
-which only the profile pane writes. That check is canonical —
+which only the profile pane writes (and, under each profile's own folder, the `memory.md` a session bound to that profile reflects into, [Memory](memory.md)). That check is canonical —
 case-insensitive, with symlinks resolved — so `~/.iris/CONFIG/permissions.json` or a link planted
 under `memory/` is the same refusal. (`rules/` is not protected: it is prompt text, which the guard
 already treats as untrusted, not a way to make something run.) And a background run gets no write
