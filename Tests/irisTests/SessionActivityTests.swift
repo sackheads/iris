@@ -617,25 +617,46 @@ struct RunGroupTests {
     }
 }
 
-/// #988: `ActivityRowView`'s `!isMain` lookup must read live from `state.stripRuns` on every
-/// render, not a value captured once — the #223/#224 regression a value-parameter version would
-/// have reintroduced. Exercised at the `AppState` level: a mutation to `stripRuns` must be visible
-/// through the exact lookup path the view uses, proving there is no stale snapshot anywhere
-/// between `updateRunPhase` and what a re-render of the row would read.
+/// #988 review (dev-2): `ActivityRowView.summary(in:sessionId:isMain:)` must read a non-main row
+/// through `stripRuns` (process-wide), not `visibleRuns` (focused-session-scoped) — the global
+/// view's whole reason for being. Pinned on a scenario where the two sources actually disagree
+/// (an unfocused, or differently-focused, conversation's run), not just that `stripRuns` itself
+/// updates, which a direct read of `stripRuns` would pass under either branch.
 @MainActor
-@Suite("ActivityRowView's non-main lookup stays live (#988)")
+@Suite("ActivityRowView's non-main lookup reads stripRuns, not the focused-session view (#988)")
 struct ActivityRowLiveLookupTests {
-    @Test("the row's lookup source (stripRuns) reflects a phase mutation immediately, with no caching in between")
+    @Test("a non-main row resolves through the summary helper even when no conversation is focused, or a different one is")
+    func nonMainLookupIgnoresFocus() {
+        let app = AppState(store: try! ConversationStore.inMemory(), tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        let owner = UUID(), other = UUID()
+        app.createNewConversation(id: owner)
+        app.createNewConversation(id: other)
+        let id = UUID()
+        app.registerSubagent(id: id, role: "engineer", owner: owner)
+
+        // Nothing focused: visibleRuns has no non-main rows at all (focusedId == nil), but the
+        // global view must still resolve this row.
+        app.selectedConversationId = nil
+        #expect(app.visibleRuns.first { $0.id == id } == nil, "control: visibleRuns excludes it with nothing focused")
+        #expect(ActivityRowView.summary(in: app, sessionId: id, isMain: false)?.id == id)
+
+        // A different conversation focused: visibleRuns is scoped to `other`, excluding `owner`'s
+        // run, but the global view must still resolve it.
+        app.selectedConversationId = other
+        #expect(app.visibleRuns.first { $0.id == id } == nil, "control: visibleRuns excludes a foreign owner's run")
+        #expect(ActivityRowView.summary(in: app, sessionId: id, isMain: false)?.id == id)
+    }
+
+    @Test("the lookup reflects a phase mutation immediately, with no caching in between")
     func lookupReflectsMutation() {
         let app = AppState(store: try! ConversationStore.inMemory(), tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
         let id = UUID()
         app.registerSubagent(id: id, role: "engineer")
-        // What ActivityRowView's body does for a non-main row: state.stripRuns.first(where:).
-        let before = app.stripRuns.first { $0.id == id }
-        guard case .thinking = before?.phase else { Issue.record("expected the fresh registration's default phase"); return }
+        guard case .thinking = ActivityRowView.summary(in: app, sessionId: id, isMain: false)?.phase else {
+            Issue.record("expected the fresh registration's default phase"); return
+        }
         app.updateRunPhase(id, .executing(tool: "run_command", detail: "swift build"))
-        let after = app.stripRuns.first { $0.id == id }
-        guard case .executing(let tool, _) = after?.phase else {
+        guard case .executing(let tool, _) = ActivityRowView.summary(in: app, sessionId: id, isMain: false)?.phase else {
             Issue.record("the same lookup path read a stale phase after the mutation")
             return
         }

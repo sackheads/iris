@@ -30,8 +30,15 @@ struct AllRunningTasksView: View {
                                 Text(group.title)
                                     .font(.headline)
                                 ForEach(group.runs) { run in
+                                    // dev-2 review: the app's one transcript sheet lives on the
+                                    // main window (`ActivityStripView`'s own `.sheet`, always
+                                    // mounted there); a second `.sheet` here bound to the same
+                                    // `transcriptSheetConversationId` would try to present in both
+                                    // windows at once. `openTranscript` is the established opener
+                                    // (Run Log uses it too): it raises the main window first, then
+                                    // sets the id, so the one sheet has somewhere to appear.
                                     ActivityRowView(state: state, sessionId: run.id, isMain: false) {
-                                        state.transcriptSheetConversationId = run.id
+                                        state.openTranscript(run.id)
                                     }
                                 }
                             }
@@ -42,22 +49,5 @@ struct AllRunningTasksView: View {
             }
         }
         .frame(minWidth: 480, minHeight: 320)
-        // Same sheet `ActivityStripView` opens a row's transcript with (#19/#187): one
-        // presentation, two openers.
-        .sheet(isPresented: Binding(
-            get: { state.transcriptSheetConversationId != nil },
-            set: { presented in if !presented { state.transcriptSheetConversationId = nil } }
-        )) {
-            if let id = state.transcriptSheetConversationId {
-                if #available(macOS 15, *) {
-                    TranscriptSheet(state: state, sessionId: id)
-                        .id(id)
-                        .presentationSizing(.fitted)
-                } else {
-                    TranscriptSheet(state: state, sessionId: id)
-                        .id(id)
-                }
-            }
-        }
     }
 }
