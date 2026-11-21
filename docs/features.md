@@ -172,7 +172,7 @@ activity strip's rows do.
 
 ### Markdown Export & Utilities
 
-Right-click conversations to archive or unarchive them, copy them to your clipboard as clean, formatted Markdown, or select specific chat turns to copy just those. Archiving is refused while a turn is still running or a goal is active on that conversation, and refused outright on Iris, your pinned main conversation — `/new` there archives it for you (see Session Control under [Slash commands](#slash-commands)). Sending anything to an archived conversation — a message, a subagent post-back — brings it back automatically, with two deliberate exceptions: a message from another session is refused instead of un-archiving it, and a job's event card lands silently, because a card starts no turn and an archived conversation is meant to stay idle. A human reopening a conversation is a choice about one thing they picked; a peer doing the same would be expanding its own reach on its own initiative, so it doesn't get to. A session left untouched archives itself after 14 days by default ([details](sessions.md)); a plain chat never does. Automatically renames conversations via the `/rename` command — except Iris, which keeps its name.
+Right-click conversations to archive or unarchive them, copy them to your clipboard as clean, formatted Markdown, or select specific chat turns to copy just those. Archiving is refused while a turn is still running or a goal is active on that conversation, and refused outright on Iris, your pinned main conversation — `/new` there archives it for you (see Session Control under [Slash commands](#slash-commands)). Sending anything to an archived conversation — a message, a subagent post-back — brings it back automatically, with two deliberate exceptions: a message from another session is refused instead of un-archiving it, and a job's event card lands silently, because a card starts no turn and an archived conversation is meant to stay idle. A human reopening a conversation is a choice about one thing they picked; a peer doing the same would be expanding its own reach on its own initiative, so it doesn't get to. A session left untouched archives itself after 14 days by default ([details](sessions.md)); a plain chat never does, and neither does a member of a sidebar team ([details](#sidebar-teams)) for as long as it stays in one. Automatically renames conversations via the `/rename` command — except Iris, which keeps its name.
 
 ### Agent Profiles
 
@@ -181,6 +181,10 @@ Start a conversation as a reviewer, researcher or writer: a profile is a Markdow
 ### Sessions
 
 Conversations as sessions that can see and message each other, with roles, cards, topics to broadcast on, and limits: see [docs/sessions.md](sessions.md).
+
+### Sidebar Teams
+
+Group conversations into a persistent, named team in the sidebar — not a visual folder that empties out on its own, but a standing group you create once and keep: drag conversations in and out, reorder teams and their members, rename a team, or delete one (which ungroups its members; it never archives or deletes a conversation). A team's members are exempt from the 14-day idle auto-archive sweep (see [Sessions](#sessions) above) for as long as they stay grouped. [Details](sidebar_teams.md)
 
 ## Memory and skills
 

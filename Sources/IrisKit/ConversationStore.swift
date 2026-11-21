@@ -866,6 +866,20 @@ final class ConversationStore: Sendable {
                 t.add(column: "hasGuestInput", .boolean)
             }
         }
+        // #960: persistent sidebar teams. The group's own identity (name, order) lives in its own
+        // table, never derived from a member — deleting every member must not lose the group's
+        // name. `sidebarGroupId` NULL (every earlier row) reads as ungrouped, the status-quo
+        // default. Paired with `Conversation`'s own `decodeIfPresent`: the store is columnar.
+        m.registerMigration("v44_sidebar_groups") { db in
+            try db.create(table: "sidebar_groups") { t in
+                t.column("id", .text).notNull().primaryKey()
+                t.column("name", .text).notNull()
+                t.column("position", .integer).notNull()
+            }
+            try db.alter(table: "conversations") { t in
+                t.add(column: "sidebarGroupId", .text)
+            }
+        }
         return m
     }
 
@@ -1104,14 +1118,14 @@ final class ConversationStore: Sendable {
                     isBackground = ?, isPinned = ?, sessionCard = ?, jobProfile = ?, sandboxGrant = ?,
                     hasUnattendedInput = ?, hasUntrustedToolOutput = ?, outboundAllowedTools = ?, jobOutboundExemptions = ?, prefixMismatchBehavior = ?, role = ?, homeWritableOptIn = ?,
                     agentProfile = ?, agentProfileSnapshot = ?,
-                    loop = ?, modelTier = ?, lastTouchedAt = ?, archivedAutomaticallyAt = ?, inSessions = ?, additionalRoots = ?, vibecopGuidance = ?, accessProfileId = ?, hasGuestInput = ?
+                    loop = ?, modelTier = ?, lastTouchedAt = ?, archivedAutomaticallyAt = ?, inSessions = ?, additionalRoots = ?, vibecopGuidance = ?, accessProfileId = ?, hasGuestInput = ?, sidebarGroupId = ?
                 WHERE id = ?
                 """, arguments: [c.title, touched, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
                                  evaluation, report, c.isArchived, c.isBackground, c.isPinned, card,
                                  c.jobProfile?.rawValue, grant, c.hasUnattendedInput, c.hasUntrustedToolOutput, outboundAllowed, jobExemptions, c.prefixMismatchBehavior?.rawValue,
                                  c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue,
-                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, additionalRoots, c.vibecopGuidance, c.accessProfileId, c.hasGuestInput, c.id.uuidString])
+                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, additionalRoots, c.vibecopGuidance, c.accessProfileId, c.hasGuestInput, c.sidebarGroupId?.uuidString, c.id.uuidString])
         } else {
             let position = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(position), 0) FROM conversations") ?? 0) + 1
             try db.execute(sql: """
@@ -1120,14 +1134,14 @@ final class ConversationStore: Sendable {
                     subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived,
                     isBackground, isPinned, sessionCard, jobProfile, sandboxGrant, hasUnattendedInput,
                     hasUntrustedToolOutput, outboundAllowedTools, jobOutboundExemptions, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier,
-                    lastTouchedAt, archivedAutomaticallyAt, inSessions, additionalRoots, vibecopGuidance, accessProfileId, hasGuestInput)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    lastTouchedAt, archivedAutomaticallyAt, inSessions, additionalRoots, vibecopGuidance, accessProfileId, hasGuestInput, sidebarGroupId)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [c.id.uuidString, position, c.title, now, touched, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
                                  tokenUsage, contract, result, history, evaluation, report, c.isArchived,
                                  c.isBackground, c.isPinned, card, c.jobProfile?.rawValue, grant, c.hasUnattendedInput,
                                  c.hasUntrustedToolOutput, outboundAllowed, jobExemptions, c.prefixMismatchBehavior?.rawValue, c.role, c.homeWritableOptIn, c.agentProfile, profileSnapshot, loop, c.modelTier?.rawValue,
-                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, additionalRoots, c.vibecopGuidance, c.accessProfileId, c.hasGuestInput])
+                                 c.lastTouchedAt, c.archivedAutomaticallyAt, c.inSessions, additionalRoots, c.vibecopGuidance, c.accessProfileId, c.hasGuestInput, c.sidebarGroupId?.uuidString])
         }
     }
 
@@ -1318,6 +1332,9 @@ final class ConversationStore: Sendable {
                 // reason to decide anything about owner here; `BindingResolver` is what turns a
                 // nil or a dangling id into an actual refusal or bind.
                 let accessProfileId = supplementary("accessProfileId")
+                // #960: an unreadable id is ungrouped, the safe-soft-loss shape above — not a
+                // reason to decide anything about the group's own existence here.
+                let sidebarGroupId = supplementary("sidebarGroupId")
                 let prefixMismatch = supplementary("prefixMismatchBehavior")
                 let checkpointHistory = supplementary("checkpointHistory")
                 let lastGoalEvaluation = supplementary("lastGoalEvaluation")
@@ -1476,6 +1493,11 @@ final class ConversationStore: Sendable {
                 }
                 c.vibecopGuidance = vibecopGuidance
                 c.accessProfileId = accessProfileId
+                // #960: an id that no longer parses as a UUID (damaged text) is ungrouped, same
+                // fail-safe direction as an unreadable column — never promoted to an error state.
+                if let sidebarGroupId, let parsed = UUID(uuidString: sidebarGroupId) {
+                    c.sidebarGroupId = parsed
+                }
                 // #962: an unreadable list is none, same fail-safe shape as outboundAllowedTools above.
                 if let s = additionalRoots {
                     do { c.additionalRoots = try decoder.decode([String].self, from: Data(s.utf8)) }
@@ -1848,6 +1870,18 @@ final class ConversationStore: Sendable {
         }
     }
 
+    /// #960: assigns sequential `position` values (0, 1, 2, …) to exactly the conversations
+    /// named, in the order given — a drag-reorder within a sidebar bucket (a team, or the
+    /// ungrouped list). One transaction, so a crash mid-reorder never leaves two rows sharing a
+    /// position. Does not touch any conversation not named.
+    func reorderConversations(_ orderedIds: [UUID]) throws {
+        try writer.write { db in
+            for (index, id) in orderedIds.enumerated() {
+                try db.execute(sql: "UPDATE conversations SET position = ? WHERE id = ?", arguments: [index, id.uuidString])
+            }
+        }
+    }
+
     /// Full-text search across every persisted conversation's user and agent messages. Ranked by
     /// bm25 (best match first), ties broken by the conversation's `updatedAt` so the more recent
     /// chat wins. An empty or all-punctuation query matches nothing: the fact store answers a
@@ -1980,6 +2014,41 @@ final class ConversationStore: Sendable {
             guard try db.tableExists("pending_context_writes") else { return [] }
             return try pendingWrites(db)
         }
+    }
+
+    // MARK: Sidebar teams (#960)
+
+    /// Every persisted group, lowest `position` first. A row this build can't read is skipped and
+    /// logged, never fatal — same shape as `loadPendingWrites`.
+    func loadSidebarGroups() throws -> [SidebarGroup] {
+        try writer.read { db in
+            try Row.fetchAll(db, sql: "SELECT id, name, position FROM sidebar_groups ORDER BY position").compactMap { row in
+                guard let idString = Self.readText(row, "id"), let id = UUID(uuidString: idString),
+                      let name = Self.readText(row, "name") else {
+                    print("WARNING: unreadable sidebar_groups row; skipped")
+                    return nil
+                }
+                let position: Int = (row["position"] as Int?) ?? 0
+                return SidebarGroup(id: id, name: name, position: position)
+            }
+        }
+    }
+
+    /// Inserts or replaces one group, whole.
+    func upsertSidebarGroup(_ group: SidebarGroup) throws {
+        try writer.write { db in
+            try db.execute(sql: """
+                INSERT INTO sidebar_groups (id, name, position) VALUES (?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET name = excluded.name, position = excluded.position
+                """, arguments: [group.id.uuidString, group.name, group.position])
+        }
+    }
+
+    /// Deletes a group row. Never touches `conversations.sidebarGroupId` — ungrouping members is
+    /// the caller's job (`AppState.deleteSidebarGroup`), done before this so the two writes land
+    /// as one visible step from the person's side even though they are two statements here.
+    func deleteSidebarGroup(id: UUID) throws {
+        try writer.write { db in try db.execute(sql: "DELETE FROM sidebar_groups WHERE id = ?", arguments: [id.uuidString]) }
     }
 
     /// Tests corrupt rows through this; nothing in the app calls it.

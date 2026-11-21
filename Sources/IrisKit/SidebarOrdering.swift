@@ -19,4 +19,21 @@ enum SidebarOrdering {
     static func archived(_ all: [Conversation]) -> [Conversation] {
         all.filter { $0.isUserFacing && $0.isArchived }
     }
+
+    /// #960: the flat, unpinned, ungrouped part of the main list — what `visible`'s non-pinned
+    /// half used to show in full, now narrowed to the conversations that belong to no team.
+    static func ungrouped(_ all: [Conversation]) -> [Conversation] {
+        visible(all).filter { !$0.isPinned && $0.sidebarGroupId == nil }
+    }
+
+    /// #960: one entry per persistent team, lowest `position` first, each with its own members in
+    /// `all`'s array order (which `reorderConversations` keeps consistent with the stored
+    /// `position` column). An empty group is still returned — a team with no members right now is
+    /// not the same as a team that doesn't exist (#960: persists until explicitly deleted).
+    static func teams(_ all: [Conversation], groups: [SidebarGroup]) -> [(group: SidebarGroup, members: [Conversation])] {
+        let shown = visible(all)
+        return groups.sorted { $0.position < $1.position }.map { group in
+            (group, shown.filter { $0.sidebarGroupId == group.id })
+        }
+    }
 }
