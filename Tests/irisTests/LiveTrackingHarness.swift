@@ -38,11 +38,18 @@ final class ViewHost<Content: View> {
         hosting.layoutSubtreeIfNeeded()
         guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else { return 0 }
         hosting.cacheDisplay(in: hosting.bounds, to: rep)
-        guard let whole = rep.cgImage else { return 0 }
-        let crop = CGRect(x: region.minX * CGFloat(whole.width), y: region.minY * CGFloat(whole.height),
-                          width: region.width * CGFloat(whole.width), height: region.height * CGFloat(whole.height))
-        guard let part = whole.cropping(to: crop) else { return 0 }
-        return NSBitmapImageRep(cgImage: part).representation(using: .tiff, properties: [:])?.hashValue ?? 0
+        // Read the pixels straight off the cached display rep. Going through `rep.cgImage` (and then a
+        // TIFF) hashed the same before and after the row changed on the CI runner, and converting each pixel with
+        // `usingColorSpace(.deviceRGB)` returned nil here, which made every digest constant.
+        let x0 = Int(region.minX * CGFloat(rep.pixelsWide)), x1 = Int(region.maxX * CGFloat(rep.pixelsWide))
+        let y0 = Int(region.minY * CGFloat(rep.pixelsHigh)), y1 = Int(region.maxY * CGFloat(rep.pixelsHigh))
+        var hasher = Hasher()
+        for y in y0..<y1 {
+            for x in x0..<x1 {
+                hasher.combine(rep.colorAt(x: x, y: y))
+            }
+        }
+        return hasher.finalize()
     }
 
     /// How many pixels differ from the top-left corner's colour: 0 means the view painted nothing,
