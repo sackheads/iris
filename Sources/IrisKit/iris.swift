@@ -5548,20 +5548,31 @@ actor IrisEngine {
     /// #1066: the engine an external MCP client's guest conversation runs on: principal `.mcpGuest`,
     /// the cheapest tier, a role label naming the guest. Its prompt is `GuestPrompt` alone.
     ///
-    /// #974 R2 (planner's ruling on dev-3's #1202 review finding 2): this call has no real
-    /// `(transport, issuer, id)` identity to resolve yet (#965/Task 16's gap), so it cannot call
-    /// `makeBoundEngine`. It still stamps an explicit fail-closed `.mcpGuest`-floor binding rather
-    /// than relying on `IrisEngine`'s own non-main default — a missing binding on a non-main
-    /// principal must never read as owner (R2), and this is the production call site where that
-    /// default would otherwise be the only thing standing between a guest and the owner shape.
+    /// #974 Task 16: the binding comes from the guest's `(mcp, iris-mcp-provider, clientId)` identity
+    /// (`providerGuestBinding`). The identity is a function of `clientId`, so the engine's `guestClientId`
+    /// already names it and `principalMismatch` needs nothing more to keep one guest's engine off another's
+    /// conversation (#1124).
     static func makeGuestEngine(state: AppState, clientId: String, client: any LLMClientProtocol = LLMClient(),
                                 factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil,
-                                memory: MemoryManager? = nil) -> IrisEngine {
-        let binding = AccessBinding(profile: AccessProfile(), principal: .mcpGuest, isOwner: false)
-            .capped(by: PrincipalFloor.floor(for: .mcpGuest))
+                                memory: MemoryManager? = nil,
+                                store: AccessProfileStore = AccessProfileStore(paths: .default)) -> IrisEngine {
+        let binding = providerGuestBinding(clientId: clientId, store: store)
         return IrisEngine(state: state, tier: .easy, principal: .mcpGuest, roleLabel: "guest:\(clientId)", client: client,
                           factStore: factStore, protectionEnabled: protectionEnabled, memory: memory,
-                          guestClientId: clientId, binding: binding)
+                          guestClientId: clientId, binding: binding, accessProfileStore: store)
+    }
+
+    /// The binding a provider guest runs under. A guest with a mapping to a live, non-owner profile gets
+    /// that profile capped by the `.mcpGuest` floor; every other case gets the deny-all floor binding the
+    /// shipped path always had: no mapping, a client id the provider would refuse, a mapping or profile that
+    /// cannot be read, and the reserved owner id (R2: a missing or unusable binding on a non-main principal
+    /// is never owner, and never wider than nothing).
+    static func providerGuestBinding(clientId: String, store: AccessProfileStore) -> AccessBinding {
+        let floor = PrincipalFloor.floor(for: .mcpGuest)
+        let denyAll = AccessBinding(profile: AccessProfile(), principal: .mcpGuest, isOwner: false).capped(by: floor)
+        guard let identity = IdentityKey.providerGuest(clientId: clientId),
+              case .found(let profile) = store.lookupMappedProfile(for: identity) else { return denyAll }
+        return AccessBinding(profile: profile, principal: .mcpGuest, isOwner: false).capped(by: floor)
     }
 
     /// #974 Task 5: resolves a binding from an authenticated identity before the engine is even
