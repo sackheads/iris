@@ -41,6 +41,7 @@ struct ProfileReflectionTests {
         try FileManager.default.createDirectory(at: paths.profilesDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: paths.memoryDir, withIntermediateDirectories: true)
         try #"{"memoryWrite":1}"#.write(to: paths.profilesDir.appendingPathComponent("writer.json"), atomically: true, encoding: .utf8)
+        try #"{"memoryWrite":1}"#.write(to: paths.profilesDir.appendingPathComponent("writer2.json"), atomically: true, encoding: .utf8)
         try #"{"memoryRead":2}"#.write(to: paths.profilesDir.appendingPathComponent("reader.json"), atomically: true, encoding: .utf8)
         for file in [paths.userMd, paths.soulMd, paths.memoryMd] {
             try "owner's own text".write(to: file, atomically: true, encoding: .utf8)
@@ -132,6 +133,36 @@ struct ProfileReflectionTests {
         #expect(h.client.calls == 1)
         let offered = IrisEngine.offeredToolNames(try #require(h.client.requests.first))
         #expect(offered.contains("update_memory") && !offered.contains(IrisEngine.profileMemoryTool), "\(offered)")
+    }
+
+    /// The write re-reads the binding when it runs, not when the reflection started: a profile narrowed, or a
+    /// conversation re-bound, while the turn is in flight is refused by what it is now.
+    @Test("a profile narrowed or a conversation re-bound after the reflection started: the write is refused")
+    func bindingChangedMidReflection() async throws {
+        for change in ["narrowed", "rebound"] {
+            let h = try harness(profileId: "writer", script: [])
+            defer { h.tearDown() }
+            let state = h.state, source = h.source, paths = h.paths
+            let mutate: @Sendable () async -> Void = {
+                if change == "narrowed" {
+                    try? #"{"memoryWrite":0}"#.write(to: paths.profilesDir.appendingPathComponent("writer.json"), atomically: true, encoding: .utf8)
+                } else {
+                    await MainActor.run {
+                        if let idx = state.conversations.firstIndex(where: { $0.id == source }) { state.conversations[idx].accessProfileId = "writer2" }
+                    }
+                }
+            }
+            let client = ScriptedStreamClient([[.block(mutate)] + Self.writeCall(Self.note), Self.text("ok")])
+            let engine = IrisEngine(state: state, tier: .medium, principal: .main, client: client, retryDelays: [],
+                                    streamResponses: true, protectionEnabled: false, sessionPeerCount: 0,
+                                    memory: MemoryManager(paths: paths), accessProfileStore: AccessProfileStore(paths: paths))
+            state.installEngine(engine)
+            state.sendMessage("/reflect")
+            try await waitForTurn(h)
+            #expect(client.calls >= 1, "\(change): the reflection turn ran")
+            #expect(profileFile(h) == nil, "\(change): nothing written")
+            #expect(!FileManager.default.fileExists(atPath: paths.profilesDir.appendingPathComponent("writer2/memory.md").path), "\(change)")
+        }
     }
 
     @Test("the writer is not offered, and a call to it does nothing, outside a reflection turn")
