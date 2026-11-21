@@ -20,7 +20,8 @@ public final class KeychainManager: @unchecked Sendable {
     public static let mcpProviderService = "iris.mcp.provider"
     /// Per-client role allowlists for MCP guests (#1066), keyed `[clientId: JSON array of role
     /// names]`. A second item beside `mcpProviderService`, so a token write never rewrites a grant
-    /// and a grant write never rewrites a token; `revokeToken` removes both.
+    /// and a grant write never rewrites a token; `revokeToken` removes both. Since #974 Task 16 S3 the
+    /// access-profile store holds the live grant and this item is its read-only fallback.
     public static let mcpProviderRolesService = "iris.mcp.provider.roles"
     /// Iris's own GitHub identity (#966): the configured GitHub account's fine-grained PAT, keyed
     /// `["token": <PAT>]`. It is Iris's own contributor credential (identity separation from

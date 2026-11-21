@@ -29,7 +29,8 @@ struct IdentityKey: Hashable, Sendable {
 /// named `AccessProfile`, and `profiles/mappings.json` for the identity→profile-id table. Internal
 /// (not `public`) because its one `init` takes `IrisPaths`, itself internal — matches
 /// `PermissionManager`'s own `init(paths:)`. This type declares **no write method** — writes come
-/// only from the #961 UI's own writer type, which this store never exposes. A read of a missing or
+/// only from `AccessProfileWriter` (the provider registry's own guest grants, and the #961 UI's), which
+/// this store never exposes and no tool reaches. A read of a missing or
 /// unreadable file is `nil`/empty, never a default profile or mapping (C8): the caller's
 /// `BindingResolver` (Task 4) is what turns that into a refusal.
 final class AccessProfileStore: Sendable {

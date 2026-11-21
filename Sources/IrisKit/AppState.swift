@@ -3531,8 +3531,10 @@ class AppState {
     }
 
     /// The roles each guest client may address, by client id. Injected so `AppState` imports no
-    /// provider type (`ProviderTokenRegistry.roles(forClientId:)` is the production source). The
-    /// default is empty, so a guest with no provider behind it can reach nobody.
+    /// provider type (`MCPProviderRuntime.start` wires it to `ProviderTokenRegistry.guestRoles`, which reads
+    /// the access-profile store and falls back to the Keychain roles item, #974 Task 16). The default is
+    /// empty, so a guest with no provider behind it can reach nobody. Read on every call and only for a
+    /// guest: an owner-bound session never consults it.
     @ObservationIgnored var guestRoleAllowlist: (String) -> Set<String> = { _ in [] }
 
     /// One refusal for every address a guest may not use, so its text says nothing about whether
