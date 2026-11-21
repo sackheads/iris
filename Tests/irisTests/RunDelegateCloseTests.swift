@@ -157,7 +157,7 @@ struct RunDelegateCloseTests {
         #expect(rt.createdCount == 3)
 
         clock.advance(by: 601)
-        await fire.value
+        try await value(of: fire)
 
         for id in [run, childId, grandId] {
             #expect(await sessions.isClosed(id), "session \(id) was closed")
@@ -175,8 +175,8 @@ struct RunDelegateCloseTests {
         #expect(rt.createdCount == 3, "no container after the close")
 
         client.release()
-        #expect(await child.value.status == .cancelled)
-        #expect(await grandchild.value.status == .cancelled)
+        #expect(try await value(of: child).status == .cancelled)
+        #expect(try await value(of: grandchild).status == .cancelled)
     }
 
     @Test("the close still gets a delegate the drain stopped after it unlinks, once, and a drain after the close notes nothing")
@@ -250,13 +250,13 @@ struct RunDelegateCloseTests {
         #expect(!state.pendingApprovals.contains { $0.conversationId == grandId }, "and the grandchild's")
         state.denyPendingApprovals(for: childId)   // unblocks a failed run; a no-op on a passing one
         state.denyPendingApprovals(for: grandId)
-        #expect(await childAsk.value == false)
-        #expect(await grandAsk.value == false)
+        #expect(try await value(of: childAsk) == false)
+        #expect(try await value(of: grandAsk) == false)
         #expect(await eventually { Set(closes.all) == [parent, childId, grandId] }, "closed: \(closes.all)")
         #expect(await eventually { client.cancellations("WORKER") == 1 }, "the background subagent's turn was stopped")
 
         client.release()
-        let outcome = await child.value
+        let outcome = try await value(of: child)
         #expect(outcome.status == .cancelled)
         #expect(outcome.rendered.contains(SubagentManager.parentDeletedReason))
     }
