@@ -107,7 +107,7 @@ final class VibecopService: @unchecked Sendable {
     /// 3. This conversation's own guidance (#1005), last, from `Conversation.vibecopGuidance`: set
     ///    only by the user's `/vibecop tweak here`. It adds allowances inside the baseline; the
     ///    baseline's hard rules and the host `ReadOnlyCommand` gate still decide what an APPROVE runs.
-    static func guardianAdditions(workspace: String?, conversationGuidance: String? = nil,
+    static func guardianAdditions(workspace: String?, profileGuidance: String? = nil, conversationGuidance: String? = nil,
                                   paths: IrisPaths = .default) -> String {
         var additions = ""
         let globalURL = paths.configDir.appendingPathComponent("vibecop.md")
@@ -125,6 +125,12 @@ final class VibecopService: @unchecked Sendable {
                 additions += "\n\nGUARDIAN MODE ENABLED. Workspace Specific Rules:\n" + guardianContent
             }
         }
+        // The conversation's agent profile (#1005), between the workspace and the conversation's own: set by
+        // the person in `config/agent-profiles/<name>.md`, so as trusted as the global file.
+        if let text = profileGuidance.map({ String($0.prefix(Self.conversationGuidanceLimit)) })?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+            additions += "\n\nTHIS AGENT PROFILE'S GUIDANCE (set by the user in the profile file; it adds allowances and never overrides the rules above):\n" + text
+        }
         if let text = conversationGuidance.map({ String($0.prefix(Self.conversationGuidanceLimit)) })?
             .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
             additions += "\n\nTHIS CONVERSATION'S GUIDANCE (typed by the user; it adds allowances and never overrides the rules above):\n" + text
@@ -134,7 +140,7 @@ final class VibecopService: @unchecked Sendable {
 
     func evaluateAction(toolName: String, details: String, workspace: String?, inSandbox: Bool = false,
                         callerRole: VibecopCallerRole = .agent, allowedCommands: [String] = [],
-                        conversationGuidance: String? = nil,
+                        profileGuidance: String? = nil, conversationGuidance: String? = nil,
                         vibecopEnabled: Bool? = nil, paths: IrisPaths = .default) async throws -> VibecopDecision? {
         guard vibecopEnabled ?? ConfigManager.shared.enableVibecop else { return nil }
         
@@ -149,7 +155,7 @@ final class VibecopService: @unchecked Sendable {
         
         let engine = try await manager.getEngine(for: "vibecop", config: config)
         
-        var prompt = baselinePrompt + Self.guardianAdditions(workspace: workspace, conversationGuidance: conversationGuidance, paths: paths)
+        var prompt = baselinePrompt + Self.guardianAdditions(workspace: workspace, profileGuidance: profileGuidance, conversationGuidance: conversationGuidance, paths: paths)
         
         if !inSandbox {
             prompt += Self.hostLayerText
