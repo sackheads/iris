@@ -266,7 +266,7 @@ struct ProcessInputCallSitesTests {
     @Test("the production call sites of processInput are exactly the reviewed ones")
     func processInputCallSites() throws {
         let expected: [String: Int] = [
-            "AppState.swift": 11,           // drain (system event), startTurn x3, goal reprompt/kickoff/skill check, /init, /new, rename, draft
+            "AppState.swift": 12,           // drain (system event), startTurn x3, goal reprompt/kickoff/skill check, /init, /new, rename, draft, profile reflection (#1245: the main engine, on the bound conversation, after reflectionRoute)
             "ConversationRotation.swift": 1, // reflection: on a user conversation, main engine
             "GoalEvaluator.swift": 1,        // a fresh evaluator engine on its own evaluator conversation
             "GuestSessionDriver.swift": 1,    // the guest's own engine (guestEngines[conv]) on its own guest conversation; the head check refuses any other pairing
