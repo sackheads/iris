@@ -4,9 +4,9 @@ import Foundation
 /// profile may write, `profiles/<id>/memory.md`. A bound session's reflection used to be skipped
 /// outright because the only stores it could write were the owner's; this is the store it writes
 /// instead. It sits inside `IrisPaths.profilesDir`, so it is a protected write for every model tool
-/// (`PermissionManager.isProtectedWrite`) and this type is the only writer. Nothing reads it back
-/// into a prompt yet (a new injection surface, its own follow-up), so a write here reaches no owner
-/// context and no other profile.
+/// (`PermissionManager.isProtectedWrite`) and this type is the only writer. #1263 reads it back into
+/// that same profile's own later turns, through the injection guard under its own `profile_memory`
+/// tag, never into the owner's context or another profile's (`IrisEngine.guardedProfileMemoryText`).
 struct ProfileMemoryStore {
     /// The one flippable threshold: the `memoryWrite` tier a profile needs for its session to reflect
     /// into this store. Below it the session writes nothing anywhere.
@@ -35,7 +35,14 @@ struct ProfileMemoryStore {
 
     var fileURL: URL { directory.appendingPathComponent(Self.fileName) }
 
-    func read() -> String? { try? String(contentsOf: fileURL, encoding: .utf8) }
+    /// At most `maxBytes`: `replace` already refuses to write more, but a file that got there some
+    /// other way (hand-edited, a future writer) must not be fed to the prompt partially or in full
+    /// past the cap either — this enforces the same bound independently on the read path, rather
+    /// than trusting that the file on disk was always made through `replace`.
+    func read() -> String? {
+        guard let data = try? Data(contentsOf: fileURL), data.count <= Self.maxBytes else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
 
     /// Replaces the file. Refuses over the size cap, and refuses to write through a link at the profile's
     /// directory or at the file itself (the directory is made here, never followed from elsewhere).

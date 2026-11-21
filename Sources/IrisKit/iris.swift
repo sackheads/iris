@@ -318,11 +318,18 @@ actor IrisEngine {
     private var agentsStamp: [String: GuardTextStamp] = [:]
     private var cachedAgentsText: [String: String] = [:]
 
-    /// The fully composed system prompt (base + USER.md + AGENTS.md), per workspace (5a Task 7).
-    /// Keyed on the three already-deduplicated inputs rather than re-deriving a stamp of its own:
-    /// concatenation is pure, so equal inputs guarantee an equal result, and this layer can never
-    /// drift from what `guardedUserProfileText`/`guardedAgentsMdText` already decided was unchanged.
-    private var composedPromptCache: [String: (base: String, profile: String?, agents: String?, agentProfile: String?, content: Content)] = [:]
+    /// #1263: a bound profile's own `memory.md`, guarded, cached per profile id — the same
+    /// per-key pattern as `agentsStamp`/`cachedAgentsText`. A profile id absent from
+    /// `profileMemoryStamp` means "not checked yet, or the file was missing last time".
+    private var profileMemoryStamp: [String: GuardTextStamp] = [:]
+    private var cachedProfileMemoryText: [String: String] = [:]
+
+    /// The fully composed system prompt (base + USER.md + profile memory + AGENTS.md), per
+    /// workspace (5a Task 7). Keyed on the already-deduplicated inputs rather than re-deriving a
+    /// stamp of its own: concatenation is pure, so equal inputs guarantee an equal result, and this
+    /// layer can never drift from what `guardedUserProfileText`/`guardedProfileMemoryText`/
+    /// `guardedAgentsMdText` already decided was unchanged.
+    private var composedPromptCache: [String: (base: String, profile: String?, profileMemory: String?, agents: String?, agentProfile: String?, content: Content)] = [:]
 
     /// Sentinel key for `composedPromptCache`/`agentsStamp` when a conversation has no bound
     /// workspace — distinct from any real path, including the empty string.
@@ -357,6 +364,43 @@ actor IrisEngine {
         }
         noteUnjudged(unjudged, file: "USER.md")
         return safeUserProfile
+    }
+
+    /// #1263: a bound profile's own `profiles/<id>/memory.md`, read back into that same profile's
+    /// LATER turns — the read-back half of #1245's write-only loop. Unlike USER.md (owner-authored),
+    /// this file can hold content a guest-steered turn reflected (#1286: `runProfileReflection` has
+    /// no `!hasGuestInput` gate), so it is strictly less trusted and gets no weaker sanitization:
+    /// the same `.tier3_canary` ceiling USER.md/AGENTS.md use, under its own `profile_memory` tag so
+    /// a verdict on one is never served for another. `nil` means no file for this profile yet, or
+    /// one that failed `ProfileMemoryStore.read()`'s own size cap — never partial content.
+    private func guardedProfileMemoryText(profileId: String) async -> String? {
+        guard let store = ProfileMemoryStore(paths: memory.paths, profileId: profileId) else { return nil }
+        guard let modified = Self.fileModificationDate(atPath: store.fileURL.path) else {
+            profileMemoryStamp.removeValue(forKey: profileId)
+            cachedProfileMemoryText.removeValue(forKey: profileId)
+            return nil
+        }
+        let stamp = currentGuardTextStamp(modified: modified)
+        if profileMemoryStamp[profileId] == stamp, let cached = cachedProfileMemoryText[profileId] {
+            return cached
+        }
+        guard let raw = store.read() else {
+            profileMemoryStamp.removeValue(forKey: profileId)
+            cachedProfileMemoryText.removeValue(forKey: profileId)
+            return nil
+        }
+        let (guarded, cacheable, unjudged, strippedLines) = await measureSpan("assembly.profileMemory") {
+            await InjectionGuard.sanitizeUntrustedCacheable(raw, contextTag: "profile_memory", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
+        }
+        let safe = Self.notingStrippedMarkers(guarded, lines: strippedLines)
+        // Same rule as `guardedUserProfileText`: a transient guard error is shown this turn but
+        // never cached, so the next turn retries instead of serving a permanently-blocked profile.
+        if cacheable {
+            profileMemoryStamp[profileId] = stamp
+            cachedProfileMemoryText[profileId] = safe
+        }
+        noteUnjudged(unjudged, file: "profile memory")
+        return safe
     }
 
     /// #1209: what the model is told when the guard deleted a role marker from a file that is woven into
@@ -448,20 +492,24 @@ actor IrisEngine {
         return safeAgentsMd
     }
 
-    /// The per-turn system prompt: the cached base from `ensureSystemPrompt()` plus USER.md and the
-    /// bound workspace's `AGENTS.md`, both re-read only when they actually change (5a Task 7). The
-    /// composed result is itself cached per workspace so two unchanged turns hand back the identical
-    /// `Content` value — what keeps the provider's prompt cache hitting (5a §0.2).
+    /// The per-turn system prompt: the cached base from `ensureSystemPrompt()` plus USER.md, a
+    /// bound profile's own memory, and the bound workspace's `AGENTS.md`, each re-read only when it
+    /// actually changes (5a Task 7). The composed result is itself cached per workspace so two
+    /// unchanged turns hand back the identical `Content` value — what keeps the provider's prompt
+    /// cache hitting (5a §0.2).
     /// `agentProfile` (#465) is a layer after AGENTS.md. Keyed into the cache by name, so two
     /// conversations in one workspace with different profiles keep a cache entry each.
     /// `binding` (#974 Task 13, W1) is the TURN's binding (`bindingForCall`, not the engine's own):
     /// USER.md is owner context, included only for an owner binding or one whose `memoryRead` is at
     /// least `.full` -- the same tier `MemoryBindingGate.writerTiers` already requires to WRITE it
     /// (`update_user_profile`), so reading it costs no less than writing it.
+    /// `profileId` (#1263) is the conversation's own persisted `accessProfileId`, not derivable from
+    /// `binding` alone (`AccessBinding` carries no id) — the caller fetches it the same way it
+    /// already fetches `workspacePath`/`additionalRoots`.
     private func assembledSystemPrompt(workspacePath: String?, additionalRoots: [String] = [], agentProfile: AgentProfile? = nil,
-                                       binding: AccessBinding) async -> Content {
+                                       binding: AccessBinding, profileId: String?) async -> Content {
         var composed = await composedSystemPrompt(workspacePath: workspacePath, additionalRoots: additionalRoots, agentProfile: agentProfile,
-                                                   binding: binding)
+                                                   binding: binding, profileId: profileId)
         // After the cached composition, never inside it: the date must not freeze in a cache entry.
         // Not for a guest: the line carries the owner's IANA time zone (#1066). #974 Task 13 (W1
         // review, dev-2/the planner): a non-owner binding gets the date in UTC instead -- the
@@ -482,7 +530,7 @@ actor IrisEngine {
     func setWallClockForTesting(_ clock: @escaping @Sendable () -> Date) { wallClock = clock }
 
     private func composedSystemPrompt(workspacePath: String?, additionalRoots: [String] = [], agentProfile: AgentProfile? = nil,
-                                      binding: AccessBinding) async -> Content {
+                                      binding: AccessBinding, profileId: String?) async -> Content {
         // #1066: a guest gets its own text and nothing of the owner's. First, ahead of every read of
         // SOUL.md, USER.md, AGENTS.md, the skills catalogue and the profile below.
         if principal == .mcpGuest {
@@ -496,15 +544,26 @@ actor IrisEngine {
         let base = includesOwnerProfile ? await ensureSystemPrompt(skills: agentProfile?.skills) : await ensureNonOwnerSystemPrompt()
         guard let baseText = base.parts.first?.text else { return base }
         let profileText = includesOwnerProfile ? await guardedUserProfileText() : nil
+        // #1263: the read-back half of #1245's write-only loop. Symmetric with the write gate
+        // (`ProfileMemoryStore.minimumWriteTier`, `.task`) on the READ axis (Brian's ruling): a
+        // profile narrow enough to write its own notes but not read them back could never close
+        // the loop the feature exists for. Never for the owner (`binding.isOwner` already implies
+        // no persisted profile id applies) and never without a valid id to scope the read to.
+        let validProfileId = profileId.flatMap { AccessProfileStore.isValidProfileId($0) ? $0 : nil }
+        let includesProfileMemory = !binding.isOwner && binding.profile.memoryRead >= ProfileMemoryStore.minimumWriteTier && validProfileId != nil
+        let profileMemoryText = includesProfileMemory ? await guardedProfileMemoryText(profileId: validProfileId!) : nil
         let agentsText = await guardedAgentsMdText(workspacePath: workspacePath, additionalRoots: additionalRoots)
         let agentText = agentProfile.map { "# Agent Profile: \($0.name)\n" + $0.prompt }
-        // #974 Task 13: `includesOwnerProfile` is part of the key -- an owner's and a non-owner's
-        // composed prompt must never share a cache entry, even for the same workspace/agentProfile.
+        // #974 Task 13 / #1263 / #1287: `includesOwnerProfile` and the resolved profile id are both
+        // part of the key -- an owner's and a non-owner's composed prompt must never share a cache
+        // entry, and neither may two different bound profiles in the same workspace (#1287's
+        // latent collision: the owner/non-owner bucket alone does not distinguish them).
         let key = (workspacePath ?? Self.noWorkspaceCacheKey) + "\u{0}" + (agentProfile?.name ?? "")
-            + "\u{0}" + (includesOwnerProfile ? "owner" : "non-owner")
+            + "\u{0}" + (includesOwnerProfile ? "owner" : "non-owner") + "\u{0}" + (validProfileId ?? "")
 
         if let cached = composedPromptCache[key], cached.base == baseText,
-           cached.profile == profileText, cached.agents == agentsText, cached.agentProfile == agentText {
+           cached.profile == profileText, cached.profileMemory == profileMemoryText,
+           cached.agents == agentsText, cached.agentProfile == agentText {
             return cached.content
         }
 
@@ -512,13 +571,16 @@ actor IrisEngine {
         if let profileText {
             text += "\n\n# User Profile (USER.md)\n" + profileText
         }
+        if let profileMemoryText {
+            text += "\n\n# Profile Memory\n" + profileMemoryText
+        }
         if let agentsText {
             text += "\n\n# Project Workspace Rules (AGENTS.md)\n" + agentsText
         }
         if let agentText { text += "\n\n" + agentText }
         var composed = base
         composed.parts[0].text = text
-        composedPromptCache[key] = (baseText, profileText, agentsText, agentText, composed)
+        composedPromptCache[key] = (baseText, profileText, profileMemoryText, agentsText, agentText, composed)
         return composed
     }
 
@@ -3471,18 +3533,23 @@ actor IrisEngine {
         var history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
         let workspacePath = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.workspacePath }
         let additionalRoots = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.additionalRoots ?? [] }
+        // #1263: the conversation's own persisted profile id, if any -- `AccessBinding` carries no
+        // id, so this is fetched alongside workspacePath/additionalRoots rather than derived from
+        // `turnBinding` below.
+        let turnProfileId = await MainActor.run { localState?.persistedAccessProfileId(for: conversationId) }
         // #974 Task 13: this turn's resolved binding, not the engine's own -- a guest-steered
         // stamp or a profile-bound job run narrows what the assembled prompt and the cache key may
         // carry (below).
         let turnBinding = await bindingForCall(conversationId: conversationId)
 
-        // USER.md and AGENTS.md are re-read and re-guarded only when they actually change — by
-        // content (via modification date, following symlinks), by the protection setting, or by a
-        // guard tier's provisioning state (5a Task 7). An unchanged turn gets back the identical
-        // `Content` it got last time, keeping the system prompt byte-stable for the provider's
-        // prompt cache (5a §0.2). #962's additionalRoots feed in the same way workspacePath does.
+        // USER.md, a bound profile's own memory, and AGENTS.md are re-read and re-guarded only
+        // when they actually change — by content (via modification date, following symlinks), by
+        // the protection setting, or by a guard tier's provisioning state (5a Task 7). An unchanged
+        // turn gets back the identical `Content` it got last time, keeping the system prompt
+        // byte-stable for the provider's prompt cache (5a §0.2). #962's additionalRoots feed in
+        // the same way workspacePath does.
         let currentSystemPrompt = await assembledSystemPrompt(workspacePath: workspacePath, additionalRoots: additionalRoots, agentProfile: agentProfile,
-                                                               binding: turnBinding)
+                                                               binding: turnBinding, profileId: turnProfileId)
         for notice in pendingGuardNotices {
             await pushToUI(role: .system, text: notice, conversationId: conversationId)
         }
