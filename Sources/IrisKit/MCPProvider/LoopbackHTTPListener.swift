@@ -114,6 +114,7 @@ final class LoopbackHTTPListener: @unchecked Sendable {
         listener.newConnectionHandler = { [weak self] connection in
             self?.accept(connection)
         }
+        let cancelled = CancelFlag()
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 let resumer = StartResumer(continuation)
@@ -132,11 +133,16 @@ final class LoopbackHTTPListener: @unchecked Sendable {
                         break
                     }
                 }
+                if cancelled.isSet { resumer.resume(throwing: CancellationError()); return }
                 listener.start(queue: queue)
+                // A cancel that landed before `start` cancelled a listener that then never reports a state
+                // (a cancelled `NWListener` started afterwards is silent), so the check is repeated here.
+                if cancelled.isSet { resumer.resume(throwing: CancellationError()) }
             }
         } onCancel: {
-            // A cancelled start leaves no listener parked in `.waiting` (#1272): the `.cancelled` state
-            // below resumes the wait.
+            // A cancelled start leaves no listener parked in `.waiting` (#1272): once started, the
+            // `.cancelled` state resumes the wait; before it, the flag does.
+            cancelled.set()
             listener.cancel()
         }
     }
@@ -453,6 +459,14 @@ extension Duration {
         let (seconds, attoseconds) = components
         return Double(seconds) + Double(attoseconds) / 1e18
     }
+}
+
+/// Set by `start()`'s cancellation handler, read by the body: the two can run in either order.
+private final class CancelFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func set() { lock.withLock { value = true } }
+    var isSet: Bool { lock.withLock { value } }
 }
 
 /// `NWListener.stateUpdateHandler` can fire `.ready` and then later `.failed`/`.cancelled` on the
