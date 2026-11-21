@@ -176,6 +176,7 @@ struct AgentProfileStore: Sendable {
             // `vibecop:` with the text on indented lines below is not a YAML scalar we promise to read.
             return field.rawLines.dropFirst().allSatisfy { $0.trimmingCharacters(in: .whitespaces).isEmpty } ? "" : nil
         }
+        if [">", ">-", ">+"].contains(inline) { return nil }
         guard ["|", "|-", "|+"].contains(inline) else { return field.scalarValue ?? "" }
         let lines = Array(field.rawLines.dropFirst())
         let indent = lines.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
