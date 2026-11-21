@@ -59,7 +59,9 @@ struct ActivityRowLiveTrackingTests {
         let host = ViewHost(size: CGSize(width: 520, height: 30), region: Self.left) {
             ActivityRowView(state: a, sessionId: id, isMain: false, onTap: {})
         }
-        #expect(host.repaints { a.updateRunPhase(id, .executing(tool: "run_command", detail: "swift build")) })
+        let ink0 = host.inkPixels()
+        #expect(host.repaints { a.updateRunPhase(id, .executing(tool: "run_command", detail: "swift build")) },
+                "ink before \(ink0), after \(host.inkPixels())")
     }
 
     @Test("control: a change to a run the row is not showing does not repaint it")
