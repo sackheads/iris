@@ -13,38 +13,37 @@ import Foundation
 struct ScrubKnownSecretsTests {
     private struct Shape {
         let name: String
-        /// Puts a secret in the item and reads it the way the item's own owner does; returns the value.
-        let hold: (KeychainManager) throws -> String
+        /// Puts a secret in the item and returns the value.
+        let put: (KeychainManager) throws -> String
+        /// Reads it back the way the item's own owner does at launch or per call.
+        let read: (KeychainManager) throws -> Void
     }
 
     private static let shapes: [Shape] = [
-        Shape(name: "GitHub token") { keychain in
+        Shape(name: "GitHub token", put: { keychain in
             let token = "github_pat_11AAAAAAA0abcdefghijklmnop"
             keychain.updateSecrets(service: KeychainManager.githubService) { $0["token"] = token }
-            #expect(GitHubProxyClient.token(keychain: keychain) == token)
             return token
-        },
-        Shape(name: "MCP header secret") { keychain in
+        }, read: { keychain in _ = GitHubProxyClient.token(keychain: keychain) }),
+        Shape(name: "MCP header secret", put: { keychain in
             let value = "mcp-header-secret-7f3a9c21d4e8"
             keychain.updateSecrets(service: KeychainManager.mcpFileService) { $0["LINEAR_API_KEY"] = value }
+            return value
+        }, read: { keychain in
             // `MCPManager`'s default `fileSecrets` closure is exactly this read.
-            #expect(keychain.secrets(service: KeychainManager.mcpFileService)["LINEAR_API_KEY"] == value)
-            return value
-        },
-        Shape(name: "plugin secret") { keychain in
+            _ = keychain.secrets(service: KeychainManager.mcpFileService)
+        }),
+        Shape(name: "plugin secret", put: { keychain in
             let value = "plugin-bearer-3c91e07ab25f"
-            let service = KeychainManager.pluginService("acme")
-            keychain.updateSecrets(service: service) { $0["API_TOKEN"] = value }
-            #expect(keychain.secrets(service: service)["API_TOKEN"] == value)
+            keychain.updateSecrets(service: KeychainManager.pluginService("acme")) { $0["API_TOKEN"] = value }
             return value
-        },
-        Shape(name: "A2A signing seed") { keychain in
-            let key = try IrisSigningKeyStore(keychain: keychain).loadOrCreate()
-            return key.base64Seed
-        },
-        Shape(name: "MCP provider guest token") { keychain in
+        }, read: { keychain in _ = keychain.secrets(service: KeychainManager.pluginService("acme")) }),
+        Shape(name: "A2A signing seed", put: { keychain in
+            try IrisSigningKeyStore(keychain: keychain).loadOrCreate().base64Seed
+        }, read: { keychain in _ = try IrisSigningKeyStore(keychain: keychain).current() }),
+        Shape(name: "MCP provider guest token", put: { keychain in
             try ProviderTokenRegistry(keychain: keychain).issueToken(forClientId: "dev-1")
-        },
+        }, read: { keychain in _ = ProviderTokenRegistry(keychain: keychain) }),
     ]
 
     private func config(_ keychain: KeychainManager) -> (ConfigManager, () -> Void) {
@@ -116,8 +115,13 @@ struct ScrubKnownSecretsTests {
             let keychain = freshKeychain()
             let (cfg, teardown) = config(keychain)
             defer { teardown() }
-            let secret = try shape.hold(keychain)
+            let secret = try shape.put(keychain)
             #expect(secret.count >= SecretScrub.minLength, "\(shape.name): fixture is long enough to count")
+            #expect(cfg.knownSecretValues.contains(secret), "\(shape.name): a write holds it")
+            // A value already in the item at launch is held by the read alone.
+            keychain.forgetHeldSecretValuesForTesting()
+            #expect(!cfg.knownSecretValues.contains(secret), "\(shape.name): nothing held yet")
+            try shape.read(keychain)
             #expect(cfg.knownSecretValues.contains(secret), "\(shape.name): in the known set")
 
             let (dir, path) = try fileWith(secret)
