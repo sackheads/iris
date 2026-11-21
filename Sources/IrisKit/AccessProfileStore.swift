@@ -72,14 +72,33 @@ final class AccessProfileStore: Sendable {
         case unreadable
     }
 
+    /// `.absent` means exactly "no such profile file for a valid id". An id that is not a valid profile id
+    /// (empty, path-shaped, reserved) is `.unreadable`: it can only reach here from a mapping that names it,
+    /// an entry that exists and names no usable profile, which must not permit a fallback to a wider source.
     func lookupProfile(id: String) -> Lookup<AccessProfile> {
-        guard Self.isValidProfileId(id) else { return .absent }
+        guard Self.isValidProfileId(id) else { return .unreadable }
         let url = profilesDir.appendingPathComponent("\(id).json")
         guard FileManager.default.fileExists(atPath: url.path) else { return .absent }
         guard let data = try? Data(contentsOf: url), let profile = try? JSONDecoder().decode(AccessProfile.self, from: data) else {
             return .unreadable
         }
         return .found(profile)
+    }
+
+    /// What the store says about `identity`'s profile, in one answer the gate can act on (#974 Task 16): `.absent`
+    /// ONLY when the identity has no mapping at all (the one case a caller may fall back to another source);
+    /// a mapping whose profile file is missing (dangling), invalid or damaged is `.unreadable`, because the owner
+    /// did map this identity and a fallback would hand it the wider source instead.
+    func lookupMappedProfile(for identity: IdentityKey) -> Lookup<AccessProfile> {
+        switch lookupMapping(for: identity) {
+        case .absent: return .absent
+        case .unreadable: return .unreadable
+        case .found(let profileId):
+            switch lookupProfile(id: profileId) {
+            case .found(let profile): return .found(profile)
+            case .absent, .unreadable: return .unreadable
+            }
+        }
     }
 
     /// The profile id `identity` is mapped to. `.absent` only when there is no mappings file or no entry
