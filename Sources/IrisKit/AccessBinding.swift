@@ -24,7 +24,7 @@ public struct AccessBinding: Equatable, Sendable {
     /// is the H2 capability backstop, not the assigned profile alone — relying only on a minimal
     /// profile at the call site is exactly the "policy, not a capability floor" shape H2 rejects).
     /// `tools`/`credentials`/`transports` clamp by set intersection; `memoryRead`/`memoryWrite`
-    /// clamp to at most the floor's fixed tier. `fsRoots`/`skills` are not floor axes (Task 1) and
+    /// clamp to at most the floor's fixed tier. `fsRoots`/`skills`/`peerRoles` are not floor axes (Task 1, Task 16) and
     /// pass through unchanged.
     public func capped(by floor: PrincipalFloor) -> AccessBinding {
         AccessBinding(
@@ -35,7 +35,8 @@ public struct AccessBinding: Equatable, Sendable {
                 transports: Self.cappedSet(profile.transports, by: floor.transports),
                 fsRoots: profile.fsRoots,
                 skills: profile.skills,
-                tools: Self.cappedTools(profile.tools, by: floor.tools)
+                tools: Self.cappedTools(profile.tools, by: floor.tools),
+                peerRoles: profile.peerRoles
             ),
             principal: principal,
             isOwner: isOwner

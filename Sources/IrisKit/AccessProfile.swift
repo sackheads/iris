@@ -70,10 +70,15 @@ public struct AccessProfile: Codable, Equatable, Sendable {
     public var fsRoots: FSGrant
     public var skills: SkillGrant
     public var tools: ToolGrant
+    /// #974 Task 16: the session roles a guest bound to this profile may address (`role:<name>`), the
+    /// message-addressing reach `ProviderTokenRegistry` roles carry today. Normalised names
+    /// (`SessionRoles.normalizedName`). Not a `PrincipalFloor` axis: the guest floor fixes `transports` to
+    /// `[]`, so folding roles into it would zero every grant. Deny-all by default.
+    public var peerRoles: Set<String>
 
     public init(credentials: Set<AccountRef> = [], memoryRead: MemoryTier = .none, memoryWrite: MemoryTier = .none,
                transports: TransportGrant = [], fsRoots: FSGrant = [], skills: SkillGrant = [],
-               tools: ToolGrant = .set([])) {
+               tools: ToolGrant = .set([]), peerRoles: Set<String> = []) {
         self.credentials = credentials
         self.memoryRead = memoryRead
         self.memoryWrite = memoryWrite
@@ -81,10 +86,11 @@ public struct AccessProfile: Codable, Equatable, Sendable {
         self.fsRoots = fsRoots
         self.skills = skills
         self.tools = tools
+        self.peerRoles = peerRoles
     }
 
     private enum CodingKeys: String, CodingKey {
-        case credentials, memoryRead, memoryWrite, transports, fsRoots, skills, tools
+        case credentials, memoryRead, memoryWrite, transports, fsRoots, skills, tools, peerRoles
     }
 
     public init(from decoder: Decoder) throws {
@@ -96,6 +102,8 @@ public struct AccessProfile: Codable, Equatable, Sendable {
         fsRoots = try container.decodeIfPresent(FSGrant.self, forKey: .fsRoots) ?? []
         skills = try container.decodeIfPresent(SkillGrant.self, forKey: .skills) ?? []
         tools = try container.decodeIfPresent(ToolGrant.self, forKey: .tools) ?? .set([])
+        // A name that does not normalise is dropped: a narrower grant, never a wider one.
+        peerRoles = Set((try container.decodeIfPresent([String].self, forKey: .peerRoles) ?? []).compactMap(SessionRoles.normalizedName))
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -107,6 +115,7 @@ public struct AccessProfile: Codable, Equatable, Sendable {
         try container.encode(fsRoots, forKey: .fsRoots)
         try container.encode(skills, forKey: .skills)
         try container.encode(tools, forKey: .tools)
+        try container.encode(peerRoles.sorted(), forKey: .peerRoles)
     }
 
     /// Full access on every axis — what `main` runs as. Never decoded; `Binding.isOwner` is what
