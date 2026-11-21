@@ -731,9 +731,9 @@ its own — a real conversation, so its transcript can be read back afterwards, 
 `isBackground`, so it is out of the sidebar and can never be selected. The model turn happens
 there. A run in flight is tracked as `job:<name>` in the same place a subagent or evaluator run is,
 but under the strip's per-session scope (#986) it never surfaces in any focused conversation's
-strip — a job has no interactive parent to belong to there. It will become visible once #988's
-global "all running tasks" view ships; until then, `list_jobs` and `get_job_run` are how you check
-on a run in flight.
+strip — a job has no interactive parent to belong to there. It surfaces in the global "All Running
+Tasks" window instead (#988, see [features.md](features.md#activity-strip)); `list_jobs` and
+`get_job_run` also show a run in flight.
 
 ### Built-in jobs
 

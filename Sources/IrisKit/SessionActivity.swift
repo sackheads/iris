@@ -70,6 +70,32 @@ extension ActivitySummary {
     }
 }
 
+/// #988: one group of runs sharing an owner, for the global cross-session view. `id` is the
+/// owner's conversation id, or `nil` for the ownerless group (background job runs, which have no
+/// interactive parent).
+struct RunGroup: Identifiable, Equatable {
+    let id: UUID?
+    let title: String
+    let runs: [ActivitySummary]
+
+    /// Groups every non-main run by `owner` (#988): one group per owning session, sorted by
+    /// title, plus a trailing "Jobs" group for the ownerless background runs, omitted when empty.
+    /// `titleForOwner` returns nil for an owner whose conversation no longer resolves — that
+    /// group's title falls back to a placeholder rather than disappearing silently.
+    static func groupedByOwner(_ runs: [ActivitySummary], titleForOwner: (UUID) -> String?) -> [RunGroup] {
+        var byOwner: [UUID?: [ActivitySummary]] = [:]
+        for run in runs where run.kind != .main {
+            byOwner[run.owner, default: []].append(run)
+        }
+        let ownedGroups = byOwner.keys.compactMap { $0 }
+            .map { owner in (owner, titleForOwner(owner) ?? "Untitled session") }
+            .sorted { $0.1.localizedCompare($1.1) == .orderedAscending }
+            .map { owner, title in RunGroup(id: owner, title: title, runs: byOwner[owner] ?? []) }
+        guard let jobs = byOwner[nil], !jobs.isEmpty else { return ownedGroups }
+        return ownedGroups + [RunGroup(id: nil, title: "Jobs", runs: jobs)]
+    }
+}
+
 /// Pure mappings the activity strip renders from — no formatting logic lives in the SwiftUI layer,
 /// so it is all testable without standing up a view.
 enum SessionActivity {
