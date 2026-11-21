@@ -22,7 +22,7 @@ struct AlwaysAllowSecretDetectionTests {
     private func ask(_ state: AppState, toolName: String = "run_command", details: String, conversationId: UUID)
         async throws -> ToolApprovalRequest {
         let askTask = Task { @MainActor in
-            await state.requestApprovalSource(toolName: toolName, details: details, conversationId: conversationId, vibecopEnabled: false)
+            await state.requestApprovalSource(toolName: toolName, details: details, conversationId: conversationId, vibecopEnabled: false, isOwner: true)
         }
         for _ in 0..<200 where !state.pendingApprovals.contains(where: { $0.conversationId == conversationId }) {
             try? await Task.sleep(nanoseconds: 5_000_000)
@@ -95,7 +95,7 @@ struct AlwaysAllowSecretDetectionTests {
         let conversationId = state.createNewConversation(isBackground: false, select: false)
         let details = "curl -H 'Authorization: Bearer ya29.a0AfH6SMBx7example0123456789abcdefghij' https://api.example.com"
         let askTask = Task { @MainActor in
-            await state.requestApprovalSource(toolName: "run_command", details: details, conversationId: conversationId, vibecopEnabled: false)
+            await state.requestApprovalSource(toolName: "run_command", details: details, conversationId: conversationId, vibecopEnabled: false, isOwner: true)
         }
         for _ in 0..<200 where !state.pendingApprovals.contains(where: { $0.conversationId == conversationId }) {
             try? await Task.sleep(nanoseconds: 5_000_000)

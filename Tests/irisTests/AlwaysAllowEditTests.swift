@@ -119,7 +119,7 @@ struct AlwaysAllowEditResolveTests {
     private func resolve(_ state: AppState, _ details: String, _ resolution: AppState.ApprovalResolution,
                          choice: AppState.AlwaysAllowChoice, in conversationId: UUID) async throws -> ToolApprovalRequest {
         let askTask = Task { @MainActor in
-            await state.requestApprovalSource(toolName: "run_command", details: details, conversationId: conversationId, vibecopEnabled: false)
+            await state.requestApprovalSource(toolName: "run_command", details: details, conversationId: conversationId, vibecopEnabled: false, isOwner: true)
         }
         for _ in 0..<200 where !state.pendingApprovals.contains(where: { $0.conversationId == conversationId }) {
             try? await Task.sleep(nanoseconds: 5_000_000)
@@ -234,7 +234,7 @@ struct AlwaysAllowEditResolveTests {
         let ws = root.appendingPathComponent("ws"); try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: true)
         state.conversations[state.conversations.firstIndex { $0.id == cid }!].workspacePath = ws.path
         let askTask = Task { @MainActor in
-            await state.requestApprovalSource(toolName: "run_command", details: "swift test --filter Foo", workspace: ws.path, conversationId: cid, vibecopEnabled: false)
+            await state.requestApprovalSource(toolName: "run_command", details: "swift test --filter Foo", workspace: ws.path, conversationId: cid, vibecopEnabled: false, isOwner: true)
         }
         for _ in 0..<200 where state.pendingApprovals.isEmpty { try? await Task.sleep(nanoseconds: 5_000_000) }
         let pending = try #require(state.pendingApprovals.first)

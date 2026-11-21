@@ -207,7 +207,7 @@ struct CommandPatternTests {
 
         let ordinaryId = state.createNewConversation(isBackground: false, select: false)
         let ordinary = await state.requestApprovalSource(
-            toolName: toolName, details: details, conversationId: ordinaryId, vibecopEnabled: false)
+            toolName: toolName, details: details, conversationId: ordinaryId, vibecopEnabled: false, isOwner: true)
 
         let guestRoot = state.createNewConversation(isBackground: false, select: false)
         state.markGuestOriginTurn(guestRoot)
@@ -219,7 +219,7 @@ struct CommandPatternTests {
             #expect(!state.isGuestOriginTurn(guestId))
         }
         let askTask = Task { @MainActor in
-            await state.requestApprovalSource(toolName: toolName, details: details, conversationId: guestId, vibecopEnabled: false)
+            await state.requestApprovalSource(toolName: toolName, details: details, conversationId: guestId, vibecopEnabled: false, isOwner: true)
         }
         for _ in 0..<200 where !state.pendingApprovals.contains(where: { $0.conversationId == guestId }) {
             try? await Task.sleep(nanoseconds: 5_000_000)

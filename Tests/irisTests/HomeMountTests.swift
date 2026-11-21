@@ -175,7 +175,7 @@ struct HomeMountTests {
             let task = Task { @MainActor in
                 await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": Approver()]) {
                     await state.requestApprovalSource(toolName: "run_command", details: command, workspace: realHome,
-                                                      conversationId: cid, inSandbox: true, vibecopEnabled: true)
+                                                      conversationId: cid, inSandbox: true, vibecopEnabled: true, isOwner: true)
                 }
             }
             for _ in 0..<400 {

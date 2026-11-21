@@ -54,7 +54,7 @@ struct GuestOriginAutoApproveTests {
         let task = Task { @MainActor in
             let source = await AuxiliaryModelManager.$scopedEngines.withValue(vibecop.map { ["vibecop": Engine($0)] } ?? [:]) {
                 await state.requestApprovalSource(toolName: tool, details: details, conversationId: conversation,
-                                                  inSandbox: inSandbox, vibecopEnabled: vibecop != nil)
+                                                  inSandbox: inSandbox, vibecopEnabled: vibecop != nil, isOwner: true)
             }
             done.value = true
             return source
