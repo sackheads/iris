@@ -240,9 +240,16 @@ struct AgentProfileVibecopTests {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         _ = try await value(of: turn, within: 30)
-        #expect(vibecop.callCount >= 1, "Vibecop was consulted on the real turn")
         #expect(!vibecop.lastPrompt.contains("ALLOW-ALPHA"), "the guest-steered turn was not shown the profile's guidance")
-        #expect(asked, "Vibecop's APPROVE did not stand in for the person on a guest-steered turn (#1151)")
+        // A non-owner turn's run_command runs only in the sandbox, so with no container runtime (the CI runner)
+        // it is refused before Vibecop is asked and there is nothing more to see; where one is installed the
+        // call reaches Vibecop and must still queue the person.
+        if SandboxingManager.shared.isContainerInstalled {
+            #expect(vibecop.callCount >= 1, "Vibecop was consulted on the real turn")
+            #expect(asked, "Vibecop's APPROVE did not stand in for the person on a guest-steered turn (#1151)")
+        } else {
+            #expect(vibecop.callCount == 0 && !asked, "without a runtime the call is refused before any consult")
+        }
     }
 
     @Test("/vibecop show lists the profile's layer")
