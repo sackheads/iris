@@ -8947,11 +8947,15 @@ extension IrisEngine {
     }
 
     /// The peer guard every artifact read goes through (§7.3): structural isolation, then tiers
-    /// 2 and 3 under the `peer_artifact` tag.
+    /// 2 and 3 under the `peer_artifact` tag. #1267: `read_artifact`'s result is a write-back
+    /// channel exactly like USER.md/AGENTS.md (the model can retype what it read), so a role
+    /// marker the guard deletes gets the same #1209 notice, not cached — an artifact read is
+    /// already a one-shot, content-addressed lookup, nothing like USER.md's per-turn re-guard.
     static func guardArtifactText(_ text: String, protectionEnabled: Bool?) async -> String {
         // #735's one entry point: the strip records the lines a role delimiter came from, and tier
         // 2 scores each alone, which a strip before `sanitize` would have hidden.
-        await InjectionGuard.sanitizeUntrusted(text, contextTag: "peer_artifact", maxTier: .tier3_canary,
-                                               protectionEnabled: protectionEnabled)
+        let (guarded, _, _, strippedLines) = await InjectionGuard.sanitizeUntrustedCacheable(
+            text, contextTag: "peer_artifact", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
+        return Self.notingStrippedMarkers(guarded, lines: strippedLines)
     }
 }
