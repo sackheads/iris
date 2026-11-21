@@ -19,7 +19,7 @@ struct ContinuationBoundsTests {
     }
 
     /// Whether something still accepts a TCP connection on this loopback port.
-    private func accepts(port: UInt16) -> Bool {
+    private nonisolated func accepts(port: UInt16) -> Bool {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         defer { close(fd) }
         var addr = sockaddr_in()
@@ -32,7 +32,7 @@ struct ContinuationBoundsTests {
         return rc == 0
     }
 
-    private func waitFor(_ seconds: Double = 10, _ condition: () -> Bool) async -> Bool {
+    private func waitFor(_ seconds: Double = 10, _ condition: @Sendable () -> Bool) async -> Bool {
         let deadline = TestClock.deadline(seconds)
         while !condition() {
             if TestClock.seconds(since: deadline) > 0 { return false }
