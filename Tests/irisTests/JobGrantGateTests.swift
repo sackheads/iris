@@ -198,12 +198,12 @@ struct JobGrantApprovalTests {
         let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
         let (app, cid) = background(t, grant: t.grant)
         #expect(await app.requestApproval(toolName: "run_command", details: "git status", args: ["command": .string("git status")],
-                                          workspace: c(t.proj), conversationId: cid, inSandbox: true))
+                                          workspace: c(t.proj), conversationId: cid, inSandbox: true, isOwner: true))
         #expect(app.takeBackgroundDenials(for: cid).isEmpty)
         // The same call arriving with the dispatcher's answer "not sandboxed" (R20 would have refused
         // it first; this is the second lock) falls to the allowlist and is recorded.
         #expect(!(await app.requestApproval(toolName: "run_command", details: "git status", args: ["command": .string("git status")],
-                                            workspace: c(t.proj), conversationId: cid, inSandbox: false)))
+                                            workspace: c(t.proj), conversationId: cid, inSandbox: false, isOwner: true)))
         let denial = try #require(app.takeBackgroundDenials(for: cid).first)
         #expect(denial.toolName == "run_command")
         #expect(denial.grantNearest == nil, "a command is not placed against the grant's directories; 'nearest' is the file tools' word")
@@ -218,7 +218,7 @@ struct JobGrantApprovalTests {
         let decided = t.grant.allowedMount(toolName: "write_file", details: "out.md", cwd: c(t.proj))
         let ok = await app.requestApproval(toolName: "write_file", details: "out.md",
                                            args: ["path": .string("out.md")], workspace: c(t.proj), conversationId: cid,
-                                           grantedMount: decided)
+                                           grantedMount: decided, isOwner: true)
         #expect(ok)
         #expect(app.pendingApprovals.isEmpty && app.takeBackgroundDenials(for: cid).isEmpty)
         #expect(app.conversations.first { $0.id == cid }?.messages.isEmpty == true)
@@ -237,7 +237,7 @@ struct JobGrantApprovalTests {
         #expect(decided != nil, "the grant says yes; the refusal has to be R10's")
         let ok = await app.requestApproval(toolName: "write_file", details: target,
                                            args: ["path": .string(target)], workspace: c(t.proj), conversationId: cid,
-                                           grantedMount: decided)
+                                           grantedMount: decided, isOwner: true)
         #expect(!ok)
         let denial = try #require(app.takeBackgroundDenials(for: cid).first)
         #expect(denial.reason == .approval && denial.grantNearest == nil, "a protected write is refused as R10, not as 'outside the grant'")
@@ -251,7 +251,7 @@ struct JobGrantApprovalTests {
         let (app, cid) = background(t, grant: t.grant)
         let escape = link.path + "/../.iris/config/permissions.json"
         #expect(!(await app.requestApproval(toolName: "write_file", details: escape, args: ["path": .string(escape)],
-                                            workspace: c(t.proj), conversationId: cid)))
+                                            workspace: c(t.proj), conversationId: cid, isOwner: true)))
         let denial = try #require(app.takeBackgroundDenials(for: cid).first)
         #expect(denial.grantNearest == nil, "refused by R10, before the grant is read")
         #expect(app.conversations.first { $0.id == cid }?.messages.last?.content
@@ -263,7 +263,7 @@ struct JobGrantApprovalTests {
         let readDecision = t.grant.allowedMount(toolName: "read_file", details: read, cwd: c(t.proj))
         #expect(readDecision == nil, "the real path is ~/.iris/config, under no mount")
         #expect(!(await app.requestApproval(toolName: "read_file", details: read, args: ["path": .string(read)],
-                                            workspace: c(t.proj), conversationId: cid, grantedMount: readDecision)))
+                                            workspace: c(t.proj), conversationId: cid, grantedMount: readDecision, isOwner: true)))
         #expect(app.takeBackgroundDenials(for: cid).first?.grantNearest == c(t.proj))
     }
 
@@ -283,18 +283,18 @@ struct JobGrantApprovalTests {
         // H1's invariant: a granted run's write reaches Foundation on no branch, so the allowlist
         // cannot widen the two file tools — the decision (nil here) is the whole answer.
         #expect(!(await app.requestApproval(toolName: "write_file", details: outside, args: ["path": .string(outside)],
-                                            workspace: c(t.proj), conversationId: cid, grantedMount: nil)))
+                                            workspace: c(t.proj), conversationId: cid, grantedMount: nil, isOwner: true)))
         #expect(app.takeBackgroundDenials(for: cid).first?.grantNearest == c(t.proj))
         // Every other tool keeps the allowlist step (here a command the sandbox answer refused).
         #expect(await app.requestApproval(toolName: "run_command", details: "make lint", workspace: c(t.proj),
-                                          conversationId: cid, inSandbox: false))
+                                          conversationId: cid, inSandbox: false, isOwner: true))
         // And an ungranted background run's allowlisted write is exactly as today.
         let (plainApp, plainCid) = background(t, grant: nil)
-        #expect(await plainApp.requestApproval(toolName: "write_file", details: outside, workspace: c(t.proj), conversationId: plainCid))
+        #expect(await plainApp.requestApproval(toolName: "write_file", details: outside, workspace: c(t.proj), conversationId: plainCid, isOwner: true))
 
         let other = c(t.base, "other.md")
         #expect(!(await app.requestApproval(toolName: "write_file", details: other, args: ["path": .string(other)],
-                                            workspace: c(t.proj), conversationId: cid)))
+                                            workspace: c(t.proj), conversationId: cid, isOwner: true)))
         let denial = try #require(app.takeBackgroundDenials(for: cid).first)
         #expect(denial.grantNearest == c(t.proj))
         let notice = String(format: AppState.outsideGrantDenialNotice, "write_file", c(t.proj))
@@ -306,7 +306,7 @@ struct JobGrantApprovalTests {
         let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
         let (app, cid) = background(t, grant: nil)
         let target = c(t.proj, "x.md")
-        #expect(!(await app.requestApproval(toolName: "write_file", details: target, workspace: c(t.proj), conversationId: cid)))
+        #expect(!(await app.requestApproval(toolName: "write_file", details: target, workspace: c(t.proj), conversationId: cid, isOwner: true)))
         #expect(app.takeBackgroundDenials(for: cid).first?.grantNearest == nil)
         #expect(app.conversations.first { $0.id == cid }?.messages.last?.content
                 == String(format: AppState.unattendedDenialNotice, "write_file"))
@@ -387,7 +387,7 @@ struct JobGrantApprovalTests {
         #expect(t.grant.allowedMount(toolName: "write_file", details: target, cwd: c(t.proj)) != nil, "a gate that recomputed would now say yes")
         let (app, cid) = background(t, grant: t.grant)
         let ok = await app.requestApproval(toolName: "write_file", details: target, args: ["path": .string(target)],
-                                           workspace: c(t.proj), conversationId: cid, grantedMount: decided)
+                                           workspace: c(t.proj), conversationId: cid, grantedMount: decided, isOwner: true)
         #expect(!ok, "the gate consumes the decision it was handed")
         #expect(app.takeBackgroundDenials(for: cid).first?.grantNearest == c(t.proj))
         // t4 — and had it somehow reached the executor with that nil decision, while `sub` is a link again:

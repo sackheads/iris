@@ -231,7 +231,7 @@ struct GuestToolsetTests {
         // Auto-approve is on, so a request that reached the ladder would be granted: only the guest
         // refusal at its head can make this answer no.
         app.autoApproveTools = true
-        let granted = await app.requestApproval(toolName: "run_command", details: "ls", conversationId: id, origin: "MCP guest")
+        let granted = await app.requestApproval(toolName: "run_command", details: "ls", conversationId: id, origin: "MCP guest", isOwner: false)
         #expect(!granted)
         #expect(app.pendingApprovals.isEmpty, "no dialog was raised")
         #expect(app.conversations.first { $0.id == id }?.messages.isEmpty == true)

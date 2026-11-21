@@ -35,12 +35,12 @@ struct PermissionCarveOutTests {
 
         for target in [paths.permissionsJSON, paths.pluginsJSON, paths.settingsJSON,
                        paths.configDir.appendingPathComponent("hooks.json")] {
-            #expect(permissions.isAllowed(toolName: "write_file", details: target.path, workspace: nil) == false,
+            #expect(permissions.isAllowed(toolName: "write_file", details: target.path, workspace: nil, isOwner: true) == false,
                     "the carve-out must not grant a write to \(target.lastPathComponent)")
         }
         // A tilde-free traversal back into config/ is the same write.
         let traversal = paths.memoryDir.appendingPathComponent("../config/permissions.json").path
-        #expect(permissions.isAllowed(toolName: "write_file", details: traversal, workspace: nil) == false)
+        #expect(permissions.isAllowed(toolName: "write_file", details: traversal, workspace: nil, isOwner: true) == false)
     }
 
     @Test("a plugins/ write is protected the same way config/ is")
@@ -53,13 +53,13 @@ struct PermissionCarveOutTests {
         // defaults to enabled — dropping one in is as good as being handed `run_command`.
         for target in [paths.pluginsDir.appendingPathComponent("evil/plugin.json"),
                        paths.pluginsDir.appendingPathComponent("evil/mcp.json")] {
-            #expect(permissions.isAllowed(toolName: "write_file", details: target.path, workspace: nil) == false)
+            #expect(permissions.isAllowed(toolName: "write_file", details: target.path, workspace: nil, isOwner: true) == false)
         }
-        #expect(permissions.isAllowed(toolName: "read_file", details: paths.pluginsJSON.path, workspace: nil),
+        #expect(permissions.isAllowed(toolName: "read_file", details: paths.pluginsJSON.path, workspace: nil, isOwner: true),
                 "reading a plugin manifest is not the danger")
         #expect(permissions.isAllowed(toolName: "write_file",
                                       details: paths.rulesDir.appendingPathComponent("r.md").path,
-                                      workspace: nil),
+                                      workspace: nil, isOwner: true),
                 "rules/ is prompt persistence, not a grant surface — deliberately unprotected")
     }
 
@@ -71,15 +71,15 @@ struct PermissionCarveOutTests {
 
         // APFS is case-insensitive by default, so this is the same file as config/permissions.json.
         let shouted = paths.root.appendingPathComponent("CONFIG/permissions.json").path
-        #expect(permissions.isAllowed(toolName: "write_file", details: shouted, workspace: nil) == false)
+        #expect(permissions.isAllowed(toolName: "write_file", details: shouted, workspace: nil, isOwner: true) == false)
 
         // memory/ IS writable, so a symlink planted there is a legal path to an illegal target.
         let link = paths.memoryDir.appendingPathComponent("cfg")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: paths.configDir)
         let throughLink = link.appendingPathComponent("permissions.json").path
-        #expect(permissions.isAllowed(toolName: "write_file", details: throughLink, workspace: nil) == false)
+        #expect(permissions.isAllowed(toolName: "write_file", details: throughLink, workspace: nil, isOwner: true) == false)
         // The same symlink is not an excuse to deny an ordinary memory write.
-        #expect(permissions.isAllowed(toolName: "write_file", details: paths.memoryMd.path, workspace: nil))
+        #expect(permissions.isAllowed(toolName: "write_file", details: paths.memoryMd.path, workspace: nil, isOwner: true))
     }
 
     @Test("reading config/ is still auto-allowed, and so is writing elsewhere under ~/.iris")
@@ -88,8 +88,8 @@ struct PermissionCarveOutTests {
         defer { try? FileManager.default.removeItem(at: paths.root) }
         let permissions = PermissionManager(paths: paths)
 
-        #expect(permissions.isAllowed(toolName: "read_file", details: paths.permissionsJSON.path, workspace: nil))
-        #expect(permissions.isAllowed(toolName: "write_file", details: paths.memoryMd.path, workspace: nil))
+        #expect(permissions.isAllowed(toolName: "read_file", details: paths.permissionsJSON.path, workspace: nil, isOwner: true))
+        #expect(permissions.isAllowed(toolName: "write_file", details: paths.memoryMd.path, workspace: nil, isOwner: true))
     }
 
     @Test("a background run gets no write carve-out at all, but still reads its own memory")
@@ -99,9 +99,9 @@ struct PermissionCarveOutTests {
         let permissions = PermissionManager(paths: paths)
 
         #expect(permissions.isAllowed(toolName: "write_file", details: paths.memoryMd.path,
-                                      workspace: nil, isBackground: true) == false)
+                                      workspace: nil, isBackground: true, isOwner: true) == false)
         #expect(permissions.isAllowed(toolName: "read_file", details: paths.memoryMd.path,
-                                      workspace: nil, isBackground: true))
+                                      workspace: nil, isBackground: true, isOwner: true))
     }
 
     @Test("an explicit rule can allow a background write, but never one into config/")
@@ -114,13 +114,13 @@ struct PermissionCarveOutTests {
         let permissions = PermissionManager(paths: paths)
 
         #expect(permissions.isAllowed(toolName: "write_file", details: paths.memoryMd.path,
-                                      workspace: nil, isBackground: true),
+                                      workspace: nil, isBackground: true, isOwner: true),
                 "an explicit rule is a decision a person made; it still holds unattended")
         #expect(permissions.isAllowed(toolName: "write_file", details: paths.permissionsJSON.path,
-                                      workspace: nil, isBackground: true) == false,
+                                      workspace: nil, isBackground: true, isOwner: true) == false,
                 "no rule may hand an unattended run the file that grants permissions")
         #expect(permissions.isAllowed(toolName: "write_file", details: paths.permissionsJSON.path,
-                                      workspace: nil),
+                                      workspace: nil, isOwner: true),
                 "a foreground write the user explicitly allowed is unchanged")
     }
 
@@ -133,7 +133,7 @@ struct PermissionCarveOutTests {
         let cid = app.createNewConversation(isBackground: true, select: false)
 
         let approved = await app.requestApproval(toolName: "write_file", details: paths.permissionsJSON.path,
-                                                 workspace: nil, conversationId: cid)
+                                                 workspace: nil, conversationId: cid, isOwner: true)
         #expect(approved == false)
         #expect(app.pendingApprovals.isEmpty)
         let denials = app.takeBackgroundDenials(for: cid)
@@ -153,7 +153,7 @@ struct PermissionCarveOutTests {
 
         let approved = await app.requestApproval(toolName: "read_file",
                                                  details: paths.memoryDir.appendingPathComponent("USER.md").path,
-                                                 workspace: nil, conversationId: cid)
+                                                 workspace: nil, conversationId: cid, isOwner: true)
         #expect(approved)
         #expect(app.takeBackgroundDenials(for: cid).isEmpty)
         #expect(app.conversations.first(where: { $0.id == cid })?.messages.isEmpty == true)
@@ -172,7 +172,7 @@ struct PermissionCarveOutTests {
         let installed = PermissionManager(paths: paths, identity: .release, release: release)
         for target in [release.permissionsJSON, release.pluginsDir.appendingPathComponent("p/plugin.json")] {
             #expect(dev.isProtectedWrite(toolName: "write_file", path: target.path))
-            #expect(dev.isAllowed(toolName: "write_file", details: target.path, workspace: nil) == false)
+            #expect(dev.isAllowed(toolName: "write_file", details: target.path, workspace: nil, isOwner: true) == false)
             #expect(!installed.isProtectedWrite(toolName: "write_file", path: target.path))
         }
         // Outside the protected dirs a release-home write is still an ordinary (approvable) one.

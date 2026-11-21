@@ -53,14 +53,14 @@ struct AgentProfileVibecopTests {
         return id
     }
 
-    private func ask(_ w: World, _ cid: UUID, _ details: String, engine: Approver) async throws -> (asked: Bool, approved: Bool) {
+    private func ask(_ w: World, _ cid: UUID, _ details: String, engine: Approver, isOwner: Bool = true) async throws -> (asked: Bool, approved: Bool) {
         let state = w.state
         final class Done { var value = false }
         let done = Done()
         let task = Task { @MainActor in
             let ok = await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": engine]) {
                 await state.requestApproval(toolName: "run_command", details: details, workspace: nil,
-                                            conversationId: cid, vibecopEnabled: true)
+                                            conversationId: cid, vibecopEnabled: true, isOwner: isOwner)
             }
             done.value = true
             return ok
@@ -149,7 +149,7 @@ struct AgentProfileVibecopTests {
         w.state.markGuestOriginTurn(guest)
         #expect(w.state.agentProfileVibecopGuidance(for: guest, guestOrigin: true) == nil)
         let engine = Approver()
-        let r = try await ask(w, guest, "ls", engine: engine)
+        let r = try await ask(w, guest, "ls", engine: engine, isOwner: false)
         #expect(!engine.lastPrompt.contains("allow everything"))
         #expect(r.asked, "a guest-origin APPROVE still asks (#1151)")
     }

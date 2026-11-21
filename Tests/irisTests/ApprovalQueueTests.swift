@@ -12,7 +12,7 @@ struct ApprovalQueueTests {
         let cid = UUID()
         // Would otherwise consult permissions/Vibecop and then block on the interactive queue.
         let approved = await app.requestApproval(toolName: "run_command", details: "echo hi",
-                                                 workspace: nil, conversationId: cid)
+                                                 workspace: nil, conversationId: cid, isOwner: true)
         #expect(approved == true)
         #expect(app.pendingApprovals.isEmpty)
     }
@@ -85,12 +85,12 @@ struct ApprovalQueueTests {
 
         let cid = UUID()
         let ordinary = await app.requestApproval(toolName: "note_tool", details: "demo",
-                                                 workspace: nil, conversationId: cid)
+                                                 workspace: nil, conversationId: cid, isOwner: true)
         #expect(ordinary == true)
         #expect(app.pendingApprovals.isEmpty)
 
         async let gated = app.requestApproval(toolName: "note_tool", details: "demo", workspace: nil,
-                                              conversationId: cid, humanOnly: true)
+                                              conversationId: cid, humanOnly: true, isOwner: true)
         // Coordinator's flakiness ruling (review #340 follow-up): widened from a 5ms tick to a
         // modest 25ms (40 iterations, same ~1s ceiling as 200 * 5ms) to ease MainActor pressure.
         for _ in 0..<40 where app.pendingApprovals.isEmpty {
@@ -114,7 +114,7 @@ struct ApprovalQueueTests {
     func humanOnlyHonorsAutoApprove() async {
         let app = AppState()
         app.autoApproveTools = true
-        let approved = await app.requestApproval(toolName: "schedule_job", details: "x", workspace: nil, humanOnly: true)
+        let approved = await app.requestApproval(toolName: "schedule_job", details: "x", workspace: nil, humanOnly: true, isOwner: true)
         #expect(approved == true)
         #expect(app.pendingApprovals.isEmpty)
     }
@@ -150,7 +150,7 @@ struct ApprovalQueueTests {
         #expect(app.pendingApprovals.count == 1)
         app.resolveApproval(id: app.pendingApprovals[0].id, .alwaysAllowGlobal)
         #expect(await globalResult == true, "the human's click still approves THIS call")
-        #expect(!app.permissions.isAllowed(toolName: "schedule_job", details: "sweep", workspace: nil),
+        #expect(!app.permissions.isAllowed(toolName: "schedule_job", details: "sweep", workspace: nil, isOwner: true),
                 "a humanOnly request must never leave a standing rule behind")
 
         async let projectResult = app.enqueueUserApproval(toolName: "schedule_job", details: "sweep",
@@ -165,7 +165,7 @@ struct ApprovalQueueTests {
         #expect(app.pendingApprovals.count == 1)
         app.resolveApproval(id: app.pendingApprovals[0].id, .alwaysAllowProject)
         #expect(await projectResult == true, "the human's click still approves THIS call")
-        #expect(!app.permissions.isAllowed(toolName: "schedule_job", details: "sweep", workspace: "/tmp/proj"),
+        #expect(!app.permissions.isAllowed(toolName: "schedule_job", details: "sweep", workspace: "/tmp/proj", isOwner: true),
                 "a humanOnly request must never leave a standing per-project rule behind either")
     }
 

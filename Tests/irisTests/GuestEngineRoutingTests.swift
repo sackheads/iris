@@ -212,7 +212,7 @@ struct GuestEngineRoutingTests {
         f.app.setYoloMode(true, for: f.guestId)
         #expect(!f.app.isYoloMode(f.guestId))
         // And an approval asked for from the guest's conversation is refused, not waved through.
-        let granted = await f.app.requestApproval(toolName: "run_command", details: "ls", conversationId: f.guestId, origin: "MCP guest")
+        let granted = await f.app.requestApproval(toolName: "run_command", details: "ls", conversationId: f.guestId, origin: "MCP guest", isOwner: false)
         #expect(!granted)
         // The routed turn runs on the guest engine, which has none of the host's approval state.
         _ = await f.main.deliverPeerMessage("an answer", from: f.roleId, senderName: "role", to: f.guestId, envelope: envelope("ffff0001"))

@@ -70,7 +70,7 @@ struct GraderWorkspaceReadTests {
                                                conversationId: cid, callerRole: role, vibecopEnabled: false,
                                                // the dispatcher's walk decision, on the spelling (#256)
                                                graderReadWalked: state.conversations.first { $0.id == cid }?.goalContract?
-                                                   .approvedReadComponents(of: ToolExecutor.resolvePath(details, cwd: f.proj.path)) != nil)
+                                                   .approvedReadComponents(of: ToolExecutor.resolvePath(details, cwd: f.proj.path)) != nil, isOwner: true)
         }
         var queued = false
         for _ in 0..<400 {

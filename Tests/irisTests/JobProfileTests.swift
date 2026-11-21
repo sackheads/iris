@@ -207,7 +207,7 @@ struct JobProfileTests {
 
         let approved = await app.requestApproval(toolName: "run_command", details: "rm -rf x",
                                                  args: ["command": .string("rm -rf x")],
-                                                 workspace: "/tmp/ws", conversationId: cid)
+                                                 workspace: "/tmp/ws", conversationId: cid, isOwner: true)
         #expect(approved == false)
         let denials = app.takeBackgroundDenials(for: cid)
         #expect(denials.count == 1)

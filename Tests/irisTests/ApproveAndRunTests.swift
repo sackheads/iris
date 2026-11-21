@@ -906,7 +906,7 @@ struct ApproveAndRunTests {
 
         let command = "true --never-run-\(UUID().uuidString)"
         #expect(await state.requestApproval(toolName: "run_command", details: command,
-                                            conversationId: conversationId) == false)
+                                            conversationId: conversationId, isOwner: true) == false)
         #expect(state.firstBackgroundDenial(for: conversationId)?.toolName == "run_command")
     }
 

@@ -111,8 +111,8 @@ struct ApprovalResolvedPathTests {
 
         let (_, state, _) = try await attendedTurn(f, call: write("out.txt"), answer: .alwaysAllowGlobal)
 
-        #expect(state.permissions.isAllowed(toolName: "write_file", details: f.real(target), workspace: nil))
-        #expect(!state.permissions.isAllowed(toolName: "write_file", details: "out.txt", workspace: nil),
+        #expect(state.permissions.isAllowed(toolName: "write_file", details: f.real(target), workspace: nil, isOwner: true))
+        #expect(!state.permissions.isAllowed(toolName: "write_file", details: "out.txt", workspace: nil, isOwner: true),
                 "no rule for the bare relative spelling, which names no file")
     }
 
@@ -345,14 +345,14 @@ struct ApprovalResolvedPathTests {
         let permissions = PermissionManager(paths: paths)
         let shouted = IrisEngine.decidedPath(f.home.path + "/CONFIG/permissions.json", cwd: nil, walked: false)
         #expect(permissions.isProtectedWrite(toolName: "write_file", path: shouted))
-        #expect(!permissions.isAllowed(toolName: "write_file", details: shouted, workspace: nil, isBackground: true))
+        #expect(!permissions.isAllowed(toolName: "write_file", details: shouted, workspace: nil, isBackground: true, isOwner: true))
 
         let caseSensitive = try f.root.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
             .volumeSupportsCaseSensitiveNames
         let insensitive = try #require(caseSensitive as Bool?).isFalse
         permissions.allowGlobally(toolName: "write_file", details: f.workspace.path + "/NOTES.md")
         let lower = IrisEngine.decidedPath("notes.md", cwd: f.workspace.path, walked: false)
-        #expect(permissions.isAllowed(toolName: "write_file", details: lower, workspace: nil) == insensitive,
+        #expect(permissions.isAllowed(toolName: "write_file", details: lower, workspace: nil, isOwner: true) == insensitive,
                 "one file on a case-insensitive volume, two on a case-sensitive one")
         // The existing part is already the on-disk case: `WS` is `ws`.
         #expect(IrisEngine.decidedPath(f.root.path + "/WS/a", cwd: nil, walked: false)
@@ -369,7 +369,7 @@ struct ApprovalResolvedPathTests {
         #expect(tilde.hasPrefix("/"))
         let permissions = PermissionManager(paths: IrisPaths(root: f.home))
         permissions.allowGlobally(toolName: "read_file", details: "~/" + name)
-        #expect(permissions.isAllowed(toolName: "read_file", details: absolute, workspace: nil))
+        #expect(permissions.isAllowed(toolName: "read_file", details: absolute, workspace: nil, isOwner: true))
     }
 
     @Test("a grader read that reaches its workspace only once resolved still asks: the walk decision is the spelling's")
@@ -395,7 +395,7 @@ struct ApprovalResolvedPathTests {
                 return await state.requestApproval(toolName: "read_file", details: f.real(notes),
                                                    workspace: f.real(f.workspace), conversationId: cid,
                                                    callerRole: .evaluator, vibecopEnabled: false,
-                                                   graderReadWalked: walked)
+                                                   graderReadWalked: walked, isOwner: true)
             }
             var queued = false
             for _ in 0..<400 where !finished.value {
@@ -448,18 +448,18 @@ struct ApprovalResolvedPathTests {
         let resolved = f.real(file)
 
         permissions.allowGlobally(toolName: "read_file", details: file.path)   // through /var
-        #expect(permissions.isAllowed(toolName: "read_file", details: resolved, workspace: nil))
-        #expect(!permissions.isAllowed(toolName: "write_file", details: resolved, workspace: nil),
+        #expect(permissions.isAllowed(toolName: "read_file", details: resolved, workspace: nil, isOwner: true))
+        #expect(!permissions.isAllowed(toolName: "write_file", details: resolved, workspace: nil, isOwner: true),
                 "a rule is still per tool")
 
         permissions.allowInProject(toolName: "write_file", details: "notes.md", workspace: f.workspace.path)
-        #expect(permissions.isAllowed(toolName: "write_file", details: resolved, workspace: f.workspace.path),
+        #expect(permissions.isAllowed(toolName: "write_file", details: resolved, workspace: f.workspace.path, isOwner: true),
                 "a project rule is relative to its own workspace")
 
         permissions.allowGlobally(toolName: "write_file", details: "other.md")
         #expect(!permissions.isAllowed(toolName: "write_file",
                                        details: f.real(f.workspace.appendingPathComponent("other.md")),
-                                       workspace: nil),
+                                       workspace: nil, isOwner: true),
                 "a relative global rule names no directory")
     }
 

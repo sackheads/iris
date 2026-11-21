@@ -46,9 +46,11 @@ enum PluginAuthRunner {
     }
 
     /// Whether `command` already has a global "Always allow" rule for `run_command` — the same
-    /// rule `statusOnOpen` consults to decide whether to run unasked.
+    /// rule `statusOnOpen` consults to decide whether to run unasked. `isOwner: true` is correct,
+    /// not defaulted: this runs only from the Settings pane's plugin UI, which is the owner's own
+    /// configuration surface with no non-owner path to it at all (#1270).
     static func isAlwaysAllowed(_ command: String, permissions: PermissionManager) -> Bool {
-        permissions.isAllowed(toolName: "run_command", details: command, workspace: nil)
+        permissions.isAllowed(toolName: "run_command", details: command, workspace: nil, isOwner: true)
     }
 
     /// Writes the rule the pane's "Always allow this command" checkbox grants, through the same

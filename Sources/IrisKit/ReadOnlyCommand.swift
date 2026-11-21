@@ -220,7 +220,7 @@ enum ReadOnlyCommand {
     /// (#600) no longer holds for one — a read gated by the FS-roots grant, or refused outright by
     /// the denial set, must go through the attended path like anything else that isn't unconditionally safe.
     static func vibecopGate(toolName: String, details: String, inSandbox: Bool, homeWritable: Bool = false,
-                            isOwner: Bool = true, cwd: String? = nil, lookup: @autoclosure () -> HostLookup) -> VibecopGate {
+                            isOwner: Bool, cwd: String? = nil, lookup: @autoclosure () -> HostLookup) -> VibecopGate {
         switch toolName {
         case "run_command":
             if inSandbox { return !homeWritable || isReadOnly(details) ? .run : .ask }

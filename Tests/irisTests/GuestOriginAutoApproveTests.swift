@@ -90,9 +90,9 @@ struct GuestOriginAutoApproveTests {
         let w = try world()
         defer { try? FileManager.default.removeItem(at: w.root) }
         let path = w.paths.memoryMd.path
-        #expect(w.state.permissions.match(toolName: "write_file", details: path, workspace: nil) != nil)
-        #expect(w.state.permissions.match(toolName: "write_file", details: path, workspace: nil, isGuestOrigin: true) == nil)
-        #expect(w.state.permissions.match(toolName: "read_file", details: path, workspace: nil, isGuestOrigin: true) == nil)
+        #expect(w.state.permissions.match(toolName: "write_file", details: path, workspace: nil, isOwner: true) != nil)
+        #expect(w.state.permissions.match(toolName: "write_file", details: path, workspace: nil, isGuestOrigin: true, isOwner: true) == nil)
+        #expect(w.state.permissions.match(toolName: "read_file", details: path, workspace: nil, isGuestOrigin: true, isOwner: true) == nil)
     }
 
     // MARK: #1151

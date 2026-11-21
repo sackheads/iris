@@ -179,14 +179,14 @@ struct CommandPatternTests {
         defer { try? FileManager.default.removeItem(at: root) }
         permissions.allowGlobally(PermissionRule.forAlwaysAllow(toolName: "run_command",
                                                                 details: "cd /tmp && git status --short | head"))
-        let match = permissions.match(toolName: "run_command", details: "git status -sb", workspace: nil)
+        let match = permissions.match(toolName: "run_command", details: "git status -sb", workspace: nil, isOwner: true)
         #expect(match == AllowMatch(scope: .global, rule: PermissionRule(toolName: "run_command", details: "git status", match: .prefix)))
-        #expect(!permissions.isAllowed(toolName: "run_command", details: "git status -sb", workspace: nil, isBackground: true))
-        #expect(!permissions.isAllowed(toolName: "run_command", details: "git status", workspace: nil, isBackground: true),
+        #expect(!permissions.isAllowed(toolName: "run_command", details: "git status -sb", workspace: nil, isBackground: true, isOwner: true))
+        #expect(!permissions.isAllowed(toolName: "run_command", details: "git status", workspace: nil, isBackground: true, isOwner: true),
                 "not even the bare prefix's text, which an exact compare would have matched")
-        #expect(!permissions.isAllowed(toolName: "run_command", details: "git status -sb", workspace: nil, isGuestOrigin: true),
+        #expect(!permissions.isAllowed(toolName: "run_command", details: "git status -sb", workspace: nil, isGuestOrigin: true, isOwner: true),
                 "a guest-origin turn must not use a saved prefix rule")
-        #expect(!permissions.isAllowed(toolName: "run_command", details: "git push", workspace: nil))
+        #expect(!permissions.isAllowed(toolName: "run_command", details: "git push", workspace: nil, isOwner: true))
     }
 
     /// The ladder's answer for `details` in an ordinary conversation and in a guest-origin one, with `rule` saved.
@@ -277,8 +277,8 @@ struct CommandPatternTests {
         let (permissions, root) = try manager()
         defer { try? FileManager.default.removeItem(at: root) }
         permissions.allowGlobally(PermissionRule.forAlwaysAllow(toolName: "run_command", details: "git push origin main"))
-        #expect(permissions.isAllowed(toolName: "run_command", details: "git push origin main", workspace: nil))
-        #expect(!permissions.isAllowed(toolName: "run_command", details: "git push origin main", workspace: nil, isGuestOrigin: true))
+        #expect(permissions.isAllowed(toolName: "run_command", details: "git push origin main", workspace: nil, isOwner: true))
+        #expect(!permissions.isAllowed(toolName: "run_command", details: "git push origin main", workspace: nil, isGuestOrigin: true, isOwner: true))
     }
 
     @Test("a chain can match one global rule and one project rule")
@@ -289,10 +289,10 @@ struct CommandPatternTests {
         try FileManager.default.createDirectory(atPath: workspace, withIntermediateDirectories: true)
         permissions.allowGlobally(PermissionRule.forAlwaysAllow(toolName: "run_command", details: "swift build"))
         permissions.allowInProject(PermissionRule.forAlwaysAllow(toolName: "run_command", details: "swift test"), workspace: workspace)
-        let match = permissions.match(toolName: "run_command", details: "swift build && swift test --filter X", workspace: workspace)
+        let match = permissions.match(toolName: "run_command", details: "swift build && swift test --filter X", workspace: workspace, isOwner: true)
         #expect(match?.scope == .project)
         #expect(match?.rule?.details == "swift build; swift test")
-        #expect(!permissions.isAllowed(toolName: "run_command", details: "swift build && swift test", workspace: nil))
+        #expect(!permissions.isAllowed(toolName: "run_command", details: "swift build && swift test", workspace: nil, isOwner: true))
     }
 
     @Test("a command with no general rule still saves the exact command, and a file rule is untouched")
@@ -318,8 +318,8 @@ struct CommandPatternTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let future = #"[{"toolName":"read_file","details":"/tmp","match":"directory"},{"toolName":"run_command","details":"pwd"}]"#
         try Data(future.utf8).write(to: permissions.paths.permissionsJSON)
-        #expect(!permissions.isAllowed(toolName: "read_file", details: "/tmp", workspace: nil))
-        #expect(permissions.isAllowed(toolName: "run_command", details: "pwd", workspace: nil))
+        #expect(!permissions.isAllowed(toolName: "read_file", details: "/tmp", workspace: nil, isOwner: true))
+        #expect(permissions.isAllowed(toolName: "run_command", details: "pwd", workspace: nil, isOwner: true))
         permissions.allowGlobally(toolName: "run_command", details: "ls")
         let saved = String(decoding: try Data(contentsOf: permissions.paths.permissionsJSON), as: UTF8.self)
         #expect(saved.contains("\"directory\""), "saving keeps the newer kind as it was")

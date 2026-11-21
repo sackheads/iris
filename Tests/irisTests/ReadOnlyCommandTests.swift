@@ -302,16 +302,16 @@ struct ReadOnlyCommandTests {
     @Test("Vibecop's APPROVE: any command in the VM, a host read restricted, a file read, never a file write")
     func vibecopGate() {
         let host = Self.lookup()
-        #expect(ReadOnlyCommand.vibecopGate(toolName: "run_command", details: "rm -f x", inSandbox: true, lookup: host) == .run)
-        #expect(ReadOnlyCommand.vibecopGate(toolName: "run_command", details: "rm -f x", inSandbox: false, lookup: host) == .ask)
-        #expect(ReadOnlyCommand.vibecopGate(toolName: "run_command", details: "ls -la", inSandbox: false, lookup: host)
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "run_command", details: "rm -f x", inSandbox: true, isOwner: true, lookup: host) == .run)
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "run_command", details: "rm -f x", inSandbox: false, isOwner: true, lookup: host) == .ask)
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "run_command", details: "ls -la", inSandbox: false, isOwner: true, lookup: host)
                 == .runRestricted(path: ["/bin", "/usr/bin"]))
-        #expect(ReadOnlyCommand.vibecopGate(toolName: "run_command", details: "ls -la", inSandbox: false,
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "run_command", details: "ls -la", inSandbox: false, isOwner: true,
                                             cwd: "/Users/me", lookup: host) == .ask)
-        #expect(ReadOnlyCommand.vibecopGate(toolName: "read_file", details: "/etc/hosts", inSandbox: false, lookup: host) == .run)
-        #expect(ReadOnlyCommand.vibecopGate(toolName: "write_file", details: "/tmp/x", inSandbox: false, lookup: host) == .ask)
-        #expect(ReadOnlyCommand.vibecopGate(toolName: "write_file", details: "/tmp/x", inSandbox: true, lookup: host) == .ask)
-        #expect(ReadOnlyCommand.vibecopGate(toolName: "schedule_job", details: "x", inSandbox: false, lookup: host) == .ask)
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "read_file", details: "/etc/hosts", inSandbox: false, isOwner: true, lookup: host) == .run)
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "write_file", details: "/tmp/x", inSandbox: false, isOwner: true, lookup: host) == .ask)
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "write_file", details: "/tmp/x", inSandbox: true, isOwner: true, lookup: host) == .ask)
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "schedule_job", details: "x", inSandbox: false, isOwner: true, lookup: host) == .ask)
     }
 
     /// #974 Task 8 (C5): APPROVE standing in for the person on "any file read" (#600) does not

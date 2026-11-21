@@ -248,11 +248,11 @@ struct GitReadTests {
             ReadOnlyCommand.HostLookup(path: "/usr/bin", cwd: repo.path, home: "/nonexistent-home", writableRoots: roots,
                                        isExecutable: { $0 == "/usr/bin/git" })
         }
-        #expect(ReadOnlyCommand.vibecopGate(toolName: "run_command", details: "git status", inSandbox: false,
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "run_command", details: "git status", inSandbox: false, isOwner: true,
                                             cwd: repo.path, lookup: lookup([])) == .runRestricted(path: ["/usr/bin"]))
-        #expect(ReadOnlyCommand.vibecopGate(toolName: "run_command", details: "git status", inSandbox: false,
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "run_command", details: "git status", inSandbox: false, isOwner: true,
                                             cwd: repo.path, lookup: lookup([base.path])) == .ask)
-        #expect(ReadOnlyCommand.vibecopGate(toolName: "run_command", details: "git push", inSandbox: false,
+        #expect(ReadOnlyCommand.vibecopGate(toolName: "run_command", details: "git push", inSandbox: false, isOwner: true,
                                             cwd: repo.path, lookup: lookup([])) == .ask)
     }
 

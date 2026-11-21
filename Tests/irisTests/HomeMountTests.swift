@@ -195,7 +195,7 @@ struct HomeMountTests {
         #expect(await source("ls -la") == .vibecop(reason: "routine"), "a read still runs in the VM")
         #expect(await source("rm -f x") == .person, "a write asked the person")
         #expect(ReadOnlyCommand.vibecopGate(toolName: "run_command", details: "rm -f x", inSandbox: true,
-                                            homeWritable: true, lookup: ReadOnlyCommand.HostLookup(
+                                            homeWritable: true, isOwner: true, lookup: ReadOnlyCommand.HostLookup(
                                                 path: "", cwd: "/tmp", home: "/x", isExecutable: { _ in false })) == .ask)
     }
 

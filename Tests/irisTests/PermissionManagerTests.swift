@@ -18,12 +18,12 @@ struct PermissionManagerTests {
         let configPath = paths.configDir.appendingPathComponent("settings.json").path
         let outsidePath = "/Users/someone/other_secret.txt"
 
-        #expect(manager.isAllowed(toolName: "read_file", details: memoryPath, workspace: nil))
-        #expect(manager.isAllowed(toolName: "write_file", details: memoryPath, workspace: nil))
-        #expect(manager.isAllowed(toolName: "read_file", details: configPath, workspace: nil))
+        #expect(manager.isAllowed(toolName: "read_file", details: memoryPath, workspace: nil, isOwner: true))
+        #expect(manager.isAllowed(toolName: "write_file", details: memoryPath, workspace: nil, isOwner: true))
+        #expect(manager.isAllowed(toolName: "read_file", details: configPath, workspace: nil, isOwner: true))
         // config/ holds the file that grants permissions; see PermissionCarveOutTests.
-        #expect(!manager.isAllowed(toolName: "write_file", details: configPath, workspace: nil))
-        #expect(!manager.isAllowed(toolName: "read_file", details: outsidePath, workspace: nil))
-        #expect(!manager.isAllowed(toolName: "write_file", details: outsidePath, workspace: nil))
+        #expect(!manager.isAllowed(toolName: "write_file", details: configPath, workspace: nil, isOwner: true))
+        #expect(!manager.isAllowed(toolName: "read_file", details: outsidePath, workspace: nil, isOwner: true))
+        #expect(!manager.isAllowed(toolName: "write_file", details: outsidePath, workspace: nil, isOwner: true))
     }
 }

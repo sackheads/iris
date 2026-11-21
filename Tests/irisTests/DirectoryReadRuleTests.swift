@@ -223,12 +223,12 @@ struct DirectoryReadRuleTests {
         let rule = PermissionRule(toolName: "read_file", details: f.real(f.project), match: .directory)
         let pm = manager(f, saving: rule)
         let inside = f.real(f.project + "/sub/b.txt")
-        #expect(pm.match(toolName: "read_file", details: inside, workspace: nil)?.rule == rule)
-        #expect(pm.match(toolName: "read_file", details: inside, workspace: nil)?.scope == .global)
-        #expect(!pm.isAllowed(toolName: "write_file", details: inside, workspace: nil), "reads only")
-        #expect(!pm.isAllowed(toolName: "run_command", details: inside, workspace: nil))
-        #expect(!pm.isAllowed(toolName: "read_file", details: f.real(f.project + "bc/c.txt"), workspace: nil))
-        #expect(!pm.isAllowed(toolName: "read_file", details: f.real(f.project + "/.env"), workspace: nil))
+        #expect(pm.match(toolName: "read_file", details: inside, workspace: nil, isOwner: true)?.rule == rule)
+        #expect(pm.match(toolName: "read_file", details: inside, workspace: nil, isOwner: true)?.scope == .global)
+        #expect(!pm.isAllowed(toolName: "write_file", details: inside, workspace: nil, isOwner: true), "reads only")
+        #expect(!pm.isAllowed(toolName: "run_command", details: inside, workspace: nil, isOwner: true))
+        #expect(!pm.isAllowed(toolName: "read_file", details: f.real(f.project + "bc/c.txt"), workspace: nil, isOwner: true))
+        #expect(!pm.isAllowed(toolName: "read_file", details: f.real(f.project + "/.env"), workspace: nil, isOwner: true))
     }
 
     @Test("an unattended run and a guest-origin turn are not waved through by a folder rule")
@@ -236,9 +236,9 @@ struct DirectoryReadRuleTests {
         let f = try fixture(); defer { f.tearDown() }
         let pm = manager(f, saving: PermissionRule(toolName: "read_file", details: f.real(f.project), match: .directory))
         let inside = f.real(f.project + "/a.txt")
-        #expect(pm.isAllowed(toolName: "read_file", details: inside, workspace: nil))
-        #expect(!pm.isAllowed(toolName: "read_file", details: inside, workspace: nil, isBackground: true))
-        #expect(!pm.isAllowed(toolName: "read_file", details: inside, workspace: nil, isGuestOrigin: true))
+        #expect(pm.isAllowed(toolName: "read_file", details: inside, workspace: nil, isOwner: true))
+        #expect(!pm.isAllowed(toolName: "read_file", details: inside, workspace: nil, isBackground: true, isOwner: true))
+        #expect(!pm.isAllowed(toolName: "read_file", details: inside, workspace: nil, isGuestOrigin: true, isOwner: true))
     }
 
     @Test("a folder rule in a project allowlist matches the same way, and reports the project scope")
@@ -248,7 +248,7 @@ struct DirectoryReadRuleTests {
         let rule = PermissionRule(toolName: "read_file", details: f.real(f.project), match: .directory)
         let pm = PermissionManager(paths: f.iris)
         pm.allowInProject([rule], workspace: workspace)
-        let hit = pm.match(toolName: "read_file", details: f.real(f.project + "/a.txt"), workspace: workspace)
+        let hit = pm.match(toolName: "read_file", details: f.real(f.project + "/a.txt"), workspace: workspace, isOwner: true)
         #expect(hit?.scope == .project && hit?.rule == rule)
     }
 
@@ -302,7 +302,7 @@ struct DirectoryReadRuleTests {
         let first = try await readTurn(s, path: f.project + "/a.txt", answer: .alwaysAllowDirectory)
         #expect(first?.directoryRule == PermissionRule(toolName: "read_file", details: f.real(f.project), match: .directory),
                 "the dialog offered the folder the file is in")
-        let saved = s.permissions.match(toolName: "read_file", details: f.real(f.project + "/sub/b.txt"), workspace: nil)
+        let saved = s.permissions.match(toolName: "read_file", details: f.real(f.project + "/sub/b.txt"), workspace: nil, isOwner: true)
         #expect(saved?.rule?.isDirectory == true, "the click wrote the folder rule")
         let second = try await readTurn(s, path: f.project + "/sub/b.txt", answer: nil)
         #expect(second == nil, "a read under the folder runs without a prompt")
@@ -337,8 +337,8 @@ struct DirectoryReadRuleTests {
         let path = NSHomeDirectory() + "/.ssh/iris-1136-test-\(UUID().uuidString)"
         let asked = try await readTurn(s, path: path, answer: .alwaysAllowDirectory)
         #expect(asked != nil && asked?.directoryRule == nil, "no folder rule is offered inside a credential store")
-        #expect(!s.permissions.isAllowed(toolName: "read_file", details: IrisPaths.realPath(path), workspace: nil))
-        #expect(!s.permissions.isAllowed(toolName: "read_file", details: IrisPaths.realPath(NSHomeDirectory() + "/.ssh/other"), workspace: nil),
+        #expect(!s.permissions.isAllowed(toolName: "read_file", details: IrisPaths.realPath(path), workspace: nil, isOwner: true))
+        #expect(!s.permissions.isAllowed(toolName: "read_file", details: IrisPaths.realPath(NSHomeDirectory() + "/.ssh/other"), workspace: nil, isOwner: true),
                 "and nothing was saved that covers the store")
     }
 
