@@ -174,8 +174,24 @@ struct GuestRolesActivationTests {
         try r.registry.setRoles(["reviewer"], forClientId: "dev-1")
         try r.registry.revokeToken(forClientId: "dev-1")
         #expect(r.registry.guestRoles(forClientId: "dev-1").isEmpty)
+        let identity = try #require(IdentityKey.providerGuest(clientId: "dev-1"))
+        if case .found = r.store.lookupMapping(for: identity) { Issue.record("revoke left the registry's mapping behind") }
+        let ownId = try #require(ProviderGuestGrants.generatedProfileId(forClientId: "dev-1"))
+        if case .found = r.store.lookupProfile(id: ownId) { Issue.record("revoke left the registry's profile behind") }
         _ = try r.registry.issueToken(forClientId: "dev-1")
         #expect(r.registry.guestRoles(forClientId: "dev-1").isEmpty, "a first registration starts with no roles")
+    }
+
+    @Test("a registry grant left in the store by a revoke whose store write failed is cleared by the next first registration, not inherited")
+    func firstRegistrationClearsALeftoverGrant() throws {
+        let r = try rig(clients: []); defer { r.tearDown() }
+        let ownId = try #require(ProviderGuestGrants.generatedProfileId(forClientId: "dev-1"))
+        let identity = try #require(IdentityKey.providerGuest(clientId: "dev-1"))
+        try r.writer.writeProfile(id: ownId, AccessProfile(peerRoles: ["reviewer"]), replacing: true)
+        try r.writer.setMapping(identity, profileId: ownId, replacing: false)
+        _ = try r.registry.issueToken(forClientId: "dev-1")
+        #expect(r.registry.guestRoles(forClientId: "dev-1").isEmpty)
+        if case .found = r.store.lookupMapping(for: identity) { Issue.record("the leftover mapping survived the first registration") }
     }
 
     @Test("an operator-authored mapping is never modified or deleted by setRoles or revoke; it keeps serving, and a token is still required")
