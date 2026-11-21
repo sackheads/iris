@@ -362,7 +362,9 @@ struct GuestRolesActivationTests {
     @Test("a guest's granted send reaches a PROFILE-BOUND role session, and that guest-steered turn is not handed the profile's memory")
     func grantedSendToProfileBoundSessionCarriesNoProfileMemory() async throws {
         let r = try rig(); defer { r.tearDown() }
-        try r.registry.setRoles(["reviewer"], forClientId: "dev-1")
+        // A guest whose profile carries memoryRead .task (the guest floor's own ceiling), so the stamp its send
+        // puts on the recipient turn would pass the profile-memory read tier if #1289's guest-origin gate were absent.
+        try put(r, profile: "g1", json: #"{"memoryRead":1,"peerRoles":["reviewer"]}"#, mapping: "dev-1")
         try FileManager.default.createDirectory(at: r.paths.memoryDir, withIntermediateDirectories: true)
         for f in [r.paths.userMd, r.paths.soulMd, r.paths.memoryMd] { try "owner text".write(to: f, atomically: true, encoding: .utf8) }
         try put(r, profile: "p1", json: #"{"memoryRead":1}"#)
