@@ -102,6 +102,7 @@ public enum BindingResolver {
         guard target.transports.isSubset(of: source.transports) else { return false }
         guard isFSSubset(target.fsRoots, of: source.fsRoots) else { return false }
         guard target.skills.isSubset(of: source.skills) else { return false }
+        guard target.peerRoles.isSubset(of: source.peerRoles) else { return false }
         guard isToolSubset(target.tools, of: source.tools) else { return false }
         return true
     }

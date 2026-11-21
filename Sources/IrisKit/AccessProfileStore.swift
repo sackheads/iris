@@ -11,6 +11,18 @@ struct IdentityKey: Hashable, Sendable {
         self.issuer = issuer
         self.id = id
     }
+
+    /// #974 Task 16: the identity of a guest of the loopback MCP provider (#1067), which today is only
+    /// the client id its bearer token resolves to. The token lookup at the provider's door IS the
+    /// authentication, so this key is door-authenticated, never a name the guest supplied. The issuer is
+    /// one constant: Iris's own provider. nil for an id the registry would not issue a token to (a bad
+    /// shape, or the reserved `iris`), so it can never name a mapping.
+    static let providerGuestTransport = "mcp"
+    static let providerGuestIssuer = "iris-mcp-provider"
+    static func providerGuest(clientId: String) -> IdentityKey? {
+        guard ProviderTokenRegistry.isValidClientIdShape(clientId), !ProviderTokenRegistry.isReservedSpelling(clientId) else { return nil }
+        return IdentityKey(transport: providerGuestTransport, issuer: providerGuestIssuer, id: clientId)
+    }
 }
 
 /// The protected, read-only store over `IrisPaths.profilesDir` (spec H3): `profiles/<id>.json` per
@@ -47,6 +59,43 @@ final class AccessProfileStore: Sendable {
         // "mappings" would, so the check must not rest on exact case matching the id.
         !id.isEmpty && !reservedIds.contains(id.lowercased()) && id.allSatisfy { char in
             char.isASCII && (char.isLetter || char.isNumber || char == "_" || char == "-")
+        }
+    }
+
+    /// What a read of the store found, which `profile(id:)` and `allMappings()` cannot say: they return
+    /// nil / empty for a missing file and for an unreadable one alike, and a caller that falls back to
+    /// another source when the store has no answer must not fall back because the file is damaged
+    /// (#974 Task 16: an owner's narrowing in a corrupt file would otherwise reopen a wider grant).
+    enum Lookup<Value: Sendable>: Sendable {
+        case found(Value)
+        case absent
+        case unreadable
+    }
+
+    func lookupProfile(id: String) -> Lookup<AccessProfile> {
+        guard Self.isValidProfileId(id) else { return .absent }
+        let url = profilesDir.appendingPathComponent("\(id).json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return .absent }
+        guard let data = try? Data(contentsOf: url), let profile = try? JSONDecoder().decode(AccessProfile.self, from: data) else {
+            return .unreadable
+        }
+        return .found(profile)
+    }
+
+    /// The profile id `identity` is mapped to. `.absent` only when there is no mappings file or no entry
+    /// for the identity; a file that does not decode, or an identity with two conflicting entries, is
+    /// `.unreadable` (the ambiguity `allMappings()` resolves to "no mapping" is not an absence).
+    func lookupMapping(for identity: IdentityKey) -> Lookup<String> {
+        let url = profilesDir.appendingPathComponent("mappings.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return .absent }
+        guard let data = try? Data(contentsOf: url), let entries = try? JSONDecoder().decode([MappingEntry].self, from: data) else {
+            return .unreadable
+        }
+        let matching = entries.filter { IdentityKey(transport: $0.transport, issuer: $0.issuer, id: $0.id) == identity }
+        switch matching.count {
+        case 0: return .absent
+        case 1: return .found(matching[0].profileId)
+        default: return .unreadable
         }
     }
 

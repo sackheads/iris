@@ -55,7 +55,7 @@ final class ProviderTokenRegistry: @unchecked Sendable {
     /// one of them through. The exact lowercase spelling "iris" still passes this allowlist on
     /// its own, since it is itself a valid identifier shape — `isReservedSpelling` below is the
     /// second, explicit guard that rejects that one specific case.
-    private static func isValidClientIdShape(_ clientId: String) -> Bool {
+    static func isValidClientIdShape(_ clientId: String) -> Bool {
         guard clientId.count <= 64, let first = clientId.unicodeScalars.first else { return false }
         guard first.isASCII, CharacterSet.lowercaseASCIILetters.contains(first) || CharacterSet.asciiDigits.contains(first) else {
             return false
@@ -66,7 +66,7 @@ final class ProviderTokenRegistry: @unchecked Sendable {
         }
     }
 
-    private static func isReservedSpelling(_ clientId: String) -> Bool { clientId == reservedClientId }
+    static func isReservedSpelling(_ clientId: String) -> Bool { clientId == reservedClientId }
 
     init(keychain: KeychainManager = .shared) {
         self.keychain = keychain
