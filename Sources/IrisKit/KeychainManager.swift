@@ -77,6 +77,24 @@ public final class KeychainManager: @unchecked Sendable {
     /// The service name actually used for Keychain/in-memory storage for a given base name.
     func resolvedService(_ base: String) -> String { base + serviceSuffix }
 
+    /// Every value this process has read from, or written to, a secrets item other than the main one
+    /// (the GitHub token, MCP header secrets, plugin secrets, the A2A seed, the MCP provider's guest
+    /// tokens), for `ConfigManager.knownSecretValues` (#1220). Recorded where the value is already in
+    /// memory, so the scrub reads no Keychain of its own and cannot raise a prompt mid-turn. A value
+    /// stays after it is rotated or deleted: text that carries the old one is still worth scrubbing.
+    /// The main item is `ConfigManager`'s (it must drop the guarded settings that share it), and the
+    /// roles item holds role names, not secrets.
+    private let heldLock = NSLock()
+    private var heldValues: Set<String> = []
+    var heldSecretValues: Set<String> { heldLock.withLock { heldValues } }
+
+    private func hold(_ secrets: [String: String], service base: String) {
+        guard base != Self.legacyService, base != Self.mcpProviderRolesService else { return }
+        let values = secrets.values.filter { $0.count >= SecretScrub.minLength }
+        guard !values.isEmpty else { return }
+        heldLock.withLock { heldValues.formUnion(values) }
+    }
+
     // MARK: - Legacy API (service = com.iris.secrets), unchanged behavior
     public func loadSecrets() -> [String: String] { secrets(service: Self.legacyService) }
     /// Replaces the whole item: for a copy of a whole item or a test's fixture, never for a change
@@ -84,7 +102,13 @@ public final class KeychainManager: @unchecked Sendable {
     public func replaceSecrets(_ secrets: [String: String]) { replaceSecrets(secrets, service: Self.legacyService) }
 
     // MARK: - Service-scoped API
-    public func secrets(service: String) -> [String: String] {
+    public func secrets(service base: String) -> [String: String] {
+        let found = loadSecretsItem(service: base)
+        hold(found, service: base)
+        return found
+    }
+
+    private func loadSecretsItem(service: String) -> [String: String] {
         let service = resolvedService(service)
         if usesInMemoryStore {
             return inMemoryLock.withLock { inMemorySecrets[service] ?? [:] }
@@ -137,6 +161,7 @@ public final class KeychainManager: @unchecked Sendable {
     }
 
     private func storeSecrets(_ secrets: [String: String], service: String) {
+        hold(secrets, service: service)
         if service == Self.legacyService, areWritesBlocked {
             print("Not saving secrets: the secrets item could not be read at launch, so it is left as it is (#678).")
             return
@@ -187,7 +212,13 @@ public final class KeychainManager: @unchecked Sendable {
 
     /// `secrets(service:)`, but any Keychain failure other than "not found" throws instead of
     /// coming back as the same empty dictionary an absent item would.
-    func secretsOrThrow(service: String) throws -> [String: String] {
+    func secretsOrThrow(service base: String) throws -> [String: String] {
+        let found = try loadSecretsItemOrThrow(service: base)
+        hold(found, service: base)
+        return found
+    }
+
+    private func loadSecretsItemOrThrow(service: String) throws -> [String: String] {
         let service = resolvedService(service)
         if usesInMemoryStore, let status = blockLock.withLock({ simulatedReadFailure }) {
             throw SecretsError.status(status)
@@ -224,6 +255,7 @@ public final class KeychainManager: @unchecked Sendable {
     }
 
     private func storeSecretsOrThrow(_ secrets: [String: String], service: String) throws {
+        hold(secrets, service: service)
         if service == Self.legacyService, areWritesBlocked { throw SecretsError.status(errSecWrPerm) }
         let service = resolvedService(service)
         if usesInMemoryStore {

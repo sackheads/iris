@@ -67,18 +67,18 @@ enum SecretScrub {
 }
 
 extension ConfigManager {
-    /// NOT all of Iris's secrets: only the `com.iris.secrets` item (provider keys, Google tokens, ...). The
-    /// GitHub token, MCP header secrets, the MCP provider's guest tokens, plugin secrets and the A2A key
-    /// live in their own Keychain items and are not here (tracked as #1220). Cached at launch, but
-    /// `secretsSnapshot` reads the Keychain once after a Settings write invalidates the cache, so the first
-    /// non-owner result after a key change can pay that read, on the main actor.
-    ///
-    /// Every secret value this manager already holds in memory: the cached secrets item, minus the
-    /// guarded settings that live in the same item but are not secrets (a base URL, a repo list, a
-    /// login). No Keychain read of its own: `secretsSnapshot` is the launch-time read, cached.
+    /// Every secret value Iris holds in memory: the cached secrets item (provider keys, Google tokens,
+    /// ...) minus the guarded settings that live in the same item but are not secrets (a base URL, a
+    /// repo list, a login), plus what the Keychain manager has read or written of the items that hold
+    /// the GitHub token, MCP header secrets, plugin secrets, the A2A seed and the MCP provider's guest
+    /// tokens (#1220). No Keychain read of its own: `secretsSnapshot` is cached at launch, but reads the
+    /// Keychain once after a Settings write invalidates the cache, so the first non-owner result after a
+    /// key change can pay that read, on the main actor. A value in an item Iris has not yet read in this
+    /// process is not here, but then nothing of Iris's has held it either.
     var knownSecretValues: Set<String> {
         guard let keychain = guardedKeychain else { return [] }
         let settingKeys = Set(GuardedKey.allCases.map(\.rawValue)).union([GuardedSettings.markerKey])
-        return Set(secretsSnapshot(keychain).filter { !settingKeys.contains($0.key) }.values.filter { $0.count >= SecretScrub.minLength })
+        let main = secretsSnapshot(keychain).filter { !settingKeys.contains($0.key) }.values.filter { $0.count >= SecretScrub.minLength }
+        return Set(main).union(keychain.heldSecretValues)
     }
 }
