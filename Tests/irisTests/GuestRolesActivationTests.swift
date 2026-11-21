@@ -199,7 +199,7 @@ struct GuestRolesActivationTests {
         let r = try rig(); defer { r.tearDown() }
         try put(r, profile: "ops", json: #"{"peerRoles":["auditor"]}"#, mapping: "dev-1")
         let bytes = mappingsData(r)
-        try r.registry.setRoles(["reviewer"], forClientId: "dev-1")
+        #expect(throws: ProviderTokenRegistry.RegistryError.storeOwnsGrant) { try r.registry.setRoles(["reviewer"], forClientId: "dev-1") }
         #expect(mappingsData(r) == bytes)
         #expect(r.registry.guestRoles(forClientId: "dev-1") == ["auditor"], "the store wins over the registry's own grant")
         try r.registry.revokeToken(forClientId: "dev-1")
@@ -216,6 +216,35 @@ struct GuestRolesActivationTests {
         try "{not json".write(to: r.paths.profilesDir.appendingPathComponent("mappings.json"), atomically: true, encoding: .utf8)
         #expect(throws: ProviderTokenRegistry.RegistryError.accessStoreUnreadable) { try r.registry.setRoles(["reviewer"], forClientId: "dev-1") }
         #expect(r.registry.roles(forClientId: "dev-1").isEmpty, "the Keychain item was not changed either")
+    }
+
+    @Test("a setRoles whose Keychain write fails leaves the store, and so the guest's reach, as it was")
+    func failedSetRolesChangesNothing() throws {
+        let keychain = KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("iris-t16s3-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = IrisPaths(root: root)
+        let registry = ProviderTokenRegistry(keychain: keychain, accessPaths: paths)
+        let store = AccessProfileStore(paths: paths)
+        _ = try registry.issueToken(forClientId: "dev-1")
+        _ = try registry.issueToken(forClientId: "dev-2")
+        try registry.setRoles(["reviewer"], forClientId: "dev-1")
+        keychain.simulateReadFailure(errSecIO)
+        #expect(throws: (any Error).self) { try registry.setRoles(["reviewer", "builder"], forClientId: "dev-1") }
+        #expect(throws: (any Error).self) { try registry.setRoles(["builder"], forClientId: "dev-2") }
+        keychain.simulateReadFailure(nil)
+        #expect(ProviderGuestGrants.allowedRoles(clientId: "dev-1", registry: registry, store: store) == ["reviewer"], "a granted guest keeps exactly its old reach")
+        #expect(ProviderGuestGrants.allowedRoles(clientId: "dev-2", registry: registry, store: store).isEmpty, "an ungranted guest gains nothing")
+        let identity = try #require(IdentityKey.providerGuest(clientId: "dev-2"))
+        if case .found = store.lookupMapping(for: identity) { Issue.record("a mapping was left behind by a failed call") }
+    }
+
+    @Test("setRoles for a guest mapped to an operator's profile throws instead of reporting a success that changes nothing")
+    func setRolesOnOperatorMappingThrows() throws {
+        let r = try rig(); defer { r.tearDown() }
+        try put(r, profile: "ops", json: #"{"peerRoles":["auditor"]}"#, mapping: "dev-1")
+        #expect(throws: ProviderTokenRegistry.RegistryError.storeOwnsGrant) { try r.registry.setRoles(["reviewer"], forClientId: "dev-1") }
+        #expect(r.registry.guestRoles(forClientId: "dev-1") == ["auditor"])
     }
 
     // MARK: the live mechanism: a guest's send through a real engine turn, both directions

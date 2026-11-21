@@ -39,6 +39,15 @@ enum ProviderGuestGrants {
         }
     }
 
+    /// The roles the registry's own generated profile currently grants `clientId` (empty if it has none, or
+    /// the guest is mapped elsewhere): what `grant` restores after a failed call.
+    static func registryGrant(clientId: String, store: AccessProfileStore) -> Set<String> {
+        guard let identity = IdentityKey.providerGuest(clientId: clientId), let ownId = generatedProfileId(forClientId: clientId),
+              case .found(let mapped) = store.lookupMapping(for: identity), mapped == ownId,
+              case .found(let profile) = store.lookupProfile(id: ownId) else { return [] }
+        return profile.peerRoles
+    }
+
     /// Records `roles` for `clientId` in the store. Empty roles clear the registry's own grant.
     @discardableResult
     static func grant(_ roles: Set<String>, clientId: String, store: AccessProfileStore, writer: AccessProfileWriter) throws -> Outcome {
