@@ -563,6 +563,7 @@ actor IrisEngine {
     func bindingForCall(conversationId: UUID) async -> AccessBinding {
         let ownBinding = binding
         let store = accessProfileStore
+        let myGuestClientId = guestClientId
         guard let state else { return ownBinding }
         return await MainActor.run { () -> AccessBinding in
             // dev-2 review of #1212: checked at the delegation root too, mirroring
@@ -604,6 +605,22 @@ actor IrisEngine {
             // engine's own, owner-shaped binding — that is exactly the fail-open the stamp exists
             // to close.
             if state.isGuestOriginTurn(conversationId) || state.isGuestOriginTurn(root) {
+                return AccessBinding(profile: AccessProfile(), principal: .mcpGuest, isOwner: false)
+                    .capped(by: PrincipalFloor.floor(for: .mcpGuest))
+            }
+            // #1269: `conversationId` naming a guest's own conversation does not, by itself, mean
+            // `ownBinding` applies — `ownBinding` is THIS engine's, and a guest's own conversation
+            // is run by its own separately-identity-resolved engine (`makeGuestEngine`/Task 16),
+            // never by the single shared `.main` engine that answers `reflectionRoute`/
+            // `reflectionMayRun`'s cross-engine ask. Comparing `guestClientId` rather than
+            // `ownBinding.principal != .mcpGuest` also closes the (today unreachable) case of one
+            // guest's engine asking about a different guest's conversation, not just `.main`
+            // asking about any guest's. `persisted` is always nil here in practice (it is computed
+            // only for `ownBinding.principal == .main`, and nothing stamps a guest conversation's
+            // `accessProfileId`), but this returns before it regardless, so that stays true even
+            // if that assumption ever changes.
+            if let target = state.conversations.first(where: { $0.id == conversationId }), target.isGuest,
+               target.guestClientId != myGuestClientId {
                 return AccessBinding(profile: AccessProfile(), principal: .mcpGuest, isOwner: false)
                     .capped(by: PrincipalFloor.floor(for: .mcpGuest))
             }
