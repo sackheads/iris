@@ -45,6 +45,18 @@ final class ViewHost<Content: View> {
         return NSBitmapImageRep(cgImage: part).representation(using: .tiff, properties: [:])?.hashValue ?? 0
     }
 
+    /// How many pixels differ from the top-left corner's colour: 0 means the view painted nothing,
+    /// which makes every digest constant and every "repaints" test a false red (or a false green).
+    func inkPixels() -> Int {
+        hosting.layoutSubtreeIfNeeded()
+        guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else { return -1 }
+        hosting.cacheDisplay(in: hosting.bounds, to: rep)
+        guard let base = rep.colorAt(x: 0, y: 0) else { return -1 }
+        var n = 0
+        for y in 0..<rep.pixelsHigh { for x in 0..<rep.pixelsWide where rep.colorAt(x: x, y: y) != base { n += 1 } }
+        return n
+    }
+
     /// One turn of the main run loop, then a layout and display pass, so SwiftUI applies the
     /// invalidation an observed change queued.
     private func render() {
