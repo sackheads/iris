@@ -81,7 +81,7 @@ struct ActivityRowLiveTrackingTests {
         a.registerSubagent(id: id, role: "engineer")
         let size = CGSize(width: 520, height: 30)
         let whole = ViewHost(size: size) { ActivityRowView(state: a, sessionId: id, isMain: false, onTap: {}) }
-        #expect(whole.repaints(within: 2.5) { }, "the elapsed clock must tick, or this control proves nothing")
+        #expect(whole.repaints { }, "the elapsed clock must tick, or this control proves nothing; ink \(whole.inkPixels())")
         let left = ViewHost(size: size, region: Self.left) { ActivityRowView(state: a, sessionId: id, isMain: false, onTap: {}) }
         #expect(!left.repaints(within: 2.5) { })
     }

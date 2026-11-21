@@ -66,9 +66,10 @@ final class ViewHost<Content: View> {
     }
 
     /// Runs `mutation`, then lets the view settle. True if the pixels changed within `within`
-    /// seconds. A view that must NOT change waits out the whole bound, so keep it small there.
+    /// seconds. A positive returns as soon as it sees the change, so its bound is generous (a CI runner
+    /// repainted the row late, #1284); a view that must NOT change waits out the whole bound, so keep it small there.
     @discardableResult
-    func repaints(within seconds: Double = 1.0, after mutation: () -> Void) -> Bool {
+    func repaints(within seconds: Double = 8.0, after mutation: () -> Void) -> Bool {
         let before = snapshot()
         mutation()
         let deadline = TestClock.deadline(seconds)
