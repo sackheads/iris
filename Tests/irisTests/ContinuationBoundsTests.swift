@@ -147,7 +147,7 @@ struct ContinuationBoundsTests {
 
     @Test("a cancelled LoopbackHTTPListener.start ends: before it begins, with a listener that never reports, and with a real one")
     func loopbackStartCancel() async throws {
-        for (name, early, neverStarts) in [("before it begins", true, false), ("a listener stuck waiting", false, true), ("a real listener", false, false)] {
+        for (name, early, neverStarts) in [("before it begins", true, true), ("before it begins, real listener", true, false), ("a listener stuck waiting", false, true), ("a real listener", false, false)] {
             let listener = LoopbackHTTPListener(port: 0) { _ in .error(statusCode: 404, .invalidRequest("none")) }
             defer { listener.stop() }
             let task = Task {
