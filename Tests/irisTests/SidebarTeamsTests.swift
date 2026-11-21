@@ -78,6 +78,23 @@ struct SidebarTeamsTests {
         #expect(persisted.sidebarGroupId == nil, "the repair is persisted, not just in memory")
     }
 
+    @Test("#1281 review, round 2: a groups read that fails as a whole does not ungroup anyone")
+    func groupsReadFailureDoesNotUngroup() throws {
+        let store = try ConversationStore.inMemory()
+        let app = AppState(store: store, createIfEmpty: false, emitLaunchNotices: false)
+        let id = app.createNewConversation(select: false)
+        let groupId = try #require(app.createSidebarGroup(name: "team"))
+        app.moveConversation(id, toGroup: groupId)
+        app.flushSave()
+
+        try store.rawWrite("DROP TABLE sidebar_groups")
+
+        let reloaded = AppState(store: store, createIfEmpty: false, emitLaunchNotices: false)
+        #expect(reloaded.conversations.first { $0.id == id }?.sidebarGroupId == groupId,
+               "a read that fails as a whole must not be mistaken for \"no groups\" and ungroup the member")
+        #expect(reloaded.sidebarGroups.isEmpty)
+    }
+
     // MARK: Live mechanism: reorder and move, driven through AppState
 
     @Test("drag-reordering a team's members persists the new order through a reload")
