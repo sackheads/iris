@@ -34,6 +34,17 @@ struct ChatView: View {
     /// Whether the Archived disclosure group is open. The single source of truth: the group
     /// binds to it directly, so the disclosure triangle always does what it looks like it does.
     @State private var archivedExpanded = false
+    /// #960: which teams are collapsed. Absent means expanded — a newly created team, which is
+    /// never in this set, opens expanded by default.
+    @State private var collapsedTeams: Set<UUID> = []
+    /// #960: the team being renamed, and the text field's live value.
+    @State private var renamingTeam: SidebarGroup?
+    @State private var renamingTeamText = ""
+    /// #960: the team pending the delete confirmation (non-destructive: ungroups its members).
+    @State private var deletingTeam: SidebarGroup?
+    /// #960: the "New Team" prompt's live text.
+    @State private var showNewTeamPrompt = false
+    @State private var newTeamName = ""
     /// #611: the conversation whose "let the sandbox write this folder" confirmation is showing.
     @State private var homeOptInTarget: Conversation?
     /// #625: the conversation whose workspace rules are being reviewed.
@@ -112,8 +123,35 @@ struct ChatView: View {
                             // List's `selectedConversationId` binding — no `.tag`, a tap selects
                             // the mailbox directly instead.
                             inboxRow
-                            ForEach(visible.filter { !$0.isPinned }) { conv in
+                            let ungrouped = SidebarOrdering.ungrouped(state.conversations)
+                            ForEach(ungrouped) { conv in
                                 conversationRow(conv)
+                                    .draggable(SidebarDragConversationId(id: conv.id))
+                            }
+                            .onMove { indices, destination in
+                                var ids = ungrouped.map(\.id)
+                                ids.move(fromOffsets: indices, toOffset: destination)
+                                state.reorderConversations(ids, within: nil)
+                            }
+                        }
+                        // #960: lets a conversation dragged from a team land back in the flat list.
+                        .dropDestination(for: SidebarDragConversationId.self) { items, _ in
+                            for item in items { state.moveConversation(item.id, toGroup: nil) }
+                            return true
+                        }
+
+                        // #960: persistent teams — each a DisclosureGroup, members and the teams
+                        // themselves both drag-reorderable, and a drop target for moving a
+                        // conversation in from elsewhere in the sidebar.
+                        let teams = SidebarOrdering.teams(state.conversations, groups: state.sidebarGroups)
+                        if !teams.isEmpty {
+                            ForEach(teams, id: \.group.id) { team in
+                                sidebarTeamSection(team.group, members: team.members)
+                            }
+                            .onMove { indices, destination in
+                                var ids = teams.map(\.group.id)
+                                ids.move(fromOffsets: indices, toOffset: destination)
+                                state.reorderSidebarGroups(ids)
                             }
                         }
 
@@ -209,6 +247,32 @@ struct ChatView: View {
                 .task(id: sidebarQuery) {
                     await runSidebarSearch()
                 }
+                // #960: name a new team up front.
+                .alert("New Team", isPresented: $showNewTeamPrompt) {
+                    TextField("Team name", text: $newTeamName)
+                    Button("Cancel", role: .cancel) {}
+                    Button("Create") { state.createSidebarGroup(name: newTeamName) }
+                }
+                // #960: rename, in place.
+                .alert("Rename Team", isPresented: Binding(get: { renamingTeam != nil }, set: { if !$0 { renamingTeam = nil } })) {
+                    TextField("Team name", text: $renamingTeamText)
+                    Button("Cancel", role: .cancel) {}
+                    Button("Rename") {
+                        if let team = renamingTeam { state.renameSidebarGroup(team.id, to: renamingTeamText) }
+                    }
+                }
+                // #960: "delete the team" is non-destructive — it ungroups members, never deletes
+                // a conversation or a session, which the confirmation says plainly.
+                .confirmationDialog("Delete \"\(deletingTeam?.name ?? "")\"?",
+                                    isPresented: Binding(get: { deletingTeam != nil }, set: { if !$0 { deletingTeam = nil } }),
+                                    titleVisibility: .visible) {
+                    Button("Delete Team", role: .destructive) {
+                        if let team = deletingTeam { state.deleteSidebarGroup(team.id) }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("Its sessions are not deleted — they move back to the flat conversation list, and age out again normally if left idle.")
+                }
 
                 // #465: the button starts a plain conversation, as before; the menu beside it starts
                 // one on an agent profile, read when it opens so a new or edited file shows at once.
@@ -244,6 +308,14 @@ struct ChatView: View {
                     .fixedSize()
                     .help("New conversation on an agent profile")
                     .accessibilityLabel("New conversation on an agent profile")
+                    // #960: a new persistent team, named up front.
+                    Button(action: { newTeamName = ""; showNewTeamPrompt = true }) {
+                        Image(systemName: "folder.badge.plus")
+                            .font(.title3)
+                    }
+                    .buttonStyle(.plain)
+                    .help("New team")
+                    .accessibilityLabel("New team")
                 }
                 .padding()
             }
@@ -757,6 +829,55 @@ struct ChatView: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(state.inboxBadgeCount > 0 ? "Inbox, \(state.inboxBadgeCount) open" : "Inbox")
         .accessibilityAddTraits(.isButton)
+    }
+
+    /// #960: one persistent team's sidebar section. Its own `.onMove` reorders members within
+    /// the team; `.dropDestination` accepts a conversation id dragged in from the ungrouped list
+    /// or another team. The label carries the "+" (new session in this team) and a context menu
+    /// (Rename, Delete Team) rather than overloading the label's own tap, which keeps toggling
+    /// the disclosure the way "Archived"'s label always has.
+    @ViewBuilder
+    private func sidebarTeamSection(_ group: SidebarGroup, members: [Conversation]) -> some View {
+        DisclosureGroup(isExpanded: Binding(
+            get: { !collapsedTeams.contains(group.id) },
+            set: { expanded in
+                if expanded { collapsedTeams.remove(group.id) } else { collapsedTeams.insert(group.id) }
+            }
+        )) {
+            ForEach(members) { conv in
+                conversationRow(conv)
+                    .draggable(SidebarDragConversationId(id: conv.id))
+            }
+            .onMove { indices, destination in
+                var ids = members.map(\.id)
+                ids.move(fromOffsets: indices, toOffset: destination)
+                state.reorderConversations(ids, within: group.id)
+            }
+        } label: {
+            HStack {
+                Text(group.name).font(.caption.weight(.bold)).foregroundColor(.secondary)
+                Spacer()
+                Button {
+                    let newId = state.createNewConversation()
+                    state.moveConversation(newId, toGroup: group.id)
+                } label: {
+                    Image(systemName: "plus.circle")
+                }
+                .buttonStyle(.plain)
+                .help("New session in \(group.name)")
+            }
+            .contextMenu {
+                Button("Rename Team…") {
+                    renamingTeam = group
+                    renamingTeamText = group.name
+                }
+                Button("Delete Team", role: .destructive) { deletingTeam = group }
+            }
+        }
+        .dropDestination(for: SidebarDragConversationId.self) { items, _ in
+            for item in items { state.moveConversation(item.id, toGroup: group.id) }
+            return true
+        }
     }
 
     /// Shared row body for both the Conversations and Archived sections, so archiving a

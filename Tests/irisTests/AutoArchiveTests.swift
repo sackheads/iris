@@ -142,6 +142,22 @@ struct AutoArchiveTests {
         #expect(conv(app, id)?.isArchived == false)
     }
 
+    @Test("#960: a team member never ages out, however idle; the same session un-grouped ages out again")
+    func teamMemberNeverAgesOut() throws {
+        let id = UUID()
+        let app = appWithIdleSession(id)
+        let groupId = try #require(app.createSidebarGroup(name: "overseer team"))
+        app.moveConversation(id, toGroup: groupId)
+        setTouched(app, id, stale)
+        #expect(app.sweepIdleSessions(days: Self.days, now: now).isEmpty, "a grouped member must not be swept")
+        #expect(conv(app, id)?.isArchived == false)
+
+        // Deleting the team ungroups it, and it becomes a sweep candidate again.
+        app.deleteSidebarGroup(groupId)
+        #expect(conv(app, id)?.sidebarGroupId == nil)
+        #expect(app.sweepIdleSessions(days: Self.days, now: now) == [id])
+    }
+
     @Test("a role holder is kept")
     func roleKept() {
         let id = UUID()

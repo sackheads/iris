@@ -510,6 +510,13 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// so every existing conversation resolves as before.
     var accessProfileId: String?
 
+    /// #960: the persistent team this conversation belongs to, or nil (ungrouped, today's
+    /// behavior). Exactly one group at a time. Never set for a pinned conversation. Set only by
+    /// the person (dragging into a group, or the group's "+"); never by a tool. A member is
+    /// exempt from the idle auto-archive sweep (`AppState.isIdleSessionCandidate`) for as long as
+    /// this is non-nil — a group never ages a member out on its own.
+    var sidebarGroupId: UUID?
+
     init(id: UUID = UUID(), title: String, messages: [ChatMessage] = [], workspacePath: String? = nil, history: [Content] = [], tokenUsage: TokenUsage = TokenUsage(), activeGoal: String? = nil, messageCountSinceReflection: Int = 0, goalContract: GoalContract? = nil) {
         self.id = id
         self.title = title
@@ -523,7 +530,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, hasUntrustedToolOutput, outboundAllowedTools, jobOutboundExemptions, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier, lastTouchedAt, archivedAutomaticallyAt, inSessions, additionalRoots, vibecopGuidance, accessProfileId, hasGuestInput
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, hasUntrustedToolOutput, outboundAllowedTools, jobOutboundExemptions, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier, lastTouchedAt, archivedAutomaticallyAt, inSessions, additionalRoots, vibecopGuidance, accessProfileId, hasGuestInput, sidebarGroupId
     }
 
     init(from decoder: Decoder) throws {
@@ -583,6 +590,8 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         // Invariant 1: absent before #974. Absent means "no persisted profile", NOT owner — the
         // resolver (not this decode) is what turns that into owner, and only for .main.
         accessProfileId = try container.decodeIfPresent(String.self, forKey: .accessProfileId)
+        // Invariant 1: absent before #960. Absent means ungrouped, the correct default.
+        sidebarGroupId = try container.decodeIfPresent(UUID.self, forKey: .sidebarGroupId)
         // Invariant 1: a conversation persisted before this ruling has no such key, and absent
         // means "no turn here ever started without the owner present", the correct default.
         hasUnattendedInput = try container.decodeIfPresent(Bool.self, forKey: .hasUnattendedInput) ?? false
@@ -744,6 +753,10 @@ class AppState {
         // assigned only when the marks differ, so a write that changes no wait re-renders no row.
         didSet { recomputeNeedsHuman() }
     }
+    /// #960: persistent sidebar teams, lowest `position` first. Loaded once at launch alongside
+    /// `conversations`; every mutation (`createSidebarGroup`, `renameSidebarGroup`,
+    /// `reorderSidebarGroups`, `deleteSidebarGroup`) writes through to the store in the same call.
+    var sidebarGroups: [SidebarGroup] = []
     /// The visible conversations waiting on the person, with what on (#466): see `NeedsHuman`.
     /// Assigned only when it changes, on the main actor, from `conversations`, `pendingApprovals`
     /// and `ledgerAttention`. A streamed token changes none of them (#583).
@@ -3791,8 +3804,12 @@ class AppState {
     }
 
     /// A session at all, and nothing about it that makes the sweep's archiving its business.
+    /// #960: a team's member never ages out on its own — `sidebarGroupId` is set only by the
+    /// person, and a group persists until explicitly retired (archiving a member) or deleted
+    /// (which ungroups the rest, making them sweep candidates again); the sweep itself must never
+    /// be the thing that moves a member out of its team.
     private static func isIdleSessionCandidate(_ c: Conversation) -> Bool {
-        (c.inSessions || c.sessionCard != nil || c.role != nil) && c.loop == nil
+        (c.inSessions || c.sessionCard != nil || c.role != nil) && c.loop == nil && c.sidebarGroupId == nil
     }
 
     private func archiveIdle(_ id: UUID, now: Date, inExchange: Set<UUID>, jobBound: Set<UUID>) -> Bool {
@@ -3803,6 +3820,95 @@ class AppState {
         conversations[idx].archivedAutomaticallyAt = now
         markChanged(id, .metadata)
         return true
+    }
+
+    // MARK: Sidebar teams (#960)
+
+    /// Creates a persistent team at the end of the group list and returns its id. An empty or
+    /// all-whitespace name creates nothing.
+    @discardableResult
+    func createSidebarGroup(name: String) -> UUID? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let position = (sidebarGroups.map(\.position).max() ?? -1) + 1
+        let group = SidebarGroup(id: UUID(), name: trimmed, position: position)
+        sidebarGroups.append(group)
+        try? store.upsertSidebarGroup(group)
+        return group.id
+    }
+
+    /// An empty or all-whitespace name leaves the group's name unchanged.
+    func renameSidebarGroup(_ id: UUID, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let idx = sidebarGroups.firstIndex(where: { $0.id == id }) else { return }
+        sidebarGroups[idx].name = trimmed
+        try? store.upsertSidebarGroup(sidebarGroups[idx])
+    }
+
+    /// "Delete the team" (#960, Brian's wording): non-destructive. Ungroups every member back to
+    /// the flat sidebar list — never deletes a conversation or a session — and they become idle
+    /// auto-archive candidates again from this point on, the same as any other ungrouped session.
+    func deleteSidebarGroup(_ id: UUID) {
+        guard sidebarGroups.contains(where: { $0.id == id }) else { return }
+        for idx in conversations.indices where conversations[idx].sidebarGroupId == id {
+            conversations[idx].sidebarGroupId = nil
+            markChanged(conversations[idx].id, .metadata)
+        }
+        sidebarGroups.removeAll { $0.id == id }
+        try? store.deleteSidebarGroup(id: id)
+    }
+
+    /// Drag-reorders the teams themselves (Brian's override of the original proposal: "everyone
+    /// expects this"). `order` is the complete new ordering of every group's id; any id this
+    /// build doesn't recognize is ignored, and any group missing from `order` keeps its prior
+    /// relative position, appended at the end — defensive, since the UI is expected to always
+    /// pass the whole list.
+    func reorderSidebarGroups(_ order: [UUID]) {
+        var byId = Dictionary(uniqueKeysWithValues: sidebarGroups.map { ($0.id, $0) })
+        var reordered: [SidebarGroup] = []
+        for id in order {
+            if let group = byId.removeValue(forKey: id) { reordered.append(group) }
+        }
+        reordered.append(contentsOf: sidebarGroups.filter { byId[$0.id] != nil })
+        for index in reordered.indices { reordered[index].position = index }
+        sidebarGroups = reordered
+        for group in reordered { try? store.upsertSidebarGroup(group) }
+    }
+
+    /// Moves a conversation into a team (the drag target, or a group's "+" flow passing the new
+    /// conversation's id), or back out to the flat ungrouped list (`groupId: nil`). A pinned
+    /// conversation is never grouped — it stays always-first, as today.
+    func moveConversation(_ id: UUID, toGroup groupId: UUID?) {
+        guard let idx = conversations.firstIndex(where: { $0.id == id }), !conversations[idx].isPinned else { return }
+        if let groupId {
+            guard sidebarGroups.contains(where: { $0.id == groupId }) else { return }
+        }
+        conversations[idx].sidebarGroupId = groupId
+        markChanged(id, .metadata)
+    }
+
+    /// Drag-reorders conversations within one sidebar bucket (a team, or the ungrouped list —
+    /// `groupId: nil`). `order` must be exactly that bucket's current members (any id outside the
+    /// bucket, or a partial list, is refused outright rather than guessed at). Reinserts the whole
+    /// reordered run at the position its first member held, so everything outside the bucket keeps
+    /// its own relative order.
+    func reorderConversations(_ order: [UUID], within groupId: UUID?) {
+        let bucket = conversations.filter { $0.sidebarGroupId == groupId && !$0.isPinned }
+        guard Set(order) == Set(bucket.map(\.id)), order.count == bucket.count else { return }
+        let byId = Dictionary(uniqueKeysWithValues: bucket.map { ($0.id, $0) })
+        let reordered = order.compactMap { byId[$0] }
+        let targetIds = Set(order)
+        var result: [Conversation] = []
+        var spliced = false
+        for c in conversations {
+            if targetIds.contains(c.id) {
+                if !spliced { result.append(contentsOf: reordered); spliced = true }
+            } else {
+                result.append(c)
+            }
+        }
+        conversations = result
+        try? store.reorderConversations(order)
     }
 
     func start() {
@@ -6154,6 +6260,7 @@ class AppState {
         do {
             let result = try store.loadAll()
             pendingContextWrites = (try? store.loadPendingWrites()) ?? []
+            sidebarGroups = (try? store.loadSidebarGroups()) ?? []
             loadedSkippedRows = result.skipped
             loadedRepairFailed = result.repairFailed
             let (loaded, roleNormalizationChanged) = Self.sanitizeLoaded(result.conversations)
