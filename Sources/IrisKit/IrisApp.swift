@@ -180,6 +180,15 @@ struct IrisApp: App {
         }
         .defaultSize(width: RunLogView.defaultWidth, height: RunLogView.defaultHeight)
 
+        // #988: the global cross-session view, Window-menu only (not the toolbar) — the
+        // "firehose" surface for when the person actually wants to see everything running
+        // everywhere, grouped by owning session, rather than the per-session strip's default.
+        Window("All Running Tasks", id: "allRunningTasks") {
+            GatedContent(gate: LaunchGate.shared) {
+                AllRunningTasksView(state: AppState.shared)
+            }
+        }
+
         MenuBarExtra {
             GatedStatusMenu(gate: LaunchGate.shared)
         } label: {

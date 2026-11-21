@@ -569,3 +569,76 @@ struct ActivityStripToggleTests {
         #expect(!ActivityStripView.idleNoteRequest(false, mainIsIdle: true))
     }
 }
+
+/// #988: the global cross-session view's grouping.
+@Suite("RunGroup.groupedByOwner (#988)")
+struct RunGroupTests {
+    private func run(_ kind: ActivitySummary.Kind, owner: UUID?) -> ActivitySummary {
+        ActivitySummary(id: UUID(), kind: kind, role: "r", owner: owner, startTime: Date(), phase: .thinking, lastActivity: nil)
+    }
+
+    @Test("groups by owner, sorted by title, with the main kind excluded")
+    func groupsByOwnerSorted() {
+        let alice = UUID(), bob = UUID()
+        let runs = [run(.subagent, owner: bob), run(.main, owner: nil), run(.evaluator, owner: alice), run(.subagent, owner: alice)]
+        let groups = RunGroup.groupedByOwner(runs, titleForOwner: { $0 == alice ? "Alice" : "Bob" })
+        #expect(groups.map(\.title) == ["Alice", "Bob"])
+        #expect(groups[0].runs.count == 2)
+        #expect(groups[1].runs.count == 1)
+        #expect(groups.flatMap(\.runs).allSatisfy { $0.kind != .main })
+    }
+
+    @Test("an ownerless run (a background job) lands in a trailing Jobs group")
+    func jobsGroupTrailing() {
+        let alice = UUID()
+        let runs = [run(.job, owner: nil), run(.subagent, owner: alice)]
+        let groups = RunGroup.groupedByOwner(runs, titleForOwner: { _ in "Alice" })
+        #expect(groups.map(\.id) == [alice, nil])
+        #expect(groups.last?.title == "Jobs")
+    }
+
+    @Test("no ownerless runs means no Jobs group at all")
+    func noJobsGroupWhenEmpty() {
+        let alice = UUID()
+        let groups = RunGroup.groupedByOwner([run(.subagent, owner: alice)], titleForOwner: { _ in "Alice" })
+        #expect(!groups.contains { $0.id == nil })
+    }
+
+    @Test("an owner whose conversation no longer resolves still gets a group, with a placeholder title")
+    func unresolvedOwnerStillGrouped() {
+        let gone = UUID()
+        let groups = RunGroup.groupedByOwner([run(.subagent, owner: gone)], titleForOwner: { _ in nil })
+        #expect(groups.map(\.title) == ["Untitled session"])
+    }
+
+    @Test("no runs at all means no groups")
+    func empty() {
+        #expect(RunGroup.groupedByOwner([], titleForOwner: { _ in nil }).isEmpty)
+    }
+}
+
+/// #988: `ActivityRowView`'s `!isMain` lookup must read live from `state.stripRuns` on every
+/// render, not a value captured once — the #223/#224 regression a value-parameter version would
+/// have reintroduced. Exercised at the `AppState` level: a mutation to `stripRuns` must be visible
+/// through the exact lookup path the view uses, proving there is no stale snapshot anywhere
+/// between `updateRunPhase` and what a re-render of the row would read.
+@MainActor
+@Suite("ActivityRowView's non-main lookup stays live (#988)")
+struct ActivityRowLiveLookupTests {
+    @Test("the row's lookup source (stripRuns) reflects a phase mutation immediately, with no caching in between")
+    func lookupReflectsMutation() {
+        let app = AppState(store: try! ConversationStore.inMemory(), tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        let id = UUID()
+        app.registerSubagent(id: id, role: "engineer")
+        // What ActivityRowView's body does for a non-main row: state.stripRuns.first(where:).
+        let before = app.stripRuns.first { $0.id == id }
+        guard case .thinking = before?.phase else { Issue.record("expected the fresh registration's default phase"); return }
+        app.updateRunPhase(id, .executing(tool: "run_command", detail: "swift build"))
+        let after = app.stripRuns.first { $0.id == id }
+        guard case .executing(let tool, _) = after?.phase else {
+            Issue.record("the same lookup path read a stale phase after the mutation")
+            return
+        }
+        #expect(tool == "run_command")
+    }
+}

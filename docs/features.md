@@ -161,7 +161,14 @@ A goal's criteria can be grouped into an ordered checkpoint ladder, stopping the
 
 ### Activity Strip
 
-A compact activity strip below the composer, scoped to the session you have focused (#986) — one line per running (or just-finished) run (the conversation you have open, plus any subagent or evaluator *it* spawned) with its role, current activity (thinking, responding, or the tool it's running), elapsed time, and token usage. A background job never appears here: it has no interactive parent, so it belongs only to the global "all running tasks" view (#988) once that ships. The toolbar "cpu" badge toggles it between a single line for your conversation and the full list, or, while no subagent or evaluator owned by this session exists (the strip is otherwise absent), shows and hides a one-line "No active runs" note (#982); clicking a subagent or evaluator row opens a read-only transcript of that run's conversation, and a running subagent's row has a Stop button that ends just that subagent: its result comes back `cancelled` to the conversation that delegated it, which is woken to re-plan without it. Finished runs linger briefly before aging out. Subagents dynamically self-assign the Easy, Medium, or Hard model tiers based on task complexity.
+A compact activity strip below the composer, scoped to the session you have focused (#986) — one line per running (or just-finished) run (the conversation you have open, plus any subagent or evaluator *it* spawned) with its role, current activity (thinking, responding, or the tool it's running), elapsed time, and token usage. A background job never appears here: it has no interactive parent, so it belongs only to the global "All Running Tasks" window (below). The toolbar "cpu" badge toggles it between a single line for your conversation and the full list, or, while no subagent or evaluator owned by this session exists (the strip is otherwise absent), shows and hides a one-line "No active runs" note (#982); clicking a subagent or evaluator row opens a read-only transcript of that run's conversation, and a running subagent's row has a Stop button that ends just that subagent: its result comes back `cancelled` to the conversation that delegated it, which is woken to re-plan without it. Finished runs linger briefly before aging out. Subagents dynamically self-assign the Easy, Medium, or Hard model tiers based on task complexity.
+
+**All Running Tasks** (#988). The activity strip's firehose: every run across every session —
+subagents, evaluators and standalone background jobs — grouped by owning session, with a trailing
+group for jobs (which have no interactive parent). Low-prominence by design: it's a separate
+Window-menu item, not a toolbar button, for when you actually want to see everything at once rather
+than just the session in front of you. Clicking a row opens the same read-only transcript the
+activity strip's rows do.
 
 ### Markdown Export & Utilities
 

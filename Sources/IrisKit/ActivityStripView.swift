@@ -204,14 +204,20 @@ private struct CollapsedSummaryRow: View {
 /// One row. Takes `sessionId`, not a `ActivitySummary` value, and reads the live summary + token
 /// count from `state` inside `body` — the #223/#224 lesson (`Conversation ==` compares by id
 /// only, so a struct value captured at construction time goes stale under SwiftUI's diffing).
-private struct ActivityRowView: View {
+/// Internal rather than file-private since #988: the global cross-session view reuses this row.
+/// The main row (`isMain`) is looked up through `visibleRuns` (the only place the synthesised main
+/// summary lives); every other row through `stripRuns` directly, which holds every non-main run
+/// process-wide — `visibleRuns` only has the ones owned by whatever conversation is focused, which
+/// is exactly wrong for a view that isn't scoped to one.
+struct ActivityRowView: View {
     var state: AppState
     let sessionId: UUID
     let isMain: Bool
     var onTap: () -> Void
 
     var body: some View {
-        if let session = state.visibleRuns.first(where: { $0.id == sessionId }) {
+        if let session = isMain ? state.visibleRuns.first(where: { $0.id == sessionId })
+                                 : state.stripRuns.first(where: { $0.id == sessionId }) {
             let tokens = state.conversations.first(where: { $0.id == sessionId })?.tokenUsage.totalTokenCount ?? 0
             HStack(spacing: 8) {
                 statusGlyph(session.phase)
