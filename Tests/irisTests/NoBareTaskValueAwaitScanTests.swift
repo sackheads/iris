@@ -15,6 +15,10 @@ struct NoBareTaskValueAwaitScanTests {
         "JobRetryTests.swift: task",
         // A watcher task: the test polls its result with a bounded yield loop and never awaits it.
         "SessionStatusTests.swift: ask",
+        // Inside `bounded(_:_:)`, which returns at its deadline whatever the task does.
+        "ConversationRotationTests.swift: task",
+        // The bounded helper itself: its wait is raced against the deadline.
+        "BoundedWait.swift: task",
         // An actor property, not a task.
         "LLMRetryTests.swift: counter",
         // Opt-in (`IRIS_REAL_VM`), skipped by default and in CI; its driver is a child process wrapper.
@@ -22,7 +26,7 @@ struct NoBareTaskValueAwaitScanTests {
     ]
 
     static func offences(in text: String, file: String) -> [String] {
-        let pattern = try! NSRegularExpression(pattern: #"await\s+([A-Za-z_][A-Za-z0-9_]*)\.value\b"#)
+        let pattern = try! NSRegularExpression(pattern: #"await\s+([A-Za-z_][A-Za-z0-9_]*)\.value\b(?!\()"#)
         var out: [String] = []
         for (n, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
