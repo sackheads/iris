@@ -2619,8 +2619,20 @@ class AppState {
     /// card goes to Iris: whatever the reply says stays in this conversation.
     static let profileReflectionPrompt = "System Event [Reflection Trigger]: It's time to consolidate what is worth keeping from this conversation. If you learned something durable, rewrite your profile memory file with `update_profile_memory` (the complete, condensed notes). If nothing needs updating, just reply 'No memory consolidation needed at this time.'"
 
+    /// #1286 (folded into #1263/#1289, the write side of the same guest/profile-memory boundary):
+    /// mirrors the OWNER automatic trigger's `!hasGuestInput` half -- a turn a guest's message
+    /// steered is not reflected into the profile's own memory, so that memory can never become a
+    /// vehicle for guest-planted content (#1263 then reads it back into the SAME profile's later
+    /// turns, which is exactly what makes stored guest content reachable rather than inert).
+    /// Checked here, not only upstream: the automatic trigger's own `shouldReflect` already has
+    /// `!hasGuestInput` before it ever calls this, but `/reflect` (asked for, and deliberately NOT
+    /// gated on `hasGuestInput` for the OWNER's own path, since the owner's ask runs regardless)
+    /// had no such check for the profile path -- a live gap this closes without touching that
+    /// owner-path behavior at all. Deliberately not `!isGuest` -- unlike the owner's reflection,
+    /// this one exists FOR bound sessions; excluding `isGuest` would disable it outright.
     func runProfileReflection(profileId: String, in convId: UUID) async {
-        guard await reflectionRoute(in: convId) == .profile(profileId) else { return }
+        guard await reflectionRoute(in: convId) == .profile(profileId),
+              conversations.first(where: { $0.id == convId })?.hasGuestInput != true else { return }
         await IrisEngine.$profileReflectionId.withValue(profileId) {
             await engine.processInput(Self.profileReflectionPrompt, source: "System", conversationId: convId)
         }
