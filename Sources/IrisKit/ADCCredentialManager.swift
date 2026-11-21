@@ -159,42 +159,26 @@ actor ADCCredentialManager {
         return nil
     }
     
-    private func runGCloud(path: String, args: [String]) async throws -> String? {
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: path)
-                process.arguments = args
-                
-                var env = ProcessInfo.processInfo.environment
-                let pathEnv = env["PATH"] ?? ""
-                env["PATH"] = "\(NSString(string: path).deletingLastPathComponent):/usr/local/bin:/usr/bin:/bin:\(pathEnv)"
-                process.environment = env
-                
-                let pipe = Pipe()
-                let errPipe = Pipe()
-                process.standardOutput = pipe
-                process.standardError = errPipe
-                
-                do {
-                    try process.run()
-                    process.waitUntilExit()
-                    
-                    if process.terminationStatus == 0 {
-                        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                        if let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !output.isEmpty {
-                            let lines = output.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-                            if let lastLine = lines.last, !lastLine.isEmpty {
-                                continuation.resume(returning: lastLine)
-                                return
-                            }
-                        }
-                    }
-                    continuation.resume(returning: nil)
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
+    /// How long a `gcloud` token or config read may take before its process group is killed (#1272). A
+    /// gcloud wedged on the network or a prompt used to hold a thread in `waitUntilExit` for good.
+    static let gcloudTimeoutSeconds = 60.0
+
+    /// The last output line of a `gcloud` run that exited 0, or nil if it failed, printed nothing, hit the
+    /// deadline or was cancelled (Stop). A spawn failure throws, as before. Runs under `ProcessGroupRunner`
+    /// so the deadline and a cancel kill the whole group (Invariant 4, #353, #364).
+    func runGCloud(path: String, args: [String], timeoutSeconds: Double = ADCCredentialManager.gcloudTimeoutSeconds) async throws -> String? {
+        var env = ProcessInfo.processInfo.environment
+        let pathEnv = env["PATH"] ?? ""
+        env["PATH"] = "\(NSString(string: path).deletingLastPathComponent):/usr/local/bin:/usr/bin:/bin:\(pathEnv)"
+        switch await ProcessGroupRunner.capture(executable: path, arguments: args, environment: env, timeoutSeconds: timeoutSeconds) {
+        case .failure(let error):
+            throw error
+        case .success(let output):
+            guard output.status == 0, !output.timedOut, !output.killed,
+                  let text = String(data: output.stdout, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !text.isEmpty else { return nil }
+            let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            return lines.last
         }
     }
 }
