@@ -24,7 +24,7 @@ struct GitDirHostWriteTests {
     /// The gate's answer for a `write_file` the grant already said yes to.
     private func write(_ path: String, _ t: Tree, _ app: AppState, _ cid: UUID) async -> Bool {
         await app.requestApproval(toolName: "write_file", details: path, args: ["path": .string(path)],
-                                  workspace: c(t.proj), conversationId: cid, grantedMount: t.grant.mounts[0])
+                                  workspace: c(t.proj), conversationId: cid, grantedMount: t.grant.mounts[0], isOwner: true)
     }
 
     @Test("each .git target is refused unattended, as a person's alone, though the grant covers it")
@@ -91,7 +91,7 @@ struct GitDirHostWriteTests {
         app.autoApproveTools = true    // a headless driver: approves what an attended turn would
         let cid = app.createNewConversation(isBackground: false, select: false)
         let ok = await app.requestApproval(toolName: "write_file", details: c(t.proj, ".git/config"), args: [:],
-                                           workspace: c(t.proj), conversationId: cid)
+                                           workspace: c(t.proj), conversationId: cid, isOwner: true)
         #expect(ok, "not a background conversation: today's flow, unchanged")
         #expect(app.takeBackgroundDenials(for: cid).isEmpty)
     }

@@ -1956,7 +1956,7 @@ struct JobToolsTests {
         // Sanity check the fixture: an ordinary (non-humanOnly) call with this rule and these exact
         // arguments really would be auto-allowed, so the test below is proving the gate bypasses
         // the allowlist on purpose — not merely that the rule failed to match for some other reason.
-        #expect(app.permissions.isAllowed(toolName: "schedule_job", details: expectedDetails, workspace: nil))
+        #expect(app.permissions.isAllowed(toolName: "schedule_job", details: expectedDetails, workspace: nil, isOwner: true))
 
         let (result, queued) = await runJobCreationCallThroughRealQueue(
             FunctionCall(name: "schedule_job", args: args, id: "c1"),

@@ -84,19 +84,20 @@ struct PermissionManager: Sendable {
     /// `isBackground` is the unattended caller: a job run, or any subagent descended from one.
     /// It narrows the `~/.iris` carve-out to reads, because nobody is watching what it writes.
     /// `isGuestOrigin` (#1141) is a turn a guest's message started or steered: no saved rule, exact or
-    /// prefix, applies to it. `isOwner` (#974 Task 9, R3) defaults true so every existing caller that
-    /// does not yet resolve a binding keeps today's behavior; a non-owner binding (a scoped subagent
-    /// or guest-steered profile, #1216's class — distinct from `isGuestOrigin`, which is about
-    /// provenance, not identity) loses the `~/.iris` carve-out below even when it is not guest-origin.
+    /// prefix, applies to it. `isOwner` (#974 Task 9, R3; #1270: required, not defaulted — a caller
+    /// that forgot to resolve a binding used to silently read as owner) is a non-owner binding (a
+    /// scoped subagent or guest-steered profile, #1216's class — distinct from `isGuestOrigin`, which
+    /// is about provenance, not identity) losing the `~/.iris` carve-out below even when it is not
+    /// guest-origin.
     func isAllowed(toolName: String, details: String, workspace: String?, isBackground: Bool = false, isGuestOrigin: Bool = false,
-                   isOwner: Bool = true) -> Bool {
+                   isOwner: Bool) -> Bool {
         match(toolName: toolName, details: details, workspace: workspace, isBackground: isBackground, isGuestOrigin: isGuestOrigin,
               isOwner: isOwner) != nil
     }
 
     /// `isAllowed`, saying which part of the allowlist let the call run (#599).
     func match(toolName: String, details: String, workspace: String?, isBackground: Bool = false, isGuestOrigin: Bool = false,
-               isOwner: Bool = true) -> AllowMatch? {
+               isOwner: Bool) -> AllowMatch? {
         let isWrite = (toolName == "write_file")
         // A write that grants permissions must not come from an auto-allow. `IrisPaths`
         // enumerates the directories that qualify (`config/`, `plugins/`) and resolves case and

@@ -104,7 +104,7 @@ struct AlwaysAllowSecretDetectionTests {
         state.resolveApproval(id: pending.id, .alwaysAllowGlobal)
         let source = try await value(of: askTask)
         #expect(source == .person, "the current call still ran, approved")
-        #expect(state.permissions.match(toolName: "run_command", details: details, workspace: nil) == nil,
+        #expect(state.permissions.match(toolName: "run_command", details: details, workspace: nil, isOwner: true) == nil,
                 "nothing was saved: a second identical call still prompts")
     }
 }

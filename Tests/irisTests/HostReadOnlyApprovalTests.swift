@@ -216,7 +216,7 @@ struct HostReadOnlyApprovalTests {
         let task = Task { @MainActor in
             await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": vibecop]) {
                 await state.requestApproval(toolName: "run_command", details: "touch x", workspace: nil,
-                                            conversationId: cid, vibecopEnabled: true)
+                                            conversationId: cid, vibecopEnabled: true, isOwner: true)
             }
         }
         for _ in 0..<400 where !state.pendingApprovals.contains(where: { $0.conversationId == cid }) {

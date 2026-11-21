@@ -38,7 +38,7 @@ struct VibecopUnderAutoApproveTests {
         let id = PerformanceProfiler.shared.beginTurn(label: "approve", source: "test")
         defer { PerformanceProfiler.shared.endTurn(id, totalMs: 0) }
         let ok = await PerformanceProfiler.$currentTurnID.withValue(id) {
-            await app.requestApproval(toolName: "run_command", details: "uname -sr", vibecopEnabled: vibecopEnabled)
+            await app.requestApproval(toolName: "run_command", details: "uname -sr", vibecopEnabled: vibecopEnabled, isOwner: true)
         }
         let spans = PerformanceProfiler.shared.activeProfileForTesting(id)?.spans["vibecop"]?.count ?? 0
         return (ok, spans)

@@ -29,7 +29,7 @@ struct VibecopOffApprovalTests {
                      answer: AppState.ApprovalResolution) async throws -> (queued: Bool, approved: Bool) {
         let call = Task { @MainActor in
             await state.requestApproval(toolName: tool, details: details, workspace: nil,
-                                        conversationId: cid, vibecopEnabled: false)
+                                        conversationId: cid, vibecopEnabled: false, isOwner: true)
         }
         var queued = false
         for _ in 0..<400 {
@@ -75,7 +75,7 @@ struct VibecopOffApprovalTests {
         state.permissions.allowGlobally(toolName: "run_command", details: command)
 
         let approved = await state.requestApproval(toolName: "run_command", details: command, workspace: nil,
-                                                   conversationId: cid, vibecopEnabled: false)
+                                                   conversationId: cid, vibecopEnabled: false, isOwner: true)
         #expect(approved)
         #expect(state.pendingApprovals.isEmpty)
     }
@@ -88,7 +88,7 @@ struct VibecopOffApprovalTests {
         let cid = state.createNewConversation(isBackground: false, select: false)
 
         let approved = await state.requestApproval(toolName: "run_command", details: "true --x", workspace: nil,
-                                                   conversationId: cid, vibecopEnabled: false)
+                                                   conversationId: cid, vibecopEnabled: false, isOwner: true)
         #expect(approved)
         #expect(state.pendingApprovals.isEmpty)
     }
@@ -102,7 +102,7 @@ struct VibecopOffApprovalTests {
 
         let approved = await state.requestApproval(toolName: "run_command", details: "rm -rf x",
                                                    args: ["command": .string("rm -rf x")], workspace: nil,
-                                                   conversationId: cid, vibecopEnabled: vibecopEnabled)
+                                                   conversationId: cid, vibecopEnabled: vibecopEnabled, isOwner: true)
         #expect(approved == false)
         #expect(state.pendingApprovals.isEmpty)
         #expect(state.takeBackgroundDenials(for: cid).count == 1)
@@ -157,7 +157,7 @@ struct VibecopOffApprovalTests {
         let waiting = Task { @MainActor in
             defer { finished.mutate { $0 = true } }
             return await state.requestApproval(toolName: "run_command", details: "true --x", workspace: nil,
-                                               conversationId: cid, callerRole: role, vibecopEnabled: false)
+                                               conversationId: cid, callerRole: role, vibecopEnabled: false, isOwner: true)
         }
         // A prompt from another conversation, which the cancellation must leave alone.
         let bystander = Task { @MainActor in

@@ -53,7 +53,7 @@ struct GateScriptAlwaysAllowTests {
         let details = "gate script: echo CHANGED \(UUID().uuidString)"
         let (_, approved) = try await ask(state, details, in: id, answer: .alwaysAllowGlobal)
         #expect(approved, "the person did approve this one")
-        #expect(!state.permissions.isAllowed(toolName: "run_command", details: details, workspace: nil),
+        #expect(!state.permissions.isAllowed(toolName: "run_command", details: details, workspace: nil, isOwner: true),
                 "and no standing rule matches the gate text as a host command")
     }
 
@@ -75,6 +75,6 @@ struct GateScriptAlwaysAllowTests {
         }
         #expect(offered == true)
         #expect(try await value(of: task))
-        #expect(state.permissions.isAllowed(toolName: "run_command", details: details, workspace: nil))
+        #expect(state.permissions.isAllowed(toolName: "run_command", details: details, workspace: nil, isOwner: true))
     }
 }

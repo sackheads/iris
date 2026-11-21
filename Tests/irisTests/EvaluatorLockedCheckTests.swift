@@ -69,7 +69,7 @@ struct EvaluatorLockedCheckTests {
                                                allowedCommands: [Self.check], vibecopEnabled: false,
                                                // the dispatcher's walk decision, on the spelling (#256)
                                                graderReadWalked: state.conversations.first { $0.id == cid }?.goalContract?
-                                                   .approvedReadComponents(of: ToolExecutor.resolvePath(details, cwd: workspace)) != nil)
+                                                   .approvedReadComponents(of: ToolExecutor.resolvePath(details, cwd: workspace)) != nil, isOwner: true)
         }
         var queued = false
         for _ in 0..<400 {
@@ -201,7 +201,7 @@ struct EvaluatorLockedCheckTests {
         let approved = await state.requestApproval(toolName: "run_command", details: Self.check,
                                                    workspace: proj(home).path, conversationId: cid,
                                                    callerRole: .evaluator, allowedCommands: [Self.check],
-                                                   vibecopEnabled: false)
+                                                   vibecopEnabled: false, isOwner: true)
         #expect(!approved)
         #expect(state.pendingApprovals.isEmpty)
         #expect(state.takeBackgroundDenials(for: cid).count == 1)
@@ -349,7 +349,7 @@ struct EvaluatorLockedCheckTests {
         let approved = await state.requestApproval(toolName: "read_file", details: inside.path,
                                                    workspace: proj(home).path, conversationId: cid,
                                                    callerRole: .evaluator, vibecopEnabled: false,
-                                                   graderReadWalked: true)
+                                                   graderReadWalked: true, isOwner: true)
         #expect(!approved)
         #expect(state.takeBackgroundDenials(for: cid).count == 1)
     }

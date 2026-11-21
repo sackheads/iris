@@ -131,7 +131,7 @@ struct AlwaysAllowEditResolveTests {
     }
 
     private func allowed(_ state: AppState, _ command: String) -> Bool {
-        state.permissions.isAllowed(toolName: "run_command", details: command, workspace: nil)
+        state.permissions.isAllowed(toolName: "run_command", details: command, workspace: nil, isOwner: true)
     }
 
     @Test("a narrowed rule is saved and matches only what it names")
@@ -240,8 +240,8 @@ struct AlwaysAllowEditResolveTests {
         let pending = try #require(state.pendingApprovals.first)
         state.resolveApproval(id: pending.id, .alwaysAllowProject, choice: .edited(["swift test --filter"]))
         _ = try await value(of: askTask)
-        #expect(state.permissions.isAllowed(toolName: "run_command", details: "swift test --filter Bar", workspace: ws.path))
-        #expect(!state.permissions.isAllowed(toolName: "run_command", details: "swift test --parallel", workspace: ws.path))
+        #expect(state.permissions.isAllowed(toolName: "run_command", details: "swift test --filter Bar", workspace: ws.path, isOwner: true))
+        #expect(!state.permissions.isAllowed(toolName: "run_command", details: "swift test --parallel", workspace: ws.path, isOwner: true))
     }
 }
 

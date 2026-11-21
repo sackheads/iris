@@ -169,7 +169,7 @@ struct PolicyStoreApprovalTests {
         let task = Task { @MainActor in
             let approved = await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": Approver()]) {
                 await state.requestApproval(toolName: "run_command", details: details, workspace: nil,
-                                            conversationId: cid, vibecopEnabled: true)
+                                            conversationId: cid, vibecopEnabled: true, isOwner: true)
             }
             done.value = true
             return approved

@@ -72,13 +72,13 @@ struct ToolApprovalTests {
         let paths = IrisPaths(root: root.appendingPathComponent("iris-home"))
         let permissions = PermissionManager(paths: paths)
         let command = "make test-\(UUID().uuidString)"
-        #expect(permissions.match(toolName: "run_command", details: command, workspace: nil) == nil)
+        #expect(permissions.match(toolName: "run_command", details: command, workspace: nil, isOwner: true) == nil)
         permissions.allowGlobally(toolName: "run_command", details: command)
-        #expect(permissions.match(toolName: "run_command", details: command, workspace: nil)
+        #expect(permissions.match(toolName: "run_command", details: command, workspace: nil, isOwner: true)
                 == AllowMatch(scope: .global, rule: PermissionRule(toolName: "run_command", details: command)))
-        #expect(permissions.isAllowed(toolName: "run_command", details: command, workspace: nil))
+        #expect(permissions.isAllowed(toolName: "run_command", details: command, workspace: nil, isOwner: true))
         let own = paths.root.appendingPathComponent("memory/notes.md").path
-        #expect(permissions.match(toolName: "read_file", details: own, workspace: nil) == AllowMatch(scope: .irisHome, rule: nil))
+        #expect(permissions.match(toolName: "read_file", details: own, workspace: nil, isOwner: true) == AllowMatch(scope: .irisHome, rule: nil))
     }
 
     // MARK: what the ladder returns

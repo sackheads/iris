@@ -5182,7 +5182,7 @@ class AppState {
                          inSandbox: Bool = false, callerRole: VibecopCallerRole = .agent,
                          allowedCommands: [String] = [], vibecopEnabled: Bool? = nil,
                          grantedMount: ContainerMount? = nil, humanOnly: Bool = false,
-                         graderReadWalked: Bool = false, isOwner: Bool = true) async -> Bool {
+                         graderReadWalked: Bool = false, isOwner: Bool) async -> Bool {
         await requestApprovalSource(toolName: toolName, details: details, args: args, workspace: workspace,
                                     conversationId: conversationId, origin: origin, inSandbox: inSandbox,
                                     callerRole: callerRole, allowedCommands: allowedCommands,

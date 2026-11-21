@@ -153,7 +153,7 @@ struct WorkspaceIrisApprovalTests {
         let task = Task { @MainActor in
             let approved = await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": Approver()]) {
                 await state.requestApproval(toolName: tool, details: details, workspace: workspace,
-                                            conversationId: cid, vibecopEnabled: true)
+                                            conversationId: cid, vibecopEnabled: true, isOwner: true)
             }
             done.value = true
             return approved
@@ -195,7 +195,7 @@ struct WorkspaceIrisApprovalTests {
         let task = Task { @MainActor in
             let approved = await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": Approver()]) {
                 await state.requestApproval(toolName: "write_file", details: target, workspace: ws,
-                                            conversationId: cid, vibecopEnabled: true)
+                                            conversationId: cid, vibecopEnabled: true, isOwner: true)
             }
             done.value = true
             return approved
@@ -239,11 +239,11 @@ struct WorkspaceIrisApprovalTests {
         defer { try? FileManager.default.removeItem(at: home); try? FileManager.default.removeItem(atPath: ws) }
         state.permissions.allowInProject(toolName: "run_command", details: "swift build", workspace: ws)
         #expect(state.pendingApprovals.isEmpty)
-        #expect(state.permissions.isAllowed(toolName: "run_command", details: "swift build", workspace: ws))
+        #expect(state.permissions.isAllowed(toolName: "run_command", details: "swift build", workspace: ws, isOwner: true))
         // Replace it by a symlink to a VM-writable copy: the rule no longer grants anything.
         let rules = ws + "/.iris/permissions.json"
         try FileManager.default.moveItem(atPath: rules, toPath: ws + "/copy.json")
         try FileManager.default.createSymbolicLink(atPath: rules, withDestinationPath: "../copy.json")
-        #expect(!state.permissions.isAllowed(toolName: "run_command", details: "swift build", workspace: ws))
+        #expect(!state.permissions.isAllowed(toolName: "run_command", details: "swift build", workspace: ws, isOwner: true))
     }
 }
