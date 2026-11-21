@@ -253,6 +253,10 @@ struct GuestRolesActivationTests {
         #expect(throws: (any Error).self) { try registry.setRoles([], forClientId: "dev-1") }
         keychain.simulateReadFailure(nil)
         #expect(ProviderGuestGrants.allowedRoles(clientId: "dev-1", registry: registry, store: store) == ["reviewer"], "the failed clear did not take reach away")
+        // The Keychain fallback alone would keep that answer true, so look at the store itself.
+        let identity = try #require(IdentityKey.providerGuest(clientId: "dev-1"))
+        guard case .found(let profile) = store.lookupMappedProfile(for: identity) else { Issue.record("the grant was not put back in the store"); return }
+        #expect(profile.peerRoles == ["reviewer"])
     }
 
     @Test("setRoles for a guest mapped to an operator's profile throws instead of reporting a success that changes nothing")
