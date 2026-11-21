@@ -505,11 +505,14 @@ actor IrisEngine {
     /// (`update_user_profile`), so reading it costs no less than writing it.
     /// `profileId` (#1263) is the conversation's own persisted `accessProfileId`, not derivable from
     /// `binding` alone (`AccessBinding` carries no id) — the caller fetches it the same way it
-    /// already fetches `workspacePath`/`additionalRoots`.
+    /// already fetches `workspacePath`/`additionalRoots`. `isGuestOriginTurn` (dev-3 review of
+    /// #1289) is likewise read by the caller through `AppState.isGuestOriginTurn`, the established
+    /// pattern (`AppState.swift`'s other call sites), not inferred here from `self.binding` -- a
+    /// `.main` engine's own binding never reflects a per-turn guest steer.
     private func assembledSystemPrompt(workspacePath: String?, additionalRoots: [String] = [], agentProfile: AgentProfile? = nil,
-                                       binding: AccessBinding, profileId: String?) async -> Content {
+                                       binding: AccessBinding, profileId: String?, isGuestOriginTurn: Bool) async -> Content {
         var composed = await composedSystemPrompt(workspacePath: workspacePath, additionalRoots: additionalRoots, agentProfile: agentProfile,
-                                                   binding: binding, profileId: profileId)
+                                                   binding: binding, profileId: profileId, isGuestOriginTurn: isGuestOriginTurn)
         // After the cached composition, never inside it: the date must not freeze in a cache entry.
         // Not for a guest: the line carries the owner's IANA time zone (#1066). #974 Task 13 (W1
         // review, dev-2/the planner): a non-owner binding gets the date in UTC instead -- the
@@ -530,7 +533,7 @@ actor IrisEngine {
     func setWallClockForTesting(_ clock: @escaping @Sendable () -> Date) { wallClock = clock }
 
     private func composedSystemPrompt(workspacePath: String?, additionalRoots: [String] = [], agentProfile: AgentProfile? = nil,
-                                      binding: AccessBinding, profileId: String?) async -> Content {
+                                      binding: AccessBinding, profileId: String?, isGuestOriginTurn: Bool) async -> Content {
         // #1066: a guest gets its own text and nothing of the owner's. First, ahead of every read of
         // SOUL.md, USER.md, AGENTS.md, the skills catalogue and the profile below.
         if principal == .mcpGuest {
@@ -549,8 +552,32 @@ actor IrisEngine {
         // profile narrow enough to write its own notes but not read them back could never close
         // the loop the feature exists for. Never for the owner (`binding.isOwner` already implies
         // no persisted profile id applies) and never without a valid id to scope the read to.
+        //
+        // dev-3 review of #1289 / planner's ruling (the stamped-non-owner-.main-turn pattern): a
+        // guest-steered turn on a PROFILE-BOUND `.main` conversation resolves `binding` (via
+        // `bindingForCall`) to a `.mcpGuest`-principal, non-owner binding whose `memoryRead` floor
+        // is fixed at exactly `.task` (`PrincipalFloor.floor(for: .mcpGuest)`) -- satisfying the
+        // tier check above even though this turn is a guest's, not the bound profile's own.
+        //
+        // Two checks, on purpose, guarding DIFFERENT upstream failures rather than one re-stated
+        // twice: `isGuestOriginTurn` is read directly from `AppState` by the caller (see
+        // `assembledSystemPrompt`'s doc comment) and is the INTENT-primary check -- it is what
+        // this gate is actually for, and it alone keeps working even if some future
+        // `bindingForCall` path stamped a `.main`-principal binding for a guest-origin turn (a
+        // `bindingForCall` bug). `binding.principal == .main` is the structural check -- it alone
+        // keeps working even if `AppState`'s own flag were ever wrong or unset for a turn that
+        // genuinely resolved to a guest-steered binding (a stamping bug). Today, with both sides
+        // correct, they are PROVABLY redundant: every guest-steered resolution branch inside
+        // `bindingForCall` (the stamp checks, its own `isGuestOriginTurn` fail-closed branch)
+        // returns a `.mcpGuest`-principal binding, so `isGuestOriginTurn == true` and
+        // `binding.principal == .main` can never co-occur through `bindingForCall` as it stands
+        // (confirmed by mutation-testing each check alone -- neither is independently pinned by a
+        // test, because no test can construct the divergence). If a future reader simplifies this
+        // gate, drop `binding.principal == .main`, never `isGuestOriginTurn` -- the latter is the
+        // one this gate exists for.
         let validProfileId = profileId.flatMap { AccessProfileStore.isValidProfileId($0) ? $0 : nil }
-        let includesProfileMemory = !binding.isOwner && binding.profile.memoryRead >= ProfileMemoryStore.minimumWriteTier && validProfileId != nil
+        let includesProfileMemory = !binding.isOwner && !isGuestOriginTurn && binding.principal == .main
+            && binding.profile.memoryRead >= ProfileMemoryStore.minimumWriteTier && validProfileId != nil
         let profileMemoryText = includesProfileMemory ? await guardedProfileMemoryText(profileId: validProfileId!) : nil
         let agentsText = await guardedAgentsMdText(workspacePath: workspacePath, additionalRoots: additionalRoots)
         let agentText = agentProfile.map { "# Agent Profile: \($0.name)\n" + $0.prompt }
@@ -3559,6 +3586,18 @@ actor IrisEngine {
         // id, so this is fetched alongside workspacePath/additionalRoots rather than derived from
         // `turnBinding` below.
         let turnProfileId = await MainActor.run { localState?.persistedAccessProfileId(for: conversationId) }
+        // dev-3 review of #1289 / planner's ruling: whether THIS turn is guest-origin, read the
+        // same way `bindingForCall` itself reads it (the established pattern at AppState.swift
+        // isGuestOriginTurn's other call sites), not inferred from `self.binding` -- a `.main`
+        // engine's own binding never reflects a per-turn steer. A profile-bound, guest-STEERED
+        // turn on this engine would otherwise satisfy the profile-memory read tier (the
+        // `.mcpGuest` floor fixes `memoryRead` at exactly `.task`) and hand the bound profile's
+        // reflected notes to the guest whose message is driving this turn.
+        let turnIsGuestOrigin = await MainActor.run {
+            guard let localState else { return false }
+            let root = localState.delegationRoot(of: conversationId)
+            return localState.isGuestOriginTurn(conversationId) || localState.isGuestOriginTurn(root)
+        }
         // #974 Task 13: this turn's resolved binding, not the engine's own -- a guest-steered
         // stamp or a profile-bound job run narrows what the assembled prompt and the cache key may
         // carry (below).
@@ -3571,7 +3610,7 @@ actor IrisEngine {
         // byte-stable for the provider's prompt cache (5a §0.2). #962's additionalRoots feed in
         // the same way workspacePath does.
         let currentSystemPrompt = await assembledSystemPrompt(workspacePath: workspacePath, additionalRoots: additionalRoots, agentProfile: agentProfile,
-                                                               binding: turnBinding, profileId: turnProfileId)
+                                                               binding: turnBinding, profileId: turnProfileId, isGuestOriginTurn: turnIsGuestOrigin)
         for notice in pendingGuardNotices {
             await pushToUI(role: .system, text: notice, conversationId: conversationId)
         }

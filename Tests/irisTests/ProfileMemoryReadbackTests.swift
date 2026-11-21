@@ -103,6 +103,42 @@ struct ProfileMemoryReadbackTests {
         #expect(!text.contains("# Profile Memory"))
     }
 
+    /// dev-3 review / planner's ruling (the stamped-non-owner-.main-turn pattern): a guest-steered
+    /// turn on a profile-bound `.main` conversation resolves `bindingForCall` to a
+    /// `.mcpGuest`-principal binding whose `memoryRead` floor is fixed at exactly `.task` --
+    /// satisfying the tier gate even though this turn is a guest's, not the bound profile's own.
+    /// Both stamps a real guest delivery sets together (`AppState.drainPendingUserMessages`/
+    /// `takePendingSteers`): `markGuestOriginTurn` (what the gate actually reads, via
+    /// `isGuestOriginTurn`) and `markGuestSteeredBinding` (what narrows `bindingForCall`'s answer
+    /// to a `.mcpGuest`-principal binding in the first place -- without it this test's turn would
+    /// resolve to the owner's own binding and prove nothing).
+    @Test("a guest-steered turn on a profile-bound conversation never sees the profile's own memory")
+    func guestSteeredTurnSeesNothing() async throws {
+        let h = try harness(profileId: "p1", memoryRead: 1, preexistingNote: "Alpha's own note.")
+        defer { h.tearDown() }
+        h.state.markGuestOriginTurn(h.source)
+        h.state.markGuestSteeredBinding(
+            AccessBinding(profile: AccessProfile(memoryRead: .task), principal: .mcpGuest, isOwner: false),
+            for: h.source)
+        await h.state.engine.processInput("hello from a guest", source: "UI", conversationId: h.source)
+        let text = systemText(try #require(h.client.requests.first))
+        #expect(!text.contains("Alpha's own note."))
+        #expect(!text.contains("# Profile Memory"))
+    }
+
+    /// The reverse direction (planner's ruling, both directions required): a profile-bound `.main`
+    /// turn that is NOT guest-origin still reads its own memory -- the gate above must not have
+    /// over-corrected into refusing the feature entirely for every non-owner binding.
+    @Test("a profile-bound turn that is NOT guest-origin still reads its own memory")
+    func nonGuestOriginProfileBoundTurnStillReadsItsMemory() async throws {
+        let h = try harness(profileId: "p1", memoryRead: 1, preexistingNote: "Alpha's own note.")
+        defer { h.tearDown() }
+        #expect(!h.state.isGuestOriginTurn(h.source))
+        await h.state.engine.processInput("hello", source: "UI", conversationId: h.source)
+        let text = systemText(try #require(h.client.requests.first))
+        #expect(text.contains("Alpha's own note."))
+    }
+
     @Test("a profile with no memory.md yet injects nothing, not an empty section")
     func noFileYetInjectsNothing() async throws {
         let h = try harness(profileId: "p1", memoryRead: 1)
