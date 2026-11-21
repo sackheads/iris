@@ -83,56 +83,32 @@ enum GCloudHelper {
         return parseEnabledServices(from: raw)
     }
     
-    /// Enables a single API. Returns true on success.  Runs off the calling actor.
+    /// How long a `gcloud` read may take, and how long enabling an API may (it provisions on Google's side),
+    /// before the process group is killed (#1272).
+    static let commandTimeoutSeconds = 60.0
+    static let enableTimeoutSeconds = 180.0
+
+    /// Enables a single API. Returns true on success.  Runs off the calling actor, under `ProcessGroupRunner`
+    /// so a hung `gcloud` is killed at the deadline or when the caller is cancelled, not waited on forever.
     @discardableResult
-    static func enableAPI(_ serviceName: String) async -> Bool {
-        guard let gcloudPath = resolvedGCloudPath else { return false }
-        return await withCheckedContinuation { continuation in
-            DispatchQueue.global().async {
-                let task = Process()
-                task.executableURL = URL(fileURLWithPath: gcloudPath)
-                task.arguments = ["services", "enable", serviceName, "--quiet"]
-                task.standardOutput = Pipe()
-                task.standardError = Pipe()
-                do {
-                    try task.run()
-                    task.waitUntilExit()
-                } catch {
-                    continuation.resume(returning: false)
-                    return
-                }
-                continuation.resume(returning: task.terminationStatus == 0)
-            }
-        }
+    static func enableAPI(_ serviceName: String, gcloudPath: String? = nil, timeoutSeconds: Double = enableTimeoutSeconds) async -> Bool {
+        guard let gcloudPath = gcloudPath ?? resolvedGCloudPath else { return false }
+        guard case .success(let output) = await ProcessGroupRunner.capture(
+            executable: gcloudPath, arguments: ["services", "enable", serviceName, "--quiet"],
+            environment: nil, timeoutSeconds: timeoutSeconds) else { return false }
+        return output.status == 0 && !output.timedOut && !output.killed
     }
-    
+
     // MARK: - Internal
-    
-    /// Runs a gcloud subcommand asynchronously on a background queue and returns its stdout.
-    private static func runAsync(_ args: String...) async -> String? {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global().async {
-                let result = run(args)
-                continuation.resume(returning: result)
-            }
-        }
-    }
-    
-    private static func run(_ args: [String]) -> String? {
-        guard let gcloudPath = resolvedGCloudPath else { return nil }
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: gcloudPath)
-        task.arguments = args
-        let pipe = Pipe(); task.standardOutput = pipe; task.standardError = Pipe()
-        do {
-            try task.run()
-            task.waitUntilExit()
-        } catch {
-            return nil
-        }
-        guard task.terminationStatus == 0 else { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return output?.isEmpty == true ? nil : output
+
+    /// Runs a gcloud subcommand and returns its trimmed stdout, or nil on failure, an empty output, the
+    /// deadline or a cancel.
+    static func runAsync(gcloudPath: String? = nil, timeoutSeconds: Double = commandTimeoutSeconds, _ args: String...) async -> String? {
+        guard let gcloudPath = gcloudPath ?? resolvedGCloudPath else { return nil }
+        guard case .success(let output) = await ProcessGroupRunner.capture(
+            executable: gcloudPath, arguments: args, environment: nil, timeoutSeconds: timeoutSeconds),
+              output.status == 0, !output.timedOut, !output.killed else { return nil }
+        let text = String(data: output.stdout, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text?.isEmpty == true ? nil : text
     }
 }

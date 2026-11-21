@@ -114,24 +114,30 @@ final class LoopbackHTTPListener: @unchecked Sendable {
         listener.newConnectionHandler = { [weak self] connection in
             self?.accept(connection)
         }
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let resumer = StartResumer(continuation)
-            listener.stateUpdateHandler = { [weak self] state in
-                switch state {
-                case .ready:
-                    self?.boundPort = listener.port?.rawValue
-                    resumer.resume()
-                case .failed(let error):
-                    resumer.resume(throwing: error)
-                case .cancelled:
-                    // stop() raced start(): resume rather than hang forever on a continuation
-                    // nothing will ever fulfill.
-                    resumer.resume(throwing: CancellationError())
-                default:
-                    break
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let resumer = StartResumer(continuation)
+                listener.stateUpdateHandler = { [weak self] state in
+                    switch state {
+                    case .ready:
+                        self?.boundPort = listener.port?.rawValue
+                        resumer.resume()
+                    case .failed(let error):
+                        resumer.resume(throwing: error)
+                    case .cancelled:
+                        // stop() raced start(): resume rather than hang forever on a continuation
+                        // nothing will ever fulfill.
+                        resumer.resume(throwing: CancellationError())
+                    default:
+                        break
+                    }
                 }
+                listener.start(queue: queue)
             }
-            listener.start(queue: queue)
+        } onCancel: {
+            // A cancelled start leaves no listener parked in `.waiting` (#1272): the `.cancelled` state
+            // below resumes the wait.
+            listener.cancel()
         }
     }
 

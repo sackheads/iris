@@ -2,12 +2,49 @@ import Foundation
 import Network
 import AppKit
 
-actor ContinuationState {
-    var isCalled = false
-    func setCalled() -> Bool {
-        if isCalled { return true }
-        isCalled = true
-        return false
+/// The one place the OAuth wait is resumed, once: by the code, an error, the timeout or a cancel. It
+/// also closes the listener on any ending, so a finished or cancelled wait leaves no port open.
+final class CodeWaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<String, Error>?
+    private var listener: NWListener?
+    private var done = false
+    private var cancelled = false
+
+    /// False when a cancel already landed: the continuation is resumed here with `CancellationError`.
+    func install(_ continuation: CheckedContinuation<String, Error>) -> Bool {
+        let early: Bool = lock.withLock {
+            if cancelled { done = true; return true }
+            self.continuation = continuation
+            return false
+        }
+        if early { continuation.resume(throwing: CancellationError()) }
+        return !early
+    }
+
+    func attach(_ listener: NWListener) {
+        let closeNow: Bool = lock.withLock {
+            if done { return true }
+            self.listener = listener
+            return false
+        }
+        if closeNow { listener.cancel() }
+    }
+
+    func finish(_ result: Result<String, Error>) {
+        let (continuation, listener): (CheckedContinuation<String, Error>?, NWListener?) = lock.withLock {
+            guard !done else { return (nil, nil) }
+            done = true
+            defer { self.continuation = nil; self.listener = nil }
+            return (self.continuation, self.listener)
+        }
+        listener?.cancel()
+        continuation?.resume(with: result)
+    }
+
+    func cancel() {
+        lock.withLock { cancelled = true }
+        finish(.failure(CancellationError()))
     }
 }
 
@@ -35,109 +72,94 @@ final class OAuthManager: @unchecked Sendable {
         try await exchangeCode(code)
     }
     
-    private func listenForCode() async throws -> String {
-        return try await withCheckedThrowingContinuation { continuation in
-            let continuationState = ContinuationState()
-            
-            do {
-                let parameters = NWParameters.tcp
-                let localEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .any)
-                parameters.requiredLocalEndpoint = localEndpoint
-                let listener = try NWListener(using: parameters)
-                let localScopes = self.scopes // capture safely
-                let csrfState = UUID().uuidString
-                
-                listener.stateUpdateHandler = { state in
-                    switch state {
-                    case .ready:
-                        guard let port = listener.port?.rawValue else { return }
-                        let redirectUri = "http://localhost:\(port)/callback"
-                        
-                        IrisDefaults.store.set(redirectUri, forKey: "OAUTH_REDIRECT_URI")
-                        
-                        var components = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")!
-                        components.queryItems = [
-                            URLQueryItem(name: "client_id", value: ConfigManager.shared.googleClientID),
-                            URLQueryItem(name: "redirect_uri", value: redirectUri),
-                            URLQueryItem(name: "response_type", value: "code"),
-                            URLQueryItem(name: "scope", value: localScopes.joined(separator: " ")),
-                            URLQueryItem(name: "access_type", value: "offline"),
-                            URLQueryItem(name: "prompt", value: "consent"),
-                            URLQueryItem(name: "state", value: csrfState)
-                        ]
-                        
-                        if let url = components.url {
-                            DispatchQueue.main.async {
-                                NSWorkspace.shared.open(url)
-                            }
+    /// What `listenForCode` does once the listener is up: remember where Google sends the browser back,
+    /// and open the consent page. Injected so a test opens no browser and writes no setting.
+    static let openInBrowser: @Sendable (_ redirectUri: String, _ authURL: URL) -> Void = { redirectUri, authURL in
+        IrisDefaults.store.set(redirectUri, forKey: "OAUTH_REDIRECT_URI")
+        DispatchQueue.main.async { NSWorkspace.shared.open(authURL) }
+    }
+
+    /// Waits for the browser's redirect on a loopback listener. Ends, whichever comes first, with the code,
+    /// a failure of the listener, the `timeout`, or the caller's cancellation (Stop): a continuation parked
+    /// on a callback that never comes ignores cancellation, so `CodeWaiter` resumes it from
+    /// `withTaskCancellationHandler` and closes the listener (#1272, #428).
+    func listenForCode(timeout: TimeInterval = 120,
+                       ready: @escaping @Sendable (_ redirectUri: String, _ authURL: URL) -> Void = OAuthManager.openInBrowser) async throws -> String {
+        let waiter = CodeWaiter()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                guard waiter.install(continuation) else { return }
+                do {
+                    let parameters = NWParameters.tcp
+                    let localEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .any)
+                    parameters.requiredLocalEndpoint = localEndpoint
+                    let listener = try NWListener(using: parameters)
+                    let localScopes = self.scopes // capture safely
+                    let csrfState = UUID().uuidString
+                    waiter.attach(listener)
+
+                    listener.stateUpdateHandler = { state in
+                        switch state {
+                        case .ready:
+                            guard let port = listener.port?.rawValue else { return }
+                            let redirectUri = "http://localhost:\(port)/callback"
+                            var components = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")!
+                            components.queryItems = [
+                                URLQueryItem(name: "client_id", value: ConfigManager.shared.googleClientID),
+                                URLQueryItem(name: "redirect_uri", value: redirectUri),
+                                URLQueryItem(name: "response_type", value: "code"),
+                                URLQueryItem(name: "scope", value: localScopes.joined(separator: " ")),
+                                URLQueryItem(name: "access_type", value: "offline"),
+                                URLQueryItem(name: "prompt", value: "consent"),
+                                URLQueryItem(name: "state", value: csrfState)
+                            ]
+                            if let url = components.url { ready(redirectUri, url) }
+                        case .failed(let error):
+                            waiter.finish(.failure(error))
+                        default:
+                            break
                         }
-                        
-                    case .failed(let error):
-                        Task {
-                            let alreadyCalled = await continuationState.setCalled()
-                            if !alreadyCalled {
-                                continuation.resume(throwing: error)
-                            }
-                        }
-                    default:
-                        break
                     }
-                }
-                
-                listener.newConnectionHandler = { connection in
-                    connection.start(queue: .main)
-                    connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { data, _, isComplete, error in
-                        if let data = data, let requestStr = String(data: data, encoding: .utf8) {
-                            
-                            guard let firstLine = requestStr.components(separatedBy: .newlines).first,
-                                  let urlPart = firstLine.components(separatedBy: " ").dropFirst().first,
-                                  let urlComps = URLComponents(string: urlPart),
-                                  let code = urlComps.queryItems?.first(where: { $0.name == "code" })?.value,
-                                  let state = urlComps.queryItems?.first(where: { $0.name == "state" })?.value,
-                                  state == csrfState else {
-                                connection.cancel()
-                                return
-                            }
-                            
-                            let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><head><style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;background:#f5f5f7;}</style></head><body><div style='background:white;padding:40px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.1);text-align:center;'><h2>Iris Connected! 🌈</h2><p>Authentication successful. You can close this tab and return to Iris.</p></div></body></html>"
-                            
-                            connection.send(content: response.data(using: .utf8), completion: .contentProcessed({ _ in
-                                connection.cancel()
-                                listener.cancel()
-                                Task {
-                                    let alreadyCalled = await continuationState.setCalled()
-                                    if !alreadyCalled {
-                                        continuation.resume(returning: code)
-                                    }
+
+                    listener.newConnectionHandler = { connection in
+                        connection.start(queue: .main)
+                        connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { data, _, isComplete, error in
+                            if let data = data, let requestStr = String(data: data, encoding: .utf8) {
+
+                                guard let firstLine = requestStr.components(separatedBy: .newlines).first,
+                                      let urlPart = firstLine.components(separatedBy: " ").dropFirst().first,
+                                      let urlComps = URLComponents(string: urlPart),
+                                      let code = urlComps.queryItems?.first(where: { $0.name == "code" })?.value,
+                                      let state = urlComps.queryItems?.first(where: { $0.name == "state" })?.value,
+                                      state == csrfState else {
+                                    connection.cancel()
+                                    return
                                 }
-                            }))
+
+                                let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><head><style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;background:#f5f5f7;}</style></head><body><div style='background:white;padding:40px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.1);text-align:center;'><h2>Iris Connected! 🌈</h2><p>Authentication successful. You can close this tab and return to Iris.</p></div></body></html>"
+
+                                connection.send(content: response.data(using: .utf8), completion: .contentProcessed({ _ in
+                                    connection.cancel()
+                                    waiter.finish(.success(code))
+                                }))
+                            }
                         }
                     }
-                }
-                
-                listener.start(queue: .main)
-                
-                DispatchQueue.main.asyncAfter(deadline: .now() + 120) {
-                    listener.cancel()
-                    Task {
-                        let alreadyCalled = await continuationState.setCalled()
-                        if !alreadyCalled {
-                            continuation.resume(throwing: NSError(domain: "OAuth", code: 408, userInfo: [NSLocalizedDescriptionKey: "Timeout waiting for auth code"]))
-                        }
+
+                    listener.start(queue: .main)
+
+                    DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
+                        waiter.finish(.failure(NSError(domain: "OAuth", code: 408, userInfo: [NSLocalizedDescriptionKey: "Timeout waiting for auth code"])))
                     }
-                }
-                
-            } catch {
-                Task {
-                    let alreadyCalled = await continuationState.setCalled()
-                    if !alreadyCalled {
-                        continuation.resume(throwing: error)
-                    }
+                } catch {
+                    waiter.finish(.failure(error))
                 }
             }
+        } onCancel: {
+            waiter.cancel()
         }
     }
-    
+
     private func exchangeCode(_ code: String) async throws {
         let clientId = ConfigManager.shared.googleClientID
         let clientSecret = ConfigManager.shared.googleClientSecret
