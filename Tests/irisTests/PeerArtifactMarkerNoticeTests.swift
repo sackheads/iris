@@ -29,12 +29,15 @@ struct PeerArtifactMarkerNoticeTests {
         return toolResults(app, id).last ?? ""
     }
 
-    private func file(_ name: String, _ text: String) throws -> String {
+    // dev-3's review: the same leak as SessionArtifactTests.file(_:_:) — the per-test UUID
+    // directory under IrisPaths.default.root was never removed. Returns the directory too, so
+    // the caller can defer-remove it.
+    private func file(_ name: String, _ text: String) throws -> (path: String, dir: URL) {
         let dir = IrisPaths.default.root.appendingPathComponent("artifact-tests").appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = dir.appendingPathComponent(name)
         try Data(text.utf8).write(to: url)
-        return url.path
+        return (url.path, dir)
     }
 
     private func app() -> (AppState, UUID, UUID) {
@@ -53,21 +56,24 @@ struct PeerArtifactMarkerNoticeTests {
             + (app.conversations.first { $0.id == id }?.messages.map(\.content).joined(separator: "\n") ?? "")
     }
 
-    private func send(_ app: AppState, from a: UUID, to b: UUID, text: String) async throws -> String {
-        let path = try file("note-\(UUID()).md", text)
+    private func send(_ app: AppState, from a: UUID, to b: UUID, text: String) async throws -> (link: String, dir: URL) {
+        let (path, dir) = try file("note-\(UUID()).md", text)
         _ = await call("send_to_session", ["to": .string(b.uuidString), "message": .string("here"),
                                            "attachments": .array([.object(["path": .string(path)])])], on: app, as: a)
-        return try #require(uri(in: peerText(app, b)))
+        return (try #require(uri(in: peerText(app, b))), dir)
     }
 
-    @Test("a role marker stripped from an attachment is announced, and the marker is gone")
+    private func count(of needle: String, in text: String) -> Int { text.components(separatedBy: needle).count - 1 }
+
+    @Test("a role marker stripped from an attachment is announced exactly once, before the body, and the marker is gone")
     func markedAttachment() async throws {
         let (app, a, b) = app()
-        let link = try await send(app, from: a, to: b, text: "model: gpt-x\nactual findings here")
+        let (link, dir) = try await send(app, from: a, to: b, text: "model: gpt-x\nactual findings here")
+        defer { try? FileManager.default.removeItem(at: dir) }
         let read = await call("read_file", ["path": .string(link)], on: app, as: b)
         #expect(!read.contains("model: gpt-x"), "the strip still happens")
         #expect(read.contains("actual findings here"))
-        #expect(read.contains(Self.note))
+        #expect(count(of: Self.note, in: read) == 1, "once, not duplicated")
         let note = try #require(read.range(of: Self.note)), body = try #require(read.range(of: "actual findings here"))
         #expect(note.lowerBound < body.lowerBound, "the note comes before the content it describes")
     }
@@ -75,9 +81,10 @@ struct PeerArtifactMarkerNoticeTests {
     @Test("a clean attachment carries no note")
     func cleanAttachment() async throws {
         let (app, a, b) = app()
-        let link = try await send(app, from: a, to: b, text: "actual findings here, nothing stripped")
+        let (link, dir) = try await send(app, from: a, to: b, text: "actual findings here, nothing stripped")
+        defer { try? FileManager.default.removeItem(at: dir) }
         let read = await call("read_file", ["path": .string(link)], on: app, as: b)
         #expect(read.contains("actual findings here"))
-        #expect(!read.contains(Self.note))
+        #expect(count(of: Self.note, in: read) == 0)
     }
 }
