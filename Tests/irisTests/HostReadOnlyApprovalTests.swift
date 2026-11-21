@@ -263,22 +263,22 @@ struct HostReadOnlyApprovalTests {
         let vibecop = Approver()
         let read = await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": vibecop]) {
             await state.requestApprovalSource(toolName: "run_command", details: "ls -la", workspace: nil,
-                                              conversationId: cid, vibecopEnabled: true)
+                                              conversationId: cid, vibecopEnabled: true, isOwner: true)
         }
         #expect(read == .vibecopRestricted(path: ["/bin", "/usr/bin"], reason: "routine"))
         let inVM = await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": vibecop]) {
             await state.requestApprovalSource(toolName: "run_command", details: "make", workspace: nil,
-                                              conversationId: cid, inSandbox: true, vibecopEnabled: true)
+                                              conversationId: cid, inSandbox: true, vibecopEnabled: true, isOwner: true)
         }
         #expect(inVM == .vibecop(reason: "routine"))
         let command = "make --allowed-\(UUID().uuidString)"
         state.permissions.allowGlobally(toolName: "run_command", details: command)
         let allowed = await state.requestApprovalSource(toolName: "run_command", details: command, workspace: nil,
-                                                        conversationId: cid, vibecopEnabled: true)
+                                                        conversationId: cid, vibecopEnabled: true, isOwner: true)
         #expect(allowed == .allowlist(AllowMatch(scope: .global, rule: PermissionRule(toolName: "run_command", details: command))))
         let task = Task { @MainActor in
             await state.requestApprovalSource(toolName: "run_command", details: "make", workspace: nil,
-                                              conversationId: cid, vibecopEnabled: false)
+                                              conversationId: cid, vibecopEnabled: false, isOwner: true)
         }
         for _ in 0..<400 where !state.pendingApprovals.contains(where: { $0.conversationId == cid }) {
             try? await Task.sleep(nanoseconds: 5_000_000)

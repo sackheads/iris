@@ -5043,7 +5043,7 @@ class AppState {
                          graderReadWalked: Bool = false, offersAlwaysAllow: Bool = true,
                          offersConversationAllow: Bool = false,
                          beforeToolFired: Bool = false,
-                         isOwner: Bool = true) async -> ApprovalSource? {
+                         isOwner: Bool) async -> ApprovalSource? {
         // #1066: a guest's session is invisible to the person, so a dialog for it would be
         // unattributable. Nothing in its two-tool floor needs an approval; if the floor ever grows,
         // this keeps the answer no, with no UI and no recorded blocked call.

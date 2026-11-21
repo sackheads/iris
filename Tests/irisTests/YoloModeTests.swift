@@ -104,7 +104,7 @@ struct YoloModeTests {
         let vibecop = ExplodingVibecop()
         let cmdSource = await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": vibecop]) {
             await state.requestApprovalSource(toolName: "run_command", details: "rm -rf build && make",
-                                              workspace: root.path, conversationId: cid, vibecopEnabled: true)
+                                              workspace: root.path, conversationId: cid, vibecopEnabled: true, isOwner: true)
         }
         #expect(cmdSource == .yolo)
         #expect(vibecop.calls == 0)
@@ -126,7 +126,7 @@ struct YoloModeTests {
         // Workspace .iris/ write (irisWrite, #617): still asks under YOLO.
         let irisFile = root.appendingPathComponent(".iris/vibecop.md").path
         async let irisWriteSource = state.requestApprovalSource(toolName: "write_file", details: irisFile,
-                                                                 workspace: root.path, conversationId: cid, vibecopEnabled: false)
+                                                                 workspace: root.path, conversationId: cid, vibecopEnabled: false, isOwner: true)
         for _ in 0..<40 where state.pendingApprovals.isEmpty {
             try? await Task.sleep(nanoseconds: 25_000_000)
         }
@@ -140,7 +140,7 @@ struct YoloModeTests {
 
         // Explicit humanOnly (e.g. job creation, outbound tool): still asks under YOLO.
         async let humanOnlySource = state.requestApprovalSource(toolName: "schedule_job", details: "name: test",
-                                                                  workspace: root.path, conversationId: cid, humanOnly: true)
+                                                                  workspace: root.path, conversationId: cid, humanOnly: true, isOwner: true)
         for _ in 0..<40 where state.pendingApprovals.isEmpty {
             try? await Task.sleep(nanoseconds: 25_000_000)
         }
@@ -164,7 +164,7 @@ struct YoloModeTests {
         let profilePath = root.appendingPathComponent("iris-home/profiles/evil.json").path
         async let policyWriteSource = state.requestApprovalSource(toolName: "run_command",
                                                                     details: "echo x > \(profilePath)",
-                                                                    workspace: root.path, conversationId: cid)
+                                                                    workspace: root.path, conversationId: cid, isOwner: true)
         for _ in 0..<40 where state.pendingApprovals.isEmpty {
             try? await Task.sleep(nanoseconds: 25_000_000)
         }
@@ -191,12 +191,12 @@ struct YoloModeTests {
         #expect(!state.isYoloMode(guest))
 
         let bgSource = await state.requestApprovalSource(toolName: "run_command", details: "ls",
-                                                         workspace: root.path, conversationId: bg)
+                                                         workspace: root.path, conversationId: bg, isOwner: true)
         #expect(bgSource == nil)
         #expect(state.takeBackgroundDenials(for: bg).count == 1)
 
         let guestSource = await state.requestApprovalSource(toolName: "run_command", details: "ls",
-                                                            workspace: root.path, conversationId: guest)
+                                                            workspace: root.path, conversationId: guest, isOwner: true)
         #expect(guestSource == nil)
     }
 
@@ -223,10 +223,10 @@ struct YoloModeTests {
         #expect(!state.isYoloMode(guest))
 
         let bgSource = await state.requestApprovalSource(toolName: "run_command", details: "ls",
-                                                         workspace: root.path, conversationId: bg)
+                                                         workspace: root.path, conversationId: bg, isOwner: true)
         #expect(bgSource == nil)
         let guestSource = await state.requestApprovalSource(toolName: "run_command", details: "ls",
-                                                            workspace: root.path, conversationId: guest)
+                                                            workspace: root.path, conversationId: guest, isOwner: true)
         #expect(guestSource == nil)
     }
 

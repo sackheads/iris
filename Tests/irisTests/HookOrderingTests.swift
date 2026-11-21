@@ -318,7 +318,7 @@ struct HookOrderingTests {
         let state = try app(f)
         let runId = state.createNewConversation(isBackground: true, select: false)
         let source = await state.requestApprovalSource(toolName: "run_command", details: "make it", args: ["command": .string("make it")],
-                                                       conversationId: runId, beforeToolFired: true)
+                                                       conversationId: runId, beforeToolFired: true, isOwner: true)
         #expect(source == nil, "nobody to ask: recorded for its card")
         #expect(state.firstBackgroundDenial(for: runId)?.hooksFired == true)
 

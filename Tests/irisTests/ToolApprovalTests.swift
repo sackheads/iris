@@ -90,7 +90,7 @@ struct ToolApprovalTests {
         let cid = state.createNewConversation(isBackground: false, select: false)
         let inVM = await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": Approver()]) {
             await state.requestApprovalSource(toolName: "run_command", details: "make", workspace: nil,
-                                              conversationId: cid, inSandbox: true, vibecopEnabled: true)
+                                              conversationId: cid, inSandbox: true, vibecopEnabled: true, isOwner: true)
         }
         #expect(inVM == .vibecop(reason: "routine build step"))
         #expect(ToolApproval(try #require(inVM)).line == "Approved by Vibecop: routine build step")
@@ -98,7 +98,7 @@ struct ToolApprovalTests {
         let command = "make ok-\(UUID().uuidString)"
         state.permissions.allowGlobally(toolName: "run_command", details: command)
         let ruled = try #require(await state.requestApprovalSource(toolName: "run_command", details: command,
-                                                                   workspace: nil, conversationId: cid, vibecopEnabled: false))
+                                                                   workspace: nil, conversationId: cid, vibecopEnabled: false, isOwner: true))
         #expect(ToolApproval(ruled).line == "Allowed by a rule in your global rules: run_command \(command)")
 
         // A granted job run's file tool: the grant's mount is the reason.
@@ -109,7 +109,7 @@ struct ToolApprovalTests {
         state.conversations[index].sandboxGrant = JobGrant(mounts: [ContainerMount(source: rw.path)], network: false)
         let granted = await state.requestApprovalSource(toolName: "write_file", details: rw.appendingPathComponent("a").path,
                                                         workspace: rw.path, conversationId: bid,
-                                                        grantedMount: ContainerMount(source: rw.path))
+                                                        grantedMount: ContainerMount(source: rw.path), isOwner: true)
         #expect(granted == .grant(mount: rw.path))
     }
 
@@ -121,7 +121,7 @@ struct ToolApprovalTests {
         let details = "schedule a job \(UUID().uuidString)"
         state.permissions.allowGlobally(toolName: "schedule_job", details: details)
         let source = await state.requestApprovalSource(toolName: "schedule_job", details: details, workspace: nil,
-                                                       conversationId: bid, humanOnly: true)
+                                                       conversationId: bid, humanOnly: true, isOwner: true)
         #expect(source == nil, "nobody is there to ask, and a rule does not stand in for them")
         #expect(state.takeBackgroundDenials(for: bid).count == 1, "the refusal is on the record")
     }
