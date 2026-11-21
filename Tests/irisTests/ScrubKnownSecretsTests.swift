@@ -168,6 +168,16 @@ struct ScrubKnownSecretsTests {
         #expect(cfg.knownSecretValues.isEmpty, "\(cfg.knownSecretValues)")
     }
 
+    @Test("a whole-item replace (the plugin installer's route) holds its values too, throwing and not")
+    func replaceHoldsValues() throws {
+        let keychain = freshKeychain()
+        let (cfg, teardown) = config(keychain)
+        defer { teardown() }
+        keychain.replaceSecrets(["API_TOKEN": "plugin-replace-aaaa1111"], service: KeychainManager.pluginService("acme"))
+        try keychain.replaceSecretsOrThrow(["API_TOKEN": "plugin-replace-bbbb2222"], service: KeychainManager.pluginService("acme"))
+        #expect(cfg.knownSecretValues.isSuperset(of: ["plugin-replace-aaaa1111", "plugin-replace-bbbb2222"]))
+    }
+
     @Test("a rotated value stays known: text that still carries the old one is scrubbed")
     func rotatedValueStaysKnown() {
         let keychain = freshKeychain()
