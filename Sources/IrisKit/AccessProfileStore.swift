@@ -41,7 +41,7 @@ final class AccessProfileStore: Sendable {
     /// this allowlist (empty, containing `/`, `\`, any `.`, a NUL, or a reserved name) is simply
     /// not a profile — `nil`, same as one that does not exist. The charset excludes `.` entirely,
     /// not just a leading one, so `..` can never appear anywhere in the id.
-    private static func isValidProfileId(_ id: String) -> Bool {
+    static func isValidProfileId(_ id: String) -> Bool {
         // Lowercased before the reserved check (dev-3's RE-REVIEW non-blocking nit): on a
         // case-insensitive volume (the default for APFS), "Mappings" reads the same file as
         // "mappings" would, so the check must not rest on exact case matching the id.

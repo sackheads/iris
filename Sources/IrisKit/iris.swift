@@ -3236,6 +3236,22 @@ actor IrisEngine {
     /// Set by `AppState.runReflection` around its turn, and read once as that turn begins (#465
     /// part 2): the reflection's own task, never a turn beside it or one it schedules.
     @TaskLocal static var isReflectionTurn = false
+    /// #1245: set by `AppState.runProfileReflection` around a bound session's reflection, to that profile's
+    /// id. While it is set the turn's whole tool list is `profileMemoryDeclaration` and nothing else, and
+    /// only `update_profile_memory` is honoured (and only while it is set).
+    @TaskLocal static var profileReflectionId: String?
+    nonisolated static let profileMemoryTool = "update_profile_memory"
+    nonisolated static let profileMemoryDeclaration = FunctionDeclaration(
+        name: profileMemoryTool,
+        description: "Overwrite this profile's own memory file with the complete, condensed notes worth keeping for future sessions under it. It is a separate file from Iris's own memory: nothing you write here reaches the owner's memory or any other profile.",
+        parameters: Schema(
+            type: "OBJECT",
+            properties: [
+                "content": Schema(type: "STRING", description: "The new complete text content for this profile's memory file")
+            ],
+            required: ["content"]
+        )
+    )
     /// The current turn's agent-profile tool scope (#465 part 2). nil: no profile, or no `tools:`.
     @TaskLocal static var agentToolScope: AgentToolScope?
     /// The current turn's model tier (#465 part 3, #667): the conversation's own (`/model`), else
@@ -4033,6 +4049,12 @@ actor IrisEngine {
         // sticky tool cannot widen it and nothing a strip removed comes back.
         if let scope = Self.agentToolScope {
             toolsList = scope.narrow(toolsList)
+        }
+
+        // #1245: a bound session's reflection is offered its own profile-memory writer and nothing
+        // else, whatever the gates above built (Invariant 6: declared on this turn alone).
+        if Self.profileReflectionId != nil {
+            toolsList = [Self.profileMemoryDeclaration]
         }
 
         // Offer an optional `intent` on every tool so the model can attach a one-line
@@ -5206,7 +5228,7 @@ actor IrisEngine {
     nonisolated static let resultIsIrisOwnWords: Set<String> = [
         "write_file", "create_skill", "update_skill", "delete_skill",
         "set_workspace", "register_directory_watcher",
-        "update_user_profile", "update_soul", "update_memory", "save_fact", "reflect",
+        "update_user_profile", "update_soul", "update_memory", "update_profile_memory", "save_fact", "reflect",
         "rename_conversation", "inbox_item", scheduleNextTickTool, setAlarmTool, currentTimeTool,
     ]
 
@@ -6121,6 +6143,22 @@ actor IrisEngine {
     }
 
     /// `pillId` is the call's `[TOOL_CALL]` message, which is told what let the call run (#599).
+    /// #1245: the bound session's reflection write. Refused unless this is a profile-reflection turn, the
+    /// conversation's binding is still a non-owner one whose `memoryWrite` reaches
+    /// `ProfileMemoryStore.minimumWriteTier`, and the conversation's persisted profile is the one the
+    /// reflection was started for. The path is made from that id, never from an argument.
+    private func updateProfileMemory(content: String, conversationId: UUID) async -> String {
+        let refusal = "Refused: profile memory can be written only by a bound session's own memory reflection."
+        guard let reflectId = Self.profileReflectionId else { return refusal }
+        let binding = await bindingForCall(conversationId: conversationId)
+        let localState = state
+        let persisted = await MainActor.run { localState?.persistedAccessProfileId(for: conversationId) }
+        guard !binding.isOwner, binding.profile.memoryWrite >= ProfileMemoryStore.minimumWriteTier,
+              persisted == reflectId,
+              let store = ProfileMemoryStore(paths: memory.paths, profileId: reflectId) else { return refusal }
+        return store.replace(content: content)
+    }
+
     private func executeFunctionCall(_ functionCall: FunctionCall, conversationId: UUID, workspacePath: String?, restrictToGoalComplete: Bool = false,
                                      offeredTools: Set<String>, pillId: UUID? = nil) async -> String {
         let localState = state
@@ -7136,6 +7174,8 @@ actor IrisEngine {
         } else if functionCall.name == "update_memory", let content = functionCall.args["content"]?.stringValue {
             memory.updateMemory(content: content)
             result = "Memory updated."
+        } else if functionCall.name == Self.profileMemoryTool, let content = functionCall.args["content"]?.stringValue {
+            result = await updateProfileMemory(content: content, conversationId: conversationId)
         } else if functionCall.name == "reflect" {
             result = "Reflection logged. Proceed with your next action."
         } else if functionCall.name == Self.currentTimeTool {
@@ -7794,7 +7834,7 @@ actor IrisEngine {
     nonisolated static let inlineDeclaredToolNames: Set<String> = [
         "set_workspace", "rename_conversation", "schedule_job", "save_fact", "manage_fact",
         "reflect", "goal_complete", "search_memory", "update_user_profile", "update_soul",
-        "update_memory", "propose_goal_contract", "list_sessions", "describe_session", "send_to_session",
+        "update_memory", "update_profile_memory", "propose_goal_contract", "list_sessions", "describe_session", "send_to_session",
         "set_session_card", "close_request", "amend_goal_contract", "reach_checkpoint", "waive_criterion",
         "invoke_subagent", "delegate_milestone", "inbox_item", scheduleNextTickTool, setAlarmTool, currentTimeTool,
     ]
