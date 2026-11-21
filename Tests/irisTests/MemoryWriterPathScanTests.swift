@@ -102,8 +102,15 @@ struct MemoryWriterPathScanTests {
     @Test("the dispatcher gate and the two direct gates are really on the paths the table claims")
     func gatesAreWhereTheTableSays() throws {
         let iris = try String(contentsOf: sourcesDir().appendingPathComponent("IrisKit/iris.swift"), encoding: .utf8)
-        // The dispatch choke point, the approved-card path and writeGoalLearnings each call the gate.
-        #expect(iris.components(separatedBy: "MemoryBindingGate.writeRefusal(").count - 1 >= 3)
+        // #1222: the dispatch choke point, the approved-card replay and the held-write release each
+        // call the one shared `memoryBindingWriteGate` helper (its definition, plus the 3 callers),
+        // rather than each holding its own copy of the gate -- that consolidation is the point of
+        // #1222. `writeGoalLearnings` keeps its own direct call, and the helper's body is now the
+        // only other place `MemoryBindingGate.writeRefusal` is spelled.
+        #expect(iris.components(separatedBy: "memoryBindingWriteGate(tool:").count - 1 == 4,
+                "the helper's definition plus its 3 callers: executeFunctionCall, executeApprovedCall, applyHeldWrite")
+        #expect(iris.components(separatedBy: "MemoryBindingGate.writeRefusal(").count - 1 == 2,
+                "writeGoalLearnings' own direct call, and the one inside memoryBindingWriteGate")
         let goal = try #require(iris.range(of: "func writeGoalLearnings"))
         let tail = String(iris[goal.lowerBound...].prefix(2500))
         #expect(tail.contains("MemoryBindingGate.writeRefusal(tool: \"save_fact\""), "writeGoalLearnings must gate before it stores")
