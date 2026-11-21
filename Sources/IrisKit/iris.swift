@@ -619,8 +619,13 @@ actor IrisEngine {
             // only for `ownBinding.principal == .main`, and nothing stamps a guest conversation's
             // `accessProfileId`), but this returns before it regardless, so that stays true even
             // if that assumption ever changes.
+            // dev-2 review: `!=` alone treats nil == nil as a match — a guest conversation with no
+            // client id (`createNewConversation(isGuest: true, ...)` allows it; the registry
+            // always passes one, but nothing enforces that) then matched the owner engine's own
+            // nil `guestClientId` and fell through. Self-referential now requires both sides to be
+            // the SAME non-nil id, not merely equal (nil is never "the same guest" as anyone).
             if let target = state.conversations.first(where: { $0.id == conversationId }), target.isGuest,
-               target.guestClientId != myGuestClientId {
+               myGuestClientId == nil || target.guestClientId != myGuestClientId {
                 return AccessBinding(profile: AccessProfile(), principal: .mcpGuest, isOwner: false)
                     .capped(by: PrincipalFloor.floor(for: .mcpGuest))
             }

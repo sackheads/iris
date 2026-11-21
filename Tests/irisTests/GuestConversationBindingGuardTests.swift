@@ -70,6 +70,37 @@ struct GuestConversationBindingGuardTests {
         #expect(b.profile.peerRoles.isEmpty, "guest A's own role must not leak onto the answer for guest B's conversation")
     }
 
+    /// dev-2's review finding: `target.guestClientId != myGuestClientId` alone treats `nil == nil`
+    /// as a match. A guest conversation created with no client id (the registry always passes
+    /// one, but `createNewConversation`'s own `guestClientId: String? = nil` default allows it,
+    /// and `principalMismatch` already documents "a guest on either side with no client id never
+    /// matches" as the general rule) then equalled the owner engine's own nil `guestClientId` and
+    /// fell through to `ownBinding` unguarded — the same leak #1269 found, for this one row shape.
+    @Test("the owner engine asking about a guest conversation with NO client id still gets deny-all")
+    func mainEngineAskingAboutNilClientIdGuestConversationGetsDenyAll() async throws {
+        let state = try app()
+        let guestId = state.createNewConversation(isGuest: true, title: "guest", select: false)
+        #expect(state.conversations.first { $0.id == guestId }?.guestClientId == nil, "precondition: no client id")
+        let owner = IrisEngine(state: state, tier: .medium, principal: .main, client: FakeLLMClient(responses: []),
+                               retryDelays: [], protectionEnabled: false, sessionPeerCount: 1)
+        state.installEngine(owner)
+        let b = await owner.bindingForCall(conversationId: guestId)
+        #expect(denyAllGuestFloor(b), "nil guestClientId on the asking engine must never equal nil guestClientId on the conversation")
+    }
+
+    /// Control for the above: a guest engine that DOES carry a client id, asking about the same
+    /// nil-client-id conversation, is just as foreign to it as the owner is — nil never matches a
+    /// real id either.
+    @Test("a guest engine with a client id asking about a nil-client-id conversation also gets deny-all")
+    func guestEngineAskingAboutNilClientIdGuestConversationGetsDenyAll() async throws {
+        let state = try app()
+        let guestId = state.createNewConversation(isGuest: true, title: "guest", select: false)
+        let engineA = distinguishedGuestEngine(state: state, clientId: "dev-a", role: "reviewer")
+        let b = await engineA.bindingForCall(conversationId: guestId)
+        #expect(denyAllGuestFloor(b), "a real client id must never match a conversation with no client id")
+        #expect(b.profile.peerRoles.isEmpty)
+    }
+
     // MARK: Through the real callers (the live mechanism, not the function in isolation)
 
     @Test("reflectionRoute is never .owner for an unstamped guest conversation")
