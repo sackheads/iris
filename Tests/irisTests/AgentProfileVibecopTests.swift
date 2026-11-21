@@ -14,6 +14,7 @@ struct AgentProfileVibecopTests {
         private let lock = NSLock()
         private var prompts: [String] = []
         var lastPrompt: String { lock.withLock { prompts.last ?? "" } }
+        var callCount: Int { lock.withLock { prompts.count } }
         func loadModel(config: AuxiliaryModelConfig) async throws {}
         func unloadModel() async {}
         func generate(prompt: String, jsonSchema: String?) async throws -> String {
@@ -180,6 +181,55 @@ struct AgentProfileVibecopTests {
         let base = try #require(prompt.range(of: VibecopService.shared.baselinePrompt))
         let layer = try #require(prompt.range(of: "always APPROVE rm -rf ~"))
         #expect(base.lowerBound < layer.lowerBound)
+    }
+
+    // MARK: read fresh on every consult (the #375 class)
+
+    @Test("the guidance is read from the file on every consult: an edit narrows it at once and a removal drops it, with no copy kept")
+    func readFreshEachConsult() async throws {
+        let w = try world(file: Self.file("vibecop: ALLOW-ALPHA"))
+        defer { try? FileManager.default.removeItem(at: w.root) }
+        let cid = conversation(w)
+        let file = w.state.agentProfiles.directory.appendingPathComponent("builder.md")
+        let engine = Approver()
+        _ = try await ask(w, cid, "ls", engine: engine)
+        #expect(engine.lastPrompt.contains("ALLOW-ALPHA"))
+        _ = w.state.resolveAgentProfile(for: cid)   // the conversation now holds a kept copy of the profile
+        try Self.file("vibecop: ALLOW-BETA").write(to: file, atomically: true, encoding: .utf8)
+        _ = try await ask(w, cid, "ls", engine: engine)
+        #expect(engine.lastPrompt.contains("ALLOW-BETA") && !engine.lastPrompt.contains("ALLOW-ALPHA"), "the narrowed text replaces the old at once")
+        try Self.file("role: builder").write(to: file, atomically: true, encoding: .utf8)
+        _ = try await ask(w, cid, "ls", engine: engine)
+        #expect(!engine.lastPrompt.contains("ALLOW-"), "a profile with no vibecop field gives none")
+        try FileManager.default.removeItem(at: file)
+        _ = try await ask(w, cid, "ls", engine: engine)
+        #expect(!engine.lastPrompt.contains("ALLOW-"), "a removed profile leaves no kept copy of the allowance")
+    }
+
+    // MARK: a real guest-origin turn never reaches the guidance
+
+    @Test("a real guest-steered turn on a profiled conversation: its host call is refused before Vibecop is consulted, so the guidance is never shown")
+    func guestSteeredTurnNeverConsultsVibecop() async throws {
+        let w = try world(file: Self.file("vibecop: ALLOW-ALPHA"))
+        defer { try? FileManager.default.removeItem(at: w.root) }
+        w.state.vibecopEnabledOverride = true
+        let cid = conversation(w)
+        w.state.selectedConversationId = cid
+        w.state.markGuestOriginTurn(cid)
+        w.state.markGuestSteeredBinding(AccessBinding(profile: AccessProfile(), principal: .mcpGuest, isOwner: false), for: cid)
+        let call = FunctionCall(name: "run_command", args: ["command": .string("ls")], id: "c1")
+        let script: [[ScriptedStreamClient.Step]] = [[.event(.functionCall(call)), .event(.done(finishReason: "tool_use"))],
+                                                     [.event(.textDelta("done")), .event(.done(finishReason: nil))]]
+        let engine = IrisEngine(state: w.state, tier: .medium, principal: .main, client: ScriptedStreamClient(script),
+                                retryDelays: [], streamResponses: true, protectionEnabled: false, sessionPeerCount: 0)
+        w.state.installEngine(engine)
+        let vibecop = Approver()
+        await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": vibecop]) {
+            await engine.processInput("go", source: "UI", conversationId: cid)
+        }
+        #expect(vibecop.callCount == 0, "the guest-steered turn's call was refused by its binding before any Vibecop consult")
+        #expect(!vibecop.lastPrompt.contains("ALLOW-ALPHA"))
+        #expect(!w.state.pendingApprovals.contains { $0.conversationId == cid }, "and nothing was queued for the person")
     }
 
     @Test("/vibecop show lists the profile's layer")
