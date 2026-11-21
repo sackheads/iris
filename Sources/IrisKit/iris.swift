@@ -5327,11 +5327,28 @@ actor IrisEngine {
         }
     }
 
+    /// #974 Task 7 (C4), consolidated for #1222: the memory-tier write gate, read fresh off
+    /// `bindingForCall` rather than trusted from whenever the call was first made — the one check
+    /// `executeFunctionCall`'s live dispatch, `executeApprovedCall`'s card replay and
+    /// `applyHeldWrite`'s held-write release all consult, so a binding that changed between a call
+    /// being queued (a hold, a card) and it actually running (the #974 "stamped non-owner `.main`
+    /// turn" class) is gated by what it is NOW, not what it was then. `write_file` is not itself in
+    /// `ToolExecutor.memoryWriteTools` today — it is held by path instead (`ContextHolds`) — so this
+    /// is a no-op for it now; called anyway from every write path on purpose, so the day `write_file`
+    /// joins that set every one of them is covered without a second edit.
+    func memoryBindingWriteGate(tool: String, conversationId: UUID) async -> String? {
+        MemoryBindingGate.writeRefusal(tool: tool, binding: await bindingForCall(conversationId: conversationId))
+    }
+
     /// #813: applies an item the person approved, through the handler that would have applied
     /// it, with the hold switched off for this call only. A held `write_file` runs as an approved
     /// call, past the permission ladder: the person's approval is the permission.
     func applyHeldWrite(_ item: PendingContextWrite) async -> String {
         if item.toolName == "write_file" {
+            // #1222: read fresh, not trusted from the hold — see `memoryBindingWriteGate`.
+            if let refusal = await memoryBindingWriteGate(tool: item.toolName, conversationId: item.conversationId) {
+                return refusal
+            }
             // The target the person was shown: the real path taken at the hold, not the call's
             // spelling resolved again now. The approved write walks it with no link followed, so a
             // link swapped in since is refused rather than written through.
@@ -6279,8 +6296,7 @@ actor IrisEngine {
         // before the #813 hold asks the person or anything is written. After the offered-tools
         // check, which keeps its own wording for a tool the round never declared. The three reads
         // check their own branches below.
-        if let refusal = MemoryBindingGate.writeRefusal(tool: functionCall.name,
-                                                        binding: await bindingForCall(conversationId: conversationId)) {
+        if let refusal = await memoryBindingWriteGate(tool: functionCall.name, conversationId: conversationId) {
             return refusal
         }
 
@@ -7670,12 +7686,11 @@ actor IrisEngine {
             case .unchanged: break
             }
         }
-        // #974 Task 7 (C4): an approved card reaches the executor without passing the dispatcher, so
-        // a memory writer on it meets the same gate here (the dispatcher refuses one before a card
-        // is ever recorded, but the binding a card is clicked under is not necessarily the one it
-        // was recorded under).
-        if let refusal = MemoryBindingGate.writeRefusal(tool: call.toolName,
-                                                        binding: await bindingForCall(conversationId: conversationId)) {
+        // #974 Task 7 (C4), #1222: an approved card reaches the executor without passing the
+        // dispatcher, so a memory writer on it meets the same gate here, via `memoryBindingWriteGate`
+        // (the dispatcher refuses one before a card is ever recorded, but the binding a card is
+        // clicked under is not necessarily the one it was recorded under).
+        if let refusal = await memoryBindingWriteGate(tool: call.toolName, conversationId: conversationId) {
             return refusal
         }
         let result = await executeToolWithHooks(name: call.toolName, args: call.args, cwd: call.cwd,
