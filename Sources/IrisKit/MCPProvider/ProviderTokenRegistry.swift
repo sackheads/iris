@@ -22,6 +22,8 @@ final class ProviderTokenRegistry: @unchecked Sendable {
         /// A grant needs a registered client: an id with no token must not lend its roles to the
         /// next registrant.
         case notRegistered
+        /// The access-profile store (`profiles/`) cannot be read, so a grant cannot be recorded in it.
+        case accessStoreUnreadable
     }
 
     private let keychain: KeychainManager
@@ -68,8 +70,15 @@ final class ProviderTokenRegistry: @unchecked Sendable {
 
     static func isReservedSpelling(_ clientId: String) -> Bool { clientId == reservedClientId }
 
-    init(keychain: KeychainManager = .shared) {
+    /// Where a guest's roles live besides the Keychain (#974 Task 16 S3); nil keeps the registry
+    /// Keychain-only, which is how a test of the registry alone builds it.
+    private let accessStore: AccessProfileStore?
+    private let accessWriter: AccessProfileWriter?
+
+    init(keychain: KeychainManager = .shared, accessPaths: IrisPaths? = nil) {
         self.keychain = keychain
+        self.accessStore = accessPaths.map { AccessProfileStore(paths: $0) }
+        self.accessWriter = accessPaths.map { AccessProfileWriter(paths: $0) }
         var cache: [String: String] = [:]
         var reverseCache: [String: String] = [:]
         do {
@@ -121,6 +130,7 @@ final class ProviderTokenRegistry: @unchecked Sendable {
                 try keychain.updateSecretsOrThrow(service: KeychainManager.mcpProviderRolesService) { dict in
                     dict[clientId] = nil
                 }
+                if let accessStore, let accessWriter { try ProviderGuestGrants.clear(clientId: clientId, store: accessStore, writer: accessWriter) }
             }
             try keychain.updateSecretsOrThrow(service: KeychainManager.mcpProviderService) { dict in
                 dict[clientId] = token
@@ -155,6 +165,7 @@ final class ProviderTokenRegistry: @unchecked Sendable {
             // The grant goes first for the same reason: a revoked client must not keep reaching
             // roles in this process because a Keychain write failed.
             lock.withLock { roleCache[clientId] = nil }
+            if let accessStore, let accessWriter { try ProviderGuestGrants.clear(clientId: clientId, store: accessStore, writer: accessWriter) }
             // The roles item first: a failed write after this point can leave a token that still
             // authenticates, never a grant that outlives its token.
             try keychain.updateSecretsOrThrow(service: KeychainManager.mcpProviderRolesService) { dict in
@@ -166,7 +177,23 @@ final class ProviderTokenRegistry: @unchecked Sendable {
         }
     }
 
-    /// What `clientId` may address as a guest (#1066): empty unless granted here.
+    /// What `clientId` may address as a guest: the access-profile store's answer (it wins), with the roles
+    /// item above as a fallback only for a guest the store has no mapping for (#974 Task 16 S3). Read on
+    /// every call, so a narrowed or removed mapping reaches a live guest's next send.
+    func guestRoles(forClientId clientId: String) -> Set<String> {
+        guard let accessStore else { return roles(forClientId: clientId) }
+        return ProviderGuestGrants.allowedRoles(clientId: clientId, registry: self, store: accessStore)
+    }
+
+    /// Copies the Keychain roles of every registered guest into the store, once (see `ProviderGuestGrants.migrate`).
+    @discardableResult
+    func migrateRolesToAccessStore() -> [String] {
+        guard let accessStore, let accessWriter else { return [] }
+        return ProviderGuestGrants.migrate(registry: self, store: accessStore, writer: accessWriter)
+    }
+
+    /// The roles item's own answer for `clientId` (#1066): empty unless granted here. Since S3 this is
+    /// the fallback, not the gate; the gate is `guestRoles(forClientId:)`.
     func roles(forClientId clientId: String) -> Set<String> {
         lock.withLock { cache[clientId] == nil ? [] : (roleCache[clientId] ?? []) }
     }
@@ -184,6 +211,12 @@ final class ProviderTokenRegistry: @unchecked Sendable {
         }
         try writeLock.withLock {
             guard isRegistered(clientId: clientId) else { throw RegistryError.notRegistered }
+            // The store first: if it cannot be written, nothing changes anywhere.
+            if let accessStore, let accessWriter {
+                if try ProviderGuestGrants.grant(normalised, clientId: clientId, store: accessStore, writer: accessWriter) == .unreadable {
+                    throw RegistryError.accessStoreUnreadable
+                }
+            }
             let encoded = String(data: try JSONEncoder().encode(normalised.sorted()), encoding: .utf8) ?? "[]"
             try keychain.updateSecretsOrThrow(service: KeychainManager.mcpProviderRolesService) { dict in
                 dict[clientId] = normalised.isEmpty ? nil : encoded

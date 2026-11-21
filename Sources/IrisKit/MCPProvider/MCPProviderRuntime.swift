@@ -52,7 +52,7 @@ final class MCPProviderRuntime {
 
     /// Production defaults read the real settings, Keychain and home; a test injects its own.
     init(isEnabled: @escaping @MainActor () -> Bool = { ConfigManager.shared.mcpProviderEnabled },
-         makeRegistry: @escaping @MainActor () -> ProviderTokenRegistry = { ProviderTokenRegistry() },
+         makeRegistry: @escaping @MainActor () -> ProviderTokenRegistry = { ProviderTokenRegistry(accessPaths: .default) },
          configuredPort: @escaping @MainActor () -> UInt16 = { UInt16(clamping: ConfigManager.shared.mcpProviderPort) },
          artifactRoot: URL = IrisPaths.default.root.appendingPathComponent("mcp-provider-artifacts", isDirectory: true),
          report: @escaping @MainActor (String) -> Void = MCPProviderRuntime.logToConsole,
@@ -97,6 +97,13 @@ final class MCPProviderRuntime {
         let mailboxGate = ProviderRequestGate(registry: tokenRegistry, capacity: Self.mailboxGateCapacity, refillInterval: Self.refillInterval(forCapacity: Self.mailboxGateCapacity))
         let port = configuredPort()
         let guests = makeGuestRegistry()
+        // #974 Task 16 S3: the guests' addressing reach comes from the access-profile store (the Keychain
+        // roles item is its fallback), read on every call; an old install's roles are copied in once here.
+        let skipped = tokenRegistry.migrateRolesToAccessStore()
+        if !skipped.isEmpty {
+            report("MCP provider: guest roles for \(skipped.joined(separator: ", ")) were not copied into the access-profile store; the Keychain roles keep serving them")
+        }
+        guests?.state.guestRoleAllowlist = { tokenRegistry.guestRoles(forClientId: $0) }
         let driver = guests.map { registry in
             GuestSessionDriver(state: registry.state, registry: registry, mailbox: mailbox,
                                turnGate: ProviderRequestGate(registry: tokenRegistry, capacity: GuestSessionDriver.turnsPerHour,
