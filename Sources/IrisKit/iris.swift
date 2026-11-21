@@ -7834,7 +7834,7 @@ actor IrisEngine {
     nonisolated static let inlineDeclaredToolNames: Set<String> = [
         "set_workspace", "rename_conversation", "schedule_job", "save_fact", "manage_fact",
         "reflect", "goal_complete", "search_memory", "update_user_profile", "update_soul",
-        "update_memory", "update_profile_memory", "propose_goal_contract", "list_sessions", "describe_session", "send_to_session",
+        "update_memory", "propose_goal_contract", "list_sessions", "describe_session", "send_to_session",
         "set_session_card", "close_request", "amend_goal_contract", "reach_checkpoint", "waive_criterion",
         "invoke_subagent", "delegate_milestone", "inbox_item", scheduleNextTickTool, setAlarmTool, currentTimeTool,
     ]
@@ -7846,7 +7846,7 @@ actor IrisEngine {
     /// read-only job's refusal means is decided by `jobRunToolNames` instead.
     nonisolated static let allDeclaredToolNames: Set<String> =
         pathWritingTools.union(toolsThatWriteNoPath).union(inlineDeclaredToolNames)
-            .union(EvaluatorToolset.allowedNames)
+            .union(EvaluatorToolset.allowedNames).union([profileMemoryTool])   // declared as a static, on a profile-reflection turn only (#1245)
 
     /// Every tool a job run can be offered, as a mutating job with every gate on: what decides
     /// whether a read-only run's refused call is a profile denial, which ends the run saying the
