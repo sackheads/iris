@@ -6263,13 +6263,28 @@ class AppState {
             sidebarGroups = (try? store.loadSidebarGroups()) ?? []
             loadedSkippedRows = result.skipped
             loadedRepairFailed = result.repairFailed
-            let (loaded, roleNormalizationChanged) = Self.sanitizeLoaded(result.conversations)
+            let (sanitized, roleNormalizationChanged) = Self.sanitizeLoaded(result.conversations)
+            // #1281 review (dev-2): a conversation can carry a sidebarGroupId for a group whose row
+            // is gone (quit between deleteSidebarGroup's in-memory ungroup and its row delete; an
+            // unreadable group row `loadSidebarGroups` skipped) — invisible in both `ungrouped` and
+            // `teams`, and exempt from the idle sweep forever. Cleared the same way role
+            // normalization is: in memory here, then persisted so it does not recur every launch.
+            let groupIds = Set(sidebarGroups.map(\.id))
+            var danglingGroupCleared: Set<UUID> = []
+            let loaded = sanitized.map { conv -> Conversation in
+                guard let gid = conv.sidebarGroupId, !groupIds.contains(gid) else { return conv }
+                var fixed = conv
+                fixed.sidebarGroupId = nil
+                danglingGroupCleared.insert(conv.id)
+                return fixed
+            }
             self.conversations = loaded
             self.selectedConversationId = Self.selectLaunchConversation(loaded)?.id
             // #480 review item 5: persist the repair, not just this in-memory copy — otherwise
             // the loser of a duplicate-role (or invalid-role) cleanup keeps its stale role in the
             // store and can win it back at the next launch.
             for id in roleNormalizationChanged { markChanged(id, .metadata) }
+            for id in danglingGroupCleared { markChanged(id, .metadata) }
             // A whole-table corruption can be thousands of rows; one line each would bury
             // everything else in the log.
             let logCap = 10

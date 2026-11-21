@@ -55,6 +55,29 @@ struct SidebarTeamsTests {
         #expect(reloaded.sidebarGroupId == nil)
     }
 
+    @Test("#1281 review: a conversation whose group row is gone is reconciled on load, not left invisible and sweep-exempt forever")
+    func danglingGroupReconciledOnLoad() throws {
+        let store = try ConversationStore.inMemory()
+        let app = AppState(store: store, createIfEmpty: false, emitLaunchNotices: false)
+        let id = app.createNewConversation(select: false)
+        let groupId = try #require(app.createSidebarGroup(name: "team"))
+        app.moveConversation(id, toGroup: groupId)
+        app.flushSave()
+
+        // Only the group row is gone — not through deleteSidebarGroup, which would have ungrouped
+        // the member too. This is what a quit between the in-memory ungroup and the row delete, or
+        // an unreadable group row loadSidebarGroups skipped, leaves behind.
+        try store.deleteSidebarGroup(id: groupId)
+
+        let reloaded = AppState(store: store, createIfEmpty: false, emitLaunchNotices: false)
+        #expect(reloaded.conversations.first { $0.id == id }?.sidebarGroupId == nil, "the dangling reference is cleared")
+        #expect(SidebarOrdering.ungrouped(reloaded.conversations).contains { $0.id == id }, "visible again, not lost between both lists")
+
+        reloaded.flushSave()
+        let persisted = try #require(try store.loadAll().conversations.first { $0.id == id })
+        #expect(persisted.sidebarGroupId == nil, "the repair is persisted, not just in memory")
+    }
+
     // MARK: Live mechanism: reorder and move, driven through AppState
 
     @Test("drag-reordering a team's members persists the new order through a reload")
