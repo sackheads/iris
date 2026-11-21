@@ -341,9 +341,12 @@ actor IrisEngine {
             return cached
         }
         let userProfile = manager.getUserProfile()
-        let (safeUserProfile, cacheable, unjudged, _) = await measureSpan("assembly.userProfile") {
+        let (guardedUserProfile, cacheable, unjudged, strippedLines) = await measureSpan("assembly.userProfile") {
             await InjectionGuard.sanitizeUntrustedCacheable(userProfile, contextTag: "user_profile", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
         }
+        // #1209: the note is part of what is cached, so it costs nothing on a clean file and is
+        // computed once per change of the file, never per turn.
+        let safeUserProfile = Self.notingStrippedMarkers(guardedUserProfile, lines: strippedLines)
         // A transient guard error (fix round 1) is shown for THIS turn but never cached: caching it
         // would pin the user's profile as blocked for every later turn of a long-lived main engine
         // until something else happens to invalidate the stamp. Leaving `profileStamp` untouched
@@ -354,6 +357,16 @@ actor IrisEngine {
         }
         noteUnjudged(unjudged, file: "USER.md")
         return safeUserProfile
+    }
+
+    /// #1209: what the model is told when the guard deleted a role marker from a file that is woven into
+    /// the system prompt. The model can rewrite both files from the view it is given
+    /// (`update_user_profile` replaces USER.md whole), so it is told, as three facts and no instruction,
+    /// that the view is not the file. A clean file gets nothing.
+    nonisolated static let strippedMarkerPromptNote = "[Iris: one or more injection markers were removed from the file content below; it is shown sanitized. Rewriting the file from this view will save the sanitized version.]"
+
+    nonisolated static func notingStrippedMarkers(_ text: String, lines: Int) -> String {
+        lines > 0 ? strippedMarkerPromptNote + "\n" + text : text
     }
 
     /// The person's own files the guard couldn't judge whole this turn (planner, #723): said once
@@ -421,9 +434,10 @@ actor IrisEngine {
             cachedAgentsText.removeValue(forKey: wp)
             return nil
         }
-        let (safeAgentsMd, cacheable, unjudged, _) = await measureSpan("assembly.agentsMd") {
+        let (guardedAgentsMd, cacheable, unjudged, strippedLines) = await measureSpan("assembly.agentsMd") {
             await InjectionGuard.sanitizeUntrustedCacheable(agentsMdContent, contextTag: "workspace_rules", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
         }
+        let safeAgentsMd = Self.notingStrippedMarkers(guardedAgentsMd, lines: strippedLines)   // #1209, as for USER.md
         // Same rule as `guardedUserProfileText`: a transient error is shown this turn but never
         // recorded, so the next turn retries instead of serving a permanently-blocked workspace.
         if cacheable {
