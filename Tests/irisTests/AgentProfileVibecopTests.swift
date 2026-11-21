@@ -208,8 +208,8 @@ struct AgentProfileVibecopTests {
 
     // MARK: a real guest-origin turn never reaches the guidance
 
-    @Test("a real guest-steered turn on a profiled conversation: its host call is refused before Vibecop is consulted, so the guidance is never shown")
-    func guestSteeredTurnNeverConsultsVibecop() async throws {
+    @Test("a real guest-steered turn on a profiled conversation: Vibecop is consulted without the guidance, and its APPROVE still queues the person")
+    func guestSteeredTurnGetsNoGuidanceAndStillAsks() async throws {
         let w = try world(file: Self.file("vibecop: ALLOW-ALPHA"))
         defer { try? FileManager.default.removeItem(at: w.root) }
         w.state.vibecopEnabledOverride = true
@@ -223,13 +223,26 @@ struct AgentProfileVibecopTests {
         let engine = IrisEngine(state: w.state, tier: .medium, principal: .main, client: ScriptedStreamClient(script),
                                 retryDelays: [], streamResponses: true, protectionEnabled: false, sessionPeerCount: 0)
         w.state.installEngine(engine)
-        let vibecop = Approver()
-        await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": vibecop]) {
-            await engine.processInput("go", source: "UI", conversationId: cid)
+        let vibecop = Approver()   // answers APPROVE to everything
+        let state = w.state
+        let turn = Task { @MainActor in
+            await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": vibecop]) {
+                await engine.processInput("go", source: "UI", conversationId: cid)
+            }
         }
-        #expect(vibecop.callCount == 0, "the guest-steered turn's call was refused by its binding before any Vibecop consult")
-        #expect(!vibecop.lastPrompt.contains("ALLOW-ALPHA"))
-        #expect(!w.state.pendingApprovals.contains { $0.conversationId == cid }, "and nothing was queued for the person")
+        var asked = false
+        for _ in 0..<600 {
+            if let request = state.pendingApprovals.first(where: { $0.conversationId == cid }) {
+                asked = true
+                state.resolveApproval(id: request.id, .deny)
+                break
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        _ = try await value(of: turn, within: 30)
+        #expect(vibecop.callCount >= 1, "Vibecop was consulted on the real turn")
+        #expect(!vibecop.lastPrompt.contains("ALLOW-ALPHA"), "the guest-steered turn was not shown the profile's guidance")
+        #expect(asked, "Vibecop's APPROVE did not stand in for the person on a guest-steered turn (#1151)")
     }
 
     @Test("/vibecop show lists the profile's layer")
