@@ -87,6 +87,8 @@ public final class KeychainManager: @unchecked Sendable {
     private let heldLock = NSLock()
     private var heldValues: Set<String> = []
     var heldSecretValues: Set<String> { heldLock.withLock { heldValues } }
+    /// Tests only: forget what was held, to show a later read alone puts a value back.
+    func forgetHeldSecretValuesForTesting() { heldLock.withLock { heldValues = [] } }
 
     private func hold(_ secrets: [String: String], service base: String) {
         guard base != Self.legacyService, base != Self.mcpProviderRolesService else { return }
