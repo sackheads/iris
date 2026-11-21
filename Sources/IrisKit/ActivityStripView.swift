@@ -215,9 +215,16 @@ struct ActivityRowView: View {
     let isMain: Bool
     var onTap: () -> Void
 
+    /// #988 review (dev-2): pulled out of `body` so a test can pin the branch directly, with a
+    /// scenario `visibleRuns` and `stripRuns` actually disagree on, rather than asserting on
+    /// `stripRuns` alone (which passes whichever branch `body` takes).
+    static func summary(in state: AppState, sessionId: UUID, isMain: Bool) -> ActivitySummary? {
+        isMain ? state.visibleRuns.first(where: { $0.id == sessionId })
+               : state.stripRuns.first(where: { $0.id == sessionId })
+    }
+
     var body: some View {
-        if let session = isMain ? state.visibleRuns.first(where: { $0.id == sessionId })
-                                 : state.stripRuns.first(where: { $0.id == sessionId }) {
+        if let session = Self.summary(in: state, sessionId: sessionId, isMain: isMain) {
             let tokens = state.conversations.first(where: { $0.id == sessionId })?.tokenUsage.totalTokenCount ?? 0
             HStack(spacing: 8) {
                 statusGlyph(session.phase)
