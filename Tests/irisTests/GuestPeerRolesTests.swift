@@ -121,7 +121,6 @@ struct GuestPeerRolesTests {
         func isUnreadable<V>(_ l: AccessProfileStore.Lookup<V>) -> Bool { if case .unreadable = l { return true }; return false }
 
         #expect(isAbsent(store.lookupProfile(id: "nope")) && isAbsent(store.lookupMapping(for: id)), "nothing on disk")
-        #expect(isAbsent(store.lookupProfile(id: "../x")) && isAbsent(store.lookupProfile(id: "mappings")), "an invalid or reserved id names nothing")
 
         try #"{"peerRoles":["a"]}"#.write(to: paths.profilesDir.appendingPathComponent("p.json"), atomically: true, encoding: .utf8)
         if case .found(let p) = store.lookupProfile(id: "p") { #expect(p.peerRoles == ["a"]) } else { Issue.record("expected found") }
@@ -137,5 +136,43 @@ struct GuestPeerRolesTests {
         #expect(isUnreadable(store.lookupMapping(for: id)), "two conflicting entries are ambiguous, not absent")
         try "garbage".write(to: paths.profilesDir.appendingPathComponent("mappings.json"), atomically: true, encoding: .utf8)
         #expect(isUnreadable(store.lookupMapping(for: id)))
+
+        // An invalid id is not "no such profile": only a mapping can name it, and that is an entry with no usable profile.
+        for bad in ["", "../x", "a/b", "mappings", "owner"] { #expect(isUnreadable(store.lookupProfile(id: bad)), "\(bad.debugDescription)") }
+        // A profile "file" that is a directory is unreadable, not absent.
+        try FileManager.default.createDirectory(at: paths.profilesDir.appendingPathComponent("dir.json"), withIntermediateDirectories: true)
+        #expect(isUnreadable(store.lookupProfile(id: "dir")))
+    }
+
+    @Test("the one answer a gate acts on: absent only when the identity has no mapping; a dangling, invalid or damaged mapped profile is unreadable")
+    func mappedProfileLookup() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("iris-t16s1-mapped-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = IrisPaths(root: root)
+        try FileManager.default.createDirectory(at: paths.profilesDir, withIntermediateDirectories: true)
+        let store = AccessProfileStore(paths: paths)
+        let id = try #require(IdentityKey.providerGuest(clientId: "dev-1"))
+        func map(_ profileId: String) throws {
+            try #"[{"transport":"mcp","issuer":"iris-mcp-provider","id":"dev-1","profileId":"\#(profileId)"}]"#
+                .write(to: paths.profilesDir.appendingPathComponent("mappings.json"), atomically: true, encoding: .utf8)
+        }
+        func kind(_ l: AccessProfileStore.Lookup<AccessProfile>) -> String {
+            switch l { case .found: "found"; case .absent: "absent"; case .unreadable: "unreadable" }
+        }
+        #expect(kind(store.lookupMappedProfile(for: id)) == "absent", "no mappings file: the fallback is allowed")
+        try map("p")
+        #expect(kind(store.lookupMappedProfile(for: id)) == "unreadable", "mapped, but the profile file does not exist (dangling)")
+        try "{not json".write(to: paths.profilesDir.appendingPathComponent("p.json"), atomically: true, encoding: .utf8)
+        #expect(kind(store.lookupMappedProfile(for: id)) == "unreadable", "mapped to a damaged profile")
+        try #"{"peerRoles":["a"]}"#.write(to: paths.profilesDir.appendingPathComponent("p.json"), atomically: true, encoding: .utf8)
+        #expect(kind(store.lookupMappedProfile(for: id)) == "found")
+        try map("../x")
+        #expect(kind(store.lookupMappedProfile(for: id)) == "unreadable", "mapped to a path-shaped id")
+        try map("")
+        #expect(kind(store.lookupMappedProfile(for: id)) == "unreadable", "mapped to an empty id")
+        let other = try #require(IdentityKey.providerGuest(clientId: "dev-2"))
+        #expect(kind(store.lookupMappedProfile(for: other)) == "absent", "a readable file with no entry for this identity")
+        try "garbage".write(to: paths.profilesDir.appendingPathComponent("mappings.json"), atomically: true, encoding: .utf8)
+        #expect(kind(store.lookupMappedProfile(for: id)) == "unreadable", "an unreadable mappings file is not an absent mapping")
     }
 }
