@@ -145,18 +145,25 @@ struct ContinuationBoundsTests {
 
     // MARK: the loopback listener's start
 
-    @Test("a cancelled LoopbackHTTPListener.start ends, whether the cancel lands before or after it begins")
+    @Test("a cancelled LoopbackHTTPListener.start ends: before it begins, with a listener that never reports, and with a real one")
     func loopbackStartCancel() async throws {
-        for early in [true, false] {
+        for (name, early, neverStarts) in [("before it begins", true, false), ("a listener stuck waiting", false, true), ("a real listener", false, false)] {
             let listener = LoopbackHTTPListener(port: 0) { _ in .error(statusCode: 404, .invalidRequest("none")) }
             defer { listener.stop() }
             let task = Task {
                 if early { while !Task.isCancelled { await Task.yield() } }
-                try await listener.start()
+                if neverStarts {
+                    try await listener.start(startListener: { @Sendable _, _ in })
+                } else {
+                    try await listener.start()
+                }
             }
-            if early { task.cancel() } else { try await Task.sleep(nanoseconds: 1_000_000); task.cancel() }
+            if early { task.cancel() } else {
+                try await Task.sleep(nanoseconds: neverStarts ? 300_000_000 : 1_000_000)
+                task.cancel()
+            }
             do { _ = try await value(of: task, within: 10) } catch is CancellationError {} catch {
-                Issue.record("early \(early): unexpected \(error)")
+                Issue.record("\(name): unexpected \(error)")
             }
         }
     }

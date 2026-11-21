@@ -103,7 +103,9 @@ final class LoopbackHTTPListener: @unchecked Sendable {
         }
     }
 
-    func start() async throws {
+    /// `startListener` is a seam for a test whose listener never reports a state (a bind stuck in
+    /// `.waiting`): the default starts it.
+    func start(startListener: @Sendable (NWListener, DispatchQueue) -> Void = { $0.start(queue: $1) }) async throws {
         let params = Self.loopbackParameters(port: requestedPort)
         // The port lives in `requiredLocalEndpoint` and nowhere else. Passing it to
         // `NWListener(using:on:)` as well throws POSIX 22 (EINVAL) for any fixed port, and worked
@@ -114,7 +116,7 @@ final class LoopbackHTTPListener: @unchecked Sendable {
         listener.newConnectionHandler = { [weak self] connection in
             self?.accept(connection)
         }
-        let cancelled = CancelFlag()
+        let cancelled = StartCancel()
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 let resumer = StartResumer(continuation)
@@ -133,16 +135,18 @@ final class LoopbackHTTPListener: @unchecked Sendable {
                         break
                     }
                 }
-                if cancelled.isSet { resumer.resume(throwing: CancellationError()); return }
-                listener.start(queue: queue)
-                // A cancel that landed before `start` cancelled a listener that then never reports a state
-                // (a cancelled `NWListener` started afterwards is silent), so the check is repeated here.
-                if cancelled.isSet { resumer.resume(throwing: CancellationError()) }
+                // The cancel resumes the wait itself, whichever side of this line it lands on, so nothing
+                // rests on what a cancelled or never-started `NWListener` reports.
+                guard cancelled.arm(resumer) else {
+                    resumer.resume(throwing: CancellationError())
+                    return
+                }
+                startListener(listener, queue)
+                if cancelled.isSet { listener.cancel() }
             }
         } onCancel: {
-            // A cancelled start leaves no listener parked in `.waiting` (#1272): once started, the
-            // `.cancelled` state resumes the wait; before it, the flag does.
-            cancelled.set()
+            // A cancelled start leaves no listener parked in `.waiting` (#1272).
+            cancelled.cancel()
             listener.cancel()
         }
     }
@@ -461,12 +465,28 @@ extension Duration {
     }
 }
 
-/// Set by `start()`'s cancellation handler, read by the body: the two can run in either order.
-private final class CancelFlag: @unchecked Sendable {
+/// Joins `start()`'s body and its cancellation handler, which can run in either order: whichever comes
+/// second finishes the wait, with `CancellationError`.
+private final class StartCancel: @unchecked Sendable {
     private let lock = NSLock()
-    private var value = false
-    func set() { lock.withLock { value = true } }
-    var isSet: Bool { lock.withLock { value } }
+    private var resumer: StartResumer?
+    private var cancelled = false
+
+    var isSet: Bool { lock.withLock { cancelled } }
+
+    /// False when a cancel already landed: the caller resumes and does not start the listener.
+    func arm(_ resumer: StartResumer) -> Bool {
+        lock.withLock {
+            if cancelled { return false }
+            self.resumer = resumer
+            return true
+        }
+    }
+
+    func cancel() {
+        let armed: StartResumer? = lock.withLock { cancelled = true; defer { resumer = nil }; return resumer }
+        armed?.resume(throwing: CancellationError())
+    }
 }
 
 /// `NWListener.stateUpdateHandler` can fire `.ready` and then later `.failed`/`.cancelled` on the
