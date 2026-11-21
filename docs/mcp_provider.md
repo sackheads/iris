@@ -94,9 +94,17 @@ it: a guest never gets an address a role session could message first.
   person's approval (#813) and the Google writers by the outbound gate, and are stripped as well. The role
   session's own prompt (`SOUL.md`, `USER.md`, `memory.md`, skills) still carries what it carries, and MCP
   tools the person added are not stripped; only the tools named here are closed.
-- **The per-client role allowlist.** A guest reaches only the roles its client was granted
-  (`ProviderTokenRegistry.setRoles`). The default is empty: a guest with no role can message
-  nobody. It cannot name `iris`, a session id, a name, a topic or another guest. A role session
+- **The per-client role allowlist.** A guest reaches only the roles its client was granted. The grant
+  lives in the access-profile store (`profiles/`): a guest is mapped, as `(mcp, iris-mcp-provider, <client
+  id>)`, to a profile whose `peerRoles` are the roles it may address, and the store wins. The Keychain
+  roles item that `ProviderTokenRegistry.setRoles` has always written is only a fallback, for a guest the
+  store has no mapping for; a store that cannot be read gives the guest no roles, never the fallback. At
+  launch an old install's roles are copied into the store once (a guest that already has a mapping is
+  left alone). The gate reads the grant on every call, so a narrowed or removed grant reaches a live
+  guest's next send; a guest's other limits (tools, credentials, memory writes) are fixed by the guest
+  floor and cannot change for a live session. A mapping you wrote by hand is never changed or deleted
+  by the provider, and survives a revoke (the token is still required); one the provider wrote itself is
+  removed on revoke. The default is empty: a guest with no role can message nobody. It cannot name `iris`, a session id, a name, a topic or another guest. A role session
   answers a guest only with `in_reply_to` (the guest is hidden and has no address); once the guest
   session is closed or reaped, that reply is refused as "no longer active".
 - **What a role session sees.** A guest's message arrives framed as a request from an external MCP
