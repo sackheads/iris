@@ -72,4 +72,15 @@ struct ActivityRowLiveTrackingTests {
         }
         #expect(!host.repaints(within: 0.3) { a.updateRunPhase(other, .executing(tool: "run_command", detail: "x")) })
     }
+
+    @Test("control: the row's own clock repaints the whole row but not the region the tests digest")
+    func clockIsOutsideTheRegion() {
+        let a = app(), id = UUID()
+        a.registerSubagent(id: id, role: "engineer")
+        let size = CGSize(width: 520, height: 30)
+        let whole = ViewHost(size: size) { ActivityRowView(state: a, sessionId: id, isMain: false, onTap: {}) }
+        #expect(whole.repaints(within: 2.5) { }, "the elapsed clock must tick, or this control proves nothing")
+        let left = ViewHost(size: size, region: Self.left) { ActivityRowView(state: a, sessionId: id, isMain: false, onTap: {}) }
+        #expect(!left.repaints(within: 2.5) { })
+    }
 }
