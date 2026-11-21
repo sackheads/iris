@@ -599,7 +599,7 @@ actor IrisEngine {
 
     /// #974 Task 14 (C2, defence in depth): the owner's secret values, read when a result or a message
     /// is about to cross into a guest-bound context. The app's own secrets by default (`ConfigManager`'s
-    /// cached secrets item, no Keychain read of its own); a test injects its own set (Invariant 7).
+    /// cached secrets item plus the values `KeychainManager` has held from the other items, #1220; no Keychain read of its own); a test injects its own set (Invariant 7).
     let knownSecrets: @Sendable () async -> Set<String>
 
     /// Whether a turn's output crosses into a guest-bound context: its binding is not the owner's.
