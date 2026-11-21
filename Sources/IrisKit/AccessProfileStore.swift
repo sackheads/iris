@@ -149,7 +149,7 @@ final class AccessProfileStore: Sendable {
         return result
     }
 
-    private struct MappingEntry: Codable {
+    struct MappingEntry: Codable {
         let transport: String
         let issuer: String
         let id: String
