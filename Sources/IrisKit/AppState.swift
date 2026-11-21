@@ -5226,6 +5226,7 @@ class AppState {
 
         if let decision = await consultVibecop(toolName: toolName, details: details, workspace: workspace, inSandbox: inSandbox,
                                                callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: vibecopEnabled,
+                                               profileGuidance: agentProfileVibecopGuidance(for: conversationId, guestOrigin: guestOrigin),
                                                conversationGuidance: vibecopGuidance(for: conversationId, guestOrigin: guestOrigin)) {
             // On the host, an APPROVE stands in for the person only on a read (#600), and not at all
             // for a command once the person has denied one in this conversation.
@@ -5272,12 +5273,24 @@ class AppState {
         return conversations.first(where: { $0.id == id })?.vibecopGuidance
     }
 
+    /// The Vibecop guidance in the agent profile this conversation is linked to (#1005): its own profile
+    /// only, as with `vibecopGuidance` (a delegate inherits nothing silently), and only while the file
+    /// reads. Guidance adds allowances, so a missing or broken file gives none: the kept copy that stands
+    /// in for a narrowing profile (`resolveAgentProfile`) does not stand in here. A guest-origin turn
+    /// gets none, as it gets no Vibecop APPROVE either (#1151).
+    func agentProfileVibecopGuidance(for conversationId: UUID?, guestOrigin: Bool) -> String? {
+        guard !guestOrigin, let id = conversationId,
+              let conv = conversations.first(where: { $0.id == id }), !conv.isPinned,
+              let name = conv.agentProfile, case .loaded(let profile) = agentProfiles.load(name) else { return nil }
+        return profile.vibecop
+    }
+
     /// Vibecop, bounded by a timeout so a wedged local model can't hang the turn. nil means
     /// Vibecop is off, or the evaluation failed or timed out: no verdict, so the user prompt decides.
     /// Uses adaptive timeout: if the Ollama model is cold (unloaded), give it 30s to load.
     private func consultVibecop(toolName: String, details: String, workspace: String?, inSandbox: Bool,
                                 callerRole: VibecopCallerRole, allowedCommands: [String], vibecopEnabled: Bool?,
-                                conversationGuidance: String? = nil) async -> VibecopDecision? {
+                                profileGuidance: String? = nil, conversationGuidance: String? = nil) async -> VibecopDecision? {
         // Off is checked before the Ollama warm-up probe below, which would otherwise build an engine for nothing.
         let enabled = vibecopEnabled ?? vibecopEnabledOverride ?? ConfigManager.shared.enableVibecop
         guard enabled else { return nil }
@@ -5300,7 +5313,7 @@ class AppState {
         return await Self.boundedVibecopVerdict(seconds: timeout) {
             try await VibecopService.shared.evaluateAction(toolName: toolName, details: details, workspace: workspace, inSandbox: inSandbox,
                                                            callerRole: callerRole, allowedCommands: allowedCommands,
-                                                           conversationGuidance: conversationGuidance, vibecopEnabled: enabled,
+                                                           profileGuidance: profileGuidance, conversationGuidance: conversationGuidance, vibecopEnabled: enabled,
                                                            paths: activePaths)
         }
     }
@@ -7350,7 +7363,9 @@ class AppState {
         if rest.isEmpty || rest == "show" {
             let workspace = conversations.first(where: { $0.id == convId })?.workspacePath
             let own = conversations.first(where: { $0.id == convId })?.vibecopGuidance
-            let additions = VibecopService.guardianAdditions(workspace: workspace, conversationGuidance: own, paths: permissions.paths)
+            let additions = VibecopService.guardianAdditions(workspace: workspace,
+                                                             profileGuidance: agentProfileVibecopGuidance(for: convId, guestOrigin: false),
+                                                             conversationGuidance: own, paths: permissions.paths)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if additions.isEmpty {
                 emitCommandOutput("No custom Vibecop guidance configured. Use `/vibecop tweak <guidance>` to add guidance for this conversation or `/vibecop init` to analyze the workspace.", format: .markdown, to: convId)

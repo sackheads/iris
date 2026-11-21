@@ -16,6 +16,11 @@ struct AgentProfile: Equatable, Sendable {
     var prompt: String
     /// SHA-256 of the file's bytes, so an edit made within the same second still counts.
     var contentHash: String
+    /// Vibecop guidance the owner wrote in the profile's frontmatter (`vibecop:`, #1005): appended to the
+    /// prompt Vibecop judges this profile's own conversations with. The directory is a protected write,
+    /// so only the person sets it. It adds allowances inside Vibecop's baseline and decides nothing
+    /// itself: it is not an approval, and a guest-origin turn is not given it.
+    var vibecop: String? = nil
 
     /// Tools a profile never narrows (#465, Fork B): each is already offered only on its own
     /// trigger or in its own state (Invariant 6), so narrowing it would break `/goal` or `/rename`
@@ -39,7 +44,7 @@ struct AgentProfile: Equatable, Sendable {
 
     var snapshot: AgentProfileSnapshot {
         AgentProfileSnapshot(name: name, role: role, tier: tier?.rawValue, skills: skills, tools: tools,
-                             prompt: prompt, contentHash: contentHash)
+                             prompt: prompt, contentHash: contentHash, vibecop: vibecop)
     }
 }
 
@@ -54,11 +59,12 @@ struct AgentProfileSnapshot: Codable, Equatable, Sendable {
     var tools: [String]?
     var prompt: String
     var contentHash: String
+    var vibecop: String?
 
     init(name: String, role: String?, tier: String?, skills: [String]?, tools: [String]?,
-         prompt: String, contentHash: String) {
+         prompt: String, contentHash: String, vibecop: String? = nil) {
         self.name = name; self.role = role; self.tier = tier; self.skills = skills
-        self.tools = tools; self.prompt = prompt; self.contentHash = contentHash
+        self.tools = tools; self.prompt = prompt; self.contentHash = contentHash; self.vibecop = vibecop
     }
 
     // Invariant 1: every field past the name and prompt may be absent in a later format.
@@ -71,11 +77,12 @@ struct AgentProfileSnapshot: Codable, Equatable, Sendable {
         tools = try c.decodeIfPresent([String].self, forKey: .tools)
         prompt = try c.decode(String.self, forKey: .prompt)
         contentHash = try c.decodeIfPresent(String.self, forKey: .contentHash) ?? ""
+        vibecop = try c.decodeIfPresent(String.self, forKey: .vibecop)
     }
 
     var profile: AgentProfile {
         AgentProfile(name: name, role: role, tier: tier.flatMap(ModelTier.init(rawValue:)), skills: skills,
-                     tools: tools, prompt: prompt, contentHash: contentHash)
+                     tools: tools, prompt: prompt, contentHash: contentHash, vibecop: vibecop)
     }
 }
 
@@ -146,10 +153,35 @@ struct AgentProfileStore: Sendable {
             guard let items = Self.list(field) else { return .failure(.init(message: "\(key) must be a list of names")) }
             lists[key] = items
         }
+        var vibecop: String?
+        if let field = fields.first(where: { $0.key == "vibecop" }) {
+            guard let text = Self.vibecopText(field) else {
+                return .failure(.init(message: "vibecop must be text, or a `|` block of indented lines"))
+            }
+            vibecop = text.isEmpty ? nil : text
+        }
         guard !body.isEmpty else { return .failure(.init(message: "the profile has no text below its frontmatter")) }
         let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         return .success(AgentProfile(name: name, role: role, tier: tier, skills: lists["skills"], tools: lists["tools"],
-                                     prompt: body, contentHash: hash))
+                                     prompt: body, contentHash: hash, vibecop: vibecop))
+    }
+
+    /// `vibecop: one line of text`, or the YAML literal block (`vibecop: |` and indented lines, one
+    /// shared indent removed). Trimmed; "" when the field is empty. nil for any other spelling (a list, a
+    /// folded `>` block, a `|` with nothing under it that is not meant as empty is just empty).
+    static func vibecopText(_ field: SkillFrontmatterField) -> String? {
+        let first = field.rawLines.first ?? ""
+        let inline = first.firstIndex(of: ":").map { first[first.index(after: $0)...].trimmingCharacters(in: .whitespaces) } ?? ""
+        if inline.isEmpty {
+            // `vibecop:` with the text on indented lines below is not a YAML scalar we promise to read.
+            return field.rawLines.dropFirst().allSatisfy { $0.trimmingCharacters(in: .whitespaces).isEmpty } ? "" : nil
+        }
+        guard ["|", "|-", "|+"].contains(inline) else { return field.scalarValue ?? "" }
+        let lines = Array(field.rawLines.dropFirst())
+        let indent = lines.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            .map { $0.prefix { $0 == " " || $0 == "\t" }.count }.min() ?? 0
+        return lines.map { $0.count >= indent ? String($0.dropFirst(indent)) : "" }
+            .joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// `key: [a, b]` or the YAML block form (`- a` lines). nil when it is neither.
