@@ -1016,6 +1016,10 @@ struct ChatView: View {
                     }
                 }
             }
+            // #1278: `/vibecop init` without typing it, for a conversation bound to a workspace.
+            if let wp = conv.workspacePath, !wp.isEmpty {
+                Button("Vibecop: Generate Rules...") { state.startVibecopInit(convId: conv.id) }
+            }
             // #625: rules Iris did not write are off until the person reads and trusts them.
             if let wp = conv.workspacePath, !state.untrustedWorkspaceRules(for: wp).isEmpty {
                 Button("Review Workspace Rules...") {
