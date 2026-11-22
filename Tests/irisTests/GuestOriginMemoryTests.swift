@@ -34,11 +34,9 @@ struct GuestOriginMemoryTests {
         #expect(ToolExecutor.memoryTools == Set(Self.memory))
         #expect(ToolExecutor.googleWorkspaceTools == Set(Self.google))
         #expect(ToolExecutor.ownerJobReadTools == Set(Self.jobReads))
-        #expect(ToolExecutor.guestOriginInterimDeniedTools == Set(Self.interim))
-        #expect(ToolExecutor.guestOriginDeniedTools == Set(Self.all))
-        #expect(ToolExecutor.guestOriginDeniedTools.isDisjoint(with: ToolExecutor.memoryTools),
-                "the memory tools are gated by the binding, not the denylist (#1224)")
-        #expect(!ToolExecutor.guestOriginDeniedTools.isEmpty)
+        #expect(ToolClassTable.ownerOnlyNames.isSuperset(of: Set(Self.all)), "the table refuses every one of them")
+        #expect(ToolClassTable.ownerOnlyNames.isDisjoint(with: ToolExecutor.memoryTools),
+                "the memory tools are gated by the binding's tier, not owner-only (#1224)")
         #expect(ToolExecutor.memoryReadTools.isDisjoint(with: ToolExecutor.memoryWriteTools))
     }
 
@@ -71,7 +69,7 @@ struct GuestOriginMemoryTests {
             .union(IrisEngine.jobToolDeclarations(isPinned: true).map(\.name))
             .union(["create_skill", "update_skill", "delete_skill"])
             .union(ToolExecutor.googleWorkspaceTools)
-        #expect(ToolExecutor.guestOriginDeniedTools.isSubset(of: declared), "\(ToolExecutor.guestOriginDeniedTools.subtracting(declared).sorted())")
+        #expect(ToolClassTable.ownerOnlyNames.isSubset(of: declared), "\(ToolClassTable.ownerOnlyNames.subtracting(declared).sorted())")
     }
 
     @Test("reflect stays out: its handler returns a fixed line and stores nothing")
@@ -99,9 +97,9 @@ struct GuestOriginMemoryTests {
 
     @Test("hardStrip strips the whole set at once")
     func hardStripWholeSet() {
-        let stripped = Set(IrisEngine.hardStrip(declarations(Array(ToolExecutor.guestOriginDeniedTools)), isUnattended: false,
+        let stripped = Set(IrisEngine.hardStrip(declarations(Array(ToolClassTable.ownerOnlyNames)), isUnattended: false,
                                                 principal: .main, guestOrigin: true).map(\.name))
-        #expect(stripped.isDisjoint(with: ToolExecutor.guestOriginDeniedTools))
+        #expect(stripped.isDisjoint(with: ToolClassTable.ownerOnlyNames))
     }
 
     /// The tool names a real turn declares to the model.
@@ -123,7 +121,7 @@ struct GuestOriginMemoryTests {
     func realTurnDeclaration(_ pinned: Bool) async {
         let control = await declared(guestOrigin: false, pinned: pinned)
         let guest = await declared(guestOrigin: true, pinned: pinned)
-        let offered = control.intersection(ToolExecutor.guestOriginDeniedTools)
+        let offered = control.intersection(ToolClassTable.ownerOnlyNames)
         // The control must actually offer them, or "none offered" proves nothing.
         // `manage_fact` is declared only once the fact store has something to manage, so a fresh turn does
         // not offer it; it is covered by the pure strip and dispatch tests above and below.
@@ -132,8 +130,8 @@ struct GuestOriginMemoryTests {
         }
         // The memory tools stay offered to the guest-origin turn (refused by the binding at call time).
         #expect(guest.isSuperset(of: Set(Self.writes).subtracting(["manage_fact"]).union(["search_memory"])), "\(guest.sorted())")
-        #expect(guest.intersection(ToolExecutor.guestOriginDeniedTools).isEmpty,
-                "\(guest.intersection(ToolExecutor.guestOriginDeniedTools).sorted())")
+        #expect(guest.intersection(ToolClassTable.ownerOnlyNames).isEmpty,
+                "\(guest.intersection(ToolClassTable.ownerOnlyNames).sorted())")
         #expect(guest.contains("run_command"), "the guest-origin turn did declare tools")
     }
 
@@ -151,10 +149,11 @@ struct GuestOriginMemoryTests {
 
     @Test("the dispatcher refuses each memory tool on a guest-origin turn, and no other tool", arguments: GuestOriginMemoryTests.all)
     func dispatchRefusalByTool(_ name: String) {
-        #expect(IrisEngine.guestOriginDispatchRefusal(name, guestOrigin: true) == IrisEngine.guestOriginDataRefusal)
-        #expect(IrisEngine.guestOriginDispatchRefusal(name, guestOrigin: false) == nil)
-        #expect(IrisEngine.guestOriginDispatchRefusal("run_command", guestOrigin: true) == nil)
-        #expect(IrisEngine.guestOriginDispatchRefusal("reflect", guestOrigin: true) == nil)
+        let guest = AccessBinding(profile: AccessProfile(), principal: .mcpGuest, isOwner: false)
+        #expect(ToolClassTable.refusal(tool: name, binding: guest) == IrisEngine.nonOwnerToolRefusal)
+        #expect(ToolClassTable.refusal(tool: name, binding: AccessBinding(profile: .owner, principal: .main, isOwner: true)) == nil)
+        #expect(ToolClassTable.refusal(tool: "run_command", binding: guest) == nil)
+        #expect(ToolClassTable.refusal(tool: "reflect", binding: guest) == nil)
     }
 
     enum Origin { case none, conversation, delegationRoot }
@@ -205,12 +204,12 @@ struct GuestOriginMemoryTests {
           arguments: GuestOriginMemoryTests.all, [Origin.conversation, .delegationRoot])
     func forgedCallRefused(_ name: String, _ origin: Origin) async throws {
         let result = try await dispatchResult(for: name, origin: origin)
-        #expect(result.contains(IrisEngine.guestOriginDataRefusal), "\(name): \(result)")
+        #expect(result.contains(IrisEngine.nonOwnerToolRefusal), "\(name): \(result)")
     }
 
     @Test("control: the same call from an unmarked attended turn is not refused as guest-origin", arguments: GuestOriginMemoryTests.all)
     func unmarkedTurnIsNotRefused(_ name: String) async throws {
         let result = try await dispatchResult(for: name, origin: .none)
-        #expect(!result.contains(IrisEngine.guestOriginDataRefusal), "\(name): \(result)")
+        #expect(!result.contains(IrisEngine.nonOwnerToolRefusal), "\(name): \(result)")
     }
 }

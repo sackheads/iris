@@ -289,26 +289,8 @@ struct ToolExecutor {
     /// The pinned Iris conversation's reads of the owner's jobs and their run output (#1195).
     nonisolated static let ownerJobReadTools: Set<String> = ["list_jobs", "get_job_run"]
 
-    /// What a turn a guest's message started or steered is neither offered nor allowed to run
-    /// (#1195): the owner's Google account, job history, session roster and standing jobs. One list for
-    /// `hardStrip`, the dispatcher and the tests. The eleven memory tools are NOT here any more (#1224):
-    /// `MemoryBindingGate` refuses them for the turn's own non-owner binding (`bindingForCall`), proven
-    /// per tool through a real turn with them offered (`GuestOriginMemoryGateTests`). Not here, and
-    /// still the spine's job (a binding-based tool gate for the recipient turn, #1015 gap A): MCP tools
-    /// the user added, and the tools that already ask the person. The Google and job tools stay here
-    /// until that gate exists: nothing else refuses them on such a turn.
-    nonisolated static let guestOriginDeniedTools: Set<String> =
-        googleWorkspaceTools.union(ownerJobReadTools).union(guestOriginInterimDeniedTools)
-
-    /// Interim, until the spine's tool table classifies them owner-only (#1203): the session roster and
-    /// standing jobs. `list_sessions`/`describe_session` returned the owner's roster (ids, names,
-    /// workspaces, descriptions) on a guest-steered turn, whose reply goes to the guest (#1293).
-    /// `schedule_job`/`register_directory_watcher` created a job on such a turn with no approval for the
-    /// default read-only profile and stamped it with no profile, so it fired as the owner running the
-    /// guest's prompt (#1294). A job made by a turn bound to a profile still carries that profile; this
-    /// only closes the turn a guest steered.
-    nonisolated static let guestOriginInterimDeniedTools: Set<String> =
-        ["list_sessions", "describe_session", "schedule_job", "register_directory_watcher"]
+    // The #1195/#1199 hand-maintained denylist is retired (#974 gap A): `ToolClassTable` classifies every
+    // declared tool, `ToolClassTableTests` fails on one with no row, and the gate reads the turn's binding.
 
     nonisolated static let githubToolDeclarations: [FunctionDeclaration] = [
         FunctionDeclaration(

@@ -74,7 +74,7 @@ struct GuestOriginMemoryGateTests {
 
     @Test("the memory tools are not on the denylist, and each is OFFERED to a guest-steered turn (so a refusal below is the gate's)", arguments: GuestOriginMemoryGateTests.tools)
     func isOfferedAndNotDenylisted(_ name: String) async throws {
-        #expect(!ToolExecutor.guestOriginDeniedTools.contains(name))
+        #expect(!ToolClassTable.ownerOnlyNames.contains(name))
         #expect(try await offered(name), "\(name) must be offered on the steered turn, or the refusal below could be the #811 not-offered text")
     }
 
@@ -82,7 +82,7 @@ struct GuestOriginMemoryGateTests {
     func gateRefuses(_ name: String) async throws {
         let result = try await forgedResult(name)
         #expect(result.contains(MemoryBindingGate.refusal), "\(name): \(result)")
-        #expect(!result.contains(IrisEngine.guestOriginDataRefusal), "\(name) was refused by the denylist: \(result)")
+        #expect(!result.contains(IrisEngine.nonOwnerToolRefusal), "\(name) was refused by the denylist: \(result)")
         #expect(!result.contains("is not one of the tools offered"), "\(name) was refused as not offered: \(result)")
         if name == "search_memory" {
             #expect(result.components(separatedBy: MemoryBindingGate.refusal).count - 1 == 2, "both the facts and the conversations branch must be refused: \(result)")

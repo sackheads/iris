@@ -7,7 +7,7 @@ import Foundation
 /// (`list_sessions`, `describe_session`: the reply goes to the guest) and standing jobs (`schedule_job`,
 /// `register_directory_watcher`: the default read-only profile needs no approval, and the row was stamped
 /// with no profile, so it fired as the owner running the guest's prompt). Until the spine classifies them
-/// owner-only (#1203) they are in `guestOriginDeniedTools`: not offered to such a turn, and refused at
+/// owner-only (#1203) they are in `ToolClassTable.ownerOnlyNames`: not offered to such a turn, and refused at
 /// dispatch. Each test drives a real turn through `processInput`.
 @MainActor
 @Suite("a guest-steered turn has no session roster and no standing jobs (#1293, #1294)", .serialized, .timeLimit(.minutes(2)))
@@ -85,7 +85,7 @@ struct GuestOriginSessionJobToolsTests {
     @Test("a forged call to each of the four from a guest-steered turn is refused with the guest-origin text, and creates no job", arguments: GuestOriginSessionJobToolsTests.tools)
     func forgedCallIsRefused(_ name: String) async throws {
         let r = try await forged(name, steered: true)
-        #expect(r.result.contains(IrisEngine.guestOriginDataRefusal), "\(name): \(r.result)")
+        #expect(r.result.contains(IrisEngine.nonOwnerToolRefusal), "\(name): \(r.result)")
         #expect(r.jobs == 0, "\(name) created a job")
         #expect(!r.result.contains("PEER-TITLE") && !r.result.contains("session_id"), "\(name) leaked the roster: \(r.result)")
     }
@@ -93,6 +93,6 @@ struct GuestOriginSessionJobToolsTests {
     @Test("control: the same forged calls from an unsteered turn are not refused as guest-origin", arguments: GuestOriginSessionJobToolsTests.tools)
     func unsteeredIsNotRefused(_ name: String) async throws {
         let r = try await forged(name, steered: false)
-        #expect(!r.result.contains(IrisEngine.guestOriginDataRefusal), "\(name): \(r.result)")
+        #expect(!r.result.contains(IrisEngine.nonOwnerToolRefusal), "\(name): \(r.result)")
     }
 }
