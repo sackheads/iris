@@ -95,19 +95,28 @@ struct ProfileReflectionTests {
     /// #1286 (folded into #1263/#1289): unlike the automatic trigger, `/reflect` on the OWNER's
     /// own path runs regardless of guest input by design ("asked for, so it runs"). The profile
     /// path had no equivalent gate at all before this -- a live gap, not merely untested, since
-    /// `/reflect` never checked `hasGuestInput` for a bound session either. `runProfileReflection`
-    /// itself is the fix, so this is the gate-removal proof for it: the model call never happens,
-    /// and it is skipped silently like a narrow-profile `/reflect` already does (no written file,
-    /// but also no refusal message -- `/reflect` still only distinguishes "may this bound session
-    /// write at all" from "not now, this turn is tainted" at the `reflectionMayRun`/owner level,
-    /// and this gate sits one level narrower, inside the profile path alone).
-    @Test("/reflect on a session with guest input in its history does not reflect into the profile file either")
+    /// `/reflect` never checked `hasGuestInput` for a bound session either. #1290: the handler now
+    /// says why nothing ran instead of printing "Triggering" and doing nothing; the gate inside
+    /// `runProfileReflection` stays, and the next test pins it on its own.
+    @Test("/reflect on a session with guest input in its history does not reflect into the profile file, and says why")
     func manualReflectSkipsWhenGuestTouched() async throws {
         let h = try harness(profileId: "writer", script: [Self.writeCall(Self.note), Self.text("Saved.")], guestInput: true)
         defer { h.tearDown() }
         h.state.sendMessage("/reflect")
         try await waitForTurn(h)
         #expect(h.client.calls == 0, "the model is never called for a guest-touched bound session's manual reflect")
+        #expect(profileFile(h) == nil)
+        let system = (h.state.conversations.first { $0.id == h.source }?.messages ?? []).filter { $0.role == .system }.map(\.content)
+        #expect(system.contains(AppState.reflectionNotRunForGuestInput), "\(system)")
+        #expect(!system.contains { $0.hasPrefix("Triggering") }, "\(system)")
+    }
+
+    @Test("runProfileReflection refuses a session with guest input in its history on its own, whatever its caller checked")
+    func profileReflectionGateHoldsWithoutHandler() async throws {
+        let h = try harness(profileId: "writer", script: [Self.writeCall(Self.note), Self.text("Saved.")], guestInput: true)
+        defer { h.tearDown() }
+        await h.state.runProfileReflection(profileId: "writer", in: h.source)
+        #expect(h.client.calls == 0)
         #expect(profileFile(h) == nil)
     }
 

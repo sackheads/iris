@@ -2638,6 +2638,8 @@ class AppState {
         }
     }
 
+    static let reflectionNotRunForGuestInput = "Memory reflection was not run: a guest's message is in this conversation's history, and a conversation a guest has written into is not reflected into this profile's memory."
+
     static let reflectionNotRunForBoundSession = "Memory reflection was not run: this session is bound to an access profile that may not write memory, and a reflection writes the owner's memory and reports into Iris."
 
     /// Swaps the `.agent` messages at or after `before` for one `reflectionReportedNotice` line,
@@ -4040,6 +4042,11 @@ class AppState {
             // #974 Task 11 (C7): a session not bound to the owner is told why nothing ran, not "Triggering".
             runThinkingTask(conversationId: convId) { [self] in
                 if case .profile(let profileId) = await reflectionRoute(in: convId) {
+                    // #1290: said here, before "Triggering"; `runProfileReflection` keeps its own check (#1286).
+                    if conversations.first(where: { $0.id == convId })?.hasGuestInput == true {
+                        appendMessage(role: .system, content: Self.reflectionNotRunForGuestInput, to: convId)
+                        return
+                    }
                     appendMessage(role: .system, content: "Triggering manual memory reflection into this profile's own memory...", to: convId)
                     await runProfileReflection(profileId: profileId, in: convId)
                     return
