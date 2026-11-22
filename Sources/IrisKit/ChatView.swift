@@ -1020,6 +1020,8 @@ struct ChatView: View {
             // (a job run's or a subagent's would run the turn only to have its `.iris` write refused unattended).
             if conv.isUserFacing, let wp = conv.workspacePath, !wp.isEmpty {
                 Button("Vibecop: Generate Rules...") { state.startVibecopInit(convId: conv.id) }
+                // #1278: `/vibecop refine`, the same call.
+                Button("Vibecop: Refine Rules...") { state.startVibecopRefine(convId: conv.id) }
             }
             // #625: rules Iris did not write are off until the person reads and trusts them.
             if let wp = conv.workspacePath, !state.untrustedWorkspaceRules(for: wp).isEmpty {

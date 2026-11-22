@@ -70,9 +70,17 @@ struct VibecopInitMenuWiringTests {
         #expect(before.contains("if conv.isUserFacing, let wp = conv.workspacePath, !wp.isEmpty"),
                 "the item is shown only for the person's own conversation with a bound workspace")
 
+        // #1278's refine item: under the same condition, calling the one refine method.
+        let refine = try #require(chat.range(of: "Button(\"Vibecop: Refine Rules...\")"))
+        #expect(chat[chat.lineRange(for: refine)].contains("state.startVibecopRefine(convId: conv.id)"))
+        #expect(refine.lowerBound > item.lowerBound && !chat[item.lowerBound..<refine.lowerBound].contains("\n            }"),
+                "the refine item sits inside the same isUserFacing/workspace block as Generate Rules")
+
         let app = try String(contentsOf: sources.appendingPathComponent("AppState.swift"), encoding: .utf8)
         let handler = try #require(app.range(of: "private func handleVibecopCommand"))
         let initBranch = app[handler.lowerBound...].prefix(400)
         #expect(initBranch.contains("startVibecopInit(convId: convId)"), "\(initBranch)")
+        let refineBranch = app[handler.lowerBound...].prefix(900)
+        #expect(refineBranch.contains("if rest == \"refine\" {\n            startVibecopRefine(convId: convId)"), "\(refineBranch)")
     }
 }
