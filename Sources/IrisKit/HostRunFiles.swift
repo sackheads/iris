@@ -4,6 +4,7 @@ import Foundation
 /// startup file, an SSH config, a launch agent, outlives `/yolo off` the way a permission grant does,
 /// so YOLO does not approve it (`AppState.requestApprovalSource`): the call takes the ordinary ladder,
 /// as with YOLO off. The files are `VibecopService.hostRunFiles` (#613), plus `.config/git/config`.
+/// #1327 adds the jobs a command plants without writing one of them: a crontab, a launchd job.
 /// Best effort on a command's text, like `PolicyStores`: a path built at run time is not seen.
 enum HostRunFiles {
     private static let startupFiles: Set<String> = [".gitconfig", ".zshenv", ".zshrc", ".zprofile", ".zlogin", ".zlogout",
@@ -35,20 +36,70 @@ enum HostRunFiles {
         // Each list of words is scanned, and so is every quoted span re-split as a command of its own:
         // `sh -c 'echo x >> ~/.zshrc'` and `bash -lc "git config core.hooksPath h"` are the usual shapes
         // of a model-written command (dev-1's review). Bounded, since a span re-splits into shorter ones.
-        for list in wordLists(command, depth: 4) {
+        for text in commandTexts(command, depth: 4) {
+            let list = words(text)
             // An assignment's value is a path too (`X=~/.zshrc`, `--file=.git/config`).
             if list.flatMap({ $0.split(separator: "=").map(String.init) }).contains(where: isRunFile) { return true }
             if setsGitConfig(list) { return true }
+            if segments(text).contains(where: plantsJob) { return true }
         }
         return false
     }
 
     /// `command`'s words, then the words of each word that is itself more than one, recursively.
     static func wordLists(_ command: String, depth: Int) -> [[String]] {
-        let list = words(command)
-        guard depth > 0 else { return [list] }
-        return [list] + list.filter { word in word.contains { $0.isWhitespace || "><|;&()`$".contains($0) } }
-            .flatMap { wordLists($0, depth: depth - 1) }
+        commandTexts(command, depth: depth).map(words)
+    }
+
+    /// `command`, then each of its words that is itself more than one (a quoted `sh -c` body), recursively.
+    private static func commandTexts(_ command: String, depth: Int) -> [String] {
+        guard depth > 0 else { return [command] }
+        return [command] + words(command).filter { word in word.contains { $0.isWhitespace || "><|;&()`$".contains($0) } }
+            .flatMap { commandTexts($0, depth: depth - 1) }
+    }
+
+    /// #1327: a persistent job a later launch runs, planted without writing any listed file. `crontab` with
+    /// anything but `-l` (a file, `-` for stdin, none at all, `-e`, `-r`), and `launchctl load`, `bootstrap`,
+    /// `enable` or `submit`. Only in the command's own position, so `man crontab` is not one.
+    static func plantsJob(_ segment: [String]) -> Bool {
+        guard let i = commandIndex(segment) else { return false }
+        let program = (segment[i] as NSString).lastPathComponent
+        var args = Array(segment[(i + 1)...])
+        switch program {
+        case "crontab":
+            if let u = args.firstIndex(of: "-u"), u + 1 < args.count { args.removeSubrange(u...(u + 1)) }
+            return args != ["-l"]
+        case "launchctl":
+            return args.first.map { ["load", "bootstrap", "enable", "submit"].contains($0) } ?? false
+        default:
+            return false
+        }
+    }
+
+    /// Where a segment's program is: past variable assignments and the wrappers that run the next word
+    /// (`sudo`, `env`, `nohup`, `command`, `exec`, `time`, `nice`, `doas`) with their own options.
+    private static func commandIndex(_ segment: [String]) -> Int? {
+        let wrappers: Set<String> = ["sudo", "doas", "env", "nohup", "command", "exec", "time", "nice"]
+        let takesValue: Set<String> = ["-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-n", "-S"]
+        var i = 0
+        while i < segment.count {
+            let word = segment[i]
+            if word.contains("=") && !word.hasPrefix("-") { i += 1; continue }
+            guard wrappers.contains((word as NSString).lastPathComponent) else { return i }
+            i += 1
+            while i < segment.count, segment[i].hasPrefix("-") { i += takesValue.contains(segment[i]) ? 2 : 1 }
+        }
+        return nil
+    }
+
+    /// The command's simple commands: its words, split again at the list, pipe and grouping characters
+    /// (`;`, `&`, `|`, parentheses, a backtick) and at a line break, which `words` treats as plain gaps.
+    static func segments(_ command: String) -> [[String]] {
+        var result: [[String]] = [[]]
+        for token in tokens(command) {
+            if let token { result[result.count - 1].append(token) } else if !result[result.count - 1].isEmpty { result.append([]) }
+        }
+        return result.filter { !$0.isEmpty }
     }
 
     /// The command's shell words: split at unquoted whitespace and the shell's redirection, pipe and
@@ -56,7 +107,12 @@ enum HostRunFiles {
     /// dev-2's review: stripping quotes before splitting made `-c "user.name=Iris Bot"` two words, so
     /// the `git config` scan below lost its place.
     static func words(_ command: String) -> [String] {
-        var words: [String] = [], current = "", quote: Character?, escaped = false, started = false
+        tokens(command).compactMap { $0 }
+    }
+
+    /// `words`, with a nil where a simple command ends (see `segments`).
+    private static func tokens(_ command: String) -> [String?] {
+        var words: [String?] = [], current = "", quote: Character?, escaped = false, started = false
         func end() { if started { words.append(current) }; current = ""; started = false }
         for c in command {
             if escaped { current.append(c); escaped = false; started = true; continue }
@@ -66,7 +122,8 @@ enum HostRunFiles {
                 continue
             }
             if c == "'" || c == "\"" { quote = c; started = true; continue }
-            if c.isWhitespace || "><|;&()`".contains(c) { end(); continue }
+            if c.isNewline || ";&|()`".contains(c) { end(); words.append(nil); continue }
+            if c.isWhitespace || "><".contains(c) { end(); continue }
             current.append(c); started = true
         }
         end()

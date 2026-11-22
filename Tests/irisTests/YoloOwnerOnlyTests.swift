@@ -208,6 +208,18 @@ struct YoloOwnerOnlyTests {
         }
     }
 
+    @Test("under YOLO, a crontab install or a launchctl load asks (#1327)", arguments: [
+        "crontab /tmp/iris-1327-never-installed", "launchctl load /tmp/iris-1327-never-loaded.plist",
+        "sh -c 'echo x | crontab -'",
+    ])
+    func persistentJobsAskUnderYolo(_ command: String) async throws {
+        let w = try world(); defer { w.tearDown() }
+        w.state.sendMessage("/yolo on")
+        // Denied at the card, so nothing is installed on the machine running the test.
+        let asked = try await asksThePerson(w, Self.call("run_command", ["command": .string(command)]), ran: { false })
+        #expect(asked, "\(command): YOLO must not approve a persistent job")
+    }
+
     @Test("control: under YOLO ordinary git (git init) still runs unasked")
     func ordinaryGitStillYolo() async throws {
         let w = try world(); defer { w.tearDown() }
