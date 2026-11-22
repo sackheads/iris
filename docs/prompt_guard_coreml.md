@@ -179,11 +179,14 @@ the cleanest such path**, and the model side is proven:
 
 ### Swift integration (done)
 
-Microsoft ships an official Swift Package Manager distribution with **macOS support**:
-[`microsoft/onnxruntime-swift-package-manager`](https://github.com/microsoft/onnxruntime-swift-package-manager)
-(1.20.0), which vends the native runtime as a binary SPM dependency (module
-`OnnxRuntimeBindings`) — no CocoaPods or manual xcframework wrangling. It is wired into
-`Package.swift`. The pipeline reuses the tokenizer work already done here:
+Microsoft shipped an official Swift Package Manager distribution with **macOS support**,
+`microsoft/onnxruntime-swift-package-manager`, which vends the native runtime as a binary SPM
+dependency (module `OnnxRuntimeBindings`): no CocoaPods or manual xcframework wrangling. That
+repository and its binary download host stopped resolving in November 2026 (#1322), so
+`Package.swift` now pins our mirror,
+[`sackheads/onnxruntime-swift-package-manager`](https://github.com/sackheads/onnxruntime-swift-package-manager),
+at 1.24.2: the upstream history plus one commit pointing the binaries at the mirror's release
+assets, byte-identical to upstream. The pipeline reuses the tokenizer work already done here:
 
 1. **Tokenize** with `swift-transformers` (the `XLMRobertaTokenizer` relabel →
    `UnigramTokenizer`, parity-tested in `DebertaV3TokenizerParityTests`).
