@@ -11,8 +11,8 @@ import Foundation
 ///   - a profile-bound conversation stamps its profile, and so does a delegate of it;
 ///   - a stamp is never changed once set, and an unstamped job takes the stamp of the conversation that re-schedules it;
 ///   - a guest-STEERED `.main` turn has a stamped binding but no persisted id, so a job made through this function
-///     is unstamped. That is not a license: such a creation is refused upstream (the guest-origin denylist, #1294),
-///     and a confined guest-authored job would need the turn's binding snapshotted onto the job (an owner decision).
+///     is unstamped. That is not a license: such a creation is meant to be refused upstream (the guest-origin
+///     denylist, #1294; it lands with #1301, so at a base without it the creation still succeeds), and a confined guest-authored job would need the turn's binding snapshotted onto the job (an owner decision).
 @MainActor
 @Suite("a job or watch is stamped with the creating conversation's profile (#1297)", .serialized, .timeLimit(.minutes(2)))
 struct JobCreationStampTests {
@@ -87,13 +87,16 @@ struct JobCreationStampTests {
         w.bind(c, to: "reviewer")
         #expect(try await w.watch("keep-watch", in: c).accessProfileId == "other", "a re-registered watch keeps its stamp")
 
+        w.bind(c, to: nil)
+        #expect(try await w.schedule("keep", in: c).accessProfileId == "reviewer", "unbinding the conversation must not widen a stamped job to the owner")
+
         let late = w.conversation()
         #expect(try await w.schedule("late", in: late).accessProfileId == nil)
         w.bind(late, to: "reviewer")
         #expect(try await w.schedule("late", in: late).accessProfileId == "reviewer", "an unstamped job takes the stamp on re-schedule (narrowing, never widening)")
     }
 
-    @Test("a guest-steered conversation has no persisted id, so a job made through this function is unstamped (refused upstream, #1294)")
+    @Test("a guest-steered conversation has no persisted id, so a job made through this function is unstamped (to be refused upstream, #1294/#1301)")
     func guestSteeredIsUnstamped() async throws {
         let w = try world(); defer { w.tearDown() }
         let steered = w.conversation()
