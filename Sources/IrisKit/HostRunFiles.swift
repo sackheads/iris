@@ -6,8 +6,8 @@ import Foundation
 /// as with YOLO off. The files are `VibecopService.hostRunFiles` (#613), plus `.config/git/config`.
 /// Best effort on a command's text, like `PolicyStores`: a path built at run time is not seen.
 enum HostRunFiles {
-    private static let startupFiles: Set<String> = [".gitconfig", ".zshenv", ".zshrc", ".zprofile", ".bashrc",
-                                                    ".bash_profile", ".profile", ".envrc"]
+    private static let startupFiles: Set<String> = [".gitconfig", ".zshenv", ".zshrc", ".zprofile", ".zlogin", ".zlogout",
+                                                    ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile", ".envrc"]
 
     /// Whether `path` names one of the files, or a directory that holds them (`.git/hooks`, `.ssh`),
     /// by its components: `.zshrc.bak` and `.github/` are not.
