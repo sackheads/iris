@@ -223,15 +223,29 @@ struct ToolClassGateRouteTests {
 
     // MARK: held write
 
-    @Test("held write: the release of an item naming an owner-only tool is refused by the gate under a non-owner binding")
-    func heldWriteRelease() async throws {
+    /// The release dispatches with the item's tool as the ONE offered tool, so this is the live dispatcher with the
+    /// declaration strip out of the picture: the refusal is the dispatch gate's own, not "not offered" (#811) and not
+    /// the strip's. For a profile-bound and a guest-steered conversation alike.
+    @Test("with the tool OFFERED (held-write release), the dispatch gate refuses an owner-only tool on its own", arguments: ToolClassGateRouteTests.tools)
+    func offeredToolIsRefusedByTheGate(_ name: String) async throws {
+        for profile in [nil, "narrow"] as [String?] {
+            let w = try world(profile: profile); defer { w.tearDown() }
+            if profile == nil { steer(w) }
+            let e = engine(w, FakeLLMClient(responses: []))
+            let item = PendingContextWrite(id: UUID(), conversationId: w.id, toolName: name, args: [:],
+                                           firstLine: "", createdAt: Date(), state: .pending)
+            let released = await e.applyHeldWrite(item)
+            #expect(released.contains(IrisEngine.nonOwnerToolRefusal), Comment(rawValue: "\(name) [\(profile ?? "steered")]: \(released)"))
+        }
+    }
+
+    @Test("control: the same release on the owner's conversation is not refused by the gate", arguments: ToolClassGateRouteTests.tools)
+    func offeredToolOwnerControl(_ name: String) async throws {
         let w = try world(); defer { w.tearDown() }
-        steer(w)
         let e = engine(w, FakeLLMClient(responses: []))
-        // The release dispatches with the item's tool as the one offered, so a refusal here is the gate's, not "not offered".
-        let item = PendingContextWrite(id: UUID(), conversationId: w.id, toolName: "gmail_send_email", args: [:],
+        let item = PendingContextWrite(id: UUID(), conversationId: w.id, toolName: name, args: [:],
                                        firstLine: "", createdAt: Date(), state: .pending)
         let released = await e.applyHeldWrite(item)
-        #expect(released.contains(IrisEngine.nonOwnerToolRefusal), Comment(rawValue: released))
+        #expect(!released.contains(IrisEngine.nonOwnerToolRefusal), Comment(rawValue: "\(name): \(released)"))
     }
 }
