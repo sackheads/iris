@@ -82,4 +82,9 @@ public extension PrincipalFloor {
             return boundTools.contains(toolName)
         }
     }
+
+    /// What the broker is told when it names a tool outside its floor (mirrors `GuestToolset.refusal`).
+    static func brokerRefusal(for name: String) -> String {
+        "Refused — this session can only use \(brokerTools.sorted().joined(separator: ", ")); '\(IrisEngine.flattenToolEcho(name))' is not available."
+    }
 }

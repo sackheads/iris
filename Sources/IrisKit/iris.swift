@@ -3741,7 +3741,18 @@ actor IrisEngine {
         // #1066: a guest's list starts as its two-tool floor, not the executor's full set; the gates
         // below can only add to it, and `GuestToolset.restrict`, the last write to the list, takes
         // back whatever they added.
-        var toolsList = principal == .mcpGuest ? Self.guestToolDeclarations() : await executor.getTools()
+        // #1203: the broker's floor starts the same way -- its three read-only tools, filtered from
+        // the real executor declarations (unlike the guest's, these are ordinary tools with ordinary
+        // schemas, not a custom guest-only shape), so it never sees the full surface even transiently.
+        var toolsList: [FunctionDeclaration]
+        switch principal {
+        case .mcpGuest:
+            toolsList = Self.guestToolDeclarations()
+        case .broker:
+            toolsList = (await executor.getTools()).filter { PrincipalFloor.brokerTools.contains($0.name) }
+        default:
+            toolsList = await executor.getTools()
+        }
         // No unattended job creation (the agency epic's standing ruling): a background run may
         // not write itself a cadence or a watch, so the two tools that do are not declared to it
         // at all — undeclared costs it nothing, and `executeFunctionCall` refuses the call anyway.
@@ -4225,10 +4236,12 @@ actor IrisEngine {
                 toolsList = modifiedTools
             }
         }
-        // The last write to `toolsList` before it is sent, kept last defensively: a guest's list is
-        // the floor whatever any gate above appended.
+        // The last write to `toolsList` before it is sent, kept last defensively: a guest's (or
+        // broker's) list is the floor whatever any gate above appended.
         if principal == .mcpGuest {
             toolsList = GuestToolset.restrict(toolsList)
+        } else if principal == .broker {
+            toolsList = toolsList.filter { PrincipalFloor.brokerTools.contains($0.name) }
         }
         
         // AppState's own list, before the hook may rewrite the copy round one sends (see the anchor).
@@ -5714,14 +5727,13 @@ actor IrisEngine {
                                 requestedDrop: String? = nil, store: AccessProfileStore = AccessProfileStore(paths: .default),
                                 tier: ModelTier = .easy, roleLabel: String? = nil,
                                 client: any LLMClientProtocol = LLMClient(), guestClientId: String? = nil) -> IrisEngine? {
-        // #974: .broker is refused here until #1203 wires PrincipalFloor.isAllowed at the
-        // dispatch/declaration sites (dev-2's #1202 review finding 4) — about 17 sites in this
-        // file test `principal == .mcpGuest` directly and know nothing about `.broker`, so an
-        // engine built with it today would declare the full `executor.getTools()` list despite
-        // `binding.profile.tools` being correctly capped to `brokerTools`. The binding's own
-        // shape is already right (Task 1/4); only the engine-side enforcement is missing, and
-        // this refusal keeps that gap unreachable rather than silently wrong.
-        guard principal != .broker else { return nil }
+        // #1203: .broker's engine-side enforcement (the tool-declaration and dispatch sites) is
+        // now wired through PrincipalFloor.isAllowed/brokerTools, so a .broker engine built here
+        // declares and dispatches exactly its floor — this function no longer needs to refuse it
+        // outright. Nothing in the codebase constructs a .broker engine yet regardless: the
+        // disclosure-request bus, the separate owner-authority decision run and the Inbox
+        // escalation it depends on are a later slice (#974's own plan doc, "only the floor is in
+        // scope here"), so .broker stays unreachable in practice until that flow exists.
         guard case .bound(let binding) = BindingResolver.resolveBinding(principal: principal, identity: identity,
                                                                         requestedDrop: requestedDrop, store: store) else {
             return nil
@@ -6317,11 +6329,24 @@ actor IrisEngine {
         let localState = state
         var result = ""
 
-        // #1066: a guest's floor, checked before anything else runs. Declaration gating only stops a
-        // well-behaved model, and every `== .main` guard below would refuse a guest by accident of
-        // being a different principal; this is the one place that says so on purpose.
-        if principal == .mcpGuest, !GuestToolset.allowedNames.contains(functionCall.name) {
-            return GuestToolset.refusal(for: functionCall.name)
+        // #1066/#1203: a fixed-floor principal's cap, checked before anything else runs. Declaration
+        // gating only stops a well-behaved model, and every `== .main` guard below would refuse a
+        // guest or broker by accident of being a different principal; this is the one place that
+        // says so on purpose. Routed through `PrincipalFloor.isAllowed` (the one dispatch mechanism,
+        // #974's "one gate consulted") rather than `GuestToolset.allowedNames.contains` directly --
+        // a no-op for the guest by construction, since the floor's `.fixed` set IS
+        // `GuestToolset.allowedNames` (pinned by `PrincipalFloorTests.guestFloorAgreesWithGuestToolset`
+        // and by every existing `GuestToolsetTests` dispatch test still passing unchanged). `.broker`'s
+        // floor is likewise `.fixed`, so `boundTools` is unused by either branch here; `.subagent`/
+        // `.evaluator` are deliberately NOT routed through this check -- their floor is `.fromBinding`,
+        // and `AccessProfile.tools` can be `.allTools` (the common case: a subagent of the owner), which
+        // has no defined conversion to the `Set<String>` this call takes. Wiring that generically would
+        // either crash on the type mismatch or silently deny every subagent tool call that exists
+        // today; it is a real gap, but a different task's, not #1203's.
+        if principal == .mcpGuest || principal == .broker,
+           !PrincipalFloor.isAllowed(functionCall.name, floor: PrincipalFloor.floor(for: principal), boundTools: []) {
+            return principal == .mcpGuest ? GuestToolset.refusal(for: functionCall.name)
+                                           : PrincipalFloor.brokerRefusal(for: functionCall.name)
         }
         // A guest's `send_to_session` has no `attachments` (or any argument the guest schema lacks):
         // refused before the handler can read a host file the guest's model named.

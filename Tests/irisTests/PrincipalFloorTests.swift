@@ -106,4 +106,18 @@ struct PrincipalFloorTests {
         // A tool absent from a narrower grant is refused even though it would be fine under a wider one.
         #expect(!PrincipalFloor.isAllowed("write_file", floor: floor, boundTools: narrowGrant))
     }
+
+    /// #1203: the dispatcher's guest refusal is being rerouted from `GuestToolset.allowedNames.contains`
+    /// onto `PrincipalFloor.isAllowed`. They are a no-op by construction today (the floor's `.fixed`
+    /// set IS `GuestToolset.allowedNames`), but this pins the equivalence directly so a future edit to
+    /// either one that silently diverges them is caught here, not discovered live.
+    @Test("isAllowed under the mcpGuest floor agrees with GuestToolset.allowedNames for every tool name tried",
+          arguments: ["send_to_session", "list_sessions", "run_command", "read_file", "write_file", "search_web",
+                      "inbox_item", "describe_session", "invoke_subagent", "schedule_job",
+                      "register_directory_watcher", "manage_fact", "search_memory", "search_conversations",
+                      "read_conversation", "", "send_to_session "])
+    func guestFloorAgreesWithGuestToolset(name: String) {
+        let floor = PrincipalFloor.floor(for: .mcpGuest)
+        #expect(PrincipalFloor.isAllowed(name, floor: floor, boundTools: []) == GuestToolset.allowedNames.contains(name))
+    }
 }
