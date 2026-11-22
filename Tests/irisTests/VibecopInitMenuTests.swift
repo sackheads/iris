@@ -67,7 +67,8 @@ struct VibecopInitMenuWiringTests {
         let line = chat[chat.lineRange(for: item)]
         #expect(line.contains("state.startVibecopInit(convId: conv.id)"), "\(line)")
         let before = chat[..<item.lowerBound].suffix(200)
-        #expect(before.contains("if let wp = conv.workspacePath, !wp.isEmpty"), "the item is shown only for a bound workspace")
+        #expect(before.contains("if conv.isUserFacing, let wp = conv.workspacePath, !wp.isEmpty"),
+                "the item is shown only for the person's own conversation with a bound workspace")
 
         let app = try String(contentsOf: sources.appendingPathComponent("AppState.swift"), encoding: .utf8)
         let handler = try #require(app.range(of: "private func handleVibecopCommand"))

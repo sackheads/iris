@@ -1016,8 +1016,9 @@ struct ChatView: View {
                     }
                 }
             }
-            // #1278: `/vibecop init` without typing it, for a conversation bound to a workspace.
-            if let wp = conv.workspacePath, !wp.isEmpty {
+            // #1278: `/vibecop init` without typing it, for a conversation of the person's bound to a workspace
+            // (a job run's or a subagent's would run the turn only to have its `.iris` write refused unattended).
+            if conv.isUserFacing, let wp = conv.workspacePath, !wp.isEmpty {
                 Button("Vibecop: Generate Rules...") { state.startVibecopInit(convId: conv.id) }
             }
             // #625: rules Iris did not write are off until the person reads and trusts them.
