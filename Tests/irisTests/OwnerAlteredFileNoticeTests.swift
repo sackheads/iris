@@ -14,6 +14,7 @@ struct OwnerAlteredFileNoticeTests {
         let workspace: URL
         let app: AppState
         let engine: IrisEngine
+        let client: CapturingLLMClient
         let conversation: UUID
         func turn() async { await engine.processInput("hi", source: "UI", conversationId: conversation) }
         @MainActor func notices(_ file: String) -> [String] {
@@ -35,9 +36,10 @@ struct OwnerAlteredFileNoticeTests {
         let app = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
         let conversation = app.createNewConversation(select: false)
         app.setWorkspace(for: conversation, path: workspace.path)
-        let engine = IrisEngine(state: app, principal: principal, client: CapturingLLMClient(reply: "ok"), retryDelays: [],
+        let client = CapturingLLMClient(reply: "ok")
+        let engine = IrisEngine(state: app, principal: principal, client: client, retryDelays: [],
                                 protectionEnabled: false, sessionPeerCount: 0, memory: MemoryManager(paths: paths))
-        return Fixture(root: root, paths: paths, workspace: workspace, app: app, engine: engine, conversation: conversation)
+        return Fixture(root: root, paths: paths, workspace: workspace, app: app, engine: engine, client: client, conversation: conversation)
     }
 
     /// Rewrites `url` with a modification date a few seconds on, so the stamp changes even within one second.
@@ -77,6 +79,8 @@ struct OwnerAlteredFileNoticeTests {
         let f = try fixture(user: "model: gpt-x\nlikes tea", agents: "model: gpt-x\nuse tabs", principal: .subagent)
         defer { f.tearDown() }
         await f.turn()
+        let system = f.client.requests.first?.systemInstruction?.parts.compactMap(\.text).joined() ?? ""
+        #expect(system.contains("use tabs"), "the subagent's turn read the marked AGENTS.md, so the gate is what kept it quiet")
         #expect(f.notices("").isEmpty)
     }
 
