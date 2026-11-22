@@ -2036,6 +2036,7 @@ actor IrisEngine {
             guard let id else { remaining.append(target); continue }
             if reached.contains(id) { continue }
             reached.insert(id)
+            await noteInboxPeerInput(target: id, emitter: item.emitter)
             switch await deliver(id, body, item.emitterTainted) {
             case .delivered, .queued: delivered += 1
             case .refused: remaining.append(target)
@@ -2266,8 +2267,21 @@ actor IrisEngine {
             let id: UUID? = await MainActor.run {
                 Self.resolveInboxTarget(target, ownerChain: item.ownerChain, in: localState?.conversations ?? [])
             }
-            if let id, told.insert(id).inserted { _ = await deliver(id, body, item.emitterTainted) }
+            if let id, told.insert(id).inserted {
+                await noteInboxPeerInput(target: id, emitter: item.emitter)
+                _ = await deliver(id, body, item.emitterTainted)
+            }
         }
+    }
+
+    /// #1115: an answer frame echoes the emitter's own title (and, for a route-back, its situation
+    /// and options), so one reaching a session other than the emitter is that session's text starting
+    /// a turn in another, a peer route. Marked before delivery, since the turn it starts reads it.
+    /// Brian's answer to the session that asked stays clean.
+    private func noteInboxPeerInput(target: UUID, emitter: UUID) async {
+        guard target != emitter else { return }
+        let localState = state
+        await MainActor.run { localState?.notePeerInput(target) }
     }
 
     /// Retries every `.awaitingDelivery` item (called at launch and when a session or role holder
