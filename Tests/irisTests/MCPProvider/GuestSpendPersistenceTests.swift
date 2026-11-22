@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import GRDB
 @testable import IrisKit
 
 /// #1135, Brian's ruling on the unified-access spec (E): keep the guest budget numbers, persist the daily count. The
@@ -53,14 +54,75 @@ struct GuestSpendPersistenceTests {
         #expect(await GuestSpendLedger(now: { wall.now }).todayTotal(for: "dev-1") == 0)
     }
 
-    @Test("a row the store cannot read is skipped, not fatal, and not counted")
-    func unreadableRowIsSkipped() async throws {
+    // MARK: the cautious side (a damaged row never resets a cap)
+
+    private func today(_ wall: WallClock) -> Int { Int(wall.now.timeIntervalSince1970 / 86_400) }
+
+    @Test("a client with no row has spent nothing; other clients' good rows still count")
+    func missingRowIsZero() async throws {
         let store = try ConversationStore.inMemory(), wall = WallClock()
-        let day = Int(wall.now.timeIntervalSince1970 / 86_400)
-        try store.rawWrite("INSERT INTO guest_spend (client_id, day, tokens) VALUES ('bad', 'x', 'y')")
-        try store.rawWrite("INSERT INTO guest_spend (client_id, day, tokens) VALUES ('good', ?, 42)", arguments: [day])
+        try store.rawWrite("INSERT INTO guest_spend (client_id, day, tokens) VALUES ('good', ?, 42)", arguments: [today(wall)])
         let l = ledger(store, wall)
         #expect(await l.todayTotal(for: "good") == 42)
-        #expect(await l.todayTotal(for: "bad") == 0)
+        #expect(await l.todayTotal(for: "never-sent") == 0)
+    }
+
+    @Test("a row whose day or tokens do not read counts that client as spent for the day, never as zero; others are untouched")
+    func damagedRowIsSpent() async throws {
+        let store = try ConversationStore.inMemory(), wall = WallClock()
+        try store.rawWrite("INSERT INTO guest_spend (client_id, day, tokens) VALUES ('bad-tokens', ?, 'abc')", arguments: [today(wall)])
+        try store.rawWrite("INSERT INTO guest_spend (client_id, day, tokens) VALUES ('bad-day', 'x', 10)")
+        try store.rawWrite("INSERT INTO guest_spend (client_id, day, tokens) VALUES ('good', ?, 42)", arguments: [today(wall)])
+        let l = ledger(store, wall)
+        #expect(await l.todayTotal(for: "bad-tokens") >= GuestSessionDriver.dailyTokenCap)
+        #expect(await l.todayTotal(for: "bad-day") >= GuestSessionDriver.dailyTokenCap)
+        #expect(await l.todayTotal(for: "good") == 42)
+        #expect(await l.todayTotal(for: "stranger") == 0)
+        await l.add(5, for: "bad-tokens")
+        #expect(await l.todayTotal(for: "bad-tokens") >= GuestSessionDriver.dailyTokenCap, "a later add does not heal it within the day")
+    }
+
+    @Test("a row whose client cannot be read, or a store that cannot be read, refuses every client until the day turns")
+    func unattributableOrUnreadableRefusesEveryone() async throws {
+        let wall = WallClock()
+        let junk = try ConversationStore.inMemory()
+        try junk.rawWrite("INSERT INTO guest_spend (client_id, day, tokens) VALUES (X'00FFFE', ?, 1)", arguments: [today(wall)])
+        let l = ledger(junk, wall)
+        #expect(await l.todayTotal(for: "anyone") >= GuestSessionDriver.dailyTokenCap)
+        wall.advance(2 * 3600)    // 01:00 UTC the next day
+        #expect(await l.todayTotal(for: "anyone") == 0, "the refusal is for the day it was found on")
+
+        let broken = try ConversationStore.inMemory()
+        try broken.rawWrite("DROP TABLE guest_spend")
+        let wall2 = WallClock()
+        #expect(await ledger(broken, wall2).todayTotal(for: "anyone") >= GuestSessionDriver.dailyTokenCap, "an unreadable store is not an empty day")
+    }
+
+    @Test("an existing database from before v45 (no guest_spend table) still opens, keeps its rows, and gains the table")
+    func oldSchemaStillOpens() async throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("iris-1135-old-\(UUID().uuidString)")
+        let url = root.appendingPathComponent("conversations.sqlite")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = UUID()
+        do {
+            let queue = try DatabaseQueue(path: url.path)
+            try ConversationStore.migrator.migrate(queue, upTo: "v44_sidebar_groups")
+            #expect(try await queue.read { try $0.tableExists("guest_spend") } == false, "the fixture really predates v45")
+            try await queue.write { db in
+                try db.execute(sql: """
+                    INSERT INTO conversations (id, position, title, createdAt, updatedAt, tokenUsage)
+                    VALUES (?, 1, 'old chat', datetime('now'), datetime('now'), ?)
+                    """, arguments: [id.uuidString, String(decoding: try JSONEncoder().encode(TokenUsage()), as: UTF8.self)])
+            }
+            try queue.close()
+        }
+        let store = try ConversationStore.onDisk(at: url)
+        #expect(try store.loadAll().conversations.map(\.id) == [id], "the old conversation survived the migration")
+        let wall = WallClock()
+        let l = ledger(store, wall)
+        #expect(await l.todayTotal(for: "dev-1") == 0, "a fresh table is an empty day")
+        await l.add(77, for: "dev-1")
+        #expect(await ledger(try ConversationStore.onDisk(at: url), wall).todayTotal(for: "dev-1") == 77, "and it persists on disk across a reopen")
     }
 }

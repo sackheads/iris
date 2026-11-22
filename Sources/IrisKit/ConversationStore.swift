@@ -2062,16 +2062,34 @@ final class ConversationStore: Sendable {
 
     // MARK: Guest spend (#1135)
 
-    /// What each client has spent on `day`, from the rows that name that day. A row that does not read is skipped.
-    func loadGuestDailySpend(day: Int) throws -> [String: Int] {
+    /// What `loadGuestDailySpend` found. A row that cannot be read is not "nothing spent": it is returned so the
+    /// ledger can fail to the cautious side (the cap must not reset because a row is damaged).
+    struct GuestSpendRows: Equatable {
+        /// Clients with a readable row for `day`.
+        var counts: [String: Int] = [:]
+        /// Clients whose row names them but whose day or tokens do not read: spent, as far as today goes.
+        var damagedClients: Set<String> = []
+        /// A row whose client cannot be read, so no client can be cleared of it.
+        var unattributableRow = false
+    }
+
+    /// The rows that matter for `day`: a row for an earlier day is skipped, a row that does not read is reported.
+    /// Reads through `readInt`/`readText`, never the typed subscript, which crashes on a garbled value (#189).
+    func loadGuestDailySpend(day: Int) throws -> GuestSpendRows {
         try writer.read { db in
-            var out: [String: Int] = [:]
-            for row in try Row.fetchAll(db, sql: "SELECT client_id, day, tokens FROM guest_spend WHERE day = ?", arguments: [day]) {
-                guard let client = Self.readText(row, "client_id"), let rowDay: Int = row["day"], let tokens: Int = row["tokens"], rowDay == day else {
-                    print("WARNING: unreadable guest_spend row; skipped")
+            var out = GuestSpendRows()
+            for row in try Row.fetchAll(db, sql: "SELECT client_id, day, tokens FROM guest_spend") {
+                guard let client = Self.readText(row, "client_id") else {
+                    print("WARNING: guest_spend has a row whose client does not read; guest turns are refused until the day turns")
+                    out.unattributableRow = true
                     continue
                 }
-                out[client] = tokens
+                guard case .value(let rowDay) = Self.readInt(row, "day"), case .value(let tokens) = Self.readInt(row, "tokens") else {
+                    print("WARNING: guest_spend row for \(client) does not read; its day's budget counts as spent")
+                    out.damagedClients.insert(client)
+                    continue
+                }
+                if rowDay == day { out.counts[client] = tokens }
             }
             return out
         }

@@ -18,15 +18,20 @@ enum GuestSubmitResult: Equatable, Sendable {
 
 /// Where the ledger keeps today's count between runs (#1135). A seam so a test needs no store.
 protocol GuestSpendPersistence: Sendable {
-    func load(day: Int) -> [String: Int]
+    func load(day: Int) -> ConversationStore.GuestSpendRows
     func add(_ tokens: Int, clientId: String, day: Int)
 }
 
-/// The store-backed one: a failed write is logged and the count stays in memory for this run.
+/// The store-backed one: a failed write is logged and the count stays in memory for this run. A load that
+/// fails is not an empty day: it reports an unattributable row, so every client is treated as spent until the
+/// day turns.
 struct StoreGuestSpendPersistence: GuestSpendPersistence {
     let store: ConversationStore
-    func load(day: Int) -> [String: Int] {
-        do { return try store.loadGuestDailySpend(day: day) } catch { print("WARNING: guest spend could not be read: \(error)"); return [:] }
+    func load(day: Int) -> ConversationStore.GuestSpendRows {
+        do { return try store.loadGuestDailySpend(day: day) } catch {
+            print("WARNING: guest spend could not be read, so guest turns are refused until the day turns: \(error)")
+            return ConversationStore.GuestSpendRows(unattributableRow: true)
+        }
     }
     func add(_ tokens: Int, clientId: String, day: Int) {
         do { try store.addGuestDailySpend(tokens, clientId: clientId, day: day) } catch { print("WARNING: guest spend could not be saved: \(error)") }
@@ -47,13 +52,22 @@ actor GuestSpendLedger {
     private var daily: [String: (day: Int, tokens: Int)] = [:]
     private let now: @Sendable () -> Date
     private let persistence: GuestSpendPersistence?
+    /// What a client whose row is damaged counts as spent today: far past any cap, so the day's budget is refused,
+    /// not reset. A missing row is different: it is a client that has spent nothing.
+    private static let spentForTheDay = Int.max / 4
+    /// The UTC day on which every client counts as spent, because a row could not be attributed or the store could
+    /// not be read. Past that day the ordinary count applies again.
+    private var allSpentOn: Int?
 
     init(now: @escaping @Sendable () -> Date = Date.init, persistence: GuestSpendPersistence? = nil) {
         self.now = now
         self.persistence = persistence
         let day = Int((now().timeIntervalSince1970 / 86_400).rounded(.down))
         if let persistence {
-            daily = persistence.load(day: day).mapValues { (day, $0) }
+            let rows = persistence.load(day: day)
+            daily = rows.counts.mapValues { (day, $0) }
+            for client in rows.damagedClients { daily[client] = (day, Self.spentForTheDay) }
+            if rows.unattributableRow { allSpentOn = day }
         }
     }
 
@@ -73,6 +87,7 @@ actor GuestSpendLedger {
 
     /// What `clientId` has spent so far this UTC day.
     func todayTotal(for clientId: String) -> Int {
+        if allSpentOn == today() { return Self.spentForTheDay }
         guard let entry = daily[clientId], entry.day == today() else { return 0 }
         return entry.tokens
     }
