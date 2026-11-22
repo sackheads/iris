@@ -301,6 +301,13 @@ actor IrisEngine {
         return try? resolved.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
     }
 
+    /// A prompt file after the guard: its text and the two counts the note is built from (#1298).
+    struct GuardedPromptFile: Equatable {
+        var text: String
+        var strippedMarkers: Int
+        var divergedLines: Int
+    }
+
     /// `USER.md`'s guard-output cache (5a Task 7). `path` is tracked alongside the stamp, not just
     /// the stamp alone, so a change to WHERE `MemoryManager` reads USER.md from — never happens
     /// today — still misses the cache rather than serving another path's guarded text.
@@ -309,7 +316,7 @@ actor IrisEngine {
     /// OTHER engine reading the same USER.md — a subagent, an evaluator, or another conversation's
     /// main engine — none of which saw that tool call and none of which this method can reach.
     private var profileStamp: (path: String, stamp: GuardTextStamp)?
-    private var cachedProfileText: String?
+    private var cachedProfileText: GuardedPromptFile?
 
     /// `AGENTS.md`'s guard-output cache, per workspace path (5a Task 7). A workspace path absent
     /// from `agentsStamp` means "not checked yet, or the file was missing last time" — both compare
@@ -339,7 +346,7 @@ actor IrisEngine {
     /// setting changes, or a guard tier's provisioning state changes (5a Task 7, invariant 6/#130).
     /// Reads the path and the content from the same `memory` manager in this one place, so the
     /// stamp and the text it guards can never come from two different `MemoryManager`s.
-    private func guardedUserProfileText() async -> String {
+    private func guardedUserProfileText() async -> GuardedPromptFile {
         let manager = memory
         let path = manager.paths.userMd.path
         let stamp = currentGuardTextStamp(modified: Self.fileModificationDate(atPath: path))
@@ -348,13 +355,15 @@ actor IrisEngine {
             return cached
         }
         let userProfile = manager.getUserProfile()
-        let (guardedUserProfile, cacheable, unjudged, strippedLines) = await measureSpan("assembly.userProfile") {
-            await InjectionGuard.sanitizeUntrustedCacheable(userProfile, contextTag: "user_profile", maxTier: .tier3_canary, protectionEnabled: protectionEnabled,
-                                                            fidelity: .preserveStructureWhenJudged)
+        let judged = await measureSpan("assembly.userProfile") {
+            await InjectionGuard.sanitizeUntrustedDisplay(userProfile, contextTag: "user_profile", maxTier: .tier3_canary, protectionEnabled: protectionEnabled,
+                                                          fidelity: .preserveStructureWhenJudged)
         }
-        // #1209: the note is part of what is cached, so it costs nothing on a clean file and is
-        // computed once per change of the file, never per turn.
-        let safeUserProfile = Self.notingStrippedMarkers(guardedUserProfile, lines: strippedLines)
+        // #1209/#1298: what is cached is the guarded text and the two counts, not the finished note: the
+        // note's read_file pointer depends on who the turn is for (`userMdReadablePath`), which the cache
+        // does not know. Counted once per change of the file, never per turn.
+        let safeUserProfile = GuardedPromptFile(text: judged.text, strippedMarkers: judged.strippedMarkerLines, divergedLines: judged.divergedLines)
+        let (cacheable, unjudged) = (judged.cacheable, judged.unjudged)
         // A transient guard error (fix round 1) is shown for THIS turn but never cached: caching it
         // would pin the user's profile as blocked for every later turn of a long-lived main engine
         // until something else happens to invalidate the stamp. Leaving `profileStamp` untouched
@@ -412,6 +421,29 @@ actor IrisEngine {
 
     nonisolated static func notingStrippedMarkers(_ text: String, lines: Int) -> String {
         lines > 0 ? strippedMarkerPromptNote + "\n" + text : text
+    }
+
+    /// #1298: what the model is told when a file woven into the system prompt reaches it differently from how
+    /// it is on disk but no role marker was stripped from it (`strippedMarkerPromptNote` covers that case). With
+    /// fidelity on (#1275) this is the no-tier case, or a line a tier did not clear: `divergedLines` is zero for a
+    /// file a tier judged safe, so a cleared file carries no note.
+    nonisolated static let viewDiffersPromptNote = "[Iris: some lines of the file content below are shown differently from the file (Markdown fences, headings), altered by the injection guard. Rewriting the file from this view will save the altered version.]"
+
+    /// One note for a prompt file: the marker note if a role marker was stripped, else the differs note if any
+    /// line is shown differently, else nothing. `readablePath` is the file's path when the model can read its
+    /// exact text with `read_file` on this turn (see `userMdReadablePath`), and nil when it cannot.
+    nonisolated static func notingViewDiffers(_ text: String, stripped: Int, diverged: Int, readablePath: String?) -> String {
+        guard stripped > 0 || diverged > 0 else { return text }
+        var note = stripped > 0 ? strippedMarkerPromptNote : viewDiffersPromptNote
+        if let readablePath { note += " The file's exact text is available with read_file on \(readablePath)." }
+        return note + "\n" + text
+    }
+
+    /// Where the model can read USER.md exactly: `read_file` of a path under Iris's own home returns the file raw
+    /// (first-party trust, `executeToolWithHooks`), but only for the owner: a non-owner binding that reads USER.md
+    /// into its prompt (`memoryRead >= .full`) has no `read_file` on that home (#974 Task 9).
+    nonisolated static func userMdReadablePath(isOwner: Bool, path: String, irisPaths: IrisPaths) -> String? {
+        isOwner && irisPaths.isUnderIrisDir(path) ? path : nil
     }
 
     /// The person's own files the guard couldn't judge whole this turn (planner, #723): said once
@@ -479,11 +511,14 @@ actor IrisEngine {
             cachedAgentsText.removeValue(forKey: wp)
             return nil
         }
-        let (guardedAgentsMd, cacheable, unjudged, strippedLines) = await measureSpan("assembly.agentsMd") {
-            await InjectionGuard.sanitizeUntrustedCacheable(agentsMdContent, contextTag: "workspace_rules", maxTier: .tier3_canary, protectionEnabled: protectionEnabled,
-                                                            fidelity: .preserveStructureWhenJudged)
+        let judged = await measureSpan("assembly.agentsMd") {
+            await InjectionGuard.sanitizeUntrustedDisplay(agentsMdContent, contextTag: "workspace_rules", maxTier: .tier3_canary, protectionEnabled: protectionEnabled,
+                                                          fidelity: .preserveStructureWhenJudged)
         }
-        let safeAgentsMd = Self.notingStrippedMarkers(guardedAgentsMd, lines: strippedLines)   // #1209, as for USER.md
+        let (cacheable, unjudged) = (judged.cacheable, judged.unjudged)
+        // #1209/#1298, as for USER.md. No read_file pointer: a workspace AGENTS.md read back is itself guarded,
+        // so with no tier it is stripped the same way and the pointer would be false.
+        let safeAgentsMd = Self.notingViewDiffers(judged.text, stripped: judged.strippedMarkerLines, diverged: judged.divergedLines, readablePath: nil)
         // Same rule as `guardedUserProfileText`: a transient error is shown this turn but never
         // recorded, so the next turn retries instead of serving a permanently-blocked workspace.
         if cacheable {
@@ -548,7 +583,16 @@ actor IrisEngine {
         let includesOwnerProfile = binding.isOwner || binding.profile.memoryRead >= .full
         let base = includesOwnerProfile ? await ensureSystemPrompt(skills: agentProfile?.skills) : await ensureNonOwnerSystemPrompt()
         guard let baseText = base.parts.first?.text else { return base }
-        let profileText = includesOwnerProfile ? await guardedUserProfileText() : nil
+        let userMdPath = memory.paths.userMd.path
+        let profileText: String?
+        if includesOwnerProfile {
+            let file = await guardedUserProfileText()
+            profileText = Self.notingViewDiffers(file.text, stripped: file.strippedMarkers, diverged: file.divergedLines,
+                                                 readablePath: Self.userMdReadablePath(isOwner: binding.isOwner, path: userMdPath,
+                                                                                       irisPaths: IrisPaths.default))
+        } else {
+            profileText = nil
+        }
         // #1263: the read-back half of #1245's write-only loop. Symmetric with the write gate
         // (`ProfileMemoryStore.minimumWriteTier`, `.task`) on the READ axis (Brian's ruling): a
         // profile narrow enough to write its own notes but not read them back could never close
