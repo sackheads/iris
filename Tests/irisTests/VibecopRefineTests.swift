@@ -61,6 +61,10 @@ struct VibecopRefineTests {
         let existing = "# my rules\n- never touch prod\n"
         let w = try world(existing: existing); defer { w.tearDown() }
         add(Array(repeating: Self.pill("swift test --filter X", .person), count: 4), to: w.cid, in: w.state)
+        // Through the stored pills: approvals that were not the person's never count.
+        for layer: ToolApproval.Layer in [.yolo, .autoApprove, .allowlist, .vibecop, .vibecopRestricted] {
+            add(Array(repeating: Self.pill("ls -la", layer), count: 3), to: w.cid, in: w.state)
+        }
         w.state.sendMessage("/vibecop refine")
         try await waitForCard(w)
         let request = try #require(w.state.pendingApprovals.first, "the write reaches the person")
@@ -73,7 +77,7 @@ struct VibecopRefineTests {
             try await Task.sleep(nanoseconds: 20_000_000)
         }
         let written = try String(contentsOf: w.file, encoding: .utf8)
-        #expect(written == existing + "- Routine here: `swift test` (approved 4×)\n", "\(written)")
+        #expect(written == existing + "- Routine here: `swift test` (approved 4×)\n", "only the person's shape: \(written)")
         #expect(WorkspaceIrisTrust(paths: w.state.permissions.paths).isTrusted("vibecop.md", workspace: w.ws, data: Data(written.utf8)),
                 "recorded as Iris's own write, so its rules apply")
     }
