@@ -60,8 +60,9 @@ struct LibraryHoldTripwireTurnTests {
 
         await engine.processInput("hello", source: "UI", conversationId: conversation)
         // The reflection prompt is the one that names the library, so it is the likeliest turn
-        // for a future change to start reading it into.
-        await engine.processInput(AppState.reflectionPrompt, source: "UI", conversationId: conversation)
+        // for a future change to start reading it into. Through `runReflection`, the route
+        // `/reflect` and the automatic trigger take, so a read keyed to `isReflectionTurn` is seen.
+        await state.runReflection(AppState.reflectionPrompt, in: conversation, moveReplyToIris: false)
 
         let requests = client.requests
         #expect(requests.count >= 2, "both turns must reach the model, or this checked nothing")
