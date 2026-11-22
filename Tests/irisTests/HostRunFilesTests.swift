@@ -107,6 +107,15 @@ struct HostRunFilesTests {
         "sh -c 'echo x | crontab -'",
         "bash -lc \"launchctl load /tmp/x.plist\"",
         "ls; crontab f",
+        "echo f | xargs crontab",
+        "ls *.plist | xargs -n 1 launchctl load",
+        "find . -name x.plist -print0 | xargs -0 -I {} launchctl load {}",
+        "timeout 5 crontab f",
+        "timeout -k 2 10 launchctl load x.plist",
+        "caffeinate -t 60 crontab f",
+        "stdbuf -oL crontab f",
+        "launchctl asuser 501 launchctl load /tmp/x.plist",
+        "launchctl asuser 501 crontab f",
     ])
     func plantsAJob(_ command: String) {
         #expect(HostRunFiles.commandWrites(command), "\(command)")
@@ -123,6 +132,9 @@ struct HostRunFilesTests {
         "man crontab",
         "which launchctl",
         "echo crontab f",
+        "xargs -n 1 echo crontab",
+        "timeout 5 crontab -l",
+        "launchctl asuser 501 launchctl list",
     ])
     func listingIsNotAJob(_ command: String) {
         #expect(!HostRunFiles.commandWrites(command), "\(command)")
