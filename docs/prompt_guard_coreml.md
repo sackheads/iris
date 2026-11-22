@@ -182,7 +182,7 @@ the cleanest such path**, and the model side is proven:
 Microsoft shipped an official Swift Package Manager distribution with **macOS support**,
 `microsoft/onnxruntime-swift-package-manager`, which vends the native runtime as a binary SPM
 dependency (module `OnnxRuntimeBindings`): no CocoaPods or manual xcframework wrangling. That
-repository and its binary download host stopped resolving in November 2026 (#1322), so
+repository was removed and its binary download host stopped serving a valid certificate in November 2026 (#1322), so
 `Package.swift` now pins our mirror,
 [`sackheads/onnxruntime-swift-package-manager`](https://github.com/sackheads/onnxruntime-swift-package-manager),
 at 1.24.2: the upstream history plus one commit pointing the binaries at the mirror's release
