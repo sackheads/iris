@@ -3,7 +3,7 @@ import Foundation
 @testable import IrisKit
 
 /// #974 gap A (#1015): the tool class table and its one gate. Every route a tool call can take is driven
-/// through its real entry, and each asserts the gate's own text (`nonOwnerToolRefusal`), not a bare
+/// through its real entry, and each asserts the gate's own text (`ToolClassTable.refusalLead`, naming the tool and its class), not a bare
 /// "refused": a not-offered refusal (#811) reads like a gate refusal.
 @Suite("every declared tool has a class (#974 gap A)")
 struct ToolClassTableTests {
@@ -36,7 +36,12 @@ struct ToolClassTableTests {
     func gate() {
         let guest = AccessBinding(profile: AccessProfile(), principal: .mcpGuest, isOwner: false)
         let owner = AccessBinding(profile: .owner, principal: .main, isOwner: true)
-        #expect(ToolClassTable.refusal(tool: "srv___echo", binding: guest) == IrisEngine.nonOwnerToolRefusal)
+        let guestText = ToolClassTable.refusal(tool: "srv___echo", binding: guest, profileId: "secret-profile")
+        #expect(guestText?.hasPrefix("Not run: `srv___echo` is owner-only in the tool class table, and this turn is guest-steered") == true)
+        #expect(guestText?.contains("secret-profile") == false, "a guest-steered refusal goes back to the guest: no profile id")
+        let profileBinding = AccessBinding(profile: AccessProfile(), principal: .main, isOwner: false)
+        #expect(ToolClassTable.refusal(tool: "srv___echo", binding: profileBinding, profileId: "reviewer")?.contains("bound to profile `reviewer`") == true)
+        #expect(ToolClassTable.refusal(tool: "srv___echo", binding: profileBinding)?.contains("bound to a non-owner profile") == true)
         #expect(ToolClassTable.refusal(tool: "srv___echo", binding: owner) == nil)
         #expect(ToolClassTable.refusal(tool: "run_command", binding: guest) == nil, "left to the approval ladder")
         #expect(ToolClassTable.refusal(tool: "search_memory", binding: guest) == nil, "left to MemoryBindingGate")
@@ -116,21 +121,23 @@ struct ToolClassGateRouteTests {
         let w = try world(); defer { w.tearDown() }
         steer(w)
         let r = try await forged(name, w)
-        #expect(r.contains(IrisEngine.nonOwnerToolRefusal), "\(name): \(r)")
+        #expect(r.contains(ToolClassTable.refusalLead(tool: name)), "\(name): \(r)")
+        #expect(r.contains("this turn is guest-steered"), "\(name): \(r)")
     }
 
     @Test("live dispatch: a session bound to a non-owner profile meets the same gate", arguments: ToolClassGateRouteTests.tools)
     func profileBoundDispatch(_ name: String) async throws {
         let w = try world(profile: "narrow"); defer { w.tearDown() }
         let r = try await forged(name, w)
-        #expect(r.contains(IrisEngine.nonOwnerToolRefusal), "\(name): \(r)")
+        #expect(r.contains(ToolClassTable.refusalLead(tool: name)), "\(name): \(r)")
+        #expect(r.contains("this turn is bound to profile `narrow`"), "\(name): \(r)")
     }
 
     @Test("control: the owner's own turn is not refused by the gate", arguments: ToolClassGateRouteTests.tools)
     func ownerDispatch(_ name: String) async throws {
         let w = try world(); defer { w.tearDown() }
         let r = try await forged(name, w)
-        #expect(!r.contains(IrisEngine.nonOwnerToolRefusal), "\(name): \(r)")
+        #expect(!r.contains(ToolClassTable.refusalLead(tool: name)), "\(name): \(r)")
     }
 
     // MARK: declaration
@@ -215,7 +222,7 @@ struct ToolClassGateRouteTests {
         let r = try replay(); defer { r.teardown() }
         let refused = try await outcome(r, tool: "gmail_send_email", accessProfileId: "narrow")
         // The ledger keeps the first 200 characters of an outcome.
-        let gateText = String(IrisEngine.nonOwnerToolRefusal.prefix(100))
+        let gateText = ToolClassTable.refusalLead(tool: "gmail_send_email")
         #expect(refused?.hasPrefix(gateText) == true, "\(String(describing: refused))")
         let control = try await outcome(r, tool: "gmail_send_email", accessProfileId: nil)
         #expect(control?.hasPrefix(gateText) != true, "control: the unstamped (owner) job's card is not refused by the gate")
@@ -235,7 +242,7 @@ struct ToolClassGateRouteTests {
             let item = PendingContextWrite(id: UUID(), conversationId: w.id, toolName: name, args: [:],
                                            firstLine: "", createdAt: Date(), state: .pending)
             let released = await e.applyHeldWrite(item)
-            #expect(released.contains(IrisEngine.nonOwnerToolRefusal), Comment(rawValue: "\(name) [\(profile ?? "steered")]: \(released)"))
+            #expect(released.contains(ToolClassTable.refusalLead(tool: name)), Comment(rawValue: "\(name) [\(profile ?? "steered")]: \(released)"))
         }
     }
 
@@ -246,6 +253,6 @@ struct ToolClassGateRouteTests {
         let item = PendingContextWrite(id: UUID(), conversationId: w.id, toolName: name, args: [:],
                                        firstLine: "", createdAt: Date(), state: .pending)
         let released = await e.applyHeldWrite(item)
-        #expect(!released.contains(IrisEngine.nonOwnerToolRefusal), Comment(rawValue: "\(name): \(released)"))
+        #expect(!released.contains(ToolClassTable.refusalLead(tool: name)), Comment(rawValue: "\(name): \(released)"))
     }
 }

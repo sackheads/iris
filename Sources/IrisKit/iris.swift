@@ -5995,13 +5995,6 @@ actor IrisEngine {
         return githubOffPrincipalRefusal
     }
 
-    /// What a turn that does not run as the owner is told when it calls an owner-only tool (`ToolClassTable`)
-    /// anyway; the memory tools are refused by `MemoryBindingGate` against the turn's binding instead (#1224).
-    /// `hardStrip` only stops a well-behaved model, so this is the half that holds against a forged call or a
-    /// stale declaration, and it comes before anything that could read or write.
-    static let nonOwnerToolRefusal =
-        "This turn does not run as the user, so the user's Google and GitHub accounts, job tools, session list, job scheduling and alarms, workspace setting and added tools (MCP and plugins) are not available on it and the call was not run."
-
     /// #974 gap A: the one gate for a tool the table calls owner-only (`ToolClassTable`), on the turn's own
     /// binding (`bindingForCall`), so a turn a guest steered and a session bound to a role profile meet it
     /// alike. Asked by the live dispatcher, the approved-card replay and the held-write release. The
@@ -6011,7 +6004,14 @@ actor IrisEngine {
         // binding varies per turn. Every other principal has its own gate: a guest's floor, a subagent's
         // `mainOnlyDeclared`, the evaluator's allowlist.
         guard principal == .main, ToolClassTable.isOwnerOnly(tool) else { return nil }
-        return ToolClassTable.refusal(tool: tool, binding: await bindingForCall(conversationId: conversationId))
+        let binding = await bindingForCall(conversationId: conversationId)
+        guard !binding.isOwner else { return nil }
+        let localState = state
+        let profileId = await MainActor.run { localState?.persistedAccessProfileId(for: conversationId) }
+        // What the refusal says is `ToolClassTable.refusal`: the tool and its class first, then whose turn it is.
+        // `hardStrip` only stops a well-behaved model, so this is the half that holds against a forged call or a
+        // stale declaration, and it comes before anything that could read or write.
+        return ToolClassTable.refusal(tool: tool, binding: binding, profileId: profileId)
     }
 
     /// Whether a guest's message started this conversation's turn, or its delegation root's (#1119,

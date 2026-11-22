@@ -85,7 +85,7 @@ struct GuestOriginSessionJobToolsTests {
     @Test("a forged call to each of the four from a guest-steered turn is refused with the guest-origin text, and creates no job", arguments: GuestOriginSessionJobToolsTests.tools)
     func forgedCallIsRefused(_ name: String) async throws {
         let r = try await forged(name, steered: true)
-        #expect(r.result.contains(IrisEngine.nonOwnerToolRefusal), "\(name): \(r.result)")
+        #expect(r.result.contains(ToolClassTable.refusalLead(tool: name)), "\(name): \(r.result)")
         #expect(r.jobs == 0, "\(name) created a job")
         #expect(!r.result.contains("PEER-TITLE") && !r.result.contains("session_id"), "\(name) leaked the roster: \(r.result)")
     }
@@ -93,6 +93,6 @@ struct GuestOriginSessionJobToolsTests {
     @Test("control: the same forged calls from an unsteered turn are not refused as guest-origin", arguments: GuestOriginSessionJobToolsTests.tools)
     func unsteeredIsNotRefused(_ name: String) async throws {
         let r = try await forged(name, steered: false)
-        #expect(!r.result.contains(IrisEngine.nonOwnerToolRefusal), "\(name): \(r.result)")
+        #expect(!r.result.contains(ToolClassTable.refusalLead(tool: name)), "\(name): \(r.result)")
     }
 }
