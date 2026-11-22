@@ -250,6 +250,33 @@ struct YoloOwnerOnlyTests {
         #expect(w.state.conversations.first { $0.id == w.cid }?.hasPeerInput == true)
     }
 
+    /// dev-2's review: the delegation-root half of the peer check. A subagent's calls ride its root's
+    /// YOLO, so a peer message to the root must end it for the delegate too.
+    @Test("a delegate of a peer-touched session is not YOLO, and its write asks")
+    func delegateOfPeerTouchedSessionIsNotYolo() async throws {
+        let w = try world(); defer { w.tearDown() }
+        w.state.sendMessage("/yolo on")
+        let child = w.state.createNewConversation(isSubagent: true, select: false)
+        w.state.linkDelegate(child, of: w.cid)
+        #expect(w.state.isYoloMode(child), "control: a delegate rides its root's YOLO")
+        w.state.notePeerInput(w.cid)
+        #expect(!w.state.isGuestOriginTurn(w.cid), "no guest mark: only hasPeerInput is under test")
+        #expect(!w.state.isYoloMode(child))
+
+        let target = w.root.appendingPathComponent("ws/child.md").path
+        let asked = try await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": SilentVibecop()]) { () async -> Bool in
+            async let source = w.state.requestApprovalSource(toolName: "write_file", details: target, workspace: w.root.appendingPathComponent("ws").path,
+                                                             conversationId: child, origin: "Subagent", isOwner: true)
+            _ = await eventually { !w.state.pendingApprovals.isEmpty }
+            let asked = !w.state.pendingApprovals.isEmpty
+            w.state.denyPendingApprovals(for: child)
+            w.state.denyPendingApprovals(for: w.cid)
+            _ = await source
+            return asked
+        }
+        #expect(asked, "the delegate's ordinary write takes the ladder, not YOLO")
+    }
+
     @Test("a background subagent's post-back leaves YOLO on")
     func subagentPostBackKeepsYolo() async throws {
         let w = try world(); defer { w.tearDown() }
