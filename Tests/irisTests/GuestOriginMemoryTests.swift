@@ -17,9 +17,11 @@ struct GuestOriginMemoryTests {
                                      "google_sheets_get", "google_tasks_list_tasklists", "google_tasks_list_tasks",
                                      "google_tasks_create_task"]
     nonisolated static let jobReads = ["list_jobs", "get_job_run"]
+    /// Interim (#1293, #1294): the session roster and standing jobs, until the spine classifies them owner-only.
+    nonisolated static let interim = ["list_sessions", "describe_session", "schedule_job", "register_directory_watcher"]
     nonisolated static let memory = reads + writes
     /// Everything a guest-origin turn is neither offered nor allowed to run.
-    nonisolated static let all = memory + google + jobReads
+    nonisolated static let all = memory + google + jobReads + interim
 
     // MARK: the one list
 
@@ -30,6 +32,7 @@ struct GuestOriginMemoryTests {
         #expect(ToolExecutor.memoryTools == Set(Self.memory))
         #expect(ToolExecutor.googleWorkspaceTools == Set(Self.google))
         #expect(ToolExecutor.ownerJobReadTools == Set(Self.jobReads))
+        #expect(ToolExecutor.guestOriginInterimDeniedTools == Set(Self.interim))
         #expect(ToolExecutor.guestOriginDeniedTools == Set(Self.all))
         #expect(!ToolExecutor.guestOriginDeniedTools.isEmpty)
         #expect(ToolExecutor.memoryReadTools.isDisjoint(with: ToolExecutor.memoryWriteTools))
