@@ -12,10 +12,14 @@ F1–F9) — ship the #1195 guest-memory stopgap now. **The core-spine implement
 is written from THIS v3, not v2.** No spine code lands before the plan is approved (the epic gate is
 unchanged; the re-review it gated on is now done).
 
+**v3.1 (2026-11-22, #1015):** the five v2-review gaps A–E are resolved in §"v3.1 — resolutions of the v2 gaps A–E"
+below, each checked against `main` (0c939be7), with what is built, what is not, and the decisions that are the owner's.
+Gap D (the inter-session routes) gates the A2A inbound lane (#931 Task 5).
+
 **Execution state (2026-11-19):** the plan was approved and **Group A (the foundation — Tasks 1–5) is
 MERGED** (#1201 + #1202). **Group B (the seam closures) is APPROVED** (Brian, option b: full Group B,
 the memory-exfil tasks first; #1199 retires once they land) and in progress; **Group C (retrofit)
-is not yet authorized.** Two implementation names differ from this spec's prose: the `Binding` type
+was authorized by Brian and landed 2026-11-22 (Task 16: the shipped guest's binding, the roles move into the store).** Two implementation names differ from this spec's prose: the `Binding` type
 shipped as **`AccessBinding`** (a `SwiftUI.Binding` collision), and the `Principal` floor shipped
 **per-axis** — `AxisCap<Value> { unbounded / fixed(Value) / fromBinding }` with a cap per grant axis
 (tools, credentials, memoryRead, memoryWrite, transports) rather than tools-only. Read `Binding`
@@ -235,6 +239,9 @@ Default bindings:
 | 3 | MCP guest asks | mcpGuest | the guest's authenticated `(transport,issuer,id)` → profile | guest profile ∩ mcpGuest floor |
 | 4 | homelab A2A asks | a2aRemote | `homelab-peer`, signature-verified peer id | `homelab-peer` ∩ a2aRemote floor |
 | 5 | GitHub webhook asks | (new) webhook | configured `github-webhook` profile, else **reject** | that profile, or nothing |
+| 6 | A session with a non-owner binding sends on the session bus (`send_to_session`, a topic) | the receiving session's own (`.main`) | the receiving session's binding **met with the sender's** (gap D) | sender's binding ∩ receiver's |
+| 7 | A job or directory watcher fires | background `.main`/subagent | the binding **stamped on the job at creation**; creation from a non-owner turn that has no profile id is refused (gap D) | that profile, or nothing |
+| 8 | An `iris://run-job` link or `--run-job` fires a job | as route 7 | the job's own stamp: a trigger never changes the binding (gap D) | the job's profile |
 
 **Route-3 recipient gap (F3b — must be in the plan):** route 3 resolves the binding of the *guest's
 own engine*. But a guest's real effect is a `send_to_session` message that runs as a **`.main` turn on
@@ -499,6 +506,118 @@ close each; the spine owns C1/C4/C5/C6/C7/C8.
 - **R5 — Identity→profile routing.** The mapping lives in the protected profile store #961 owns (H3),
   keyed `(transport, issuer, id)` (M4). Every guest/peer route must resolve to an authenticated
   identity → profile or be refused. First-grant is Inbox-gated (M5). *(planner's call / scoping)*
+
+## v3.1 — resolutions of the v2 gaps A–E (#1015)
+
+Brian's decision on #999 (option 2): let it merge, close A, C and E here before the consumer plans
+(#931/#965/#966/#967) build from the spec, and settle D before #931 Task 5. Written from the spine as it
+stands on `main` (Task 16 complete); every "today" below was read in code or reproduced through a real
+`processInput` turn, not taken from the spec. **Decisions that are Brian's are marked OWNER, each with a
+recommendation; everything else is settled by the code and is a builder instruction.**
+
+### A. The tool-classification table has a mechanism
+
+**Today.** Non-owner tool gating is a set of per-principal name lists (`GuestToolset.allowedNames`,
+`PrincipalFloor.brokerTools`, `memoryWriteTools`/`writerTiers`, `githubProxyTools`, `googleWorkspaceTools`,
+`guestOriginDeniedTools`) and the #811 offered-tools check. **`AccessProfile.tools` (the `ToolGrant`) is
+never consulted at dispatch** (no call site reads it outside the type, the resolver and the floor), and
+`PrincipalFloor.isAllowed` is named in comments but does not exist: the positive allowlist is #1203, open.
+
+**Resolution.** One static table, `ToolClassification.table: [String: ToolClass]`, with
+`ToolClass = .noCred | .spends(accountType) | .ownerOnly`, keyed by tool name, covering every declared
+tool (`IrisEngine.allDeclaredToolNames`, the job tools, memory, Google, GitHub, `search_web`).
+A tool absent from the table is `.ownerOnly`. MCP tools are `.ownerOnly` unless registered against a
+registry account (then `.spends(type)`); plugin tools are `.ownerOnly` until a plugin manifest can declare
+`.spends(type)` (**OWNER, recommend yes**: plugins default to owner-only). The check is one function,
+`allows(tool, under: binding)`, called at the **one** dispatcher chokepoint beside the #811
+`offeredToolNames` refusal, and at declaration (it replaces `hardStrip`'s denylist for non-owner turns):
+a call is allowed iff the tool is in the floor's tool cap **and** in the profile's `ToolGrant`, and its class
+admits the binding (`.noCred` always; `.spends(t)` only if `binding.profile.credentials` holds an account of
+type `t`; `.ownerOnly` only if `binding.isOwner`). This is #1203. Pinned by (1) a completeness test over
+every declared tool, so a new tool fails the build until it is classified (the pattern `writerTiers` already
+uses), and (2) per-tool live tests through `processInput` with the tool **offered** and the denylist and
+the gate each removed in turn. A refused tool and a tool the turn was not offered give the same
+"not one of the tools offered" text, so a test must assert the gate's own refusal text, not "was refused".
+
+### B. The owner stays ambient-credentialed, by design
+
+The owner (`main`, owner binding) keeps the host's credentials: that is what Iris is today (invariant 1's
+named exception, Brian 2A). The consequence, stated as a rule: **no content that came from a lower binding
+may drive an owner-binding turn that has acting tools.** It is enforced where lower-binding content enters
+an owner session: the recipient stamp for a guest's `send_to_session` (Task 15, shipped), and gap D for
+every other lower binding. Until D lands the rule holds for guest senders only.
+
+### C. The owner-data gate list is complete
+
+**Today.** `search_memory`, `search_conversations`, `read_conversation` and the eight memory writers are
+spine-gated (`MemoryBindingGate`) and reproduced as refused through a real guest-origin turn with the
+#1199 denylist disabled. **Not gated:** `list_jobs`/`get_job_run` (the pinned-conversation check is the only
+guard; the denylist is the sole protection on a guest-steered turn, which blocks removing it, #1224), and
+**`list_sessions`/`describe_session`** (reproduced: a stamped guest-origin `.main` turn gets the full roster
+row, session id, role, name, workspace and description, and the turn's reply goes to the guest; #1293).
+**Resolution.** Classify all four `.ownerOnly` in the table (A); they then refuse for any non-owner
+binding. A guest's own `list_sessions` is a separate floor tool (granted roles, three fields) and is unchanged.
+The #1199 denylist is then reconciled to the spine's real coverage in one change (#1224): remove the 11 memory tools it duplicates, add `list_sessions`/`describe_session` until #1203's table gates them.
+
+### D. The inter-session routes (gates #931 Task 5)
+
+**Today, verified.**
+- *Session bus.* A guest sender stamps the recipient turn with its binding and marks it (Task 15,
+  `deliverPeerMessage`). Any other sender does not: `guestOrigin = guestClientId != nil ||
+  senderTurnIsGuestOrigin`, and a sender whose conversation carries a non-owner profile (`accessProfileId`)
+  is never consulted. A profile-bound attended session can message an owner session and the recipient runs
+  as owner. Latent today (few entry points set a persisted profile), real for #961 and the A2A lane.
+- *Jobs and watchers.* A job is stamped at creation with `persistedAccessProfileId(for: conversation)`, the
+  conversation's own persisted profile id. A guest-**steered** `.main` turn has a stamped binding but no
+  persisted id, so a job it creates is stamped nil and **fires as the owner**, running the guest's prompt on
+  a schedule. Reproduced through a real `processInput` turn: a stamped guest-origin `.main` turn calling
+  `schedule_job` with the default read-only profile is created with **no approval prompt at all** (the
+  human is asked only for a non-read-only profile, the pinned conversation, a conversation that has read
+  untrusted text, or an outbound exemption) and the row's `accessProfileId` is nil (#1294).
+- *Links and the CLI.* `iris://run-job` and `--run-job` fire an existing job under that job's own stamp.
+
+**Resolution.**
+1. **Bus:** a receiving turn's binding is the meet of its own and the sender's binding, for **any** sender
+   whose `bindingForCall` is non-owner, not only a guest; the receiver is marked as having received
+   lower-binding input (today's `hasGuestInput`, generalised) so outbound gating and the #1246 reflection
+   gate apply. A non-owner session's bus **access** is the `peerRoles` axis (shipped in Task 16 for guests):
+   direct `role:<name>` sends to granted roles only; no topics, names, `iris` or session ids. Owner sends
+   are unrestricted. **OWNER (recommend yes):** generalise the guest addressing rule to every non-owner
+   binding.
+2. **Jobs and watchers:** `schedule_job` and `register_directory_watcher` are `.ownerOnly` in the table
+   (A), so a guest-steered turn cannot create one (refusal, not a synthetic profile). A profile-bound turn
+   keeps stamping its own profile id, and an update never changes a stamp. **OWNER (recommend refuse):**
+   the alternative is a synthetic deny-all profile, which makes a durable job from guest text possible.
+3. **Links and the CLI:** a trigger never changes the binding; the job's stamp does. The link's token is
+   the authority (owner-issued, per job). A future webhook trigger (route 5) follows the same rule.
+4. **A2A lane sessions** (#931): the receiving session's binding is the meet of its own and the verified
+   peer's profile (route 4); the lane never runs a turn as owner on a peer's text.
+
+### E. Kill switch, budget, guest network
+
+- **Kill switch.** Add one entry point, `AppState.dropAllGuests()`: close every guest session
+  (`GuestSessionRegistry.closeAll`, exists), cancel in-flight guest-steered turns and clear their stamps
+  (`guestSteeredBindings`, `guestOriginTurnConversations`), and refuse new guest turns until the owner
+  re-enables. A Settings button is the #961 pane's. **OWNER:** whether it also revokes tokens (clients must
+  re-register); recommend no: revocation is the existing per-client control, and an emergency stop should
+  be reversible.
+- **Budget.** Shipped per client: 12 turns an hour, 500,000 tokens a UTC day, 30,000 per turn
+  (`GuestSessionDriver`); the ledger is in memory and resets on restart. Recommend: persist the daily counts
+  (a restart must not refill a day's allowance), keep the budget per authenticated identity in v1 (a
+  per-profile budget is the follow-up if profiles are shared). **OWNER:** confirm or change the numbers.
+- **Guest network.** A guest has no `run_command` (its floor tools are `list_sessions` and
+  `send_to_session`), so it never reaches a container. The rule matters for the other sandboxed non-owner
+  runs: `SandboxSessionManager` creates a container with `NetworkMode.default` (network on) unless a
+  job grant says otherwise. Under the spine a sandboxed non-owner run defaults to network off, and the
+  `transports` axis, not the sandbox default, grants it. Builder instruction; no owner decision.
+
+### Decisions for Brian, in order (cheapest first)
+
+1. Plugin tools default `.ownerOnly` (A): yes/no. Recommend yes.
+2. Non-owner bus access is the `peerRoles` role-send rule for every non-owner binding (D1): yes/no. Recommend yes.
+3. A guest-steered turn may not create a job or watcher (D2): refuse or synthetic deny-all. Recommend refuse.
+4. Kill switch also revokes tokens (E): recommend no.
+5. Guest budget numbers and durability (E): recommend durable, numbers unchanged.
 
 ## Open questions / flags for the plan (not resolved in this spec)
 
