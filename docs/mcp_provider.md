@@ -89,7 +89,7 @@ it: a guest never gets an address a role session could message first.
   That turn is not offered, and a call that arrives anyway is refused at dispatch for, every tool the tool class
   table (`ToolClassTable`, #1015 gap A) calls owner-only: the Google tools (mail, Drive, Docs, Sheets, calendar,
   tasks), the GitHub tools, `list_jobs` and `get_job_run` (#1195), the session roster (`list_sessions`,
-  `describe_session`, #1293), job scheduling (`schedule_job`, `register_directory_watcher`, #1294), `set_workspace`
+  `describe_session`, #1293), job scheduling (`schedule_job`, `register_directory_watcher`, #1294), `set_alarm` (a later turn would run without the guest's stamp), `set_workspace`
   (it re-points which `AGENTS.md` reaches the prompt) and any tool the table has no row for, which is an MCP
   server's or a plugin's. None of them has an approval step, and a job it made would have run as the owner. The
   same rule applies to any turn whose binding is not the owner's, so a session bound to a role profile loses

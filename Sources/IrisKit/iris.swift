@@ -5956,7 +5956,7 @@ actor IrisEngine {
     /// `hardStrip` only stops a well-behaved model, so this is the half that holds against a forged call or a
     /// stale declaration, and it comes before anything that could read or write.
     static let nonOwnerToolRefusal =
-        "This turn does not run as the user, so the user's Google and GitHub accounts, job tools, session list, job scheduling, workspace setting and added tools (MCP and plugins) are not available on it and the call was not run."
+        "This turn does not run as the user, so the user's Google and GitHub accounts, job tools, session list, job scheduling and alarms, workspace setting and added tools (MCP and plugins) are not available on it and the call was not run."
 
     /// #974 gap A: the one gate for a tool the table calls owner-only (`ToolClassTable`), on the turn's own
     /// binding (`bindingForCall`), so a turn a guest steered and a session bound to a role profile meet it
