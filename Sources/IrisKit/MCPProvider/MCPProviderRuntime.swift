@@ -107,7 +107,9 @@ final class MCPProviderRuntime {
         let driver = guests.map { registry in
             GuestSessionDriver(state: registry.state, registry: registry, mailbox: mailbox,
                                turnGate: ProviderRequestGate(registry: tokenRegistry, capacity: GuestSessionDriver.turnsPerHour,
-                                                             refillInterval: GuestSessionDriver.turnRefillInterval))
+                                                             refillInterval: GuestSessionDriver.turnRefillInterval),
+                               // #1135: the day's count survives a restart.
+                               spend: GuestSpendLedger(persistence: StoreGuestSpendPersistence(store: registry.state.store)))
         }
 
         let server = IrisMCPProviderServer(tokenRegistry: tokenRegistry, mailbox: mailbox, artifactStore: artifactStore,

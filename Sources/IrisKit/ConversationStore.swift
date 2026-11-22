@@ -880,6 +880,15 @@ final class ConversationStore: Sendable {
                 t.add(column: "sidebarGroupId", .text)
             }
         }
+        // #1135: the guest daily spend count, one row per client: the UTC day it counts (`floor(unix / 86400)`) and
+        // the tokens spent that day. A row from an earlier day is replaced by the next add, never summed.
+        m.registerMigration("v45_guest_spend") { db in
+            try db.create(table: "guest_spend") { t in
+                t.column("client_id", .text).notNull().primaryKey()
+                t.column("day", .integer).notNull()
+                t.column("tokens", .integer).notNull()
+            }
+        }
         return m
     }
 
@@ -2049,6 +2058,35 @@ final class ConversationStore: Sendable {
     /// as one visible step from the person's side even though they are two statements here.
     func deleteSidebarGroup(id: UUID) throws {
         try writer.write { db in try db.execute(sql: "DELETE FROM sidebar_groups WHERE id = ?", arguments: [id.uuidString]) }
+    }
+
+    // MARK: Guest spend (#1135)
+
+    /// What each client has spent on `day`, from the rows that name that day. A row that does not read is skipped.
+    func loadGuestDailySpend(day: Int) throws -> [String: Int] {
+        try writer.read { db in
+            var out: [String: Int] = [:]
+            for row in try Row.fetchAll(db, sql: "SELECT client_id, day, tokens FROM guest_spend WHERE day = ?", arguments: [day]) {
+                guard let client = Self.readText(row, "client_id"), let rowDay: Int = row["day"], let tokens: Int = row["tokens"], rowDay == day else {
+                    print("WARNING: unreadable guest_spend row; skipped")
+                    continue
+                }
+                out[client] = tokens
+            }
+            return out
+        }
+    }
+
+    /// Adds `tokens` to `clientId`'s count for `day`. A row left from an earlier day is replaced, not added to.
+    func addGuestDailySpend(_ tokens: Int, clientId: String, day: Int) throws {
+        try writer.write { db in
+            try db.execute(sql: """
+                INSERT INTO guest_spend (client_id, day, tokens) VALUES (?, ?, ?)
+                ON CONFLICT(client_id) DO UPDATE SET
+                    tokens = CASE WHEN guest_spend.day = excluded.day THEN guest_spend.tokens + excluded.tokens ELSE excluded.tokens END,
+                    day = excluded.day
+                """, arguments: [clientId, day, tokens])
+        }
     }
 
     /// Tests corrupt rows through this; nothing in the app calls it.

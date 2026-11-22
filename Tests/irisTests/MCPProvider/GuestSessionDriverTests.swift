@@ -274,6 +274,29 @@ struct GuestSessionDriverTests {
         #expect(await r.driver.spend.total(for: "dev-1") == GuestSessionDriver.dailyTokenCap + 100, "the lifetime tally is not reset")
     }
 
+    @Test("a restart does not refill the day's allowance: a driver built over the same store refuses a client that spent its cap before")
+    func restartKeepsTheCapEnforced() async throws {
+        let store = try ConversationStore.inMemory()
+        let wall = WallClock()
+        let before = GuestSpendLedger(now: { wall.now }, persistence: StoreGuestSpendPersistence(store: store))
+        await before.add(GuestSessionDriver.dailyTokenCap, for: "dev-1")
+        let app = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
+        let tokens = ProviderTokenRegistry(keychain: KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true))
+        _ = try tokens.issueToken(forClientId: "dev-1")
+        let sessions = GuestSessionRegistry(state: app) { s, c in
+            IrisEngine.makeGuestEngine(state: s, clientId: c, client: CapturingLLMClient(reply: "unused"), protectionEnabled: false)
+        }
+        let script = Script()
+        // The restart: a new ledger and a new driver over the SAME store.
+        let driver = GuestSessionDriver(
+            state: app, registry: sessions, mailbox: ProviderMailbox(registry: tokens),
+            turnGate: ProviderRequestGate(registry: tokens, capacity: GuestSessionDriver.turnsPerHour, refillInterval: GuestSessionDriver.turnRefillInterval),
+            isEnabled: { true }, spend: GuestSpendLedger(now: { wall.now }, persistence: StoreGuestSpendPersistence(store: store)),
+            runTurn: Self.fakeTurn(app, script))
+        #expect(await driver.submit(text: "after restart", from: "dev-1") == .overDailyBudget)
+        #expect(script.texts.isEmpty && sessions.liveCount == 0)
+    }
+
     @Test("revoking and re-issuing a client does not reset its day's count")
     func revokeKeepsTheDayCount() async throws {
         let r = try rig()

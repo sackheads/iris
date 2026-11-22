@@ -16,20 +16,45 @@ enum GuestSubmitResult: Equatable, Sendable {
     case disabled
 }
 
+/// Where the ledger keeps today's count between runs (#1135). A seam so a test needs no store.
+protocol GuestSpendPersistence: Sendable {
+    func load(day: Int) -> [String: Int]
+    func add(_ tokens: Int, clientId: String, day: Int)
+}
+
+/// The store-backed one: a failed write is logged and the count stays in memory for this run.
+struct StoreGuestSpendPersistence: GuestSpendPersistence {
+    let store: ConversationStore
+    func load(day: Int) -> [String: Int] {
+        do { return try store.loadGuestDailySpend(day: day) } catch { print("WARNING: guest spend could not be read: \(error)"); return [:] }
+    }
+    func add(_ tokens: Int, clientId: String, day: Int) {
+        do { try store.addGuestDailySpend(tokens, clientId: clientId, day: day) } catch { print("WARNING: guest spend could not be saved: \(error)") }
+    }
+}
+
 /// What guest turns have spent, per client, in tokens. The guest conversation is deleted when its
 /// session is reaped and is never persisted, so a figure kept on it would go with it; this tally
-/// is the one place a reaped guest's spend survives (memory only: a restart starts it empty).
+/// is the one place a reaped guest's spend survives. The running total is memory only: a restart
+/// starts it empty.
 ///
 /// Besides the running total it keeps today's total, by UTC day, which the driver reads to refuse a
 /// client that has used its daily budget (#1135). A day is `floor(unix time / 86400)`, so the
-/// count restarts at 00:00 UTC without a timer.
+/// count restarts at 00:00 UTC without a timer. With a `persistence` the day's count also survives a
+/// restart (the same ruling), so a restart does not refill a day's allowance.
 actor GuestSpendLedger {
     private var totals: [String: Int] = [:]
     private var daily: [String: (day: Int, tokens: Int)] = [:]
     private let now: @Sendable () -> Date
+    private let persistence: GuestSpendPersistence?
 
-    init(now: @escaping @Sendable () -> Date = Date.init) {
+    init(now: @escaping @Sendable () -> Date = Date.init, persistence: GuestSpendPersistence? = nil) {
         self.now = now
+        self.persistence = persistence
+        let day = Int((now().timeIntervalSince1970 / 86_400).rounded(.down))
+        if let persistence {
+            daily = persistence.load(day: day).mapValues { (day, $0) }
+        }
     }
 
     private func today() -> Int { Int((now().timeIntervalSince1970 / 86_400).rounded(.down)) }
@@ -41,6 +66,7 @@ actor GuestSpendLedger {
         // Entries from an earlier day are dead weight: drop them as the day turns.
         daily = daily.filter { $0.value.day == day }
         daily[clientId] = (day, (daily[clientId]?.tokens ?? 0) + tokens)
+        persistence?.add(tokens, clientId: clientId, day: day)
     }
 
     func total(for clientId: String) -> Int { totals[clientId] ?? 0 }

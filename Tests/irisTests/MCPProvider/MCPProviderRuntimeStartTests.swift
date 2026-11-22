@@ -88,6 +88,21 @@ struct MCPProviderRuntimeStartTests {
         #expect(guests.liveCount == 0)
     }
 
+    @Test("a running provider's guest driver keeps the day's spend in the app's store, so a restart does not refill it (#1135)")
+    func driverSpendIsPersisted() async throws {
+        let store = try ConversationStore.inMemory()
+        let app = AppState(store: store, createIfEmpty: false, emitLaunchNotices: false)
+        let guests = GuestSessionRegistry(state: app) { s, c in IrisEngine.makeGuestEngine(state: s, clientId: c, protectionEnabled: false) }
+        let runtime = MCPProviderRuntime(isEnabled: { true }, makeRegistry: { Self.registry() }, configuredPort: { 0 },
+                                         artifactRoot: Self.tempRoot(), report: { _ in }, makeGuestRegistry: { guests })
+        await runtime.start()
+        defer { Task { await runtime.stop() } }
+        let driver = try #require(runtime.guestDriver)
+        await driver.spend.add(1_234, for: "dev-1")
+        // A restart: a new ledger over the same store sees it.
+        #expect(await GuestSpendLedger(persistence: StoreGuestSpendPersistence(store: store)).todayTotal(for: "dev-1") == 1_234)
+    }
+
     @Test("stopping the provider closes its live guest sessions (#1066)")
     func stopClosesLiveGuestSessions() async throws {
         let app = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
