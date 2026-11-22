@@ -86,13 +86,15 @@ it: a guest never gets an address a role session could message first.
   message started or steered asks for approvals as usual for that turn (#1119): no saved Always Allow rule, exact or prefix, answers for it either (#1141).
   Neither the `~/.iris` file carve-out nor a Vibecop approval answers for such a turn either: the call asks
   the person (#1150, #1151).
-  Nor is that turn offered the memory tools (#1195): `search_memory`, `search_conversations`,
-  `read_conversation`, and the writers `save_fact`, `manage_fact`, `update_memory`, `update_user_profile`,
-  `update_soul`, `create_skill`, `update_skill` and `delete_skill`, nor the Google tools (mail, Drive, Docs,
-  Sheets, calendar, tasks) nor `list_jobs` and `get_job_run`. A call to one that arrives anyway is refused
-  at dispatch. The reads were not behind any approval step; the memory writers were already held for the
-  person's approval (#813) and the Google writers by the outbound gate, and are stripped as well. The role
-  session's own prompt (`SOUL.md`, `USER.md`, `memory.md`, skills) still carries what it carries, and MCP
+  That turn is not offered, and a call that arrives anyway is refused at dispatch for, the Google tools (mail,
+  Drive, Docs, Sheets, calendar, tasks), `list_jobs` and `get_job_run` (#1195), the session roster
+  (`list_sessions`, `describe_session`, #1293) and job scheduling (`schedule_job`,
+  `register_directory_watcher`, #1294): none of them has an approval step, and a job it made would have run as
+  the owner. The memory tools (`search_memory`, `search_conversations`, `read_conversation` and the writers
+  `save_fact`, `manage_fact`, `update_memory`, `update_user_profile`, `update_soul`, `create_skill`,
+  `update_skill`, `delete_skill`) are offered but refused by the turn's own access binding (a guest's memory
+  tier is below what they need, #1224); the memory writers are also held for the person's approval (#813).
+  The role session's own prompt (`SOUL.md`, `USER.md`, `memory.md`, skills) still carries what it carries, and MCP
   tools the person added are not stripped; only the tools named here are closed.
 - **The per-client role allowlist.** A guest reaches only the roles its client was granted. The grant
   lives in the access-profile store (`profiles/`): a guest is mapped, as `(mcp, iris-mcp-provider, <client

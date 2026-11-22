@@ -289,11 +289,15 @@ struct ToolExecutor {
     nonisolated static let ownerJobReadTools: Set<String> = ["list_jobs", "get_job_run"]
 
     /// What a turn a guest's message started or steered is neither offered nor allowed to run
-    /// (#1195): the owner's memory, Google account, job history, session roster and standing jobs. One list for `hardStrip`, the
-    /// dispatcher and the tests. Not here, and still the spine's job (a positive allowlist for the
-    /// recipient turn, #974): MCP tools the user added, and the tools that already ask the person.
+    /// (#1195): the owner's Google account, job history, session roster and standing jobs. One list for
+    /// `hardStrip`, the dispatcher and the tests. The eleven memory tools are NOT here any more (#1224):
+    /// `MemoryBindingGate` refuses them for the turn's own non-owner binding (`bindingForCall`), proven
+    /// per tool through a real turn with them offered (`GuestOriginMemoryGateTests`). Not here, and
+    /// still the spine's job (a binding-based tool gate for the recipient turn, #1015 gap A): MCP tools
+    /// the user added, and the tools that already ask the person. The Google and job tools stay here
+    /// until that gate exists: nothing else refuses them on such a turn.
     nonisolated static let guestOriginDeniedTools: Set<String> =
-        memoryTools.union(googleWorkspaceTools).union(ownerJobReadTools).union(guestOriginInterimDeniedTools)
+        googleWorkspaceTools.union(ownerJobReadTools).union(guestOriginInterimDeniedTools)
 
     /// Interim, until the spine's tool table classifies them owner-only (#1203): the session roster and
     /// standing jobs. `list_sessions`/`describe_session` returned the owner's roster (ids, names,
