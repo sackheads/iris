@@ -371,6 +371,7 @@ actor IrisEngine {
         if cacheable {
             profileStamp = (path, stamp)
             cachedProfileText = safeUserProfile
+            noteAltered(file: "USER.md", stripped: judged.strippedMarkerLines, diverged: judged.divergedLines)
         }
         noteUnjudged(unjudged, file: "USER.md")
         return safeUserProfile
@@ -457,6 +458,19 @@ actor IrisEngine {
         pendingGuardNotices.append(Self.unjudgedFileNotice(file: file, ranges: ranges))
     }
 
+    /// #1268 (Brian: "a"): the person's own line for what `notingViewDiffers` tells the model, once per
+    /// change of the file: only when the guarded view is cached, so a cache hit or a retried transient
+    /// error never says it again.
+    private func noteAltered(file: String, stripped: Int, diverged: Int) {
+        guard stripped > 0 || diverged > 0 else { return }
+        pendingGuardNotices.append(Self.alteredFileNotice(file: file, stripped: stripped > 0))
+    }
+
+    nonisolated static func alteredFileNotice(file: String, stripped: Bool) -> String {
+        let what = stripped ? "removed an injection marker from" : "changed how some lines look in"
+        return "The injection guard \(what) \(file) before the model saw it, so the model saw a cleaned version. The file itself is unchanged."
+    }
+
     nonisolated static func unjudgedFileNotice(file: String, ranges: [String]) -> String {
         "\(file) is too long for the injection guard to judge whole; lines \(ranges.joined(separator: ", ")) weren't sent to the model. Shorten it to have them sent."
     }
@@ -524,6 +538,8 @@ actor IrisEngine {
         if cacheable {
             agentsStamp[wp] = stamp
             cachedAgentsText[wp] = safeAgentsMd
+            noteAltered(file: (fullPath as NSString).abbreviatingWithTildeInPath, stripped: judged.strippedMarkerLines,
+                        diverged: judged.divergedLines)
         }
         noteUnjudged(unjudged, file: "AGENTS.md")
         return safeAgentsMd
