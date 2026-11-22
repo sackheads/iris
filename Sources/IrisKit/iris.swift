@@ -3368,8 +3368,11 @@ actor IrisEngine {
         }
         // #1317: the untrusted entry point, so the summary gets the normalization and full role-delimiter
         // strip every other untrusted text does (#727); it is what keeps the new Iris untainted.
+        // #1321: and #1275's structure rule, since the owner reads this summary as the new Iris's first
+        // message: a standalone `###` or `---` comes back once a tier judged the text, a role marker never.
         return await InjectionGuard.classifyUntrusted(reply, contextTag: "rotation_summary", maxTier: .tier3_canary,
-                                                      protectionEnabled: protectionEnabled)
+                                                      protectionEnabled: protectionEnabled,
+                                                      fidelity: .preserveStructureWhenJudged)
     }
 
     /// #187 §0.5 structural ruling: no `isPeer` parameter here any more. Three rounds tried
