@@ -289,11 +289,21 @@ struct ToolExecutor {
     nonisolated static let ownerJobReadTools: Set<String> = ["list_jobs", "get_job_run"]
 
     /// What a turn a guest's message started or steered is neither offered nor allowed to run
-    /// (#1195): the owner's memory, Google account and job history. One list for `hardStrip`, the
+    /// (#1195): the owner's memory, Google account, job history, session roster and standing jobs. One list for `hardStrip`, the
     /// dispatcher and the tests. Not here, and still the spine's job (a positive allowlist for the
     /// recipient turn, #974): MCP tools the user added, and the tools that already ask the person.
     nonisolated static let guestOriginDeniedTools: Set<String> =
-        memoryTools.union(googleWorkspaceTools).union(ownerJobReadTools)
+        memoryTools.union(googleWorkspaceTools).union(ownerJobReadTools).union(guestOriginInterimDeniedTools)
+
+    /// Interim, until the spine's tool table classifies them owner-only (#1203): the session roster and
+    /// standing jobs. `list_sessions`/`describe_session` returned the owner's roster (ids, names,
+    /// workspaces, descriptions) on a guest-steered turn, whose reply goes to the guest (#1293).
+    /// `schedule_job`/`register_directory_watcher` created a job on such a turn with no approval for the
+    /// default read-only profile and stamped it with no profile, so it fired as the owner running the
+    /// guest's prompt (#1294). A job made by a turn bound to a profile still carries that profile; this
+    /// only closes the turn a guest steered.
+    nonisolated static let guestOriginInterimDeniedTools: Set<String> =
+        ["list_sessions", "describe_session", "schedule_job", "register_directory_watcher"]
 
     nonisolated static let githubToolDeclarations: [FunctionDeclaration] = [
         FunctionDeclaration(
