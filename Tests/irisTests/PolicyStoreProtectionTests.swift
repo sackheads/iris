@@ -234,6 +234,11 @@ struct ProtectedDirShellWriteTests {
         #expect(!flags("touch ~/.iris/configs/x"), "a sibling with a longer name")
         #expect(!flags("printf x > ~/project/config/app.json"), "another folder's config/")
         #expect(!flags("git config core.editor vim", cwd: root), "the bare word from inside the home")
+        #expect(flags("printf x > $HOME/.iris/config/permissions.json"), "through the .iris/ spelling")
+        // Known miss, pinned so a change to it is deliberate: a cd into the home followed by a relative
+        // path, from a workspace outside it. Catching it by `.iris` plus `config/` anywhere in the text
+        // would also flag `cat ~/.iris/memory/x > ~/proj/config/app.json`.
+        #expect(!flags("cd ~/.iris && printf x > config/permissions.json"), "known miss: cd-chain into the home")
     }
 }
 
