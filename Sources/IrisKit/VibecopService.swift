@@ -69,8 +69,8 @@ final class VibecopService: @unchecked Sendable {
 
     /// Files under a mounted folder that a Mac program runs or reads as configuration (#613): a
     /// closed list, so routine project dotfiles (.gitignore, .eslintrc) stay routine.
-    static let hostRunFiles = [".git/hooks/", ".git/config", ".gitconfig", ".zshenv", ".zshrc", ".zprofile",
-                               ".bashrc", ".bash_profile", ".profile", ".ssh/", "Library/LaunchAgents/",
+    static let hostRunFiles = [".git/hooks/", ".git/config", ".gitconfig", ".zshenv", ".zshrc", ".zprofile", ".zlogin", ".zlogout",
+                               ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile", ".ssh/", "Library/LaunchAgents/",
                                ".envrc", ".vscode/tasks.json"]
 
     static func evaluatorLayerText(allowedCommands: [String]) -> String {
