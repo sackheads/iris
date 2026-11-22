@@ -5330,8 +5330,14 @@ class AppState {
         // Brian-reserved humanOnly call (#1115). Nor, by Brian's ruling on #1115, a write that grants
         // permission (`config/`, `plugins/`, `exchange/`, `profiles/`, any `.git`), which outlives
         // `/yolo off`: it takes the ladder below as it would with YOLO off. Nor a non-owner turn's call.
-        let grantsPermission = gitWrite
-            || permissions.isProtectedWrite(toolName: toolName, path: ToolExecutor.resolvePath(details, cwd: workspace))
+        let resolvedTarget = ToolExecutor.resolvePath(details, cwd: workspace)
+        // #1316: nor a write that plants something a Mac program runs later (a git hook or config, a
+        // shell startup file, `.ssh/`, a launch agent), by file or by host command (`HostRunFiles`).
+        let plantsRunFile = toolName == "write_file"
+            ? HostRunFiles.isRunFile(resolvedTarget) || HostRunFiles.isRunFile(IrisPaths.realPath(resolvedTarget))
+            : toolName == "run_command" && HostRunFiles.commandWrites(details)
+        let grantsPermission = gitWrite || plantsRunFile
+            || permissions.isProtectedWrite(toolName: toolName, path: resolvedTarget)
         if isYoloMode(conversationId), isOwner, !grantsPermission {
             return .yolo
         }
