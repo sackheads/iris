@@ -81,8 +81,26 @@ struct PromptInjectionGuard {
     /// Markdown's own rules and headings, which strip without recording a line.
     private static let markdownOnly: Set<String> = ["---", "###"]
     /// `---`/`###` that do record a line: at its start, before a role word.
-    private static let delimiterBeforeRole = try! NSRegularExpression(
+    static let delimiterBeforeRole = try! NSRegularExpression(
         pattern: #"^\s*(---|###)\s*(system|assistant|user|model|instruction)\b"#, options: [.caseInsensitive])
+
+    /// The role and chat-template patterns: `malRolePatterns` without the two Markdown-only ones.
+    private static let roleOnlyPatterns = malRolePatterns.filter { !markdownOnly.contains($0) }
+    /// A standalone run of `---` or `###` (a fence, a rule, a heading marker): bounded by whitespace or the line's ends.
+    private static let standaloneStructure = try! NSRegularExpression(pattern: #"(?<!\S)(?:-{3,}|#{3,})(?!\S)"#)
+
+    /// #1275: whether the ONLY thing the strip removed from `normalizedLine` is Markdown structure, so that a
+    /// tier-cleared line may be shown as the file has it in the system prompt (`InjectionGuard.FidelityMode
+    /// .preserveStructureWhenJudged`). False for a line that carries a role word or chat token, a
+    /// delimiter right before a role word (`### System`, with or without a colon), or a `---`/`###` glued to
+    /// anything (`IG###NORE`, `sys---tem:`): such a line stays stripped whatever a tier said.
+    static func isStructureOnlyMarkerLine(_ normalizedLine: String) -> Bool {
+        let whole = NSRange(normalizedLine.startIndex..., in: normalizedLine)
+        guard delimiterBeforeRole.firstMatch(in: normalizedLine, range: whole) == nil else { return false }
+        let remainder = standaloneStructure.stringByReplacingMatches(in: normalizedLine, range: whole, withTemplate: "")
+        guard !remainder.contains("---"), !remainder.contains("###") else { return false }
+        return stripRecording(remainder, patterns: roleOnlyPatterns).text == remainder
+    }
 
     /// A role word's pattern (`system:`, `user:`, `System Prompt:` …) matches only as a whole word
     /// (#736): as a suffix it mangled ordinary keys, `filesystem:` into `file`, in every tool result

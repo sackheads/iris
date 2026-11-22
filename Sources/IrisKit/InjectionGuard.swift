@@ -86,6 +86,12 @@ public struct InjectionGuard {
     enum FidelityMode: Equatable, Sendable {
         case off
         case preserveWhenJudged
+        /// #1275: `preserveWhenJudged` for a file woven into the SYSTEM prompt (USER.md, a workspace AGENTS.md):
+        /// only a bare Markdown fence or heading (a standalone `---` / `###`) may be carried back once a tier
+        /// judged the line safe. A role delimiter (`system:`, `### Assistant:`, `Instruction:`, a glued split) is
+        /// never restored there, whatever a tier said: the structural strip of a role marker stays a boundary,
+        /// not a classifier verdict.
+        case preserveStructureWhenJudged
     }
 
     /// Test-only seam (#952 Task 1): every fidelity mode `classifyDetailed` actually received,
@@ -131,7 +137,7 @@ public struct InjectionGuard {
     /// runs unconditionally below to produce the deletion candidate every return point can fall
     /// back to when nothing model-backed ends up judging this one.
     private static func preserveFidelityCandidate(_ rawInput: String, fidelity: FidelityMode) -> String? {
-        fidelity == .preserveWhenJudged ? rawInput : nil
+        fidelity != .off ? rawInput : nil
     }
 
     /// Whether a tier-3 check would actually run now (#330's card marker): protection on, and a
@@ -617,8 +623,9 @@ public struct InjectionGuard {
         // because the verdict was reached on the normalized form either way. Without a candidate
         // (every caller but `read_file`) this is `clean` unchanged.
         func display(_ clean: String, markersMayCarry: Bool) -> (text: String, diverged: Int) {
-            guard fidelity == .preserveWhenJudged, let raw = preserveCandidate else { return (clean, 0) }
-            return carriedDisplay(clean: clean, rawOriginal: raw, markersMayCarry: markersMayCarry)
+            guard fidelity != .off, let raw = preserveCandidate else { return (clean, 0) }
+            return carriedDisplay(clean: clean, rawOriginal: raw, markersMayCarry: markersMayCarry,
+                                  structureOnly: fidelity == .preserveStructureWhenJudged)
         }
         // #727: what the caller's own strip recorded, then tier 1's, as the line read before both.
         let delimiterLines = tier1.delimiterLines.merging(delimiterLines) { _, callers in callers }
@@ -650,7 +657,7 @@ public struct InjectionGuard {
         // separate "deletion candidate" any more: with no swap, it already IS that candidate at
         // every return point below, mutated only by tier 2's own `.partial` redaction / `OutputCap`
         // — the same mutations a non-fidelity call sees.
-        let attemptingFidelity = fidelity == .preserveWhenJudged && preserveCandidate != nil && fingerprint.protectionEnabled
+        let attemptingFidelity = fidelity != .off && preserveCandidate != nil && fingerprint.protectionEnabled
         // Whether a model actually judged `clean` as handed to it — set from the tiers' own
         // verdicts below, never inferred from `attemptingFidelity` alone: protection can be on and
         // a tier still `.skipped` (unprovisioned), and that is exactly the case deletion must win.
@@ -829,7 +836,8 @@ public struct InjectionGuard {
     /// cursor past whatever a mismatched judged line consumed keeps every later, unaffected line
     /// aligned and eligible to carry; the resync bound is "the rest of `clean`", never a parse of
     /// the marker's own text.
-    static func carriedDisplay(clean: String, rawOriginal: String, markersMayCarry: Bool) -> (text: String, diverged: Int) {
+    static func carriedDisplay(clean: String, rawOriginal: String, markersMayCarry: Bool,
+                               structureOnly: Bool = false) -> (text: String, diverged: Int) {
         let cleanLines = clean.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         let originalLines = rawOriginal.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
 
@@ -892,7 +900,9 @@ public struct InjectionGuard {
                 // The guard acted on this line: the raw spelling is never shown. #952's carry of a
                 // whole-marker line (only once a model judged `clean`) keeps its marker, shown with
                 // its fold applied and its breakout neutralized, exactly as before #959.
-                shown = markerStripped && markersMayCarry ? escapeWrapperBreakout(normalized) : cleanLine
+                let carries = markerStripped && markersMayCarry
+                    && (!structureOnly || PromptInjectionGuard.isStructureOnlyMarkerLine(normalized))
+                shown = carries ? escapeWrapperBreakout(normalized) : cleanLine
             } else {
                 shown = rawLine
             }

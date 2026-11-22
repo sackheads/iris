@@ -350,7 +350,7 @@ actor IrisEngine {
         let userProfile = manager.getUserProfile()
         let (guardedUserProfile, cacheable, unjudged, strippedLines) = await measureSpan("assembly.userProfile") {
             await InjectionGuard.sanitizeUntrustedCacheable(userProfile, contextTag: "user_profile", maxTier: .tier3_canary, protectionEnabled: protectionEnabled,
-                                                            fidelity: .preserveWhenJudged)
+                                                            fidelity: .preserveStructureWhenJudged)
         }
         // #1209: the note is part of what is cached, so it costs nothing on a clean file and is
         // computed once per change of the file, never per turn.
@@ -481,7 +481,7 @@ actor IrisEngine {
         }
         let (guardedAgentsMd, cacheable, unjudged, strippedLines) = await measureSpan("assembly.agentsMd") {
             await InjectionGuard.sanitizeUntrustedCacheable(agentsMdContent, contextTag: "workspace_rules", maxTier: .tier3_canary, protectionEnabled: protectionEnabled,
-                                                            fidelity: .preserveWhenJudged)
+                                                            fidelity: .preserveStructureWhenJudged)
         }
         let safeAgentsMd = Self.notingStrippedMarkers(guardedAgentsMd, lines: strippedLines)   // #1209, as for USER.md
         // Same rule as `guardedUserProfileText`: a transient error is shown this turn but never
