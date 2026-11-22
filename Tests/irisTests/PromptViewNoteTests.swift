@@ -39,7 +39,7 @@ struct PromptViewNoteTests {
         func tearDown() { try? FileManager.default.removeItem(at: root) }
     }
 
-    private func fixture(user: String, agents: String, protection: Bool = true) throws -> Fixture {
+    private func fixture(user: String, agents: String, protection: Bool = true, stamp: AccessBinding? = nil) throws -> Fixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("iris-1298-\(UUID().uuidString)")
         let paths = IrisPaths(root: root)
         try FileManager.default.createDirectory(at: paths.memoryDir, withIntermediateDirectories: true)
@@ -50,6 +50,7 @@ struct PromptViewNoteTests {
         let app = AppState(store: try ConversationStore.inMemory(), tier2Provisioning: .provisioned, tier3Provisioning: .provisioned,
                            createIfEmpty: false, emitLaunchNotices: false)
         let conversation = app.createNewConversation(select: false)
+        if let stamp { app.markGuestSteeredBinding(stamp, for: conversation) }
         app.setWorkspace(for: conversation, path: workspace.path)
         let client = CapturingLLMClient(reply: "ok")
         let engine = IrisEngine(state: app, client: client, retryDelays: [], protectionEnabled: protection,
@@ -68,7 +69,22 @@ struct PromptViewNoteTests {
         #expect(!system.contains(Self.marker), "no role marker was stripped, so not the marker note")
         let note = try #require(system.range(of: Self.differs)), body = try #require(system.range(of: "likes terse answers"))
         #expect(note.lowerBound < body.lowerBound, "the note comes before the content it describes")
-        #expect(!system.contains("read_file on"), "no pointer: neither file is readable raw here (a temp home, a workspace file)")
+        let pointer = "read_file on"
+        #expect(count(of: pointer, in: system) == 1, "one pointer: USER.md under the engine's Iris home, for the owner; never the workspace AGENTS.md")
+        let agentsNote = try #require(system.range(of: "run the tests"))
+        let beforeAgents = String(system[..<agentsNote.lowerBound])
+        #expect(beforeAgents.components(separatedBy: Self.differs).count == 3, "both notes precede the AGENTS.md body")
+        #expect(!(system[system.range(of: "# Project Workspace Rules")!.lowerBound...].contains(pointer)), "no pointer inside the AGENTS.md section")
+    }
+
+    @Test("a non-owner binding that reads USER.md (memoryRead .full) is told the view differs but is NOT pointed at read_file")
+    func nonOwnerGetsNoPointer() async throws {
+        let f = try fixture(user: Self.okf, agents: Self.agents, stamp: AccessBinding(profile: AccessProfile(memoryRead: .full), principal: .main, isOwner: false))
+        defer { f.tearDown() }
+        let system = await f.system(tiers: nil)
+        #expect(system.contains("# User Profile (USER.md)"), "the non-owner turn does read USER.md into its prompt")
+        #expect(count(of: Self.differs, in: system) == 2)
+        #expect(!system.contains("read_file on"), "no pointer for a binding with no read_file on the Iris home")
     }
 
     @Test("protection off (the other no-tier config) is announced the same way")
