@@ -25,7 +25,7 @@ struct ToolClassTableTests {
 
     @Test("the classes the rulings name")
     func rulings() {
-        for name in ["set_workspace", "gmail_send_email", "list_sessions", "schedule_job", "list_jobs", "github_approve"] {
+        for name in ["set_workspace", "gmail_send_email", "list_sessions", "schedule_job", "list_jobs", "github_approve", "set_alarm"] {
             #expect(ToolClassTable.toolClass(of: name) == .ownerOnly, Comment(rawValue: name))
         }
         #expect(ToolClassTable.toolClass(of: "run_command") == .approvalGated, "Brian: run_command stays approval-gated")
@@ -46,7 +46,7 @@ struct ToolClassTableTests {
 @MainActor
 @Suite("the class gate on every route (#974 gap A)", .serialized, .timeLimit(.minutes(3)))
 struct ToolClassGateRouteTests {
-    nonisolated static let tools = ["gmail_list_unread", "set_workspace", "srv___echo", "list_jobs", "schedule_job", "register_directory_watcher"]
+    nonisolated static let tools = ["gmail_list_unread", "set_workspace", "srv___echo", "list_jobs", "schedule_job", "register_directory_watcher", "set_alarm"]
 
     private struct World {
         let app: AppState

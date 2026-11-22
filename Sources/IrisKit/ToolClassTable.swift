@@ -25,13 +25,14 @@ enum ToolClassTable {
         put(ToolExecutor.githubProxyTools, .ownerOnly)      // act as Iris's own GitHub account, no approval step
         put(ToolExecutor.ownerJobReadTools, .ownerOnly)
         // The roster, standing jobs, and the one tool that re-points which AGENTS.md reaches the prompt.
-        put(["list_sessions", "describe_session", "schedule_job", "register_directory_watcher", "set_workspace"], .ownerOnly)
+        // `set_alarm` schedules a future turn that runs without the guest stamp, carrying the guest's note (#1294's shape, dev-2's review of #1307).
+        put(["list_sessions", "describe_session", "schedule_job", "register_directory_watcher", "set_workspace", IrisEngine.setAlarmTool], .ownerOnly)
         put(ToolExecutor.memoryTools, .tierGated)
         put(["search_conversations", "read_conversation", IrisEngine.profileMemoryTool], .tierGated)
         put(["search_web", "rename_conversation", "reflect", "goal_complete", "propose_goal_contract",
              "amend_goal_contract", "reach_checkpoint", "waive_criterion", "invoke_subagent", "delegate_milestone",
              "inbox_item", "submit_evaluation", "set_session_card", "close_request", "send_to_session",
-             IrisEngine.scheduleNextTickTool, IrisEngine.setAlarmTool, IrisEngine.currentTimeTool], .noCred)
+             IrisEngine.scheduleNextTickTool, IrisEngine.currentTimeTool], .noCred)
         return table
     }()
 
