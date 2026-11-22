@@ -140,6 +140,46 @@ struct YoloOwnerOnlyTests {
         #expect(FileManager.default.fileExists(atPath: target), "YOLO approved it, so it ran")
     }
 
+    @Test("under YOLO, a host command naming config/, plugins/ or exchange/ under Iris's home asks the person")
+    func shellGrantMintingWritesAskUnderYolo() async throws {
+        for dir in ["config", "plugins", "exchange"] {
+            let w = try world(); defer { w.tearDown() }
+            w.state.sendMessage("/yolo on")
+            let target = w.home.root.appendingPathComponent("\(dir)/planted.json").path
+            let asked = try await asksThePerson(w, Self.call("run_command", ["command": .string("printf x > '\(target)'")]),
+                                                ran: { FileManager.default.fileExists(atPath: target) })
+            #expect(asked, "\(dir)/: YOLO must not approve a shell write that grants permission")
+        }
+    }
+
+    @Test("control: under YOLO an ordinary host command still runs unasked")
+    func ordinaryCommandStillYolo() async throws {
+        let w = try world(); defer { w.tearDown() }
+        w.state.sendMessage("/yolo on")
+        let target = w.root.appendingPathComponent("ws/out.txt").path
+        let asked = try await asksThePerson(w, Self.call("run_command", ["command": .string("printf x > '\(target)'")]), ran: { false })
+        #expect(!asked)
+        #expect(FileManager.default.fileExists(atPath: target), "YOLO approved it, so it ran")
+    }
+
+    /// The widening on purpose (planner's R2): with YOLO off too, a shell write naming `config/` is a
+    /// person's alone, so its card offers no Always Allow, as a `profiles/` write's already did.
+    @Test("without YOLO, a host command naming config/ asks with no Always Allow")
+    func shellConfigWriteOffersNoAlwaysAllow() async throws {
+        let w = try world(); defer { w.tearDown() }
+        let target = w.home.configDir.appendingPathComponent("permissions.json").path
+        let engine = engine(w, ScriptedClient([Self.call("run_command", ["command": .string("printf x > '\(target)'")]), Self.done]))
+        try await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": SilentVibecop()]) {
+            let turn = Task { await engine.processInput("go", source: "UI", conversationId: w.cid) }
+            _ = await eventually { !w.state.pendingApprovals.isEmpty }
+            let request = try #require(w.state.pendingApprovals.first)
+            #expect(!request.offersAlwaysAllow, "no standing rule may answer a write to Iris's own configuration")
+            w.state.denyPendingApprovals(for: w.cid)
+            _ = try await value(of: turn, within: 10)
+        }
+        #expect(!FileManager.default.fileExists(atPath: target))
+    }
+
     // MARK: Non-owner bindings
 
     @Test("a guest-steered binding gets no YOLO even without the guest-origin turn mark")

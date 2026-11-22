@@ -218,7 +218,8 @@ struct PermissionManager: Sendable {
     }
 
     /// Whether a host command would write one of the access-policy stores (#974 Task 9b, F6 /
-    /// Invariant 6): `profiles/` and `config/a2a-peers/`. Task 3 gives the model no API for them, but
+    /// Invariant 6): `profiles/` and `config/a2a-peers/`, and since #1115 every protected directory
+    /// (`config/`, `plugins/`, `exchange/`), whose shell write grants permission too. Task 3 gives the model no API for them, but
     /// a host command can still write the files, so such a command is a person's call alone (never an
     /// allowlist rule's or Vibecop's APPROVE), as a write to a workspace `.iris/` is. `write_file`
     /// is not this rule's: it is already a protected write (`isProtectedWrite`). In the VM a command

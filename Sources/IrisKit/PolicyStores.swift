@@ -6,9 +6,14 @@ import Foundation
 /// protected write; what this adds is the text side: naming them for the approval dialog, and
 /// recognizing a host command that writes one, which `isProtectedWrite` (path-based, file tools
 /// only) cannot see. Best effort on the text, like `WorkspaceIrisDir.commandNamesWorkspaceIris`.
+/// #1115 widened it to every protected directory (`config/`, `plugins/`, `exchange/`): a shell
+/// write there grants permission as a `write_file` would, and YOLO must not approve it.
 enum PolicyStores {
-    /// The two stores' directory names, for the tests that pin them to `IrisPaths`.
-    static let directoryNames = ["profiles", "a2a-peers"]
+    /// The stores' directory names, for the tests that pin them to `IrisPaths`.
+    static let directoryNames = ["profiles", "a2a-peers", "config", "plugins", "exchange"]
+
+    /// #1115's three: common words, so only spelled under the home (`.iris/config`) counts as naming one.
+    private static let homeSpelledNames = ["config", "plugins", "exchange"]
 
     /// What the shell would see: quotes and backslashes removed, case folded (APFS is
     /// case-insensitive).
@@ -33,6 +38,20 @@ enum PolicyStores {
         return false
     }
 
+    /// Whether `name/` starts a path component in `text` (`config/x`, `./config/x`, `../config/x`):
+    /// not the bare word, which `git config` or `--plugins` would match.
+    private static func hasDirectory(_ name: String, in text: String) -> Bool {
+        var rest = Substring(text)
+        var previous: Character?
+        while let range = rest.range(of: name + "/") {
+            let before = rest[..<range.lowerBound].last ?? previous
+            if !(before.map(isNameCharacter) ?? false) { return true }
+            previous = rest[range.lowerBound...].first
+            rest = rest[range.upperBound...]
+        }
+        return false
+    }
+
     /// The store a text names, for the dialog's warning: `a2a-peers`, or `profiles` spelled under
     /// Iris's home (`~/.iris[-dev]/profiles`, `$HOME/.iris/profiles`, a `cd` into the home followed by
     /// a relative `profiles/`). nil for the same words elsewhere (`~/profiles`, `user_profiles`).
@@ -40,6 +59,15 @@ enum PolicyStores {
         let plain = plain(text)
         if plain.contains("a2a-peers") { return "config/a2a-peers/" }
         if plain.contains(".iris"), hasWord("profiles", in: plain) { return "profiles/" }
+        for name in homeSpelledNames {
+            for home in [".iris/", ".iris-dev/"] {
+                var rest = Substring(plain)
+                while let range = rest.range(of: home + name) {
+                    if !(rest[range.upperBound...].first.map(isNameCharacter) ?? false) { return name + "/" }
+                    rest = rest[range.upperBound...]
+                }
+            }
+        }
         return nil
     }
 
@@ -48,7 +76,7 @@ enum PolicyStores {
     static func commandNamesStore(_ command: String, paths: IrisPaths, release: IrisPaths, workspace: String?) -> Bool {
         if named(in: command) != nil { return true }
         let plainCommand = plain(command)
-        let dirs = [paths, release].flatMap { [$0.profilesDir, $0.a2aPeersDir] }
+        let dirs = [paths, release].flatMap { [$0.profilesDir, $0.a2aPeersDir] + $0.protectedWriteDirs }
         for dir in dirs {
             for spelled in Set([dir.path, IrisPaths.realPath(dir.path)]) {
                 let lowered = spelled.lowercased()
@@ -74,7 +102,8 @@ enum PolicyStores {
                 for spelled in Set([root.root.path, IrisPaths.realPath(root.root.path)]) {
                     let lowered = spelled.lowercased()
                     guard here == lowered || here.hasPrefix(lowered + "/") else { continue }
-                    if directoryNames.contains(where: { hasWord($0, in: plainCommand) }) { return true }
+                    if ["profiles", "a2a-peers"].contains(where: { hasWord($0, in: plainCommand) }) { return true }
+                    if homeSpelledNames.contains(where: { hasDirectory($0, in: plainCommand) }) { return true }
                 }
             }
         }
