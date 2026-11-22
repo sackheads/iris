@@ -129,7 +129,7 @@ it: a guest never gets an address a role session could message first.
   `GuestSpendLedger` tallies each client's tokens, and that tally is what the cap reads. The day's count
   is kept in the conversation store (`guest_spend`, one row per client: the UTC day and the tokens spent
   that day), so a restart does not refill a day's allowance (#1135); a row from an earlier day is replaced
-  by the next add, never summed. A row that does not read counts that client as spent for the day (never as zero), and a row whose client cannot be read, or a store that cannot be read, refuses every client until the day turns; a client with no row has simply spent nothing. The lifetime total beside it is memory only. Revoking a client does not
+  by the next add, never summed. A row that does not read counts that client as spent for the day (never as zero), and a row whose client cannot be read refuses every client until the day turns. A store that cannot be read refuses the send in the moment, with the reason in the provider's log ("guest spend ledger could not be read (...)"), re-reads on the next send, and clears as soon as it reads again; it is not a lock until midnight, and it never refills a cap (every client counts as spent while it is unreadable, and spend tallied in the meantime is added to what the store has once it reads). A client with no row has simply spent nothing. The lifetime total beside it is memory only. Revoking a client does not
   clear its day's count, so re-issuing an id does not reset its cap.
 - **The flag.** `MCP_GUEST_SESSIONS_ENABLED` is a guarded setting, off by default (off is its
   protective value): a `"true"` written from outside the app is not carried across an upgrade and
