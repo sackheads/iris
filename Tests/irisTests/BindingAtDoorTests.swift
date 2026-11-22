@@ -104,16 +104,25 @@ struct BindingAtDoorTests {
         #expect(binding.profile.memoryRead == .task)
     }
 
-    @Test("makeBoundEngine refuses .broker until #1203 wires the dispatch-side enforcement (dev-2's #1202 review finding 4)")
-    func makeBoundEngineRefusesBroker() throws {
+    @Test("makeBoundEngine now builds a .broker engine (#1203 wired the dispatch-side enforcement, dev-2's #1202 review finding 4), with its binding correctly capped by the broker floor")
+    func makeBoundEngineBuildsBroker() async throws {
         let (store, paths) = tempStore()
         let state = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
         let identity = IdentityKey(transport: "a2a", issuer: "homelab", id: "peer-1")
-        try write(AccessProfile(tools: .set(["search_memory"])), id: "broker-profile", to: paths)
+        // A profile wider than the floor (tools includes one outside brokerTools) -- capped(by:)
+        // must narrow it, not the profile alone.
+        try write(AccessProfile(memoryRead: .full, tools: .set(["search_memory", "run_command"])), id: "broker-profile", to: paths)
         try writeMappings([(identity, "broker-profile")], to: paths)
 
-        let engine = IrisEngine.makeBoundEngine(state: state, principal: .broker, identity: identity, store: store)
-        #expect(engine == nil)
+        let engine = try #require(IrisEngine.makeBoundEngine(state: state, principal: .broker, identity: identity, store: store))
+        let binding = await engine.binding
+        #expect(!binding.isOwner)
+        #expect(binding.principal == .broker)
+        guard case .set(let tools) = binding.profile.tools else {
+            Issue.record("expected a concrete tool set, not .allTools")
+            return
+        }
+        #expect(tools == ["search_memory"], "the wider profile's run_command must not survive the broker floor's cap")
     }
 
     // MARK: - SubagentManager: parent ∩ floor, never widened (Review Focus 2)
