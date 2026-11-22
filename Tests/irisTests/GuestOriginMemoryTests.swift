@@ -20,8 +20,9 @@ struct GuestOriginMemoryTests {
     /// Interim (#1293, #1294): the session roster and standing jobs, until the spine classifies them owner-only.
     nonisolated static let interim = ["list_sessions", "describe_session", "schedule_job", "register_directory_watcher"]
     nonisolated static let memory = reads + writes
-    /// Everything a guest-origin turn is neither offered nor allowed to run.
-    nonisolated static let all = memory + google + jobReads + interim
+    /// Everything the denylist strips and refuses on a guest-origin turn. The memory tools are not here
+    /// (#1224): `MemoryBindingGate` refuses them, pinned per tool in `GuestOriginMemoryGateTests`.
+    nonisolated static let all = google + jobReads + interim
 
     // MARK: the one list
 
@@ -34,6 +35,8 @@ struct GuestOriginMemoryTests {
         #expect(ToolExecutor.ownerJobReadTools == Set(Self.jobReads))
         #expect(ToolExecutor.guestOriginInterimDeniedTools == Set(Self.interim))
         #expect(ToolExecutor.guestOriginDeniedTools == Set(Self.all))
+        #expect(ToolExecutor.guestOriginDeniedTools.isDisjoint(with: ToolExecutor.memoryTools),
+                "the memory tools are gated by the binding, not the denylist (#1224)")
         #expect(!ToolExecutor.guestOriginDeniedTools.isEmpty)
         #expect(ToolExecutor.memoryReadTools.isDisjoint(with: ToolExecutor.memoryWriteTools))
     }
@@ -123,10 +126,11 @@ struct GuestOriginMemoryTests {
         // The control must actually offer them, or "none offered" proves nothing.
         // `manage_fact` is declared only once the fact store has something to manage, so a fresh turn does
         // not offer it; it is covered by the pure strip and dispatch tests above and below.
-        #expect(offered.isSuperset(of: Set(Self.writes).subtracting(["manage_fact"]).union(["search_memory"])), "\(offered.sorted())")
         if pinned {
-            #expect(offered.isSuperset(of: ["search_conversations", "read_conversation", "list_jobs", "get_job_run"]), "\(offered.sorted())")
+            #expect(offered.isSuperset(of: ["list_jobs", "get_job_run"]), "\(offered.sorted())")
         }
+        // The memory tools stay offered to the guest-origin turn (refused by the binding at call time).
+        #expect(guest.isSuperset(of: Set(Self.writes).subtracting(["manage_fact"]).union(["search_memory"])), "\(guest.sorted())")
         #expect(guest.intersection(ToolExecutor.guestOriginDeniedTools).isEmpty,
                 "\(guest.intersection(ToolExecutor.guestOriginDeniedTools).sorted())")
         #expect(guest.contains("run_command"), "the guest-origin turn did declare tools")

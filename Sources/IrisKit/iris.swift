@@ -5923,10 +5923,11 @@ actor IrisEngine {
     }
 
     /// #1195: what a turn a guest's message started or steered is told when it calls one of the owner's
-    /// data tools (memory, Google, job history, the session roster, scheduling) anyway. `hardStrip` only stops a well-behaved model, so this is the half that holds against a
+    /// data tools (Google, job history, the session roster, scheduling) anyway; the memory tools are refused by
+    /// `MemoryBindingGate` against the turn's binding instead (#1224). `hardStrip` only stops a well-behaved model, so this is the half that holds against a
     /// forged call or a stale declaration, and it comes before anything that could read or write.
     static let guestOriginDataRefusal =
-        "This turn is answering a message from outside the user's own conversation, so the user's memory, Google account, job tools, session list and job scheduling are not available on it and the call was not run."
+        "This turn is answering a message from outside the user's own conversation, so the user's Google account, job tools, session list and job scheduling are not available on it and the call was not run."
 
     static func guestOriginDispatchRefusal(_ name: String, guestOrigin: Bool) -> String? {
         guard guestOrigin, ToolExecutor.guestOriginDeniedTools.contains(name) else { return nil }
