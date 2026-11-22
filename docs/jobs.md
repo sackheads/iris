@@ -857,7 +857,9 @@ that prints more on standard output fails (#699). **A card posts only when somet
 happened**: the first run, any failure, or a run whose status or outcome differs from the last
 one's. Every run writes its row either way, and `/jobs` shows a script job's *last ran* and
 *last posted* separately so a quiet one doesn't look dead. A posted line is untrusted script
-output, so it passes the injection guard to tier 3 first; a blocked one is posted as `output
+output, so it passes the injection guard to tier 3 first, which also removes role-marker words from it
+(`system:`, `user:`, `model:`, `Instruction:`, `<|im_start|>` and the like, #1319), so a line that legitimately prints one
+loses that word; a blocked one is posted as `output
 withheld: the injection guard blocked it`, and a line checked without tier 3 (protection off, or
 its model not downloaded) ends `(checked without tier 3)`. `get_job_run` returns the output,
 guarded, and `iris --run-job --dry-run` refuses a script job, since a dry run would have to run it.
