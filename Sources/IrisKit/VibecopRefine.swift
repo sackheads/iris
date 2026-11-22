@@ -60,7 +60,7 @@ enum VibecopRefine {
     static func proposals(_ calls: [(command: String, byPerson: Bool, approved: Bool)], existing: String) -> [Proposal] {
         var counts: [String: Int] = [:], excluded = Set<String>()
         for call in calls {
-            let segments = HostRunFiles.segments(call.command)
+            let segments = simpleCommands(call.command)
             let shapes = segments.compactMap(shape)
             // Anything left unapproved counts against every shape in it; a compound command never counts for one.
             if !call.approved { excluded.formUnion(shapes); continue }
@@ -70,6 +70,13 @@ enum VibecopRefine {
         return counts.filter { $0.value >= minimumApprovals && !excluded.contains($0.key) && !existing.contains("`\($0.key)`") }
             .map { Proposal(shape: $0.key, approvals: $0.value) }
             .sorted { $0.approvals != $1.approvals ? $0.approvals > $1.approvals : $0.shape < $1.shape }
+    }
+
+    /// The command's simple commands, split at `;`, `&`, `|`, parentheses, a backtick or a line break, quoted
+    /// or not. Over-splitting only fails safe here: a command then reads as compound (never counted), and a
+    /// denied one excludes more shapes.
+    static func simpleCommands(_ command: String) -> [[String]] {
+        command.components(separatedBy: CharacterSet(charactersIn: ";&|()`\n")).map(HostRunFiles.words).filter { !$0.isEmpty }
     }
 
     /// `existing` with the lines appended, its own bytes untouched.
