@@ -457,6 +457,12 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// holds for most sessions. Set only by `noteGuestInput`.
     var hasGuestInput: Bool = false
 
+    /// #1115 (Brian: "peers and guests should not get access to yolo"): true once another session's
+    /// message has been delivered here (`deliverPeerMessage`, idle or queued). Sticky and never
+    /// cleared, so the session is never in YOLO again (`isYoloMode`). Not a subagent post-back or an
+    /// inbox answer, which are the owner's own. Set only by `notePeerInput`.
+    var hasPeerInput: Bool = false
+
     /// #813: true once a tool result, an arrival or an approved call's output that did not come
     /// from the person or from Iris's own files has been put in front of the model here. It is not
     /// `hasUnattendedInput`, which says a turn started without the owner present; this one says the
@@ -530,7 +536,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, hasUntrustedToolOutput, outboundAllowedTools, jobOutboundExemptions, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier, lastTouchedAt, archivedAutomaticallyAt, inSessions, additionalRoots, vibecopGuidance, accessProfileId, hasGuestInput, sidebarGroupId
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, hasUntrustedToolOutput, outboundAllowedTools, jobOutboundExemptions, prefixMismatchBehavior, role, homeWritableOptIn, agentProfile, agentProfileSnapshot, loop, modelTier, lastTouchedAt, archivedAutomaticallyAt, inSessions, additionalRoots, vibecopGuidance, accessProfileId, hasGuestInput, hasPeerInput, sidebarGroupId
     }
 
     init(from decoder: Decoder) throws {
@@ -597,6 +603,8 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         hasUnattendedInput = try container.decodeIfPresent(Bool.self, forKey: .hasUnattendedInput) ?? false
         // Invariant 1: absent before #1246; absent means no guest message is known to have arrived.
         hasGuestInput = try container.decodeIfPresent(Bool.self, forKey: .hasGuestInput) ?? false
+        // Invariant 1: absent before #1115's peer half; absent means no peer message is known to have arrived.
+        hasPeerInput = try container.decodeIfPresent(Bool.self, forKey: .hasPeerInput) ?? false
         // Invariant 1, and #813's narrow direction: absent means persisted before the flag, with
         // nothing to say what the model read, so it reads as tainted.
         hasUntrustedToolOutput = try container.decodeIfPresent(Bool.self, forKey: .hasUntrustedToolOutput) ?? true
@@ -3409,6 +3417,13 @@ class AppState {
         markChanged(id, .metadata)
     }
     func isGuestOriginTurn(_ id: UUID) -> Bool { guestOriginTurnConversations.contains(id) }
+
+    /// #1115: another session's message has reached `id`; see `Conversation.hasPeerInput`.
+    func notePeerInput(_ id: UUID) {
+        guard let idx = conversations.firstIndex(where: { $0.id == id }), !conversations[idx].hasPeerInput else { return }
+        conversations[idx].hasPeerInput = true
+        markChanged(id, .metadata)
+    }
     /// dev-3 review of #1212, finding 1: meets with any existing stamp rather than overwriting —
     /// a wider guest's send arriving while a narrower guest's turn is still running (or a relay
     /// that inherits a narrower binding than whatever this conversation already carries) must
@@ -5311,8 +5326,12 @@ class AppState {
         // #1099: YOLO mode approves every other attended call (including a tainted outbound send,
         // which may reach here per the exception above) in this session and its delegates,
         // skipping the allowlist, Vibecop, and the user prompt -- never irisWrite or a
-        // Brian-reserved humanOnly call (#1115).
-        if isYoloMode(conversationId) {
+        // Brian-reserved humanOnly call (#1115). Nor, by Brian's ruling on #1115, a write that grants
+        // permission (`config/`, `plugins/`, `exchange/`, `profiles/`, any `.git`), which outlives
+        // `/yolo off`: it takes the ladder below as it would with YOLO off. Nor a non-owner turn's call.
+        let grantsPermission = gitWrite
+            || permissions.isProtectedWrite(toolName: toolName, path: ToolExecutor.resolvePath(details, cwd: workspace))
+        if isYoloMode(conversationId), isOwner, !grantsPermission {
             return .yolo
         }
         // `humanOnly`: straight to the prompt, bypassing the allowlist below (a standing "yes"
@@ -7377,6 +7396,10 @@ class AppState {
         // #1119: a turn a guest's message started or steered is never YOLO, whichever session in
         // the delegation chain asks (a delegate's calls ride the same turn).
         if isGuestOriginTurn(conversationId) || isGuestOriginTurn(delegationRoot(of: conversationId)) { return false }
+        // #1115: nor once a peer's message has reached the session or the one it was delegated from, for good.
+        if [conversationId, delegationRoot(of: conversationId)].contains(where: { id in
+            conversations.first { $0.id == id }?.hasPeerInput == true
+        }) { return false }
         if let conv = conversations.first(where: { $0.id == conversationId }),
            conv.isBackground || conv.isGuest {
             return false
@@ -7527,6 +7550,20 @@ class AppState {
         emitCommandOutput("Usage: `/vibecop [init|tweak [here|global] <guidance>|show|clear]`", format: .markdown, to: convId)
     }
 
+    static let yoloRefusedForPeerInput = "Yolo mode stays off here: another session has messaged this conversation, and a session a peer can reach never runs in YOLO."
+    static let yoloRefusedForBoundSession = "Yolo mode stays off here: this session is bound to an access profile, and only your own sessions run in YOLO."
+
+    /// #1115: why `/yolo on` would change nothing here, or nil. `isYoloMode` and the ladder's owner
+    /// check enforce it either way; this only keeps the status from claiming a YOLO that never applies.
+    func yoloRefusal(for convId: UUID) -> String? {
+        let ids = [convId, delegationRoot(of: convId)]
+        if ids.contains(where: { id in conversations.first { $0.id == id }?.hasPeerInput == true }) {
+            return Self.yoloRefusedForPeerInput
+        }
+        if persistedAccessProfileId(for: convId) != nil { return Self.yoloRefusedForBoundSession }
+        return nil
+    }
+
     private func handleYoloCommand(_ trimmed: String, convId: UUID) {
         let arg = trimmed.dropFirst("/yolo".count).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         switch arg {
@@ -7534,6 +7571,10 @@ class AppState {
             let status = isYoloMode(convId) ? "on" : "off"
             emitCommandOutput("Yolo mode is \(status).", format: .markdown, to: convId)
         case "on":
+            if let refusal = yoloRefusal(for: convId) {
+                emitCommandOutput(refusal, format: .markdown, to: convId)
+                return
+            }
             setYoloMode(true, for: convId)
             yoloAudio.playVengabusYolo()
             emitCommandOutput("Yolo mode is on.", format: .markdown, to: convId)
