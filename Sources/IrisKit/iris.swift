@@ -460,9 +460,10 @@ actor IrisEngine {
 
     /// #1268 (Brian: "a"): the person's own line for what `notingViewDiffers` tells the model, once per
     /// change of the file: only when the guarded view is cached, so a cache hit or a retried transient
-    /// error never says it again.
+    /// error never says it again. Only the `.main` engine says it: the cache is per engine, so a
+    /// subagent, grader or job run would say it again in its own log (dev-2's review).
     private func noteAltered(file: String, stripped: Int, diverged: Int) {
-        guard stripped > 0 || diverged > 0 else { return }
+        guard principal == .main, stripped > 0 || diverged > 0 else { return }
         pendingGuardNotices.append(Self.alteredFileNotice(file: file, stripped: stripped > 0))
     }
 
