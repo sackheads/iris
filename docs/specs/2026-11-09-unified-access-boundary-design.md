@@ -322,7 +322,7 @@ session could read owner **mail/Drive/calendar/tasks**, worse than the memory re
 `list_jobs`/`get_job_run` — are **stripped on guest-origin turns** via `hardStrip` **and** a dispatch-side
 refusal, using a single source-of-truth `ToolExecutor.guestOriginDeniedTools` set (mirroring
 `githubProxyTools`), with a test that every tool the Google managers declare is covered.
-**Reconciled (#1224, 2026-11-22):** the 11 memory tools came OFF this list once `MemoryBindingGate` was shown to refuse each of them on a guest-steered `.main` turn with the tool offered (live per-tool tests with a gate-removal mutant); `list_sessions`, `describe_session`, `schedule_job` and `register_directory_watcher` went ON (#1293, #1294); the 10 Google tools and `list_jobs`/`get_job_run` stay until the binding-based tool gate (#1015 gap A) exists.
+**Reconciled (#1224, 2026-11-22):** the 11 memory tools came OFF this list once `MemoryBindingGate` was shown to refuse each of them on a guest-steered `.main` turn with the tool offered (live per-tool tests with a gate-removal mutant); `list_sessions`, `describe_session`, `schedule_job` and `register_directory_watcher` went ON (#1293, #1294); the 10 Google tools and `list_jobs`/`get_job_run` stayed until the binding-based tool gate (#1015 gap A) replaced the whole list: `ToolClassTable` (`ToolExecutor.guestOriginDeniedTools` is gone).
 **What the strip actually closes (corrected mid-build, verified on origin/main):** the **reads** are the
 real ungated exfiltration path — a granted-role guest steering a role session's
 `search_memory`/`search_conversations`/`read_conversation` to pull owner memory out. The **writes** are

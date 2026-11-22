@@ -1305,7 +1305,7 @@ actor IrisEngine {
         // #974 Task 15 (F3b): the COMPLETE fix the #1119 bool above only bounds — the recipient
         // turn's own `AccessBinding`, not just a YOLO-off marker, so every tool and memory read
         // that turn makes is gated by the sender's floor, not an enumerated denylist (#1199's
-        // stopgap). Direct guest send: `self` is the guest's own engine (`makeGuestEngine`), so
+        // stopgap, retired by `ToolClassTable`). Direct guest send: `self` is the guest's own engine (`makeGuestEngine`), so
         // `self.binding` IS the sender's binding. A relay (the sender's own turn was itself
         // guest-steered): inherit whatever was stamped on the sender's conversation, or its
         // delegation root's — chained the same way the bool is. If `guestOrigin` turns out true
@@ -4171,13 +4171,13 @@ actor IrisEngine {
         // otherwise.
         // #966: a turn a guest's message started is attended and `.main`, but it acts for a guest;
         // the `github_*` tools act as Iris's own account with no approval step, so it is not offered them.
-        // #1195: the same turn is not offered the owner's memory, Google account or job history either:
-        // those reads have no approval step.
-        let guestSensitiveOffered = toolsList.contains {
-            ToolExecutor.githubProxyTools.contains($0.name) || ToolExecutor.guestOriginDeniedTools.contains($0.name)
-        }
+        // #974 gap A: nor, on any binding that is not the owner's, a tool the class table calls owner-only
+        // (Google, jobs, sessions, workspace, MCP and plugin tools): none has an approval step.
+        let guestSensitiveOffered = toolsList.contains { ToolClassTable.isOwnerOnly($0.name) }
         let guestOrigin = guestSensitiveOffered ? await isGuestOriginConversation(conversationId) : false
-        toolsList = Self.hardStrip(toolsList, isUnattended: isUnattended, principal: principal, guestOrigin: guestOrigin)
+        let nonOwnerTurn = guestSensitiveOffered && principal == .main ? !(await callIsOwner(conversationId)) : false
+        toolsList = Self.hardStrip(toolsList, isUnattended: isUnattended, principal: principal, guestOrigin: guestOrigin,
+                                   nonOwner: nonOwnerTurn)
         if stickyApplies {
             let declared = toolsList.map(\.name)
             await MainActor.run { localState?.stickyTools.record(declared, for: conversationId) }
@@ -5146,6 +5146,10 @@ actor IrisEngine {
                 // #974 Task 12 (C8): the job carries the binding of the turn that made it, so its
                 // run is confined the same way. An update never changes a stamped job's profile.
                 let stamp = await MainActor.run { localState?.persistedAccessProfileId(for: conversationId) }
+                // #1303: this reads only the persisted profile id, so a turn whose binding is a guest's (steered,
+                // no persisted id) would stamp nil and the job would fire as the owner (#1294). It is not reached
+                // for one: the class gate refuses both job tools to any non-owner binding (`ToolClassTable`), and
+                // `hardStrip` does not offer them. Do not loosen those without resolving this stamp from `bindingForCall`.
                 job.accessProfileId = stamp
                 if let replacing {
                     job = Job(id: replacing.id, name: job.name, prompt: job.prompt, trigger: job.trigger,
@@ -5532,6 +5536,9 @@ actor IrisEngine {
             if let refusal = await memoryBindingWriteGate(tool: item.toolName, conversationId: item.conversationId) {
                 return refusal
             }
+            if let refusal = await toolClassGate(tool: item.toolName, conversationId: item.conversationId) {
+                return refusal
+            }
             // The target the person was shown: the real path taken at the hold, not the call's
             // spelling resolved again now. The approved write walks it with no link followed, so a
             // link swapped in since is refused rather than written through.
@@ -5752,12 +5759,16 @@ actor IrisEngine {
     }
 
     nonisolated static func hardStrip(_ tools: [FunctionDeclaration], isUnattended: Bool,
-                                      principal: Principal, guestOrigin: Bool = false) -> [FunctionDeclaration] {
+                                      principal: Principal, guestOrigin: Bool = false, nonOwner: Bool = false) -> [FunctionDeclaration] {
         var denied: Set<String> = []
-        if guestOrigin { denied.formUnion(ToolExecutor.githubProxyTools.union(ToolExecutor.guestOriginDeniedTools)) }
+        if guestOrigin { denied.formUnion(ToolExecutor.githubProxyTools) }
         if isUnattended { denied.formUnion(unattendedNeverDeclared) }
         if principal != .main { denied.formUnion(mainOnlyDeclared) }
-        return denied.isEmpty ? tools : tools.filter { !denied.contains($0.name) }
+        // #974 gap A: a binding that is not the owner's is not offered the owner-only tools, or any tool
+        // the table has no row for (an MCP server's or a plugin's).
+        let refuseOwnerOnly = nonOwner || guestOrigin   // a turn a guest steered is a non-owner turn
+        if denied.isEmpty, !refuseOwnerOnly { return tools }
+        return tools.filter { !denied.contains($0.name) && !(refuseOwnerOnly && ToolClassTable.isOwnerOnly($0.name)) }
     }
 
     /// What the owner sees on the approval dialog for a job-creating call (fix round 2, #187; every
@@ -5940,16 +5951,23 @@ actor IrisEngine {
         return githubOffPrincipalRefusal
     }
 
-    /// #1195: what a turn a guest's message started or steered is told when it calls one of the owner's
-    /// data tools (Google, job history, the session roster, scheduling) anyway; the memory tools are refused by
-    /// `MemoryBindingGate` against the turn's binding instead (#1224). `hardStrip` only stops a well-behaved model, so this is the half that holds against a
-    /// forged call or a stale declaration, and it comes before anything that could read or write.
-    static let guestOriginDataRefusal =
-        "This turn is answering a message from outside the user's own conversation, so the user's Google account, job tools, session list and job scheduling are not available on it and the call was not run."
+    /// What a turn that does not run as the owner is told when it calls an owner-only tool (`ToolClassTable`)
+    /// anyway; the memory tools are refused by `MemoryBindingGate` against the turn's binding instead (#1224).
+    /// `hardStrip` only stops a well-behaved model, so this is the half that holds against a forged call or a
+    /// stale declaration, and it comes before anything that could read or write.
+    static let nonOwnerToolRefusal =
+        "This turn does not run as the user, so the user's Google and GitHub accounts, job tools, session list, job scheduling, workspace setting and added tools (MCP and plugins) are not available on it and the call was not run."
 
-    static func guestOriginDispatchRefusal(_ name: String, guestOrigin: Bool) -> String? {
-        guard guestOrigin, ToolExecutor.guestOriginDeniedTools.contains(name) else { return nil }
-        return guestOriginDataRefusal
+    /// #974 gap A: the one gate for a tool the table calls owner-only (`ToolClassTable`), on the turn's own
+    /// binding (`bindingForCall`), so a turn a guest steered and a session bound to a role profile meet it
+    /// alike. Asked by the live dispatcher, the approved-card replay and the held-write release. The
+    /// binding is read only for a tool the table refuses to non-owners.
+    func toolClassGate(tool: String, conversationId: UUID) async -> String? {
+        // The shared `.main` engine serves the owner, role sessions, guest-steered turns and job runs, and its
+        // binding varies per turn. Every other principal has its own gate: a guest's floor, a subagent's
+        // `mainOnlyDeclared`, the evaluator's allowlist.
+        guard principal == .main, ToolClassTable.isOwnerOnly(tool) else { return nil }
+        return ToolClassTable.refusal(tool: tool, binding: await bindingForCall(conversationId: conversationId))
     }
 
     /// Whether a guest's message started this conversation's turn, or its delegation root's (#1119,
@@ -6373,13 +6391,12 @@ actor IrisEngine {
         // background turn (see `buildRequest`), but declaration gating only stops a well-behaved
         // model — the refusal has to live at the point that would actually write the row.
         let githubGuestOrigin = ToolExecutor.githubProxyTools.contains(functionCall.name)
-            || ToolExecutor.guestOriginDeniedTools.contains(functionCall.name)
             ? await isGuestOriginConversation(conversationId) : false
         if let refusal = Self.githubDispatchRefusal(functionCall.name, isUnattended: isUnattended, principal: principal,
                                                     guestOrigin: githubGuestOrigin) {
             return refusal
         }
-        if let refusal = Self.guestOriginDispatchRefusal(functionCall.name, guestOrigin: githubGuestOrigin) {
+        if let refusal = await toolClassGate(tool: functionCall.name, conversationId: conversationId) {
             return refusal
         }
         if Self.jobCreationTools.contains(functionCall.name), isUnattended {
@@ -7919,6 +7936,10 @@ actor IrisEngine {
         // (the dispatcher refuses one before a card is ever recorded, but the binding a card is
         // clicked under is not necessarily the one it was recorded under).
         if let refusal = await memoryBindingWriteGate(tool: call.toolName, conversationId: conversationId) {
+            return refusal
+        }
+        // #974 gap A: and the class gate, for the same reason (a card recorded under one binding, clicked under another).
+        if let refusal = await toolClassGate(tool: call.toolName, conversationId: conversationId) {
             return refusal
         }
         let result = await executeToolWithHooks(name: call.toolName, args: call.args, cwd: call.cwd,
