@@ -94,7 +94,8 @@ enum ContextHolds {
     }
 
     /// SOUL.md, USER.md, memory.md, or anything under the skills folder or rules/, compared by
-    /// real path so a link or another spelling of the same file is the same file.
+    /// real path so a link or another spelling of the same file is the same file. Not library/ or
+    /// artifacts/ while no prompt reads them: `LibraryHoldTripwireTests` fails when one does (#1295).
     static func heldWritePath(_ path: String, cwd: String?, paths: IrisPaths, irisPaths: IrisPaths = .default) -> Bool {
         let target = IrisPaths.realPath(ToolExecutor.resolvePath(path, cwd: cwd))
         for file in [paths.soulMd, paths.userMd, paths.memoryMd, irisPaths.soulMd, irisPaths.userMd, irisPaths.memoryMd]
