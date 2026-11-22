@@ -120,6 +120,9 @@ struct HostRunFilesTests {
         "at -f /tmp/evil 23:00",
         "batch < /tmp/evil",
         "sh -c 'echo x | at midnight'",
+        "time -p crontab f",
+        "nice -n 5 crontab f",
+        "crontab < /tmp/evil",
     ])
     func plantsAJob(_ command: String) {
         #expect(HostRunFiles.commandWrites(command), "\(command)")
@@ -145,6 +148,9 @@ struct HostRunFilesTests {
         "atrm 3",
         "echo meet at 5",
         "grep -n at notes.txt",
+        "command -v crontab",
+        "crontab -l > backup.txt",
+        "crontab -l >> ~/backups/cron.txt",
     ])
     func listingIsNotAJob(_ command: String) {
         #expect(!HostRunFiles.commandWrites(command), "\(command)")

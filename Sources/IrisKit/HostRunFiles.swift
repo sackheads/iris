@@ -89,19 +89,28 @@ enum HostRunFiles {
     /// Where a segment's program is: past variable assignments and the wrappers that run the next word
     /// (`sudo`, `env`, `nohup`, `command`, `exec`, `time`, `nice`, `doas`, and from dev-1's review `xargs`,
     /// `timeout`, `caffeinate`, `stdbuf`) with their own options; `timeout` also takes its duration first.
+    /// Each wrapper's options that take a value as the next word (dev-2's review: one shared table read
+    /// `time -p` as sudo's `-p prompt` and skipped the program).
+    private static let wrapperValueOptions: [String: Set<String>] = [
+        "sudo": ["-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U"], "doas": ["-u", "-C"],
+        "env": ["-u", "-S", "-P"], "nice": ["-n"], "exec": ["-a"], "time": [], "nohup": [], "command": [],
+        "xargs": ["-n", "-I", "-L", "-P", "-s", "-E", "-d", "-J", "-R"], "timeout": ["-s", "-k"],
+        "caffeinate": ["-t", "-w"], "stdbuf": ["-i", "-o", "-e"],
+    ]
+
     private static func commandIndex(_ segment: [String]) -> Int? {
-        let wrappers: Set<String> = ["sudo", "doas", "env", "nohup", "command", "exec", "time", "nice",
-                                     "xargs", "timeout", "caffeinate", "stdbuf"]
-        let takesValue: Set<String> = ["-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-n", "-S",
-                                       "-I", "-L", "-P", "-s", "-E", "-d", "-w", "-k", "-a", "-J", "-R"]
         var i = 0
         while i < segment.count {
             let word = segment[i]
             if word.contains("=") && !word.hasPrefix("-") { i += 1; continue }
             let wrapper = (word as NSString).lastPathComponent
-            guard wrappers.contains(wrapper) else { return i }
+            guard let takesValue = wrapperValueOptions[wrapper] else { return i }
             i += 1
-            while i < segment.count, segment[i].hasPrefix("-") { i += takesValue.contains(segment[i]) ? 2 : 1 }
+            while i < segment.count, segment[i].hasPrefix("-") {
+                // `command -v name` / `-V` looks the name up; it runs nothing.
+                if wrapper == "command", ["-v", "-V"].contains(segment[i]) { return nil }
+                i += takesValue.contains(segment[i]) ? 2 : 1
+            }
             if wrapper == "timeout", i < segment.count { i += 1 }   // the duration
         }
         return nil
@@ -110,9 +119,16 @@ enum HostRunFiles {
     /// The command's simple commands: its words, split again at the list, pipe and grouping characters
     /// (`;`, `&`, `|`, parentheses, a backtick) and at a line break, which `words` treats as plain gaps.
     static func segments(_ command: String) -> [[String]] {
-        var result: [[String]] = [[]]
+        var result: [[String]] = [[]], skipNext = false
         for token in tokens(command) {
-            if let token { result[result.count - 1].append(token) } else if !result[result.count - 1].isEmpty { result.append([]) }
+            guard let token else {
+                if !result[result.count - 1].isEmpty { result.append([]) }
+                skipNext = false
+                continue
+            }
+            if token == redirectMark { skipNext = true; continue }
+            if skipNext { skipNext = false; continue }   // a redirect's target (`crontab -l > backup.txt`)
+            result[result.count - 1].append(token)
         }
         return result.filter { !$0.isEmpty }
     }
@@ -122,8 +138,11 @@ enum HostRunFiles {
     /// dev-2's review: stripping quotes before splitting made `-c "user.name=Iris Bot"` two words, so
     /// the `git config` scan below lost its place.
     static func words(_ command: String) -> [String] {
-        tokens(command).compactMap { $0 }
+        tokens(command).compactMap { $0 }.filter { $0 != redirectMark }
     }
+
+    /// Stands for `>` or `<` in `tokens`: the word after it is where the output goes, not an argument.
+    private static let redirectMark = "\u{1}redirect"
 
     /// `words`, with a nil where a simple command ends (see `segments`).
     private static func tokens(_ command: String) -> [String?] {
@@ -138,7 +157,8 @@ enum HostRunFiles {
             }
             if c == "'" || c == "\"" { quote = c; started = true; continue }
             if c.isNewline || ";&|()`".contains(c) { end(); words.append(nil); continue }
-            if c.isWhitespace || "><".contains(c) { end(); continue }
+            if "><".contains(c) { end(); words.append(redirectMark); continue }
+            if c.isWhitespace { end(); continue }
             current.append(c); started = true
         }
         end()
