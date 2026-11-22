@@ -104,25 +104,16 @@ struct BindingAtDoorTests {
         #expect(binding.profile.memoryRead == .task)
     }
 
-    @Test("makeBoundEngine now builds a .broker engine (#1203 wired the dispatch-side enforcement, dev-2's #1202 review finding 4), with its binding correctly capped by the broker floor")
-    func makeBoundEngineBuildsBroker() async throws {
+    @Test("makeBoundEngine still refuses .broker (#1203 only wired the tool-declaration/dispatch sites; dev-2's #1300 review finding 1: principalMismatch, hooks and composedSystemPrompt still assume .broker cannot reach this function)")
+    func makeBoundEngineRefusesBroker() throws {
         let (store, paths) = tempStore()
         let state = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
         let identity = IdentityKey(transport: "a2a", issuer: "homelab", id: "peer-1")
-        // A profile wider than the floor (tools includes one outside brokerTools) -- capped(by:)
-        // must narrow it, not the profile alone.
-        try write(AccessProfile(memoryRead: .full, tools: .set(["search_memory", "run_command"])), id: "broker-profile", to: paths)
+        try write(AccessProfile(tools: .set(["search_memory"])), id: "broker-profile", to: paths)
         try writeMappings([(identity, "broker-profile")], to: paths)
 
-        let engine = try #require(IrisEngine.makeBoundEngine(state: state, principal: .broker, identity: identity, store: store))
-        let binding = await engine.binding
-        #expect(!binding.isOwner)
-        #expect(binding.principal == .broker)
-        guard case .set(let tools) = binding.profile.tools else {
-            Issue.record("expected a concrete tool set, not .allTools")
-            return
-        }
-        #expect(tools == ["search_memory"], "the wider profile's run_command must not survive the broker floor's cap")
+        let engine = IrisEngine.makeBoundEngine(state: state, principal: .broker, identity: identity, store: store)
+        #expect(engine == nil)
     }
 
     // MARK: - SubagentManager: parent ∩ floor, never widened (Review Focus 2)

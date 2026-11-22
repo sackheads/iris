@@ -5727,13 +5727,17 @@ actor IrisEngine {
                                 requestedDrop: String? = nil, store: AccessProfileStore = AccessProfileStore(paths: .default),
                                 tier: ModelTier = .easy, roleLabel: String? = nil,
                                 client: any LLMClientProtocol = LLMClient(), guestClientId: String? = nil) -> IrisEngine? {
-        // #1203: .broker's engine-side enforcement (the tool-declaration and dispatch sites) is
-        // now wired through PrincipalFloor.isAllowed/brokerTools, so a .broker engine built here
-        // declares and dispatches exactly its floor — this function no longer needs to refuse it
-        // outright. Nothing in the codebase constructs a .broker engine yet regardless: the
-        // disclosure-request bus, the separate owner-authority decision run and the Inbox
-        // escalation it depends on are a later slice (#974's own plan doc, "only the floor is in
-        // scope here"), so .broker stays unreachable in practice until that flow exists.
+        // #1203 wired .broker's tool-declaration and dispatch enforcement (PrincipalFloor.isAllowed/
+        // brokerTools), but that is not the only site that still assumes .broker cannot reach this
+        // function (dev-2's #1300 review finding 1): `principalMismatch` only distinguishes guest
+        // vs. non-guest, so a `.broker` turn is not tied to the conversation it was created for the
+        // way a guest is; `self.hooks = principal == .mcpGuest ? .inert : hooks` leaves a broker's
+        // hooks live, not inert; and `composedSystemPrompt`'s `includesOwnerProfile = binding.isOwner
+        // || binding.profile.memoryRead >= .full` would hand a broker profile with H2's own intended
+        // `memoryRead == .full` the OWNER's full system prompt and USER.md verbatim, unguarded by
+        // whatever the real disclosure flow would normally wrap around that. Each of those is its
+        // own task, not #1203's; this refusal stays until they land.
+        guard principal != .broker else { return nil }
         guard case .bound(let binding) = BindingResolver.resolveBinding(principal: principal, identity: identity,
                                                                         requestedDrop: requestedDrop, store: store) else {
             return nil
