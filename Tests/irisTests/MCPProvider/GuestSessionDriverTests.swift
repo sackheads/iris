@@ -297,6 +297,28 @@ struct GuestSessionDriverTests {
         #expect(script.texts.isEmpty && sessions.liveCount == 0)
     }
 
+    @Test("a damaged spend row after a restart refuses the client rather than refilling its day (#1135)")
+    func damagedRowRefusesAfterRestart() async throws {
+        let store = try ConversationStore.inMemory()
+        let wall = WallClock()
+        let day = Int(wall.now.timeIntervalSince1970 / 86_400)
+        try store.rawWrite("INSERT INTO guest_spend (client_id, day, tokens) VALUES ('dev-1', ?, 'garbled')", arguments: [day])
+        let app = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
+        let tokens = ProviderTokenRegistry(keychain: KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true))
+        _ = try tokens.issueToken(forClientId: "dev-1")
+        let sessions = GuestSessionRegistry(state: app) { s, c in
+            IrisEngine.makeGuestEngine(state: s, clientId: c, client: CapturingLLMClient(reply: "unused"), protectionEnabled: false)
+        }
+        let script = Script()
+        let driver = GuestSessionDriver(
+            state: app, registry: sessions, mailbox: ProviderMailbox(registry: tokens),
+            turnGate: ProviderRequestGate(registry: tokens, capacity: GuestSessionDriver.turnsPerHour, refillInterval: GuestSessionDriver.turnRefillInterval),
+            isEnabled: { true }, spend: GuestSpendLedger(now: { wall.now }, persistence: StoreGuestSpendPersistence(store: store)),
+            runTurn: Self.fakeTurn(app, script))
+        #expect(await driver.submit(text: "hi", from: "dev-1") == .overDailyBudget)
+        #expect(script.texts.isEmpty && sessions.liveCount == 0)
+    }
+
     @Test("revoking and re-issuing a client does not reset its day's count")
     func revokeKeepsTheDayCount() async throws {
         let r = try rig()
