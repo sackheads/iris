@@ -124,10 +124,11 @@ it: a guest never gets an address a role session could message first.
   checked when a turn would start, so one turn in flight at the limit can run it over: by up to
   the per-turn ceiling plus the model round that crosses it. A round a timed-out turn was in the
   middle of is not counted. A turn that fails or times out is answered with a short failure message.
-  `GuestSpendLedger` tallies each client's tokens, and that tally is what the cap reads. It is kept
-  in memory only: a restart starts every client's day at zero, so the cap resets when Iris restarts
-  (a durable count is #1135's open question). Revoking a client does not clear its day's count, so
-  re-issuing an id does not reset its cap; it does not survive a restart either.
+  `GuestSpendLedger` tallies each client's tokens, and that tally is what the cap reads. The day's count
+  is kept in the conversation store (`guest_spend`, one row per client: the UTC day and the tokens spent
+  that day), so a restart does not refill a day's allowance (#1135); a row from an earlier day is replaced
+  by the next add, never summed. The lifetime total beside it is memory only. Revoking a client does not
+  clear its day's count, so re-issuing an id does not reset its cap.
 - **The flag.** `MCP_GUEST_SESSIONS_ENABLED` is a guarded setting, off by default (off is its
   protective value): a `"true"` written from outside the app is not carried across an upgrade and
   an unreadable settings item loads it off. Off, `iris_send` is exactly the mailbox above. It is read
