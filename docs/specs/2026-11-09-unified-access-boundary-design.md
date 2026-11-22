@@ -522,7 +522,7 @@ recommendation; everything else is settled by the code and is a builder instruct
 `PrincipalFloor.brokerTools`, `memoryWriteTools`/`writerTiers`, `githubProxyTools`, `googleWorkspaceTools`,
 `guestOriginDeniedTools`) and the #811 offered-tools check. **`AccessProfile.tools` (the `ToolGrant`) is
 never consulted at dispatch** (no call site reads it outside the type, the resolver and the floor), and
-`PrincipalFloor.isAllowed` is named in comments but does not exist: the positive allowlist is #1203, open.
+`PrincipalFloor.isAllowed` exists but had no caller until #1203 (#1300), which wires it for the two fixed-floor principals (`.mcpGuest`, `.broker`) only: a turn a guest steered is `.main` with an unbounded floor and never reaches it.
 
 **Resolution.** One static table, `ToolClassification.table: [String: ToolClass]`, keyed by tool name and
 covering every declared tool (`IrisEngine.allDeclaredToolNames`, the job tools, memory, Google, GitHub,
@@ -541,10 +541,14 @@ is "does it act, with no human in the loop, on owner data or credentials?".
 
 *Classes.* `.approvalGated` (it already asks the person on a guest-origin turn: `run_command`, `write_file`,
 `read_file` outside the workspace, the git proxy; unchanged), `.ownerOnly` (no approval step, owner data or
-authority: the memory, Google, job and session tools, `schedule_job`, `register_directory_watcher`, and MCP
-tools by default), `.noCred` (pure or local: `search_web`, `set_workspace`, `reflect`), `.spends(type)`.
+authority: the Google, job and session tools, `schedule_job`, `register_directory_watcher`, `set_workspace`
+(it re-points which `AGENTS.md` reaches the prompt), and MCP tools by default), `.tierGated` (the memory tools:
+not refused by class but delegated to `MemoryBindingGate`, which checks the binding's memory tier, so a
+profile-bound session with the tier still searches its facts and a guest-steered turn, whose tier is the
+guest floor's, is refused; a test pins that a profile-bound `.shared` session still reads), `.noCred` (pure
+or local: `search_web`, `reflect`), `.spends(type)`.
 
-*The gate.* For a binding that is not the owner's: refuse `.ownerOnly`; refuse `.spends(t)` unless
+*The gate.* For a binding that is not the owner's: refuse `.ownerOnly`; ask `MemoryBindingGate` for `.tierGated`; refuse `.spends(t)` unless
 `binding.profile.credentials` holds an account of type `t`; leave `.approvalGated` and `.noCred` to their own
 paths. A binding that carries a persisted profile (a profile-bound session or a job run) also applies the
 profile's positive tool grant. `ToolGrant` gets `permits(name)`: `.set(S)` is `S.contains(name)` and `.allTools`
