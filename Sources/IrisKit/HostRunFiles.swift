@@ -70,6 +70,8 @@ enum HostRunFiles {
             if let u = args.firstIndex(of: "-u"), u + 1 < args.count { args.removeSubrange(u...(u + 1)) }
             return args != ["-l"]
         case "launchctl":
+            // `launchctl asuser <uid> <command…>` runs its tail as that user (dev-1's review).
+            if args.first == "asuser" { return plantsJob(Array(args.dropFirst(2))) }
             return args.first.map { ["load", "bootstrap", "enable", "submit"].contains($0) } ?? false
         default:
             return false
@@ -77,17 +79,22 @@ enum HostRunFiles {
     }
 
     /// Where a segment's program is: past variable assignments and the wrappers that run the next word
-    /// (`sudo`, `env`, `nohup`, `command`, `exec`, `time`, `nice`, `doas`) with their own options.
+    /// (`sudo`, `env`, `nohup`, `command`, `exec`, `time`, `nice`, `doas`, and from dev-1's review `xargs`,
+    /// `timeout`, `caffeinate`, `stdbuf`) with their own options; `timeout` also takes its duration first.
     private static func commandIndex(_ segment: [String]) -> Int? {
-        let wrappers: Set<String> = ["sudo", "doas", "env", "nohup", "command", "exec", "time", "nice"]
-        let takesValue: Set<String> = ["-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-n", "-S"]
+        let wrappers: Set<String> = ["sudo", "doas", "env", "nohup", "command", "exec", "time", "nice",
+                                     "xargs", "timeout", "caffeinate", "stdbuf"]
+        let takesValue: Set<String> = ["-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-n", "-S",
+                                       "-I", "-L", "-P", "-s", "-E", "-d", "-w", "-k", "-a", "-J", "-R"]
         var i = 0
         while i < segment.count {
             let word = segment[i]
             if word.contains("=") && !word.hasPrefix("-") { i += 1; continue }
-            guard wrappers.contains((word as NSString).lastPathComponent) else { return i }
+            let wrapper = (word as NSString).lastPathComponent
+            guard wrappers.contains(wrapper) else { return i }
             i += 1
             while i < segment.count, segment[i].hasPrefix("-") { i += takesValue.contains(segment[i]) ? 2 : 1 }
+            if wrapper == "timeout", i < segment.count { i += 1 }   // the duration
         }
         return nil
     }
