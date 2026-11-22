@@ -46,8 +46,23 @@ enum ToolClassTable {
     /// Whether `name` is refused on a binding that is not the owner's.
     static func isOwnerOnly(_ name: String) -> Bool { toolClass(of: name) == .ownerOnly }
 
-    static func refusal(tool: String, binding: AccessBinding) -> String? {
+    /// How a refusal opens. The tool and its class come first: the ledger keeps the first 200 characters of an
+    /// outcome, and whoever hits an over-block needs to read which tool and which class closed it (#1309).
+    static func refusalLead(tool: String) -> String { "Not run: `\(tool)` is owner-only in the tool class table" }
+
+    /// `profileId` is the conversation's persisted profile id, named only for a session bound to one: a guest-steered
+    /// turn's refusal goes back to the guest, so it says "guest-steered" and never a profile id.
+    static func refusal(tool: String, binding: AccessBinding, profileId: String? = nil) -> String? {
         guard !binding.isOwner, isOwnerOnly(tool) else { return nil }
-        return IrisEngine.nonOwnerToolRefusal
+        let origin: String
+        if binding.principal == .mcpGuest {
+            origin = "guest-steered"
+        } else if let profileId {
+            origin = "bound to profile `\(profileId)`"
+        } else {
+            origin = "bound to a non-owner profile"
+        }
+        return refusalLead(tool: tool) + ", and this turn is \(origin), not the owner's. Owner-only tools act as the user "
+            + "(their Google and GitHub accounts, jobs, sessions, workspace, added MCP and plugin tools) with no approval step."
     }
 }

@@ -150,7 +150,7 @@ struct GuestOriginMemoryTests {
     @Test("the dispatcher refuses each memory tool on a guest-origin turn, and no other tool", arguments: GuestOriginMemoryTests.all)
     func dispatchRefusalByTool(_ name: String) {
         let guest = AccessBinding(profile: AccessProfile(), principal: .mcpGuest, isOwner: false)
-        #expect(ToolClassTable.refusal(tool: name, binding: guest) == IrisEngine.nonOwnerToolRefusal)
+        #expect(ToolClassTable.refusal(tool: name, binding: guest)?.hasPrefix(ToolClassTable.refusalLead(tool: name)) == true)
         #expect(ToolClassTable.refusal(tool: name, binding: AccessBinding(profile: .owner, principal: .main, isOwner: true)) == nil)
         #expect(ToolClassTable.refusal(tool: "run_command", binding: guest) == nil)
         #expect(ToolClassTable.refusal(tool: "reflect", binding: guest) == nil)
@@ -204,12 +204,12 @@ struct GuestOriginMemoryTests {
           arguments: GuestOriginMemoryTests.all, [Origin.conversation, .delegationRoot])
     func forgedCallRefused(_ name: String, _ origin: Origin) async throws {
         let result = try await dispatchResult(for: name, origin: origin)
-        #expect(result.contains(IrisEngine.nonOwnerToolRefusal), "\(name): \(result)")
+        #expect(result.contains(ToolClassTable.refusalLead(tool: name)), "\(name): \(result)")
     }
 
     @Test("control: the same call from an unmarked attended turn is not refused as guest-origin", arguments: GuestOriginMemoryTests.all)
     func unmarkedTurnIsNotRefused(_ name: String) async throws {
         let result = try await dispatchResult(for: name, origin: .none)
-        #expect(!result.contains(IrisEngine.nonOwnerToolRefusal), "\(name): \(result)")
+        #expect(!result.contains(ToolClassTable.refusalLead(tool: name)), "\(name): \(result)")
     }
 }

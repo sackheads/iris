@@ -82,7 +82,7 @@ struct GuestOriginMemoryGateTests {
     func gateRefuses(_ name: String) async throws {
         let result = try await forgedResult(name)
         #expect(result.contains(MemoryBindingGate.refusal), "\(name): \(result)")
-        #expect(!result.contains(IrisEngine.nonOwnerToolRefusal), "\(name) was refused by the denylist: \(result)")
+        #expect(!result.contains(ToolClassTable.refusalLead(tool: name)), "\(name) was refused by the denylist: \(result)")
         #expect(!result.contains("is not one of the tools offered"), "\(name) was refused as not offered: \(result)")
         if name == "search_memory" {
             #expect(result.components(separatedBy: MemoryBindingGate.refusal).count - 1 == 2, "both the facts and the conversations branch must be refused: \(result)")
