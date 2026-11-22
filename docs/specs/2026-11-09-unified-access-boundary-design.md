@@ -569,11 +569,15 @@ The #1199 denylist is then reconciled to the spine's real coverage in one change
   as owner. Latent today (few entry points set a persisted profile), real for #961 and the A2A lane.
 - *Jobs and watchers.* A job is stamped at creation with `persistedAccessProfileId(for: conversation)`, the
   conversation's own persisted profile id. A guest-**steered** `.main` turn has a stamped binding but no
-  persisted id, so a job it creates is stamped nil and **fires as the owner**, running the guest's prompt on
-  a schedule. Reproduced through a real `processInput` turn: a stamped guest-origin `.main` turn calling
-  `schedule_job` with the default read-only profile is created with **no approval prompt at all** (the
-  human is asked only for a non-read-only profile, the pinned conversation, a conversation that has read
-  untrusted text, or an outbound exemption) and the row's `accessProfileId` is nil (#1294).
+  persisted id, so a job it creates is stamped nil and **fires as the owner**, running the guest's prompt on a
+  schedule, confined by nothing the turn was bound to (#1294). The creation approval is requested only when
+  the profile is not read-only, the conversation is the pinned one, `hasUnattendedInput` is set, or an
+  outbound exemption is asked for. On the real route a guest's message arrives through the peer-delivery
+  path, which sets `hasUnattendedInput` on the target (`queuePeerArrival`), so the owner **is** asked
+  (human-only) and sees the job's details; the gap is what the approval buys: the approved job is still
+  stamped nil and runs as the owner, with the guest-authored prompt, rather than confined to the binding of
+  the turn that proposed it. (A direct stamp without that delivery, as a test can make, is created with no
+  prompt at all, so the stamp, not the prompt, is what must carry the binding.)
 - *Links and the CLI.* `iris://run-job` and `--run-job` fire an existing job under that job's own stamp.
 
 **Resolution.**
