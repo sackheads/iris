@@ -57,6 +57,8 @@ extension AppState {
 
         // Follow the pin only if the owner is still looking at Iris; a conversation they switched
         // to during the reflection is theirs to keep.
+        // #1317: the new Iris does not inherit `hasUntrustedToolOutput`, on purpose. Rotation is the pinned
+        // Iris's only way back to clean, and the summary it carries is guarded and wrapped as untrusted.
         let newId = createNewConversation(title: Self.activityConversationTitle,
                                           select: selectedConversationId == oldId)
         // The meta write comes before the pin flags move, so a failed write leaves only an empty

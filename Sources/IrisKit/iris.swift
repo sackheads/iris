@@ -3366,8 +3366,10 @@ actor IrisEngine {
         } catch {
             return nil
         }
-        return await InjectionGuard.classify(reply, contextTag: "rotation_summary", maxTier: .tier3_canary,
-                                             protectionEnabled: protectionEnabled)
+        // #1317: the untrusted entry point, so the summary gets the normalization and full role-delimiter
+        // strip every other untrusted text does (#727); it is what keeps the new Iris untainted.
+        return await InjectionGuard.classifyUntrusted(reply, contextTag: "rotation_summary", maxTier: .tier3_canary,
+                                                      protectionEnabled: protectionEnabled)
     }
 
     /// #187 §0.5 structural ruling: no `isPeer` parameter here any more. Three rounds tried
