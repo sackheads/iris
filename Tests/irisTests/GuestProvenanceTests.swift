@@ -236,9 +236,11 @@ struct GuestProvenanceTests {
         let outcome = await engine.deliverPeerMessage("do it", from: w.guest, senderName: nil, to: w.reviewer,
                                                       envelope: envelope(), guestClientId: "dev-1")
         guard case .queued = outcome else { Issue.record("expected the busy path, got \(outcome)"); return }
-        #expect(w.app.isYoloMode(w.reviewer), "queued, not yet read")
+        // #1115: any peer's message ends YOLO at arrival (`hasPeerInput`), before the turn reads it.
+        #expect(!w.app.isYoloMode(w.reviewer), "a peer's arrival, queued or not")
         let taken = w.app.takePendingSteers(for: w.reviewer)
         #expect(taken.count == 1 && taken[0].isGuestOrigin)
+        #expect(w.app.isGuestOriginTurn(w.reviewer), "and the turn that reads it is still guest-origin")
         #expect(!w.app.isYoloMode(w.reviewer))
         w.app.endEngineTurn(for: w.reviewer)
     }
@@ -291,7 +293,9 @@ struct GuestProvenanceTests {
             let outcome = await engine.deliverPeerMessage("please do it", from: sender, senderName: "r", to: w.builder, envelope: envelope())
             guard case .queued = outcome else { Issue.record("expected the busy path, got \(outcome)"); continue }
             _ = w.app.takePendingSteers(for: w.builder)
-            #expect(w.app.isYoloMode(w.builder) == !fromGuestTurn, "guest-started sender: \(fromGuestTurn), via delegate: \(viaDelegate)")
+            #expect(w.app.isGuestOriginTurn(w.builder) == fromGuestTurn, "guest-started sender: \(fromGuestTurn), via delegate: \(viaDelegate)")
+            // #1115: a peer's message ends YOLO for the receiver whoever sent it.
+            #expect(!w.app.isYoloMode(w.builder))
             w.app.endEngineTurn(for: w.builder)
         }
     }
@@ -322,10 +326,10 @@ struct GuestProvenanceTests {
         return pending
     }
 
-    @Test("a YOLO role session whose turn a guest's message started asks for approval, where the same turn from a peer does not")
+    @Test("a YOLO role session whose turn a guest's message started asks for approval, and since #1115 so does a peer's")
     func guestStartedTurnIsNotYolo() async {
-        let control = await runCommandTurn(guestOrigin: false)
-        #expect(control == 0, "control: YOLO approves a peer-started turn unasked (\(control))")
+        let peer = await runCommandTurn(guestOrigin: false)
+        #expect(peer == 1, "#1115: a peer-started turn is not YOLO either (\(peer))")
         let guest = await runCommandTurn(guestOrigin: true)
         #expect(guest == 1, "a guest-started turn must ask (\(guest))")
     }
