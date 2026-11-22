@@ -24,7 +24,7 @@ struct OwnerAlteredFileNoticeTests {
         func tearDown() { try? FileManager.default.removeItem(at: root) }
     }
 
-    private func fixture(user: String, agents: String) throws -> Fixture {
+    private func fixture(user: String, agents: String, principal: Principal = .main) throws -> Fixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("iris-1268-\(UUID().uuidString)")
         let paths = IrisPaths(root: root)
         try FileManager.default.createDirectory(at: paths.memoryDir, withIntermediateDirectories: true)
@@ -35,8 +35,8 @@ struct OwnerAlteredFileNoticeTests {
         let app = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
         let conversation = app.createNewConversation(select: false)
         app.setWorkspace(for: conversation, path: workspace.path)
-        let engine = IrisEngine(state: app, client: CapturingLLMClient(reply: "ok"), retryDelays: [], protectionEnabled: false,
-                                sessionPeerCount: 0, memory: MemoryManager(paths: paths))
+        let engine = IrisEngine(state: app, principal: principal, client: CapturingLLMClient(reply: "ok"), retryDelays: [],
+                                protectionEnabled: false, sessionPeerCount: 0, memory: MemoryManager(paths: paths))
         return Fixture(root: root, paths: paths, workspace: workspace, app: app, engine: engine, conversation: conversation)
     }
 
@@ -68,6 +68,16 @@ struct OwnerAlteredFileNoticeTests {
         let path = (f.workspace.appendingPathComponent("AGENTS.md").path as NSString).abbreviatingWithTildeInPath
         #expect(notices.first == IrisEngine.alteredFileNotice(file: path, stripped: true))
         #expect(f.notices("USER.md").isEmpty)
+    }
+
+    /// dev-2's review: the cache is per engine, so only the `.main` one may say it, or every subagent,
+    /// grading and job run would post the line again.
+    @Test("a subagent's own engine guarding the same file says nothing")
+    func subagentEngineSaysNothing() async throws {
+        let f = try fixture(user: "model: gpt-x\nlikes tea", agents: "model: gpt-x\nuse tabs", principal: .subagent)
+        defer { f.tearDown() }
+        await f.turn()
+        #expect(f.notices("").isEmpty)
     }
 
     @Test("clean files: no line")
