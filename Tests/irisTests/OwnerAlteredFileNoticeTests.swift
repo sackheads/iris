@@ -19,7 +19,7 @@ struct OwnerAlteredFileNoticeTests {
         func turn() async { await engine.processInput("hi", source: "UI", conversationId: conversation) }
         @MainActor func notices(_ file: String) -> [String] {
             (app.conversations.first { $0.id == conversation }?.messages ?? [])
-                .filter { $0.role == .system && $0.content.hasPrefix("The injection guard ") && $0.content.contains(file) }
+                .filter { $0.role == .system && $0.content.hasPrefix("The injection guard ") && (file.isEmpty || $0.content.contains(file)) }
                 .map(\.content)
         }
         func tearDown() { try? FileManager.default.removeItem(at: root) }
