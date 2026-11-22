@@ -159,7 +159,7 @@ enum GuardedSettings {
         guard let named else {
             // #974 Task 9b: a policy store is Iris's own access policy, not a setting.
             guard let store = PolicyStores.named(in: details) else { return nil }
-            return "This names Iris's own access policy (`\(store)`). A command or file that changes it can widen what a guest, a peer or a profile may do. Deny it unless you meant to."
+            return "This names Iris's own access policy or configuration (`\(store)`). A command or file that changes it can widen what a guest, a peer, a profile or a later command may do. Deny it unless you meant to."
         }
         return "This names Iris's own settings (`\(named)`). A command that changes them can change Iris's limits, guards or provider addresses. Deny it unless you meant to."
     }

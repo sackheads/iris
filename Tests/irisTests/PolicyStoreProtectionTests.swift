@@ -132,7 +132,8 @@ struct PolicyStoreNamesTests {
     func namesFollowIrisPaths() {
         let names = IrisPaths(root: URL(fileURLWithPath: "\(home)/.iris")).protectedWriteDirs.map(\.lastPathComponent)
         #expect(names.contains("profiles") && names.contains("config"))
-        #expect(PolicyStores.directoryNames == ["profiles", "a2a-peers"])
+        #expect(PolicyStores.directoryNames == ["profiles", "a2a-peers", "config", "plugins", "exchange"])
+        #expect(Set(names).isSubset(of: Set(PolicyStores.directoryNames)), "#1115: every protected directory is a store a shell write is caught for")
     }
 }
 
@@ -209,6 +210,30 @@ struct PolicyStoreApprovalTests {
         let command = "echo '{}' > ~/.iris/profiles/guest.json"
         state.permissions.allowGlobally(toolName: "run_command", details: command)
         #expect(try await call(state, command, in: cid) == .silent(false))
+    }
+}
+
+/// #1115: the three protected directories with common names count only spelled under the home, or
+/// as a path from a command run inside it, never as the bare word.
+@Suite("config/, plugins/ and exchange/ are policy stores to a shell write (#1115)")
+struct ProtectedDirShellWriteTests {
+    @Test("named under the home or as a path from inside it: flagged; the bare word or another folder: not")
+    func spellings() {
+        let root = "/tmp/iris-1115-\(UUID().uuidString)/.iris"
+        let paths = IrisPaths(root: URL(fileURLWithPath: root))
+        let p = PermissionManager(paths: paths, identity: .dev, release: paths)
+        func flags(_ command: String, cwd: String? = nil) -> Bool {
+            p.writesPolicyStore(toolName: "run_command", details: command, workspace: cwd, inSandbox: false)
+        }
+        #expect(flags("printf x > ~/.iris/config/permissions.json"))
+        #expect(flags("printf x > \"$HOME/.iris-dev/plugins/evil/plugin.json\""))
+        #expect(flags("cp a ~/.iris/exchange/ab/x"))
+        #expect(flags("printf x > \(root)/config/vibecop.md"), "absolute path of the home's store")
+        #expect(flags("printf x > ./config/permissions.json", cwd: root), "a path from inside the home")
+        #expect(!flags("git config user.name x && touch ~/.iris/memory/n.md"), "the bare word is not the directory")
+        #expect(!flags("touch ~/.iris/configs/x"), "a sibling with a longer name")
+        #expect(!flags("printf x > ~/project/config/app.json"), "another folder's config/")
+        #expect(!flags("git config core.editor vim", cwd: root), "the bare word from inside the home")
     }
 }
 
