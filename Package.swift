@@ -26,7 +26,10 @@ let package = Package(
         .package(url: "https://github.com/mattt/llama.swift.git", branch: "main"),
         .package(url: "https://github.com/huggingface/swift-transformers.git", branch: "main"),
         .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", branch: "main"),
-        .package(url: "https://github.com/microsoft/onnxruntime-swift-package-manager", from: "1.20.0"),
+        // #1322: microsoft/onnxruntime-swift-package-manager and its download.onnxruntime.ai binaries stopped
+        // resolving, so this is our mirror: upstream 1.24.2 plus one commit pointing the two binary targets at
+        // the mirror's release assets (byte-identical, checksums unchanged). Pinned at 1.24.2 until upstream returns.
+        .package(url: "https://github.com/sackheads/onnxruntime-swift-package-manager", revision: "def1e49e06770d4bd70a85160f98b78abf9f1b6d"),
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.10.0")
     ],
