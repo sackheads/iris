@@ -1383,6 +1383,8 @@ actor IrisEngine {
             localState.notePeerArrival(depth: envelope.depth, at: targetId)
             // #1246: on either path below the guest's text reaches the target's history, now or at the drain.
             if guestOrigin { localState.noteGuestInput(targetId) }
+            // #1115: and any peer's, which ends YOLO here for good (`isYoloMode`).
+            localState.notePeerInput(targetId)
             // #478: a goal follow-up waiting out its delay is busy too; it reads the queued entry.
             if loop.isLive(for: targetId) { return .busy }
             guard localState.claimPeerDelivery(for: targetId) else { return .busy }
