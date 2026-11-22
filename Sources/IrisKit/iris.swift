@@ -589,7 +589,7 @@ actor IrisEngine {
             let file = await guardedUserProfileText()
             profileText = Self.notingViewDiffers(file.text, stripped: file.strippedMarkers, diverged: file.divergedLines,
                                                  readablePath: Self.userMdReadablePath(isOwner: binding.isOwner, path: userMdPath,
-                                                                                       irisPaths: IrisPaths.default))
+                                                                                       irisPaths: memory.paths))
         } else {
             profileText = nil
         }
