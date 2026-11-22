@@ -264,7 +264,7 @@ struct YoloOwnerOnlyTests {
         #expect(!w.state.isYoloMode(child))
 
         let target = w.root.appendingPathComponent("ws/child.md").path
-        let asked = try await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": SilentVibecop()]) { () async -> Bool in
+        let asked = await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": SilentVibecop()]) { () async -> Bool in
             async let source = w.state.requestApprovalSource(toolName: "write_file", details: target, workspace: w.root.appendingPathComponent("ws").path,
                                                              conversationId: child, origin: "Subagent", isOwner: true)
             _ = await eventually { !w.state.pendingApprovals.isEmpty }
