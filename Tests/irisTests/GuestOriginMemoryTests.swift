@@ -4,10 +4,11 @@ import Foundation
 
 /// #1195: a turn a guest's message started or steered is attended `.main`, but its words are a guest's.
 /// The memory tools read the owner's facts and every other conversation with no approval step, and
-/// write standing context, so that turn is not offered them (`hardStrip`), a call that arrives anyway
-/// is refused at the dispatcher. One list drives the code and these tests: `ToolExecutor.memoryTools`.
+/// write standing context. The Google, job, roster and scheduling tools are not offered to that turn (`hardStrip`)
+/// and a call that arrives anyway is refused at the dispatcher; the memory tools are refused by
+/// `MemoryBindingGate` instead (#1224, `GuestOriginMemoryGateTests`). One list drives the code and these tests.
 @MainActor
-@Suite("A turn a guest's message started has no memory tools (#1195)", .timeLimit(.minutes(1)))
+@Suite("A turn a guest's message started has no Google, job, session or scheduling tools (#1195, #1293, #1294); the memory tools are the binding's (#1224)", .timeLimit(.minutes(1)))
 struct GuestOriginMemoryTests {
     nonisolated static let reads = ["search_memory", "search_conversations", "read_conversation"]
     nonisolated static let writes = ["save_fact", "manage_fact", "update_memory", "update_user_profile", "update_soul",

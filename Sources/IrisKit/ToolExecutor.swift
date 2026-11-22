@@ -256,10 +256,11 @@ struct ToolExecutor {
 
     /// Every tool that reads the owner's memory or conversations (#1195). A turn a guest's message
     /// started or steered is `.main` and attended, but its words are a guest's: these read the
-    /// owner's facts and every other conversation with no approval step, so the turn is not offered
-    /// them (`IrisEngine.hardStrip`) and a call that arrives anyway is refused
-    /// (`IrisEngine.guestOriginDispatchRefusal`, over `guestOriginDeniedTools`). One list for the strip, the refusal and the tests, so a
-    /// tool added here is covered everywhere and a tool left out fails `GuestOriginMemoryTests`.
+    /// owner's facts and every other conversation with no approval step. Since #1224 they are offered to
+    /// such a turn and refused at call time by `MemoryBindingGate` against the turn's own non-owner binding
+    /// (the #1195 denylist no longer lists them); `GuestOriginMemoryGateTests` pins that per tool. One list
+    /// for the gate, the tests and the other memory paths, so a tool added here must be decided in
+    /// `MemoryBindingGate` (a test pins `writerTiers` complete over the writers).
     nonisolated static let memoryReadTools: Set<String> = ["search_memory", "search_conversations", "read_conversation"]
 
     /// Every tool that writes the owner's facts, profile, soul or skills (#1195). Already held for
