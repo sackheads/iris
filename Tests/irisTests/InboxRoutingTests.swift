@@ -63,6 +63,25 @@ struct InboxRoutingTests {
         #expect(stored.state == .answered && stored.pendingTargets.isEmpty)
     }
 
+    /// #1115: the answer frame echoes the emitter's own text, so reaching another session is a peer
+    /// route that ends YOLO there for good; Brian's answer to the session that asked is not.
+    @Test("an answer echoed into another session marks it peer-touched; the emitter's own answer does not")
+    func crossSessionAnswerMarksPeerInput() async throws {
+        let (app, engine) = try await setup()
+        let emitter = session(app), holder = session(app, role: "dev"), told = session(app, role: "planner")
+        let item = try raise(app, emitter: emitter, ownerChain: "dev", routeBack: ["role:dev"], notify: ["role:planner"])
+        #expect(await engine.submitInboxAnswer(itemId: item.id, choice: "a", freeText: nil, deliver: Sink().deliver) == .delivered(1))
+        #expect(app.conversations.first { $0.id == holder }?.hasPeerInput == true, "route_back to another session")
+        #expect(app.conversations.first { $0.id == told }?.hasPeerInput == true, "notify to another session")
+        #expect(app.conversations.first { $0.id == emitter }?.hasPeerInput == false)
+
+        let own = try raise(app, emitter: emitter, ownerChain: emitter.uuidString, routeBack: [])
+        let sink = Sink()
+        #expect(await engine.submitInboxAnswer(itemId: own.id, choice: "a", freeText: nil, deliver: sink.deliver) == .delivered(1))
+        #expect(sink.calls.map(\.0) == [emitter])
+        #expect(app.conversations.first { $0.id == emitter }?.hasPeerInput == false, "Brian's answer to the session that asked")
+    }
+
     @Test("a dead emitter's reply is persisted as awaiting delivery, not dropped")
     func deadEmitterReplyPersistsNotDropped() async throws {
         let (app, engine) = try await setup()

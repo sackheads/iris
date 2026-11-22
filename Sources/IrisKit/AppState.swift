@@ -458,9 +458,10 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     var hasGuestInput: Bool = false
 
     /// #1115 (Brian: "peers and guests should not get access to yolo"): true once another session's
-    /// message has been delivered here (`deliverPeerMessage`, idle or queued). Sticky and never
-    /// cleared, so the session is never in YOLO again (`isYoloMode`). Not a subagent post-back or an
-    /// inbox answer, which are the owner's own. Set only by `notePeerInput`.
+    /// message has been delivered here (`deliverPeerMessage`, idle or queued), or an inbox answer
+    /// echoing another session's item (`noteInboxPeerInput`). Sticky and never cleared, so the
+    /// session is never in YOLO again (`isYoloMode`). Not a subagent post-back, or an inbox answer
+    /// to the session that asked, which are the owner's own. Set only by `notePeerInput`.
     var hasPeerInput: Bool = false
 
     /// #813: true once a tool result, an arrival or an approved call's output that did not come
