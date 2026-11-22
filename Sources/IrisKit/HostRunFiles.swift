@@ -59,8 +59,9 @@ enum HostRunFiles {
     }
 
     /// #1327: a persistent job a later launch runs, planted without writing any listed file. `crontab` with
-    /// anything but `-l` (a file, `-` for stdin, none at all, `-e`, `-r`), and `launchctl load`, `bootstrap`,
-    /// `enable` or `submit`. Only in the command's own position, so `man crontab` is not one.
+    /// anything but `-l` (a file, `-` for stdin, none at all, `-e`, `-r`), `launchctl load`, `bootstrap`,
+    /// `enable` or `submit`, and `at`/`batch` queueing a job. Only in the command's own position, so
+    /// `man crontab` and `echo meet at 5` are not one.
     static func plantsJob(_ segment: [String]) -> Bool {
         guard let i = commandIndex(segment) else { return false }
         let program = (segment[i] as NSString).lastPathComponent
@@ -73,6 +74,13 @@ enum HostRunFiles {
             // `launchctl asuser <uid> <command…>` runs its tail as that user (dev-1's review).
             if args.first == "asuser" { return plantsJob(Array(args.dropFirst(2))) }
             return args.first.map { ["load", "bootstrap", "enable", "submit"].contains($0) } ?? false
+        // Planner's ruling: a queued `at` job waits for atrun (off by default on macOS) and fires once it
+        // is enabled, long after anyone remembers it. Listing (`at -l`, `atq`) and removal (`at -r`/`-d`,
+        // `atrm`) only narrow, so they run.
+        case "at":
+            return !args.contains { ["-l", "-r", "-d"].contains($0) }
+        case "batch":
+            return true
         default:
             return false
         }
