@@ -523,21 +523,54 @@ recommendation; everything else is settled by the code and is a builder instruct
 never consulted at dispatch** (no call site reads it outside the type, the resolver and the floor), and
 `PrincipalFloor.isAllowed` is named in comments but does not exist: the positive allowlist is #1203, open.
 
-**Resolution.** One static table, `ToolClassification.table: [String: ToolClass]`, with
-`ToolClass = .noCred | .spends(accountType) | .ownerOnly`, keyed by tool name, covering every declared
-tool (`IrisEngine.allDeclaredToolNames`, the job tools, memory, Google, GitHub, `search_web`).
-A tool absent from the table is `.ownerOnly`. MCP tools are `.ownerOnly` unless registered against a
-registry account (then `.spends(type)`); plugin tools are `.ownerOnly` until a plugin manifest can declare
-`.spends(type)` (**OWNER, recommend yes**: plugins default to owner-only). The check is one function,
-`allows(tool, under: binding)`, called at the **one** dispatcher chokepoint beside the #811
-`offeredToolNames` refusal, and at declaration (it replaces `hardStrip`'s denylist for non-owner turns):
-a call is allowed iff the tool is in the floor's tool cap **and** in the profile's `ToolGrant`, and its class
-admits the binding (`.noCred` always; `.spends(t)` only if `binding.profile.credentials` holds an account of
-type `t`; `.ownerOnly` only if `binding.isOwner`). This is #1203. Pinned by (1) a completeness test over
-every declared tool, so a new tool fails the build until it is classified (the pattern `writerTiers` already
-uses), and (2) per-tool live tests through `processInput` with the tool **offered** and the denylist and
-the gate each removed in turn. A refused tool and a tool the turn was not offered give the same
-"not one of the tools offered" text, so a test must assert the gate's own refusal text, not "was refused".
+**Resolution.** One static table, `ToolClassification.table: [String: ToolClass]`, keyed by tool name and
+covering every declared tool (`IrisEngine.allDeclaredToolNames`, the job tools, memory, Google, GitHub,
+`search_web`; about 60). A tool absent from the table is `.ownerOnly`. The check is one function called at
+the **one** dispatcher chokepoint beside the #811 `offeredToolNames` refusal, at the declaration pass (it
+replaces `hardStrip`'s denylist for non-owner turns), and on **every other route a tool call can take**:
+`executeApprovedCall` (card replay), `applyHeldWrite` (held writes), and the subagent, job and evaluator
+dispatch. Each leaked a gate before (#1217/#1222: a gate on the live route that a parallel route skipped).
+
+*Why class-based, not grant-based.* A turn a guest steered is `.main` with a stamped non-owner binding that is
+the **guest's**: its `tools` are `{list_sessions, send_to_session}` (floor-fixed). Checking `binding.profile.tools`
+on that turn would take `run_command` and `read_file` from a reviewer role a guest messaged (it uses them, with
+per-call approvals), and would **allow** `list_sessions` because the guest's own grant contains it, which is the
+#1293 hole. The steered turn runs with the owner's authority at a guest's direction, so the question per tool
+is "does it act, with no human in the loop, on owner data or credentials?".
+
+*Classes.* `.approvalGated` (it already asks the person on a guest-origin turn: `run_command`, `write_file`,
+`read_file` outside the workspace, the git proxy; unchanged), `.ownerOnly` (no approval step, owner data or
+authority: the memory, Google, job and session tools, `schedule_job`, `register_directory_watcher`, and MCP
+tools by default), `.noCred` (pure or local: `search_web`, `set_workspace`, `reflect`), `.spends(type)`.
+
+*The gate.* For a binding that is not the owner's: refuse `.ownerOnly`; refuse `.spends(t)` unless
+`binding.profile.credentials` holds an account of type `t`; leave `.approvalGated` and `.noCred` to their own
+paths. A binding that carries a persisted profile (a profile-bound session or a job run) also applies the
+profile's positive tool grant. `ToolGrant` gets `permits(name)`: `.set(S)` is `S.contains(name)` and `.allTools`
+is "no name restriction", so the `.allTools` grant a subagent of the owner inherits never needs converting to a
+`Set` (the type mismatch that kept #1203 to the fixed-floor principals), and the class gate **still** applies to
+a non-owner binding. An owner binding, including a subagent whose `childBinding` stays `isOwner`, is allowed
+everything. A job run's `JobProfile` and the profile's `ToolGrant` are intersected (fail closed); `JobProfile`
+is unchanged.
+
+*Build.* Two PRs, each rule-26 dual: (a) the table, its completeness test (a new tool fails the build until it
+is classified, the `writerTiers` pattern), and the declaration, dispatch and parallel-route gates for a
+stamped non-owner `.main` turn, replacing the #1199 denylist (closes #1293 and #1294's interim); (b) the
+persisted-profile `ToolGrant.permits` application. Every route gets a live `processInput` test with the tool
+**offered** and a gate-removal mutant on the gate itself; a refusal by the gate and a refusal as "not offered"
+read alike (#811), so a test asserts the gate's own text.
+
+**OWNER decisions (batched with the five at the end of this section):**
+- **A1. MCP tools on a turn a guest steered.** Default `.ownerOnly` (recommended): they are the person's own
+  servers with their credentials and no approval step, so a role session loses them for that turn only. The
+  alternative is `.approvalGated` per server, which keeps a reviewer's GitHub MCP working at the cost of one
+  click per call.
+- **A2. `run_command` on a turn a guest steered.** (i) Stay `.approvalGated` (recommended): today's ladder (no YOLO,
+  no saved rule, Vibecop never answers for it, the `~/.iris` carve-out off) asks the person each time, and a
+  reviewer role legitimately runs tests this way. (ii) `.ownerOnly`: a guest can never drive a host command,
+  even through a click. Honest case for (ii): #1294 showed a person approving a job a guest had crafted, so a
+  click is not a reliable boundary against a social-engineered prompt; the cost of (ii) is that a role session
+  cannot run commands on any turn a guest steered. Brian picks; the table makes either a one-line change.
 
 ### B. The owner stays ambient-credentialed, by design
 
@@ -622,6 +655,8 @@ The #1199 denylist is then reconciled to the spine's real coverage in one change
 3. A guest-steered turn may not create a job or watcher (D2): refuse or synthetic deny-all. Recommend refuse.
 4. Kill switch also revokes tokens (E): recommend no.
 5. Guest budget numbers and durability (E): recommend durable, numbers unchanged.
+6. MCP tools on a guest-steered turn (A1): default owner-only, or approval-gated per server. Recommend owner-only.
+7. `run_command` on a guest-steered turn (A2): stay approval-gated, or owner-only. Both cases are stated above; no recommendation beyond approval-gated preserving the reviewer-runs-tests case.
 
 ## Open questions / flags for the plan (not resolved in this spec)
 
