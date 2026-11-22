@@ -7463,6 +7463,10 @@ class AppState {
             startVibecopInit(convId: convId)
             return
         }
+        if rest == "refine" {
+            startVibecopRefine(convId: convId)
+            return
+        }
         if rest == "clear" {
             guard let idx = conversations.firstIndex(where: { $0.id == convId }) else { return }
             let had = conversations[idx].vibecopGuidance != nil
@@ -7482,7 +7486,7 @@ class AppState {
                 break
             }
             guard !guidance.isEmpty else {
-                emitCommandOutput("Usage: `/vibecop tweak [here|global] <guidance>` (or `/vibecop init`, `/vibecop show`, `/vibecop clear`)", format: .markdown, to: convId)
+                emitCommandOutput("Usage: `/vibecop tweak [here|global] <guidance>` (or `/vibecop init`, `/vibecop refine`, `/vibecop show`, `/vibecop clear`)", format: .markdown, to: convId)
                 return
             }
             let workspace = conversations.first(where: { $0.id == convId })?.workspacePath
@@ -7560,7 +7564,62 @@ class AppState {
             }
             return
         }
-        emitCommandOutput("Usage: `/vibecop [init|tweak [here|global] <guidance>|show|clear]`", format: .markdown, to: convId)
+        emitCommandOutput("Usage: `/vibecop [init|refine|tweak [here|global] <guidance>|show|clear]`", format: .markdown, to: convId)
+    }
+
+    /// #1278: `/vibecop refine`. Proposes `VibecopRefine`'s lines for the bound workspace's `.iris/vibecop.md`,
+    /// shows them, and writes them only on the person's click: the same person-only ask a write to a
+    /// workspace's `.iris/` always gets (#617), then trusted as Iris's own write, as `tweak`'s is.
+    func startVibecopRefine(convId: UUID) {
+        guard let ws = conversations.first(where: { $0.id == convId })?.workspacePath, !ws.isEmpty else {
+            emitCommandOutput("`/vibecop refine` needs a workspace: it reads what you approved there. Link one first.", format: .markdown, to: convId)
+            return
+        }
+        let expandedWS = IrisEngine.expandTilde(ws)
+        let trust = WorkspaceIrisTrust(paths: permissions.paths)
+        if let unverified = WorkspaceIrisDir.readUnverified("vibecop.md", workspace: expandedWS),
+           !trust.isTrusted("vibecop.md", workspace: expandedWS, data: unverified) {
+            emitCommandOutput("Cannot refine `.iris/vibecop.md`: this workspace already has unreviewed Vibecop rules. Right-click the conversation and choose **Review Workspace Rules...** to trust or replace them first.", format: .markdown, to: convId)
+            return
+        }
+        let existing = WorkspaceIrisDir.read("vibecop.md", workspace: expandedWS, trust: trust)
+            .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        let calls = VibecopRefine.recentCommands(VibecopRefine.evidence(conversations, workspace: ws))
+        let proposals = VibecopRefine.proposals(calls, existing: existing)
+        guard !proposals.isEmpty else {
+            emitCommandOutput("Nothing to add to `.iris/vibecop.md`: no command here was approved by you \(VibecopRefine.minimumApprovals) or more times without ever being denied, among the last \(calls.count) commands in this workspace's conversations.", format: .markdown, to: convId)
+            return
+        }
+        let added = proposals.map(\.line).joined(separator: "\n")
+        emitCommandOutput("Proposed additions to `\(ws)/.iris/vibecop.md`, from the commands you approved here (the existing rules are kept as they are):\n\n```\n\(added)\n```", format: .markdown, to: convId)
+        Task { @MainActor [self] in
+            guard await enqueueUserApproval(toolName: "write_file", details: "\(ws)/.iris/vibecop.md",
+                                            workspace: ws, conversationId: convId, origin: "Vibecop refine",
+                                            humanOnly: true, offersAlwaysAllow: false) else {
+                emitCommandOutput("Not written: `.iris/vibecop.md` is unchanged.", format: .markdown, to: convId)
+                return
+            }
+            guard case .ready(let irisPath) = WorkspaceIrisDir.prepareForMount(expandedWS) else {
+                emitCommandOutput("Cannot refine `.iris/vibecop.md`: the workspace's `.iris` folder could not be prepared safely.", format: .markdown, to: convId)
+                return
+            }
+            // Read again after the click: a change made while the card waited is kept, not overwritten, and
+            // one that left the rules unreviewed stops the write rather than lose lines nobody has trusted.
+            let unverified = WorkspaceIrisDir.readUnverified("vibecop.md", workspace: expandedWS)
+            if let unverified, !trust.isTrusted("vibecop.md", workspace: expandedWS, data: unverified) {
+                emitCommandOutput("Not written: `.iris/vibecop.md` changed while you were asked and now has unreviewed rules. Review them first.", format: .markdown, to: convId)
+                return
+            }
+            let current = unverified.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            let data = Data(VibecopRefine.appended(current, proposals).utf8)
+            do {
+                try data.write(to: URL(fileURLWithPath: irisPath).appendingPathComponent("vibecop.md"), options: .atomic)
+                trust.recordWritten("vibecop.md", workspace: expandedWS, written: data)
+                emitCommandOutput("Added to `\(ws)/.iris/vibecop.md`:\n\(added)", format: .markdown, to: convId)
+            } catch {
+                emitCommandOutput("Failed to write `.iris/vibecop.md`: \(error)", format: .markdown, to: convId)
+            }
+        }
     }
 
     static let yoloRefusedForPeerInput = "Yolo mode stays off here: another session has messaged this conversation, and a session a peer can reach never runs in YOLO."
