@@ -26,8 +26,19 @@ struct IsOwnerDefaultSourceScanTests {
         }
     }
 
-    @Test("requestApprovalSource is never called with a literal isOwner: true in production code")
-    func noLiteralTrueOnRequestApprovalSource() throws {
+    /// A literal `isOwner: true`, or `isOwner: self.binding.isOwner` (the #1237 lesson: the
+    /// engine's own principal is not the turn's binding), are exactly the mistakes this scan must
+    /// catch -- so it asserts the positive form each call must have, not just the absence of one
+    /// bad spelling. Also asserts a non-zero count: an empty match set would pass this vacuously.
+    ///
+    /// Two forms count as compliant: `isOwner: await callIsOwner(...)` (the real production call
+    /// sites in iris.swift), and `isOwner: isOwner)` -- the bare parameter name, which is only
+    /// `AppState.requestApproval`'s own one-line passthrough to `requestApprovalSource`. That
+    /// parameter has no default (pinned by `noOwnerDefaultReappears` above) and is itself audited
+    /// at every one of `requestApproval`'s own call sites, all of which are tests today.
+    @Test("every requestApprovalSource call resolves isOwner through the turn's own binding")
+    func everyCallUsesCallIsOwner() throws {
+        var totalCalls = 0
         for path in ["Sources/IrisKit/AppState.swift", "Sources/IrisKit/iris.swift"] {
             let url = PerfPaths.repoRoot().appendingPathComponent(path)
             let source = try String(contentsOf: url, encoding: .utf8)
@@ -36,11 +47,16 @@ struct IsOwnerDefaultSourceScanTests {
                 let openIndex = source.index(before: callRange.upperBound)
                 let callEnd = Self.matchingParen(in: source, openingAt: openIndex)
                 let call = source[callRange.lowerBound..<callEnd]
-                #expect(!call.contains("isOwner: true"),
-                        "\(path): requestApprovalSource must be called with the turn's real binding (callIsOwner(conversationId)/bindingForCall), never a literal isOwner: true")
+                let lineStart = source[source.startIndex..<callRange.lowerBound].lastIndex(of: "\n").map(source.index(after:)) ?? source.startIndex
+                let linePrefix = source[lineStart..<callRange.lowerBound]
+                if linePrefix.contains("func ") { searchRange = callEnd..<source.endIndex; continue }
+                totalCalls += 1
+                #expect(call.contains("isOwner: await callIsOwner(") || call.contains("isOwner: isOwner)"),
+                        "\(path): requestApprovalSource must resolve isOwner via callIsOwner(conversationId) (or AppState.requestApproval's own audited passthrough) -- not a literal true or self.binding.isOwner")
                 searchRange = callEnd..<source.endIndex
             }
         }
+        #expect(totalCalls >= 5, "expected at least the 5 known production call sites -- a count of 0 would pass the check above vacuously")
     }
 
     /// Finds the index just past the parenthesis matching the one at `openIndex` (which must point at `(`).
