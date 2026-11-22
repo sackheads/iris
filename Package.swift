@@ -17,7 +17,10 @@ let package = Package(
         // An exact tag, not a branch (#1083): the MCP provider depends on `StatelessHTTPServerTransport`'s
         // validation pipeline, per-instance `Server` state and `withMethodHandler` behaviour of this
         // release. Moving it is a deliberate edit here, with the provider's suites re-run.
-        .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1"),
+        // #1116: 0.12.1 plus one change, `HTTPClientTransport.init(endpoint:session:...)` made public, so
+        // Iris can give remote MCP servers a session with a redirect policy. Switch back to the upstream
+        // release once that change ships there (upstream issue/PR linked from #1116).
+        .package(url: "https://github.com/sackheads/swift-sdk.git", revision: "1971631fa83108da6c6d24ff7945a4e8f55186b2"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.0"),
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "6.0.0"),
         .package(url: "https://github.com/mattt/llama.swift.git", branch: "main"),

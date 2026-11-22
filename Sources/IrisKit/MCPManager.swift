@@ -378,7 +378,12 @@ actor MCPManager {
     }
 
     private func startRemoteServer(name: String, url: URL, headers: [String: String]) async throws {
-        let transport = HTTPClientTransport(endpoint: url, streaming: true, requestModifier: { request in
+        // #1116: the SDK's own session is `URLSession(configuration: .default)`; this is the same one
+        // with a redirect policy, since the request modifier is not called again on a redirect hop.
+        let session = URLSession(configuration: .default,
+                                 delegate: RemoteMCPRedirectPolicy(endpoint: url, configuredHeaders: Set(headers.keys)),
+                                 delegateQueue: nil)
+        let transport = HTTPClientTransport(endpoint: url, session: session, streaming: true, requestModifier: { request in
             var request = request
             for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
             return request
@@ -392,9 +397,14 @@ actor MCPManager {
             }
         } catch {
             await client.disconnect()
+            session.invalidateAndCancel()
             throw error
         }
-        try await register(name: name, client: client, tools: tools, stop: { await client.disconnect() })
+        // A session with a delegate holds it until invalidated.
+        try await register(name: name, client: client, tools: tools, stop: {
+            await client.disconnect()
+            session.invalidateAndCancel()
+        })
     }
 
     private func startStdioServer(name: String, command: String, args: [String], env: [String: String]?) async throws {
