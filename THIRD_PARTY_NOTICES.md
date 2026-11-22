@@ -552,9 +552,9 @@ Source: https://github.com/gonzalezreal/NetworkImage
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
 
-## onnxruntime-swift-package-manager (1.24.2)
+## onnxruntime-swift-package-manager (def1e49)
 
-Source: https://github.com/microsoft/onnxruntime-swift-package-manager
+Source: https://github.com/sackheads/onnxruntime-swift-package-manager
 
 ### LICENSE
 
