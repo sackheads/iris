@@ -64,12 +64,15 @@ struct HostRunFilesTests {
     }
 
     /// Known misses, pinned so a change to them is deliberate: a `cd` into a git dir then a relative
-    /// path, a template that copies hooks into a new repository, and a path built at run time.
+    /// path, a template that copies hooks into a new repository, a path built at run time, and a hook in
+    /// a tracked folder that the repository's `core.hooksPath` already points at (husky's `.husky/`):
+    /// seeing that would need a git config read on every call.
     @Test("known misses", arguments: [
         "cd .git && printf x > hooks/pre-commit",
         "git init --template=evil/",
         "git clone --template=evil/ https://x/y",
         "d=.gi; printf x > ${d}t/hooks/pre-commit",
+        "printf x > .husky/pre-commit",
     ])
     func knownMisses(_ command: String) {
         #expect(!HostRunFiles.commandWrites(command), "\(command)")
