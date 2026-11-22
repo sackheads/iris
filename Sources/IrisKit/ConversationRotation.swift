@@ -107,6 +107,8 @@ extension AppState {
         case .passed(let clean)?:
             visible = "\(label)\n\n\(clean)"
             model = "\(label)\n\n\(InjectionGuard.wrapped(.passed(clean: clean), contextTag: "rotation_summary"))"
+            // #1314: the summary carries the old Iris's text into the new one, and with it what a guest wrote there.
+            if conversations.first(where: { $0.id == oldId })?.hasGuestInput == true { noteGuestInput(newId) }
         case .blocked(let marker)?:
             visible = "\(label)\n\n\(marker)"
             model = "\(label)\n\n\(InjectionGuard.wrapped(.blocked(marker: marker), contextTag: "rotation_summary"))"
