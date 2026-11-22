@@ -706,7 +706,7 @@ import Foundation
 
     @Test("#1321: a judged summary keeps its Markdown headings and rules, on screen and in history")
     func judgedSummaryKeepsStructure() async throws {
-        let id = UUID().uuidString   // verdicts are cached per content
+        let id = UUID().uuidString   // a summary of its own; the scoped canary bypasses the verdict cache anyway (#375)
         let (shown, entry) = try await rotated("### Decisions \(id)\n- launch Friday\n---\n### Open\n- the recap", canary: true)
         for text in [shown, entry] {
             #expect(text.contains("### Decisions \(id)"), "\(text)")
