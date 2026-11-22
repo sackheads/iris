@@ -43,6 +43,10 @@ struct HostRunFilesTests {
         "git -c 'alias.x=!sh -c x' config core.fsmonitor /tmp/m",
         "git -c core.pager=less config core.editor evil",
         "printf x > \".git/hooks/pre commit\"",
+        "zsh -c 'echo evil >> ~/.zshrc; true'",
+        "sh -c \"git config core.hooksPath /tmp/h\"",
+        "echo \"$(printf x > ~/.zshrc)\"",
+        "bash -lc 'cd /w && sh -c \"echo x > .git/hooks/pre-commit\"'",
     ])
     func caught(_ command: String) {
         #expect(HostRunFiles.commandWrites(command), "\(command)")

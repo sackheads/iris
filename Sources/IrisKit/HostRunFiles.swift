@@ -32,10 +32,23 @@ enum HostRunFiles {
     /// sets a git config value. A command that can only read is never one (`ReadOnlyCommand`).
     static func commandWrites(_ command: String) -> Bool {
         guard !ReadOnlyCommand.isReadOnly(command) else { return false }
-        let words = Self.words(command)
-        // An assignment's value is a path too (`X=~/.zshrc`, `--file=.git/config`).
-        if words.flatMap({ $0.split(separator: "=").map(String.init) }).contains(where: isRunFile) { return true }
-        return setsGitConfig(words)
+        // Each list of words is scanned, and so is every quoted span re-split as a command of its own:
+        // `sh -c 'echo x >> ~/.zshrc'` and `bash -lc "git config core.hooksPath h"` are the usual shapes
+        // of a model-written command (dev-1's review). Bounded, since a span re-splits into shorter ones.
+        for list in wordLists(command, depth: 4) {
+            // An assignment's value is a path too (`X=~/.zshrc`, `--file=.git/config`).
+            if list.flatMap({ $0.split(separator: "=").map(String.init) }).contains(where: isRunFile) { return true }
+            if setsGitConfig(list) { return true }
+        }
+        return false
+    }
+
+    /// `command`'s words, then the words of each word that is itself more than one, recursively.
+    static func wordLists(_ command: String, depth: Int) -> [[String]] {
+        let list = words(command)
+        guard depth > 0 else { return [list] }
+        return [list] + list.filter { word in word.contains { $0.isWhitespace || "><|;&()`$".contains($0) } }
+            .flatMap { wordLists($0, depth: depth - 1) }
     }
 
     /// The command's shell words: split at unquoted whitespace and the shell's redirection, pipe and
