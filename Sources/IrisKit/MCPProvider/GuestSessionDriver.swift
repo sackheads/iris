@@ -11,6 +11,9 @@ enum GuestSubmitResult: Equatable, Sendable {
     case rateLimited
     /// No turn: this client has spent its token budget for the UTC day (#1135).
     case overDailyBudget
+    /// No turn for now: the spend ledger could not be read, so no client's budget can be checked (#1135). Refused in
+    /// the moment and re-checked on the next send; it clears as soon as the store reads again.
+    case spendLedgerUnreadable(String)
     /// No turn: guest sessions are off (or the client is no longer registered). The caller keeps
     /// the Phase 1 behaviour: the message sits in the mailbox.
     case disabled
@@ -18,21 +21,15 @@ enum GuestSubmitResult: Equatable, Sendable {
 
 /// Where the ledger keeps today's count between runs (#1135). A seam so a test needs no store.
 protocol GuestSpendPersistence: Sendable {
-    func load(day: Int) -> ConversationStore.GuestSpendRows
+    func load(day: Int) throws -> ConversationStore.GuestSpendRows
     func add(_ tokens: Int, clientId: String, day: Int)
 }
 
-/// The store-backed one: a failed write is logged and the count stays in memory for this run. A load that
-/// fails is not an empty day: it reports an unattributable row, so every client is treated as spent until the
-/// day turns.
+/// The store-backed one: a failed write is logged and the count stays in memory for this run. A load that fails
+/// throws: the ledger refuses guest turns while it cannot read, and reads again on the next send.
 struct StoreGuestSpendPersistence: GuestSpendPersistence {
     let store: ConversationStore
-    func load(day: Int) -> ConversationStore.GuestSpendRows {
-        do { return try store.loadGuestDailySpend(day: day) } catch {
-            print("WARNING: guest spend could not be read, so guest turns are refused until the day turns: \(error)")
-            return ConversationStore.GuestSpendRows(unattributableRow: true)
-        }
-    }
+    func load(day: Int) throws -> ConversationStore.GuestSpendRows { try store.loadGuestDailySpend(day: day) }
     func add(_ tokens: Int, clientId: String, day: Int) {
         do { try store.addGuestDailySpend(tokens, clientId: clientId, day: day) } catch { print("WARNING: guest spend could not be saved: \(error)") }
     }
@@ -55,20 +52,63 @@ actor GuestSpendLedger {
     /// What a client whose row is damaged counts as spent today: far past any cap, so the day's budget is refused,
     /// not reset. A missing row is different: it is a client that has spent nothing.
     private static let spentForTheDay = Int.max / 4
-    /// The UTC day on which every client counts as spent, because a row could not be attributed or the store could
-    /// not be read. Past that day the ordinary count applies again.
+    /// The UTC day on which every client counts as spent, because a row could not be attributed to a client. Past
+    /// that day the ordinary count applies again.
     private var allSpentOn: Int?
+    /// Why the store could not be read, while it cannot. Not a day's lock: every send re-reads, and the first read
+    /// that works clears it. Until then every client counts as spent, so a glitch never refills a cap.
+    private var unreadableReason: String?
 
     init(now: @escaping @Sendable () -> Date = Date.init, persistence: GuestSpendPersistence? = nil) {
         self.now = now
         self.persistence = persistence
-        let day = Int((now().timeIntervalSince1970 / 86_400).rounded(.down))
         if let persistence {
-            let rows = persistence.load(day: day)
-            daily = rows.counts.mapValues { (day, $0) }
+            let folded = Self.fold(persistence, day: Int((now().timeIntervalSince1970 / 86_400).rounded(.down)), into: [:])
+            daily = folded.daily
+            allSpentOn = folded.allSpentOn
+            unreadableReason = folded.reason
+        }
+    }
+
+    private struct Folded {
+        var daily: [String: (day: Int, tokens: Int)]
+        var allSpentOn: Int?
+        var reason: String?
+    }
+
+    /// Reads today's rows and folds them into `existing`. Counts add to what this run already tallied for the day
+    /// (spend the store may not have seen while it could not be read); a damaged row is spent; an unattributable one
+    /// refuses everyone for the day; a read that throws is the unreadable reason.
+    private nonisolated static func fold(_ persistence: GuestSpendPersistence, day: Int,
+                                         into existing: [String: (day: Int, tokens: Int)]) -> Folded {
+        var daily = existing
+        var allSpentOn: Int?
+        do {
+            let rows = try persistence.load(day: day)
+            for (client, tokens) in rows.counts {
+                let before = daily[client]?.day == day ? daily[client]!.tokens : 0
+                daily[client] = (day, before + tokens)
+            }
             for client in rows.damagedClients { daily[client] = (day, Self.spentForTheDay) }
             if rows.unattributableRow { allSpentOn = day }
+            return Folded(daily: daily, allSpentOn: allSpentOn, reason: nil)
+        } catch {
+            return Folded(daily: daily, allSpentOn: nil, reason: "\(error)")
         }
+    }
+
+    /// nil when the ledger can be trusted right now. Re-reads the store if it could not be read, so the refusal
+    /// clears on the first send after the store reads again.
+    func unreadable() -> String? {
+        if unreadableReason != nil, let persistence {
+            let folded = Self.fold(persistence, day: today(), into: daily)
+            daily = folded.daily
+            if folded.allSpentOn != nil { allSpentOn = folded.allSpentOn }
+            unreadableReason = folded.reason
+        }
+        if let unreadableReason { return unreadableReason }
+        if allSpentOn == today() { return "a guest_spend row does not name a client" }
+        return nil
     }
 
     private func today() -> Int { Int((now().timeIntervalSince1970 / 86_400).rounded(.down)) }
@@ -87,7 +127,7 @@ actor GuestSpendLedger {
 
     /// What `clientId` has spent so far this UTC day.
     func todayTotal(for clientId: String) -> Int {
-        if allSpentOn == today() { return Self.spentForTheDay }
+        if unreadableReason != nil || allSpentOn == today() { return Self.spentForTheDay }
         guard let entry = daily[clientId], entry.day == today() else { return 0 }
         return entry.tokens
     }
@@ -152,6 +192,8 @@ final class GuestSessionDriver {
     private let isEnabled: @MainActor () -> Bool
     private let turnTimeout: Double
     private let dailyCap: Int
+    private let report: @MainActor (String) -> Void
+    private var reportedLedgerProblem: String?
     private let runTurn: TurnRunner
     let spend: GuestSpendLedger
 
@@ -165,7 +207,9 @@ final class GuestSessionDriver {
          turnTimeout: Double = GuestSessionDriver.turnTimeoutSeconds,
          dailyCap: Int = GuestSessionDriver.dailyTokenCap,
          spend: GuestSpendLedger = GuestSpendLedger(),
+         report: @escaping @MainActor (String) -> Void = { print($0) },
          runTurn: TurnRunner? = nil) {
+        self.report = report
         self.state = state
         self.registry = registry
         self.mailbox = mailbox
@@ -208,6 +252,13 @@ final class GuestSessionDriver {
         var started = false
         defer { if !started { running.remove(clientId) } }
 
+        // A ledger that cannot be read refuses this send (no budget can be checked) and is re-read on the next one.
+        if let reason = await spend.unreadable() {
+            let line = "guest spend ledger could not be read (\(reason))"
+            if reportedLedgerProblem != line { reportedLedgerProblem = line; report(line + "; guest turns are refused until it can") }
+            return .spendLedgerUnreadable(reason)
+        }
+        if reportedLedgerProblem != nil { reportedLedgerProblem = nil; report("guest spend ledger can be read again; guest turns are accepted") }
         // Before the turns gate, so a refusal here does not also spend one of the client's hourly turns.
         if await spend.todayTotal(for: clientId) >= dailyCap { return .overDailyBudget }
         switch await turnGate.admit(clientId: clientId) {
