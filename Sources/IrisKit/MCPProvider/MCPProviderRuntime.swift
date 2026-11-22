@@ -109,7 +109,8 @@ final class MCPProviderRuntime {
                                turnGate: ProviderRequestGate(registry: tokenRegistry, capacity: GuestSessionDriver.turnsPerHour,
                                                              refillInterval: GuestSessionDriver.turnRefillInterval),
                                // #1135: the day's count survives a restart.
-                               spend: GuestSpendLedger(persistence: StoreGuestSpendPersistence(store: registry.state.store)))
+                               spend: GuestSpendLedger(persistence: StoreGuestSpendPersistence(store: registry.state.store)),
+                               report: { [report] in report("MCP provider: \($0)") })
         }
 
         let server = IrisMCPProviderServer(tokenRegistry: tokenRegistry, mailbox: mailbox, artifactStore: artifactStore,

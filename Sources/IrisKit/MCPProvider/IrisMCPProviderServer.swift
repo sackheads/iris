@@ -452,6 +452,10 @@ final class IrisMCPProviderServer: Sendable {
             case .overDailyBudget:
                 await mailbox.retract(id: message.id)
                 return CallTool.Result(content: [.text(text: "daily token budget reached for this client; it resets at 00:00 UTC", annotations: nil, _meta: nil)], isError: true)
+            case .spendLedgerUnreadable:
+                // The reason is the owner's to read (the provider's report line), not an external client's.
+                await mailbox.retract(id: message.id)
+                return CallTool.Result(content: [.text(text: "Iris cannot check this client's budget just now, so it is not starting turns; try again later", annotations: nil, _meta: nil)], isError: true)
             }
         }
         return try CallTool.Result(structuredContent: message)

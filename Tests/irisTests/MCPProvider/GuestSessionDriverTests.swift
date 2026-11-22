@@ -319,6 +319,37 @@ struct GuestSessionDriverTests {
         #expect(script.texts.isEmpty && sessions.liveCount == 0)
     }
 
+    @Test("an unreadable spend store refuses this send with the reason and reports it once; the next send after it reads again is accepted (#1135)")
+    func unreadableLedgerRefusesThenHeals() async throws {
+        let store = try ConversationStore.inMemory()
+        let wall = WallClock()
+        try store.rawWrite("DROP TABLE guest_spend")
+        let app = AppState(store: try ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
+        let tokens = ProviderTokenRegistry(keychain: KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)", inMemory: true))
+        _ = try tokens.issueToken(forClientId: "dev-1")
+        let sessions = GuestSessionRegistry(state: app) { s, c in
+            IrisEngine.makeGuestEngine(state: s, clientId: c, client: CapturingLLMClient(reply: "unused"), protectionEnabled: false)
+        }
+        let script = Script()
+        final class Lines: @unchecked Sendable { private let l = NSLock(); private var v: [String] = []; func add(_ s: String) { l.withLock { v.append(s) } }; var all: [String] { l.withLock { v } } }
+        let lines = Lines()
+        let driver = GuestSessionDriver(
+            state: app, registry: sessions, mailbox: ProviderMailbox(registry: tokens),
+            turnGate: ProviderRequestGate(registry: tokens, capacity: GuestSessionDriver.turnsPerHour, refillInterval: GuestSessionDriver.turnRefillInterval),
+            isEnabled: { true }, spend: GuestSpendLedger(now: { wall.now }, persistence: StoreGuestSpendPersistence(store: store)),
+            report: { lines.add($0) }, runTurn: Self.fakeTurn(app, script))
+        guard case .spendLedgerUnreadable(let reason) = await driver.submit(text: "first", from: "dev-1") else { Issue.record("not refused"); return }
+        #expect(!reason.isEmpty)
+        guard case .spendLedgerUnreadable = await driver.submit(text: "second", from: "dev-1") else { Issue.record("not refused again"); return }
+        #expect(script.texts.isEmpty && sessions.liveCount == 0)
+        #expect(lines.all.count == 1 && lines.all[0].hasPrefix("guest spend ledger could not be read (") , "reported once, with the reason: \(lines.all)")
+        // The store reads again.
+        try store.rawWrite("CREATE TABLE guest_spend (client_id TEXT NOT NULL PRIMARY KEY, day INTEGER NOT NULL, tokens INTEGER NOT NULL)")
+        guard case .accepted = await driver.submit(text: "after", from: "dev-1") else { Issue.record("still refused after the store reads"); return }
+        if let task = driver.turnTask(for: "dev-1") { try await value(of: task, within: 20) }
+        #expect(lines.all.count == 2 && lines.all[1].contains("can be read again"), "the recovery is reported: \(lines.all)")
+    }
+
     @Test("revoking and re-issuing a client does not reset its day's count")
     func revokeKeepsTheDayCount() async throws {
         let r = try rig()

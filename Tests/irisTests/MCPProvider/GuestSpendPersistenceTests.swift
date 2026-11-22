@@ -82,8 +82,8 @@ struct GuestSpendPersistenceTests {
         #expect(await l.todayTotal(for: "bad-tokens") >= GuestSessionDriver.dailyTokenCap, "a later add does not heal it within the day")
     }
 
-    @Test("a row whose client cannot be read, or a store that cannot be read, refuses every client until the day turns")
-    func unattributableOrUnreadableRefusesEveryone() async throws {
+    @Test("a row whose client cannot be read refuses every client until the day turns")
+    func unattributableRowRefusesEveryone() async throws {
         let wall = WallClock()
         let junk = try ConversationStore.inMemory()
         try junk.rawWrite("INSERT INTO guest_spend (client_id, day, tokens) VALUES (X'00FFFE', ?, 1)", arguments: [today(wall)])
@@ -91,11 +91,35 @@ struct GuestSpendPersistenceTests {
         #expect(await l.todayTotal(for: "anyone") >= GuestSessionDriver.dailyTokenCap)
         wall.advance(2 * 3600)    // 01:00 UTC the next day
         #expect(await l.todayTotal(for: "anyone") == 0, "the refusal is for the day it was found on")
+    }
 
-        let broken = try ConversationStore.inMemory()
-        try broken.rawWrite("DROP TABLE guest_spend")
-        let wall2 = WallClock()
-        #expect(await ledger(broken, wall2).todayTotal(for: "anyone") >= GuestSessionDriver.dailyTokenCap, "an unreadable store is not an empty day")
+    @Test("a store that cannot be read refuses now, says why, and clears on the first read that works: it is not a lock until midnight")
+    func unreadableStoreSelfHeals() async throws {
+        let store = try ConversationStore.inMemory(), wall = WallClock()
+        try store.rawWrite("DROP TABLE guest_spend")
+        let l = ledger(store, wall)
+        let reason = try #require(await l.unreadable(), "an unreadable store is refused, not an empty day")
+        #expect(!reason.isEmpty)
+        #expect(await l.todayTotal(for: "anyone") >= GuestSessionDriver.dailyTokenCap, "every client counts as spent while it cannot be read")
+        #expect(await l.unreadable() != nil, "and it stays refused while the store is still unreadable")
+        // The store reads again, with a row for one client.
+        try store.rawWrite("CREATE TABLE guest_spend (client_id TEXT NOT NULL PRIMARY KEY, day INTEGER NOT NULL, tokens INTEGER NOT NULL)")
+        try store.rawWrite("INSERT INTO guest_spend (client_id, day, tokens) VALUES ('dev-1', ?, 40)", arguments: [today(wall)])
+        #expect(await l.unreadable() == nil, "the first read that works clears the refusal, with no wait for the day to turn")
+        #expect(await l.todayTotal(for: "dev-1") == 40)
+        #expect(await l.todayTotal(for: "anyone") == 0)
+    }
+
+    @Test("spend tallied while the store could not be read is kept, and added to what the store has once it reads again")
+    func outageSpendIsNotLost() async throws {
+        let store = try ConversationStore.inMemory(), wall = WallClock()
+        try store.rawWrite("DROP TABLE guest_spend")
+        let l = ledger(store, wall)
+        await l.add(30, for: "dev-1")              // a turn that was already running when the store broke
+        try store.rawWrite("CREATE TABLE guest_spend (client_id TEXT NOT NULL PRIMARY KEY, day INTEGER NOT NULL, tokens INTEGER NOT NULL)")
+        try store.rawWrite("INSERT INTO guest_spend (client_id, day, tokens) VALUES ('dev-1', ?, 100)", arguments: [today(wall)])
+        #expect(await l.unreadable() == nil)
+        #expect(await l.todayTotal(for: "dev-1") == 130, "the safe side: the outage's spend and the store's, even if the store already had it")
     }
 
     @Test("an existing database from before v45 (no guest_spend table) still opens, keeps its rows, and gains the table")
