@@ -125,8 +125,10 @@ enum ScriptJobs {
     /// The tier-3 guard on a line about to be posted (#330, D): the line, or the withheld text when
     /// the guard blocks it, and whether tier 3 could not run (protection off, or its model absent).
     static func guardLine(_ line: String, protectionEnabled: Bool? = nil) async -> (line: String, withoutTier3: Bool) {
-        let outcome = await InjectionGuard.classify(line, contextTag: "script_output", maxTier: .tier3_canary,
-                                                    protectionEnabled: protectionEnabled)
+        // #1319: the untrusted entry point, so a script's line gets the normalization and full role-delimiter
+        // strip every other untrusted text does (#727).
+        let outcome = await InjectionGuard.classifyUntrusted(line, contextTag: "script_output", maxTier: .tier3_canary,
+                                                             protectionEnabled: protectionEnabled)
         let ran = InjectionGuard.tier3WillRun(protectionEnabled: protectionEnabled)
         switch outcome {
         case .passed(let clean): return (clean, !ran)
