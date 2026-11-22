@@ -39,6 +39,10 @@ struct HostRunFilesTests {
         "git config --unset core.editor",
         "git config set core.sshCommand evil",
         "git config --file .git/config core.hooksPath x",
+        "git -c \"user.name=Iris Bot\" config --global core.hooksPath ~/.hooks",
+        "git -c 'alias.x=!sh -c x' config core.fsmonitor /tmp/m",
+        "git -c core.pager=less config core.editor evil",
+        "printf x > \".git/hooks/pre commit\"",
     ])
     func caught(_ command: String) {
         #expect(HostRunFiles.commandWrites(command), "\(command)")
@@ -58,6 +62,7 @@ struct HostRunFilesTests {
         "printf x > notes/.zshrc.bak",
         "printf x > ws/config/app.json",
         "git -c core.pager=less log",
+        "git -c \"user.name=Iris Bot\" commit -m \"fix config handling now\"",
     ])
     func neverTrips(_ command: String) {
         #expect(!HostRunFiles.commandWrites(command), "\(command)")

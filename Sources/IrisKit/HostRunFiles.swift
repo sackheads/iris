@@ -33,16 +33,31 @@ enum HostRunFiles {
     static func commandWrites(_ command: String) -> Bool {
         guard !ReadOnlyCommand.isReadOnly(command) else { return false }
         let words = Self.words(command)
-        if words.contains(where: isRunFile) { return true }
+        // An assignment's value is a path too (`X=~/.zshrc`, `--file=.git/config`).
+        if words.flatMap({ $0.split(separator: "=").map(String.init) }).contains(where: isRunFile) { return true }
         return setsGitConfig(words)
     }
 
-    /// The command's words, quotes and backslashes removed, split at whitespace and the shell's
-    /// redirection, pipe, list and assignment characters, so `>.git/hooks/x` and `X=~/.zshrc` count.
+    /// The command's shell words: split at unquoted whitespace and the shell's redirection, pipe and
+    /// list characters, so `>.git/hooks/x` counts, with a quoted span kept whole and its quotes removed.
+    /// dev-2's review: stripping quotes before splitting made `-c "user.name=Iris Bot"` two words, so
+    /// the `git config` scan below lost its place.
     static func words(_ command: String) -> [String] {
-        let plain = command.filter { $0 != "'" && $0 != "\"" && $0 != "\\" }
-        let separators = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "><|;&()`="))
-        return plain.components(separatedBy: separators).filter { !$0.isEmpty }
+        var words: [String] = [], current = "", quote: Character?, escaped = false, started = false
+        func end() { if started { words.append(current) }; current = ""; started = false }
+        for c in command {
+            if escaped { current.append(c); escaped = false; started = true; continue }
+            if c == "\\", quote != "'" { escaped = true; started = true; continue }
+            if let q = quote {
+                if c == q { quote = nil } else { current.append(c) }
+                continue
+            }
+            if c == "'" || c == "\"" { quote = c; started = true; continue }
+            if c.isWhitespace || "><|;&()`".contains(c) { end(); continue }
+            current.append(c); started = true
+        }
+        end()
+        return words
     }
 
     /// Planner's ruling (F2 a): any `git config` that sets a value, whatever the key. Git's set of
@@ -56,7 +71,7 @@ enum HostRunFiles {
             var j = i + 1
             // git's own options before the subcommand: `-C dir`, `-c k=v` (split at `=` above), `--git-dir x`.
             while j < words.count, words[j].hasPrefix("-") {
-                if words[j] == "-c" { j += 3 }   // `-c key=value`, split at `=` into two words
+                if words[j] == "-c" { j += 2 }   // `-c key=value`, one shell word however it is quoted
                 else if ["-C", "--git-dir", "--work-tree", "--namespace"].contains(words[j]) { j += 2 }
                 else { j += 1 }
             }
