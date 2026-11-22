@@ -513,8 +513,8 @@ close each; the spine owns C1/C4/C5/C6/C7/C8.
 Brian's decision on #999 (option 2): let it merge, close A, C and E here before the consumer plans
 (#931/#965/#966/#967) build from the spec, and settle D before #931 Task 5. Written from the spine as it
 stands on `main` (Task 16 complete); every "today" below was read in code or reproduced through a real
-`processInput` turn, not taken from the spec. **Decisions that are Brian's are marked OWNER, each with a
-recommendation; everything else is settled by the code and is a builder instruction.**
+`processInput` turn, not taken from the spec. **Decisions that were Brian's are marked OWNER and carry his ruling of
+2026-11-22 (listed at the end of this section); everything else is settled by the code and is a builder instruction.**
 
 ### A. The tool-classification table has a mechanism
 
@@ -561,21 +561,24 @@ is unchanged.
 *Build.* Two PRs, each rule-26 dual: (a) the table, its completeness test (a new tool fails the build until it
 is classified, the `writerTiers` pattern), and the declaration, dispatch and parallel-route gates for a
 stamped non-owner `.main` turn, replacing the #1199 denylist (closes #1293 and #1294's interim); (b) the
-persisted-profile `ToolGrant.permits` application. Every route gets a live `processInput` test with the tool
+persisted-profile `ToolGrant.permits` application, only if the planner agrees it is not beyond minimal (see
+Scope under the rulings below). Every route gets a live `processInput` test with the tool
 **offered** and a gate-removal mutant on the gate itself; a refusal by the gate and a refusal as "not offered"
 read alike (#811), so a test asserts the gate's own text.
 
-**OWNER decisions (batched with the five at the end of this section):**
-- **A1. MCP tools on a turn a guest steered.** Default `.ownerOnly` (recommended): they are the person's own
-  servers with their credentials and no approval step, so a role session loses them for that turn only. The
-  alternative is `.approvalGated` per server, which keeps a reviewer's GitHub MCP working at the cost of one
-  click per call.
-- **A2. `run_command` on a turn a guest steered.** (i) Stay `.approvalGated` (recommended): today's ladder (no YOLO,
-  no saved rule, Vibecop never answers for it, the `~/.iris` carve-out off) asks the person each time, and a
-  reviewer role legitimately runs tests this way. (ii) `.ownerOnly`: a guest can never drive a host command,
-  even through a click. Honest case for (ii): #1294 showed a person approving a job a guest had crafted, so a
-  click is not a reliable boundary against a social-engineered prompt; the cost of (ii) is that a role session
-  cannot run commands on any turn a guest steered. Brian picks; the table makes either a one-line change.
+**Ruled by Brian (2026-11-22).**
+- **A1. MCP tools on a turn a guest steered: `.ownerOnly`.** They are the person's own servers with their
+  credentials and no approval step, so a role session loses them for that turn only. Brian: a guest "should not
+  expect access to internal tools". The same rule covers plugin tools.
+- **A2. `run_command` on a turn a guest steered: stays `.approvalGated`.** Today's ladder (no YOLO, no saved
+  rule, Vibecop never answers for it, the `~/.iris` carve-out off) asks the person each time, and a reviewer
+  role legitimately runs tests this way. The table makes `.ownerOnly` a one-line change if that is ever wanted.
+- **Scope (Brian: "in general we are over-engineering this ... it's all my own claudes and geminis and
+  irises").** Gap A is the minimal closed rule: the class table, the one gate, the completeness test and the
+  #1303 stamp requirement. Enforcement whose only payoff is against untrusted strangers is parked, and the
+  stamped-non-owner holes that matter (#1293, #1294) stay closed. Build (b), the per-profile
+  `ToolGrant.permits` application, is built only if the gate cannot work for a configured role profile
+  without it; that call goes to the planner before any code.
 
 ### B. The owner stays ambient-credentialed, by design
 
@@ -624,11 +627,11 @@ The #1199 denylist is then reconciled to the spine's real coverage in one change
    lower-binding input (today's `hasGuestInput`, generalised) so outbound gating and the #1246 reflection
    gate apply. A non-owner session's bus **access** is the `peerRoles` axis (shipped in Task 16 for guests):
    direct `role:<name>` sends to granted roles only; no topics, names, `iris` or session ids. Owner sends
-   are unrestricted. **OWNER (recommend yes):** generalise the guest addressing rule to every non-owner
+   are unrestricted. **OWNER, ruled yes ("we'll find a fix if it becomes annoying"):** generalise the guest addressing rule to every non-owner
    binding.
 2. **Jobs and watchers:** `schedule_job` and `register_directory_watcher` are `.ownerOnly` in the table
    (A), so a guest-steered turn cannot create one (refusal, not a synthetic profile). A profile-bound turn
-   keeps stamping its own profile id, and an update never changes a stamp. **OWNER (recommend refuse):**
+   keeps stamping its own profile id, and an update never changes a stamp. **OWNER, ruled refuse ("guests do not create jobs"):**
    the alternative is a synthetic deny-all profile, which makes a durable job from guest text possible.
 3. **Links and the CLI:** a trigger never changes the binding; the job's stamp does. The link's token is
    the authority (owner-issued, per job). A future webhook trigger (route 5) follows the same rule.
@@ -640,28 +643,28 @@ The #1199 denylist is then reconciled to the spine's real coverage in one change
 - **Kill switch.** Add one entry point, `AppState.dropAllGuests()`: close every guest session
   (`GuestSessionRegistry.closeAll`, exists), cancel in-flight guest-steered turns and clear their stamps
   (`guestSteeredBindings`, `guestOriginTurnConversations`), and refuse new guest turns until the owner
-  re-enables. A Settings button is the #961 pane's. **OWNER:** whether it also revokes tokens (clients must
-  re-register); recommend no: revocation is the existing per-client control, and an emergency stop should
+  re-enables. A Settings button is the #961 pane's. **OWNER, ruled no:** it does not also revoke tokens (clients would have to
+  re-register); revocation is the existing per-client control, and an emergency stop should
   be reversible.
 - **Budget.** Shipped per client: 12 turns an hour, 500,000 tokens a UTC day, 30,000 per turn
-  (`GuestSessionDriver`); the ledger is in memory and resets on restart. Recommend: persist the daily counts
+  (`GuestSessionDriver`); the ledger is in memory and resets on restart. Ruled: persist the daily counts
   (a restart must not refill a day's allowance), keep the budget per authenticated identity in v1 (a
-  per-profile budget is the follow-up if profiles are shared). **OWNER:** confirm or change the numbers.
+  per-profile budget is the follow-up if profiles are shared). **OWNER, ruled:** the numbers stay.
 - **Guest network.** A guest has no `run_command` (its floor tools are `list_sessions` and
   `send_to_session`), so it never reaches a container. The rule matters for the other sandboxed non-owner
   runs: `SandboxSessionManager` creates a container with `NetworkMode.default` (network on) unless a
   job grant says otherwise. Under the spine a sandboxed non-owner run defaults to network off, and the
   `transports` axis, not the sandbox default, grants it. Builder instruction; no owner decision.
 
-### Decisions for Brian, in order (cheapest first)
+### Decisions for Brian, all ruled 2026-11-22
 
-1. Plugin tools default `.ownerOnly` (A): yes/no. Recommend yes.
-2. Non-owner bus access is the `peerRoles` role-send rule for every non-owner binding (D1): yes/no. Recommend yes.
-3. A guest-steered turn may not create a job or watcher (D2): refuse or synthetic deny-all. Recommend refuse.
-4. Kill switch also revokes tokens (E): recommend no.
-5. Guest budget numbers and durability (E): recommend durable, numbers unchanged.
-6. MCP tools on a guest-steered turn (A1): default owner-only, or approval-gated per server. Recommend owner-only.
-7. `run_command` on a guest-steered turn (A2): stay approval-gated, or owner-only. Both cases are stated above; no recommendation beyond approval-gated preserving the reviewer-runs-tests case.
+1. Plugin tools default `.ownerOnly` (A): **yes** ("should not expect access to internal tools").
+2. Non-owner bus access is the `peerRoles` role-send rule for every non-owner binding (D1): **yes** ("we'll find a fix if it becomes annoying").
+3. A guest-steered turn may not create a job or watcher (D2): **refuse** ("guests do not create jobs").
+4. Kill switch also revokes tokens (E): **no**.
+5. Guest budget (E): **numbers unchanged, daily count persisted**.
+6. MCP tools on a guest-steered turn (A1): **owner-only**.
+7. `run_command` on a guest-steered turn (A2): **stays approval-gated**.
 
 ## Open questions / flags for the plan (not resolved in this spec)
 
