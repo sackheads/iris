@@ -7447,14 +7447,20 @@ class AppState {
         }
     }
 
+    static let vibecopInitPrompt = "System Event [Vibecop Init]: Analyze the current workspace directory to understand the project structure, language, framework, and tooling. Generate a custom Guardian prompt that defines what terminal commands and file operations are 'routine' for this specific workspace, and what should be escalated to the user. Write this prompt to a new file at `.iris/vibecop.md` inside the workspace using the `write_file` tool; the user approves that write, then reviews and trusts the rules before they take effect, since rules in `.iris/` are theirs to accept. Output a transparent summary of the generated rules for the user."
+
+    /// `/vibecop init`, and the conversation menu's "Vibecop: Generate Rules…" (#1278), which is the same call.
+    func startVibecopInit(convId: UUID) {
+        appendMessage(role: .system, content: "Initializing Vibecop Guardian mode...", to: convId)
+        runThinkingTask(conversationId: convId) { [self] in
+            await engine.processInput(Self.vibecopInitPrompt, source: "System", conversationId: convId)
+        }
+    }
+
     private func handleVibecopCommand(_ trimmed: String, convId: UUID) {
         let rest = String(trimmed.dropFirst("/vibecop".count)).trimmingCharacters(in: .whitespacesAndNewlines)
         if rest == "init" || rest.hasPrefix("init ") {
-            appendMessage(role: .system, content: "Initializing Vibecop Guardian mode...", to: convId)
-            let initPrompt = "System Event [Vibecop Init]: Analyze the current workspace directory to understand the project structure, language, framework, and tooling. Generate a custom Guardian prompt that defines what terminal commands and file operations are 'routine' for this specific workspace, and what should be escalated to the user. Write this prompt to a new file at `.iris/vibecop.md` inside the workspace using the `write_file` tool; the user approves that write, then reviews and trusts the rules before they take effect, since rules in `.iris/` are theirs to accept. Output a transparent summary of the generated rules for the user."
-            runThinkingTask(conversationId: convId) { [self] in
-                await engine.processInput(initPrompt, source: "System", conversationId: convId)
-            }
+            startVibecopInit(convId: convId)
             return
         }
         if rest == "clear" {
