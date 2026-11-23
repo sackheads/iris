@@ -73,6 +73,36 @@ struct BlockingSpawnTests {
         #expect(gone, "the forked sleep died with its group")
     }
 
+    /// #1359: the kill reaches a group one member at a time, so a shell whose `wait` saw its child die
+    /// first can exit 0 before its own SIGKILL lands (a queue run read 0 here once). The seam stages
+    /// that order on purpose: its "kill" ends only the sleep, and the shell exits 0 by itself.
+    @Test("#1359: a call killed at its deadline reads as SIGKILLed, even when the shell raced out with 0",
+          arguments: [true, false])
+    func killedCallReadsAsKilled(newGroup: Bool) {
+        let nap = Self.marker()
+        defer { RunCommandProcessGroupTests.killAll(nap) }
+        var sent = 0
+        // `pkill -P`, not the marker: the shell's own argv carries `sleep <nap>` too, and must outlive its child.
+        let status = BlockingSpawn.run("/bin/sh", ["-c", "sleep \(nap) & wait"], timeoutSeconds: 0.5,
+                                       newGroup: newGroup, signal: { pid, _ in
+            sent += 1
+            BlockingSpawn.run("/usr/bin/pkill", ["-9", "-P", String(abs(pid))])
+            return 0
+        })
+        #expect(sent == 1, "one kill, the group's or the pid's")
+        #expect(status == 128 + SIGKILL)
+    }
+
+    @Test("#1359: an exit reaped before the deadline is the child's own, and nothing is signalled",
+          arguments: [true, false])
+    func exitBeforeDeadlinePassesThrough(newGroup: Bool) {
+        var sent = 0
+        let status = BlockingSpawn.run("/bin/sh", ["-c", "sleep 0.2; exit 0"], timeoutSeconds: 2,
+                                       newGroup: newGroup, signal: { pid, sig in sent += 1; return kill(pid, sig) })
+        #expect(status == 0)
+        #expect(sent == 0)
+    }
+
     @Test("detached returns at once and reports the status on a queue that is not the caller's")
     func detachedRuns() async {
         final class Box: @unchecked Sendable {

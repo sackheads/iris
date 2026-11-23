@@ -35,7 +35,7 @@ final class LiveContainerNames: @unchecked Sendable {
     /// Deletes every recorded container in parallel, each through `BlockingSpawn` in a process
     /// group of its own, and returns within `seconds` (plus a moment) whatever they are doing: a
     /// helper still running at the bound is SIGKILLed by `BlockingSpawn`. A delete that exits 0
-    /// drops its name. Returns how many exited 0 by the time it returns. `command` is a seam for
+    /// drops its name; one killed at the bound keeps it, whatever it raced out with (#1359). Returns how many exited 0 by the time it returns. `command` is a seam for
     /// the `container` binary; nil means the installed one, and none installed means nothing to do.
     /// Blocks its caller: call it from a signal source's queue or the exit path, never the pool.
     /// Closes the box first, in the same lock as the snapshot: a later `add` is refused.
