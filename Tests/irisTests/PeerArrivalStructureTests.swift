@@ -2,12 +2,13 @@ import Testing
 import Foundation
 @testable import IrisKit
 
-/// #1329: a direct peer message keeps the Markdown headings and rules a model tier judged safe
-/// (`.preserveStructureWhenJudged`, explicit at `deliverPeerMessage`'s call of `sanitizeArrival`). Everything else
-/// that shares `sanitizeArrival` stays `.off`: a background subagent's post-back, a scheduler event, and a topic
-/// body, which is judged at publish and gets only the structural pass per subscriber (#696, #1337).
+/// #1329, measured and reverted: a direct peer message does NOT keep the Markdown headings and rules a model tier
+/// judged safe. The real canary (gemma4:12b under the peer prompt, #1338's table) passed two role-shaped fake turns, so
+/// it is no control for what the best-effort role list misses, and `.preserveStructureWhenJudged` stays off for
+/// every arrival `sanitizeArrival` handles: a direct peer message, a background post-back, a scheduler event, and a
+/// topic body (judged at publish, structural pass per subscriber, #696, #1337).
 @MainActor
-@Suite("a peer's report keeps its judged-safe structure; post-backs and topics stay stripped (#1329)", .serialized, .timeLimit(.minutes(1)))
+@Suite("every arrival through sanitizeArrival, a direct peer message included, stays stripped (#1329, #1338)", .serialized, .timeLimit(.minutes(1)))
 struct PeerArrivalStructureTests {
     private struct SafeModel: CoreMLModelProtocol {
         func evaluate(text: String) async throws -> Double { 0.01 }
@@ -44,13 +45,14 @@ struct PeerArrivalStructureTests {
 
     private let envelope = PeerEnvelope(msgId: "m1329", contextId: "c1329", depth: 1, expectsReply: false, replyTo: nil)
 
-    @Test("a direct peer message judged safe reaches the model with its headings and rules")
-    func directPeerKeepsStructure() async {
+    @Test("a direct peer message, judged safe, still reaches the model with its headings and rules stripped")
+    func directPeerStaysStripped() async {
         let (app, engine, sender, target) = room()
         let outcome = await judged { await engine.deliverPeerMessage(Self.report, from: sender, senderName: "dev", to: target, envelope: envelope) }
         #expect(outcome == .delivered)
         #expect(await eventually { history(app, target).contains("24/24 green") })
-        #expect(history(app, target).contains(Self.restored), "\(history(app, target).debugDescription)")
+        #expect(!history(app, target).contains(Self.restored) && !history(app, target).contains("### Results"),
+                "\(history(app, target).debugDescription)")
     }
 
     @Test("a peer's split turn header does not come back whole")
