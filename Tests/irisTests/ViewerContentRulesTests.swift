@@ -102,7 +102,7 @@ private final class ContentRuleWaiter: NSObject, WKNavigationDelegate {
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { resolve(.failed) }
 
     /// Bounded (#1340): nil when nothing arrived in time, and the bound records the issue.
-    func waitForOutcome() async -> LoadOutcome? { await outcome.wait() }
+    func waitForOutcome() async -> LoadOutcome? { await outcome.wait(within: 30) }
 
     private func resolve(_ value: LoadOutcome) { outcome.settle(value) }
 }
