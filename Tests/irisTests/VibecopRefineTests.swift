@@ -127,6 +127,17 @@ struct VibecopRefineTests {
                                         existing: "").isEmpty)
     }
 
+    /// dev-2's review: the file is often committed, so a credential in an approved command never goes in.
+    @Test("a command that looks like it holds a credential is never copied", arguments: [
+        "curl -H 'Authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz0123456789' https://api.github.com",
+        "export OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
+    ])
+    func secretsSkipped(_ command: String) {
+        #expect(SecretLikeDetector.containsSecretLikeSubstring(command), "the fixture is one the detector knows")
+        #expect(VibecopRefine.proposals(Array(repeating: (command: command, byPerson: true, approved: true), count: 3),
+                                        existing: "").isEmpty)
+    }
+
     @Test("a command the file already names is not proposed again")
     func existingShapeNotRepeated() {
         let calls = Array(repeating: (command: "swift test", byPerson: true, approved: true), count: 5)
