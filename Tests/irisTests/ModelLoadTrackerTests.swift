@@ -119,6 +119,13 @@ struct OllamaTimingsTests {
         #expect(OllamaEngine.timings(from: Data(body.utf8)) == "load_duration_ms=61234 total_duration_ms=61300")
     }
 
+    @Test("the token counts follow the durations (#1356)")
+    func tokenCountsFollowTheDurations() {
+        let body = #"{"done":true,"eval_duration":9000000000,"total_duration":10000000000,"prompt_eval_count":388,"eval_count":367}"#
+        #expect(OllamaEngine.timings(from: Data(body.utf8))
+                == "eval_duration_ms=9000 total_duration_ms=10000 prompt_eval_count=388 eval_count=367")
+    }
+
     @Test func aBodyWithoutTimingsGivesNothing() {
         #expect(OllamaEngine.timings(from: Data(#"{"error":"model not found"}"#.utf8)) == "")
         #expect(OllamaEngine.timings(from: Data("not json".utf8)) == "")
