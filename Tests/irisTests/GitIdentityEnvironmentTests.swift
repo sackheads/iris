@@ -251,48 +251,56 @@ struct HostSpawnGitIdentityTests {
 /// SSH-rewrite rules on an already-https remote under a pre-existing global rewrite. These tests
 /// run a real `git`, no network: `git ls-remote --get-url` and `git credential fill` both resolve
 /// locally without ever reaching GitHub.
-@Suite("real git end-to-end (#966 Task 8, dev-3's review)", .serialized)
+@Suite("real git end-to-end (#966 Task 8, dev-3's review)", .serialized, .timeLimit(.minutes(1)))
 struct RealGitEndToEndTests {
     static let git: String? = ["/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"]
         .first { FileManager.default.isExecutableFile(atPath: $0) }
 
-    private func run(_ arguments: [String], cwd: URL, env: [String: String], stdin: Data? = nil) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: Self.git!)
-        process.arguments = arguments
-        process.currentDirectoryURL = cwd
-        process.environment = env
-        let out = Pipe()
-        process.standardOutput = out
-        process.standardError = Pipe()
-        if stdin != nil { process.standardInput = Pipe() }
-        try process.run()
-        if let stdin, let inPipe = process.standardInput as? Pipe {
-            inPipe.fileHandleForWriting.write(stdin)
-            try inPipe.fileHandleForWriting.close()
-        }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return String(decoding: data, as: UTF8.self)
+    /// #1162: never the person's own git setup. The system config (`credential.helper=osxkeychain` on a
+    /// stock Mac) would ask the Keychain, which can raise a SecurityAgent prompt mid-suite, and a helper that
+    /// answers nothing leaves git prompting on the terminal for a username: either waits at zero CPU, and an
+    /// unbounded read on it hung the whole serial run. So no system config, no prompt, no askpass, and a bound.
+    static let isolation = ["GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/usr/bin/false",
+                            "SSH_ASKPASS": "/usr/bin/false"]
+
+    private func run(_ arguments: [String], cwd: URL, env: [String: String], stdin: Data? = nil) async throws -> String {
+        let result = await ProcessGroupRunner.capture(executable: Self.git!, arguments: arguments,
+                                                      environment: env.merging(Self.isolation) { _, isolated in isolated },
+                                                      currentDirectory: cwd.path, stdin: stdin, timeoutSeconds: 20)
+        let output = try result.get()
+        try #require(!output.timedOut, "git \(arguments.joined(separator: " ")) ran past its bound")
+        return String(decoding: output.stdout, as: UTF8.self)
     }
 
-    private func makeRepo(home: URL, globalInsteadOf: String? = nil) throws -> URL {
+    /// #1162: the isolation really hides the machine's git setup: no system or global credential helper is
+    /// seen, so nothing can reach the Keychain or prompt.
+    @Test("the helper's git sees no system or global credential helper")
+    func isolationHidesTheMachinesHelpers() async throws {
+        guard Self.git != nil else { return }
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("iris-gitid-iso-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let helpers = try await run(["config", "--get-all", "credential.helper"], cwd: home, env: ["HOME": home.path, "PATH": "/usr/bin:/bin"])
+        #expect(helpers.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, "\(helpers)")
+    }
+
+    private func makeRepo(home: URL, globalInsteadOf: String? = nil) async throws -> URL {
         if let globalInsteadOf {
             try globalInsteadOf.write(to: home.appendingPathComponent(".gitconfig"), atomically: true, encoding: .utf8)
         }
         let repo = home.appendingPathComponent("repo")
         try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
-        _ = try run(["init", "-q"], cwd: repo, env: ["HOME": home.path, "PATH": "/usr/bin:/bin"])
+        _ = try await run(["init", "-q"], cwd: repo, env: ["HOME": home.path, "PATH": "/usr/bin:/bin"])
         return repo
     }
 
     @Test("without credential.useHttpPath, a real git sends no path to the helper; with it, it does")
-    func useHttpPathIsRequired() throws {
+    func useHttpPathIsRequired() async throws {
         guard Self.git != nil else { return }
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("iris-gitid-rg-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: home) }
-        let repo = try makeRepo(home: home)
+        let repo = try await makeRepo(home: home)
         let fillInput = Data("url=https://github.com/sackheads/iris.git\n\n".utf8)
         // A stub helper that just dumps whatever it was handed: `git credential fill` prints
         // NOTHING on stdout when no helper is configured at all (it doesn't echo the request back
@@ -305,7 +313,7 @@ struct RealGitEndToEndTests {
         let baseEnv = ["HOME": home.path, "PATH": "/usr/bin:/bin",
                        "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "credential.helper",
                        "GIT_CONFIG_VALUE_0": stub.path]
-        _ = try run(["credential", "fill"], cwd: repo, env: baseEnv, stdin: fillInput)
+        _ = try await run(["credential", "fill"], cwd: repo, env: baseEnv, stdin: fillInput)
         let withoutUseHttpPath = try String(contentsOf: captured, encoding: .utf8)
         #expect(!withoutUseHttpPath.contains("path="), "a plain credential fill shouldn't add path on its own")
         try FileManager.default.removeItem(at: captured)
@@ -314,22 +322,22 @@ struct RealGitEndToEndTests {
         withEnv["GIT_CONFIG_COUNT"] = "2"
         withEnv["GIT_CONFIG_KEY_1"] = "credential.useHttpPath"
         withEnv["GIT_CONFIG_VALUE_1"] = "true"
-        _ = try run(["credential", "fill"], cwd: repo, env: withEnv, stdin: fillInput)
+        _ = try await run(["credential", "fill"], cwd: repo, env: withEnv, stdin: fillInput)
         let withUseHttpPath = try String(contentsOf: captured, encoding: .utf8)
         #expect(withUseHttpPath.contains("path=sackheads/iris.git"),
                 "credential.useHttpPath=true must make git add the repo path for the helper to check")
     }
 
     @Test("the fragment's stub helper actually receives the repo path through GitIdentityEnvironment.environment()")
-    func fragmentDrivesTheRealHelper() throws {
+    func fragmentDrivesTheRealHelper() async throws {
         guard Self.git != nil else { return }
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("iris-gitid-rg-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: home) }
-        let repo = try makeRepo(home: home)
+        let repo = try await makeRepo(home: home)
         // `includeIf.hasconfig:remote.*.url:` matches against a CONFIGURED remote, not the
         // `credential fill` request's own `url=` field -- the repo needs a real matching remote.
-        _ = try run(["remote", "add", "origin", "https://github.com/sackheads/iris.git"], cwd: repo,
+        _ = try await run(["remote", "add", "origin", "https://github.com/sackheads/iris.git"], cwd: repo,
                     env: ["HOME": home.path, "PATH": "/usr/bin:/bin"])
 
         let captured = home.appendingPathComponent("captured.txt")
@@ -346,26 +354,26 @@ struct RealGitEndToEndTests {
         env = GitIdentityEnvironment.environment(repos: ["sackheads/iris"], routingPath: routingPath, base: env)
 
         let fillInput = Data("url=https://github.com/sackheads/iris.git\n\n".utf8)
-        _ = try run(["credential", "fill"], cwd: repo, env: env, stdin: fillInput)
+        _ = try await run(["credential", "fill"], cwd: repo, env: env, stdin: fillInput)
 
         let capturedText = try String(contentsOf: captured, encoding: .utf8)
         #expect(capturedText.contains("path=sackheads/iris.git"))
     }
 
     @Test("a push URL resolves to https for an allowed repo even under a pre-existing global SSH insteadOf rule (dev-3's review, reproduced)")
-    func pushURLResolvesToHTTPSDespiteAGlobalSSHRewrite() throws {
+    func pushURLResolvesToHTTPSDespiteAGlobalSSHRewrite() async throws {
         guard Self.git != nil else { return }
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("iris-gitid-rg-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: home) }
         // The quirk dev-3 found on a real Mac (from `gh auth setup-git` or similar): a global rule
         // that rewrites ANY github.com https remote to ssh.
-        let repo = try makeRepo(home: home, globalInsteadOf: "[url \"ssh://git@github.com/\"]\n\tinsteadOf = https://github.com/\n")
-        _ = try run(["remote", "add", "origin", "https://github.com/sackheads/iris.git"], cwd: repo,
+        let repo = try await makeRepo(home: home, globalInsteadOf: "[url \"ssh://git@github.com/\"]\n\tinsteadOf = https://github.com/\n")
+        _ = try await run(["remote", "add", "origin", "https://github.com/sackheads/iris.git"], cwd: repo,
                     env: ["HOME": home.path, "PATH": "/usr/bin:/bin"])
 
         // Without the fix: the global rule wins, resolving to ssh (reproduces the bug).
-        let withoutFix = try run(["ls-remote", "--get-url", "origin"], cwd: repo,
+        let withoutFix = try await run(["ls-remote", "--get-url", "origin"], cwd: repo,
                                  env: ["HOME": home.path, "PATH": "/usr/bin:/bin"])
         #expect(withoutFix.trimmingCharacters(in: .whitespacesAndNewlines) == "ssh://git@github.com/sackheads/iris.git")
 
@@ -376,18 +384,18 @@ struct RealGitEndToEndTests {
         GitIdentityEnvironment.writeRoutingFile(repos: ["sackheads/iris"], identityFragmentPath: fragmentPath, to: routingPath)
         var env = ["HOME": home.path, "PATH": "/usr/bin:/bin"]
         env = GitIdentityEnvironment.environment(repos: ["sackheads/iris"], routingPath: routingPath, base: env)
-        let withFix = try run(["ls-remote", "--get-url", "origin"], cwd: repo, env: env)
+        let withFix = try await run(["ls-remote", "--get-url", "origin"], cwd: repo, env: env)
         #expect(withFix.trimmingCharacters(in: .whitespacesAndNewlines) == "https://github.com/sackheads/iris.git")
     }
 
     @Test("a repo NOT on the allowlist gets no URL rewrite at all: the global rule still applies")
-    func unlistedRepoUnaffected() throws {
+    func unlistedRepoUnaffected() async throws {
         guard Self.git != nil else { return }
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("iris-gitid-rg-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: home) }
-        let repo = try makeRepo(home: home, globalInsteadOf: "[url \"ssh://git@github.com/\"]\n\tinsteadOf = https://github.com/\n")
-        _ = try run(["remote", "add", "origin", "https://github.com/other/repo.git"], cwd: repo,
+        let repo = try await makeRepo(home: home, globalInsteadOf: "[url \"ssh://git@github.com/\"]\n\tinsteadOf = https://github.com/\n")
+        _ = try await run(["remote", "add", "origin", "https://github.com/other/repo.git"], cwd: repo,
                     env: ["HOME": home.path, "PATH": "/usr/bin:/bin"])
 
         let fragmentPath = home.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
@@ -397,13 +405,13 @@ struct RealGitEndToEndTests {
         GitIdentityEnvironment.writeRoutingFile(repos: ["sackheads/iris"], identityFragmentPath: fragmentPath, to: routingPath)
         var env = ["HOME": home.path, "PATH": "/usr/bin:/bin"]
         env = GitIdentityEnvironment.environment(repos: ["sackheads/iris"], routingPath: routingPath, base: env)
-        let resolved = try run(["ls-remote", "--get-url", "origin"], cwd: repo, env: env)
+        let resolved = try await run(["ls-remote", "--get-url", "origin"], cwd: repo, env: env)
         #expect(resolved.trimmingCharacters(in: .whitespacesAndNewlines) == "ssh://git@github.com/other/repo.git",
                 "an unlisted repo keeps today's behavior -- the global rewrite, untouched by ours")
     }
 
     @Test("the real collision case: an allowed repo's rewrite does not bleed into an unrelated repo sharing its name as a literal string prefix (planner's load-bearing regression guard)")
-    func prefixCollisionRepoUnaffected() throws {
+    func prefixCollisionRepoUnaffected() async throws {
         guard Self.git != nil else { return }
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("iris-gitid-rg-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
@@ -413,8 +421,8 @@ struct RealGitEndToEndTests {
         // "git@github.com:sackheads/iris.github.io.git" ("iris.git" is exactly the first 8
         // characters of "iris.github.io.git") -- the exact shape that defeated a flat,
         // unconditional `url.*.insteadOf` injection (round 1 of this PR).
-        let repo = try makeRepo(home: home)
-        _ = try run(["remote", "add", "origin", "git@github.com:sackheads/iris.github.io.git"], cwd: repo,
+        let repo = try await makeRepo(home: home)
+        _ = try await run(["remote", "add", "origin", "git@github.com:sackheads/iris.github.io.git"], cwd: repo,
                     env: ["HOME": home.path, "PATH": "/usr/bin:/bin"])
 
         let fragmentPath = home.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
@@ -424,18 +432,18 @@ struct RealGitEndToEndTests {
         var env = ["HOME": home.path, "PATH": "/usr/bin:/bin"]
         env = GitIdentityEnvironment.environment(repos: ["sackheads/iris"], routingPath: routingPath, base: env)
 
-        let resolved = try run(["ls-remote", "--get-url", "origin"], cwd: repo, env: env)
+        let resolved = try await run(["ls-remote", "--get-url", "origin"], cwd: repo, env: env)
         #expect(resolved.trimmingCharacters(in: .whitespacesAndNewlines) == "git@github.com:sackheads/iris.github.io.git",
                 "sackheads/iris.github.io's remote must be untouched by sackheads/iris's rewrite rules")
     }
 
     @Test("a known residual: a second remote in the SAME checkout that string-extends the allowed repo fails loudly, not silently over the ambient key (planner's ruling, pinned)")
-    func secondRemoteInSameCheckoutMangledNotSilent() throws {
+    func secondRemoteInSameCheckoutMangledNotSilent() async throws {
         guard Self.git != nil else { return }
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("iris-gitid-rg-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: home) }
-        let repo = try makeRepo(home: home)
+        let repo = try await makeRepo(home: home)
         let env0 = ["HOME": home.path, "PATH": "/usr/bin:/bin"]
         // "origin" is the allowed repo; "upstream" is a second, UNRELATED remote in the same
         // checkout whose name string-extends it ("iris" -> "iris-fork"). Once origin's exact
@@ -443,8 +451,8 @@ struct RealGitEndToEndTests {
         // this repository -- including upstream, which the includeIf gate alone cannot scope out
         // (that gate is per-repository, not per-remote). This is the one case the fix doesn't
         // close; see the comment on `remoteSpellings`.
-        _ = try run(["remote", "add", "origin", "https://github.com/sackheads/iris.git"], cwd: repo, env: env0)
-        _ = try run(["remote", "add", "upstream", "git@github.com:sackheads/iris-fork.git"], cwd: repo, env: env0)
+        _ = try await run(["remote", "add", "origin", "https://github.com/sackheads/iris.git"], cwd: repo, env: env0)
+        _ = try await run(["remote", "add", "upstream", "git@github.com:sackheads/iris-fork.git"], cwd: repo, env: env0)
 
         let fragmentPath = home.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
         GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: "acme-bot", accountId: 12345, helperExecutable: "/path/to/iris")
@@ -453,11 +461,11 @@ struct RealGitEndToEndTests {
         var env = env0
         env = GitIdentityEnvironment.environment(repos: ["sackheads/iris"], routingPath: routingPath, base: env)
 
-        let originResolved = try run(["ls-remote", "--get-url", "origin"], cwd: repo, env: env)
+        let originResolved = try await run(["ls-remote", "--get-url", "origin"], cwd: repo, env: env)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         #expect(originResolved == "https://github.com/sackheads/iris.git", "the allowed repo itself still resolves correctly")
 
-        let upstreamResolved = try run(["ls-remote", "--get-url", "upstream"], cwd: repo, env: env)
+        let upstreamResolved = try await run(["ls-remote", "--get-url", "upstream"], cwd: repo, env: env)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         // Confirmed empirically: this mangles to a nonsense URL that would 404 or fail to parse
         // as a repo -- a loud failure, never a silent fallback to the user's own ambient SSH key.
@@ -482,5 +490,25 @@ struct ToolExecutorGitIdentityWiringSourceScanTests {
                 "ensureFragment's accountId must come from a real read, not a hardcoded value -- changing it to nil would silently revert #1188 with every test still green")
         let occurrences = source.components(separatedBy: "accountId: accountId").count - 1
         #expect(occurrences == 2, "the one read must feed both shouldApply's gate and ensureFragment's write -- two uses of the same captured value, not a second independent read (dev-2's finding 2: two reads can straddle an invalidate)")
+    }
+}
+
+/// #1162: a test that runs real `git credential fill` must keep git off the person's Keychain and terminal.
+@Suite("real-git tests are isolated from the machine's git setup (#1162)")
+struct RealGitIsolationScanTests {
+    @Test("every test file that runs git credential fill sets GIT_CONFIG_NOSYSTEM and GIT_TERMINAL_PROMPT")
+    func credentialFillIsIsolated() throws {
+        let tests = PerfPaths.repoRoot().appendingPathComponent("Tests/irisTests")
+        let files = try #require(FileManager.default.enumerator(at: tests, includingPropertiesForKeys: nil))
+            .compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" && $0.lastPathComponent != "GitIdentityEnvironmentTests.swift" || $0.lastPathComponent == "GitIdentityEnvironmentTests.swift" }
+        var checked = 0
+        for file in files {
+            let text = try String(contentsOf: file, encoding: .utf8)
+            guard text.contains(#"["credential", "fill"]"#) else { continue }
+            checked += 1
+            #expect(text.contains(#""GIT_CONFIG_NOSYSTEM": "1""#) && text.contains(#""GIT_TERMINAL_PROMPT": "0""#),
+                    "\(file.lastPathComponent) runs git credential fill without isolating it")
+        }
+        #expect(checked >= 1, "the scan found the real-git tests")
     }
 }
