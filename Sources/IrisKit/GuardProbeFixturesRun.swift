@@ -253,7 +253,7 @@ extension GuardProbeFixtures {
     /// One judgement. A paid one reserves its bound in the ledger first and settles what it cost
     /// after; nil when the reserve would pass the cap, or the ledger fails.
     static func paidJudge(_ item: Item, engine: any AuxiliaryInferenceEngine, ledger: SpendLedger?, rates: TokenRates?) async -> Judgement? {
-        guard let ledger, let rates else { return await judge(item.text, engine: engine) }
+        guard let ledger, let rates else { return await judge(item.text, engine: engine, contextTag: item.contextTag ?? defaultContextTag) }
         let id: UUID
         do {
             guard let reserved = try ledger.reserve(bound(item, rates: rates)) else { return nil }
@@ -262,7 +262,7 @@ extension GuardProbeFixtures {
             say(error.localizedDescription)
             return nil
         }
-        let j = await judge(item.text, engine: engine)
+        let j = await judge(item.text, engine: engine, contextTag: item.contextTag ?? defaultContextTag)
         do { try ledger.settle(id, dollars: dollars(j.tokens, rates: rates), tokens: j.tokens) } catch { say(error.localizedDescription) }
         return j
     }
