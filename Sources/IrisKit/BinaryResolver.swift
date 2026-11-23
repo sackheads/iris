@@ -82,13 +82,13 @@ enum BinaryResolver {
         return pathEntries(text)
     }
 
-    /// The entries of a `PATH` value, or empty unless it is one line of absolute paths (a login file that
-    /// printed into it, or a shell whose `$PATH` is not colon-separated, gives nothing rather than garbage).
+    /// The absolute entries of a `PATH` value, or empty unless it is a single line. A relative entry (`.`,
+    /// a literal `~/bin`) is dropped rather than costing the whole PATH (dev-1's review: such lines are
+    /// common in login files); two lines, or none, give nothing.
     static func pathEntries(_ text: String) -> [String] {
         let line = text.trimmingCharacters(in: .whitespaces)
         guard !line.isEmpty, !line.contains(where: \.isNewline) else { return [] }
-        let entries = line.components(separatedBy: ":").filter { !$0.isEmpty }
-        return entries.allSatisfy { $0.hasPrefix("/") } ? entries : []
+        return line.components(separatedBy: ":").filter { $0.hasPrefix("/") }
     }
 
     static func defaultSearchDirs() -> [String] {

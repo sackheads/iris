@@ -68,12 +68,21 @@ struct LoginPathCaptureTests {
         #expect(TestClock.seconds(since: start) < 10, "the answer came on the shell's exit, not the child's")
     }
 
-    @Test("what isn't one line of absolute paths gives no entries", arguments: [
-        "relative/bin:/usr/bin", "/usr/bin\n/opt/bin", "Welcome back! /usr/bin", "", "~/bin:/usr/bin",
+    @Test("what isn't one line gives no entries, and a line with no absolute entry gives none", arguments: [
+        "/usr/bin\n/opt/bin", "Welcome back! /usr/bin", "", "relative/bin:~/bin:.",
     ])
     func malformedIsEmpty(_ value: String) {
         // A space is legal inside a path (`/Applications/My App/bin`), so only these shapes are refused.
         #expect(BinaryResolver.pathEntries(value).isEmpty, "\(value)")
+    }
+
+    /// dev-1's review: a `.` or a literal `~/bin` in a login file must not cost the rest of the PATH.
+    @Test("a relative entry is dropped and the absolute ones are kept", arguments: [
+        ("relative/bin:/usr/bin", ["/usr/bin"]), ("~/bin:/usr/bin", ["/usr/bin"]),
+        (".:/opt/homebrew/bin:/usr/bin", ["/opt/homebrew/bin", "/usr/bin"]),
+    ])
+    func relativeEntriesDropped(_ row: (String, [String])) {
+        #expect(BinaryResolver.pathEntries(row.0) == row.1, "\(row.0)")
     }
 
     @Test("a path with a space in it is kept")
