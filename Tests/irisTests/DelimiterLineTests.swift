@@ -49,6 +49,9 @@ struct DelimiterLineTests {
         for pattern in PromptInjectionGuard.malRolePatterns {
             whole = whole.replacingOccurrences(of: pattern, with: "", options: [.caseInsensitive])
         }
+        // #1345 differs from the old whole-text strip in one way only: a line left as a bare role word is emptied.
+        whole = whole.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { PromptInjectionGuard.isBareRoleLine(String($0)) ? "" : String($0) }.joined(separator: "\n")
         #expect(stripped == whole)
     }
 
