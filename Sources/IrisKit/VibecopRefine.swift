@@ -58,6 +58,11 @@ enum VibecopRefine {
         let text = command.trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty, text.count <= maxCommandLength,
               !text.contains(where: { $0.isNewline || $0 == "`" }),
+              // A hidden character (a right-to-left override, a zero-width space, a control) would let the
+              // file say something other than what the person reads (dev-2's review; Always Allow's editor
+              // refuses them too).
+              !text.unicodeScalars.contains(where: { $0.properties.generalCategory == .format
+                  || $0.properties.generalCategory == .control }),
               !SecretLikeDetector.containsSecretLikeSubstring(text) else { return nil }
         return text
     }
