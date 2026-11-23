@@ -39,8 +39,9 @@ swift run iris --bench scenarios/live.json --real     # hit a real provider (nee
   without `--real`. Tier 2 still needs its own bundle. Bench-only: the flags exist nowhere in the app.
 - `--cloud-primary PROVIDER:MODEL --allow-paid --max-dollars N --spend-ledger FILE` plus exactly one of `--local-canary NAME`,
   `--canary-gguf FILE` and `--bypass-guard` (#854) makes a `--real` run's primary a paid cloud model, for measuring a capable
-  driver's compliance with a planted request (`scripts/bench854/`). It is **paid**: only `gemini:gemini-3.8-flash` and
-  `anthropic:claude-opus-5-5` are accepted, the key is read from `GEMINI_API_KEY` or `ANTHROPIC_API_KEY`, or with `--cloud-auth vertex-adc` from gcloud
+  driver's compliance with a planted request (`scripts/bench854/`). It is **paid**: only the `CloudModels` rows marked bench primary are
+  accepted, `gemini:gemini-4-hydrogen` (run at thinking level medium) and `anthropic:claude-opus-5-5` (#1346), and a run is
+  refused when its model's price is past its date or the price list is more than 45 days old; the key is read from `GEMINI_API_KEY` or `ANTHROPIC_API_KEY`, or with `--cloud-auth vertex-adc` from gcloud
   Application Default Credentials as the app's Vertex modes use them (Gemini rides the ADC quota project; Claude needs
   `--vertex-project ID` and takes `--vertex-location`, default `global`; the run stops before any model call if ADC gives no token),
   never the Keychain, so it cannot prompt. A run is refused unless `--max-dollars` is at most 50. The cap holds in three places.
