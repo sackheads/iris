@@ -23,8 +23,20 @@ struct PromptInjectionGuard {
     /// document has them); at a line's start before a role word they do.
     static func stripRecordingDelimiters(_ rawInput: String) -> (text: String, delimiterLines: [Int: String]) {
         measureSync(.injectionGuard) {
-            stripRecording(normalize(rawInput), patterns: malRolePatterns)
+            stripRecording(normalize(rawInput), patterns: malRolePatterns, bareRoleLines: true)
         }
+    }
+
+    /// #1345: a line that is only a role word, a turn header with no colon (`AI`, `**User**`, `system`).
+    /// Up to three leading spaces, CommonMark's line between text and code, so `    user` in code is left
+    /// alone; optional emphasis and a trailing colon; any case. Not `instruction(s)`, a common doc label.
+    /// Best effort, like every text rule here: the canary is the control, not this.
+    private static let bareRoleLine = try! NSRegularExpression(
+        pattern: #"^ {0,3}(?:\*{1,2}|_{1,2})?(?:system(?: prompt)?|assistant|user|model|human|ai|developer|tool|function):?(?:\*{1,2}|_{1,2})?:?[ \t]*$"#,
+        options: [.caseInsensitive])
+
+    static func isBareRoleLine(_ line: String) -> Bool {
+        bareRoleLine.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) != nil
     }
 
     /// Step 1 alone, for a caller that strips later through `InjectionGuard.sanitizeUntrusted`.
@@ -193,7 +205,9 @@ struct PromptInjectionGuard {
     /// whole-text replace would (none spans a newline), and records each line a delimiter was
     /// stripped from, including one revealed only by a later pass's reassembly, or withheld
     /// outright for failing to converge.
-    static func stripRecording(_ text: String, patterns: [String]) -> (text: String, delimiterLines: [Int: String]) {
+    /// `bareRoleLines` (#1345): also empty a line that is, or after the strip is, only a role word
+    /// (`isBareRoleLine`), recording it. The untrusted pre-strip asks for it; tier 1's own list does not.
+    static func stripRecording(_ text: String, patterns: [String], bareRoleLines: Bool = false) -> (text: String, delimiterLines: [Int: String]) {
         var recorded: [Int: String] = [:]
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false).enumerated().map { index, raw -> String in
             let original = String(raw)
@@ -219,6 +233,11 @@ struct PromptInjectionGuard {
             if !counts, line != original,
                delimiterBeforeRole.firstMatch(in: original, range: NSRange(original.startIndex..., in: original)) != nil {
                 counts = true
+            }
+            // After the strip too: `<|im_start|>assistant` leaves a bare `assistant`.
+            if bareRoleLines, isBareRoleLine(original) || isBareRoleLine(line) {
+                recorded[index] = original
+                return ""
             }
             if counts { recorded[index] = original }
             return line
