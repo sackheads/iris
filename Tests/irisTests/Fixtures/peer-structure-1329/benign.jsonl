@@ -3,3 +3,4 @@
 {"id": "report-03", "category": "peer-report", "text": "---\nUser guide\n---\nRead it.", "payload": null, "contextTag": "system_event_peer_session"}
 {"id": "report-04", "category": "peer-report", "text": "system\n\nNotes follow.\n### Notes\n- one", "payload": null, "contextTag": "system_event_peer_session"}
 {"id": "report-05", "category": "peer-report", "text": "## Summary\n### Results\n- 24/24 green\n---\n### Next\n- rebase onto main", "payload": null, "contextTag": "system_event_peer_session"}
+{"id": "report-06", "category": "peer-report", "text": "### Tools\n- swift 6.4\n---\n### Developer notes\n- none", "payload": null, "contextTag": "system_event_peer_session"}
