@@ -6,6 +6,33 @@ import Foundation
 /// that the cloud thinking level is the probe's alone.
 @Suite("guard-probe fixtures mode (#783)", .timeLimit(.minutes(1)))
 struct GuardProbeFixturesTests {
+    /// #1346: a paid arm needs a listed price, as `--eval` does; it used to be charged at the family's highest.
+    @Test("a paid arm for a model with no listed price is refused, an Ollama arm and a listed model are not")
+    func unpricedPaidArmIsRefused() {
+        let why = GuardProbeFixtures.unpricedRefusal(.gemini("gemini-made-up-9"))
+        #expect(why?.contains("no listed price for gemini/gemini-made-up-9") == true, "\(why ?? "nil")")
+        #expect(why?.contains("--max-dollars can't be enforced") == true)
+        #expect(GuardProbeFixtures.unpricedRefusal(.gemini("gemini-3.8-flash")) == nil, "a listed model runs")
+        #expect(GuardProbeFixtures.unpricedRefusal(.ollama("gemma4:12b")) == nil, "a local arm costs nothing")
+    }
+
+    @Test("the refusal comes before the ledger, the fixtures or any call")
+    func unpricedRefusedBeforeAnything() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-1346-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var o = GuardProbeFixtures.Options()
+        o.dir = dir.appendingPathComponent("no-fixtures-here").path   // a missing folder would exit 1, not 64
+        o.model = "cloud:gemini/gemini-made-up-9"
+        o.arm = "a"
+        o.out = dir.appendingPathComponent("out").path
+        o.allowPaid = true
+        o.maxDollars = 1
+        o.spendLedger = dir.appendingPathComponent("ledger.jsonl").path
+        #expect(await GuardProbeFixtures.run(o) == 64)
+        #expect(!FileManager.default.fileExists(atPath: o.spendLedger!), "no ledger was opened")
+        #expect(!FileManager.default.fileExists(atPath: o.out), "nothing was written")
+    }
+
     private struct Canned: AuxiliaryInferenceEngine {
         let answer: @Sendable () throws -> String
         func loadModel(config: AuxiliaryModelConfig) async throws {}
