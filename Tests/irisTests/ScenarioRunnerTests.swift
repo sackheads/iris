@@ -3,7 +3,7 @@ import Foundation
 @testable import IrisKit
 
 @MainActor
-@Suite("ScenarioRunner")
+@Suite("ScenarioRunner", .timeLimit(.minutes(1)))
 struct ScenarioRunnerTests {
 
     @Test("fake scenario with a tool call runs headlessly and profiles one turn")

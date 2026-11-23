@@ -10,7 +10,7 @@ import Foundation
 /// with the wiring in `IrisEngine.start()` broken, because none of them uses it. This one does: it
 /// takes the handler from `fireHandler()`, which is the same call `start()` makes.
 @MainActor
-@Suite("A scheduled job fires a turn")
+@Suite("A scheduled job fires a turn", .timeLimit(.minutes(1)))
 struct JobFireIntegrationTests {
 
     /// A clock the test moves by hand, so the fire happens because `now` passed `nextFireAt`

@@ -81,8 +81,7 @@ private enum LoadOutcome: Equatable { case finishedLoading, failed }
 /// independent mechanisms").
 @MainActor
 private final class ContentRuleWaiter: NSObject, WKNavigationDelegate {
-    private var continuation: CheckedContinuation<LoadOutcome, Never>?
-    private var outcome: LoadOutcome?
+    private let outcome = MainActorSignal<LoadOutcome>()
 
     // The async overload, not the completion-handler one: the SDK's completion-handler type is
     // `@MainActor @Sendable`, which a `@MainActor` class's plain override never exactly matches
@@ -99,16 +98,11 @@ private final class ContentRuleWaiter: NSObject, WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { resolve(.finishedLoading) }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { resolve(.failed) }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { resolve(.failed) }
+    /// #1340: a crashed web content process sends neither didFinish nor didFail.
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { resolve(.failed) }
 
-    func waitForOutcome() async -> LoadOutcome {
-        if let outcome { return outcome }
-        return await withCheckedContinuation { continuation = $0 }
-    }
+    /// Bounded (#1340): nil when nothing arrived in time, and the bound records the issue.
+    func waitForOutcome() async -> LoadOutcome? { await outcome.wait() }
 
-    private func resolve(_ value: LoadOutcome) {
-        guard outcome == nil else { return }
-        outcome = value
-        continuation?.resume(returning: value)
-        continuation = nil
-    }
+    private func resolve(_ value: LoadOutcome) { outcome.settle(value) }
 }

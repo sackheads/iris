@@ -503,17 +503,23 @@ private func firstNonLoopbackIPv4Address() -> String? {
 private func rawConnect(port: UInt16) async throws -> RawConnection {
     let connection = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
     let raw = RawConnection(connection)
-    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-        let resumer = OneShotThrowingResumer(continuation)
-        connection.stateUpdateHandler = { state in
-            switch state {
-            case .ready: resumer.resume()
-            case .failed(let error): resumer.resume(throwing: error)
-            default: break
+    // #1340: bounded, since a connection that never gets past `.waiting` would park a bare continuation
+    // that `.timeLimit` cannot end (#428). Cancelling it on the way out resumes the continuation.
+    let ready = Task<Void, any Error> {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let resumer = OneShotThrowingResumer(continuation)
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready: resumer.resume()
+                case .failed(let error): resumer.resume(throwing: error)
+                case .cancelled: resumer.resume(throwing: CancellationError())
+                default: break   // `.waiting` may still retry into `.ready`; the bound ends one that never does
+                }
             }
+            connection.start(queue: .global())
         }
-        connection.start(queue: .global())
     }
+    do { try await value(of: ready, within: 10) } catch { connection.cancel(); throw error }
     return raw
 }
 

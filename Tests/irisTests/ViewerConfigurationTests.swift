@@ -73,14 +73,11 @@ struct ViewerConfigurationTests {
 }
 
 /// Resolves once the main-frame navigation finishes (or fails), so the behavioural CSP test
-/// doesn't poll. Suite-level `.timeLimit` is the bound (#435): a stuck load fails the suite
-/// instead of hanging the run, and it lives on `.timeLimit`, not an added wall-clock wait, because
-/// this work is inherently main-actor WebKit callback work (AGENTS.md: a bound must not itself hop
-/// to the main actor, but it is fine to be the main actor's own work).
+/// doesn't poll. Bounded by `MainActorSignal` (#1340): the suite's `.timeLimit` cannot end a test
+/// parked on a bare continuation (#428), so a stuck load used to hang the run, not fail the suite.
 @MainActor
 private final class NavigationFinishWaiter: NSObject, WKNavigationDelegate {
-    private var continuation: CheckedContinuation<Void, Never>?
-    private var finished = false
+    private let finished = MainActorSignal<Void>()
 
     /// Only `ViewerConfiguration.documentURL` is ever allowed, same as `ContentRuleWaiter` in
     /// `ViewerContentRulesTests` and for the same reason: anything else risks WebKit handing an
@@ -102,15 +99,10 @@ private final class NavigationFinishWaiter: NSObject, WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { resume() }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { resume() }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { resume() }
+    /// #1340: a crashed web content process sends neither didFinish nor didFail.
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { resume() }
 
-    func waitForFinish() async {
-        if finished { return }
-        await withCheckedContinuation { continuation = $0 }
-    }
+    func waitForFinish() async { _ = await finished.wait() }
 
-    private func resume() {
-        finished = true
-        continuation?.resume()
-        continuation = nil
-    }
+    private func resume() { finished.settle(()) }
 }

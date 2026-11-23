@@ -117,17 +117,23 @@ private final class RawConnection: @unchecked Sendable {
 private func rawConnect(port: UInt16) async throws -> RawConnection {
     let connection = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
     let raw = RawConnection(connection)
-    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-        let resumer = OneShotThrowingResumer(continuation)
-        connection.stateUpdateHandler = { state in
-            switch state {
-            case .ready: resumer.resume()
-            case .failed(let error): resumer.resume(throwing: error)
-            default: break
+    // #1340: bounded, as `LoopbackHTTPListenerTests.rawConnect` is: `.waiting` forever would otherwise park
+    // a bare continuation that `.timeLimit` cannot end (#428).
+    let ready = Task<Void, any Error> {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let resumer = OneShotThrowingResumer(continuation)
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready: resumer.resume()
+                case .failed(let error): resumer.resume(throwing: error)
+                case .cancelled: resumer.resume(throwing: CancellationError())
+                default: break
+                }
             }
+            connection.start(queue: .global())
         }
-        connection.start(queue: .global())
     }
+    do { try await value(of: ready, within: 10) } catch { connection.cancel(); throw error }
     return raw
 }
 
@@ -164,7 +170,7 @@ private func decodedBody(_ response: HTTPResponse) -> [String: Any]? {
     return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
 }
 
-@Suite("IrisMCPProviderServer")
+@Suite("IrisMCPProviderServer", .timeLimit(.minutes(1)))
 struct IrisMCPProviderServerTests {
     @Test("initialize, tools/list, ping, and a tool call are all rejected pre-Server on a missing, malformed, or unknown-but-well-formed token")
     func allMethodsAuthEnforcedBeforeServerConstruction() async throws {
