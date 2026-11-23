@@ -10,6 +10,8 @@ struct BareRoleLineTests {
     @Test("emptied and recorded for tier 2", arguments: [
         "AI", "ai:", "**User**", "**User:**", "_system_", "*Human*", "Assistant:", "TOOL", "developer", "function",
         "model", "System Prompt", " AI", "   AI", "AI   ", "<|im_start|>assistant",
+        // #1353's measured shapes
+        "## User", "# Assistant", "##  system:", "  # ai", "`user`", "`Tool`:", "User.", "**Assistant**.", "model.", "#### User",
     ])
     func stripped(_ line: String) {
         let (text, lines) = PromptInjectionGuard.stripRecordingDelimiters("before\n\(line)\nafter")
@@ -25,6 +27,10 @@ struct BareRoleLineTests {
               ("Model: gpt-x", "gpt-x"), ("User guide", "User guide"), ("Instructions", "Instructions"),
               ("    user", "user"), ("\tuser", "user"), ("the user said hi", "the user said hi"), ("AIX", "AIX"),
               ("users", "users"), ("AI assistant", "AI assistant"),
+              // #1353: headings of the non-turn words, an INI section, and near misses of each new form
+              ("## Tools", "Tools"), ("# Function", "Function"), ("## Developer", "Developer"), ("[user]", "[user]"),
+              ("[User]", "[User]"), ("## User guide", "User guide"), ("`user` field", "`user` field"),
+              ("User. Then", "User. Then"), ("    ## User", "User"), ("#User", "#User"),
           ])
     func kept(_ row: (String, String)) {
         let (text, _) = PromptInjectionGuard.stripRecordingDelimiters("before\n\(row.0)\nafter")
