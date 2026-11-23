@@ -878,8 +878,10 @@ public struct InjectionGuard {
         }
 
         var diverged = 0
+        // #1329: structure carries only when no turn header is split around it, which takes the neighbours.
+        let normalizedOriginal = structureOnly ? originalLines.map(PromptInjectionGuard.normalize) : []
         /// What to show for an aligned line, and whether it differs from the file's own.
-        func shownForAligned(rawLine: String, cleanLine: String) -> String {
+        func shownForAligned(rawLine: String, cleanLine: String, at index: Int) -> String {
             let folded = rawLine.precomposedStringWithCompatibilityMapping
             let normalized = PromptInjectionGuard.normalize(rawLine)
             let stripped = strippedForm(normalized)
@@ -901,7 +903,8 @@ public struct InjectionGuard {
                 // whole-marker line (only once a model judged `clean`) keeps its marker, shown with
                 // its fold applied and its breakout neutralized, exactly as before #959.
                 let carries = markerStripped && markersMayCarry
-                    && (!structureOnly || PromptInjectionGuard.isStructureOnlyMarkerLine(normalized))
+                    && (!structureOnly || (PromptInjectionGuard.isStructureOnlyMarkerLine(normalized)
+                        && !PromptInjectionGuard.bordersBareRoleWord(normalizedOriginal, at: index)))
                 shown = carries ? escapeWrapperBreakout(normalized) : cleanLine
             } else {
                 shown = rawLine
@@ -916,7 +919,7 @@ public struct InjectionGuard {
         while ci < cleanLines.count {
             let cleanLine = cleanLines[ci]
             if oi < originalLines.count, singleLineJudgedForm(originalLines[oi]) == cleanLine {
-                carried.append(shownForAligned(rawLine: originalLines[oi], cleanLine: cleanLine))
+                carried.append(shownForAligned(rawLine: originalLines[oi], cleanLine: cleanLine, at: oi))
                 ci += 1
                 oi += 1
                 continue
