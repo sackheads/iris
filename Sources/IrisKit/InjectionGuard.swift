@@ -904,7 +904,8 @@ public struct InjectionGuard {
                 // its fold applied and its breakout neutralized, exactly as before #959.
                 let carries = markerStripped && markersMayCarry
                     && (!structureOnly || (PromptInjectionGuard.isStructureOnlyMarkerLine(normalized)
-                        && !PromptInjectionGuard.bordersBareRoleWord(normalizedOriginal, at: index)))
+                        && !(PromptInjectionGuard.isBareStructureLine(normalized)
+                             && PromptInjectionGuard.bordersBareRoleWord(normalizedOriginal, at: index))))
                 shown = carries ? escapeWrapperBreakout(normalized) : cleanLine
             } else {
                 shown = rawLine

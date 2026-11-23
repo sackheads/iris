@@ -116,6 +116,14 @@ struct PromptInjectionGuard {
         bareRoleWord.firstMatch(in: normalizedLine, range: NSRange(normalizedLine.startIndex..., in: normalizedLine)) != nil
     }
 
+    /// #1329: a line that is nothing but `---`/`###` runs, the pieces a split turn header is framed with. A heading
+    /// with its own text (`### Decisions`) frames nothing, so it is never judged by its neighbours.
+    static func isBareStructureLine(_ normalizedLine: String) -> Bool {
+        let whole = NSRange(normalizedLine.startIndex..., in: normalizedLine)
+        let rest = standaloneStructure.stringByReplacingMatches(in: normalizedLine, range: whole, withTemplate: "")
+        return rest.trimmingCharacters(in: .whitespaces).isEmpty && !normalizedLine.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
     /// #1329: whether the nearest non-blank line above or below `index` is a bare role word. Blank lines are
     /// skipped, so `---⏎⏎system` borders it as `---⏎system` does.
     static func bordersBareRoleWord(_ normalizedLines: [String], at index: Int) -> Bool {
