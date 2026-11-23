@@ -22,6 +22,8 @@ struct NoBareTaskValueAwaitScanTests {
         #"BoundedWait.swift: let outcome = await firstOf(seconds) { await task.value }"#: (1, #"[bounded] inside firstOf's race"#),
         #"BoundedWait.swift: let outcome = await firstOf(seconds) { await task.result }"#: (1, #"[bounded] inside firstOf's race (the throwing form)"#),
         #"BoundedWait.swift: await withCheckedContinuation { first.install($0) }"#: (1, #"[bounded] firstOf: onCancel and the SuspendingClock timer both resolve"#),
+        #"BoundedWait.swift: await withCheckedContinuation { c in"#: (1, #"[bounded] MainActorSignal.wait: inside a Task raced by firstOf, and resumed with nil once the race ends"#),
+        #"BoundedWait.swift: let result = await firstOf(seconds) { await task.value }"#: (1, #"[bounded] MainActorSignal.wait: inside firstOf's race"#),
         #"BoundedWait.swift: await withCheckedContinuation { continuation in"#: (1, #"[bounded] offPool: resumed after `blocking`, which its contract requires be bounded"#),
         #"CLISignalTests.swift: static func park(_ gate: DispatchSemaphore) { gate.wait() }"#: (1, #"[exit-test child] never signalled by design; used only inside a `processExitsWith` child, which `_exit()`s"#),
         #"CanaryHedgeTests.swift: try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in"#: (1, #"[bounded] Latch.wait: withTaskCancellationHandler onCancel resumes throwing"#),
@@ -50,7 +52,7 @@ struct NoBareTaskValueAwaitScanTests {
         #"NotificationInstallTests.swift: if holdAdd { await withCheckedContinuation { heldAdd = $0 } }"#: (1, #"[gate #1343] test-released gate, #1343: FakeCenter holdAdd: resumed only when test resumes heldAdd"#),
         #"NotificationInstallTests.swift: if calls.holdRequest { await withCheckedContinuation { calls.held = $0 } }"#: (1, #"[gate #1343] test-released gate, #1343: holdRequest: resumed only when test resumes calls.held"#),
         #"PeerDeliveryTests.swift: await withCheckedContinuation { waiters.append($0) }"#: (1, #"[gate #1343] test-released gate, #1343: PeerDeliveryGate.wait: resumed only by release()"#),
-        #"RawHTMLSanitizerTests.swift: let task = Task<Void, Never> { await withCheckedContinuation { self.continuation = $0 } }"#: (1, #"[part 2] #1340 part 2 (dev-1's PR): inside a Task awaited with value(of:within: 10)"#),
+        #"RawHTMLSanitizerTests.swift: let task = Task<Void, Never> { await withCheckedContinuation { self.continuation = $0 } }"#: (1, #"[bounded] inside a Task awaited with value(of:within: 10)"#),
         #"RunDelegateCloseTests.swift: await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in"#: (1, #"[gate #1343] test-released gate, #1343: deliberately deaf: onCancel only counts, does not resume; released by test"#),
         #"RunJobURLTests.swift: await withCheckedContinuation { parked[n] = $0 }"#: (1, #"[gate #1343] test-released gate, #1343: Turnstile.arrive parks until release()"#),
         #"RunJobURLTests.swift: await withCheckedContinuation { arrivalWaiters.append((n, $0)) }"#: (1, #"[bounded] arrivals() only reached via waitForArrivals' value(of:)"#),
@@ -65,26 +67,22 @@ struct NoBareTaskValueAwaitScanTests {
         #"TimeoutTests.swift: let result = await caller.result"#: (4, #"[bounded] caller pre-cancelled withTimeout; body never runs"#),
         #"TimeoutTests.swift: await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in"#: (1, #"[bounded] resumed by DispatchQueue.asyncAfter(seconds) timer"#),
         #"TopicTests.swift: func wait() async { if open { return }; await withCheckedContinuation { waiters.append($0) } }"#: (1, #"[gate #1343] test-released gate, #1343: Gate.wait: resumed only by release()"#),
-        #"ViewerConfigurationTests.swift: await withCheckedContinuation { continuation = $0 }"#: (1, #"[part 2] #1340 part 2 (dev-1's PR): resumed only by a WKNavigationDelegate callback"#),
-        #"ViewerContentRulesTests.swift: try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<WKContentRuleList, Error>) in"#: (1, #"[part 2] #1340 part 2 (dev-1's PR): resumed only by WebKit compileContentRuleList completion"#),
-        #"ViewerContentRulesTests.swift: return await withCheckedContinuation { continuation = $0 }"#: (1, #"[part 2] #1340 part 2 (dev-1's PR): resumed only by a WKNavigationDelegate callback"#),
-        #"ViewerDocumentInitiatedNavigationTests.swift: await withCheckedContinuation { continuation = $0 }"#: (1, #"[part 2] #1340 part 2 (dev-1's PR): resumed only by a WKNavigationDelegate callback"#),
-        #"ViewerZeroConnectionsTests.swift: await withCheckedContinuation { continuation = $0 }"#: (1, #"[part 2] #1340 part 2 (dev-1's PR): resumed only by a WKNavigationDelegate callback"#),
-        #"ViewerZeroLookupTests.swift: let task = Task<Void, Never> { await withCheckedContinuation { self.continuation = $0 } }"#: (2, #"[part 2] #1340 part 2 (dev-1's PR): inside a Task awaited with value(of:within: 10)"#),
+        #"ViewerContentRulesTests.swift: try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<WKContentRuleList, Error>) in"#: (1, #"[completion] resumed by compileContentRuleList's completion, which WebKit calls with the list or an error"#),
+        #"ViewerZeroLookupTests.swift: let task = Task<Void, Never> { await withCheckedContinuation { self.continuation = $0 } }"#: (2, #"[bounded] inside a Task awaited with value(of:within: 10)"#),
         #"WatchCoordinatorTests.swift: await withCheckedContinuation { openWaiters.append($0) }"#: (1, #"[gate #1343] test-released gate, #1343: Gate.arriveAndWait: resumed only by open()"#),
-        #"MCPProvider/GuestSessionDriverTests.swift: await withCheckedContinuation { waiters.append($0) }"#: (1, #"[part 2] #1340 part 2 (dev-1's PR): Latch.wait resumed only by open()"#),
-        #"MCPProvider/IrisMCPProviderServerTests.swift: try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in"#: (2, #"[part 2] #1340 part 2 (dev-1's PR): resumed only on NWConnection .ready/.failed state"#),
-        #"MCPProvider/IrisMCPProviderServerTests.swift: await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in"#: (1, #"[part 2] #1340 part 2 (dev-1's PR): OneShotResumer raced against asyncAfter(timeout)"#),
-        #"MCPProvider/LoopbackHTTPListenerTests.swift: let connected = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in"#: (1, #"[part 2] #1340 part 2 (dev-1's PR): OneShotResumer raced against asyncAfter(3)"#),
-        #"MCPProvider/LoopbackHTTPListenerTests.swift: let outcome = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in"#: (1, #"[part 2] #1340 part 2 (dev-1's PR): OneShotResumer raced against asyncAfter(3)"#),
-        #"MCPProvider/LoopbackHTTPListenerTests.swift: try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in"#: (2, #"[part 2] #1340 part 2 (dev-1's PR): resumed only on NWConnection .ready/.failed state"#),
-        #"MCPProvider/LoopbackHTTPListenerTests.swift: await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in"#: (1, #"[part 2] #1340 part 2 (dev-1's PR): OneShotResumer raced against asyncAfter(timeout)"#),
-        #"MCPProvider/LoopbackHTTPListenerTests.swift: await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in"#: (1, #"[part 2] #1340 part 2 (dev-1's PR): OneShotResumer raced against asyncAfter(timeout)"#),    ]
+        #"MCPProvider/GuestSessionDriverTests.swift: await withCheckedContinuation { waiters.append($0) }"#: (1, #"[gate #1343] Latch.wait, resumed by the test's open()"#),
+        #"MCPProvider/IrisMCPProviderServerTests.swift: try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in"#: (2, #"[completion] rawConnect's is inside a Task awaited with value(of:within: 10); send's is resumed by .contentProcessed, which Network calls once the bytes are taken or the connection fails"#),
+        #"MCPProvider/IrisMCPProviderServerTests.swift: await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in"#: (1, #"[bounded] OneShotResumer raced against asyncAfter(timeout)"#),
+        #"MCPProvider/LoopbackHTTPListenerTests.swift: let connected = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in"#: (1, #"[bounded] OneShotResumer raced against asyncAfter(3)"#),
+        #"MCPProvider/LoopbackHTTPListenerTests.swift: let outcome = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in"#: (1, #"[bounded] OneShotResumer raced against asyncAfter(3)"#),
+        #"MCPProvider/LoopbackHTTPListenerTests.swift: try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in"#: (2, #"[completion] rawConnect's is inside a Task awaited with value(of:within: 10); send's is resumed by .contentProcessed, which Network calls once the bytes are taken or the connection fails"#),
+        #"MCPProvider/LoopbackHTTPListenerTests.swift: await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in"#: (1, #"[bounded] OneShotResumer raced against asyncAfter(timeout)"#),
+        #"MCPProvider/LoopbackHTTPListenerTests.swift: await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in"#: (1, #"[bounded] OneShotResumer raced against asyncAfter(timeout)"#),    ]
 
     /// Every allowlisted row says which kind of safe it is, so a reviewer can check each against its tag: `[bounded]`
     /// names the timer, race or bounded wait that ends it; `[gate #1343]` is a test-released gate tracked by #1343;
-    /// `[part 2]` is dev-1's #1348 shape; `[not a task]`, `[synchronous]` and `[exit-test child]` say why no wait exists.
-    static let reasonTags = ["[bounded] ", "[gate #1343] ", "[part 2] ", "[not a task] ", "[synchronous] ", "[exit-test child] "]
+    /// `[completion]` is a system completion handler that is called with a result or an error; `[not a task]`, `[synchronous]` and `[exit-test child]` say why no wait exists.
+    static let reasonTags = ["[bounded] ", "[gate #1343] ", "[completion] ", "[not a task] ", "[synchronous] ", "[exit-test child] "]
 
     private static let continuation = try! NSRegularExpression(pattern: #"\bwith(Checked|Unsafe)(Throwing)?Continuation\b"#)
     private static let blockingWait = try! NSRegularExpression(pattern: #"\.wait\(\s*\)"#)
