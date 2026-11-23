@@ -102,7 +102,7 @@ private final class NavigationFinishWaiter: NSObject, WKNavigationDelegate {
     /// #1340: a crashed web content process sends neither didFinish nor didFail.
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { resume() }
 
-    func waitForFinish() async { _ = await finished.wait() }
+    func waitForFinish() async { _ = await finished.wait(within: 30) }
 
     private func resume() { finished.settle(()) }
 }

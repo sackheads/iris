@@ -98,7 +98,7 @@ private final class TrustedOnlyNavigationWaiter: NSObject, WKNavigationDelegate 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { resume() }
 
     /// Bounded (#1340): `.timeLimit` cannot end a test parked on a bare continuation (#428).
-    func waitForFinish() async { _ = await finished.wait() }
+    func waitForFinish() async { _ = await finished.wait(within: 30) }
 
     private func resume() { finished.settle(()) }
 }
