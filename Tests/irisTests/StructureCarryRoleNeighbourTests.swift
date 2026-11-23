@@ -38,6 +38,7 @@ struct StructureCarryRoleNeighbourTests {
         ("---\nUser guide\n---\nRead it.", "---\nUser guide\n---"),
         ("system\n\nNotes follow.\n### Notes\n- one", "### Notes"),
         ("### Tools\n- swift 6.4\n---\n### Developer notes\n- none", "### Tools\n- swift 6.4\n---\n### Developer notes"),
+        ("### Decisions\nUser\n- launch Friday", "### Decisions\nUser"),
     ]
 
     private struct SafeModel: CoreMLModelProtocol {
