@@ -517,8 +517,13 @@ struct SandboxTimeoutTests {
             waiting?.resume()
         }
 
-        /// Suspends until the first create is inside the barrier.
+        /// Suspends until the first create is inside the barrier, or fails the test at 20 s: a create that never
+        /// arrives would otherwise park the test where `.timeLimit` cannot end it (#1340, #428).
         func waitUntilParked() async {
+            _ = try? await value(of: Task { await self.untilParked() }, within: 20)
+        }
+
+        private func untilParked() async {
             await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
                 let already = lock.withLock { () -> Bool in
                     if parked { return true }

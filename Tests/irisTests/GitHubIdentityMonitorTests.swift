@@ -133,7 +133,7 @@ struct GitHubIdentityMonitorTests {
         let r = rig()
         let gate = DispatchSemaphore(value: 0)
         let hung = Counting {
-            gate.wait()
+            _ = gate.wait(timeout: .now() + 20)   // bounded, so a failed #require below cannot leave it parked (#1340)
             return (try JSONSerialization.data(withJSONObject: ["login": "acme-bot"]), 200)
         }
         let task = try #require(GitHubIdentityMonitor.kickIfNeeded(config: r.config, keychain: r.keychain, transport: hung))
@@ -197,8 +197,8 @@ struct GitHubIdentityWriteWindowTests {
     private final class Held: GitHubTransport, @unchecked Sendable {
         let started = DispatchSemaphore(value: 0)
         let release = DispatchSemaphore(value: 0)
-        /// Sync, so the blocking wait is not in an async context.
-        private func holdUntilReleased() { release.wait() }
+        /// Sync, so the blocking wait is not in an async context; bounded like the sibling `Held.hold()` (#1340).
+        private func holdUntilReleased() { _ = release.wait(timeout: .now() + 20) }
         func send(_ request: URLRequest, bearer: String) async throws -> (Data, HTTPURLResponse) {
             started.signal()
             holdUntilReleased()
@@ -215,7 +215,7 @@ struct GitHubIdentityWriteWindowTests {
         config.changingGitHubIdentityInputs {
             // A turn starts here: after the first drop, before the new value is stored.
             task = GitHubIdentityMonitor.kickIfNeeded(config: config, keychain: keychain, transport: held)
-            held.started.wait()
+            #expect(held.started.wait(timeout: .now() + 20) == .success, "the kicked check reached the transport")
             keychain.replaceSecrets(["token": "ghp_NewToken1234567890abcdef"], service: KeychainManager.githubService)
         }
         held.release.signal()
@@ -325,8 +325,9 @@ struct GitHubIdentityInFlightTests {
         var calls: Int { lock.withLock { _calls } }
         /// Bounded, so a broken guard fails the test instead of parking every pool thread for good.
         private func hold() { _ = release.wait(timeout: .now() + 8) }
-        /// Sync, so the blocking wait is not in an async context.
-        func awaitStarted() { started.wait() }
+        /// Sync, so the blocking wait is not in an async context; bounded, so a verify that never reaches the
+        /// transport fails the test rather than parking it (#1340).
+        func awaitStarted() { #expect(started.wait(timeout: .now() + 20) == .success, "a verify reached the transport") }
         func send(_ request: URLRequest, bearer: String) async throws -> (Data, HTTPURLResponse) {
             lock.withLock { _calls += 1 }
             started.signal()

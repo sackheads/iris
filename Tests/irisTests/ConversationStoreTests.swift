@@ -481,7 +481,7 @@ struct ConversationStoreTests {
     func writeStandDownSignals() async throws {
         let flag = WriteStandDown()
         #expect(flag.isSignalled == false)
-        await Task.detached { flag.signal() }.value
+        try await value(of: Task.detached { flag.signal() }, within: 10)
         #expect(flag.isSignalled)
         flag.signal()
         #expect(flag.isSignalled)
