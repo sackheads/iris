@@ -2,44 +2,13 @@ import Foundation
 import Testing
 @testable import IrisKit
 
-/// A preload reply the test releases by hand, so "loading" can be observed before it.
-private final class Gate: @unchecked Sendable {
-    private let lock = NSLock()
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-    private var open = false
-    private(set) var calls = 0
-
-    func wait() async {
-        await withCheckedContinuation { c in
-            let resumeNow = lock.withLock { () -> Bool in
-                calls += 1
-                if open { return true }
-                waiters.append(c)
-                return false
-            }
-            if resumeNow { c.resume() }
-        }
-    }
-
-    func release() {
-        let all = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
-            open = true
-            defer { waiters = [] }
-            return waiters
-        }
-        all.forEach { $0.resume() }
-    }
-
-    var callCount: Int { lock.withLock { calls } }
-}
-
 private func psBody(_ names: [String]) -> Data {
     try! JSONSerialization.data(withJSONObject: ["models": names.map { ["name": $0] }])
 }
 
 private func quietTracker() -> ModelLoadTracker { ModelLoadTracker(log: { _ in }) }
 
-private func engine(tracker: ModelLoadTracker, ps: Data?, gate: Gate, status: Int = 200) -> OllamaEngine {
+private func engine(tracker: ModelLoadTracker, ps: Data?, gate: TestGate, status: Int = 200) -> OllamaEngine {
     OllamaEngine(tracker: tracker, transport: .init(
         ps: { ps },
         preload: { _ in
@@ -84,24 +53,24 @@ struct ModelLoadStatusTests {
 
     @Test func theLaunchPreloadIsLoadingUntilOllamaReplies() async throws {
         let tracker = quietTracker()
-        let gate = Gate()
+        let gate = TestGate()
         let e = engine(tracker: tracker, ps: psBody([]), gate: gate)
         try await e.loadModel(config: config)
         #expect(tracker.active.map(\.name) == ["gemma4:12b"])
         #expect(tracker.active.first?.purpose == .guardTier3)
-        gate.release()
+        gate.open()
         try await settle(e)
         #expect(tracker.active.isEmpty)
-        #expect(gate.callCount == 1)
+        #expect(gate.arrivals == 1)
     }
 
     @Test func aFailedPreloadClearsTheLine() async throws {
         let tracker = quietTracker()
-        let gate = Gate()
+        let gate = TestGate()
         let e = engine(tracker: tracker, ps: psBody([]), gate: gate, status: 500)
         try await e.loadModel(config: config)
         #expect(tracker.active.count == 1)
-        gate.release()
+        gate.open()
         try await settle(e)
         #expect(tracker.active.isEmpty)
     }
@@ -109,8 +78,8 @@ struct ModelLoadStatusTests {
     @Test func aColdCallResendsThePreloadAndEndsOnItsReply() async throws {
         let lines = ModelLoadTrackerLines()
         let tracker = ModelLoadTracker(log: { lines.append($0) })
-        let gate = Gate()
-        gate.release()
+        let gate = TestGate()
+        gate.open()
         // keep_alive ran out: ps no longer lists the model.
         let e = engine(tracker: tracker, ps: psBody(["other:latest"]), gate: gate)
         try await e.loadModel(config: config)
@@ -118,47 +87,47 @@ struct ModelLoadStatusTests {
         // A reply this recent would mean the model is still loaded; age it past keep_alive.
         await e.prepareForGenerate(now: MonotonicClock.nowMs() + OllamaEngine.recentReplyMs + 1)
         try await settle(e)
-        #expect(gate.callCount == 2)
+        #expect(gate.arrivals == 2)
         #expect(tracker.active.isEmpty)
         #expect(lines.all.filter { $0.contains("model.load end") && $0.contains(" loaded") }.count == 2)
     }
 
     @Test func aListedModelIsNotALoad() async throws {
         let tracker = quietTracker()
-        let gate = Gate()
-        gate.release()
+        let gate = TestGate()
+        gate.open()
         let e = engine(tracker: tracker, ps: psBody(["gemma4:12b"]), gate: gate)
         try await e.loadModel(config: config)
         try await settle(e)
         await e.prepareForGenerate(now: MonotonicClock.nowMs() + OllamaEngine.recentReplyMs + 1)
         #expect(await e.pendingPreload == nil)
-        #expect(gate.callCount == 1)
+        #expect(gate.arrivals == 1)
     }
 
     @Test func anUnansweredPsShowsNothing() async throws {
         let tracker = quietTracker()
-        let gate = Gate()
-        gate.release()
+        let gate = TestGate()
+        gate.open()
         let e = engine(tracker: tracker, ps: nil, gate: gate)
         try await e.loadModel(config: config)
         try await settle(e)
         await e.prepareForGenerate(now: MonotonicClock.nowMs() + OllamaEngine.recentReplyMs + 1)
         #expect(await e.pendingPreload == nil)
-        #expect(gate.callCount == 1)
+        #expect(gate.arrivals == 1)
         #expect(await e.isModelLoaded() == false)
     }
 
     @Test func aCallDuringThePreloadDoesNotShowTwice() async throws {
         let tracker = quietTracker()
-        let gate = Gate()
+        let gate = TestGate()
         let e = engine(tracker: tracker, ps: psBody([]), gate: gate)
         try await e.loadModel(config: config)
         await e.prepareForGenerate()
         await e.prepareForGenerate()
         #expect(tracker.active.count == 1)
-        gate.release()
+        gate.open()
         try await settle(e)
-        #expect(gate.callCount == 1)
+        #expect(gate.arrivals == 1)
         #expect(tracker.active.isEmpty)
     }
 }
@@ -169,8 +138,8 @@ struct OllamaGenerateColdCheckTests {
     private static let reply = Data(#"{"response":"SAFE","done":true}"#.utf8)
 
     @Test func generateDoesNotWaitOnPs() async throws {
-        let psGate = Gate()
-        defer { psGate.release() }   // never leave the check parked, whatever fails
+        let psGate = TestGate()
+        defer { psGate.open() }   // never leave the check parked, whatever fails
         let calls = ModelLoadTrackerLines()
         let e = OllamaEngine(tracker: ModelLoadTracker(log: { _ in }), transport: .init(
             ps: { calls.append("ps"); await psGate.wait(); return psBody([]) },
@@ -181,8 +150,8 @@ struct OllamaGenerateColdCheckTests {
         if let t = await e.pendingPreload { try await value(of: t, within: 10) }
         let answer = try await e.generate(prompt: "x", jsonSchema: nil)
         #expect(answer == "SAFE")
-        #expect(psGate.callCount <= 1)
-        psGate.release()
+        #expect(psGate.arrivals <= 1)
+        psGate.open()
         if let check = await e.pendingColdCheck { try await value(of: check, within: 10) }
         #expect(calls.all.contains("ps"))
     }
