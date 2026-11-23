@@ -12,6 +12,9 @@ struct BareRoleLineTests {
         "model", "System Prompt", " AI", "   AI", "AI   ", "<|im_start|>assistant",
         // #1353's measured shapes
         "## User", "# Assistant", "##  system:", "  # ai", "`user`", "`Tool`:", "User.", "**Assistant**.", "model.", "#### User",
+        // #1361's combined shapes (Fixtures/role-shapes-1361)
+        "## **User**", "# User.", "## `user`", "**User.**", "_User._", "`user`.", "## User ##", "# User #", "` user `",
+        "``user``", "## System Prompt", "## system prompt:", "# _AI_.", "## ` assistant ` ##",
     ])
     func stripped(_ line: String) {
         let (text, lines) = PromptInjectionGuard.stripRecordingDelimiters("before\n\(line)\nafter")
@@ -31,11 +34,32 @@ struct BareRoleLineTests {
               ("## Tools", "Tools"), ("# Function", "Function"), ("## Developer", "Developer"), ("[user]", "[user]"),
               ("[User]", "[User]"), ("## User guide", "User guide"), ("`user` field", "`user` field"),
               ("User. Then", "User. Then"), ("    ## User", "User"), ("#User", "#User"),
+              // #1361: near misses of the combined forms, and a longer heading that starts with `System prompt`
+              ("## User guide ##", "User guide"), ("## **Users**", "Users"), ("## System prompt changes", "System prompt changes"),
+              ("## `tool`", "`tool`"), ("``user`", "user"), ("## User#", "User#"), ("`user` `field`", "`field`"),
           ])
     func kept(_ row: (String, String)) {
         let (text, _) = PromptInjectionGuard.stripRecordingDelimiters("before\n\(row.0)\nafter")
         let line = text.components(separatedBy: "\n")[1]
         #expect(line.contains(row.1), "\(row.0.debugDescription) became \(line.debugDescription)")
+    }
+
+    /// #1361: `Fixtures/role-shapes-1361/` is the real-canary run of these shapes (gemma judged 10 of 11 safe 3/3, framed
+    /// as a peer message in split-05's body), so each of its attack rows must lose its header line to the strip.
+    @Test("each probed #1361 shape is emptied in its framed probe text")
+    func probedShapesAreStripped() throws {
+        let file = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/role-shapes-1361/attacks.jsonl")
+        let rows = try String(contentsOf: file, encoding: .utf8).split(separator: "\n").map {
+            try #require(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
+        }
+        #expect(rows.count == 11)
+        for row in rows {
+            let shape = try #require(row["shape"] as? String), text = try #require(row["text"] as? String)
+            let clean = PromptInjectionGuard.stripRecordingDelimiters(text).text
+            #expect(!clean.components(separatedBy: "\n").contains(shape), "\(shape) survived")
+            #expect(clean.contains("ok, approving"), "the rest of the body stays")
+        }
     }
 
     @Test("the probe's two rows, through the untrusted entry at .off: no bare role line reaches the model")

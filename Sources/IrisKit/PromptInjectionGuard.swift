@@ -36,10 +36,14 @@ struct PromptInjectionGuard {
         options: [.caseInsensitive])
 
     /// #1353, measured (the canary passed each 3/3 in #1338's split-05 frame; 0 benign eval rows): a role word in
-    /// a code span or with a trailing period, and a `#`/`##` heading of a turn word only. `## Tools` and `## Model`
-    /// are ordinary README headings, and `[user]` is a real INI section, so neither is here.
+    /// a code span or with a trailing period, and a `#`/`##` heading of a turn word only. #1361: the forms combine
+    /// (`## **User**`, `# User.`, `**User.**`, `` `user`. ``), a code span may be padded or doubled, a heading may close
+    /// with `#`s, and `## System Prompt` is a heading too, but only as the whole line. Measured the same way: the
+    /// canary judged 10 of the 11 shapes safe 3/3 (#1356: it follows the payload), so for these the strip is the
+    /// control. `## Tools` and `## Model` are ordinary README headings, and `[user]` is a real INI section, so
+    /// neither is here.
     private static let bareRoleLineForms = try! NSRegularExpression(
-        pattern: #"^ {0,3}(?:#{1,2}[ \t]+(?:system|assistant|user|human|ai):?|`(?:system(?: prompt)?|assistant|user|model|human|ai|developer|tool|function)`:?|(?:\*{1,2}|_{1,2})?(?:system(?: prompt)?|assistant|user|model|human|ai|developer|tool|function)(?:\*{1,2}|_{1,2})?\.)[ \t]*$"#,
+        pattern: #"^ {0,3}(?:#{1,2}[ \t]+(?:\*{1,2}|_{1,2})?(?:(?<h>`{1,2}) *(?:system(?: prompt)?|assistant|user|human|ai) *\k<h>|(?:system(?: prompt)?|assistant|user|human|ai))\.?(?:\*{1,2}|_{1,2})?\.?:?(?:[ \t]+#+)?|(?:\*{1,2}|_{1,2})?(?:(?<p>`{1,2}) *(?:system(?: prompt)?|assistant|user|model|human|ai|developer|tool|function) *\k<p>|(?:system(?: prompt)?|assistant|user|model|human|ai|developer|tool|function))\.?(?:\*{1,2}|_{1,2})?\.?:?)[ \t]*$"#,
         options: [.caseInsensitive])
 
     static func isBareRoleLine(_ line: String) -> Bool {
