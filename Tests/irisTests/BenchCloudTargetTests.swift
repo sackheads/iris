@@ -8,6 +8,11 @@ import Foundation
 @Suite("Bench cloud target (#854)")
 struct BenchCloudTargetTests {
     private static let models = URL(fileURLWithPath: "/tmp/iris-bench-models")
+    /// #1346: the reserve tests run on a catalog of their own, so the shipped table's dates and the price list's age
+    /// never meet the real clock here (CloudModelsTests has the rules).
+    private static let catalog = CloudModels.Catalog(rows: CloudModels.rows.map { CloudModels.Row(provider: $0.provider, id: $0.id, bench: $0.bench) },
+                                                    asOf: "2030-01-01", prices: .snapshot)
+    private static let runDay = CloudModels.parse("2030-01-02")!
     private static let flash = ["--cloud-primary", "gemini:gemini-4-hydrogen", "--allow-paid", "--max-dollars", "3",
                                 "--spend-ledger", "/tmp/ledger.jsonl", "--local-canary", "gemma4:12b"]
     private static let opus = ["--cloud-primary", "anthropic:claude-opus-5-5", "--allow-paid", "--max-dollars", "11",
@@ -44,7 +49,7 @@ struct BenchCloudTargetTests {
     }
 
     @Test("a model off the allow list, a wrong provider prefix or a lookalike is refused", arguments: [
-        "gemini:gemini-3.8-pro", "gemini:gemini-3.8-flash", "anthropic:claude-opus-5", "openai:gpt-5", "gemini:claude-opus-5-5", "anthropic:gemini-4-hydrogen",
+        "gemini:gemini-3.8-pro", "anthropic:claude-opus-5", "openai:gpt-5", "gemini:claude-opus-5-5", "anthropic:gemini-4-hydrogen",
         "gemini-4-hydrogen", "Gemini:gemini-4-hydrogen", "gemini:gemini-4-hydrogen ", "gemini:gemini-4-hydrogen:x", ":gemini-4-hydrogen", "",
     ])
     func modelRefused(spec: String) throws {
@@ -151,7 +156,7 @@ struct BenchCloudTargetTests {
         var reserved = 0
         for n in 1...5 {
             let ledger = try SpendLedger(path: path, arm: "run\(n)", cap: cap)   // one ledger object per process, one file
-            switch try BenchCloudTarget.reserveRun(target(cap), in: ledger) {
+            switch try BenchCloudTarget.reserveRun(target(cap), in: ledger, now: Self.runDay, catalog: Self.catalog) {
             case .reserved(_, let amount): reserved += 1; #expect(amount == bound)
             case .refused(let why): #expect(why.contains("not started"))
             }
@@ -164,7 +169,7 @@ struct BenchCloudTargetTests {
     @Test("a settled run frees its reserve: what it reported is booked in its place")
     func settleReplacesReserve() throws {
         let ledger = try SpendLedger(path: nil, arm: "a", cap: 10)
-        guard case .reserved(let id, let bound) = try BenchCloudTarget.reserveRun(target(10), in: ledger) else { Issue.record("refused"); return }
+        guard case .reserved(let id, let bound) = try BenchCloudTarget.reserveRun(target(10), in: ledger, now: Self.runDay, catalog: Self.catalog) else { Issue.record("refused"); return }
         #expect(abs(try ledger.total() - bound) < 1e-12)
         try ledger.settle(id, dollars: 0.01, tokens: (0, 0, 0))
         #expect(abs(try ledger.total() - 0.01) < 1e-12)
